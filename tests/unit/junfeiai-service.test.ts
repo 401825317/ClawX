@@ -87,6 +87,9 @@ describe('JunFeiAI managed provider service', () => {
     vi.stubEnv('CLAWX_E2E', '');
     vi.stubEnv('CLAWX_MANAGED_PROVIDER', '1');
     vi.stubEnv('CLAWX_JUNFEIAI_ORIGIN', 'https://junfeiai.com');
+    vi.stubEnv('CLAWX_JUNFEIAI_BACKEND_ORIGIN', '');
+    vi.stubEnv('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', '');
+    vi.stubEnv('CLAWX_JUNFEIAI_BASE_URL', '');
     mocks.getProviderAccount.mockResolvedValue(null);
     mocks.saveProviderAccount.mockResolvedValue(undefined);
     mocks.providerAccountToConfig.mockImplementation((account: ProviderAccount) => ({
@@ -151,6 +154,33 @@ describe('JunFeiAI managed provider service', () => {
     );
     expect(mocks.setDefaultProvider).toHaveBeenCalledWith('junfeiai');
     expect(mocks.syncSavedProviderToRuntime).not.toHaveBeenCalled();
+  });
+
+  it('supports separate auth backend and provider base URL in dev mode', async () => {
+    vi.stubEnv('CLAWX_JUNFEIAI_BACKEND_ORIGIN', 'http://127.0.0.1:8080');
+    vi.stubEnv('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', 'http://127.0.0.1:18080/v1');
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        service: { displayName: 'Local JunFeiAI' },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+    }), { status: 200 }));
+
+    const result = await ensureJunFeiAIProviderSeeded({ syncRuntime: false });
+
+    expect(result.source).toBe('remote');
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8080/api/clawx/bootstrap',
+      expect.any(Object),
+    );
+    expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'http://127.0.0.1:18080/v1',
+        metadata: expect.objectContaining({
+          resourceUrl: 'http://127.0.0.1:8080',
+        }),
+      }),
+    );
   });
 
   it('stores relay token as provider secret and syncs runtime auth', async () => {

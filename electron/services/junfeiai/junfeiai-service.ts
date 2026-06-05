@@ -10,7 +10,9 @@ import {
   syncSavedProviderToRuntime,
 } from '../providers/provider-runtime-sync';
 import {
+  getJunFeiAIBackendOrigin,
   getJunFeiAIOrigin,
+  getJunFeiAIProviderBaseUrl,
   isJunFeiAIManagedDistribution,
   JUNFEIAI_AUTH_ACCOUNT_ID,
   JUNFEIAI_DEFAULT_API_PROTOCOL,
@@ -115,7 +117,7 @@ function fallbackBootstrap(): JunFeiAIBootstrapPayload {
     runtime: {
       providerKey: JUNFEIAI_PROVIDER_ID,
       providerName: JUNFEIAI_PROVIDER_NAME,
-      baseUrl: `${getJunFeiAIOrigin()}/v1`,
+      baseUrl: getJunFeiAIProviderBaseUrl(),
       apiProtocol: JUNFEIAI_DEFAULT_API_PROTOCOL,
       defaultModel: JUNFEIAI_DEFAULT_MODEL,
       fallbackModels: [],
@@ -217,7 +219,7 @@ function canUseOfflineGraceForError(error: unknown): boolean {
 }
 
 function normalizeBaseUrl(raw?: string): string {
-  const normalized = (raw || JUNFEIAI_DEFAULT_BASE_URL).trim().replace(/\/+$/, '');
+  const normalized = (raw || getJunFeiAIProviderBaseUrl()).trim().replace(/\/+$/, '');
   if (!normalized) {
     return JUNFEIAI_DEFAULT_BASE_URL;
   }
@@ -290,7 +292,7 @@ async function requestJunFeiAI<T>(
   path: string,
   init?: RequestInit & { accessToken?: string; timeoutMs?: number },
 ): Promise<T> {
-  const origin = getJunFeiAIOrigin();
+  const origin = getJunFeiAIBackendOrigin();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), init?.timeoutMs ?? 12000);
   const headers: Record<string, string> = {

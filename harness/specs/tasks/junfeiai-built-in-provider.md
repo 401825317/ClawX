@@ -6,6 +6,7 @@ taskType: runtime-bridge
 intent: Migrate the ClawBox-style startup, activation, authorization, built-in model provider, skill list, WeChat plugin install, and Windows portable experience into ClawX without requiring users to manually add a provider or paste an API key.
 touchedAreas:
   - harness/specs/tasks/junfeiai-built-in-provider.md
+  - .env.example
   - src/lib/host-api.ts
   - src/lib/providers.ts
   - src/stores/providers.ts
@@ -42,12 +43,14 @@ touchedAreas:
   - scripts/after-pack.cjs
   - scripts/bundle-openclaw.mjs
   - scripts/bundle-preinstalled-skills.mjs
+  - scripts/dev-junfeiai.mjs
   - scripts/download-bundled-agent-browser.mjs
   - scripts/download-bundled-node.mjs
   - scripts/download-bundled-uv.mjs
   - scripts/patch-nsis-extract.mjs
   - scripts/pnpm.cmd
   - scripts/run-electron-builder.mjs
+  - vite.config.ts
   - tests/unit/harness-specs.test.ts
   - tests/unit/junfeiai-service.test.ts
   - tests/unit/providers.test.ts

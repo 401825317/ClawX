@@ -6,10 +6,35 @@ export const JUNFEIAI_DEFAULT_MODEL = 'gpt-5.5';
 export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'anthropic-messages';
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'junfeiai-auth';
 
-export function getJunFeiAIOrigin(): string {
-  return (process.env.CLAWX_JUNFEIAI_ORIGIN || JUNFEIAI_DEFAULT_ORIGIN)
+function normalizeOrigin(value: string): string {
+  return value
     .trim()
     .replace(/\/+$/, '');
+}
+
+function normalizeProviderBaseUrl(value: string): string {
+  const normalized = normalizeOrigin(value);
+  return normalized.endsWith('/v1') ? normalized : `${normalized}/v1`;
+}
+
+export function getJunFeiAIBackendOrigin(): string {
+  return normalizeOrigin(
+    process.env.CLAWX_JUNFEIAI_BACKEND_ORIGIN
+      || process.env.CLAWX_JUNFEIAI_ORIGIN
+      || JUNFEIAI_DEFAULT_ORIGIN,
+  );
+}
+
+export function getJunFeiAIProviderBaseUrl(): string {
+  return normalizeProviderBaseUrl(
+    process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL
+      || process.env.CLAWX_JUNFEIAI_BASE_URL
+      || `${getJunFeiAIBackendOrigin()}/v1`,
+  );
+}
+
+export function getJunFeiAIOrigin(): string {
+  return getJunFeiAIBackendOrigin();
 }
 
 export function isJunFeiAIManagedDistribution(): boolean {

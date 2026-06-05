@@ -35,6 +35,7 @@
         "init": "pnpm install && pnpm run uv:download && pnpm run agent-browser:download",
         "predev": "node scripts/generate-ext-bridge.mjs && zx scripts/prepare-preinstalled-skills-dev.mjs",
         "dev": "vite",
+        "dev:junfeiai": "node scripts/dev-junfeiai.mjs",
         "ext:bridge": "node scripts/generate-ext-bridge.mjs",
         "build": "node scripts/generate-ext-bridge.mjs && pnpm run build:vite && zx scripts/bundle-openclaw.mjs && zx scripts/bundle-openclaw-plugins.mjs && zx scripts/bundle-preinstalled-skills.mjs && node scripts/run-electron-builder.mjs",
         "build:vite": "node --max-old-space-size=6144 ./node_modules/vite/bin/vite.js build",

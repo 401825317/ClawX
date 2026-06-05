@@ -89,7 +89,7 @@ export default defineConfig({
     dedupe: ['react', 'react-dom', 'react-i18next', 'zustand', 'sonner', 'lucide-react'],
   },
   server: {
-    port: 5173,
+    port: Number(process.env.VITE_DEV_SERVER_PORT || 5173),
   },
   build: {
     outDir: 'dist',
