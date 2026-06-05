@@ -53,8 +53,17 @@ async function setupTarget(id) {
   const tempDir = path.join(ROOT_DIR, 'temp_uv_extract');
   const archivePath = path.join(ROOT_DIR, target.filename);
   const downloadUrl = `${BASE_URL}/${target.filename}`;
+  const destBin = path.join(targetDir, target.binName);
 
   echo(chalk.blue`\n📦 Setting up uv for ${id}...`);
+
+  if (!argv.force && await fs.pathExists(destBin)) {
+    const { size } = await fs.stat(destBin);
+    if (size > 0) {
+      echo(chalk.green`Using existing: ${destBin}`);
+      return;
+    }
+  }
 
   // Cleanup & Prep
   await fs.remove(targetDir);
@@ -88,8 +97,6 @@ async function setupTarget(id) {
     // uv archives usually contain a folder named after the target
     const folderName = target.filename.replace('.tar.gz', '').replace('.zip', '');
     const sourceBin = path.join(tempDir, folderName, target.binName);
-    const destBin = path.join(targetDir, target.binName);
-
     if (await fs.pathExists(sourceBin)) {
       await fs.move(sourceBin, destBin, { overwrite: true });
     } else {
@@ -118,6 +125,7 @@ async function setupTarget(id) {
 // Main logic
 const downloadAll = argv.all;
 const platform = argv.platform;
+const explicitTarget = argv.target;
 
 if (downloadAll) {
   // Download for all platforms
@@ -125,6 +133,8 @@ if (downloadAll) {
   for (const id of Object.keys(TARGETS)) {
     await setupTarget(id);
   }
+} else if (explicitTarget) {
+  await setupTarget(String(explicitTarget));
 } else if (platform) {
   // Download for a specific platform (e.g., --platform=mac)
   const targets = PLATFORM_GROUPS[platform];

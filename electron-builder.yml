@@ -140,6 +140,9 @@ nsis:
   installerIcon: resources/icons/icon.ico
   uninstallerIcon: resources/icons/icon.ico
 
+portable:
+  artifactName: ${productName}-${version}-${os}-${arch}-portable.${ext}
+
 # Linux Configuration
 linux:
   extraResources:

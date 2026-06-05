@@ -7,6 +7,7 @@ import { listAgentsSnapshot } from '../../utils/agent-config';
 import { expandPath, getOpenClawResolvedDir, getOpenClawSkillsDir } from '../../utils/paths';
 import { getAllSkillConfigs } from '../../utils/skill-config';
 import type { SkillConfigUpdates } from '../../utils/skill-config';
+import { isJunFeiAIManagedDistribution } from '../../utils/junfeiai-distribution';
 
 export interface LocalSkillMarketplaceMeta {
   provider: string;
@@ -385,7 +386,7 @@ async function buildDescriptors(): Promise<SourceDescriptor[]> {
       root: join(getOpenClawResolvedDir(), 'skills'),
       source: 'openclaw-bundled',
       priority: 4,
-      allowedSkillSlugs: BUNDLED_OPENCLAW_SKILL_ALLOWLIST,
+      allowedSkillSlugs: isJunFeiAIManagedDistribution() ? undefined : BUNDLED_OPENCLAW_SKILL_ALLOWLIST,
     },
   ];
 }

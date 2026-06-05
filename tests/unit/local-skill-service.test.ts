@@ -26,6 +26,7 @@ describe('local skill service', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    vi.stubEnv('CLAWX_MANAGED_PROVIDER', '0');
   });
 
   it('includes bundled skill-creator but filters out other bundled openclaw skills', async () => {
@@ -57,6 +58,30 @@ describe('local skill service', () => {
       enabled: true,
     });
     expect(skills.find((skill) => skill.id === 'other-bundled')).toBeUndefined();
+  });
+
+  it('includes all bundled OpenClaw skills in JunFeiAI managed builds', async () => {
+    vi.stubEnv('CLAWX_MANAGED_PROVIDER', '1');
+    const root = mkdtempSync(join(tmpdir(), 'clawx-local-skills-managed-'));
+    const managedRoot = join(root, 'managed');
+    const bundledRoot = join(root, 'openclaw');
+
+    mkdirSync(join(bundledRoot, 'skills', 'skill-creator'), { recursive: true });
+    writeFileSync(join(bundledRoot, 'skills', 'skill-creator', 'SKILL.md'), '---\nname: skill-creator\ndescription: bundled creator\n---\n');
+
+    mkdirSync(join(bundledRoot, 'skills', 'browser-use'), { recursive: true });
+    writeFileSync(join(bundledRoot, 'skills', 'browser-use', 'SKILL.md'), '---\nname: browser-use\ndescription: bundled browser\n---\n');
+
+    listAgentsSnapshotMock.mockResolvedValue({ agents: [] });
+    getOpenClawSkillsDirMock.mockReturnValue(managedRoot);
+    getOpenClawResolvedDirMock.mockReturnValue(bundledRoot);
+    getAllSkillConfigsMock.mockResolvedValue({});
+
+    const { listLocalSkills } = await import('@electron/services/skills/local-skill-service');
+    const skills = await listLocalSkills();
+
+    expect(skills.map((skill) => skill.id)).toEqual(['browser-use', 'skill-creator']);
+    expect(skills.every((skill) => skill.source === 'openclaw-bundled')).toBe(true);
   });
 
   it('does not invent a default version when local metadata has no version', async () => {

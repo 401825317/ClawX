@@ -25,6 +25,10 @@ const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
 const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 
+function isJunFeiAIManagedDistribution() {
+  return process.env.CLAWX_MANAGED_PROVIDER !== '0';
+}
+
 // On Windows, pnpm virtual store paths can exceed MAX_PATH (260 chars).
 function normWin(p) {
   if (process.platform !== 'win32') return p;
@@ -59,6 +63,9 @@ function shouldCopyOpenClawPackageEntry(src) {
 }
 
 function trimBundledOpenClawSkills(skillsRoot) {
+  if (isJunFeiAIManagedDistribution()) {
+    return { removed: 0, kept: ['*'] };
+  }
   if (!fs.existsSync(skillsRoot)) return { removed: 0, kept: [...BUNDLED_OPENCLAW_SKILL_ALLOWLIST] };
 
   let removed = 0;

@@ -13,6 +13,7 @@ import { handleChannelRoutes } from './routes/channels';
 import { handleLogRoutes } from './routes/logs';
 import { handleUsageRoutes } from './routes/usage';
 import { handleSkillRoutes } from './routes/skills';
+import { handleJunFeIAIRoutes } from './routes/junfeiai';
 import { handleFileRoutes } from './routes/files';
 import { handleSessionRoutes } from './routes/sessions';
 import { handleCronRoutes } from './routes/cron';
@@ -31,6 +32,7 @@ const coreRouteHandlers: RouteHandler[] = [
   handleAppRoutes,
   handleGatewayRoutes,
   handleSettingsRoutes,
+  handleJunFeIAIRoutes,
   handleProviderRoutes,
   handleAgentRoutes,
   handleChannelRoutes,

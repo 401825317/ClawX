@@ -39,6 +39,10 @@ async function setupTarget(id) {
   // Only remove the target binary, not the entire directory,
   // to avoid deleting uv.exe or other binaries placed by other download scripts.
   const outputNode = path.join(targetDir, 'node.exe');
+  if (!argv.force && await fs.pathExists(outputNode)) {
+    echo(chalk.green`Using existing: ${outputNode}`);
+    return;
+  }
   if (await fs.pathExists(outputNode)) {
     await fs.remove(outputNode);
   }
@@ -84,12 +88,15 @@ async function setupTarget(id) {
 
 const downloadAll = argv.all;
 const platform = argv.platform;
+const explicitTarget = argv.target;
 
 if (downloadAll) {
   echo(chalk.cyan`🌐 Downloading Node.js binaries for all Windows targets...`);
   for (const id of Object.keys(TARGETS)) {
     await setupTarget(id);
   }
+} else if (explicitTarget) {
+  await setupTarget(String(explicitTarget));
 } else if (platform) {
   const targets = PLATFORM_GROUPS[platform];
   if (!targets) {

@@ -51,10 +51,6 @@ export interface ProviderConfig {
 export async function storeApiKey(providerId: string, apiKey: string): Promise<boolean> {
   try {
     await ensureProviderStoreMigrated();
-    const s = await getClawXProviderStore();
-    const keys = (s.get('apiKeys') || {}) as Record<string, string>;
-    keys[providerId] = apiKey;
-    s.set('apiKeys', keys);
     await setProviderSecret({
       type: 'api_key',
       accountId: providerId,
@@ -130,7 +126,13 @@ export async function listStoredKeyIds(): Promise<string[]> {
   await ensureProviderStoreMigrated();
   const s = await getClawXProviderStore();
   const keys = (s.get('apiKeys') || {}) as Record<string, string>;
-  return Object.keys(keys);
+  const encryptedSecrets = (s.get('providerSecretsV2') || {}) as Record<string, unknown>;
+  const legacySecrets = (s.get('providerSecrets') || {}) as Record<string, unknown>;
+  return Array.from(new Set([
+    ...Object.keys(keys),
+    ...Object.keys(encryptedSecrets),
+    ...Object.keys(legacySecrets),
+  ]));
 }
 
 // ==================== Provider Configuration ====================

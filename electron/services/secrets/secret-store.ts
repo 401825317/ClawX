@@ -1,3 +1,4 @@
+import { safeStorage } from 'electron';
 import type { ProviderSecret } from '../../shared/providers/types';
 import { getClawXProviderStore } from '../providers/store-instance';
 
@@ -7,12 +8,67 @@ export interface SecretStore {
   delete(accountId: string): Promise<void>;
 }
 
+type EncryptedProviderSecret = {
+  encoding: 'electron-safe-storage-v1';
+  ciphertext: string;
+};
+
+function canEncryptSecrets(): boolean {
+  try {
+    return Boolean(safeStorage?.isEncryptionAvailable?.());
+  } catch {
+    return false;
+  }
+}
+
+function encryptSecret(secret: ProviderSecret): EncryptedProviderSecret | null {
+  if (!canEncryptSecrets()) {
+    return null;
+  }
+
+  const plaintext = JSON.stringify(secret);
+  const encrypted = safeStorage.encryptString(plaintext);
+  return {
+    encoding: 'electron-safe-storage-v1',
+    ciphertext: encrypted.toString('base64'),
+  };
+}
+
+function decryptSecret(stored: unknown): ProviderSecret | null {
+  if (
+    !stored
+    || typeof stored !== 'object'
+    || (stored as EncryptedProviderSecret).encoding !== 'electron-safe-storage-v1'
+    || typeof (stored as EncryptedProviderSecret).ciphertext !== 'string'
+  ) {
+    return null;
+  }
+
+  if (!canEncryptSecrets()) {
+    return null;
+  }
+
+  try {
+    const encrypted = Buffer.from((stored as EncryptedProviderSecret).ciphertext, 'base64');
+    return JSON.parse(safeStorage.decryptString(encrypted)) as ProviderSecret;
+  } catch {
+    return null;
+  }
+}
+
 export class ElectronStoreSecretStore implements SecretStore {
   async get(accountId: string): Promise<ProviderSecret | null> {
     const store = await getClawXProviderStore();
+    const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
+    const encryptedSecret = decryptSecret(encryptedSecrets[accountId]);
+    if (encryptedSecret) {
+      return encryptedSecret;
+    }
+
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
     const secret = secrets[accountId];
     if (secret) {
+      await this.set(secret);
       return secret;
     }
 
@@ -22,37 +78,43 @@ export class ElectronStoreSecretStore implements SecretStore {
       return null;
     }
 
-    return {
+    const secretFromApiKey: ProviderSecret = {
       type: 'api_key',
       accountId,
       apiKey,
     };
+    await this.set(secretFromApiKey);
+    return secretFromApiKey;
   }
 
   async set(secret: ProviderSecret): Promise<void> {
     const store = await getClawXProviderStore();
+    const encryptedSecret = encryptSecret(secret);
+    const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
-    secrets[secret.accountId] = secret;
+
+    if (encryptedSecret) {
+      encryptedSecrets[secret.accountId] = encryptedSecret;
+      delete secrets[secret.accountId];
+    } else {
+      secrets[secret.accountId] = secret;
+      delete encryptedSecrets[secret.accountId];
+    }
+
+    store.set('providerSecretsV2', encryptedSecrets);
     store.set('providerSecrets', secrets);
 
-    // Keep legacy apiKeys in sync until the rest of the app moves to account-based secrets.
     const apiKeys = (store.get('apiKeys') ?? {}) as Record<string, string>;
-    if (secret.type === 'api_key') {
-      apiKeys[secret.accountId] = secret.apiKey;
-    } else if (secret.type === 'local') {
-      if (secret.apiKey) {
-        apiKeys[secret.accountId] = secret.apiKey;
-      } else {
-        delete apiKeys[secret.accountId];
-      }
-    } else {
-      delete apiKeys[secret.accountId];
-    }
+    delete apiKeys[secret.accountId];
     store.set('apiKeys', apiKeys);
   }
 
   async delete(accountId: string): Promise<void> {
     const store = await getClawXProviderStore();
+    const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
+    delete encryptedSecrets[accountId];
+    store.set('providerSecretsV2', encryptedSecrets);
+
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
     delete secrets[accountId];
     store.set('providerSecrets', secrets);

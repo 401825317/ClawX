@@ -14,6 +14,7 @@ import { getOpenClawDir, getOpenClawResolvedDir, getResourcesDir } from './paths
 import { logger } from './logger';
 import { cpAsyncSafe } from './plugin-install';
 import { withConfigLock } from './config-mutex';
+import { isJunFeiAIManagedDistribution } from './junfeiai-distribution';
 
 const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
@@ -261,11 +262,17 @@ export async function getAllSkillConfigs(): Promise<Record<string, SkillEntry>> 
 }
 
 function getDisallowedBundledOpenClawSkillSlugs(bundledSkillSlugs: string[]): string[] {
+    if (isJunFeiAIManagedDistribution()) {
+        return [];
+    }
     return bundledSkillSlugs.filter((slug) => !BUNDLED_OPENCLAW_SKILL_ALLOWLIST.has(slug));
 }
 
 export async function trimBundledOpenClawSkills(options?: { bundledSkillsRoot?: string }): Promise<{ removed: number; removedSlugs: string[]; kept: string[] }> {
     const bundledSkillsRoot = options?.bundledSkillsRoot || join(getOpenClawResolvedDir(), 'skills');
+    if (isJunFeiAIManagedDistribution()) {
+        return { removed: 0, removedSlugs: [], kept: ['*'] };
+    }
     if (!existsSync(bundledSkillsRoot)) {
         return { removed: 0, removedSlugs: [], kept: Array.from(BUNDLED_OPENCLAW_SKILL_ALLOWLIST) };
     }

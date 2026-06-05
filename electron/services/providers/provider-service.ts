@@ -41,6 +41,10 @@ import {
 } from '../../utils/provider-keys';
 import type { ProviderWithKeyInfo } from '../../shared/providers/types';
 import { logger } from '../../utils/logger';
+import {
+  isJunFeiAIManagedDistribution,
+  JUNFEIAI_PROVIDER_ID,
+} from '../../utils/junfeiai-distribution';
 
 function maskApiKey(apiKey: string | null): string | null {
   if (!apiKey) return null;
@@ -78,6 +82,9 @@ function inferProviderVendorIdFromOpenClawEntry(
 
 export class ProviderService {
   async listVendors(): Promise<ProviderDefinition[]> {
+    if (isJunFeiAIManagedDistribution()) {
+      return PROVIDER_DEFINITIONS.filter((definition) => definition.id === JUNFEIAI_PROVIDER_ID);
+    }
     return PROVIDER_DEFINITIONS;
   }
 

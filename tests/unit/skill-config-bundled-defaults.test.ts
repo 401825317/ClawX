@@ -26,6 +26,7 @@ describe('bundled OpenClaw skill trimming', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    vi.stubEnv('CLAWX_MANAGED_PROVIDER', '0');
   });
 
   it('physically trims non-allowlisted bundled skills from a bundled skills root', async () => {
@@ -41,5 +42,21 @@ describe('bundled OpenClaw skill trimming', () => {
     expect(result).toMatchObject({ removed: 1, removedSlugs: ['browser-use'], kept: ['skill-creator'] });
     expect(existsSync(join(root, 'skill-creator'))).toBe(true);
     expect(existsSync(join(root, 'browser-use'))).toBe(false);
+  });
+
+  it('preserves bundled OpenClaw skills in JunFeiAI managed builds', async () => {
+    vi.stubEnv('CLAWX_MANAGED_PROVIDER', '1');
+    const root = mkdtempSync(join(tmpdir(), 'clawx-bundled-skills-managed-'));
+    mkdirSync(join(root, 'skill-creator'), { recursive: true });
+    mkdirSync(join(root, 'browser-use'), { recursive: true });
+    writeFileSync(join(root, 'skill-creator', 'SKILL.md'), '---\nname: skill-creator\ndescription: keep\n---\n');
+    writeFileSync(join(root, 'browser-use', 'SKILL.md'), '---\nname: browser-use\ndescription: keep too\n---\n');
+
+    const { trimBundledOpenClawSkills } = await import('@electron/utils/skill-config');
+    const result = await trimBundledOpenClawSkills({ bundledSkillsRoot: root });
+
+    expect(result).toMatchObject({ removed: 0, removedSlugs: [], kept: ['*'] });
+    expect(existsSync(join(root, 'skill-creator'))).toBe(true);
+    expect(existsSync(join(root, 'browser-use'))).toBe(true);
   });
 });

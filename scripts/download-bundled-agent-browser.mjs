@@ -52,6 +52,26 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MiB (${bytes} bytes)`;
 }
 
+async function fetchWithRetry(url, attempts = 3, timeoutMs = 60000) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { signal: controller.signal });
+    } catch (error) {
+      lastError = error;
+      echo(chalk.yellow(`   Download attempt ${attempt}/${attempts} failed: ${String(error)}`));
+      if (attempt < attempts) {
+        await sleep(2000 * attempt);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw lastError;
+}
+
 async function setupTarget(id) {
   const target = TARGETS[id];
   if (!target) {
@@ -68,6 +88,15 @@ async function setupTarget(id) {
   echo(`   asset:  ${target.asset}${reusesX64 ? ' (no native arm64 asset; reusing win32-x64)' : ''}`);
   echo(`   dest:   ${destBin}`);
 
+  if (!argv.force && await fs.pathExists(destBin)) {
+    const { size } = await fs.stat(destBin);
+    if (size > 0) {
+      echo(chalk.green(`   Using existing ${id}: ${formatBytes(size)}`));
+      installed.push({ id, asset: target.asset, dest: destBin, size });
+      return;
+    }
+  }
+
   // Only remove our own binary, not the entire directory, to avoid deleting
   // uv / node binaries placed by other download scripts.
   if (await fs.pathExists(destBin)) {
@@ -78,7 +107,7 @@ async function setupTarget(id) {
   // Download (bare binary — no extraction needed)
   const startedAt = Date.now();
   echo(`   ⬇️  Downloading: ${downloadUrl}`);
-  const response = await fetch(downloadUrl);
+  const response = await fetchWithRetry(downloadUrl);
   if (!response.ok) {
     throw new Error(`Failed to download ${target.asset}: ${response.status} ${response.statusText}`);
   }
@@ -114,6 +143,7 @@ function printSummary() {
 // Main logic
 const downloadAll = argv.all;
 const platform = argv.platform;
+const explicitTarget = argv.target;
 
 echo(chalk.cyan(`🔧 agent-browser bundler — version ${AGENT_BROWSER_VERSION}`));
 echo(chalk.cyan(`   source: ${BASE_URL}`));
@@ -124,6 +154,8 @@ if (downloadAll) {
   for (const id of Object.keys(TARGETS)) {
     await setupTarget(id);
   }
+} else if (explicitTarget) {
+  await setupTarget(String(explicitTarget));
 } else if (platform) {
   const targets = PLATFORM_GROUPS[platform];
   if (!targets) {

@@ -1,15 +1,43 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+const pathDelimiter = process.platform === 'win32' ? ';' : ':';
+const ELECTRON_BUILDER_CLI = path.join(ROOT, 'node_modules', 'electron-builder', 'cli.js');
 const ELECTRON_BUILDER_BIN = process.platform === 'win32'
-  ? path.join(ROOT, 'node_modules', '.bin', 'electron-builder.cmd')
+  ? ELECTRON_BUILDER_CLI
   : path.join(ROOT, 'node_modules', '.bin', 'electron-builder');
-const args = process.argv.slice(2);
+const passthroughArgs = process.argv.slice(2);
+const skipNsisPatch = passthroughArgs.includes('--skip-nsis-patch');
+const args = passthroughArgs.filter((arg) => arg !== '--skip-nsis-patch');
+
+function isWindowsBuild() {
+  return process.platform === 'win32' && args.some((arg) => arg === '--win' || arg === 'portable');
+}
+
+function cleanWindowsBuildOutput() {
+  if (!isWindowsBuild()) {
+    return;
+  }
+
+  const winUnpacked = path.join(ROOT, 'release', 'win-unpacked');
+  if (!fs.existsSync(winUnpacked)) {
+    return;
+  }
+
+  fs.rmSync(winUnpacked, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 1000,
+  });
+  console.log('[run-electron-builder] Removed stale release/win-unpacked before Windows packaging.');
+}
 
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -29,13 +57,28 @@ function spawnElectronBuilder() {
     });
   }
 
+  if (process.platform === 'win32') {
+    return spawn(process.execPath, [ELECTRON_BUILDER_CLI, ...args], {
+      cwd: ROOT,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        ...(skipNsisPatch ? { CLAWX_SKIP_NSIS_PATCH: '1' } : {}),
+        PATH: `${__dirname}${pathDelimiter}${process.env.PATH ?? ''}`,
+      },
+      shell: false,
+    });
+  }
+
   return spawn(ELECTRON_BUILDER_BIN, args, {
     cwd: ROOT,
     stdio: 'inherit',
     env: process.env,
-    shell: process.platform === 'win32',
+    shell: false,
   });
 }
+
+cleanWindowsBuildOutput();
 
 const child = spawnElectronBuilder();
 child.on('exit', (code, signal) => {

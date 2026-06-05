@@ -2,6 +2,7 @@
 
 import 'zx/globals';
 import { readFileSync, existsSync, mkdirSync, rmSync, cpSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -60,23 +61,24 @@ function shouldCopySkillFile(srcPath) {
   return true;
 }
 
-async function extractArchive(archiveFileName, cwd) {
-  const prevCwd = $.cwd;
-  $.cwd = cwd;
+function run(command, args, options = {}) {
+  return execFileSync(command, args, {
+    encoding: 'utf8',
+    stdio: options.capture ? ['ignore', 'pipe', 'inherit'] : 'inherit',
+  });
+}
+
+async function extractArchive(archivePath, cwd) {
   try {
-    try {
-      await $`tar -xf ${archiveFileName}`;
+    run('tar', ['-C', cwd, '-xf', archivePath]);
+    return;
+  } catch (tarError) {
+    if (process.platform === 'win32') {
+      // Some Windows images expose bsdtar instead of tar.
+      run('bsdtar', ['-C', cwd, '-xf', archivePath]);
       return;
-    } catch (tarError) {
-      if (process.platform === 'win32') {
-        // Some Windows images expose bsdtar instead of tar.
-        await $`bsdtar -xf ${archiveFileName}`;
-        return;
-      }
-      throw tarError;
     }
-  } finally {
-    $.cwd = prevCwd;
+    throw tarError;
   }
 }
 
@@ -88,16 +90,16 @@ async function fetchSparseRepo(repo, ref, paths, checkoutDir) {
   const archivePath = join(checkoutDir, archiveFileName);
   const archivePaths = [...new Set(paths.map(normalizeRepoPath))];
 
-  await $`git init ${gitCheckoutDir}`;
-  await $`git -C ${gitCheckoutDir} remote add origin ${remote}`;
-  await $`git -C ${gitCheckoutDir} fetch --depth 1 origin ${ref}`;
+  run('git', ['init', gitCheckoutDir]);
+  run('git', ['-C', gitCheckoutDir, 'remote', 'add', 'origin', remote]);
+  run('git', ['-C', gitCheckoutDir, 'fetch', '--depth', '1', 'origin', ref]);
   // Do not checkout working tree on Windows: upstream repos may contain
   // Windows-invalid paths. Export only requested directories via git archive.
-  await $`git -C ${gitCheckoutDir} archive --format=tar --output ${archiveFileName} FETCH_HEAD ${archivePaths}`;
-  await extractArchive(archiveFileName, checkoutDir);
+  run('git', ['-C', gitCheckoutDir, 'archive', '--format=tar', '--output', archiveFileName, 'FETCH_HEAD', ...archivePaths]);
+  await extractArchive(archivePath, checkoutDir);
   rmSync(archivePath, { force: true });
 
-  const commit = (await $`git -C ${gitCheckoutDir} rev-parse FETCH_HEAD`).stdout.trim();
+  const commit = run('git', ['-C', gitCheckoutDir, 'rev-parse', 'FETCH_HEAD'], { capture: true }).trim();
   return commit;
 }
 

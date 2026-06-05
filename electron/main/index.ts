@@ -46,6 +46,7 @@ import {
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
 import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
+import { ensureWeChatPluginInstalled } from '../utils/plugin-install';
 
 import { startHostApiServer } from '../api/server';
 import { HostEventBus } from '../api/event-bus';
@@ -53,6 +54,8 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
+import { ensureJunFeiAIProviderSeeded } from '../services/junfeiai/junfeiai-service';
+import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
@@ -409,11 +412,9 @@ async function initialize(): Promise<void> {
     });
   }
 
-  // Keep community builds aligned with Clawx-biz by physically trimming
-  // bundled OpenClaw consumer skills on startup (dev + packaged), keeping only
-  // `skill-creator`. This also prunes stale openclaw.json entries for trimmed
-  // bundled skills so we do not keep `enabled: false` config for skills that no
-  // longer exist.
+  // Community builds can physically trim bundled OpenClaw consumer skills on
+  // startup. JunFeiAI managed builds preserve bundled OpenClaw skills so the
+  // skills page can show the richer ClawBox-style catalog.
   if (!isE2EMode) {
     void trimBundledOpenClawSkillsAndConfigs().then(({ removed, removedConfigs, kept }) => {
       if (removed > 0 || removedConfigs > 0) {
@@ -437,6 +438,31 @@ async function initialize(): Promise<void> {
   // - When a channel is added via UI: ensureXxxPluginInstalled() in IPC handlers
   // - When Gateway starts: ensureConfiguredPluginsUpgraded() in config-sync.ts
   // No need to pre-install all bundled plugins at app startup.
+  // JunFeiAI managed builds preinstall WeChat because it is part of the
+  // activation/login success path expected by this distribution.
+  if (!isE2EMode && isJunFeiAIManagedDistribution()) {
+    void Promise.resolve().then(() => {
+      const result = ensureWeChatPluginInstalled();
+      if (result.warning) {
+        logger.warn(`[plugin] WeChat preinstall warning: ${result.warning}`);
+      }
+    }).catch((error) => {
+      logger.warn('[plugin] Failed to preinstall WeChat plugin:', error);
+    });
+  }
+
+  if (!isE2EMode) {
+    try {
+      const seed = await ensureJunFeiAIProviderSeeded({ gatewayManager });
+      if (seed.managed) {
+        logger.info(
+          `JunFeiAI provider seeded from ${seed.source}; relayToken=${seed.hasRelayToken ? 'present' : 'missing'}`,
+        );
+      }
+    } catch (error) {
+      logger.warn('Failed to seed JunFeiAI provider:', error);
+    }
+  }
 
   // Bridge gateway and host-side events before any auto-start logic runs, so
   // renderer subscribers observe the full startup lifecycle.

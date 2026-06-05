@@ -59,7 +59,31 @@ describe('provider metadata', () => {
 
   it('keeps builtin provider sources in sync', () => {
     expect(BUILTIN_PROVIDER_TYPES).toEqual(
-      expect.arrayContaining(['anthropic', 'openai', 'google', 'openrouter', 'ark', 'moonshot', 'siliconflow', 'minimax-portal', 'minimax-portal-cn', 'modelstudio', 'ollama'])
+      expect.arrayContaining(['anthropic', 'openai', 'google', 'openrouter', 'ark', 'moonshot', 'moonshot-global', 'siliconflow', 'deepseek', 'junfeiai', 'minimax-portal', 'minimax-portal-cn', 'modelstudio', 'ollama'])
+    );
+  });
+
+  it('defines JunFeiAI as a managed built-in provider', () => {
+    expect(PROVIDER_TYPES).toContain('junfeiai');
+    expect(BUILTIN_PROVIDER_TYPES).toContain('junfeiai');
+    expect(getProviderEnvVar('junfeiai')).toBe('JUNFEIAI_API_KEY');
+    expect(getProviderConfig('junfeiai')).toEqual(
+      expect.objectContaining({
+        baseUrl: 'https://junfeiai.com/v1',
+        api: 'anthropic-messages',
+        apiKeyEnv: 'JUNFEIAI_API_KEY',
+      }),
+    );
+    expect(PROVIDER_TYPE_INFO).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'junfeiai',
+          name: 'JunFeiAI',
+          requiresApiKey: false,
+          defaultBaseUrl: 'https://junfeiai.com/v1',
+          defaultModelId: 'gpt-5.5',
+        }),
+      ]),
     );
   });
 
