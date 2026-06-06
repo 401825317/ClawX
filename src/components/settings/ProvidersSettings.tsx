@@ -2,7 +2,7 @@
  * Providers Settings Component
  * Manage AI provider configurations and API keys
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Plus,
   Trash2,
@@ -17,11 +17,6 @@ import {
   Copy,
   XCircle,
   ChevronDown,
-  LogOut,
-  Mail,
-  RefreshCw,
-  ShieldCheck,
-  UserPlus,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -60,46 +55,9 @@ import { useSettingsStore } from '@/stores/settings';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 
-const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
-const JUNFEIAI_PRODUCTION_BASE_URL = `${JUNFEIAI_PRODUCTION_ORIGIN}/v1`;
-
 const inputClasses = 'h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-sm text-foreground/80 font-bold';
 type ArkMode = 'apikey' | 'codeplan';
-
-type JunFeiAIManagedStatus = {
-  managed?: boolean;
-  source?: 'remote' | 'fallback' | 'provided';
-  hasRelayToken?: boolean;
-  hasAuthToken?: boolean;
-  authValid?: boolean;
-  authError?: string;
-  account?: ProviderAccount | null;
-  bootstrap?: {
-    service?: {
-      displayName?: string;
-      apiOrigin?: string;
-    };
-    auth?: {
-      registrationEnabled?: boolean;
-      loginEnabled?: boolean;
-      activationRequired?: boolean;
-    };
-    runtime?: {
-      baseUrl?: string;
-      defaultModel?: string;
-    };
-    offline?: {
-      graceSeconds?: number;
-    };
-  };
-  auth?: {
-    user?: {
-      email?: string;
-      username?: string;
-    };
-  };
-};
 
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
   return Array.from(new Set((ids ?? []).filter(Boolean)));
@@ -219,18 +177,6 @@ function getAuthModeLabel(
   }
 }
 
-function formatOfflineGrace(seconds?: number): string {
-  if (!seconds || seconds <= 0) {
-    return 'disabled';
-  }
-  const days = Math.floor(seconds / 86400);
-  if (days >= 1) {
-    return `${days} day${days === 1 ? '' : 's'}`;
-  }
-  const hours = Math.floor(seconds / 3600);
-  return `${Math.max(1, hours)} hour${hours === 1 ? '' : 's'}`;
-}
-
 export function ProvidersSettings() {
   const { t } = useTranslation('settings');
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
@@ -250,8 +196,6 @@ export function ProvidersSettings() {
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
-  const [managedStatus, setManagedStatus] = useState<JunFeiAIManagedStatus | null>(null);
-  const [managedStatusLoading, setManagedStatusLoading] = useState(false);
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
   const managedProviderMode = vendors.length === 1 && vendors[0]?.id === 'junfeiai';
@@ -264,25 +208,6 @@ export function ProvidersSettings() {
   useEffect(() => {
     refreshProviderSnapshot();
   }, [refreshProviderSnapshot]);
-
-  const refreshManagedStatus = useCallback(async () => {
-    if (!managedProviderMode) {
-      setManagedStatus(null);
-      return;
-    }
-    setManagedStatusLoading(true);
-    try {
-      setManagedStatus(await hostApiFetch<JunFeiAIManagedStatus>('/api/junfeiai/status'));
-    } catch (error) {
-      toast.error(`JunFeiAI status failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setManagedStatusLoading(false);
-    }
-  }, [managedProviderMode]);
-
-  useEffect(() => {
-    void refreshManagedStatus();
-  }, [refreshManagedStatus]);
 
   const handleAddProvider = async (
     type: ProviderType,
@@ -359,17 +284,6 @@ export function ProvidersSettings() {
         )}
       </div>
 
-      {managedProviderMode && (
-        <JunFeiAIAuthCard
-          status={managedStatus}
-          loading={managedStatusLoading}
-          onRefresh={async () => {
-            await refreshManagedStatus();
-            await refreshProviderSnapshot();
-          }}
-        />
-      )}
-
       {loading ? (
         <div className="flex items-center justify-center py-12 text-muted-foreground bg-black/5 dark:bg-white/5 rounded-3xl border border-transparent border-dashed">
           <Loader2 className="h-6 w-6 animate-spin" />
@@ -438,369 +352,6 @@ export function ProvidersSettings() {
           onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
           devModeUnlocked={devModeUnlocked}
         />
-      )}
-    </div>
-  );
-}
-
-interface JunFeiAIAuthCardProps {
-  status: JunFeiAIManagedStatus | null;
-  loading: boolean;
-  onRefresh: () => Promise<void>;
-}
-
-function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps) {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
-  const [account, setAccount] = useState('');
-  const [password, setPassword] = useState('');
-  const [activationCode, setActivationCode] = useState('');
-  const [verifyCode, setVerifyCode] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [sendingVerifyCode, setSendingVerifyCode] = useState(false);
-  const [verifyCodeCountdown, setVerifyCodeCountdown] = useState(0);
-  const [checkingActivation, setCheckingActivation] = useState(false);
-  const [activationTicket, setActivationTicket] = useState('');
-  const [activationValid, setActivationValid] = useState<boolean | null>(null);
-
-  const auth = status?.bootstrap?.auth ?? {};
-  const displayName = status?.bootstrap?.service?.displayName || 'JunFeiAI';
-  const apiOrigin = status?.bootstrap?.service?.apiOrigin || JUNFEIAI_PRODUCTION_ORIGIN;
-  const defaultModel = status?.bootstrap?.runtime?.defaultModel || 'gpt-5.5';
-  const baseUrl = status?.bootstrap?.runtime?.baseUrl || JUNFEIAI_PRODUCTION_BASE_URL;
-  const userLabel = status?.auth?.user?.email || status?.auth?.user?.username || '';
-  const hasRelayToken = Boolean(status?.hasRelayToken);
-  const hasAuthToken = Boolean(status?.hasAuthToken);
-  const authValid = Boolean(status?.authValid);
-  const showAuthForm = !authValid;
-  const requiresActivation = Boolean(auth.activationRequired);
-  const canRegister = auth.registrationEnabled !== false;
-  const canLogin = auth.loginEnabled !== false;
-
-  useEffect(() => {
-    if (verifyCodeCountdown <= 0) {
-      return undefined;
-    }
-    const timer = window.setTimeout(() => {
-      setVerifyCodeCountdown((seconds) => Math.max(0, seconds - 1));
-    }, 1000);
-    return () => window.clearTimeout(timer);
-  }, [verifyCodeCountdown]);
-
-  const submitAuth = async () => {
-    const normalizedAccount = account.trim();
-    if (!normalizedAccount || !password) {
-      toast.error('Please enter account and password');
-      return;
-    }
-    if (mode === 'register' && requiresActivation && !activationTicket && !activationCode.trim()) {
-      toast.error('Please enter an activation code');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      await hostApiFetch(mode === 'register' ? '/api/junfeiai/register' : '/api/junfeiai/login', {
-        method: 'POST',
-        body: JSON.stringify({
-          account: normalizedAccount,
-          email: normalizedAccount,
-          password,
-          activationCode: activationCode.trim() || undefined,
-          activationTicket: activationTicket || activationCode.trim() || undefined,
-          verifyCode: verifyCode.trim() || undefined,
-        }),
-      });
-      toast.success(mode === 'register' ? 'JunFeiAI registered' : 'JunFeiAI logged in');
-      setPassword('');
-      await onRefresh();
-    } catch (error) {
-      toast.error(`JunFeiAI ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const sendVerifyCode = async () => {
-    const normalizedAccount = account.trim();
-    if (!normalizedAccount) {
-      toast.error('Please enter an email first');
-      return;
-    }
-
-    setSendingVerifyCode(true);
-    try {
-      const result = await hostApiFetch<{ message?: string; countdown?: number }>('/api/junfeiai/verification/send-code', {
-        method: 'POST',
-        body: JSON.stringify({
-          account: normalizedAccount,
-          email: normalizedAccount,
-        }),
-      });
-      setVerifyCodeCountdown(typeof result.countdown === 'number' && result.countdown > 0 ? result.countdown : 60);
-      toast.success(result.message || 'Verification code sent');
-    } catch (error) {
-      toast.error(`Send verification code failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setSendingVerifyCode(false);
-    }
-  };
-
-  const checkActivation = async () => {
-    const code = activationCode.trim();
-    if (!code) {
-      toast.error('Please enter an activation code');
-      return;
-    }
-    setCheckingActivation(true);
-    setActivationValid(null);
-    try {
-      const result = await hostApiFetch<{ valid?: boolean; activationTicket?: string; errorCode?: string }>(
-        '/api/junfeiai/activation/check',
-        {
-          method: 'POST',
-          body: JSON.stringify({ code }),
-        },
-      );
-      setActivationValid(Boolean(result.valid));
-      setActivationTicket(result.activationTicket || '');
-      if (result.valid) {
-        toast.success('Activation code verified');
-      } else {
-        toast.error(result.errorCode || 'Activation code is invalid');
-      }
-    } catch (error) {
-      toast.error(`Activation check failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setCheckingActivation(false);
-    }
-  };
-
-  const verifyAuth = async () => {
-    setSubmitting(true);
-    try {
-      await hostApiFetch('/api/junfeiai/auth/verify', {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
-      toast.success('JunFeiAI authorization verified');
-      await onRefresh();
-    } catch (error) {
-      toast.error(`JunFeiAI verify failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const logout = async () => {
-    setSubmitting(true);
-    try {
-      await hostApiFetch('/api/junfeiai/logout', {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
-      toast.success('JunFeiAI logged out');
-      await onRefresh();
-    } catch (error) {
-      toast.error(`JunFeiAI logout failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div data-testid="junfeiai-auth-card" className="rounded-2xl border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.04] p-5 space-y-4">
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-2">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-blue-500" />
-            <h3 className="text-base font-semibold text-foreground">{displayName}</h3>
-            {authValid ? (
-              <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-2xs font-semibold text-green-600 dark:text-green-400">
-                Logged in
-              </span>
-            ) : hasAuthToken ? (
-              <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-2xs font-semibold text-amber-600 dark:text-amber-400">
-                Login expired
-              </span>
-            ) : hasRelayToken && (
-              <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-2xs font-semibold text-blue-600 dark:text-blue-400">
-                Runtime active
-              </span>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 text-meta text-muted-foreground">
-            <span>{apiOrigin}</span>
-            <span>{defaultModel}</span>
-            <span>{baseUrl}</span>
-            <span>offline {formatOfflineGrace(status?.bootstrap?.offline?.graceSeconds)}</span>
-          </div>
-          {userLabel && (
-            <p className="text-meta text-foreground/70">{userLabel}</p>
-          )}
-        </div>
-        <div className="flex shrink-0 gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-9 w-9 rounded-full"
-            onClick={() => void onRefresh()}
-            disabled={loading || submitting}
-            title="Refresh JunFeiAI status"
-          >
-            <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-          </Button>
-          {(hasRelayToken || hasAuthToken) && (
-            <>
-              <Button
-                variant="outline"
-                className="h-9 rounded-full px-4 text-meta"
-                onClick={() => void verifyAuth()}
-                disabled={submitting}
-              >
-                {submitting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <ShieldCheck className="h-4 w-4 mr-2" />}
-                Verify
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-9 w-9 rounded-full text-muted-foreground hover:text-destructive"
-                onClick={() => void logout()}
-                disabled={submitting}
-                title="Logout JunFeiAI"
-              >
-                <LogOut className="h-4 w-4" />
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {showAuthForm && (
-        <div className="space-y-4">
-          {status?.authError && (
-            <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
-              {status.authError}
-            </p>
-          )}
-          <div className="flex w-full rounded-xl bg-black/5 dark:bg-white/5 p-1 text-meta">
-            <button
-              type="button"
-              onClick={() => setMode('login')}
-              disabled={!canLogin}
-              className={cn(
-                'flex-1 rounded-lg px-3 py-2 font-medium transition-colors disabled:opacity-50',
-                mode === 'login' ? 'bg-surface-modal text-foreground shadow-sm' : 'text-muted-foreground',
-              )}
-            >
-              Login
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('register')}
-              disabled={!canRegister}
-              className={cn(
-                'flex-1 rounded-lg px-3 py-2 font-medium transition-colors disabled:opacity-50',
-                mode === 'register' ? 'bg-surface-modal text-foreground shadow-sm' : 'text-muted-foreground',
-              )}
-            >
-              Register
-            </button>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label className={labelClasses}>Email</Label>
-              <Input
-                value={account}
-                onChange={(event) => setAccount(event.target.value)}
-                placeholder="user@example.com"
-                className={inputClasses}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label className={labelClasses}>Password</Label>
-              <Input
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="Password"
-                className={inputClasses}
-              />
-            </div>
-          </div>
-
-          {mode === 'register' && (
-            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-              <div className="space-y-1.5">
-                <Label className={labelClasses}>Activation code</Label>
-                <Input
-                  value={activationCode}
-                  onChange={(event) => {
-                    setActivationCode(event.target.value);
-                    setActivationTicket('');
-                    setActivationValid(null);
-                  }}
-                  placeholder={requiresActivation ? 'Required' : 'Optional'}
-                  className={inputClasses}
-                />
-                {activationValid !== null && (
-                  <p className={cn('text-xs font-medium', activationValid ? 'text-green-600' : 'text-red-500')}>
-                    {activationValid ? 'Activation code verified' : 'Activation code is invalid'}
-                  </p>
-                )}
-              </div>
-              <Button
-                variant="outline"
-                className="h-[44px] rounded-full px-5 text-meta"
-                onClick={() => void checkActivation()}
-                disabled={checkingActivation || !activationCode.trim()}
-              >
-                {checkingActivation ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="h-4 w-4 mr-2" />}
-                Check
-              </Button>
-            </div>
-          )}
-
-          {mode === 'register' && (
-            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-              <div className="space-y-1.5">
-                <Label className={labelClasses}>Email verification code</Label>
-                <Input
-                  value={verifyCode}
-                  onChange={(event) => setVerifyCode(event.target.value)}
-                  placeholder="Enter the code from your email"
-                  className={inputClasses}
-                />
-              </div>
-              <Button
-                variant="outline"
-                className="h-[44px] rounded-full px-5 text-meta"
-                onClick={() => void sendVerifyCode()}
-                disabled={sendingVerifyCode || verifyCodeCountdown > 0 || !account.trim()}
-              >
-                {sendingVerifyCode ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Mail className="h-4 w-4 mr-2" />}
-                {verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : 'Send code'}
-              </Button>
-            </div>
-          )}
-
-          <div className="flex justify-end">
-            <Button
-              className="h-[42px] rounded-full px-6 text-meta font-semibold"
-              onClick={() => void submitAuth()}
-              disabled={submitting}
-            >
-              {submitting ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              ) : mode === 'register' ? (
-                <UserPlus className="h-4 w-4 mr-2" />
-              ) : (
-                <Key className="h-4 w-4 mr-2" />
-              )}
-              {mode === 'register' ? 'Register and activate' : 'Login and activate'}
-            </Button>
-          </div>
-        </div>
       )}
     </div>
   );

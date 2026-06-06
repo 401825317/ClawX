@@ -126,6 +126,59 @@
       "requestingCode": "Запрос кода безопасного входа..."
     }
   },
+  "managedAuth": {
+    "status": {
+      "loggedIn": "Вход выполнен",
+      "loginExpired": "Сессия истекла",
+      "runtimeActive": "Рантайм активен",
+      "activationVerified": "Код активации подтверждён",
+      "activationInvalid": "Код активации недействителен",
+      "offlineGrace": "офлайн-льгота {{value}}"
+    },
+    "fields": {
+      "email": "Email",
+      "password": "Пароль",
+      "activationCode": "Код активации",
+      "verifyCode": "Код подтверждения email"
+    },
+    "placeholders": {
+      "email": "user@example.com",
+      "password": "Пароль",
+      "verifyCode": "Введите код из письма",
+      "required": "Обязательно",
+      "optional": "Необязательно"
+    },
+    "actions": {
+      "refreshStatus": "Обновить статус JunFeiAI",
+      "verify": "Проверить",
+      "logout": "Выйти из JunFeiAI",
+      "login": "Войти",
+      "register": "Зарегистрироваться",
+      "check": "Проверить",
+      "sendCode": "Отправить код",
+      "sendCodeCountdown": "{{seconds}}с",
+      "registerAndActivate": "Зарегистрироваться и активировать",
+      "loginAndActivate": "Войти и активировать"
+    },
+    "toast": {
+      "enterAccountPassword": "Введите аккаунт и пароль",
+      "enterActivationCode": "Введите код активации",
+      "registered": "JunFeiAI зарегистрирован",
+      "loggedIn": "Вход в JunFeiAI выполнен",
+      "registerFailed": "Не удалось зарегистрировать JunFeiAI: {{message}}",
+      "loginFailed": "Не удалось войти в JunFeiAI: {{message}}",
+      "enterEmailFirst": "Сначала введите email",
+      "verifyCodeSent": "Код подтверждения отправлен",
+      "sendVerifyCodeFailed": "Не удалось отправить код подтверждения: {{message}}",
+      "activationVerified": "Код активации подтверждён",
+      "activationInvalid": "Код активации недействителен",
+      "activationCheckFailed": "Не удалось проверить код активации: {{message}}",
+      "verified": "Авторизация JunFeiAI подтверждена",
+      "verifyFailed": "Не удалось подтвердить авторизацию JunFeiAI: {{message}}",
+      "loggedOut": "Выход из JunFeiAI выполнен",
+      "logoutFailed": "Не удалось выйти из JunFeiAI: {{message}}"
+    }
+  },
   "gateway": {
     "title": "Шлюз",
     "description": "Настройки шлюза OpenClaw",

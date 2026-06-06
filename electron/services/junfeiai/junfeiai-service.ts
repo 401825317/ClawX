@@ -56,6 +56,7 @@ export interface JunFeiAIBootstrapPayload {
   };
   auth?: {
     registrationEnabled?: boolean;
+    emailVerifyEnabled?: boolean;
     loginEnabled?: boolean;
     activationRequired?: boolean;
   };
@@ -83,6 +84,17 @@ export interface JunFeiAIAuthPayload extends JunFeiAIBootstrapPayload {
   token_type?: string;
   user?: Record<string, unknown>;
   device?: Record<string, unknown>;
+}
+
+interface JunFeiAIRefreshPayload {
+  accessToken?: string;
+  access_token?: string;
+  refreshToken?: string;
+  refresh_token?: string;
+  expiresIn?: number;
+  expires_in?: number;
+  tokenType?: string;
+  token_type?: string;
 }
 
 interface JunFeiAIRelayTokenPayload {
@@ -156,6 +168,7 @@ function fallbackBootstrap(): JunFeiAIBootstrapPayload {
     },
     auth: {
       registrationEnabled: true,
+      emailVerifyEnabled: false,
       loginEnabled: true,
       activationRequired: false,
     },
@@ -474,7 +487,8 @@ export async function getStoredJunFeiAIAuthToken(): Promise<string | null> {
     return null;
   }
   if (secret.expiresAt > 0 && secret.expiresAt < Date.now()) {
-    return null;
+    const refreshed = await refreshStoredJunFeiAIAuthSession(secret);
+    return refreshed?.accessToken ?? null;
   }
   return secret.accessToken;
 }
@@ -495,6 +509,36 @@ async function storeJunFeiAIAuthSession(auth: JunFeiAIAuthPayload): Promise<void
       ? String(normalized.user.id)
       : undefined,
   });
+}
+
+async function refreshStoredJunFeiAIAuthSession(secret: Extract<Awaited<ReturnType<typeof getProviderSecret>>, { type: 'oauth' }>): Promise<JunFeiAIRefreshPayload | null> {
+  const refreshToken = secret.refreshToken?.trim();
+  if (!refreshToken) {
+    return null;
+  }
+
+  const refreshed = normalizeJunFeiAIAuthPayload(
+    await requestJunFeiAI<JunFeiAIRefreshPayload>('/api/v1/auth/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    }),
+  );
+  if (!refreshed.accessToken) {
+    return null;
+  }
+
+  await setProviderSecret({
+    type: 'oauth',
+    accountId: JUNFEIAI_AUTH_ACCOUNT_ID,
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken?.trim() || refreshToken,
+    expiresAt: Date.now() + Math.max(1, refreshed.expiresIn ?? 24 * 60 * 60) * 1000,
+    email: secret.email,
+    subject: secret.subject,
+    scopes: secret.scopes,
+  });
+
+  return refreshed;
 }
 
 export async function storeJunFeiAIRelayToken(
@@ -1042,6 +1086,19 @@ export async function getJunFeiAITopupOrderStatus(
 }
 
 export async function logoutJunFeiAI(): Promise<void> {
+  const secret = await getProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
+  if (secret?.type === 'oauth' && secret.refreshToken?.trim()) {
+    try {
+      await requestJunFeiAI('/api/v1/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({
+          refresh_token: secret.refreshToken.trim(),
+        }),
+      });
+    } catch (error) {
+      logger.warn('[junfeiai] Failed to revoke refresh token during logout:', error);
+    }
+  }
   await deleteProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
   await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
   await clearVerificationCache();

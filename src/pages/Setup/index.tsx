@@ -17,7 +17,6 @@ import {
   ExternalLink,
   Key,
   Mail,
-  ShieldCheck,
   UserPlus,
 } from 'lucide-react';
 import { TitleBar } from '@/components/layout/TitleBar';
@@ -42,8 +41,8 @@ interface SetupStep {
 }
 
 const STEP = {
-  AUTH: 0,
-  WELCOME: 1,
+  WELCOME: 0,
+  AUTH: 1,
   RUNTIME: 2,
   INSTALLING: 3,
   COMPLETE: 4,
@@ -51,14 +50,14 @@ const STEP = {
 
 const getSteps = (t: TFunction): SetupStep[] => [
   {
-    id: 'auth',
-    title: 'Activate JunFeiAI',
-    description: 'Sign in or activate this device',
-  },
-  {
     id: 'welcome',
     title: t('steps.welcome.title'),
     description: t('steps.welcome.description'),
+  },
+  {
+    id: 'auth',
+    title: t('steps.auth.title'),
+    description: t('steps.auth.description'),
   },
   {
     id: 'runtime',
@@ -100,7 +99,7 @@ import clawxIcon from '@/assets/logo.svg';
 export function Setup() {
   const { t } = useTranslation(['setup', 'channels']);
   const navigate = useNavigate();
-  const [currentStep, setCurrentStep] = useState<number>(STEP.AUTH);
+  const [currentStep, setCurrentStep] = useState<number>(STEP.WELCOME);
 
   // Setup state
   // Installation state for the Installing step
@@ -111,10 +110,10 @@ export function Setup() {
 
   const steps = getSteps(t);
   const safeStepIndex = Number.isInteger(currentStep)
-    ? Math.min(Math.max(currentStep, STEP.AUTH), steps.length - 1)
-    : STEP.AUTH;
-  const step = steps[safeStepIndex] ?? steps[STEP.AUTH];
-  const isFirstStep = safeStepIndex === STEP.AUTH;
+    ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
+    : STEP.WELCOME;
+  const step = steps[safeStepIndex] ?? steps[STEP.WELCOME];
+  const isFirstStep = safeStepIndex === STEP.WELCOME;
   const isLastStep = safeStepIndex === steps.length - 1;
   const allowSetupSkip = import.meta.env.VITE_ALLOW_SETUP_SKIP === '1';
 
@@ -674,6 +673,7 @@ type JunFeiAIManagedStatus = {
     };
     auth?: {
       registrationEnabled?: boolean;
+      emailVerifyEnabled?: boolean;
       loginEnabled?: boolean;
       activationRequired?: boolean;
     };
@@ -698,6 +698,7 @@ interface JunFeiAISetupContentProps {
 }
 
 function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
+  const { t } = useTranslation('setup');
   const [status, setStatus] = useState<JunFeiAIManagedStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<'login' | 'register'>('register');
@@ -717,14 +718,9 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   const authValid = Boolean(status?.authValid);
   const auth = status?.bootstrap?.auth ?? {};
   const requiresActivation = Boolean(auth.activationRequired);
+  const emailVerifyEnabled = Boolean(auth.emailVerifyEnabled);
   const canRegister = auth.registrationEnabled !== false;
   const canLogin = auth.loginEnabled !== false;
-  const displayName = status?.bootstrap?.service?.displayName || 'JunFeiAI';
-  const apiOrigin = status?.bootstrap?.service?.apiOrigin || '';
-  const baseUrl = status?.bootstrap?.runtime?.baseUrl || '';
-  const defaultModel = status?.bootstrap?.runtime?.defaultModel || '';
-  const userLabel = status?.auth?.user?.email || status?.auth?.user?.username || '';
-
   const refreshStatus = useCallback(async () => {
     setLoading(true);
     try {
@@ -739,11 +735,11 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
       }
     } catch (error) {
       onStatusChange(false);
-      toast.error(`JunFeiAI status failed: ${error instanceof Error ? error.message : String(error)}`);
+      toast.error(t('auth.toast.statusFailed', { message: error instanceof Error ? error.message : String(error) }));
     } finally {
       setLoading(false);
     }
-  }, [onStatusChange]);
+  }, [onStatusChange, t]);
 
   useEffect(() => {
     void refreshStatus();
@@ -766,7 +762,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   const checkActivation = async () => {
     const code = activationCode.trim();
     if (!code) {
-      toast.error('Please enter an activation code');
+      toast.error(t('auth.toast.enterActivationCode'));
       return;
     }
     setCheckingActivation(true);
@@ -782,12 +778,12 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
       setActivationValid(Boolean(result.valid));
       setActivationTicket(result.activationTicket || '');
       if (result.valid) {
-        toast.success('Activation code verified');
+        toast.success(t('auth.toast.activationVerified'));
       } else {
-        toast.error(result.errorCode || 'Activation code is invalid');
+        toast.error(result.errorCode || t('auth.toast.activationInvalid'));
       }
     } catch (error) {
-      toast.error(`Activation check failed: ${error instanceof Error ? error.message : String(error)}`);
+      toast.error(t('auth.toast.activationCheckFailed', { message: error instanceof Error ? error.message : String(error) }));
     } finally {
       setCheckingActivation(false);
     }
@@ -796,7 +792,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   const sendVerifyCode = async () => {
     const normalizedAccount = account.trim();
     if (!normalizedAccount) {
-      toast.error('Please enter an email first');
+      toast.error(t('auth.toast.enterEmailFirst'));
       return;
     }
 
@@ -810,9 +806,9 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
         }),
       });
       setVerifyCodeCountdown(typeof result.countdown === 'number' && result.countdown > 0 ? result.countdown : 60);
-      toast.success(result.message || 'Verification code sent');
+      toast.success(result.message || t('auth.toast.verifyCodeSent'));
     } catch (error) {
-      toast.error(`Send verification code failed: ${error instanceof Error ? error.message : String(error)}`);
+      toast.error(t('auth.toast.sendVerifyCodeFailed', { message: error instanceof Error ? error.message : String(error) }));
     } finally {
       setSendingVerifyCode(false);
     }
@@ -821,11 +817,11 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   const submitAuth = async () => {
     const normalizedAccount = account.trim();
     if (!normalizedAccount || !password) {
-      toast.error('Please enter account and password');
+      toast.error(t('auth.toast.enterAccountPassword'));
       return;
     }
     if (mode === 'register' && requiresActivation && !activationTicket && !activationCode.trim()) {
-      toast.error('Please enter an activation code');
+      toast.error(t('auth.toast.enterActivationCode'));
       return;
     }
 
@@ -839,14 +835,35 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
           password,
           activationCode: activationCode.trim() || undefined,
           activationTicket: activationTicket || activationCode.trim() || undefined,
-          verifyCode: verifyCode.trim() || undefined,
+          verifyCode: emailVerifyEnabled ? (verifyCode.trim() || undefined) : undefined,
         }),
       });
-      toast.success(mode === 'register' ? 'JunFeiAI activated' : 'JunFeiAI logged in');
+      toast.success(mode === 'register' ? t('auth.toast.activated') : t('auth.toast.loggedIn'));
       setPassword('');
       await refreshStatus();
     } catch (error) {
-      toast.error(`JunFeiAI ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
+      toast.error(t(`auth.toast.${mode}Failed`, { message: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const logout = async () => {
+    setSubmitting(true);
+    try {
+      await hostApiFetch('/api/junfeiai/logout', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      toast.success(t('auth.toast.loggedOut'));
+      setPassword('');
+      setActivationCode('');
+      setVerifyCode('');
+      setActivationTicket('');
+      setActivationValid(null);
+      await refreshStatus();
+    } catch (error) {
+      toast.error(t('auth.toast.logoutFailed', { message: error instanceof Error ? error.message : String(error) }));
     } finally {
       setSubmitting(false);
     }
@@ -854,49 +871,18 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
 
   return (
     <div data-testid="setup-junfeiai-step" className="space-y-5">
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <ShieldCheck className="h-5 w-5 text-blue-500" />
-          <h2 className="text-xl font-serif font-normal tracking-tight">{displayName}</h2>
-          {authValid ? (
-            <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-2xs font-semibold text-green-600 dark:text-green-400">
-              Logged in
-            </span>
-          ) : hasAuthToken ? (
-            <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-2xs font-semibold text-amber-600 dark:text-amber-400">
-              Login expired
-            </span>
-          ) : hasRelayToken && (
-            <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-2xs font-semibold text-blue-600 dark:text-blue-400">
-              Runtime active
-            </span>
-          )}
-        </div>
-        <div className="space-y-1 text-meta text-muted-foreground">
-          {apiOrigin && <p>{apiOrigin}</p>}
-          {baseUrl && <p>{baseUrl}</p>}
-          {defaultModel && <p>{defaultModel}</p>}
-          {userLabel && <p className="text-foreground/70">{userLabel}</p>}
-        </div>
-      </div>
-
       {loading ? (
         <div className="flex items-center gap-2 rounded-xl bg-surface-input/50 p-4 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-          Checking JunFeiAI status...
+          {t('auth.status.checking')}
         </div>
       ) : hasRelayToken && authValid ? (
         <div className="flex items-center gap-2 rounded-xl bg-green-500/10 p-4 text-green-700 dark:text-green-400">
           <CheckCircle2 className="h-5 w-5" />
-          JunFeiAI is activated for this device.
+          {t('auth.status.activatedForDevice')}
         </div>
       ) : (
         <div className="space-y-4">
-          {status?.authError && (
-            <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
-              {status.authError}
-            </p>
-          )}
           <div className="flex w-full rounded-xl bg-black/5 dark:bg-white/5 p-1 text-meta">
             <button
               type="button"
@@ -907,7 +893,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
                 mode === 'login' ? 'bg-surface-modal text-foreground shadow-sm' : 'text-muted-foreground',
               )}
             >
-              Login
+              {t('auth.actions.login')}
             </button>
             <button
               type="button"
@@ -918,27 +904,27 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
                 mode === 'register' ? 'bg-surface-modal text-foreground shadow-sm' : 'text-muted-foreground',
               )}
             >
-              Register
+              {t('auth.actions.register')}
             </button>
           </div>
 
           <div className="grid gap-3 md:grid-cols-2">
             <div className="space-y-1.5">
-              <Label className="text-sm text-foreground/80 font-bold">Email</Label>
+              <Label className="text-sm text-foreground/80 font-bold">{t('auth.fields.email')}</Label>
               <Input
                 value={account}
                 onChange={(event) => setAccount(event.target.value)}
-                placeholder="user@example.com"
+                placeholder={t('auth.placeholders.email')}
                 className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-sm text-foreground/80 font-bold">Password</Label>
+              <Label className="text-sm text-foreground/80 font-bold">{t('auth.fields.password')}</Label>
               <Input
                 type="password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                placeholder="Password"
+                placeholder={t('auth.placeholders.password')}
                 className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
               />
             </div>
@@ -947,7 +933,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
           {mode === 'register' && (
             <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
               <div className="space-y-1.5">
-                <Label className="text-sm text-foreground/80 font-bold">Activation code</Label>
+                <Label className="text-sm text-foreground/80 font-bold">{t('auth.fields.activationCode')}</Label>
                 <Input
                   value={activationCode}
                   onChange={(event) => {
@@ -955,12 +941,12 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
                     setActivationTicket('');
                     setActivationValid(null);
                   }}
-                  placeholder={requiresActivation ? 'Required' : 'Optional'}
+                  placeholder={requiresActivation ? t('auth.placeholders.required') : t('auth.placeholders.optional')}
                   className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
                 />
                 {activationValid !== null && (
                   <p className={cn('text-xs font-medium', activationValid ? 'text-green-600' : 'text-red-500')}>
-                    {activationValid ? 'Activation code verified' : 'Activation code is invalid'}
+                    {activationValid ? t('auth.status.activationVerified') : t('auth.status.activationInvalid')}
                   </p>
                 )}
               </div>
@@ -971,19 +957,19 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
                 disabled={checkingActivation || !activationCode.trim()}
               >
                 {checkingActivation ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="h-4 w-4 mr-2" />}
-                Check
+                {t('auth.actions.check')}
               </Button>
             </div>
           )}
 
-          {mode === 'register' && (
+          {mode === 'register' && emailVerifyEnabled && (
             <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
               <div className="space-y-1.5">
-                <Label className="text-sm text-foreground/80 font-bold">Email verification code</Label>
+                <Label className="text-sm text-foreground/80 font-bold">{t('auth.fields.verifyCode')}</Label>
                 <Input
                   value={verifyCode}
                   onChange={(event) => setVerifyCode(event.target.value)}
-                  placeholder="Enter the code from your email"
+                  placeholder={t('auth.placeholders.verifyCode')}
                   className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
                 />
               </div>
@@ -994,7 +980,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
                 disabled={sendingVerifyCode || verifyCodeCountdown > 0 || !account.trim()}
               >
                 {sendingVerifyCode ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Mail className="h-4 w-4 mr-2" />}
-                {verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : 'Send code'}
+                {verifyCodeCountdown > 0 ? t('auth.actions.sendCodeCountdown', { seconds: verifyCodeCountdown }) : t('auth.actions.sendCode')}
               </Button>
             </div>
           )}
@@ -1007,22 +993,35 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
               disabled={loading || submitting}
             >
               <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
-              Refresh
+              {t('auth.actions.refresh')}
             </Button>
-            <Button
-              className="h-[42px] rounded-full px-6 text-meta font-semibold"
-              onClick={() => void submitAuth()}
-              disabled={submitting}
-            >
-              {submitting ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              ) : mode === 'register' ? (
-                <UserPlus className="h-4 w-4 mr-2" />
-              ) : (
-                <Key className="h-4 w-4 mr-2" />
+            <div className="flex justify-end gap-3">
+              {(hasRelayToken || hasAuthToken) && (
+                <Button
+                  variant="outline"
+                  className="h-[42px] rounded-full px-5 text-meta"
+                  onClick={() => void logout()}
+                  disabled={submitting}
+                >
+                  {submitting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <XCircle className="h-4 w-4 mr-2" />}
+                  {t('auth.actions.logout')}
+                </Button>
               )}
-              {mode === 'register' ? 'Register and activate' : 'Login and activate'}
-            </Button>
+              <Button
+                className="h-[42px] rounded-full px-6 text-meta font-semibold"
+                onClick={() => void submitAuth()}
+                disabled={submitting}
+              >
+                {submitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : mode === 'register' ? (
+                  <UserPlus className="h-4 w-4 mr-2" />
+                ) : (
+                  <Key className="h-4 w-4 mr-2" />
+                )}
+                {mode === 'register' ? t('auth.actions.registerAndActivate') : t('auth.actions.loginAndActivate')}
+              </Button>
+            </div>
           </div>
         </div>
       )}

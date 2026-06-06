@@ -3,6 +3,7 @@
  * Application configuration
  */
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Sun,
   Moon,
@@ -13,6 +14,7 @@ import {
   ExternalLink,
   Copy,
   FileText,
+  LogOut,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -23,7 +25,6 @@ import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
-import { useUpdateStore } from '@/stores/update';
 import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   getGatewayWsDiagnosticEnabled,
@@ -50,6 +51,7 @@ type ControlUiInfo = {
 
 export function Settings() {
   const { t } = useTranslation('settings');
+  const navigate = useNavigate();
   const {
     theme,
     setTheme,
@@ -80,7 +82,6 @@ export function Settings() {
   } = useSettingsStore();
 
   const { status: gatewayStatus, restart: restartGateway } = useGatewayStore();
-  const currentVersion = useUpdateStore((state) => state.currentVersion);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
@@ -122,6 +123,19 @@ export function Settings() {
     } catch {
       setLogContent('(Failed to load logs)');
       setShowLogs(true);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await hostApiFetch('/api/junfeiai/logout', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      toast.success(t('managedAuth.toast.loggedOut'));
+      navigate('/setup');
+    } catch (error) {
+      toast.error(t('managedAuth.toast.logoutFailed', { message: toUserMessage(error) }));
     }
   };
 
@@ -1133,40 +1147,20 @@ export function Settings() {
 
           <Separator className="bg-black/5 dark:bg-white/5" />
 
-          {/* About */}
+          {/* Account */}
           <div>
             <h2 className="text-3xl font-serif text-foreground mb-6 font-normal tracking-tight">
-              {t('about.title')}
+              {t('managedAuth.actions.account')}
             </h2>
-            <div className="space-y-3 text-sm text-muted-foreground">
-              <p>
-                <strong className="text-foreground font-semibold">{t('about.appName')}</strong> - {t('about.tagline')}
-              </p>
-              <p>{t('about.basedOn')}</p>
-              <p>{t('about.version', { version: currentVersion })}</p>
-              <div className="flex gap-4 pt-3">
-                <Button
-                  variant="link"
-                  className="h-auto p-0 text-sm text-blue-500 hover:text-blue-600 font-medium"
-                  onClick={() => window.electron.openExternal('https://claw-x.com')}
-                >
-                  {t('about.docs')}
-                </Button>
-                <Button
-                  variant="link"
-                  className="h-auto p-0 text-sm text-blue-500 hover:text-blue-600 font-medium"
-                  onClick={() => window.electron.openExternal('https://github.com/ValueCell-ai/ClawX')}
-                >
-                  {t('about.github')}
-                </Button>
-                <Button
-                  variant="link"
-                  className="h-auto p-0 text-sm text-blue-500 hover:text-blue-600 font-medium"
-                  onClick={() => window.electron.openExternal('https://icnnp7d0dymg.feishu.cn/wiki/UyfOwQ2cAiJIP6kqUW8cte5Bnlc')}
-                >
-                  {t('about.faq')}
-                </Button>
-              </div>
+            <div>
+              <Button
+                variant="outline"
+                className="rounded-full h-10 px-5 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5"
+                onClick={() => void handleLogout()}
+              >
+                <LogOut className="h-4 w-4 mr-2" />
+                {t('managedAuth.actions.logout')}
+              </Button>
             </div>
           </div>
 

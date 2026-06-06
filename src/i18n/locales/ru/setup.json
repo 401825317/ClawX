@@ -4,6 +4,10 @@
             "title": "Добро пожаловать",
             "description": "Ваш AI-ассистент готов к настройке"
         },
+        "auth": {
+            "title": "Активировать JunFeiAI",
+            "description": "Войдите или активируйте это устройство"
+        },
         "runtime": {
             "title": "Проверка окружения",
             "description": "Проверка системных требований"
@@ -33,6 +37,55 @@
             "modernUI": "Современный красивый интерфейс",
             "bundles": "Предварительно установленные наборы навыков",
             "crossPlatform": "Кроссплатформенная поддержка"
+        }
+    },
+    "auth": {
+        "status": {
+            "loggedIn": "Вход выполнен",
+            "loginExpired": "Сессия истекла",
+            "runtimeActive": "Рантайм активен",
+            "checking": "Проверка статуса JunFeiAI...",
+            "activatedForDevice": "JunFeiAI активирован для этого устройства.",
+            "activationVerified": "Код активации подтверждён",
+            "activationInvalid": "Код активации недействителен"
+        },
+        "fields": {
+            "email": "Email",
+            "password": "Пароль",
+            "activationCode": "Код активации",
+            "verifyCode": "Код подтверждения email"
+        },
+        "placeholders": {
+            "email": "user@example.com",
+            "password": "Пароль",
+            "verifyCode": "Введите код из письма",
+            "required": "Обязательно",
+            "optional": "Необязательно"
+        },
+        "actions": {
+            "login": "Войти",
+            "register": "Зарегистрироваться",
+            "check": "Проверить",
+            "sendCode": "Отправить код",
+            "sendCodeCountdown": "{{seconds}}с",
+            "refresh": "Обновить",
+            "registerAndActivate": "Зарегистрироваться и активировать",
+            "loginAndActivate": "Войти и активировать"
+        },
+        "toast": {
+            "statusFailed": "Не удалось получить статус JunFeiAI: {{message}}",
+            "enterActivationCode": "Введите код активации",
+            "activationVerified": "Код активации подтверждён",
+            "activationInvalid": "Код активации недействителен",
+            "activationCheckFailed": "Не удалось проверить код активации: {{message}}",
+            "enterEmailFirst": "Сначала введите email",
+            "verifyCodeSent": "Код подтверждения отправлен",
+            "sendVerifyCodeFailed": "Не удалось отправить код подтверждения: {{message}}",
+            "enterAccountPassword": "Введите аккаунт и пароль",
+            "activated": "JunFeiAI активирован",
+            "loggedIn": "Вход в JunFeiAI выполнен",
+            "registerFailed": "Не удалось зарегистрировать JunFeiAI: {{message}}",
+            "loginFailed": "Не удалось войти в JunFeiAI: {{message}}"
         }
     },
     "runtime": {

@@ -4,6 +4,10 @@
             "title": "Welcome to ClawX",
             "description": "Your AI assistant is ready to be configured"
         },
+        "auth": {
+            "title": "Sign In",
+            "description": "Sign in or activate this device"
+        },
         "runtime": {
             "title": "Environment Check",
             "description": "Verifying system requirements"
@@ -33,6 +37,58 @@
             "modernUI": "Modern, beautiful interface",
             "bundles": "Pre-installed skill bundles",
             "crossPlatform": "Cross-platform support"
+        }
+    },
+    "auth": {
+        "brand": "Service Account",
+        "status": {
+            "loggedIn": "Logged in",
+            "loginExpired": "Login expired",
+            "runtimeActive": "Runtime active",
+            "checking": "Checking status...",
+            "activatedForDevice": "This device is activated.",
+            "activationVerified": "Activation code verified",
+            "activationInvalid": "Activation code is invalid"
+        },
+        "fields": {
+            "email": "Email",
+            "password": "Password",
+            "activationCode": "Activation code",
+            "verifyCode": "Email verification code"
+        },
+        "placeholders": {
+            "email": "user@example.com",
+            "password": "Password",
+            "verifyCode": "Enter the code from your email",
+            "required": "Required",
+            "optional": "Optional"
+        },
+        "actions": {
+            "login": "Login",
+            "register": "Register",
+            "check": "Check",
+            "sendCode": "Send code",
+            "sendCodeCountdown": "{{seconds}}s",
+            "refresh": "Refresh",
+            "registerAndActivate": "Register and activate",
+            "loginAndActivate": "Login and activate"
+        },
+        "toast": {
+            "statusFailed": "Status check failed: {{message}}",
+            "enterActivationCode": "Please enter an activation code",
+            "activationVerified": "Activation code verified",
+            "activationInvalid": "Activation code is invalid",
+            "activationCheckFailed": "Activation check failed: {{message}}",
+            "enterEmailFirst": "Please enter an email first",
+            "verifyCodeSent": "Verification code sent",
+            "sendVerifyCodeFailed": "Send verification code failed: {{message}}",
+            "enterAccountPassword": "Please enter account and password",
+            "activated": "Activated successfully",
+            "loggedIn": "Logged in successfully",
+            "registerFailed": "Registration failed: {{message}}",
+            "loginFailed": "Login failed: {{message}}",
+            "loggedOut": "Logged out",
+            "logoutFailed": "Logout failed: {{message}}"
         }
     },
     "runtime": {

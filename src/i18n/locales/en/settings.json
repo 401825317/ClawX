@@ -126,6 +126,61 @@
       "requestingCode": "Requesting secure login code..."
     }
   },
+  "managedAuth": {
+    "brand": "Service Account",
+    "status": {
+      "loggedIn": "Logged in",
+      "loginExpired": "Login expired",
+      "runtimeActive": "Runtime active",
+      "activationVerified": "Activation code verified",
+      "activationInvalid": "Activation code is invalid",
+      "offlineGrace": "offline {{value}}"
+    },
+    "fields": {
+      "email": "Email",
+      "password": "Password",
+      "activationCode": "Activation code",
+      "verifyCode": "Email verification code"
+    },
+    "placeholders": {
+      "email": "user@example.com",
+      "password": "Password",
+      "verifyCode": "Enter the code from your email",
+      "required": "Required",
+      "optional": "Optional"
+    },
+    "actions": {
+      "account": "Account",
+      "refreshStatus": "Refresh status",
+      "verify": "Verify",
+      "logout": "Log out",
+      "login": "Login",
+      "register": "Register",
+      "check": "Check",
+      "sendCode": "Send code",
+      "sendCodeCountdown": "{{seconds}}s",
+      "registerAndActivate": "Register and activate",
+      "loginAndActivate": "Login and activate"
+    },
+    "toast": {
+      "enterAccountPassword": "Please enter account and password",
+      "enterActivationCode": "Please enter an activation code",
+      "registered": "Registered successfully",
+      "loggedIn": "Logged in successfully",
+      "registerFailed": "Registration failed: {{message}}",
+      "loginFailed": "Login failed: {{message}}",
+      "enterEmailFirst": "Please enter an email first",
+      "verifyCodeSent": "Verification code sent",
+      "sendVerifyCodeFailed": "Send verification code failed: {{message}}",
+      "activationVerified": "Activation code verified",
+      "activationInvalid": "Activation code is invalid",
+      "activationCheckFailed": "Activation check failed: {{message}}",
+      "verified": "Authorization verified",
+      "verifyFailed": "Verification failed: {{message}}",
+      "loggedOut": "Logged out",
+      "logoutFailed": "Logout failed: {{message}}"
+    }
+  },
   "gateway": {
     "title": "Gateway",
     "description": "OpenClaw Gateway settings",

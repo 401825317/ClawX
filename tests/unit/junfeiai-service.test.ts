@@ -62,6 +62,7 @@ import {
   getJunFeiAITopupOrderStatus,
   getJunFeiAITopupOverview,
   loginJunFeiAI,
+  logoutJunFeiAI,
   storeJunFeiAIRelayToken,
   verifyJunFeiAIAuth,
 } from '@electron/services/junfeiai/junfeiai-service';
@@ -444,6 +445,77 @@ describe('JunFeiAI managed provider service', () => {
     );
   });
 
+  it('refreshes expired JunFeiAI auth token before creating a topup order', async () => {
+    mocks.getProviderSecret.mockResolvedValue({
+      type: 'oauth',
+      accountId: 'junfeiai-auth',
+      accessToken: 'expired-access',
+      refreshToken: 'refresh-token',
+      expiresAt: Date.now() - 60_000,
+      email: 'user@example.com',
+      subject: '7',
+    });
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          access_token: 'fresh-access',
+          refresh_token: 'fresh-refresh',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          methods: { alipay: { payment_type: 'alipay', currency: 'CNY' } },
+          balance_recharge_multiplier: 2,
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          order_id: 9,
+          out_trade_no: 'T200',
+          pay_url: 'https://pay.example/refresh',
+          qr_code: 'qr-data',
+          amount: 10,
+          status: 'PENDING',
+          payment_type: 'alipay',
+        },
+      }), { status: 200 }));
+
+    await expect(createJunFeiAITopupOrder({
+      money: '10',
+      payMethod: 'epay',
+      epayMethod: 'alipay',
+      productId: 7,
+    })).resolves.toMatchObject({
+      trade_no: 'T200',
+      pay_url: 'https://pay.example/refresh',
+      credit_quota: 20,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://zz-cn.lingzhiwuxian.com/api/v1/auth/refresh',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ refresh_token: 'refresh-token' }),
+      }),
+    );
+    expect(mocks.setProviderSecret).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'oauth',
+      accountId: 'junfeiai-auth',
+      accessToken: 'fresh-access',
+      refreshToken: 'fresh-refresh',
+    }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://zz-cn.lingzhiwuxian.com/api/v1/payment/orders',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer fresh-access' }),
+      }),
+    );
+  });
+
   it('falls back to standard Sub2API auth and key routes when ClawX compat routes are missing', async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock
@@ -523,5 +595,37 @@ describe('JunFeiAI managed provider service', () => {
       'sk-runtime-key',
       undefined,
     );
+  });
+
+  it('revokes refresh token on logout and clears local JunFeiAI secrets', async () => {
+    mocks.getProviderSecret.mockResolvedValue({
+      type: 'oauth',
+      accountId: 'junfeiai-auth',
+      accessToken: 'access',
+      refreshToken: 'refresh-token',
+      expiresAt: Date.now() + 60_000,
+    });
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      data: { message: 'Logged out successfully' },
+    }), { status: 200 }));
+
+    memoryStore.set('junfeiaiVerificationCache', {
+      verifiedAt: Date.now(),
+      graceSeconds: 3600,
+      payload: { valid: true },
+    });
+
+    await logoutJunFeiAI();
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://zz-cn.lingzhiwuxian.com/api/v1/auth/logout',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ refresh_token: 'refresh-token' }),
+      }),
+    );
+    expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('junfeiai-auth');
+    expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('junfeiai');
+    expect(memoryStore.get('junfeiaiVerificationCache')).toBeNull();
   });
 });

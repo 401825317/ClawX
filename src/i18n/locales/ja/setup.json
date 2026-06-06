@@ -4,6 +4,10 @@
             "title": "ClawXへようこそ",
             "description": "AIアシスタントの設定準備が整いました"
         },
+        "auth": {
+            "title": "JunFeiAI を有効化",
+            "description": "このデバイスでサインインまたは有効化します"
+        },
         "runtime": {
             "title": "環境チェック",
             "description": "システム要件を確認中"
@@ -33,6 +37,55 @@
             "modernUI": "モダンで美しいインターフェース",
             "bundles": "プリインストールされたスキルバンドル",
             "crossPlatform": "クロスプラットフォーム対応"
+        }
+    },
+    "auth": {
+        "status": {
+            "loggedIn": "ログイン済み",
+            "loginExpired": "ログインの有効期限切れ",
+            "runtimeActive": "ランタイム有効",
+            "checking": "JunFeiAI の状態を確認中...",
+            "activatedForDevice": "このデバイスで JunFeiAI が有効化されています。",
+            "activationVerified": "アクティベーションコードを確認しました",
+            "activationInvalid": "アクティベーションコードが無効です"
+        },
+        "fields": {
+            "email": "メールアドレス",
+            "password": "パスワード",
+            "activationCode": "アクティベーションコード",
+            "verifyCode": "メール認証コード"
+        },
+        "placeholders": {
+            "email": "user@example.com",
+            "password": "パスワード",
+            "verifyCode": "メール内のコードを入力",
+            "required": "必須",
+            "optional": "任意"
+        },
+        "actions": {
+            "login": "ログイン",
+            "register": "登録",
+            "check": "確認",
+            "sendCode": "コード送信",
+            "sendCodeCountdown": "{{seconds}}秒",
+            "refresh": "更新",
+            "registerAndActivate": "登録して有効化",
+            "loginAndActivate": "ログインして有効化"
+        },
+        "toast": {
+            "statusFailed": "JunFeiAI の状態取得に失敗しました: {{message}}",
+            "enterActivationCode": "アクティベーションコードを入力してください",
+            "activationVerified": "アクティベーションコードを確認しました",
+            "activationInvalid": "アクティベーションコードが無効です",
+            "activationCheckFailed": "アクティベーション確認に失敗しました: {{message}}",
+            "enterEmailFirst": "先にメールアドレスを入力してください",
+            "verifyCodeSent": "認証コードを送信しました",
+            "sendVerifyCodeFailed": "認証コード送信に失敗しました: {{message}}",
+            "enterAccountPassword": "アカウントとパスワードを入力してください",
+            "activated": "JunFeiAI を有効化しました",
+            "loggedIn": "JunFeiAI にログインしました",
+            "registerFailed": "JunFeiAI の登録に失敗しました: {{message}}",
+            "loginFailed": "JunFeiAI のログインに失敗しました: {{message}}"
         }
     },
     "runtime": {

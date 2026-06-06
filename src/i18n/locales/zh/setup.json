@@ -4,6 +4,10 @@
             "title": "欢迎使用 ClawX",
             "description": "您的 AI 助手已准备好进行配置"
         },
+        "auth": {
+            "title": "登录账号",
+            "description": "登录或激活当前设备"
+        },
         "runtime": {
             "title": "环境检查",
             "description": "验证系统要求"
@@ -33,6 +37,58 @@
             "modernUI": "现代美观的界面",
             "bundles": "预装技能包",
             "crossPlatform": "跨平台支持"
+        }
+    },
+    "auth": {
+        "brand": "服务账号",
+        "status": {
+            "loggedIn": "已登录",
+            "loginExpired": "登录已过期",
+            "runtimeActive": "运行时已激活",
+            "checking": "正在检查状态...",
+            "activatedForDevice": "当前设备已完成激活。",
+            "activationVerified": "激活码已验证",
+            "activationInvalid": "激活码无效"
+        },
+        "fields": {
+            "email": "邮箱",
+            "password": "密码",
+            "activationCode": "激活码",
+            "verifyCode": "邮箱验证码"
+        },
+        "placeholders": {
+            "email": "user@example.com",
+            "password": "密码",
+            "verifyCode": "输入邮件中的验证码",
+            "required": "必填",
+            "optional": "可选"
+        },
+        "actions": {
+            "login": "登录",
+            "register": "注册",
+            "check": "检查",
+            "sendCode": "发送验证码",
+            "sendCodeCountdown": "{{seconds}}秒",
+            "refresh": "刷新",
+            "registerAndActivate": "注册并激活",
+            "loginAndActivate": "登录并激活"
+        },
+        "toast": {
+            "statusFailed": "状态获取失败：{{message}}",
+            "enterActivationCode": "请输入激活码",
+            "activationVerified": "激活码已验证",
+            "activationInvalid": "激活码无效",
+            "activationCheckFailed": "检查激活码失败：{{message}}",
+            "enterEmailFirst": "请先输入邮箱",
+            "verifyCodeSent": "验证码已发送",
+            "sendVerifyCodeFailed": "发送验证码失败：{{message}}",
+            "enterAccountPassword": "请输入账号和密码",
+            "activated": "激活成功",
+            "loggedIn": "登录成功",
+            "registerFailed": "注册失败：{{message}}",
+            "loginFailed": "登录失败：{{message}}",
+            "loggedOut": "已退出登录",
+            "logoutFailed": "退出失败：{{message}}"
         }
     },
     "runtime": {
