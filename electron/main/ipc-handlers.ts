@@ -3,7 +3,9 @@
  * Registers all IPC handlers for main-renderer communication
  */
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, extname, basename, resolve, sep, relative } from 'node:path';
 import crypto from 'node:crypto';
@@ -117,7 +119,7 @@ export function registerIpcHandlers(
   registerSessionHandlers();
 
   // App handlers
-  registerAppHandlers();
+  registerAppHandlers(gatewayManager);
 
   // Settings handlers
   registerSettingsHandlers(gatewayManager);
@@ -2198,7 +2200,152 @@ function registerDialogHandlers(): void {
 /**
  * App-related IPC handlers
  */
-function registerAppHandlers(): void {
+function quotePowerShellLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function quoteShLiteral(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function getFactoryResetTargets(): string[] {
+  const targets = [
+    app.getPath('userData'),
+    join(homedir(), '.clawx'),
+    join(homedir(), '.openclaw'),
+  ];
+  const seen = new Set<string>();
+
+  return targets
+    .map((target) => resolve(target))
+    .filter((target) => {
+      if (!target || target === resolve(homedir())) {
+        return false;
+      }
+
+      const key = process.platform === 'win32' ? target.toLowerCase() : target;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function getWindowsPowerShellPath(): string {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (systemRoot) {
+    return join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  }
+  return 'powershell.exe';
+}
+
+function buildFactoryResetPowerShellScript(targets: string[], executablePath: string, relaunchArgs: string[]): string {
+  const targetList = targets.map((target) => `  ${quotePowerShellLiteral(target)}`).join(",\r\n");
+  const argumentList = relaunchArgs.map(quotePowerShellLiteral).join(', ');
+
+  return [
+    '$ErrorActionPreference = "SilentlyContinue"',
+    `$pidToWait = ${process.pid}`,
+    '$deadline = (Get-Date).AddSeconds(60)',
+    'while ((Get-Date) -lt $deadline -and (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {',
+    '  Start-Sleep -Milliseconds 500',
+    '}',
+    'if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {',
+    '  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue',
+    '  exit 1',
+    '}',
+    `$targets = @(\r\n${targetList}\r\n)`,
+    `foreach ($target in $targets) {`,
+    '  if ([string]::IsNullOrWhiteSpace($target)) { continue }',
+    '  if (Test-Path -LiteralPath $target) {',
+    '    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue',
+    '  }',
+    '}',
+    `Start-Sleep -Milliseconds 200`,
+    `$relaunchArgs = @(${argumentList})`,
+    `if ($relaunchArgs.Count -gt 0) {`,
+    `  Start-Process -FilePath ${quotePowerShellLiteral(executablePath)} -ArgumentList $relaunchArgs | Out-Null`,
+    '} else {',
+    `  Start-Process -FilePath ${quotePowerShellLiteral(executablePath)} | Out-Null`,
+    '}',
+    'Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue',
+    '',
+  ].join('\r\n');
+}
+
+function buildFactoryResetShellScript(targets: string[], executablePath: string, relaunchArgs: string[]): string {
+  const cleanupCommands = targets.map((target) => `rm -rf -- ${quoteShLiteral(target)}`).join('\n');
+  const quotedArgs = relaunchArgs.map(quoteShLiteral).join(' ');
+  const relaunchCommand = quotedArgs
+    ? `nohup ${quoteShLiteral(executablePath)} ${quotedArgs} >/dev/null 2>&1 &`
+    : `nohup ${quoteShLiteral(executablePath)} >/dev/null 2>&1 &`;
+
+  return [
+    '#!/bin/sh',
+    `PID=${process.pid}`,
+    'i=0',
+    'while kill -0 "$PID" >/dev/null 2>&1 && [ "$i" -lt 120 ]; do',
+    '  sleep 0.5',
+    '  i=$((i + 1))',
+    'done',
+    'if kill -0 "$PID" >/dev/null 2>&1; then',
+    '  rm -f -- "$0"',
+    '  exit 1',
+    'fi',
+    cleanupCommands,
+    'sleep 0.2',
+    relaunchCommand,
+    'rm -f -- "$0"',
+    '',
+  ].join('\n');
+}
+
+async function writeFactoryResetLauncher(targets: string[], executablePath: string, relaunchArgs: string[]): Promise<{ command: string; args: string[]; scriptPath: string }> {
+  const suffix = `${process.pid}-${Date.now()}`;
+
+  if (process.platform === 'win32') {
+    const scriptPath = join(app.getPath('temp'), `clawx-factory-reset-${suffix}.ps1`);
+    await writeFile(scriptPath, buildFactoryResetPowerShellScript(targets, executablePath, relaunchArgs), 'utf8');
+    return {
+      command: getWindowsPowerShellPath(),
+      args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      scriptPath,
+    };
+  }
+
+  const scriptPath = join(app.getPath('temp'), `clawx-factory-reset-${suffix}.sh`);
+  await writeFile(scriptPath, buildFactoryResetShellScript(targets, executablePath, relaunchArgs), { encoding: 'utf8', mode: 0o700 });
+  return {
+    command: '/bin/sh',
+    args: [scriptPath],
+    scriptPath,
+  };
+}
+
+async function scheduleFactoryResetAndRelaunch(): Promise<{ success: true; targets: string[] }> {
+  const targets = getFactoryResetTargets();
+  const executablePath = process.execPath;
+  const relaunchArgs = app.isPackaged ? [] : process.argv.slice(1);
+  const launcher = await writeFactoryResetLauncher(targets, executablePath, relaunchArgs);
+
+  logger.warn('Factory reset requested; cleanup will run after ClawX exits', {
+    targets,
+    launcherScript: launcher.scriptPath,
+  });
+
+  const child = spawn(launcher.command, launcher.args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+
+  app.quit();
+  return { success: true, targets };
+}
+
+function registerAppHandlers(gatewayManager: GatewayManager): void {
   // Get app version
   ipcMain.handle('app:version', () => {
     return app.getVersion();
@@ -2228,6 +2375,14 @@ function registerAppHandlers(): void {
   ipcMain.handle('app:relaunch', () => {
     app.relaunch();
     app.quit();
+  });
+
+  // Restore the app to its first-run state after the current process exits.
+  ipcMain.handle('app:factoryReset', async () => {
+    logger.info('Factory reset requested from Settings', {
+      gatewayStatus: gatewayManager.getStatus(),
+    });
+    return await scheduleFactoryResetAndRelaunch();
   });
 }
 

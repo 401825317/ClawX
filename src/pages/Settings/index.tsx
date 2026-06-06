@@ -8,6 +8,8 @@ import {
   Moon,
   Monitor,
   RefreshCw,
+  RotateCcw,
+  AlertTriangle,
   ExternalLink,
   Copy,
   FileText,
@@ -92,6 +94,7 @@ export function Settings() {
   const [wsDiagnosticEnabled, setWsDiagnosticEnabled] = useState(false);
   const [showTelemetryViewer, setShowTelemetryViewer] = useState(false);
   const [telemetryEntries, setTelemetryEntries] = useState<UiTelemetryEntry[]>([]);
+  const [factoryResetting, setFactoryResetting] = useState(false);
 
   const isWindows = window.electron.platform === 'win32';
   const showCliTools = true;
@@ -466,6 +469,37 @@ export function Settings() {
         ? t('developer.wsDiagnosticEnabled')
         : t('developer.wsDiagnosticDisabled'),
     );
+  };
+
+  const handleFactoryReset = async () => {
+    const result = await invokeIpc<{ response: number }>('dialog:message', {
+      type: 'warning',
+      buttons: [
+        t('factoryReset.cancel', { defaultValue: '取消' }),
+        t('factoryReset.confirm', { defaultValue: '确认恢复' }),
+      ],
+      defaultId: 0,
+      cancelId: 0,
+      title: t('factoryReset.title', { defaultValue: '恢复出厂设置' }),
+      message: t('factoryReset.message', { defaultValue: '确定要把 ClawX 恢复到首次打开状态吗？' }),
+      detail: t('factoryReset.detail', {
+        defaultValue: '这会清理本机的 ClawX 设置、登录状态、Provider 配置、OpenClaw 工作区和技能数据。ClawX 会自动重启，然后重新进入初始化流程。',
+      }),
+    });
+
+    if (result.response !== 1) {
+      return;
+    }
+
+    setFactoryResetting(true);
+    toast.message(t('factoryReset.restarting', { defaultValue: '正在退出并恢复出厂设置...' }));
+
+    try {
+      await invokeIpc('app:factoryReset');
+    } catch (error) {
+      setFactoryResetting(false);
+      toast.error(`${t('factoryReset.failed', { defaultValue: '恢复出厂设置失败' })}: ${toUserMessage(error)}`);
+    }
   };
 
   return (
@@ -1054,6 +1088,46 @@ export function Settings() {
                   onCheckedChange={setAutoCheckUpdate}
                 />
               </div>
+            </div>
+          </div>
+
+          <Separator className="bg-black/5 dark:bg-white/5" />
+
+          {/* Factory Reset */}
+          <div data-testid="settings-factory-reset-section">
+            <h2 className="text-3xl font-serif text-foreground mb-6 font-normal tracking-tight">
+              {t('factoryReset.title', { defaultValue: '恢复出厂设置' })}
+            </h2>
+            <div className="flex flex-col gap-4 rounded-2xl border border-destructive/20 bg-destructive/5 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 space-y-2">
+                <div className="flex items-center gap-2 text-destructive">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <Label className="text-sm font-semibold">
+                    {t('factoryReset.warningTitle', { defaultValue: '回到首次打开流程' })}
+                  </Label>
+                </div>
+                <p className="text-meta text-muted-foreground">
+                  {t('factoryReset.description', {
+                    defaultValue: '清理本机 ClawX 配置、登录状态、Provider 配置、OpenClaw 工作区和技能数据，然后自动重启。',
+                  })}
+                </p>
+                <p className="text-tiny text-muted-foreground">
+                  {t('factoryReset.scopeNote', { defaultValue: '此操作只影响当前电脑上的本地数据，不会修改线上账户或服务器数据。' })}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => void handleFactoryReset()}
+                disabled={factoryResetting}
+                data-testid="settings-factory-reset-button"
+                className="h-10 shrink-0 rounded-xl px-5"
+              >
+                <RotateCcw className={`h-4 w-4 mr-2${factoryResetting ? ' animate-spin' : ''}`} />
+                {factoryResetting
+                  ? t('factoryReset.running', { defaultValue: '正在恢复' })
+                  : t('factoryReset.button', { defaultValue: '恢复出厂设置' })}
+              </Button>
             </div>
           </div>
 
