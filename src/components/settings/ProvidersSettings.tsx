@@ -60,6 +60,9 @@ import { useSettingsStore } from '@/stores/settings';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 
+const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
+const JUNFEIAI_PRODUCTION_BASE_URL = `${JUNFEIAI_PRODUCTION_ORIGIN}/v1`;
+
 const inputClasses = 'h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-sm text-foreground/80 font-bold';
 type ArkMode = 'apikey' | 'codeplan';
@@ -461,9 +464,9 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
 
   const auth = status?.bootstrap?.auth ?? {};
   const displayName = status?.bootstrap?.service?.displayName || 'JunFeiAI';
-  const apiOrigin = status?.bootstrap?.service?.apiOrigin || 'https://junfeiai.com';
+  const apiOrigin = status?.bootstrap?.service?.apiOrigin || JUNFEIAI_PRODUCTION_ORIGIN;
   const defaultModel = status?.bootstrap?.runtime?.defaultModel || 'gpt-5.5';
-  const baseUrl = status?.bootstrap?.runtime?.baseUrl || 'https://junfeiai.com/v1';
+  const baseUrl = status?.bootstrap?.runtime?.baseUrl || JUNFEIAI_PRODUCTION_BASE_URL;
   const userLabel = status?.auth?.user?.email || status?.auth?.user?.username || '';
   const hasRelayToken = Boolean(status?.hasRelayToken);
   const hasAuthToken = Boolean(status?.hasAuthToken);

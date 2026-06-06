@@ -5,6 +5,8 @@ import type {
   ProviderTypeInfo,
 } from './types';
 
+const JUNFEIAI_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
+
 export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
     id: 'anthropic',
@@ -54,7 +56,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: false,
     category: 'compatible',
     envVar: 'JUNFEIAI_API_KEY',
-    defaultBaseUrl: 'https://junfeiai.com/v1',
+    defaultBaseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
     defaultModelId: 'gpt-5.5',
     showBaseUrl: false,
     showModelId: false,
@@ -62,7 +64,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: false,
     providerConfig: {
-      baseUrl: 'https://junfeiai.com/v1',
+      baseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
       api: 'anthropic-messages',
       apiKeyEnv: 'JUNFEIAI_API_KEY',
       models: [

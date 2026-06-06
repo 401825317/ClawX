@@ -136,6 +136,8 @@ export interface ProviderAccount {
 
 import { providerIcons } from '@/assets/providers';
 
+const JUNFEIAI_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
+
 /** All supported provider types with UI metadata */
 export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
   {
@@ -171,7 +173,7 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     placeholder: 'Managed by JunFeiAI login',
     model: 'GPT',
     requiresApiKey: false,
-    defaultBaseUrl: 'https://junfeiai.com/v1',
+    defaultBaseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
     defaultModelId: 'gpt-5.5',
     showModelId: false,
   },

@@ -74,7 +74,7 @@ function makeAccount(overrides: Partial<ProviderAccount> = {}): ProviderAccount 
     vendorId: 'junfeiai' as ProviderAccount['vendorId'],
     label: 'JunFeiAI',
     authMode: 'api_key',
-    baseUrl: 'https://junfeiai.com/v1',
+    baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
     apiProtocol: 'anthropic-messages',
     model: 'gpt-5.5',
     enabled: true,
@@ -88,9 +88,11 @@ function makeAccount(overrides: Partial<ProviderAccount> = {}): ProviderAccount 
 describe('JunFeiAI managed provider service', () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('VITE_DEV_SERVER_URL', '');
     vi.stubEnv('CLAWX_E2E', '');
     vi.stubEnv('CLAWX_MANAGED_PROVIDER', '1');
-    vi.stubEnv('CLAWX_JUNFEIAI_ORIGIN', 'https://junfeiai.com');
+    vi.stubEnv('CLAWX_JUNFEIAI_ORIGIN', '');
     vi.stubEnv('CLAWX_JUNFEIAI_BACKEND_ORIGIN', '');
     vi.stubEnv('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', '');
     vi.stubEnv('CLAWX_JUNFEIAI_BASE_URL', '');
@@ -182,6 +184,56 @@ describe('JunFeiAI managed provider service', () => {
         baseUrl: 'http://127.0.0.1:18080/v1',
         metadata: expect.objectContaining({
           resourceUrl: 'http://127.0.0.1:8080',
+        }),
+      }),
+    );
+  });
+
+  it('defaults to JunFeiAI development backend when the Vite dev server is running', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('VITE_DEV_SERVER_URL', 'http://127.0.0.1:5173');
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        service: { displayName: 'JunFeiAI Dev' },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+    }), { status: 200 }));
+
+    await ensureJunFeiAIProviderSeeded({ syncRuntime: false });
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/clawx/bootstrap',
+      expect.any(Object),
+    );
+    expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://junfeiai.com/v1',
+        metadata: expect.objectContaining({
+          resourceUrl: 'https://junfeiai.com',
+        }),
+      }),
+    );
+  });
+
+  it('defaults to the production backend outside Vite development', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        service: { displayName: 'JunFeiAI Production' },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+    }), { status: 200 }));
+
+    await ensureJunFeiAIProviderSeeded({ syncRuntime: false });
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://zz-cn.lingzhiwuxian.com/api/clawx/bootstrap',
+      expect.any(Object),
+    );
+    expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        metadata: expect.objectContaining({
+          resourceUrl: 'https://zz-cn.lingzhiwuxian.com',
         }),
       }),
     );
@@ -306,14 +358,14 @@ describe('JunFeiAI managed provider service', () => {
       },
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/v1/auth/me',
+      'https://zz-cn.lingzhiwuxian.com/api/v1/auth/me',
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({ Authorization: 'Bearer access' }),
       }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/v1/payment/checkout-info',
+      'https://zz-cn.lingzhiwuxian.com/api/v1/payment/checkout-info',
       expect.objectContaining({
         method: 'GET',
         headers: expect.objectContaining({ Authorization: 'Bearer access' }),
@@ -362,7 +414,7 @@ describe('JunFeiAI managed provider service', () => {
       credit_quota: 20,
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/v1/payment/orders',
+      'https://zz-cn.lingzhiwuxian.com/api/v1/payment/orders',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer access' }),
@@ -381,7 +433,7 @@ describe('JunFeiAI managed provider service', () => {
       trade_no: 'T100',
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/v1/payment/orders/verify',
+      'https://zz-cn.lingzhiwuxian.com/api/v1/payment/orders/verify',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer access' }),
@@ -438,7 +490,7 @@ describe('JunFeiAI managed provider service', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/v1/auth/login',
+      'https://zz-cn.lingzhiwuxian.com/api/v1/auth/login',
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({
@@ -448,7 +500,7 @@ describe('JunFeiAI managed provider service', () => {
       }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/v1/keys',
+      'https://zz-cn.lingzhiwuxian.com/api/v1/keys',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer jwt-access' }),

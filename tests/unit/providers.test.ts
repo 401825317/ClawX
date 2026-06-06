@@ -69,7 +69,7 @@ describe('provider metadata', () => {
     expect(getProviderEnvVar('junfeiai')).toBe('JUNFEIAI_API_KEY');
     expect(getProviderConfig('junfeiai')).toEqual(
       expect.objectContaining({
-        baseUrl: 'https://junfeiai.com/v1',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         api: 'anthropic-messages',
         apiKeyEnv: 'JUNFEIAI_API_KEY',
       }),
@@ -80,7 +80,7 @@ describe('provider metadata', () => {
           id: 'junfeiai',
           name: 'JunFeiAI',
           requiresApiKey: false,
-          defaultBaseUrl: 'https://junfeiai.com/v1',
+          defaultBaseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
           defaultModelId: 'gpt-5.5',
         }),
       ]),

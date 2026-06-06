@@ -16,7 +16,7 @@ import {
   isJunFeiAIManagedDistribution,
   JUNFEIAI_AUTH_ACCOUNT_ID,
   JUNFEIAI_DEFAULT_API_PROTOCOL,
-  JUNFEIAI_DEFAULT_BASE_URL,
+  getJunFeiAIDefaultBaseUrl,
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_NAME,
@@ -351,7 +351,7 @@ function canUseOfflineGraceForError(error: unknown): boolean {
 function normalizeBaseUrl(raw?: string): string {
   const normalized = (raw || getJunFeiAIProviderBaseUrl()).trim().replace(/\/+$/, '');
   if (!normalized) {
-    return JUNFEIAI_DEFAULT_BASE_URL;
+    return getJunFeiAIDefaultBaseUrl();
   }
   return normalized.endsWith('/v1') ? normalized : `${normalized}/v1`;
 }
