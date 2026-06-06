@@ -15,9 +15,15 @@ import {
   CheckCircle2,
   XCircle,
   ExternalLink,
+  Key,
+  Mail,
+  ShieldCheck,
+  UserPlus,
 } from 'lucide-react';
 import { TitleBar } from '@/components/layout/TitleBar';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
@@ -36,13 +42,19 @@ interface SetupStep {
 }
 
 const STEP = {
-  WELCOME: 0,
-  RUNTIME: 1,
-  INSTALLING: 2,
-  COMPLETE: 3,
+  AUTH: 0,
+  WELCOME: 1,
+  RUNTIME: 2,
+  INSTALLING: 3,
+  COMPLETE: 4,
 } as const;
 
 const getSteps = (t: TFunction): SetupStep[] => [
+  {
+    id: 'auth',
+    title: 'Activate JunFeiAI',
+    description: 'Sign in or activate this device',
+  },
   {
     id: 'welcome',
     title: t('steps.welcome.title'),
@@ -88,27 +100,31 @@ import clawxIcon from '@/assets/logo.svg';
 export function Setup() {
   const { t } = useTranslation(['setup', 'channels']);
   const navigate = useNavigate();
-  const [currentStep, setCurrentStep] = useState<number>(STEP.WELCOME);
+  const [currentStep, setCurrentStep] = useState<number>(STEP.AUTH);
 
   // Setup state
   // Installation state for the Installing step
   const [installedSkills, setInstalledSkills] = useState<string[]>([]);
   // Runtime check status
   const [runtimeChecksPassed, setRuntimeChecksPassed] = useState(false);
+  const [junfeiaiReady, setJunfeiaiReady] = useState(false);
 
   const steps = getSteps(t);
   const safeStepIndex = Number.isInteger(currentStep)
-    ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
-    : STEP.WELCOME;
-  const step = steps[safeStepIndex] ?? steps[STEP.WELCOME];
-  const isFirstStep = safeStepIndex === STEP.WELCOME;
+    ? Math.min(Math.max(currentStep, STEP.AUTH), steps.length - 1)
+    : STEP.AUTH;
+  const step = steps[safeStepIndex] ?? steps[STEP.AUTH];
+  const isFirstStep = safeStepIndex === STEP.AUTH;
   const isLastStep = safeStepIndex === steps.length - 1;
+  const allowSetupSkip = import.meta.env.VITE_ALLOW_SETUP_SKIP === '1';
 
   const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
 
   // Derive canProceed based on current step - computed directly to avoid useEffect
   const canProceed = useMemo(() => {
     switch (safeStepIndex) {
+      case STEP.AUTH:
+        return junfeiaiReady;
       case STEP.WELCOME:
         return true;
       case STEP.RUNTIME:
@@ -120,7 +136,7 @@ export function Setup() {
       default:
         return true;
     }
-  }, [safeStepIndex, runtimeChecksPassed]);
+  }, [safeStepIndex, runtimeChecksPassed, junfeiaiReady]);
 
   const handleNext = async () => {
     if (isLastStep) {
@@ -200,13 +216,14 @@ export function Setup() {
             className="mx-auto max-w-2xl p-8"
           >
             <div className="text-center mb-8">
-              <h1 className="text-3xl font-serif font-normal tracking-tight mb-2">{t(`steps.${step.id}.title`)}</h1>
-              <p className="text-muted-foreground">{t(`steps.${step.id}.description`)}</p>
+              <h1 className="text-3xl font-serif font-normal tracking-tight mb-2">{step.title}</h1>
+              <p className="text-muted-foreground">{step.description}</p>
             </div>
 
             {/* Step-specific content */}
             <div className="rounded-xl bg-card text-card-foreground border shadow-sm p-8 mb-8">
               {safeStepIndex === STEP.WELCOME && <WelcomeContent />}
+              {safeStepIndex === STEP.AUTH && <JunFeiAISetupContent onStatusChange={setJunfeiaiReady} />}
               {safeStepIndex === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
               {safeStepIndex === STEP.INSTALLING && (
                 <InstallingContent
@@ -234,7 +251,7 @@ export function Setup() {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  {!isLastStep && safeStepIndex !== STEP.RUNTIME && (
+                  {allowSetupSkip && !isLastStep && safeStepIndex !== STEP.RUNTIME && safeStepIndex !== STEP.AUTH && (
                     <Button data-testid="setup-skip-button" variant="ghost" onClick={handleSkip}>
                       {t('nav.skipSetup')}
                     </Button>
@@ -644,7 +661,374 @@ function RuntimeContent({ onStatusChange }: RuntimeContentProps) {
   );
 }
 
-// NOTE: ProviderContent component removed - configure providers via Settings > AI Providers
+type JunFeiAIManagedStatus = {
+  hasRelayToken?: boolean;
+  hasAuthToken?: boolean;
+  authValid?: boolean;
+  authError?: string;
+  source?: 'remote' | 'fallback' | 'provided';
+  bootstrap?: {
+    service?: {
+      displayName?: string;
+      apiOrigin?: string;
+    };
+    auth?: {
+      registrationEnabled?: boolean;
+      loginEnabled?: boolean;
+      activationRequired?: boolean;
+    };
+    runtime?: {
+      baseUrl?: string;
+      defaultModel?: string;
+    };
+    offline?: {
+      graceSeconds?: number;
+    };
+  };
+  auth?: {
+    user?: {
+      email?: string;
+      username?: string;
+    };
+  };
+};
+
+interface JunFeiAISetupContentProps {
+  onStatusChange: (ready: boolean) => void;
+}
+
+function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
+  const [status, setStatus] = useState<JunFeiAIManagedStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<'login' | 'register'>('register');
+  const [account, setAccount] = useState('');
+  const [password, setPassword] = useState('');
+  const [activationCode, setActivationCode] = useState('');
+  const [verifyCode, setVerifyCode] = useState('');
+  const [activationTicket, setActivationTicket] = useState('');
+  const [activationValid, setActivationValid] = useState<boolean | null>(null);
+  const [checkingActivation, setCheckingActivation] = useState(false);
+  const [sendingVerifyCode, setSendingVerifyCode] = useState(false);
+  const [verifyCodeCountdown, setVerifyCodeCountdown] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+
+  const hasRelayToken = Boolean(status?.hasRelayToken);
+  const hasAuthToken = Boolean(status?.hasAuthToken);
+  const authValid = Boolean(status?.authValid);
+  const auth = status?.bootstrap?.auth ?? {};
+  const requiresActivation = Boolean(auth.activationRequired);
+  const canRegister = auth.registrationEnabled !== false;
+  const canLogin = auth.loginEnabled !== false;
+  const displayName = status?.bootstrap?.service?.displayName || 'JunFeiAI';
+  const apiOrigin = status?.bootstrap?.service?.apiOrigin || '';
+  const baseUrl = status?.bootstrap?.runtime?.baseUrl || '';
+  const defaultModel = status?.bootstrap?.runtime?.defaultModel || '';
+  const userLabel = status?.auth?.user?.email || status?.auth?.user?.username || '';
+
+  const refreshStatus = useCallback(async () => {
+    setLoading(true);
+    try {
+      const next = await hostApiFetch<JunFeiAIManagedStatus>('/api/junfeiai/status');
+      setStatus(next);
+      onStatusChange(Boolean(next.hasRelayToken) && Boolean(next.authValid));
+      const serverAuth = next.bootstrap?.auth ?? {};
+      if (serverAuth.activationRequired || serverAuth.registrationEnabled) {
+        setMode('register');
+      } else {
+        setMode('login');
+      }
+    } catch (error) {
+      onStatusChange(false);
+      toast.error(`JunFeiAI status failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [onStatusChange]);
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    onStatusChange(hasRelayToken && authValid);
+  }, [authValid, hasRelayToken, onStatusChange]);
+
+  useEffect(() => {
+    if (verifyCodeCountdown <= 0) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setVerifyCodeCountdown((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [verifyCodeCountdown]);
+
+  const checkActivation = async () => {
+    const code = activationCode.trim();
+    if (!code) {
+      toast.error('Please enter an activation code');
+      return;
+    }
+    setCheckingActivation(true);
+    setActivationValid(null);
+    try {
+      const result = await hostApiFetch<{ valid?: boolean; activationTicket?: string; errorCode?: string }>(
+        '/api/junfeiai/activation/check',
+        {
+          method: 'POST',
+          body: JSON.stringify({ code }),
+        },
+      );
+      setActivationValid(Boolean(result.valid));
+      setActivationTicket(result.activationTicket || '');
+      if (result.valid) {
+        toast.success('Activation code verified');
+      } else {
+        toast.error(result.errorCode || 'Activation code is invalid');
+      }
+    } catch (error) {
+      toast.error(`Activation check failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setCheckingActivation(false);
+    }
+  };
+
+  const sendVerifyCode = async () => {
+    const normalizedAccount = account.trim();
+    if (!normalizedAccount) {
+      toast.error('Please enter an email first');
+      return;
+    }
+
+    setSendingVerifyCode(true);
+    try {
+      const result = await hostApiFetch<{ message?: string; countdown?: number }>('/api/junfeiai/verification/send-code', {
+        method: 'POST',
+        body: JSON.stringify({
+          account: normalizedAccount,
+          email: normalizedAccount,
+        }),
+      });
+      setVerifyCodeCountdown(typeof result.countdown === 'number' && result.countdown > 0 ? result.countdown : 60);
+      toast.success(result.message || 'Verification code sent');
+    } catch (error) {
+      toast.error(`Send verification code failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSendingVerifyCode(false);
+    }
+  };
+
+  const submitAuth = async () => {
+    const normalizedAccount = account.trim();
+    if (!normalizedAccount || !password) {
+      toast.error('Please enter account and password');
+      return;
+    }
+    if (mode === 'register' && requiresActivation && !activationTicket && !activationCode.trim()) {
+      toast.error('Please enter an activation code');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await hostApiFetch(mode === 'register' ? '/api/junfeiai/register' : '/api/junfeiai/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          account: normalizedAccount,
+          email: normalizedAccount,
+          password,
+          activationCode: activationCode.trim() || undefined,
+          activationTicket: activationTicket || activationCode.trim() || undefined,
+          verifyCode: verifyCode.trim() || undefined,
+        }),
+      });
+      toast.success(mode === 'register' ? 'JunFeiAI activated' : 'JunFeiAI logged in');
+      setPassword('');
+      await refreshStatus();
+    } catch (error) {
+      toast.error(`JunFeiAI ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div data-testid="setup-junfeiai-step" className="space-y-5">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-5 w-5 text-blue-500" />
+          <h2 className="text-xl font-serif font-normal tracking-tight">{displayName}</h2>
+          {authValid ? (
+            <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-2xs font-semibold text-green-600 dark:text-green-400">
+              Logged in
+            </span>
+          ) : hasAuthToken ? (
+            <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-2xs font-semibold text-amber-600 dark:text-amber-400">
+              Login expired
+            </span>
+          ) : hasRelayToken && (
+            <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-2xs font-semibold text-blue-600 dark:text-blue-400">
+              Runtime active
+            </span>
+          )}
+        </div>
+        <div className="space-y-1 text-meta text-muted-foreground">
+          {apiOrigin && <p>{apiOrigin}</p>}
+          {baseUrl && <p>{baseUrl}</p>}
+          {defaultModel && <p>{defaultModel}</p>}
+          {userLabel && <p className="text-foreground/70">{userLabel}</p>}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center gap-2 rounded-xl bg-surface-input/50 p-4 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Checking JunFeiAI status...
+        </div>
+      ) : hasRelayToken && authValid ? (
+        <div className="flex items-center gap-2 rounded-xl bg-green-500/10 p-4 text-green-700 dark:text-green-400">
+          <CheckCircle2 className="h-5 w-5" />
+          JunFeiAI is activated for this device.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {status?.authError && (
+            <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+              {status.authError}
+            </p>
+          )}
+          <div className="flex w-full rounded-xl bg-black/5 dark:bg-white/5 p-1 text-meta">
+            <button
+              type="button"
+              onClick={() => setMode('login')}
+              disabled={!canLogin}
+              className={cn(
+                'flex-1 rounded-lg px-3 py-2 font-medium transition-colors disabled:opacity-50',
+                mode === 'login' ? 'bg-surface-modal text-foreground shadow-sm' : 'text-muted-foreground',
+              )}
+            >
+              Login
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('register')}
+              disabled={!canRegister}
+              className={cn(
+                'flex-1 rounded-lg px-3 py-2 font-medium transition-colors disabled:opacity-50',
+                mode === 'register' ? 'bg-surface-modal text-foreground shadow-sm' : 'text-muted-foreground',
+              )}
+            >
+              Register
+            </button>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-sm text-foreground/80 font-bold">Email</Label>
+              <Input
+                value={account}
+                onChange={(event) => setAccount(event.target.value)}
+                placeholder="user@example.com"
+                className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-sm text-foreground/80 font-bold">Password</Label>
+              <Input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="Password"
+                className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
+              />
+            </div>
+          </div>
+
+          {mode === 'register' && (
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <div className="space-y-1.5">
+                <Label className="text-sm text-foreground/80 font-bold">Activation code</Label>
+                <Input
+                  value={activationCode}
+                  onChange={(event) => {
+                    setActivationCode(event.target.value);
+                    setActivationTicket('');
+                    setActivationValid(null);
+                  }}
+                  placeholder={requiresActivation ? 'Required' : 'Optional'}
+                  className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
+                />
+                {activationValid !== null && (
+                  <p className={cn('text-xs font-medium', activationValid ? 'text-green-600' : 'text-red-500')}>
+                    {activationValid ? 'Activation code verified' : 'Activation code is invalid'}
+                  </p>
+                )}
+              </div>
+              <Button
+                variant="outline"
+                className="h-[44px] rounded-full px-5 text-meta"
+                onClick={() => void checkActivation()}
+                disabled={checkingActivation || !activationCode.trim()}
+              >
+                {checkingActivation ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Check className="h-4 w-4 mr-2" />}
+                Check
+              </Button>
+            </div>
+          )}
+
+          {mode === 'register' && (
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <div className="space-y-1.5">
+                <Label className="text-sm text-foreground/80 font-bold">Email verification code</Label>
+                <Input
+                  value={verifyCode}
+                  onChange={(event) => setVerifyCode(event.target.value)}
+                  placeholder="Enter the code from your email"
+                  className="h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40"
+                />
+              </div>
+              <Button
+                variant="outline"
+                className="h-[44px] rounded-full px-5 text-meta"
+                onClick={() => void sendVerifyCode()}
+                disabled={sendingVerifyCode || verifyCodeCountdown > 0 || !account.trim()}
+              >
+                {sendingVerifyCode ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Mail className="h-4 w-4 mr-2" />}
+                {verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : 'Send code'}
+              </Button>
+            </div>
+          )}
+
+          <div className="flex justify-between gap-3">
+            <Button
+              variant="ghost"
+              className="h-[42px] rounded-full px-5 text-meta"
+              onClick={() => void refreshStatus()}
+              disabled={loading || submitting}
+            >
+              <RefreshCw className={cn('h-4 w-4 mr-2', loading && 'animate-spin')} />
+              Refresh
+            </Button>
+            <Button
+              className="h-[42px] rounded-full px-6 text-meta font-semibold"
+              onClick={() => void submitAuth()}
+              disabled={submitting}
+            >
+              {submitting ? (
+                <Loader2 className="h-4 w-4 animate-spin mr-2" />
+              ) : mode === 'register' ? (
+                <UserPlus className="h-4 w-4 mr-2" />
+              ) : (
+                <Key className="h-4 w-4 mr-2" />
+              )}
+              {mode === 'register' ? 'Register and activate' : 'Login and activate'}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 
 // Installation status for each skill

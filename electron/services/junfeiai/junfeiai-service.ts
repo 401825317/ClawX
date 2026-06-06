@@ -74,9 +74,13 @@ export interface JunFeiAIBootstrapPayload {
 
 export interface JunFeiAIAuthPayload extends JunFeiAIBootstrapPayload {
   accessToken?: string;
+  access_token?: string;
   refreshToken?: string;
+  refresh_token?: string;
   expiresIn?: number;
+  expires_in?: number;
   tokenType?: string;
+  token_type?: string;
   user?: Record<string, unknown>;
   device?: Record<string, unknown>;
 }
@@ -87,6 +91,10 @@ interface JunFeiAIRelayTokenPayload {
   expiresIn?: number | null;
   runtime?: JunFeiAIRuntimePayload;
 }
+
+type JunFeiAIStandardApiKeyPayload = Record<string, unknown> & {
+  key?: unknown;
+};
 
 type JunFeiAIVerificationCache = {
   verifiedAt: number;
@@ -100,7 +108,44 @@ export interface JunFeiAISeedResult {
   bootstrap: JunFeiAIBootstrapPayload;
   source: 'remote' | 'fallback' | 'provided';
   hasRelayToken: boolean;
+  hasAuthToken?: boolean;
+  authValid?: boolean;
+  authError?: string;
+  auth?: {
+    user?: Record<string, unknown>;
+  };
 }
+
+export interface JunFeiAITopupOrderPayload {
+  money?: unknown;
+  payMethod?: unknown;
+  epayMethod?: unknown;
+  productId?: unknown;
+}
+
+export interface JunFeiAITopupOrderStatusPayload {
+  tradeNo?: unknown;
+  sync?: unknown;
+}
+
+type JunFeiAIPaymentCheckoutInfo = Record<string, unknown> & {
+  methods?: Record<string, JunFeiAIPaymentMethodLimit>;
+  global_min?: unknown;
+  global_max?: unknown;
+  balance_disabled?: unknown;
+  balance_recharge_multiplier?: unknown;
+  recharge_fee_rate?: unknown;
+};
+
+type JunFeiAIPaymentMethodLimit = Record<string, unknown> & {
+  payment_type?: unknown;
+  currency?: unknown;
+  fee_rate?: unknown;
+  daily_limit?: unknown;
+  single_min?: unknown;
+  single_max?: unknown;
+  available?: unknown;
+};
 
 function fallbackBootstrap(): JunFeiAIBootstrapPayload {
   return {
@@ -148,6 +193,91 @@ function unwrapEnvelope<T>(payload: unknown): T {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function jsonNumberAsFinite(value: unknown): number | null {
+  const num = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number(value)
+      : NaN;
+  return Number.isFinite(num) ? num : null;
+}
+
+function parseTopupMoney(value: unknown): string {
+  const money = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  const numeric = Number(money);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    throw new Error('充值金额必须大于 0');
+  }
+  return numeric.toFixed(2);
+}
+
+function parseRequiredString(value: unknown, fieldName: string): string {
+  const text = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  if (!text) {
+    throw new Error(`${fieldName} is required`);
+  }
+  return text;
+}
+
+function isMissingJunFeiAICompatRoute(error: unknown): boolean {
+  return error instanceof JunFeiAIHttpError && error.status === 404;
+}
+
+function isJunFeiAIAuthRejection(error: unknown): boolean {
+  if (error instanceof JunFeiAIHttpError && (error.status === 401 || error.status === 403)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return message.includes('invalid token')
+    || message.includes('unauthorized')
+    || message.includes('forbidden')
+    || message.includes('auth_required');
+}
+
+function getStringField(record: Record<string, unknown>, ...fields: string[]): string {
+  for (const field of fields) {
+    const value = record[field];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
+}
+
+function getNumberField(record: Record<string, unknown>, ...fields: string[]): number | undefined {
+  for (const field of fields) {
+    const numeric = jsonNumberAsFinite(record[field]);
+    if (numeric !== null) {
+      return numeric;
+    }
+  }
+  return undefined;
+}
+
+function normalizeJunFeiAIAuthPayload(payload: JunFeiAIAuthPayload): JunFeiAIAuthPayload {
+  const record = payload as Record<string, unknown>;
+  return {
+    ...payload,
+    accessToken: payload.accessToken || getStringField(record, 'access_token'),
+    refreshToken: payload.refreshToken || getStringField(record, 'refresh_token'),
+    expiresIn: payload.expiresIn ?? getNumberField(record, 'expires_in'),
+    tokenType: payload.tokenType || getStringField(record, 'token_type'),
+  };
+}
+
+function buildSub2APIAuthBody(payload: Record<string, unknown>): Record<string, unknown> {
+  const account = getStringField(payload, 'account', 'email');
+  return {
+    email: account,
+    password: payload.password,
+    verify_code: getStringField(payload, 'verifyCode', 'verify_code') || undefined,
+    turnstile_token: getStringField(payload, 'turnstileToken', 'turnstile_token') || undefined,
+    promo_code: getStringField(payload, 'promoCode', 'promo_code') || undefined,
+    invitation_code: getStringField(payload, 'invitationCode', 'invitation_code') || undefined,
+    aff_code: getStringField(payload, 'affCode', 'aff_code') || undefined,
+  };
 }
 
 function extractGraceSeconds(payload: unknown): number {
@@ -315,7 +445,7 @@ async function requestJunFeiAI<T>(
       const message = payload && typeof payload === 'object' && 'message' in payload
         ? String((payload as { message?: unknown }).message)
         : `${response.status} ${response.statusText}`;
-      throw new JunFeiAIHttpError(message, response.status);
+      throw new JunFeiAIHttpError(`${path}: ${message}`, response.status);
     }
     return unwrapEnvelope<T>(payload);
   } finally {
@@ -330,6 +460,14 @@ export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload
   });
 }
 
+async function requireStoredJunFeiAIAuthToken(): Promise<string> {
+  const accessToken = await getStoredJunFeiAIAuthToken();
+  if (!accessToken) {
+    throw new Error('请先在设置页重新登录 JunFeiAI 后再充值');
+  }
+  return accessToken;
+}
+
 export async function getStoredJunFeiAIAuthToken(): Promise<string | null> {
   const secret = await getProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
   if (secret?.type !== 'oauth') {
@@ -342,18 +480,19 @@ export async function getStoredJunFeiAIAuthToken(): Promise<string | null> {
 }
 
 async function storeJunFeiAIAuthSession(auth: JunFeiAIAuthPayload): Promise<void> {
-  if (!auth.accessToken) {
+  const normalized = normalizeJunFeiAIAuthPayload(auth);
+  if (!normalized.accessToken) {
     return;
   }
   await setProviderSecret({
     type: 'oauth',
     accountId: JUNFEIAI_AUTH_ACCOUNT_ID,
-    accessToken: auth.accessToken,
-    refreshToken: auth.refreshToken || '',
-    expiresAt: Date.now() + Math.max(1, auth.expiresIn ?? 24 * 60 * 60) * 1000,
-    email: typeof auth.user?.email === 'string' ? auth.user.email : undefined,
-    subject: typeof auth.user?.id === 'number' || typeof auth.user?.id === 'string'
-      ? String(auth.user.id)
+    accessToken: normalized.accessToken,
+    refreshToken: normalized.refreshToken || '',
+    expiresAt: Date.now() + Math.max(1, normalized.expiresIn ?? 24 * 60 * 60) * 1000,
+    email: typeof normalized.user?.email === 'string' ? normalized.user.email : undefined,
+    subject: typeof normalized.user?.id === 'number' || typeof normalized.user?.id === 'string'
+      ? String(normalized.user.id)
       : undefined,
   });
 }
@@ -380,6 +519,72 @@ async function requestRelayToken(accessToken: string, device?: Record<string, un
     body: JSON.stringify({ device: device ?? await getJunFeiAIDevicePayload() }),
     accessToken,
   });
+}
+
+async function createStandardSub2APIKey(accessToken: string, device?: Record<string, unknown>): Promise<JunFeiAIRelayTokenPayload> {
+  const deviceId = isRecord(device) ? String(device.id ?? '').trim() : '';
+  const name = deviceId ? `ClawX ${deviceId}` : 'ClawX';
+  const created = await requestJunFeiAI<JunFeiAIStandardApiKeyPayload>('/api/v1/keys', {
+    method: 'POST',
+    accessToken,
+    body: JSON.stringify({ name }),
+  });
+  const token = typeof created.key === 'string' ? created.key.trim() : '';
+  if (!token) {
+    throw new Error('JunFeiAI did not return a usable API key');
+  }
+  return {
+    token,
+    tokenType: 'sub2api-api-key',
+    expiresIn: null,
+  };
+}
+
+async function requestRuntimeToken(accessToken: string, device?: Record<string, unknown>): Promise<JunFeiAIRelayTokenPayload> {
+  try {
+    return await requestRelayToken(accessToken, device);
+  } catch (error) {
+    if (!isMissingJunFeiAICompatRoute(error)) {
+      throw error;
+    }
+    logger.warn('[junfeiai] /api/clawx/relay-token is unavailable; falling back to /api/v1/keys.');
+    return createStandardSub2APIKey(accessToken, device);
+  }
+}
+
+async function getJunFeiAIAuthStatus(): Promise<{
+  hasAuthToken: boolean;
+  authValid: boolean;
+  authError?: string;
+  auth?: { user?: Record<string, unknown> };
+}> {
+  const accessToken = await getStoredJunFeiAIAuthToken();
+  if (!accessToken) {
+    return {
+      hasAuthToken: false,
+      authValid: false,
+      authError: 'JunFeiAI is not logged in',
+    };
+  }
+
+  try {
+    const user = await requestJunFeiAI<Record<string, unknown>>('/api/v1/auth/me', {
+      method: 'GET',
+      accessToken,
+      timeoutMs: 8000,
+    });
+    return {
+      hasAuthToken: true,
+      authValid: true,
+      auth: { user },
+    };
+  } catch (error) {
+    return {
+      hasAuthToken: true,
+      authValid: false,
+      authError: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function ensureJunFeiAIProviderSeeded(options: {
@@ -435,12 +640,15 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
   }
 
+  const authStatus = await getJunFeiAIAuthStatus();
+
   return {
     managed: true,
     account,
     bootstrap,
     source,
     hasRelayToken: Boolean(await getProviderSecret(JUNFEIAI_PROVIDER_ID)),
+    ...authStatus,
   };
 }
 
@@ -448,12 +656,26 @@ export async function loginJunFeiAI(
   credentials: Record<string, unknown>,
   gatewayManager?: GatewayManager,
 ): Promise<JunFeiAISeedResult & { auth: Omit<JunFeiAIAuthPayload, 'accessToken' | 'refreshToken'> }> {
-  const auth = await requestJunFeiAI<JunFeiAIAuthPayload>('/api/clawx/login', {
-    method: 'POST',
-    body: JSON.stringify({ ...credentials, device: await getJunFeiAIDevicePayload() }),
-  });
+  const device = await getJunFeiAIDevicePayload();
+  let auth: JunFeiAIAuthPayload;
+  try {
+    auth = await requestJunFeiAI<JunFeiAIAuthPayload>('/api/clawx/login', {
+      method: 'POST',
+      body: JSON.stringify({ ...credentials, device }),
+    });
+  } catch (error) {
+    if (!isMissingJunFeiAICompatRoute(error)) {
+      throw error;
+    }
+    logger.warn('[junfeiai] /api/clawx/login is unavailable; falling back to /api/v1/auth/login.');
+    auth = await requestJunFeiAI<JunFeiAIAuthPayload>('/api/v1/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(buildSub2APIAuthBody(credentials)),
+    });
+  }
+  auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
-  const relay = auth.accessToken ? await requestRelayToken(auth.accessToken, auth.device) : {};
+  const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,
@@ -468,12 +690,26 @@ export async function registerJunFeiAI(
   payload: Record<string, unknown>,
   gatewayManager?: GatewayManager,
 ): Promise<JunFeiAISeedResult & { auth: Omit<JunFeiAIAuthPayload, 'accessToken' | 'refreshToken'> }> {
-  const auth = await requestJunFeiAI<JunFeiAIAuthPayload>('/api/clawx/register', {
-    method: 'POST',
-    body: JSON.stringify({ ...payload, device: await getJunFeiAIDevicePayload() }),
-  });
+  const device = await getJunFeiAIDevicePayload();
+  let auth: JunFeiAIAuthPayload;
+  try {
+    auth = await requestJunFeiAI<JunFeiAIAuthPayload>('/api/clawx/register', {
+      method: 'POST',
+      body: JSON.stringify({ ...payload, device }),
+    });
+  } catch (error) {
+    if (!isMissingJunFeiAICompatRoute(error)) {
+      throw error;
+    }
+    logger.warn('[junfeiai] /api/clawx/register is unavailable; falling back to /api/v1/auth/register.');
+    auth = await requestJunFeiAI<JunFeiAIAuthPayload>('/api/v1/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(buildSub2APIAuthBody(payload)),
+    });
+  }
+  auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
-  const relay = auth.accessToken ? await requestRelayToken(auth.accessToken, auth.device) : {};
+  const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,
@@ -482,6 +718,26 @@ export async function registerJunFeiAI(
   const { accessToken: _accessToken, refreshToken: _refreshToken, ...safeAuth } = auth;
   await saveVerificationCache(safeAuth);
   return { ...seed, auth: safeAuth };
+}
+
+export async function sendJunFeiAIVerificationCode(payload: Record<string, unknown>): Promise<unknown> {
+  try {
+    return await requestJunFeiAI<unknown>('/api/clawx/verification/send-code', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    if (!isMissingJunFeiAICompatRoute(error)) {
+      throw error;
+    }
+    return requestJunFeiAI<unknown>('/api/v1/auth/send-verify-code', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: getStringField(payload, 'email', 'account'),
+        turnstile_token: getStringField(payload, 'turnstileToken', 'turnstile_token') || undefined,
+      }),
+    });
+  }
 }
 
 export async function checkJunFeiAIActivation(payload: Record<string, unknown>): Promise<unknown> {
@@ -501,11 +757,28 @@ export async function verifyJunFeiAIAuth(payload: Record<string, unknown> = {}):
     throw new Error('JunFeiAI is not logged in');
   }
   try {
-    const verified = await requestJunFeiAI<unknown>('/api/clawx/auth/verify', {
-      method: 'POST',
-      body: JSON.stringify({ ...payload, device: await getJunFeiAIDevicePayload() }),
-      accessToken,
-    });
+    let verified: unknown;
+    try {
+      verified = await requestJunFeiAI<unknown>('/api/clawx/auth/verify', {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, device: await getJunFeiAIDevicePayload() }),
+        accessToken,
+      });
+    } catch (error) {
+      if (!isMissingJunFeiAICompatRoute(error)) {
+        throw error;
+      }
+      const user = await requestJunFeiAI<Record<string, unknown>>('/api/v1/auth/me', {
+        method: 'GET',
+        accessToken,
+      });
+      verified = {
+        valid: true,
+        serverTime: new Date().toISOString(),
+        user,
+        offline: fallbackBootstrap().offline,
+      };
+    }
     await saveVerificationCache(verified);
     return verified;
   } catch (error) {
@@ -515,6 +788,257 @@ export async function verifyJunFeiAIAuth(payload: Record<string, unknown> = {}):
     }
     throw error;
   }
+}
+
+function getFiniteNumber(value: unknown, fallback = 0): number {
+  const numeric = jsonNumberAsFinite(value);
+  return numeric === null ? fallback : numeric;
+}
+
+function normalizePositiveNumber(value: unknown, fallback: number): number {
+  const numeric = jsonNumberAsFinite(value);
+  return numeric !== null && numeric > 0 ? numeric : fallback;
+}
+
+function normalizePaymentMethodLabel(type: string): string {
+  switch (type) {
+    case 'alipay':
+    case 'alipay_direct':
+      return '支付宝';
+    case 'wxpay':
+    case 'wxpay_direct':
+      return '微信支付';
+    case 'easypay':
+      return '易支付';
+    case 'airwallex':
+      return 'Airwallex';
+    case 'card':
+      return '银行卡';
+    case 'link':
+      return '支付链接';
+    case 'stripe':
+      return 'Stripe';
+    default:
+      return type;
+  }
+}
+
+function normalizePaymentMethods(methods: unknown): Array<Record<string, unknown>> {
+  if (!isRecord(methods)) {
+    return [];
+  }
+
+  return Object.entries(methods)
+    .flatMap(([key, raw]) => {
+      const item = isRecord(raw) ? raw as JunFeiAIPaymentMethodLimit : {};
+      if (item.available === false) {
+        return [];
+      }
+      const paymentType = String(item.payment_type ?? key).trim();
+      if (!paymentType) {
+        return [];
+      }
+      return [{
+        type: paymentType,
+        name: normalizePaymentMethodLabel(paymentType),
+        currency: String(item.currency ?? '').trim(),
+        fee_rate: getFiniteNumber(item.fee_rate, 0),
+        single_min: getFiniteNumber(item.single_min, 0),
+        single_max: getFiniteNumber(item.single_max, 0),
+        daily_limit: getFiniteNumber(item.daily_limit, 0),
+      }];
+    });
+}
+
+function getUserBalance(user: Record<string, unknown>): number {
+  const balance = jsonNumberAsFinite(user.balance);
+  if (balance !== null && balance >= 0) {
+    return balance;
+  }
+  const shrimpQuota = jsonNumberAsFinite(user.shrimp_quota);
+  if (shrimpQuota !== null && shrimpQuota >= 0) {
+    return shrimpQuota;
+  }
+  return 0;
+}
+
+function getOrderTradeNo(order: Record<string, unknown>): string {
+  return String(order.out_trade_no ?? order.trade_no ?? order.order_id ?? order.id ?? '').trim();
+}
+
+function getOrderPaymentUrl(order: Record<string, unknown>): string {
+  const direct = String(order.pay_url ?? order.checkout_url ?? order.pay_page_url ?? '').trim();
+  if (direct) {
+    return direct;
+  }
+  if (isRecord(order.oauth)) {
+    return String(order.oauth.authorize_url ?? '').trim();
+  }
+  return '';
+}
+
+function normalizeTopupOrderResult(
+  order: Record<string, unknown>,
+  amount: number,
+  paymentType: string,
+  multiplier = 1,
+): Record<string, unknown> {
+  const tradeNo = getOrderTradeNo(order);
+  const paymentUrl = getOrderPaymentUrl(order);
+  const creditQuota = Math.round(amount * multiplier * 100) / 100;
+  const nextStatus = normalizeTopupPaymentStatus(order.status);
+  return {
+    ...order,
+    status: nextStatus === 'success' ? 'success' : 'pending',
+    trade_no: tradeNo,
+    checkout_url: paymentUrl,
+    pay_page_url: paymentUrl,
+    pay_url: paymentUrl,
+    qr_code: String(order.qr_code ?? ''),
+    credit_quota: creditQuota,
+    money: amount.toFixed(2),
+    pay_method: 'epay',
+    epay_method: String(order.payment_type ?? paymentType),
+  };
+}
+
+function normalizeTopupPaymentStatus(status: unknown): 'pending' | 'success' | 'failed' {
+  const normalized = String(status ?? '').trim().toUpperCase();
+  if (normalized === 'SUCCESS' || normalized === 'COMPLETED') {
+    return 'success';
+  }
+  if (
+    normalized === 'FAILED'
+    || normalized === 'EXPIRED'
+    || normalized === 'CANCELLED'
+    || normalized === 'REFUNDED'
+    || normalized === 'PARTIALLY_REFUNDED'
+    || normalized === 'REFUND_FAILED'
+  ) {
+    return 'failed';
+  }
+  return 'pending';
+}
+
+function normalizeTopupOrderStatusResult(order: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...order,
+    status: normalizeTopupPaymentStatus(order.status),
+    trade_no: getOrderTradeNo(order),
+    credit_quota: getFiniteNumber(order.amount, 0),
+  };
+}
+
+function normalizeTopupAuthError(error: unknown): never {
+  if (isJunFeiAIAuthRejection(error)) {
+    throw new Error('JunFeiAI 登录状态已失效，请先在设置页重新登录后再充值');
+  }
+  throw error;
+}
+
+export async function getJunFeiAITopupOverview(): Promise<Record<string, unknown>> {
+  const accessToken = await requireStoredJunFeiAIAuthToken();
+  let user: Record<string, unknown>;
+  let checkoutInfo: JunFeiAIPaymentCheckoutInfo;
+  try {
+    [user, checkoutInfo] = await Promise.all([
+      requestJunFeiAI<Record<string, unknown>>('/api/v1/auth/me', {
+        method: 'GET',
+        accessToken,
+      }),
+      requestJunFeiAI<JunFeiAIPaymentCheckoutInfo>('/api/v1/payment/checkout-info', {
+        method: 'GET',
+        accessToken,
+      }),
+    ]);
+  } catch (error) {
+    normalizeTopupAuthError(error);
+  }
+
+  const shrimpQuota = getUserBalance(user);
+  const rechargeMultiplier = normalizePositiveNumber(checkoutInfo.balance_recharge_multiplier, 1);
+  const methods = normalizePaymentMethods(checkoutInfo.methods);
+  const nextUser = { ...user };
+  nextUser.shrimp_quota = shrimpQuota;
+
+  return {
+    user: nextUser,
+    quotaPerUnit: 1,
+    topupInfo: {
+      payg_current_quota: shrimpQuota,
+      payg_credit_usd_per_cny: rechargeMultiplier,
+      enable_online_topup: checkoutInfo.balance_disabled !== true && methods.length > 0,
+      pay_methods: JSON.stringify(methods),
+      payg_products: [{
+        id: 1,
+        name: '余额充值',
+        description: '充值后自动增加账户余额',
+        enabled: checkoutInfo.balance_disabled !== true,
+        sort_order: 0,
+        stock: null,
+        allowed_group_ids: [1],
+      }],
+      global_min: getFiniteNumber(checkoutInfo.global_min, 0),
+      global_max: getFiniteNumber(checkoutInfo.global_max, 0),
+      recharge_fee_rate: getFiniteNumber(checkoutInfo.recharge_fee_rate, 0),
+      payment_checkout_info: checkoutInfo,
+    },
+  };
+}
+
+export async function createJunFeiAITopupOrder(payload: JunFeiAITopupOrderPayload): Promise<unknown> {
+  const accessToken = await requireStoredJunFeiAIAuthToken();
+  const moneyText = parseTopupMoney(payload.money);
+  const money = Number(moneyText);
+  const epayMethod = parseRequiredString(payload.epayMethod, 'epayMethod');
+  let checkoutInfo: JunFeiAIPaymentCheckoutInfo;
+  try {
+    checkoutInfo = await requestJunFeiAI<JunFeiAIPaymentCheckoutInfo>('/api/v1/payment/checkout-info', {
+      method: 'GET',
+      accessToken,
+    });
+  } catch (error) {
+    normalizeTopupAuthError(error);
+  }
+  const rechargeMultiplier = normalizePositiveNumber(checkoutInfo.balance_recharge_multiplier, 1);
+
+  let result: Record<string, unknown>;
+  try {
+    result = await requestJunFeiAI<Record<string, unknown>>('/api/v1/payment/orders', {
+      method: 'POST',
+      accessToken,
+      body: JSON.stringify({
+        amount: money,
+        payment_type: epayMethod,
+        order_type: 'balance',
+        payment_source: 'clawx',
+        is_mobile: false,
+      }),
+    });
+  } catch (error) {
+    normalizeTopupAuthError(error);
+  }
+  return normalizeTopupOrderResult(result, money, epayMethod, rechargeMultiplier);
+}
+
+export async function getJunFeiAITopupOrderStatus(
+  payload: JunFeiAITopupOrderStatusPayload,
+): Promise<unknown> {
+  const accessToken = await requireStoredJunFeiAIAuthToken();
+  const tradeNo = parseRequiredString(payload.tradeNo, 'tradeNo');
+  let result: Record<string, unknown>;
+  try {
+    result = await requestJunFeiAI<Record<string, unknown>>('/api/v1/payment/orders/verify', {
+      method: 'POST',
+      accessToken,
+      body: JSON.stringify({
+        out_trade_no: tradeNo,
+      }),
+    });
+  } catch (error) {
+    normalizeTopupAuthError(error);
+  }
+  return normalizeTopupOrderStatusResult(result);
 }
 
 export async function logoutJunFeiAI(): Promise<void> {

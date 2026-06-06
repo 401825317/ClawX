@@ -115,9 +115,11 @@
     "marketplace": {
         "title": "マーケットプレイス",
         "installDialogTitle": "スキルをインストール",
-        "installDialogSubtitle": "初期表示は Explore、キーワード入力時は検索します。",
+        "installDialogSubtitle": "初期表示はおすすめの ClawHub スキルです。キーワード入力時は検索します。",
         "sourceLabel": "ソース",
         "sourceClawHub": "ClawHub",
+        "install": "インストール",
+        "publisherLanguageNote": "スキル名と説明は ClawHub の公開元の原文で表示されます。",
         "securityNote": "インストール前にスキルカードをクリックして、ClawHubでドキュメントとセキュリティ情報を確認してください。",
         "manualInstallHint": "ネットワークに問題がありますか？いつでもClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
         "searching": "ClawHubを検索中...",

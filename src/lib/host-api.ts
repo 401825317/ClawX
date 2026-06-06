@@ -52,9 +52,11 @@ async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
-      const payload = await response.json() as { error?: string };
+      const payload = await response.json() as { error?: string; message?: string };
       if (payload?.error) {
         message = payload.error;
+      } else if (payload?.message) {
+        message = payload.message;
       }
     } catch {
       // ignore body parse failure
@@ -89,6 +91,18 @@ function parseUnifiedProxyResponse<T>(
   }
 
   const data: HostApiProxyData = response.data ?? {};
+  if (data.ok === false) {
+    const payload = typeof data.json === 'object' && data.json != null
+      ? data.json as Record<string, unknown>
+      : null;
+    const message = payload && typeof payload.error === 'string'
+      ? payload.error
+      : payload && typeof payload.message === 'string'
+        ? payload.message
+        : data.text || `HTTP ${data.status ?? 'unknown'}`;
+    throw new Error(message);
+  }
+
   trackUiEvent('hostapi.fetch', {
     path,
     method,
@@ -113,10 +127,16 @@ function parseLegacyProxyResponse<T>(
   }
 
   if (!response.ok) {
+    const payload = typeof response.json === 'object' && response.json != null
+      ? response.json as Record<string, unknown>
+      : null;
     const message = response.text
-      || (typeof response.json === 'object' && response.json != null && 'error' in (response.json as Record<string, unknown>)
-        ? String((response.json as Record<string, unknown>).error)
-        : `HTTP ${response.status ?? 'unknown'}`);
+      || (payload && typeof payload.error === 'string'
+        ? payload.error
+        : payload && typeof payload.message === 'string'
+          ? payload.message
+          : null)
+      || `HTTP ${response.status ?? 'unknown'}`;
     throw new Error(message);
   }
 

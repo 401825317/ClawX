@@ -38,8 +38,14 @@ export function getJunFeiAIOrigin(): string {
 }
 
 export function isJunFeiAIManagedDistribution(): boolean {
+  if (process.env.CLAWX_MANAGED_PROVIDER === '1') {
+    return true;
+  }
+  if (process.env.CLAWX_MANAGED_PROVIDER === '0') {
+    return false;
+  }
   if (process.env.CLAWX_E2E === '1') {
     return false;
   }
-  return process.env.CLAWX_MANAGED_PROVIDER !== '0';
+  return true;
 }

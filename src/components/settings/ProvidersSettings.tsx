@@ -18,6 +18,7 @@ import {
   XCircle,
   ChevronDown,
   LogOut,
+  Mail,
   RefreshCw,
   ShieldCheck,
   UserPlus,
@@ -67,6 +68,9 @@ type JunFeiAIManagedStatus = {
   managed?: boolean;
   source?: 'remote' | 'fallback' | 'provided';
   hasRelayToken?: boolean;
+  hasAuthToken?: boolean;
+  authValid?: boolean;
+  authError?: string;
   account?: ProviderAccount | null;
   bootstrap?: {
     service?: {
@@ -449,6 +453,8 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
   const [activationCode, setActivationCode] = useState('');
   const [verifyCode, setVerifyCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [sendingVerifyCode, setSendingVerifyCode] = useState(false);
+  const [verifyCodeCountdown, setVerifyCodeCountdown] = useState(0);
   const [checkingActivation, setCheckingActivation] = useState(false);
   const [activationTicket, setActivationTicket] = useState('');
   const [activationValid, setActivationValid] = useState<boolean | null>(null);
@@ -460,9 +466,22 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
   const baseUrl = status?.bootstrap?.runtime?.baseUrl || 'https://junfeiai.com/v1';
   const userLabel = status?.auth?.user?.email || status?.auth?.user?.username || '';
   const hasRelayToken = Boolean(status?.hasRelayToken);
+  const hasAuthToken = Boolean(status?.hasAuthToken);
+  const authValid = Boolean(status?.authValid);
+  const showAuthForm = !authValid;
   const requiresActivation = Boolean(auth.activationRequired);
   const canRegister = auth.registrationEnabled !== false;
   const canLogin = auth.loginEnabled !== false;
+
+  useEffect(() => {
+    if (verifyCodeCountdown <= 0) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setVerifyCodeCountdown((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [verifyCodeCountdown]);
 
   const submitAuth = async () => {
     const normalizedAccount = account.trim();
@@ -495,6 +514,31 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
       toast.error(`JunFeiAI ${mode} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const sendVerifyCode = async () => {
+    const normalizedAccount = account.trim();
+    if (!normalizedAccount) {
+      toast.error('Please enter an email first');
+      return;
+    }
+
+    setSendingVerifyCode(true);
+    try {
+      const result = await hostApiFetch<{ message?: string; countdown?: number }>('/api/junfeiai/verification/send-code', {
+        method: 'POST',
+        body: JSON.stringify({
+          account: normalizedAccount,
+          email: normalizedAccount,
+        }),
+      });
+      setVerifyCodeCountdown(typeof result.countdown === 'number' && result.countdown > 0 ? result.countdown : 60);
+      toast.success(result.message || 'Verification code sent');
+    } catch (error) {
+      toast.error(`Send verification code failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSendingVerifyCode(false);
     }
   };
 
@@ -567,9 +611,17 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5 text-blue-500" />
             <h3 className="text-base font-semibold text-foreground">{displayName}</h3>
-            {hasRelayToken && (
+            {authValid ? (
               <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-2xs font-semibold text-green-600 dark:text-green-400">
-                Active
+                Logged in
+              </span>
+            ) : hasAuthToken ? (
+              <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-2xs font-semibold text-amber-600 dark:text-amber-400">
+                Login expired
+              </span>
+            ) : hasRelayToken && (
+              <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-2xs font-semibold text-blue-600 dark:text-blue-400">
+                Runtime active
               </span>
             )}
           </div>
@@ -594,7 +646,7 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
           >
             <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
           </Button>
-          {hasRelayToken && (
+          {(hasRelayToken || hasAuthToken) && (
             <>
               <Button
                 variant="outline"
@@ -620,8 +672,13 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
         </div>
       </div>
 
-      {!hasRelayToken && (
+      {showAuthForm && (
         <div className="space-y-4">
+          {status?.authError && (
+            <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+              {status.authError}
+            </p>
+          )}
           <div className="flex w-full rounded-xl bg-black/5 dark:bg-white/5 p-1 text-meta">
             <button
               type="button"
@@ -702,14 +759,25 @@ function JunFeiAIAuthCard({ status, loading, onRefresh }: JunFeiAIAuthCardProps)
           )}
 
           {mode === 'register' && (
-            <div className="space-y-1.5">
-              <Label className={labelClasses}>Email verification code</Label>
-              <Input
-                value={verifyCode}
-                onChange={(event) => setVerifyCode(event.target.value)}
-                placeholder="Optional if the server does not require email verification"
-                className={inputClasses}
-              />
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <div className="space-y-1.5">
+                <Label className={labelClasses}>Email verification code</Label>
+                <Input
+                  value={verifyCode}
+                  onChange={(event) => setVerifyCode(event.target.value)}
+                  placeholder="Enter the code from your email"
+                  className={inputClasses}
+                />
+              </div>
+              <Button
+                variant="outline"
+                className="h-[44px] rounded-full px-5 text-meta"
+                onClick={() => void sendVerifyCode()}
+                disabled={sendingVerifyCode || verifyCodeCountdown > 0 || !account.trim()}
+              >
+                {sendingVerifyCode ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Mail className="h-4 w-4 mr-2" />}
+                {verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : 'Send code'}
+              </Button>
             </div>
           )}
 

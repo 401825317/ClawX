@@ -61,6 +61,7 @@ const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const isE2EMode = process.env.CLAWX_E2E === '1';
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
+let extensionsLoadPromise: Promise<void> | null = null;
 
 if (requestedRemoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', requestedRemoteDebuggingPort);
@@ -368,6 +369,10 @@ async function initialize(): Promise<void> {
     mainWindow: window,
   });
 
+  if (extensionsLoadPromise) {
+    await extensionsLoadPromise;
+  }
+
   // Initialize extension system
   await extensionRegistry.initialize({
     gatewayManager,
@@ -619,7 +624,7 @@ if (gotTheLock) {
   // Register builtin extensions and load manifest
   registerAllBuiltinExtensions();
   loadExternalMainExtensions();
-  void loadExtensionsFromManifest().catch((err) => {
+  extensionsLoadPromise = loadExtensionsFromManifest().catch((err) => {
     logger.warn('Failed to load extensions from manifest:', err);
   });
 

@@ -3,10 +3,14 @@ import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 import {
   checkJunFeiAIActivation,
+  createJunFeiAITopupOrder,
   ensureJunFeiAIProviderSeeded,
+  getJunFeiAITopupOrderStatus,
+  getJunFeiAITopupOverview,
   loginJunFeiAI,
   logoutJunFeiAI,
   registerJunFeiAI,
+  sendJunFeiAIVerificationCode,
   storeJunFeiAIRelayToken,
   verifyJunFeiAIAuth,
 } from '../../services/junfeiai/junfeiai-service';
@@ -47,8 +51,31 @@ export async function handleJunFeIAIRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/junfeiai/verification/send-code' && req.method === 'POST') {
+    sendJson(res, 200, await sendJunFeiAIVerificationCode(await parseJsonBody<Record<string, unknown>>(req)));
+    return true;
+  }
+
   if (url.pathname === '/api/junfeiai/auth/verify' && req.method === 'POST') {
     sendJson(res, 200, await verifyJunFeiAIAuth(await parseJsonBody<Record<string, unknown>>(req)));
+    return true;
+  }
+
+  if (url.pathname === '/api/junfeiai/topup/overview' && req.method === 'GET') {
+    sendJson(res, 200, await getJunFeiAITopupOverview());
+    return true;
+  }
+
+  if (url.pathname === '/api/junfeiai/topup/order' && req.method === 'POST') {
+    sendJson(res, 200, await createJunFeiAITopupOrder(await parseJsonBody<Record<string, unknown>>(req)));
+    return true;
+  }
+
+  if (url.pathname === '/api/junfeiai/topup/order/status' && req.method === 'GET') {
+    sendJson(res, 200, await getJunFeiAITopupOrderStatus({
+      tradeNo: url.searchParams.get('tradeNo') ?? url.searchParams.get('trade_no') ?? '',
+      sync: url.searchParams.get('sync') ?? false,
+    }));
     return true;
   }
 

@@ -57,7 +57,11 @@ vi.mock('@electron/utils/junfeiai-device', () => ({
 }));
 
 import {
+  createJunFeiAITopupOrder,
   ensureJunFeiAIProviderSeeded,
+  getJunFeiAITopupOrderStatus,
+  getJunFeiAITopupOverview,
+  loginJunFeiAI,
   storeJunFeiAIRelayToken,
   verifyJunFeiAIAuth,
 } from '@electron/services/junfeiai/junfeiai-service';
@@ -259,5 +263,213 @@ describe('JunFeiAI managed provider service', () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ message: 'device_revoked' }), { status: 403 }));
 
     await expect(verifyJunFeiAIAuth()).rejects.toThrow('device_revoked');
+  });
+
+  it('loads topup overview with the stored JunFeiAI login token', async () => {
+    mocks.getProviderSecret.mockResolvedValue({
+      type: 'oauth',
+      accountId: 'junfeiai-auth',
+      accessToken: 'access',
+      refreshToken: '',
+      expiresAt: Date.now() + 60_000,
+    });
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { id: 42, email: 'user@example.com', balance: 1234 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          methods: {
+            alipay: {
+              payment_type: 'alipay',
+              currency: 'CNY',
+              fee_rate: 0,
+              daily_limit: 0,
+              single_min: 1,
+              single_max: 1000,
+            },
+          },
+          global_min: 1,
+          global_max: 1000,
+          balance_disabled: false,
+          balance_recharge_multiplier: 2,
+          recharge_fee_rate: 0,
+        },
+      }), { status: 200 }));
+
+    await expect(getJunFeiAITopupOverview()).resolves.toMatchObject({
+      user: { id: 42, shrimp_quota: 1234 },
+      quotaPerUnit: 1,
+      topupInfo: {
+        payg_current_quota: 1234,
+        payg_credit_usd_per_cny: 2,
+        enable_online_topup: true,
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/v1/auth/me',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({ Authorization: 'Bearer access' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/v1/payment/checkout-info',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({ Authorization: 'Bearer access' }),
+      }),
+    );
+  });
+
+  it('maps topup order and status calls to the Sub2API payment endpoints', async () => {
+    mocks.getProviderSecret.mockResolvedValue({
+      type: 'oauth',
+      accountId: 'junfeiai-auth',
+      accessToken: 'access',
+      refreshToken: '',
+      expiresAt: Date.now() + 60_000,
+    });
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          methods: { alipay: { payment_type: 'alipay', currency: 'CNY' } },
+          balance_recharge_multiplier: 2,
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          order_id: 9,
+          out_trade_no: 'T100',
+          pay_url: 'https://pay.example',
+          qr_code: 'qr-data',
+          amount: 10,
+          status: 'PENDING',
+          payment_type: 'alipay',
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { status: 'COMPLETED', out_trade_no: 'T100', amount: 10 } }), { status: 200 }));
+
+    await expect(createJunFeiAITopupOrder({
+      money: '10',
+      payMethod: 'epay',
+      epayMethod: 'alipay',
+      productId: 7,
+    })).resolves.toMatchObject({
+      trade_no: 'T100',
+      pay_url: 'https://pay.example',
+      qr_code: 'qr-data',
+      credit_quota: 20,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/v1/payment/orders',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer access' }),
+        body: JSON.stringify({
+          amount: 10,
+          payment_type: 'alipay',
+          order_type: 'balance',
+          payment_source: 'clawx',
+          is_mobile: false,
+        }),
+      }),
+    );
+
+    await expect(getJunFeiAITopupOrderStatus({ tradeNo: 'T100', sync: true })).resolves.toMatchObject({
+      status: 'success',
+      trade_no: 'T100',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/v1/payment/orders/verify',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer access' }),
+        body: JSON.stringify({
+          out_trade_no: 'T100',
+        }),
+      }),
+    );
+  });
+
+  it('falls back to standard Sub2API auth and key routes when ClawX compat routes are missing', async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          access_token: 'jwt-access',
+          refresh_token: 'jwt-refresh',
+          expires_in: 3600,
+          token_type: 'Bearer',
+          user: { id: 7, email: 'user@example.com' },
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { key: 'sk-runtime-key' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { id: 7, email: 'user@example.com' } }), { status: 200 }));
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'junfeiai-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'junfeiai-auth',
+          accessToken: 'jwt-access',
+          refreshToken: 'jwt-refresh',
+          expiresAt: Date.now() + 60_000,
+        };
+      }
+      if (accountId === 'junfeiai') {
+        return { type: 'api_key', accountId: 'junfeiai', apiKey: 'sk-runtime-key' };
+      }
+      return null;
+    });
+
+    await expect(loginJunFeiAI({
+      account: 'user@example.com',
+      email: 'user@example.com',
+      password: 'password',
+    })).resolves.toMatchObject({
+      managed: true,
+      hasRelayToken: true,
+      authValid: true,
+      auth: {
+        user: { email: 'user@example.com' },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/v1/auth/login',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'user@example.com',
+          password: 'password',
+        }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://junfeiai.com/api/v1/keys',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer jwt-access' }),
+        body: JSON.stringify({ name: 'ClawX device-1' }),
+      }),
+    );
+    expect(mocks.setProviderSecret).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'oauth',
+      accountId: 'junfeiai-auth',
+      accessToken: 'jwt-access',
+      refreshToken: 'jwt-refresh',
+    }));
+    expect(mocks.setProviderSecret).toHaveBeenCalledWith({
+      type: 'api_key',
+      accountId: 'junfeiai',
+      apiKey: 'sk-runtime-key',
+    });
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'junfeiai', type: 'junfeiai' }),
+      'sk-runtime-key',
+      undefined,
+    );
   });
 });

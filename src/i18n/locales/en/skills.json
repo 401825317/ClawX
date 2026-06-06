@@ -115,9 +115,11 @@
     "marketplace": {
         "title": "Marketplace",
         "installDialogTitle": "Install Skills",
-        "installDialogSubtitle": "Browse Explore by default, or enter keywords to search.",
+        "installDialogSubtitle": "Browse recommended ClawHub skills by default, or enter keywords to search.",
         "sourceLabel": "Source",
         "sourceClawHub": "ClawHub",
+        "install": "Install",
+        "publisherLanguageNote": "Skill names and descriptions are shown as published on ClawHub.",
         "securityNote": "Click skill card to view its documentation and security information on ClawHub before installation.",
         "manualInstallHint": "Network issues? You can always download skill ZIP archives from ClawHub.ai and extract them manually into \"{{path}}\".",
         "searching": "Searching ClawHub...",

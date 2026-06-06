@@ -16,6 +16,7 @@ import {
   Plus,
   Terminal,
   ExternalLink,
+  CreditCard,
   Trash2,
   Pencil,
   Check,
@@ -313,6 +314,7 @@ export function Sidebar() {
     { to: '/agents', icon: <Bot className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.agents'), testId: 'sidebar-nav-agents' },
     { to: '/channels', icon: <Network className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.channels'), testId: 'sidebar-nav-channels' },
     { to: '/skills', icon: <Puzzle className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.skills'), testId: 'sidebar-nav-skills' },
+    { to: '/recharge', icon: <CreditCard className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.recharge'), testId: 'sidebar-nav-recharge' },
     { to: '/cron', icon: <Clock className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
     ...(devModeUnlocked
       ? [

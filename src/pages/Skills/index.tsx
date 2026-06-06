@@ -682,6 +682,7 @@ export function Skills() {
           <div className="px-7 py-6 border-b border-black/10 dark:border-white/10">
             <h2 className="text-2xl font-serif text-foreground font-normal tracking-tight">{t('marketplace.installDialogTitle')}</h2>
             <p className="mt-1 text-meta text-foreground/70">{t('marketplace.installDialogSubtitle')}</p>
+            <p className="mt-2 text-xs text-foreground/55">{t('marketplace.publisherLanguageNote')}</p>
             <div className="mt-4 flex flex-col md:flex-row gap-2">
               <div className="relative flex items-center bg-black/5 dark:bg-white/5 rounded-xl px-3 py-2 border border-black/10 dark:border-white/10 flex-1">
                 <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -782,7 +783,7 @@ export function Skills() {
                             disabled={isInstallLoading}
                             className="h-8 px-4 rounded-full shadow-none font-medium text-xs"
                           >
-                            {isInstallLoading ? <LoadingSpinner size="sm" /> : t('marketplace.install', 'Install')}
+                            {isInstallLoading ? <LoadingSpinner size="sm" /> : t('marketplace.install')}
                           </Button>
                         )}
                       </div>
