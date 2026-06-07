@@ -80,6 +80,8 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
 })();
 `;
 
+const DEFAULT_CLAWHUB_MIRROR_URL = 'https://mirror-cn.clawhub.com';
+
 function ensureGatewayFetchPreload(): string {
   const dest = path.join(app.getPath('userData'), 'gateway-fetch-preload.cjs');
   try {
@@ -119,6 +121,10 @@ export async function launchGatewayProcess(options: {
   const lastSpawnSummary = `mode=${mode}, entry="${entryScript}", args="${options.sanitizeSpawnArgs(gatewayArgs).join(' ')}", cwd="${openclawDir}"`;
 
   const runtimeEnv = { ...forkEnv };
+
+  if (!runtimeEnv.OPENCLAW_CLAWHUB_URL?.trim()) {
+    runtimeEnv.OPENCLAW_CLAWHUB_URL = DEFAULT_CLAWHUB_MIRROR_URL;
+  }
 
   // Disable OpenClaw's mDNS/Bonjour gateway advertiser unconditionally.
   //

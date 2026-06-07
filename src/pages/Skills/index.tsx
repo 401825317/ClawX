@@ -661,6 +661,16 @@ export function Skills() {
                         v{skill.version}
                       </span>
                     )}
+                    {canUninstallSkill(skill) && (
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => handleUninstall(skill.slug || skill.id)}
+                        className="h-8 shadow-none"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                     <Switch
                       checked={skill.enabled}
                       onCheckedChange={(checked) => handleToggle(skill.id, checked)}
@@ -741,7 +751,7 @@ export function Skills() {
                     <div
                       key={skill.slug}
                       className="group flex flex-row items-center justify-between py-3.5 px-3 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer border-b border-black/5 dark:border-white/5 last:border-0"
-                      onClick={() => invokeIpc('shell:openExternal', `https://clawhub.ai/s/${skill.slug}`)}
+                      onClick={() => invokeIpc('shell:openExternal', `https://mirror-cn.clawhub.com/s/${skill.slug}`)}
                     >
                       <div className="flex items-start gap-4 flex-1 overflow-hidden pr-4">
                         <div className="h-10 w-10 shrink-0 flex items-center justify-center text-xl bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 rounded-xl overflow-hidden">
