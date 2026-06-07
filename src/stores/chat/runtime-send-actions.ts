@@ -1,4 +1,5 @@
 import { invokeIpc } from '@/lib/api-client';
+import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../../shared/chat-timeouts';
 import { useAgentsStore } from '@/stores/agents';
 import {
   clearErrorRecoveryTimer,
@@ -208,9 +209,6 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
 
         let result: { success: boolean; result?: { runId?: string }; error?: string };
 
-        // Longer timeout for chat sends to tolerate high-latency networks (avoids connect error)
-        const CHAT_SEND_TIMEOUT_MS = 120_000;
-
         if (hasMedia) {
           result = await invokeIpc(
             'chat:sendWithMedia',
@@ -236,7 +234,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
               deliver: false,
               idempotencyKey,
             },
-            CHAT_SEND_TIMEOUT_MS,
+            CHAT_SEND_RPC_TIMEOUT_MS,
           ) as { success: boolean; result?: { runId?: string }; error?: string };
         }
 

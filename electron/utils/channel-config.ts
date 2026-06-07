@@ -12,6 +12,7 @@ import { getOpenClawResolvedDir } from './paths';
 import * as logger from './logger';
 import { proxyAwareFetch } from './proxy-fetch';
 import { withConfigLock } from './config-mutex';
+import { parseJsonWithBom } from './json';
 import {
     OPENCLAW_WECHAT_CHANNEL_TYPE,
     isWechatChannelType,
@@ -192,7 +193,7 @@ async function resolveFeishuPluginId(): Promise<string> {
         const manifestPath = join(extensionRoot, dirName, 'openclaw.plugin.json');
         try {
             const raw = await readFile(manifestPath, 'utf-8');
-            const parsed = JSON.parse(raw) as { id?: unknown };
+            const parsed = parseJsonWithBom<{ id?: unknown }>(raw);
             if (typeof parsed.id === 'string' && parsed.id.trim()) {
                 return parsed.id.trim();
             }
@@ -221,7 +222,7 @@ function deriveLegacyWeChatRawAccountId(normalizedId: string): string | undefine
 async function readWeChatAccountIndex(): Promise<string[]> {
     try {
         const raw = await readFile(WECHAT_ACCOUNT_INDEX_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
+        const parsed = parseJsonWithBom(raw);
         if (!Array.isArray(parsed)) return [];
         return parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
     } catch {
@@ -470,7 +471,7 @@ export async function readOpenClawConfig(): Promise<OpenClawConfig> {
 
     try {
         const content = await readFile(CONFIG_FILE, 'utf-8');
-        return JSON.parse(content) as OpenClawConfig;
+        return parseJsonWithBom<OpenClawConfig>(content);
     } catch (error) {
         logger.error('Failed to read OpenClaw config', error);
         console.error('Failed to read OpenClaw config:', error);

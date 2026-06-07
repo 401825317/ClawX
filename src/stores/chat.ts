@@ -8,6 +8,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import { pickStartupSessionFallback } from './chat/session-selection';
@@ -1698,7 +1699,7 @@ async function sendChatMessageViaHostApi(params: {
     }
     return response.result ?? {};
   } catch {
-    return await useGatewayStore.getState().rpc<{ runId?: string }>('chat.send', params, 120000);
+    return await useGatewayStore.getState().rpc<{ runId?: string }>('chat.send', params, CHAT_SEND_RPC_TIMEOUT_MS);
   }
 }
 

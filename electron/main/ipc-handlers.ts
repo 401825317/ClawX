@@ -11,6 +11,7 @@ import { join, extname, basename, resolve, sep, relative, dirname } from 'node:p
 import crypto from 'node:crypto';
 import { syncMacTrafficLightPosition } from './traffic-light-layout';
 import { GatewayManager } from '../gateway/manager';
+import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
 import {
   type ProviderConfig,
@@ -1385,9 +1386,7 @@ function registerGatewayHandlers(
 
       logger.info(`[chat:sendWithMedia] Sending: message="${message.substring(0, 100)}", attachments=${imageAttachments.length}, fileRefs=${fileReferences.length}`);
 
-      // Longer timeout for chat sends to tolerate high-latency networks (avoids connect error)
-      const timeoutMs = 120000;
-      const result = await gatewayManager.rpc('chat.send', rpcParams, timeoutMs);
+      const result = await gatewayManager.rpc('chat.send', rpcParams, CHAT_SEND_RPC_TIMEOUT_MS);
       logger.info(`[chat:sendWithMedia] RPC result: ${JSON.stringify(result)}`);
       return { success: true, result };
     } catch (error) {

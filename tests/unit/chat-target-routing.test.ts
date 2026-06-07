@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { chatHistoryRpcParams } from './gateway-rpc-test-utils';
 
 const { gatewayRpcMock, hostApiFetchMock, agentsState } = vi.hoisted(() => ({
@@ -142,6 +143,51 @@ describe('chat target routing', () => {
       deliver: false,
     });
     expect(typeof (sendPayload as { idempotencyKey?: unknown }).idempotencyKey).toBe('string');
+  });
+
+  it('uses the long chat.send timeout when falling back to Gateway RPC', async () => {
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/chat/send') {
+        throw new Error('host api unavailable');
+      }
+      if (url === '/api/chat/history') {
+        return { success: true, result: { messages: [] } };
+      }
+      return { success: true, result: {} };
+    });
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('Hello fallback');
+
+    expect(gatewayRpcMock).toHaveBeenCalledWith(
+      'chat.send',
+      expect.objectContaining({
+        sessionKey: 'agent:main:main',
+        message: 'Hello fallback',
+        deliver: false,
+      }),
+      CHAT_SEND_RPC_TIMEOUT_MS,
+    );
   });
 
   it('uses the selected agent main session for attachment sends', async () => {

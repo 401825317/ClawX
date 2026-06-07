@@ -3,6 +3,7 @@
  * Handles window state persistence and multi-window management
  */
 import { BrowserWindow, screen } from 'electron';
+import { parseJsonWithBom } from '../utils/json';
 
 interface WindowState {
   x?: number;
@@ -21,6 +22,7 @@ async function getStore() {
     const Store = (await import('electron-store')).default;
     windowStateStore = new Store<{ windowState: WindowState }>({
       name: 'window-state',
+      deserialize: parseJsonWithBom,
       defaults: {
         windowState: {
           width: 1280,

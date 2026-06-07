@@ -1,4 +1,6 @@
 // Lazy-load electron-store (ESM module) from the main process only.
+import { parseJsonWithBom } from '../../utils/json';
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let providerStore: any = null;
 
@@ -7,6 +9,7 @@ export async function getClawXProviderStore() {
     const Store = (await import('electron-store')).default;
     providerStore = new Store({
       name: 'clawx-providers',
+      deserialize: parseJsonWithBom,
       defaults: {
         schemaVersion: 0,
         providers: {} as Record<string, unknown>,

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { parseJsonWithBom } from '../utils/json';
 
 export type GatewayReloadMode = 'hybrid' | 'reload' | 'restart' | 'off';
 
@@ -55,7 +56,7 @@ export function parseGatewayReloadPolicy(config: unknown): GatewayReloadPolicy {
 export async function loadGatewayReloadPolicy(): Promise<GatewayReloadPolicy> {
   try {
     const raw = await readFile(OPENCLAW_CONFIG_PATH, 'utf-8');
-    return parseGatewayReloadPolicy(JSON.parse(raw));
+    return parseGatewayReloadPolicy(parseJsonWithBom(raw));
   } catch {
     return { ...DEFAULT_GATEWAY_RELOAD_POLICY };
   }

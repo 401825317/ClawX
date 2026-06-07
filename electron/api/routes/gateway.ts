@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../../shared/chat-timeouts';
 import { PORTS } from '../../utils/config';
 import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-device-pairing';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
@@ -142,7 +143,7 @@ export async function handleGatewayRoutes(
           deliver: body.deliver ?? false,
           idempotencyKey: body.idempotencyKey,
         },
-        120000,
+        CHAT_SEND_RPC_TIMEOUT_MS,
       );
       sendJson(res, 200, { success: true, result });
     } catch (error) {
@@ -203,7 +204,7 @@ export async function handleGatewayRoutes(
       if (imageAttachments.length > 0) {
         rpcParams.attachments = imageAttachments;
       }
-      const result = await runGatewayRpc(ctx, 'chat.send', rpcParams, 120000);
+      const result = await runGatewayRpc(ctx, 'chat.send', rpcParams, CHAT_SEND_RPC_TIMEOUT_MS);
       sendJson(res, 200, { success: true, result });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

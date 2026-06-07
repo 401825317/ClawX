@@ -3,6 +3,7 @@
  * Provides a typed interface for Gateway RPC calls
  */
 import { GatewayManager, GatewayStatus } from './manager';
+import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 
 /**
  * Channel types supported by OpenClaw
@@ -203,7 +204,7 @@ export class GatewayClient {
    * Send a chat message
    */
   async sendMessage(content: string, channelId?: string): Promise<ChatMessage> {
-    return this.manager.rpc<ChatMessage>('chat.send', { content, channelId });
+    return this.manager.rpc<ChatMessage>('chat.send', { content, channelId }, CHAT_SEND_RPC_TIMEOUT_MS);
   }
 
   /**

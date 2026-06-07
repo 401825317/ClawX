@@ -408,6 +408,29 @@ function normalizeBaseUrl(raw?: string): string {
   return normalized.endsWith('/v1') ? normalized : `${normalized}/v1`;
 }
 
+function getLocalProviderBaseUrlOverride(): string {
+  return (
+    process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL
+    || process.env.CLAWX_JUNFEIAI_BASE_URL
+    || ''
+  ).trim();
+}
+
+function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunFeiAIBootstrapPayload {
+  const providerBaseUrl = getLocalProviderBaseUrlOverride();
+  if (!providerBaseUrl) {
+    return bootstrap;
+  }
+
+  return {
+    ...bootstrap,
+    runtime: {
+      ...(bootstrap.runtime ?? {}),
+      baseUrl: normalizeBaseUrl(providerBaseUrl),
+    },
+  };
+}
+
 function normalizeProviderProtocol(raw?: string): ProviderProtocol {
   if (
     raw === 'openai-completions'
@@ -514,7 +537,7 @@ async function fetchRemoteJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload>
 }
 
 export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
-  const bootstrap = await fetchRemoteJunFeiAIBootstrap();
+  const bootstrap = applyLocalBootstrapOverrides(await fetchRemoteJunFeiAIBootstrap());
   return (await applyLocalDeviceActivationState(bootstrap)).bootstrap;
 }
 
@@ -687,15 +710,6 @@ async function requestRuntimeToken(accessToken: string, device?: Record<string, 
   }
 }
 
-async function getJunFeiAIAuthStatus(): Promise<{
-  hasAuthToken: boolean;
-  authValid: boolean;
-  authError?: string;
-  auth?: { user?: Record<string, unknown> };
-}> {
-  return getJunFeiAIAuthStatusWithOptions({ markDeviceActivatedFromStoredAuth: true });
-}
-
 async function getJunFeiAIAuthStatusWithOptions(options: {
   markDeviceActivatedFromStoredAuth?: boolean;
 }): Promise<{
@@ -765,6 +779,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       logger.warn('[junfeiai] Falling back to bundled bootstrap defaults:', error);
     }
   }
+  bootstrap = applyLocalBootstrapOverrides(bootstrap);
 
   const authStatus = await getJunFeiAIAuthStatusWithOptions({
     markDeviceActivatedFromStoredAuth: options.markDeviceActivatedFromStoredAuth,

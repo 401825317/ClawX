@@ -15,6 +15,7 @@ import { logger } from './logger';
 import { cpAsyncSafe } from './plugin-install';
 import { withConfigLock } from './config-mutex';
 import { isJunFeiAIManagedDistribution } from './junfeiai-distribution';
+import { parseJsonWithBom } from './json';
 
 const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
@@ -55,7 +56,7 @@ async function readConfig(): Promise<OpenClawConfig> {
     }
     try {
         const raw = await readFile(OPENCLAW_CONFIG_PATH, 'utf-8');
-        return JSON.parse(raw);
+        return parseJsonWithBom<OpenClawConfig>(raw);
     } catch (err) {
         console.error('Failed to read openclaw config:', err);
         return {};
@@ -354,7 +355,7 @@ async function tryReadMarker(markerPath: string): Promise<PreinstalledMarker | n
     }
     try {
         const raw = await readFile(markerPath, 'utf-8');
-        const parsed = JSON.parse(raw) as PreinstalledMarker;
+        const parsed = parseJsonWithBom<PreinstalledMarker>(raw);
         if (!parsed?.slug || !parsed?.version) {
             return null;
         }

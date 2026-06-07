@@ -202,13 +202,17 @@ describe('JunFeiAI managed provider service', () => {
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
       data: {
         service: { displayName: 'Local JunFeiAI' },
-        runtime: { defaultModel: 'gpt-5.5' },
+        runtime: {
+          baseUrl: 'https://zz.lingzhiwuxian.com/v1',
+          defaultModel: 'gpt-5.5',
+        },
       },
     }), { status: 200 }));
 
     const result = await ensureJunFeiAIProviderSeeded({ syncRuntime: false });
 
     expect(result.source).toBe('remote');
+    expect(result.bootstrap.runtime?.baseUrl).toBe('http://127.0.0.1:18080/v1');
     expect(fetch).toHaveBeenCalledWith(
       'http://127.0.0.1:8080/api/clawx/bootstrap',
       expect.any(Object),

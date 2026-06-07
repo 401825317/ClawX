@@ -38,6 +38,7 @@ import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
+import { parseJsonWithBom } from './json';
 
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -293,7 +294,7 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   try {
     if (!(await fileExists(filePath))) return null;
     const raw = await readFile(filePath, 'utf-8');
-    return JSON.parse(raw) as T;
+    return parseJsonWithBom<T>(raw);
   } catch {
     return null;
   }
@@ -973,7 +974,7 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
     try {
       if (await fileExists(modelsPath)) {
         const raw = await readFile(modelsPath, 'utf-8');
-        const data = JSON.parse(raw) as Record<string, unknown>;
+        const data = parseJsonWithBom<Record<string, unknown>>(raw);
         const providers = data.providers as Record<string, unknown> | undefined;
         if (providers && providers[provider]) {
           delete providers[provider];
