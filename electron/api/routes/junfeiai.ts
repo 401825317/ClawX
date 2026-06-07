@@ -7,6 +7,7 @@ import {
   ensureJunFeiAIProviderSeeded,
   getJunFeiAITopupOrderStatus,
   getJunFeiAITopupOverview,
+  listJunFeiAIModels,
   loginJunFeiAI,
   logoutJunFeiAI,
   registerJunFeiAI,
@@ -76,6 +77,11 @@ export async function handleJunFeIAIRoutes(
       tradeNo: url.searchParams.get('tradeNo') ?? url.searchParams.get('trade_no') ?? '',
       sync: url.searchParams.get('sync') ?? false,
     }));
+    return true;
+  }
+
+  if (url.pathname === '/api/junfeiai/models' && req.method === 'GET') {
+    sendJson(res, 200, await listJunFeiAIModels());
     return true;
   }
 

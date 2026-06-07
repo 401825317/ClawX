@@ -48,6 +48,19 @@ interface ChatInputProps {
   sending?: boolean;
 }
 
+interface RemoteModelOption {
+  modelRef: string;
+  label: string;
+  runtimeProviderKey: string;
+  accountId: string;
+}
+
+function formatJunFeiAIModelLabel(modelId: string): string {
+  return modelId
+    .replace(/^gpt-/i, 'GPT-')
+    .replace(/-mini$/i, '-Mini');
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
@@ -206,6 +219,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
   const [switchingModelRef, setSwitchingModelRef] = useState<string | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
+  const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
@@ -228,10 +242,25 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
   );
-  const modelOptions = useMemo(
+  const baseModelOptions = useMemo(
     () => buildConfiguredModelOptions(providerAccounts, providerStatuses, providerDefaultAccountId),
     [providerAccounts, providerDefaultAccountId, providerStatuses],
   );
+  const modelOptions = useMemo(() => {
+    if (remoteModelOptions.length === 0) {
+      return baseModelOptions;
+    }
+    const deduped = new Map<string, RemoteModelOption | typeof baseModelOptions[number]>();
+    for (const option of remoteModelOptions) {
+      deduped.set(option.modelRef, option);
+    }
+    for (const option of baseModelOptions) {
+      if (!deduped.has(option.modelRef)) {
+        deduped.set(option.modelRef, option);
+      }
+    }
+    return [...deduped.values()];
+  }, [baseModelOptions, remoteModelOptions]);
   const effectiveModelRef = optimisticModelRef || currentAgent?.modelRef || defaultModelRef || modelOptions[0]?.modelRef || null;
   const currentModelLabel = formatModelRefLabel(effectiveModelRef);
   const mentionableAgents = useMemo(
@@ -283,6 +312,44 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   useEffect(() => {
     setOptimisticModelRef(null);
   }, [currentAgent?.modelRef, currentAgentId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'junfeiai' && account.enabled);
+    if (!junfeiaiAccount) {
+      setRemoteModelOptions([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void hostApiFetch<{ models?: string[] }>('/api/junfeiai/models')
+      .then((payload) => {
+        if (cancelled) return;
+        const next = Array.isArray(payload?.models)
+          ? Array.from(new Set(
+            payload.models
+              .map((model) => (typeof model === 'string' ? model.trim() : ''))
+              .filter(Boolean),
+          )).map((modelId) => ({
+            modelRef: `junfeiai/${modelId}`,
+            label: formatJunFeiAIModelLabel(modelId),
+            runtimeProviderKey: 'junfeiai',
+            accountId: 'junfeiai',
+          }))
+          : [];
+        setRemoteModelOptions(next);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRemoteModelOptions([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [providerAccounts]);
 
   // Auto-resize textarea
   useEffect(() => {

@@ -108,6 +108,17 @@ interface JunFeiAIRelayTokenPayload {
   runtime?: JunFeiAIRuntimePayload;
 }
 
+interface JunFeiAIModelListEntry {
+  id?: unknown;
+  object?: unknown;
+  created?: unknown;
+  owned_by?: unknown;
+}
+
+interface JunFeiAIModelListPayload {
+  data?: JunFeiAIModelListEntry[];
+}
+
 type JunFeiAIStandardApiKeyPayload = Record<string, unknown> & {
   key?: unknown;
 };
@@ -613,6 +624,45 @@ async function createStandardSub2APIKey(accessToken: string, device?: Record<str
     token,
     tokenType: 'sub2api-api-key',
     expiresIn: null,
+  };
+}
+
+async function requireStoredJunFeiAIRuntimeApiKey(): Promise<string> {
+  const secret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+  if (secret?.type !== 'api_key' || !secret.apiKey.trim()) {
+    throw new Error('请先登录后再获取模型列表');
+  }
+  return secret.apiKey.trim();
+}
+
+function normalizeJunFeiAIModelIds(payload: JunFeiAIModelListPayload): string[] {
+  const raw = Array.isArray(payload?.data) ? payload.data : [];
+  return Array.from(new Set(
+    raw
+      .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : ''))
+      .filter(Boolean),
+  ));
+}
+
+export async function listJunFeiAIModels(): Promise<{ models: string[] }> {
+  const apiKey = await requireStoredJunFeiAIRuntimeApiKey();
+  const origin = getJunFeiAIProviderBaseUrl().replace(/\/+$/, '');
+  const response = await fetch(`${origin}/models`, {
+    method: 'GET',
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object' && 'message' in payload
+      ? String((payload as { message?: unknown }).message)
+      : `${response.status} ${response.statusText}`;
+    throw new Error(`/v1/models: ${message}`);
+  }
+  return {
+    models: normalizeJunFeiAIModelIds(payload as JunFeiAIModelListPayload),
   };
 }
 
