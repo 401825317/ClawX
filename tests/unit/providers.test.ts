@@ -70,7 +70,7 @@ describe('provider metadata', () => {
     expect(getProviderConfig('junfeiai')).toEqual(
       expect.objectContaining({
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
-        api: 'anthropic-messages',
+        api: 'openai-responses',
         apiKeyEnv: 'JUNFEIAI_API_KEY',
       }),
     );

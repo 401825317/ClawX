@@ -65,7 +65,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     supportsMultipleAccounts: false,
     providerConfig: {
       baseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
-      api: 'anthropic-messages',
+      api: 'openai-responses',
       apiKeyEnv: 'JUNFEIAI_API_KEY',
       models: [
         {

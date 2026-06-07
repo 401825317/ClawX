@@ -399,11 +399,12 @@ function normalizeProviderProtocol(raw?: string): ProviderProtocol {
   if (
     raw === 'openai-completions'
     || raw === 'openai-responses'
-    || raw === 'anthropic-messages'
   ) {
     return raw;
   }
-  if (raw && !(OPENCLAW_API_PROTOCOLS as readonly string[]).includes(raw)) {
+  if (raw && (OPENCLAW_API_PROTOCOLS as readonly string[]).includes(raw)) {
+    logger.warn(`[junfeiai] Ignoring non-OpenAI api protocol from bootstrap: ${raw}`);
+  } else if (raw) {
     logger.warn(`[junfeiai] Ignoring unsupported api protocol from bootstrap: ${raw}`);
   }
   return JUNFEIAI_DEFAULT_API_PROTOCOL as ProviderProtocol;

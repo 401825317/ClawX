@@ -80,7 +80,7 @@ function makeAccount(overrides: Partial<ProviderAccount> = {}): ProviderAccount 
     label: 'JunFeiAI',
     authMode: 'api_key',
     baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
-    apiProtocol: 'anthropic-messages',
+    apiProtocol: 'openai-responses',
     model: 'gpt-5.5',
     enabled: true,
     isDefault: true,
@@ -141,10 +141,10 @@ describe('JunFeiAI managed provider service', () => {
   it('seeds JunFeiAI account from bootstrap and sets it as default provider', async () => {
     const result = await ensureJunFeiAIProviderSeeded({
       bootstrap: {
-        service: { displayName: 'JunFeiAI Managed', apiOrigin: 'https://junfeiai.com' },
+        service: { displayName: 'JunFeiAI Managed', apiOrigin: 'https://zz-cn.lingzhiwuxian.com' },
         runtime: {
-          baseUrl: 'https://junfeiai.com/v1/',
-          apiProtocol: 'anthropic-messages',
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+          apiProtocol: 'openai-responses',
           defaultModel: 'gpt-5.5',
           fallbackModels: ['gpt-5.5-mini', 'gpt-5.5-mini'],
         },
@@ -159,8 +159,8 @@ describe('JunFeiAI managed provider service', () => {
         id: 'junfeiai',
         vendorId: 'junfeiai',
         label: 'JunFeiAI Managed',
-        baseUrl: 'https://junfeiai.com/v1',
-        apiProtocol: 'anthropic-messages',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        apiProtocol: 'openai-responses',
         model: 'gpt-5.5',
         fallbackModels: ['gpt-5.5-mini'],
       }),
@@ -185,7 +185,7 @@ describe('JunFeiAI managed provider service', () => {
           activationRequired: true,
         },
         runtime: {
-          baseUrl: 'https://junfeiai.com/v1/',
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
           defaultModel: 'gpt-5.5',
         },
       },
@@ -223,7 +223,7 @@ describe('JunFeiAI managed provider service', () => {
     );
   });
 
-  it('defaults to JunFeiAI development backend when the Vite dev server is running', async () => {
+  it('uses the production backend by default when the Vite dev server is running', async () => {
     vi.stubEnv('NODE_ENV', 'development');
     vi.stubEnv('VITE_DEV_SERVER_URL', 'http://127.0.0.1:5173');
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
@@ -236,14 +236,14 @@ describe('JunFeiAI managed provider service', () => {
     await ensureJunFeiAIProviderSeeded({ syncRuntime: false });
 
     expect(fetch).toHaveBeenCalledWith(
-      'https://junfeiai.com/api/clawx/bootstrap',
+      'https://zz-cn.lingzhiwuxian.com/api/clawx/bootstrap',
       expect.any(Object),
     );
     expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
       expect.objectContaining({
-        baseUrl: 'https://junfeiai.com/v1',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         metadata: expect.objectContaining({
-          resourceUrl: 'https://junfeiai.com',
+          resourceUrl: 'https://zz-cn.lingzhiwuxian.com',
         }),
       }),
     );
@@ -280,8 +280,8 @@ describe('JunFeiAI managed provider service', () => {
 
     const account = await storeJunFeiAIRelayToken('  relay-token  ', {
       runtime: {
-        baseUrl: 'https://junfeiai.com/v1',
-        apiProtocol: 'anthropic-messages',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        apiProtocol: 'openai-responses',
         defaultModel: 'gpt-5.5',
       },
     });

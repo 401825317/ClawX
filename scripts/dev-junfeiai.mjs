@@ -6,11 +6,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const DEVELOPMENT_ORIGIN = 'https://junfeiai.com';
+const DEFAULT_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
 
 function parseArgs(argv) {
   const options = {
-    backend: process.env.CLAWX_JUNFEIAI_BACKEND_ORIGIN || process.env.CLAWX_JUNFEIAI_ORIGIN || DEVELOPMENT_ORIGIN,
+    backend: process.env.CLAWX_JUNFEIAI_BACKEND_ORIGIN || process.env.CLAWX_JUNFEIAI_ORIGIN || DEFAULT_ORIGIN,
     provider: process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL || process.env.CLAWX_JUNFEIAI_BASE_URL || '',
     port: process.env.VITE_DEV_SERVER_PORT || '5173',
   };

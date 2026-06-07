@@ -1,14 +1,9 @@
 export const JUNFEIAI_PROVIDER_ID = 'junfeiai';
 export const JUNFEIAI_PROVIDER_NAME = 'JunFeiAI';
-export const JUNFEIAI_DEVELOPMENT_ORIGIN = 'https://junfeiai.com';
 export const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
 export const JUNFEIAI_DEFAULT_MODEL = 'gpt-5.5';
-export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'anthropic-messages';
+export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-responses';
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'junfeiai-auth';
-
-function isDevelopmentRuntime(): boolean {
-  return process.env.NODE_ENV === 'development' || Boolean(process.env.VITE_DEV_SERVER_URL);
-}
 
 function normalizeOrigin(value: string): string {
   return value
@@ -22,9 +17,7 @@ function normalizeProviderBaseUrl(value: string): string {
 }
 
 function getJunFeiAIDefaultOrigin(): string {
-  return isDevelopmentRuntime()
-    ? JUNFEIAI_DEVELOPMENT_ORIGIN
-    : JUNFEIAI_PRODUCTION_ORIGIN;
+  return JUNFEIAI_PRODUCTION_ORIGIN;
 }
 
 export function getJunFeiAIDefaultBaseUrl(): string {
