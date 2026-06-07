@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, extname, basename, resolve, sep, relative } from 'node:path';
+import { join, extname, basename, resolve, sep, relative, dirname } from 'node:path';
 import crypto from 'node:crypto';
 import { syncMacTrafficLightPosition } from './traffic-light-layout';
 import { GatewayManager } from '../gateway/manager';
@@ -2240,7 +2240,7 @@ function getWindowsPowerShellPath(): string {
   return 'powershell.exe';
 }
 
-function buildFactoryResetPowerShellScript(targets: string[], executablePath: string, relaunchArgs: string[]): string {
+function buildFactoryResetPowerShellScript(targets: string[], executablePath: string, relaunchArgs: string[], workingDirectory: string): string {
   const targetList = targets.map((target) => `  ${quotePowerShellLiteral(target)}`).join(",\r\n");
   const argumentList = relaunchArgs.map(quotePowerShellLiteral).join(', ');
 
@@ -2265,16 +2265,16 @@ function buildFactoryResetPowerShellScript(targets: string[], executablePath: st
     `Start-Sleep -Milliseconds 200`,
     `$relaunchArgs = @(${argumentList})`,
     `if ($relaunchArgs.Count -gt 0) {`,
-    `  Start-Process -FilePath ${quotePowerShellLiteral(executablePath)} -ArgumentList $relaunchArgs | Out-Null`,
+    `  Start-Process -FilePath ${quotePowerShellLiteral(executablePath)} -ArgumentList $relaunchArgs -WorkingDirectory ${quotePowerShellLiteral(workingDirectory)} | Out-Null`,
     '} else {',
-    `  Start-Process -FilePath ${quotePowerShellLiteral(executablePath)} | Out-Null`,
+    `  Start-Process -FilePath ${quotePowerShellLiteral(executablePath)} -WorkingDirectory ${quotePowerShellLiteral(workingDirectory)} | Out-Null`,
     '}',
     'Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue',
     '',
   ].join('\r\n');
 }
 
-function buildFactoryResetShellScript(targets: string[], executablePath: string, relaunchArgs: string[]): string {
+function buildFactoryResetShellScript(targets: string[], executablePath: string, relaunchArgs: string[], workingDirectory: string): string {
   const cleanupCommands = targets.map((target) => `rm -rf -- ${quoteShLiteral(target)}`).join('\n');
   const quotedArgs = relaunchArgs.map(quoteShLiteral).join(' ');
   const relaunchCommand = quotedArgs
@@ -2295,18 +2295,19 @@ function buildFactoryResetShellScript(targets: string[], executablePath: string,
     'fi',
     cleanupCommands,
     'sleep 0.2',
+    `cd -- ${quoteShLiteral(workingDirectory)} || exit 1`,
     relaunchCommand,
     'rm -f -- "$0"',
     '',
   ].join('\n');
 }
 
-async function writeFactoryResetLauncher(targets: string[], executablePath: string, relaunchArgs: string[]): Promise<{ command: string; args: string[]; scriptPath: string }> {
+async function writeFactoryResetLauncher(targets: string[], executablePath: string, relaunchArgs: string[], workingDirectory: string): Promise<{ command: string; args: string[]; scriptPath: string }> {
   const suffix = `${process.pid}-${Date.now()}`;
 
   if (process.platform === 'win32') {
     const scriptPath = join(app.getPath('temp'), `clawx-factory-reset-${suffix}.ps1`);
-    await writeFile(scriptPath, buildFactoryResetPowerShellScript(targets, executablePath, relaunchArgs), 'utf8');
+    await writeFile(scriptPath, buildFactoryResetPowerShellScript(targets, executablePath, relaunchArgs, workingDirectory), 'utf8');
     return {
       command: getWindowsPowerShellPath(),
       args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
@@ -2315,7 +2316,7 @@ async function writeFactoryResetLauncher(targets: string[], executablePath: stri
   }
 
   const scriptPath = join(app.getPath('temp'), `clawx-factory-reset-${suffix}.sh`);
-  await writeFile(scriptPath, buildFactoryResetShellScript(targets, executablePath, relaunchArgs), { encoding: 'utf8', mode: 0o700 });
+  await writeFile(scriptPath, buildFactoryResetShellScript(targets, executablePath, relaunchArgs, workingDirectory), { encoding: 'utf8', mode: 0o700 });
   return {
     command: '/bin/sh',
     args: [scriptPath],
@@ -2326,11 +2327,15 @@ async function writeFactoryResetLauncher(targets: string[], executablePath: stri
 async function scheduleFactoryResetAndRelaunch(): Promise<{ success: true; targets: string[] }> {
   const targets = getFactoryResetTargets();
   const executablePath = process.execPath;
-  const relaunchArgs = app.isPackaged ? [] : process.argv.slice(1);
-  const launcher = await writeFactoryResetLauncher(targets, executablePath, relaunchArgs);
+  const workingDirectory = app.isPackaged ? dirname(executablePath) : app.getAppPath();
+  const relaunchArgs = app.isPackaged
+    ? []
+    : process.argv.slice(1).map((arg) => (arg === '.' ? workingDirectory : arg));
+  const launcher = await writeFactoryResetLauncher(targets, executablePath, relaunchArgs, workingDirectory);
 
   logger.warn('Factory reset requested; cleanup will run after ClawX exits', {
     targets,
+    workingDirectory,
     launcherScript: launcher.scriptPath,
   });
 
