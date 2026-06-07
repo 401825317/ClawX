@@ -130,5 +130,30 @@ describe('local skill service', () => {
     expect(skills.find((skill) => skill.id === 'pdf')?.version).toBe('1.0.0');
     expect(skills.find((skill) => skill.id === 'docx')?.version).toBeUndefined();
     expect(skills.find((skill) => skill.id === 'custom-skill')?.version).toBe('0.1.3');
+    expect(skills.find((skill) => skill.id === 'docx')?.uninstallable).toBe(false);
+  });
+
+  it('marks only user-installed managed skills as uninstallable', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'clawx-local-skills-uninstallable-'));
+    const managedRoot = join(root, 'managed');
+
+    mkdirSync(join(managedRoot, 'market-user-skill', '.clawhub'), { recursive: true });
+    writeFileSync(join(managedRoot, 'market-user-skill', 'SKILL.md'), '---\nname: market-user-skill\ndescription: user installed\n---\n');
+    writeFileSync(join(managedRoot, 'market-user-skill', '.clawhub', 'origin.json'), JSON.stringify({ slug: 'market-user-skill', installedVersion: '1.0.0' }));
+
+    mkdirSync(join(managedRoot, 'pdf'), { recursive: true });
+    writeFileSync(join(managedRoot, 'pdf', 'SKILL.md'), '---\nname: pdf\ndescription: preinstalled\n---\n');
+    writeFileSync(join(managedRoot, 'pdf', '.clawx-preinstalled.json'), JSON.stringify({ slug: 'pdf', version: '1.0.0' }));
+
+    listAgentsSnapshotMock.mockResolvedValue({ agents: [] });
+    getOpenClawSkillsDirMock.mockReturnValue(managedRoot);
+    getOpenClawResolvedDirMock.mockReturnValue(join(root, 'openclaw'));
+    getAllSkillConfigsMock.mockResolvedValue({});
+
+    const { listLocalSkills } = await import('@electron/services/skills/local-skill-service');
+    const skills = await listLocalSkills();
+
+    expect(skills.find((skill) => skill.id === 'market-user-skill')?.uninstallable).toBe(true);
+    expect(skills.find((skill) => skill.id === 'pdf')?.uninstallable).toBe(false);
   });
 });

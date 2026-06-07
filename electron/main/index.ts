@@ -45,7 +45,7 @@ import {
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
-import { ensureBuiltinSkillsInstalled, ensurePreinstalledSkillsInstalled, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
+import { ensureBuiltinSkillsInstalled, removeClawXPreinstalledSkillsAndConfigs, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
 import { ensureWeChatPluginInstalled } from '../utils/plugin-install';
 
 import { startHostApiServer } from '../api/server';
@@ -430,12 +430,18 @@ async function initialize(): Promise<void> {
     });
   }
 
-  // Pre-deploy bundled third-party skills from resources/preinstalled-skills.
-  // This installs full skill directories (not only SKILL.md) in an idempotent,
-  // non-destructive way and never blocks startup.
+  // Remove legacy ClawX-owned preinstalled skills from the managed skills dir.
+  // OpenClaw bundled skills are preserved; this only targets skills marked with
+  // `.clawx-preinstalled.json` from older ClawX builds.
   if (!isE2EMode) {
-    void ensurePreinstalledSkillsInstalled().catch((error) => {
-      logger.warn('Failed to install preinstalled skills:', error);
+    void removeClawXPreinstalledSkillsAndConfigs().then(({ removed, removedConfigs, removedSlugs }) => {
+      if (removed > 0 || removedConfigs > 0) {
+        logger.info(
+          `Removed legacy ClawX preinstalled skills: removed ${removed}, pruned configs ${removedConfigs}, slugs ${removedSlugs.join(', ')}`,
+        );
+      }
+    }).catch((error) => {
+      logger.warn('Failed to remove legacy ClawX preinstalled skills:', error);
     });
   }
 

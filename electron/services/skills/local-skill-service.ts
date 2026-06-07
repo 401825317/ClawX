@@ -75,6 +75,20 @@ type PreinstalledMeta = {
   version?: string;
 };
 
+function isUserInstalledManagedSkill(
+  descriptorSource: string,
+  originMeta: OriginMeta | null,
+  preinstalledMeta: PreinstalledMeta | null,
+): boolean {
+  if (descriptorSource !== 'openclaw-managed') {
+    return false;
+  }
+  if (preinstalledMeta) {
+    return false;
+  }
+  return Boolean(originMeta?.provider === 'clawhub');
+}
+
 const MAX_SKILL_FILE_BYTES = 256_000;
 const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 
@@ -273,6 +287,7 @@ async function inspectSkillDir(
     const version = manifestMeta?.version || parsedManifest.version || originMeta?.installedVersion;
     const source = descriptor.source;
     const isBundled = source === 'openclaw-bundled' || Boolean(preinstalledMeta);
+    const uninstallable = isUserInstalledManagedSkill(source, originMeta, preinstalledMeta);
     const marketplace = originMeta || manifestMeta
       ? {
           provider: originMeta?.provider || (manifestMeta ? 'manifest' : source),
@@ -295,6 +310,7 @@ async function inspectSkillDir(
       config,
       isCore: parsedManifest.isCore,
       isBundled,
+      uninstallable,
       source,
       baseDir: skillDirRealPath,
       filePath: manifestPath,

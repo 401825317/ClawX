@@ -101,6 +101,7 @@ function mapGatewaySkillToSkill(status: GatewaySkillStatus, existing?: Skill): S
     baseDir: status.baseDir || existing?.baseDir,
     filePath: status.filePath || existing?.filePath,
     marketplace: existing?.marketplace,
+    uninstallable: existing?.uninstallable,
   };
 }
 

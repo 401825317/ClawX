@@ -245,4 +245,104 @@ describe('Skills page gateway readiness', () => {
     expect(screen.queryByText('detail.uninstall')).not.toBeInTheDocument();
     expect(screen.getByText('detail.disable')).toBeInTheDocument();
   });
+
+  it('does not show uninstall for preinstalled managed skills', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.skills = [
+      {
+        id: 'pdf',
+        slug: 'pdf',
+        name: 'PDF',
+        description: 'preinstalled managed skill',
+        enabled: true,
+        source: 'openclaw-managed',
+        uninstallable: false,
+        baseDir: '/tmp/pdf',
+      },
+    ];
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByText('PDF'));
+    expect(screen.queryByText('detail.uninstall')).not.toBeInTheDocument();
+    expect(screen.getByText('detail.disable')).toBeInTheDocument();
+  });
+
+  it('shows uninstall for user-installed managed skills', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.skills = [
+      {
+        id: 'market-user-skill',
+        slug: 'market-user-skill',
+        name: 'Market User Skill',
+        description: 'user installed managed skill',
+        enabled: true,
+        source: 'openclaw-managed',
+        uninstallable: true,
+        baseDir: '/tmp/market-user-skill',
+      },
+    ];
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByText('Market User Skill'));
+    expect(screen.getByText('detail.uninstall')).toBeInTheDocument();
+  });
+
+  it('does not show uninstall in marketplace results for preinstalled installed skills', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.skills = [
+      {
+        id: 'pdf',
+        slug: 'pdf',
+        name: 'PDF',
+        description: 'preinstalled managed skill',
+        enabled: true,
+        source: 'openclaw-managed',
+        uninstallable: false,
+        baseDir: '/tmp/pdf',
+      },
+    ];
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
+      }
+      if (path === '/api/skills/marketplace/search') {
+        return Promise.resolve({
+          success: true,
+          results: [{ slug: 'pdf', name: 'PDF', description: 'preinstalled managed skill', version: '1.0.0' }],
+        });
+      }
+      if (path === '/api/clawhub/open-path') {
+        return Promise.resolve({ success: true });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByText('actions.installSkill'));
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(screen.queryByRole('button', { name: /uninstall/i })).not.toBeInTheDocument();
+  });
 });

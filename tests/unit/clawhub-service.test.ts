@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -73,5 +73,20 @@ describe('ClawHubService marketplace compatibility', () => {
         baseDir: skillDir,
       },
     ]);
+  });
+
+  it('rejects uninstall for preinstalled managed skills', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'clawx-clawhub-home-'));
+    const openclawDir = join(homeDir, '.openclaw');
+    const skillDir = join(openclawDir, 'skills', 'pdf');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), '---\nname: PDF\n---\n');
+    writeFileSync(join(skillDir, '.clawx-preinstalled.json'), JSON.stringify({ slug: 'pdf', version: '1.0.0' }));
+
+    const ClawHubService = await loadServiceForHome(homeDir);
+    const service = new ClawHubService();
+
+    await expect(service.uninstall({ slug: 'pdf' })).rejects.toThrow('Preinstalled skills cannot be uninstalled');
+    expect(existsSync(skillDir)).toBe(true);
   });
 });

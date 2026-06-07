@@ -111,8 +111,18 @@ export class ClawHubService {
      */
     async uninstall(params: ClawHubUninstallParams): Promise<void> {
         const fsPromises = fs.promises;
-
         const skillDir = path.join(this.workDir, 'skills', params.slug);
+        const preinstalledMarker = path.join(skillDir, '.clawx-preinstalled.json');
+        const originPath = path.join(skillDir, '.clawhub', 'origin.json');
+
+        if (fs.existsSync(preinstalledMarker)) {
+            throw new Error('Preinstalled skills cannot be uninstalled');
+        }
+
+        if (!fs.existsSync(originPath)) {
+            throw new Error('Only user-installed marketplace skills can be uninstalled');
+        }
+
         if (fs.existsSync(skillDir)) {
             console.log(`Deleting skill directory: ${skillDir}`);
             await fsPromises.rm(skillDir, { recursive: true, force: true });

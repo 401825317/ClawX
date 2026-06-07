@@ -30,6 +30,7 @@ export interface Skill {
     manifestPath?: string;
     originPath?: string;
   };
+  uninstallable?: boolean;
 }
 
 export interface QuickAccessSkill {

@@ -119,6 +119,8 @@ interface JunFeiAIModelListPayload {
   data?: JunFeiAIModelListEntry[];
 }
 
+const JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR = ['gpt-5.5', 'gpt-5.4'] as const;
+
 type JunFeiAIStandardApiKeyPayload = Record<string, unknown> & {
   key?: unknown;
 };
@@ -647,23 +649,30 @@ function normalizeJunFeiAIModelIds(payload: JunFeiAIModelListPayload): string[] 
 export async function listJunFeiAIModels(): Promise<{ models: string[] }> {
   const apiKey = await requireStoredJunFeiAIRuntimeApiKey();
   const origin = getJunFeiAIProviderBaseUrl().replace(/\/+$/, '');
-  const response = await fetch(`${origin}/models`, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = payload && typeof payload === 'object' && 'message' in payload
-      ? String((payload as { message?: unknown }).message)
-      : `${response.status} ${response.statusText}`;
-    throw new Error(`/v1/models: ${message}`);
+  try {
+    const response = await fetch(`${origin}/models`, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = payload && typeof payload === 'object' && 'message' in payload
+        ? String((payload as { message?: unknown }).message)
+        : `${response.status} ${response.statusText}`;
+      throw new Error(`/v1/models: ${message}`);
+    }
+    return {
+      models: normalizeJunFeiAIModelIds(payload as JunFeiAIModelListPayload),
+    };
+  } catch (error) {
+    logger.warn('[junfeiai] Failed to fetch remote model list, falling back to bundled defaults:', error);
+    return {
+      models: [...JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR],
+    };
   }
-  return {
-    models: normalizeJunFeiAIModelIds(payload as JunFeiAIModelListPayload),
-  };
 }
 
 async function requestRuntimeToken(accessToken: string, device?: Record<string, unknown>): Promise<JunFeiAIRelayTokenPayload> {

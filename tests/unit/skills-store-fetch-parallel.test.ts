@@ -117,4 +117,39 @@ describe('skills store local-first fetch', () => {
 
     expect(useSkillsStore.getState().skills.map((skill) => skill.id)).toEqual(['plugin-skill']);
   });
+
+  it('preserves local uninstallable metadata when merging gateway status', async () => {
+    const gatewayDeferred = deferred<{ skills: Array<Record<string, unknown>> }>();
+    rpcMock.mockReturnValueOnce(gatewayDeferred.promise);
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      skills: [{
+        id: 'pdf',
+        slug: 'pdf',
+        name: 'PDF',
+        description: 'local preinstalled skill',
+        enabled: true,
+        source: 'openclaw-managed',
+        uninstallable: false,
+      }],
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    useSkillsStore.setState({ skills: [], loading: false, error: null });
+
+    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    await expect(fetchPromise).resolves.toBe(true);
+
+    gatewayDeferred.resolve({
+      skills: [{ skillKey: 'pdf', slug: 'pdf', name: 'PDF', source: 'openclaw-managed', disabled: false, version: '2.0.0' }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(useSkillsStore.getState().skills[0]).toMatchObject({
+      id: 'pdf',
+      version: '2.0.0',
+      uninstallable: false,
+    });
+  });
 });

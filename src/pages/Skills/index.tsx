@@ -102,7 +102,7 @@ function resolveSkillSourceLabel(skill: Skill, t: TFunction<'skills'>): string {
 }
 
 function canUninstallSkill(skill: Skill): boolean {
-  return (skill.source || '').trim().toLowerCase() === 'openclaw-managed';
+  return skill.uninstallable === true;
 }
 
 function SkillDetailDialog({ skill, isOpen, onClose, onToggle, onUninstall, onOpenFolder }: SkillDetailDialogProps) {
@@ -744,7 +744,9 @@ export function Skills() {
             {!searching && searchResults.length > 0 && (
               <div className="flex flex-col gap-1">
                 {searchResults.map((skill) => {
-                  const isInstalled = safeSkills.some(s => s.id === skill.slug || s.name === skill.name);
+                  const installedSkill = safeSkills.find((s) => s.id === skill.slug || s.slug === skill.slug || s.name === skill.name);
+                  const isInstalled = Boolean(installedSkill);
+                  const canUninstallInstalledSkill = installedSkill ? canUninstallSkill(installedSkill) : false;
                   const isInstallLoading = !!installing[skill.slug];
 
                   return (
@@ -775,7 +777,7 @@ export function Skills() {
                             v{skill.version}
                           </span>
                         )}
-                        {isInstalled ? (
+                        {isInstalled && canUninstallInstalledSkill ? (
                           <Button
                             variant="destructive"
                             size="sm"
