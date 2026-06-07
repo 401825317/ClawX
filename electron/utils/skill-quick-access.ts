@@ -13,6 +13,7 @@ export interface QuickAccessSkill {
   sourceLabel: string;
   manifestPath: string;
   baseDir: string;
+  slug?: string;
 }
 
 type QuickAccessScanParams = {
@@ -76,6 +77,16 @@ function parseFrontmatterDescription(content: string): string | null {
   return match[1]?.trim().replace(/^['"]|['"]$/g, '') || null;
 }
 
+function parseFrontmatterName(content: string): string | null {
+  if (!content.startsWith('---')) return null;
+  const endIndex = content.indexOf('\n---', 3);
+  if (endIndex === -1) return null;
+  const frontmatter = content.slice(3, endIndex);
+  const match = frontmatter.match(/^\s*name\s*:\s*(.+)\s*$/m);
+  if (!match) return null;
+  return match[1]?.trim().replace(/^['"]|['"]$/g, '') || null;
+}
+
 function parseBodyDescription(content: string): string {
   const lines = content.split(/\r?\n/);
   let inFrontmatter = false;
@@ -112,12 +123,15 @@ function parseBodyDescription(content: string): string {
   return 'No description available.';
 }
 
-async function readSkillDescription(manifestPath: string): Promise<string> {
+async function readSkillManifestContent(manifestPath: string): Promise<string> {
   const fileStat = await stat(manifestPath);
   if (fileStat.size > MAX_SKILL_FILE_BYTES) {
-    return 'Description unavailable (SKILL.md exceeds size limit).';
+    throw new Error('SKILL.md exceeds size limit');
   }
-  const content = await readFile(manifestPath, 'utf-8');
+  return readFile(manifestPath, 'utf-8');
+}
+
+function readSkillDescriptionFromContent(content: string): string {
   return parseFrontmatterDescription(content) || parseBodyDescription(content);
 }
 
@@ -148,14 +162,17 @@ async function inspectSkillDir(params: {
     if (!isInsideRoot(params.rootRealPath, skillDirRealPath)) {
       return null;
     }
-    const description = await readSkillDescription(manifestPath);
+    const content = await readSkillManifestContent(manifestPath);
+    const configuredName = parseFrontmatterName(content);
+    const description = readSkillDescriptionFromContent(content);
     return {
-      name: basename(skillDirRealPath),
+      name: configuredName || basename(skillDirRealPath),
       description,
       source: params.source,
       sourceLabel: params.sourceLabel,
       manifestPath,
       baseDir: skillDirRealPath,
+      slug: basename(skillDirRealPath),
     };
   } catch {
     return null;

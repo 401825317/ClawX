@@ -133,6 +133,33 @@ describe('collectQuickAccessSkills', () => {
     });
   });
 
+  it('uses frontmatter name instead of directory slug for marketplace-installed skills', async () => {
+    const workspaceDir = join(testRoot, 'workspace');
+    const managedDir = join(testRoot, 'managed');
+
+    writeSkill(
+      managedDir,
+      'xhs-cn',
+      "---\nname: xiaohongshu\ndescription: XiaoHongShu skill.\n---\n# 小红书 MCP\n",
+    );
+
+    const skills = await collectQuickAccessSkills({
+      agentsRoots: [],
+      legacyRoots: [],
+      openClawRoots: [managedDir],
+      workspace: workspaceDir,
+      openClawDir: join(testRoot, 'openclaw'),
+    });
+
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toMatchObject({
+      name: 'xiaohongshu',
+      slug: 'xhs-cn',
+      source: 'openclaw',
+      description: 'XiaoHongShu skill.',
+    });
+  });
+
   it('prefers project .agents skills over personal .agents duplicates', async () => {
     const workspaceDir = join(testRoot, 'workspace');
     const personalAgentsDir = join(testRoot, 'personal-agents');
