@@ -21,7 +21,11 @@ import {
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_NAME,
 } from '../../utils/junfeiai-distribution';
-import { getJunFeiAIDevicePayload } from '../../utils/junfeiai-device';
+import {
+  getJunFeiAIDevicePayload,
+  markJunFeiAIDeviceActivated,
+  readJunFeiAIDeviceActivationState,
+} from '../../utils/junfeiai-device';
 import { logger } from '../../utils/logger';
 
 type ProviderProtocol = NonNullable<ProviderAccount['apiProtocol']>;
@@ -120,6 +124,7 @@ export interface JunFeiAISeedResult {
   bootstrap: JunFeiAIBootstrapPayload;
   source: 'remote' | 'fallback' | 'provided';
   hasRelayToken: boolean;
+  deviceActivated?: boolean;
   hasAuthToken?: boolean;
   authValid?: boolean;
   authError?: string;
@@ -189,6 +194,27 @@ function fallbackBootstrap(): JunFeiAIBootstrapPayload {
       remoteMarketplaceEnabled: false,
       remoteMarketplaceBaseUrl: null,
       requiresRemoteMarketplace: false,
+    },
+  };
+}
+
+async function applyLocalDeviceActivationState(
+  bootstrap: JunFeiAIBootstrapPayload,
+): Promise<{ bootstrap: JunFeiAIBootstrapPayload; deviceActivated: boolean }> {
+  const activationState = await readJunFeiAIDeviceActivationState();
+  const deviceActivated = Boolean(activationState?.activated && activationState.onboardingCompleted);
+  if (!deviceActivated) {
+    return { bootstrap, deviceActivated };
+  }
+
+  return {
+    deviceActivated,
+    bootstrap: {
+      ...bootstrap,
+      auth: {
+        ...(bootstrap.auth ?? {}),
+        activationRequired: false,
+      },
     },
   };
 }
@@ -466,11 +492,16 @@ async function requestJunFeiAI<T>(
   }
 }
 
-export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
+async function fetchRemoteJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
   return requestJunFeiAI<JunFeiAIBootstrapPayload>('/api/clawx/bootstrap', {
     method: 'GET',
     timeoutMs: 8000,
   });
+}
+
+export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
+  const bootstrap = await fetchRemoteJunFeiAIBootstrap();
+  return (await applyLocalDeviceActivationState(bootstrap)).bootstrap;
 }
 
 async function requireStoredJunFeiAIAuthToken(): Promise<string> {
@@ -602,6 +633,17 @@ async function getJunFeiAIAuthStatus(): Promise<{
   authError?: string;
   auth?: { user?: Record<string, unknown> };
 }> {
+  return getJunFeiAIAuthStatusWithOptions({ markDeviceActivatedFromStoredAuth: true });
+}
+
+async function getJunFeiAIAuthStatusWithOptions(options: {
+  markDeviceActivatedFromStoredAuth?: boolean;
+}): Promise<{
+  hasAuthToken: boolean;
+  authValid: boolean;
+  authError?: string;
+  auth?: { user?: Record<string, unknown> };
+}> {
   const accessToken = await getStoredJunFeiAIAuthToken();
   if (!accessToken) {
     return {
@@ -617,6 +659,9 @@ async function getJunFeiAIAuthStatus(): Promise<{
       accessToken,
       timeoutMs: 8000,
     });
+    if (options.markDeviceActivatedFromStoredAuth !== false) {
+      await markJunFeiAIDeviceActivated('auth-token');
+    }
     return {
       hasAuthToken: true,
       authValid: true,
@@ -636,6 +681,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   relayToken?: string;
   gatewayManager?: GatewayManager;
   syncRuntime?: boolean;
+  markDeviceActivatedFromStoredAuth?: boolean;
 } = {}): Promise<JunFeiAISeedResult> {
   if (!isJunFeiAIManagedDistribution()) {
     return {
@@ -644,6 +690,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       bootstrap: fallbackBootstrap(),
       source: 'fallback',
       hasRelayToken: false,
+      deviceActivated: false,
     };
   }
 
@@ -651,13 +698,19 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   let bootstrap = options.bootstrap;
   if (!bootstrap) {
     try {
-      bootstrap = await fetchJunFeiAIBootstrap();
+      bootstrap = await fetchRemoteJunFeiAIBootstrap();
     } catch (error) {
       source = 'fallback';
       bootstrap = fallbackBootstrap();
       logger.warn('[junfeiai] Falling back to bundled bootstrap defaults:', error);
     }
   }
+
+  const authStatus = await getJunFeiAIAuthStatusWithOptions({
+    markDeviceActivatedFromStoredAuth: options.markDeviceActivatedFromStoredAuth,
+  });
+  const activation = await applyLocalDeviceActivationState(bootstrap);
+  bootstrap = activation.bootstrap;
 
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
   const account = buildAccount(bootstrap, existing);
@@ -684,14 +737,13 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
   }
 
-  const authStatus = await getJunFeiAIAuthStatus();
-
   return {
     managed: true,
     account,
     bootstrap,
     source,
     hasRelayToken: Boolean(await getProviderSecret(JUNFEIAI_PROVIDER_ID)),
+    deviceActivated: activation.deviceActivated,
     ...authStatus,
   };
 }
@@ -724,6 +776,7 @@ export async function loginJunFeiAI(
     bootstrap: auth,
     relayToken: relay.token,
     gatewayManager,
+    markDeviceActivatedFromStoredAuth: false,
   });
   const { accessToken: _accessToken, refreshToken: _refreshToken, ...safeAuth } = auth;
   await saveVerificationCache(safeAuth);
@@ -753,11 +806,13 @@ export async function registerJunFeiAI(
   }
   auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
+  await markJunFeiAIDeviceActivated('register');
   const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,
     gatewayManager,
+    markDeviceActivatedFromStoredAuth: false,
   });
   const { accessToken: _accessToken, refreshToken: _refreshToken, ...safeAuth } = auth;
   await saveVerificationCache(safeAuth);

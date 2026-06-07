@@ -55,6 +55,10 @@ import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { getProviderConfig } from '../utils/provider-registry';
 import { deviceOAuthManager, OAuthProviderType } from '../utils/device-oauth';
 import { browserOAuthManager, type BrowserOAuthProviderType } from '../utils/browser-oauth';
+import {
+  JUNFEIAI_DEVICE_ACTIVATION_FILE,
+  JUNFEIAI_DEVICE_IDENTITY_FILE,
+} from '../utils/junfeiai-device';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
@@ -2243,10 +2247,25 @@ function getWindowsPowerShellPath(): string {
 function buildFactoryResetPowerShellScript(targets: string[], executablePath: string, relaunchArgs: string[], workingDirectory: string): string {
   const targetList = targets.map((target) => `  ${quotePowerShellLiteral(target)}`).join(",\r\n");
   const argumentList = relaunchArgs.map(quotePowerShellLiteral).join(', ');
+  const userDataPath = resolve(app.getPath('userData'));
+  const preservedFileList = [
+    JUNFEIAI_DEVICE_IDENTITY_FILE,
+    JUNFEIAI_DEVICE_ACTIVATION_FILE,
+  ].map((fileName) => `  ${quotePowerShellLiteral(fileName)}`).join(",\r\n");
 
   return [
     '$ErrorActionPreference = "SilentlyContinue"',
     `$pidToWait = ${process.pid}`,
+    `$userDataPath = ${quotePowerShellLiteral(userDataPath)}`,
+    `$backupDir = Join-Path ${quotePowerShellLiteral(app.getPath('temp'))} ${quotePowerShellLiteral(`clawx-factory-reset-preserve-${process.pid}-${Date.now()}`)}`,
+    `$preservedFiles = @(\r\n${preservedFileList}\r\n)`,
+    'New-Item -ItemType Directory -Path $backupDir -Force | Out-Null',
+    'foreach ($fileName in $preservedFiles) {',
+    '  $source = Join-Path $userDataPath $fileName',
+    '  if (Test-Path -LiteralPath $source) {',
+    '    Copy-Item -LiteralPath $source -Destination (Join-Path $backupDir $fileName) -Force -ErrorAction SilentlyContinue',
+    '  }',
+    '}',
     '$deadline = (Get-Date).AddSeconds(60)',
     'while ((Get-Date) -lt $deadline -and (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {',
     '  Start-Sleep -Milliseconds 500',
@@ -2261,6 +2280,16 @@ function buildFactoryResetPowerShellScript(targets: string[], executablePath: st
     '  if (Test-Path -LiteralPath $target) {',
     '    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue',
     '  }',
+    '}',
+    'if (Test-Path -LiteralPath $backupDir) {',
+    '  New-Item -ItemType Directory -Path $userDataPath -Force | Out-Null',
+    '  foreach ($fileName in $preservedFiles) {',
+    '    $source = Join-Path $backupDir $fileName',
+    '    if (Test-Path -LiteralPath $source) {',
+    '      Copy-Item -LiteralPath $source -Destination (Join-Path $userDataPath $fileName) -Force -ErrorAction SilentlyContinue',
+    '    }',
+    '  }',
+    '  Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue',
     '}',
     `Start-Sleep -Milliseconds 200`,
     `$relaunchArgs = @(${argumentList})`,
@@ -2277,6 +2306,27 @@ function buildFactoryResetPowerShellScript(targets: string[], executablePath: st
 function buildFactoryResetShellScript(targets: string[], executablePath: string, relaunchArgs: string[], workingDirectory: string): string {
   const cleanupCommands = targets.map((target) => `rm -rf -- ${quoteShLiteral(target)}`).join('\n');
   const quotedArgs = relaunchArgs.map(quoteShLiteral).join(' ');
+  const userDataPath = resolve(app.getPath('userData'));
+  const backupDir = join(app.getPath('temp'), `clawx-factory-reset-preserve-${process.pid}-${Date.now()}`);
+  const preserveCommands = [
+    `mkdir -p -- ${quoteShLiteral(backupDir)}`,
+    `for file_name in ${quoteShLiteral(JUNFEIAI_DEVICE_IDENTITY_FILE)} ${quoteShLiteral(JUNFEIAI_DEVICE_ACTIVATION_FILE)}; do`,
+    `  if [ -f ${quoteShLiteral(userDataPath)}/"$file_name" ]; then`,
+    `    cp -f -- ${quoteShLiteral(userDataPath)}/"$file_name" ${quoteShLiteral(backupDir)}/"$file_name"`,
+    '  fi',
+    'done',
+  ].join('\n');
+  const restoreCommands = [
+    `if [ -d ${quoteShLiteral(backupDir)} ]; then`,
+    `  mkdir -p -- ${quoteShLiteral(userDataPath)}`,
+    `  for file_name in ${quoteShLiteral(JUNFEIAI_DEVICE_IDENTITY_FILE)} ${quoteShLiteral(JUNFEIAI_DEVICE_ACTIVATION_FILE)}; do`,
+    `    if [ -f ${quoteShLiteral(backupDir)}/"$file_name" ]; then`,
+    `      cp -f -- ${quoteShLiteral(backupDir)}/"$file_name" ${quoteShLiteral(userDataPath)}/"$file_name"`,
+    '    fi',
+    '  done',
+    `  rm -rf -- ${quoteShLiteral(backupDir)}`,
+    'fi',
+  ].join('\n');
   const relaunchCommand = quotedArgs
     ? `nohup ${quoteShLiteral(executablePath)} ${quotedArgs} >/dev/null 2>&1 &`
     : `nohup ${quoteShLiteral(executablePath)} >/dev/null 2>&1 &`;
@@ -2293,7 +2343,9 @@ function buildFactoryResetShellScript(targets: string[], executablePath: string,
     '  rm -f -- "$0"',
     '  exit 1',
     'fi',
+    preserveCommands,
     cleanupCommands,
+    restoreCommands,
     'sleep 0.2',
     `cd -- ${quoteShLiteral(workingDirectory)} || exit 1`,
     relaunchCommand,

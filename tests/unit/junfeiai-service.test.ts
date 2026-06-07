@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   syncSavedProviderToRuntime: vi.fn(),
   getClawXProviderStore: vi.fn(),
   getJunFeiAIDevicePayload: vi.fn(),
+  readJunFeiAIDeviceActivationState: vi.fn(),
+  markJunFeiAIDeviceActivated: vi.fn(),
   loggerWarn: vi.fn(),
 }));
 
@@ -54,6 +56,8 @@ vi.mock('@electron/utils/logger', () => ({
 
 vi.mock('@electron/utils/junfeiai-device', () => ({
   getJunFeiAIDevicePayload: mocks.getJunFeiAIDevicePayload,
+  readJunFeiAIDeviceActivationState: mocks.readJunFeiAIDeviceActivationState,
+  markJunFeiAIDeviceActivated: mocks.markJunFeiAIDeviceActivated,
 }));
 
 import {
@@ -128,6 +132,8 @@ describe('JunFeiAI managed provider service', () => {
       arch: 'x64',
       appVersion: '0.4.8',
     });
+    mocks.readJunFeiAIDeviceActivationState.mockResolvedValue(null);
+    mocks.markJunFeiAIDeviceActivated.mockResolvedValue(undefined);
     memoryStore.clear();
     vi.stubGlobal('fetch', vi.fn());
   });
@@ -161,6 +167,33 @@ describe('JunFeiAI managed provider service', () => {
     );
     expect(mocks.setDefaultProvider).toHaveBeenCalledWith('junfeiai');
     expect(mocks.syncSavedProviderToRuntime).not.toHaveBeenCalled();
+  });
+
+  it('uses local device activation to bypass remote activation requirement', async () => {
+    mocks.readJunFeiAIDeviceActivationState.mockResolvedValue({
+      activated: true,
+      onboardingCompleted: true,
+      activatedAt: '2026-06-07T00:00:00.000Z',
+      source: 'register',
+    });
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: {
+          loginEnabled: true,
+          registrationEnabled: true,
+          activationRequired: true,
+        },
+        runtime: {
+          baseUrl: 'https://junfeiai.com/v1/',
+          defaultModel: 'gpt-5.5',
+        },
+      },
+      syncRuntime: false,
+    });
+
+    expect(result.deviceActivated).toBe(true);
+    expect(result.bootstrap.auth?.activationRequired).toBe(false);
   });
 
   it('supports separate auth backend and provider base URL in dev mode', async () => {

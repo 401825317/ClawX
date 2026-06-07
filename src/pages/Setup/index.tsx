@@ -665,6 +665,7 @@ type JunFeiAIManagedStatus = {
   hasAuthToken?: boolean;
   authValid?: boolean;
   authError?: string;
+  deviceActivated?: boolean;
   source?: 'remote' | 'fallback' | 'provided';
   bootstrap?: {
     service?: {
@@ -716,8 +717,9 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   const hasRelayToken = Boolean(status?.hasRelayToken);
   const hasAuthToken = Boolean(status?.hasAuthToken);
   const authValid = Boolean(status?.authValid);
+  const deviceActivated = Boolean(status?.deviceActivated);
   const auth = status?.bootstrap?.auth ?? {};
-  const requiresActivation = Boolean(auth.activationRequired);
+  const requiresActivation = Boolean(auth.activationRequired) && !deviceActivated;
   const emailVerifyEnabled = Boolean(auth.emailVerifyEnabled);
   const canRegister = auth.registrationEnabled !== false;
   const canLogin = auth.loginEnabled !== false;
@@ -728,7 +730,9 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
       setStatus(next);
       onStatusChange(Boolean(next.hasRelayToken) && Boolean(next.authValid));
       const serverAuth = next.bootstrap?.auth ?? {};
-      if (serverAuth.activationRequired || serverAuth.registrationEnabled) {
+      if (next.deviceActivated) {
+        setMode('login');
+      } else if (serverAuth.activationRequired || serverAuth.registrationEnabled) {
         setMode('register');
       } else {
         setMode('login');
