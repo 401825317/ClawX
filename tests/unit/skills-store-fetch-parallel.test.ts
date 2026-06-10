@@ -152,4 +152,52 @@ describe('skills store local-first fetch', () => {
       uninstallable: false,
     });
   });
+
+  it('preserves localized local description for installed ClawHub skills when gateway status arrives later', async () => {
+    const gatewayDeferred = deferred<{ skills: Array<Record<string, unknown>> }>();
+    rpcMock.mockReturnValueOnce(gatewayDeferred.promise);
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      skills: [{
+        id: 'assess-me',
+        slug: 'assess-me',
+        name: 'Assess Me',
+        description: '当调试绕圈、结果混乱时，帮你梳理目标、进度与阻碍，理清认知状态',
+        enabled: true,
+        source: 'openclaw-managed',
+        marketplace: {
+          provider: 'clawhub',
+          slug: 'assess-me',
+          installedVersion: '1.0.0',
+        },
+      }],
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    useSkillsStore.setState({ skills: [], loading: false, error: null });
+
+    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    await expect(fetchPromise).resolves.toBe(true);
+
+    gatewayDeferred.resolve({
+      skills: [{
+        skillKey: 'assess-me',
+        slug: 'assess-me',
+        name: 'Assess Me',
+        description: 'Run this when debugging goes in circles.',
+        source: 'openclaw-managed',
+        disabled: false,
+        version: '1.0.0',
+      }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(useSkillsStore.getState().skills[0]).toMatchObject({
+      id: 'assess-me',
+      description: '当调试绕圈、结果混乱时，帮你梳理目标、进度与阻碍，理清认知状态',
+      version: '1.0.0',
+      enabled: true,
+    });
+  });
 });

@@ -144,6 +144,7 @@ export interface ChatState {
   newSession: () => void;
   deleteSession: (key: string) => Promise<void>;
   renameSession: (key: string, label: string) => Promise<void>;
+  updateSessionModel: (key: string, modelRef: string | null) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   loadMoreHistory: () => Promise<void>;

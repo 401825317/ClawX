@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
+import i18n from '@/i18n';
 import { useGatewayStore } from './gateway';
 import type { Skill, MarketplaceSkill } from '../types/skill';
 
@@ -81,12 +82,21 @@ function shouldAppendGatewayOnlySkill(status: GatewaySkillStatus): boolean {
   return GATEWAY_ONLY_APPENDABLE_SOURCES.has((status.source || '').trim().toLowerCase());
 }
 
+function shouldPreserveLocalMarketplacePresentation(existing?: Skill): boolean {
+  return existing?.source === 'openclaw-managed' && existing.marketplace?.provider === 'clawhub';
+}
+
 function mapGatewaySkillToSkill(status: GatewaySkillStatus, existing?: Skill): Skill {
+  const preserveLocalPresentation = shouldPreserveLocalMarketplacePresentation(existing);
   return {
     id: status.skillKey,
     slug: status.slug || existing?.slug || status.skillKey,
-    name: status.name || existing?.name || status.skillKey,
-    description: status.description || existing?.description || '',
+    name: preserveLocalPresentation
+      ? (existing?.name || status.name || status.skillKey)
+      : (status.name || existing?.name || status.skillKey),
+    description: preserveLocalPresentation
+      ? (existing?.description || status.description || '')
+      : (status.description || existing?.description || ''),
     enabled: !status.disabled,
     icon: status.emoji || existing?.icon || '📦',
     version: status.version || existing?.version,
@@ -251,7 +261,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
     try {
       const result = await hostApiFetch<{ success: boolean; results?: MarketplaceSkill[]; error?: string }>('/api/skills/marketplace/search', {
         method: 'POST',
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, locale: i18n.language }),
       });
       if (result.success) {
         set({ searchResults: result.results || [] });

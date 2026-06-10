@@ -93,6 +93,7 @@ const _lastHistoryLoadAtBySession = new Map<string, number>();
 const _forceNextHistoryLoadBySession = new Set<string>();
 const _foregroundHistoryLoadSeen = new Set<string>();
 const _sessionHistoryCache = new Map<string, { messages: RawMessage[]; thinkingLevel: string | null }>();
+const _pendingLocalSessionKeys = new Set<string>();
 
 type SessionRunState = Pick<
   ChatState,
@@ -1647,6 +1648,127 @@ async function fetchChatSessionsList(): Promise<Record<string, unknown>> {
   }
 }
 
+type GatewaySessionMutationResult = {
+  ok?: boolean;
+  key?: string;
+  entry?: Record<string, unknown>;
+  resolved?: {
+    modelProvider?: unknown;
+    model?: unknown;
+  };
+};
+
+function buildSessionModelRef(
+  model: unknown,
+  modelProvider?: unknown,
+): string | undefined {
+  const normalizedModel = typeof model === 'string' ? model.trim() : '';
+  if (!normalizedModel) return undefined;
+  const normalizedProvider = typeof modelProvider === 'string' ? modelProvider.trim() : '';
+  if (!normalizedProvider) return normalizedModel;
+  return normalizedModel.startsWith(`${normalizedProvider}/`)
+    ? normalizedModel
+    : `${normalizedProvider}/${normalizedModel}`;
+}
+
+function resolveEffectiveAgentModelRefForSession(sessionKey: string): string | null {
+  const agentId = getAgentIdFromSessionKey(sessionKey);
+  const { agents, defaultModelRef } = useAgentsStore.getState();
+  const agent = agents.find((entry) => entry.id === agentId);
+  const agentModelRef = typeof agent?.modelRef === 'string' ? agent.modelRef.trim() : '';
+  const fallbackModelRef = typeof defaultModelRef === 'string' ? defaultModelRef.trim() : '';
+  return agentModelRef || fallbackModelRef || null;
+}
+
+function buildEffectiveSessionModelRef(result: GatewaySessionMutationResult | null | undefined): string | null {
+  const resolvedModelRef = buildSessionModelRef(result?.resolved?.model, result?.resolved?.modelProvider);
+  if (resolvedModelRef) return resolvedModelRef;
+
+  const entry = result?.entry;
+  const entryModelRef = buildSessionModelRef(entry?.model, entry?.modelProvider);
+  if (entryModelRef) return entryModelRef;
+
+  const overrideModelRef = buildSessionModelRef(entry?.modelOverride, entry?.providerOverride);
+  if (overrideModelRef) return overrideModelRef;
+
+  return null;
+}
+
+function upsertSessionWithModel(
+  sessions: ChatSession[],
+  sessionKey: string,
+  modelRef: string | null,
+  updatedAt: number,
+): ChatSession[] {
+  const nextModelRef = modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey) ?? undefined;
+  let found = false;
+  const nextSessions = sessions.map((session) => {
+    if (session.key !== sessionKey) return session;
+    found = true;
+    return {
+      ...session,
+      model: nextModelRef,
+      updatedAt,
+    };
+  });
+
+  if (found) return nextSessions;
+
+  return [
+    ...nextSessions,
+    {
+      key: sessionKey,
+      displayName: sessionKey,
+      model: nextModelRef,
+      updatedAt,
+    },
+  ];
+}
+
+async function persistSessionModelSelection(
+  sessionKey: string,
+  modelRef: string | null,
+): Promise<string | null> {
+  if (_pendingLocalSessionKeys.has(sessionKey)) {
+    const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+      key: sessionKey,
+      agentId: getAgentIdFromSessionKey(sessionKey),
+      ...(modelRef ? { model: modelRef } : {}),
+    });
+    _pendingLocalSessionKeys.delete(sessionKey);
+    return buildEffectiveSessionModelRef(created) ?? modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+  }
+
+  const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+    key: sessionKey,
+    model: modelRef,
+  });
+  return buildEffectiveSessionModelRef(patched) ?? modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+}
+
+function mergeSessionRowWithLocalState(
+  nextSession: ChatSession,
+  localSession: ChatSession | undefined,
+): ChatSession {
+  if (!localSession) return nextSession;
+
+  const localUpdatedAt = typeof localSession.updatedAt === 'number' ? localSession.updatedAt : undefined;
+  const nextUpdatedAt = typeof nextSession.updatedAt === 'number' ? nextSession.updatedAt : undefined;
+  const shouldPreserveLocalModel = Boolean(
+    localSession.model
+    && (
+      !nextSession.model
+      || (localUpdatedAt != null && nextUpdatedAt != null && localUpdatedAt > nextUpdatedAt)
+    ),
+  );
+
+  return {
+    ...nextSession,
+    model: shouldPreserveLocalModel ? localSession.model : nextSession.model,
+    updatedAt: shouldPreserveLocalModel ? localUpdatedAt : nextUpdatedAt,
+  };
+}
+
 async function fetchChatHistory(
   sessionKey: string,
   limit: number,
@@ -1782,6 +1904,9 @@ function buildSessionSwitchPatch(
     && state.messages.length === 0
     && !state.sessionLastActivity[state.currentSessionKey]
     && !state.sessionLabels[state.currentSessionKey];
+  if (leavingEmpty) {
+    _pendingLocalSessionKeys.delete(state.currentSessionKey);
+  }
 
   const nextSessions = leavingEmpty
     ? state.sessions.filter((session) => session.key !== state.currentSessionKey)
@@ -2507,18 +2632,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const data = await fetchChatSessionsList();
         if (data) {
           const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
-          const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => ({
-            key: String(s.key || ''),
-            label: s.label ? String(s.label) : undefined,
-            displayName: s.displayName ? String(s.displayName) : undefined,
-            derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
-            lastMessagePreview: s.lastMessagePreview ? String(s.lastMessagePreview) : undefined,
-            thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
-            model: s.model ? String(s.model) : undefined,
-            updatedAt: parseSessionUpdatedAtMs(s.updatedAt),
-            status: parseSessionStatus(s.status),
-            hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
-          })).filter((s: ChatSession) => s.key);
+          const { currentSessionKey, sessions: localSessions } = get();
+          const localSessionByKey = new Map(localSessions.map((session) => [session.key, session] as const));
+          const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => {
+            const nextSession: ChatSession = {
+              key: String(s.key || ''),
+              label: s.label ? String(s.label) : undefined,
+              displayName: s.displayName ? String(s.displayName) : undefined,
+              derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
+              lastMessagePreview: s.lastMessagePreview ? String(s.lastMessagePreview) : undefined,
+              thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
+              model: buildSessionModelRef(s.model, s.modelProvider),
+              updatedAt: parseSessionUpdatedAtMs(s.updatedAt),
+              status: parseSessionStatus(s.status),
+              hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
+            };
+            return mergeSessionRowWithLocalState(nextSession, localSessionByKey.get(nextSession.key));
+          }).filter((s: ChatSession) => s.key);
 
           const canonicalBySuffix = new Map<string, string>();
           for (const session of sessions) {
@@ -2539,8 +2669,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             seen.add(s.key);
             return true;
           });
+          for (const session of dedupedSessions) {
+            _pendingLocalSessionKeys.delete(session.key);
+          }
 
-          const { currentSessionKey, sessions: localSessions } = get();
           let nextSessionKey = currentSessionKey || DEFAULT_SESSION_KEY;
           if (!nextSessionKey.startsWith('agent:')) {
             const canonicalMatch = canonicalBySuffix.get(nextSessionKey);
@@ -2560,10 +2692,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
           }
 
+          const localCurrentSession = localSessions.find((session) => session.key === nextSessionKey);
           const sessionsWithCurrent = !dedupedSessions.find((s) => s.key === nextSessionKey) && nextSessionKey
             ? [
               ...dedupedSessions,
-              { key: nextSessionKey, displayName: nextSessionKey },
+              localCurrentSession ? { ...localCurrentSession } : { key: nextSessionKey, displayName: nextSessionKey },
             ]
             : dedupedSessions;
 
@@ -2759,6 +2892,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
       }));
     }
+    _pendingLocalSessionKeys.delete(key);
   },
 
   // ── New session ──
@@ -2773,6 +2907,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ?? getCanonicalPrefixFromSessions(sessions)
       ?? DEFAULT_CANONICAL_PREFIX;
     const newKey = `${prefix}:session-${Date.now()}`;
+    _pendingLocalSessionKeys.add(newKey);
 
     // Use the same switch patch as explicit sidebar switching so a running
     // source session keeps its cached lifecycle. Without this, New Chat clears
@@ -2824,6 +2959,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  updateSessionModel: async (key: string, modelRef: string | null) => {
+    const normalizedModelRef = typeof modelRef === 'string' ? modelRef.trim() : '';
+    const effectiveModelRef = await persistSessionModelSelection(key, normalizedModelRef || null);
+    const updatedAt = Date.now();
+
+    set((state) => ({
+      sessions: upsertSessionWithModel(state.sessions, key, effectiveModelRef, updatedAt),
+    }));
+  },
+
   // ── Cleanup empty session on navigate away ──
 
   cleanupEmptySession: () => {
@@ -2839,16 +2984,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       && !sessionLastActivity[currentSessionKey]
       && !sessionLabels[currentSessionKey];
     if (!isEmptyNonMain) return;
-    set((s) => ({
-      sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
-      sessionLabels: Object.fromEntries(
-        Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
-      ),
-      sessionLastActivity: Object.fromEntries(
-        Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
-      ),
-    }));
-  },
+      set((s) => ({
+        sessions: s.sessions.filter((sess) => sess.key !== currentSessionKey),
+        sessionLabels: Object.fromEntries(
+          Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey),
+        ),
+        sessionLastActivity: Object.fromEntries(
+          Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey),
+        ),
+      }));
+      _pendingLocalSessionKeys.delete(currentSessionKey);
+    },
 
   // ── Load chat history ──
 

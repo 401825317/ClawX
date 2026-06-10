@@ -19,11 +19,17 @@ function writeRuntimeModule(openclawRoot: string): void {
     `
 export async function r(params) {
   globalThis.__clawhubSearchParams = params;
+  if (typeof params.fetchImpl === 'function') {
+    await params.fetchImpl('https://example.invalid/locale-probe', { headers: { 'X-Test': '1' } });
+  }
   return [
     {
       slug: 'home-assistant',
       displayName: 'Home Assistant',
       summary: 'Control Home Assistant devices',
+      metaContent: {
+        DisplayDescription: '控制 Home Assistant 设备'
+      },
       version: null,
       ownerHandle: 'iahmadzain',
       downloads: 123,
@@ -40,11 +46,18 @@ export async function t(params) {
   );
 }
 
-async function loadExtension(openclawRoot: string, configDir: string): Promise<MarketplaceProviderExtension> {
+async function loadExtension(
+  openclawRoot: string,
+  configDir: string,
+  options: { language?: string } = {},
+): Promise<MarketplaceProviderExtension> {
   vi.resetModules();
   vi.doMock('@electron/utils/paths', () => ({
     getOpenClawResolvedDir: () => openclawRoot,
     getOpenClawConfigDir: () => configDir,
+  }));
+  vi.doMock('@electron/utils/store', () => ({
+    getSetting: async (key: string) => key === 'language' ? (options.language ?? 'en') : undefined,
   }));
 
   const mod = await import('@electron/extensions/builtin/clawhub-marketplace');
@@ -61,6 +74,10 @@ function createFixture() {
 }
 
 describe('ClawHub marketplace extension', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })));
+  });
+
   afterEach(() => {
     delete testGlobal.__clawhubSearchParams;
     delete testGlobal.__clawhubInstallParams;
@@ -69,7 +86,9 @@ describe('ClawHub marketplace extension', () => {
       rmSync(root, { recursive: true, force: true });
     }
     vi.doUnmock('@electron/utils/paths');
+    vi.doUnmock('@electron/utils/store');
     vi.resetModules();
+    vi.unstubAllGlobals();
   });
 
   it('reports the public ClawHub marketplace capability when the OpenClaw runtime is available', async () => {
@@ -86,6 +105,8 @@ describe('ClawHub marketplace extension', () => {
   it('uses a broad default query for empty marketplace searches and maps ClawHub results', async () => {
     const { openclawRoot, configDir } = createFixture();
     const extension = await loadExtension(openclawRoot, configDir);
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
 
     await expect(extension.search({ query: '   ', limit: 250 })).resolves.toEqual([
       {
@@ -98,7 +119,64 @@ describe('ClawHub marketplace extension', () => {
         stars: 7,
       },
     ]);
-    expect(testGlobal.__clawhubSearchParams).toEqual({ query: 'skill', limit: 100 });
+    expect(testGlobal.__clawhubSearchParams).toMatchObject({
+      query: 'skill',
+      limit: 100,
+      baseUrl: 'https://mirror-cn.clawhub.com',
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://example.invalid/locale-probe',
+      expect.objectContaining({
+        headers: expect.any(Headers),
+      }),
+    );
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get('Accept-Language')).toBe('en-US,en;q=0.9');
+    expect(headers.get('X-Test')).toBe('1');
+  });
+
+  it('prefers the Chinese marketplace description when the app language is zh', async () => {
+    const { openclawRoot, configDir } = createFixture();
+    const extension = await loadExtension(openclawRoot, configDir, { language: 'zh' });
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(extension.search({ query: 'home assistant' })).resolves.toEqual([
+      {
+        slug: 'home-assistant',
+        name: 'Home Assistant',
+        description: '控制 Home Assistant 设备',
+        version: '',
+        author: 'iahmadzain',
+        downloads: 123,
+        stars: 7,
+      },
+    ]);
+
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get('Accept-Language')).toBe('zh-CN,zh;q=0.9,en;q=0.6');
+  });
+
+  it('prefers the request locale over the persisted app language', async () => {
+    const { openclawRoot, configDir } = createFixture();
+    const extension = await loadExtension(openclawRoot, configDir, { language: 'en' });
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(extension.search({ query: 'home assistant', locale: 'zh-CN' })).resolves.toEqual([
+      {
+        slug: 'home-assistant',
+        name: 'Home Assistant',
+        description: '控制 Home Assistant 设备',
+        version: '',
+        author: 'iahmadzain',
+        downloads: 123,
+        stars: 7,
+      },
+    ]);
+
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get('Accept-Language')).toBe('zh-CN,zh;q=0.9,en;q=0.6');
   });
 
   it('installs marketplace skills into the OpenClaw config directory', async () => {
@@ -111,6 +189,7 @@ describe('ClawHub marketplace extension', () => {
       slug: 'home-assistant',
       version: '1.0.0',
       force: true,
+      baseUrl: 'https://mirror-cn.clawhub.com',
     });
   });
 

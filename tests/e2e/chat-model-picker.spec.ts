@@ -4,14 +4,14 @@ const alphaModelRef = 'custom-alpha123/model-alpha';
 const betaModelRef = 'custom-beta5678/provider/model-beta';
 
 test.describe('ClawX chat model picker', () => {
-  test('switches the current agent model without requesting a gateway refresh', async ({ launchElectronApp }) => {
+  test('switches only the current session model without mutating the agent default', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
       await app.evaluate(async ({ app: _app }, refs) => {
         const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
-        let currentModelRef = refs.alphaModelRef;
+        let currentSessionModelRef = refs.alphaModelRef;
         const hostRequests: Array<{ path: string; method: string; body: unknown }> = [];
         const now = new Date().toISOString();
         const makeResponse = (json: unknown, status = 200) => ({
@@ -29,9 +29,9 @@ test.describe('ClawX chat model picker', () => {
             id: 'main',
             name: 'Main',
             isDefault: true,
-            modelDisplay: currentModelRef.split('/').slice(1).join('/'),
-            modelRef: currentModelRef,
-            overrideModelRef: currentModelRef,
+            modelDisplay: refs.alphaModelRef.split('/').slice(1).join('/'),
+            modelRef: refs.alphaModelRef,
+            overrideModelRef: refs.alphaModelRef,
             inheritedModel: false,
             workspace: '~/.openclaw/workspace',
             agentDir: '~/.openclaw/agents/main/agent',
@@ -52,7 +52,32 @@ test.describe('ClawX chat model picker', () => {
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: unknown) => {
           hostRequests.push({ path: `gateway:${method}`, method: 'RPC', body: params ?? null });
           if (method === 'sessions.list') {
-            return { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main' }] } };
+            return {
+              success: true,
+              result: {
+                sessions: [{
+                  key: 'agent:main:main',
+                  displayName: 'main',
+                  model: currentSessionModelRef,
+                }],
+              },
+            };
+          }
+          if (method === 'sessions.patch') {
+            const request = params as { key?: string; model?: string | null };
+            currentSessionModelRef = request.model ?? refs.alphaModelRef;
+            return {
+              success: true,
+              result: {
+                ok: true,
+                key: request.key ?? 'agent:main:main',
+                entry: {},
+                resolved: {
+                  modelProvider: currentSessionModelRef.split('/')[0],
+                  model: currentSessionModelRef.split('/').slice(1).join('/'),
+                },
+              },
+            };
           }
           if (method === 'chat.history') {
             return { success: true, result: { messages: [] } };
@@ -71,10 +96,6 @@ test.describe('ClawX chat model picker', () => {
             return makeResponse({ state: 'running', port: 18789, pid: 12345, gatewayReady: true });
           }
           if (path === '/api/agents' && method === 'GET') {
-            return makeResponse(agentsSnapshot());
-          }
-          if (path === '/api/agents/main/model' && method === 'PUT') {
-            currentModelRef = body?.modelRef ?? refs.alphaModelRef;
             return makeResponse(agentsSnapshot());
           }
           if (path === '/api/provider-accounts' && method === 'GET') {
@@ -137,18 +158,34 @@ test.describe('ClawX chat model picker', () => {
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
       await expect(page.getByTestId('chat-model-picker-menu')).toContainText('provider/model-beta');
       await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'provider/model-beta' }).click();
+
+      await expect.poll(async () => app.evaluate(() => (
+        (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []
+      ))).toContainEqual({
+        path: 'gateway:sessions.patch',
+        method: 'RPC',
+        body: { key: 'agent:main:main', model: betaModelRef },
+      });
+
+      await page.reload();
+      await expect(page.getByTestId('main-layout')).toBeVisible();
+      await app.evaluate(({ BrowserWindow }) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
+      });
       await expect(page.getByTestId('chat-model-picker-button')).toContainText('provider/model-beta');
 
       const requests = await app.evaluate(() => (
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []
       ));
       expect(requests).toContainEqual({
-        path: '/api/agents/main/model',
-        method: 'PUT',
-        body: { modelRef: betaModelRef },
+        path: 'gateway:sessions.patch',
+        method: 'RPC',
+        body: { key: 'agent:main:main', model: betaModelRef },
       });
       expect(requests.some((request) =>
-        request.path === '/api/gateway/restart'
+        request.path === '/api/agents/main/model'
+        || request.path === '/api/gateway/restart'
         || request.path === '/api/gateway/start'
         || request.path === 'gateway:config.patch'
       )).toBe(false);

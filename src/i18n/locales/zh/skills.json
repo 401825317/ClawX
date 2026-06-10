@@ -119,7 +119,7 @@
         "sourceLabel": "来源",
         "sourceClawHub": "ClawHub",
         "install": "安装",
-        "publisherLanguageNote": "技能名称和简介按 ClawHub 发布者原文展示，可能包含英文。",
+        "publisherLanguageNote": "若 ClawHub 提供本地化简介，ClawX 会优先显示；技能名称和部分元数据仍可能保持发布者原文。",
         "securityNote": "安装前请点击技能卡片，在 ClawHub 上查看其文档和安全信息。",
         "manualInstallHint": "遇到网络问题？您可以随时从 ClawHub 中国镜像站下载技能压缩包，并将其解压至 \"{{path}}\" 目录来完成手动安装。",
         "searching": "正在搜索 ClawHub...",

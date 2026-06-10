@@ -8,10 +8,12 @@ const { agentsState, chatState, gatewayState, providersState, artifactPanelMocks
   agentsState: {
     agents: [] as Array<Record<string, unknown>>,
     defaultModelRef: null as string | null,
-    updateAgentModel: vi.fn(),
   },
   chatState: {
     currentAgentId: 'main',
+    currentSessionKey: 'agent:main:main',
+    sessions: [{ key: 'agent:main:main', model: 'custom-alpha123/model-alpha' }],
+    updateSessionModel: vi.fn(),
   },
   gatewayState: {
     status: { state: 'running', port: 18789 },
@@ -118,8 +120,10 @@ describe('ChatInput agent targeting', () => {
   beforeEach(() => {
     agentsState.agents = [];
     agentsState.defaultModelRef = null;
-    agentsState.updateAgentModel.mockReset();
     chatState.currentAgentId = 'main';
+    chatState.currentSessionKey = 'agent:main:main';
+    chatState.sessions = [{ key: 'agent:main:main', model: 'custom-alpha123/model-alpha' }];
+    chatState.updateSessionModel.mockReset();
     gatewayState.status = { state: 'running', port: 18789 };
     providersState.accounts = [];
     providersState.statuses = [];
@@ -212,6 +216,71 @@ describe('ChatInput agent targeting', () => {
     fireEvent.click(screen.getByTitle('Send'));
 
     expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research');
+  });
+
+  it('switches only the current session model', async () => {
+    const now = '2025-01-01T00:00:00.000Z';
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'model-alpha',
+        modelRef: 'custom-alpha123/model-alpha',
+        overrideModelRef: 'custom-alpha123/model-alpha',
+        inheritedModel: false,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+    agentsState.defaultModelRef = 'custom-alpha123/model-alpha';
+    chatState.sessions = [
+      { key: 'agent:main:main', model: 'custom-alpha123/model-alpha' },
+      { key: 'agent:main:session-b', model: 'custom-alpha123/model-alpha' },
+    ];
+    providersState.accounts = [
+      {
+        id: 'alpha1234',
+        vendorId: 'custom',
+        label: 'Alpha',
+        authMode: 'api_key',
+        baseUrl: 'http://127.0.0.1:1111/v1',
+        model: 'model-alpha',
+        enabled: true,
+        isDefault: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: 'beta5678',
+        vendorId: 'custom',
+        label: 'Beta',
+        authMode: 'api_key',
+        baseUrl: 'http://127.0.0.1:2222/v1',
+        model: 'model-beta',
+        enabled: true,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    providersState.statuses = [
+      { id: 'alpha1234', name: 'Alpha', type: 'custom', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+      { id: 'beta5678', name: 'Beta', type: 'custom', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+    ];
+    providersState.defaultAccountId = 'alpha1234';
+    chatState.updateSessionModel.mockResolvedValue(undefined);
+
+    renderChatInput();
+
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(await screen.findByRole('button', { name: 'model-beta' }));
+
+    await waitFor(() => {
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith('agent:main:main', 'custom-beta5678/model-beta');
+    });
   });
 
   it('disables the input while gateway is running but not yet ready', () => {

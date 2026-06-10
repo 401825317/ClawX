@@ -224,19 +224,26 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const pendingModelChangeRef = useRef<Promise<void> | null>(null);
   const isComposingRef = useRef(false);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
-  const updateAgentModel = useAgentsStore((s) => s.updateAgentModel);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
   const providerAccounts = useProviderStore((s) => s.accounts);
   const providerStatuses = useProviderStore((s) => s.statuses);
   const providerDefaultAccountId = useProviderStore((s) => s.defaultAccountId);
   const refreshProviderSnapshot = useProviderStore((s) => s.refreshProviderSnapshot);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
+  const currentSessionKey = useChatStore((s) => s.currentSessionKey);
+  const sessions = useChatStore((s) => s.sessions);
+  const updateSessionModel = useChatStore((s) => s.updateSessionModel);
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
+  );
+  const currentSession = useMemo(
+    () => (sessions ?? []).find((session) => session.key === currentSessionKey) ?? null,
+    [currentSessionKey, sessions],
   );
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
@@ -261,7 +268,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     }
     return [...deduped.values()];
   }, [baseModelOptions, remoteModelOptions]);
-  const effectiveModelRef = optimisticModelRef || currentAgent?.modelRef || defaultModelRef || modelOptions[0]?.modelRef || null;
+  const effectiveModelRef = optimisticModelRef || currentSession?.model || currentAgent?.modelRef || defaultModelRef || modelOptions[0]?.modelRef || null;
   const currentModelLabel = formatModelRefLabel(effectiveModelRef);
   const mentionableAgents = useMemo(
     () => (agents ?? []).filter((agent) => agent.id !== currentAgentId),
@@ -311,7 +318,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
 
   useEffect(() => {
     setOptimisticModelRef(null);
-  }, [currentAgent?.modelRef, currentAgentId]);
+  }, [currentSession?.model, currentSessionKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -501,7 +508,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   }, [skillPickerOpen, loadQuickSkills]);
 
   const handleSelectModel = useCallback(async (modelRef: string) => {
-    if (!currentAgent || switchingModelRef) return;
+    if (switchingModelRef) return;
     if (modelRef === effectiveModelRef) {
       setModelPickerOpen(false);
       textareaRef.current?.focus();
@@ -513,16 +520,28 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     setSwitchingModelRef(modelRef);
     setOptimisticModelRef(modelRef);
     setModelPickerOpen(false);
+    const pendingChange = (async () => {
+      try {
+        await updateSessionModel(currentSessionKey, desiredOverride);
+      } catch (error) {
+        setOptimisticModelRef(previousModelRef);
+        toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
+        throw error;
+      } finally {
+        setSwitchingModelRef(null);
+        if (pendingModelChangeRef.current === pendingChange) {
+          pendingModelChangeRef.current = null;
+        }
+        textareaRef.current?.focus();
+      }
+    })();
+    pendingModelChangeRef.current = pendingChange;
     try {
-      await updateAgentModel(currentAgent.id, desiredOverride);
+      await pendingChange;
     } catch (error) {
-      setOptimisticModelRef(previousModelRef);
-      toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
-    } finally {
-      setSwitchingModelRef(null);
-      textareaRef.current?.focus();
+      console.error('Failed to switch session model:', error);
     }
-  }, [currentAgent, defaultModelRef, effectiveModelRef, switchingModelRef, t, updateAgentModel]);
+  }, [currentSessionKey, defaultModelRef, effectiveModelRef, switchingModelRef, t, updateSessionModel]);
 
   // ── File staging via native dialog / Electron drag-drop paths ──
 
@@ -665,6 +684,13 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const canStop = sending && !inputDisabled && !!onStop;
 
   const handleSend = useCallback(async () => {
+    if (pendingModelChangeRef.current) {
+      try {
+        await pendingModelChangeRef.current;
+      } catch {
+        return;
+      }
+    }
     if (!canSend) return;
     const readyAttachments = attachments.filter(a => a.status === 'ready');
     const textToSend = input.trim();

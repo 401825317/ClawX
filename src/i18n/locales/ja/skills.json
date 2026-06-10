@@ -119,7 +119,7 @@
         "sourceLabel": "ソース",
         "sourceClawHub": "ClawHub",
         "install": "インストール",
-        "publisherLanguageNote": "スキル名と説明は ClawHub の公開元の原文で表示されます。",
+        "publisherLanguageNote": "ClawHub がローカライズ済みの説明を提供している場合、ClawX はそれを優先表示します。スキル名や一部メタデータは公開元の原文のまま残ることがあります。",
         "securityNote": "インストール前にスキルカードをクリックして、ClawHubでドキュメントとセキュリティ情報を確認してください。",
         "manualInstallHint": "ネットワークに問題がありますか？いつでもClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
         "searching": "ClawHubを検索中...",

@@ -11,6 +11,7 @@ import { removeSkillConfig } from '../utils/skill-config';
 export interface MarketplaceSearchParams {
     query: string;
     limit?: number;
+    locale?: string;
 }
 
 export interface MarketplaceInstallParams {

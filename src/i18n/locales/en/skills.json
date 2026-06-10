@@ -119,7 +119,7 @@
         "sourceLabel": "Source",
         "sourceClawHub": "ClawHub",
         "install": "Install",
-        "publisherLanguageNote": "Skill names and descriptions are shown as published on ClawHub.",
+        "publisherLanguageNote": "ClawX shows localized descriptions when ClawHub provides them. Skill names and some metadata may still follow the publisher's original language.",
         "securityNote": "Click skill card to view its documentation and security information on ClawHub before installation.",
         "manualInstallHint": "Network issues? You can always download skill ZIP archives from the ClawHub China mirror and extract them manually into \"{{path}}\".",
         "searching": "Searching ClawHub...",

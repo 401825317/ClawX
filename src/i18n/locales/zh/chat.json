@@ -178,7 +178,7 @@
         "skillEmpty": "未找到匹配的技能",
         "pickAgent": "选择 Agent",
         "pickModel": "选择模型",
-        "modelPickerTitle": "切换当前 Agent 模型",
+        "modelPickerTitle": "切换当前会话模型",
         "modelSwitchFailed": "模型切换失败：{{error}}",
         "clearTarget": "清除目标 Agent",
         "targetChip": "@{{agent}}",

@@ -1,4 +1,4 @@
-import { access, lstat, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { access, lstat, readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -8,6 +8,8 @@ import { expandPath, getOpenClawResolvedDir, getOpenClawSkillsDir } from '../../
 import { getAllSkillConfigs } from '../../utils/skill-config';
 import type { SkillConfigUpdates } from '../../utils/skill-config';
 import { isJunFeiAIManagedDistribution } from '../../utils/junfeiai-distribution';
+import { getSetting } from '../../utils/store';
+import { resolveSupportedLanguage, type LanguageCode } from '../../../shared/language';
 
 export interface LocalSkillMarketplaceMeta {
   provider: string;
@@ -62,6 +64,10 @@ type OriginMeta = {
   slug?: string;
   installedVersion?: string;
   source?: string;
+  registry?: string;
+  displayDescription?: string;
+  defaultDescription?: string;
+  displayName?: string;
 };
 
 type ManifestMeta = {
@@ -73,6 +79,12 @@ type ManifestMeta = {
 type PreinstalledMeta = {
   slug?: string;
   version?: string;
+};
+
+type PublishedSkillMeta = {
+  displayDescription?: string;
+  defaultDescription?: string;
+  displayName?: string;
 };
 
 function isUserInstalledManagedSkill(
@@ -226,6 +238,10 @@ async function readOriginMeta(skillDir: string): Promise<OriginMeta | null> {
     slug: toStringValue(parsed.slug),
     installedVersion: toStringValue(parsed.installedVersion) || toStringValue(parsed.version),
     source: toStringValue(parsed.source),
+    registry: toStringValue(parsed.registry),
+    displayDescription: toStringValue(parsed.displayDescription),
+    defaultDescription: toStringValue(parsed.defaultDescription),
+    displayName: toStringValue(parsed.displayName),
   };
 }
 
@@ -248,6 +264,108 @@ async function readPreinstalledMeta(skillDir: string): Promise<PreinstalledMeta 
   };
 }
 
+async function readPublishedSkillMeta(skillDir: string): Promise<PublishedSkillMeta | null> {
+  const parsed = await safeReadJson<Record<string, unknown>>(join(skillDir, '_meta.json'));
+  if (!parsed) return null;
+  return {
+    displayDescription: toStringValue(parsed.DisplayDescription) || toStringValue(parsed.displayDescription),
+    defaultDescription: toStringValue(parsed.summary) || toStringValue(parsed.Summary),
+    displayName: toStringValue(parsed.displayName) || toStringValue(parsed.DisplayName),
+  };
+}
+
+function acceptLanguageFor(language: LanguageCode): string {
+  switch (language) {
+    case 'zh':
+      return 'zh-CN,zh;q=0.9,en;q=0.6';
+    case 'ja':
+      return 'ja-JP,ja;q=0.9,en;q=0.6';
+    case 'ru':
+      return 'ru-RU,ru;q=0.9,en;q=0.6';
+    default:
+      return 'en-US,en;q=0.9';
+  }
+}
+
+async function resolveSkillDisplayLanguage(): Promise<LanguageCode> {
+  try {
+    return resolveSupportedLanguage(await getSetting('language'));
+  } catch {
+    return 'en';
+  }
+}
+
+async function backfillOriginMetaFromMarketplace(skillDir: string, originMeta: OriginMeta): Promise<OriginMeta | null> {
+  const slug = originMeta.slug?.trim();
+  if (!slug) return null;
+
+  const baseUrl = originMeta.registry?.trim() || 'https://mirror-cn.clawhub.com';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_500);
+  try {
+    const response = await fetch(
+      `${baseUrl.replace(/\/+$/, '')}/api/v1/skills/${encodeURIComponent(slug)}`,
+      {
+        headers: {
+          'Accept-Language': acceptLanguageFor('zh'),
+          'User-Agent': 'ClawX-Skill-Backfill/1.0',
+        },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) return null;
+    const payload = await response.json() as {
+      skill?: { displayName?: unknown; summary?: unknown };
+      metaContent?: { DisplayDescription?: unknown; displayDescription?: unknown };
+    };
+    const displayDescription = toStringValue(payload.metaContent?.DisplayDescription)
+      || toStringValue(payload.metaContent?.displayDescription);
+    const defaultDescription = toStringValue(payload.skill?.summary);
+    const displayName = toStringValue(payload.skill?.displayName);
+    if (!displayDescription && !defaultDescription && !displayName) {
+      return null;
+    }
+
+    const originPath = join(skillDir, '.clawhub', 'origin.json');
+    const raw = await safeReadJson<Record<string, unknown>>(originPath) || {};
+    const next = {
+      ...raw,
+      ...(displayDescription ? { displayDescription } : {}),
+      ...(defaultDescription ? { defaultDescription } : {}),
+      ...(displayName ? { displayName } : {}),
+    };
+    await writeFile(originPath, `${JSON.stringify(next, null, 2)}\n`, 'utf-8');
+    return {
+      ...originMeta,
+      ...(displayDescription ? { displayDescription } : {}),
+      ...(defaultDescription ? { defaultDescription } : {}),
+      ...(displayName ? { displayName } : {}),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function resolveLocalizedDescription(params: {
+  language: LanguageCode;
+  parsedManifest: ParsedSkillManifest;
+  originMeta: OriginMeta | null;
+  publishedMeta: PublishedSkillMeta | null;
+}): string {
+  const { language, parsedManifest, originMeta, publishedMeta } = params;
+  if (language === 'zh') {
+    return originMeta?.displayDescription
+      || publishedMeta?.displayDescription
+      || parsedManifest.description;
+  }
+
+  return originMeta?.defaultDescription
+    || publishedMeta?.defaultDescription
+    || parsedManifest.description;
+}
+
 async function resolveSafeRoot(root: string): Promise<string | null> {
   if (!(await pathExists(root))) return null;
   try {
@@ -264,6 +382,7 @@ async function inspectSkillDir(
   rootRealPath: string,
   skillDir: string,
   configs: Record<string, SkillConfigUpdates>,
+  language: LanguageCode,
 ): Promise<ScannedSkillRecord | null> {
   const manifestPath = join(skillDir, 'SKILL.md');
   if (!(await pathExists(manifestPath))) return null;
@@ -276,11 +395,18 @@ async function inspectSkillDir(
 
     const fallbackId = basename(skillDirRealPath);
     const parsedManifest = await parseSkillManifest(manifestPath, fallbackId);
-    const [originMeta, manifestMeta, preinstalledMeta] = await Promise.all([
+    let [originMeta, manifestMeta, preinstalledMeta, publishedMeta] = await Promise.all([
       readOriginMeta(skillDirRealPath),
       readManifestMeta(skillDirRealPath),
       readPreinstalledMeta(skillDirRealPath),
+      readPublishedSkillMeta(skillDirRealPath),
     ]);
+    if (language === 'zh' && descriptor.source === 'openclaw-managed' && originMeta?.provider === 'clawhub' && !originMeta.displayDescription) {
+      const backfilledOrigin = await backfillOriginMetaFromMarketplace(skillDirRealPath, originMeta);
+      if (backfilledOrigin) {
+        originMeta = backfilledOrigin;
+      }
+    }
 
     const skillKey = parsedManifest.id || manifestMeta?.slug || originMeta?.slug || fallbackId;
     const config = configs[skillKey] || {};
@@ -301,8 +427,8 @@ async function inspectSkillDir(
     return {
       id: skillKey,
       slug: originMeta?.slug || manifestMeta?.slug || preinstalledMeta?.slug || fallbackId,
-      name: parsedManifest.name,
-      description: parsedManifest.description,
+      name: originMeta?.displayName || publishedMeta?.displayName || parsedManifest.name,
+      description: resolveLocalizedDescription({ language, parsedManifest, originMeta, publishedMeta }),
       enabled: config.enabled !== false,
       icon: parsedManifest.icon || (isBundled ? '🧩' : '📦'),
       version,
@@ -325,6 +451,7 @@ async function inspectSkillDir(
 async function scanRoot(
   descriptor: SourceDescriptor,
   configs: Record<string, SkillConfigUpdates>,
+  language: LanguageCode,
 ): Promise<ScannedSkillRecord[]> {
   const rootRealPath = await resolveSafeRoot(descriptor.root);
   if (!rootRealPath) return [];
@@ -365,7 +492,7 @@ async function scanRoot(
     return [];
   }
 
-  const items = await Promise.all([...skillDirs].map((skillDir) => inspectSkillDir(descriptor, rootRealPath, skillDir, configs)));
+  const items = await Promise.all([...skillDirs].map((skillDir) => inspectSkillDir(descriptor, rootRealPath, skillDir, configs, language)));
   return items.filter((item): item is ScannedSkillRecord => item != null);
 }
 
@@ -436,11 +563,12 @@ function mergeScannedSkills(skills: ScannedSkillRecord[]): LocalSkillRecord[] {
 }
 
 export async function listLocalSkills(): Promise<LocalSkillRecord[]> {
-  const [descriptors, configs] = await Promise.all([
+  const [descriptors, configs, language] = await Promise.all([
     buildDescriptors(),
     getAllSkillConfigs(),
+    resolveSkillDisplayLanguage(),
   ]);
 
-  const discovered = await Promise.all(descriptors.map((descriptor) => scanRoot(descriptor, configs)));
+  const discovered = await Promise.all(descriptors.map((descriptor) => scanRoot(descriptor, configs, language)));
   return mergeScannedSkills(discovered.flat());
 }
