@@ -11,9 +11,15 @@ import { BrowserWindow, app, ipcMain } from 'electron';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
+import { getJunFeiAIBackendOrigin } from '../utils/junfeiai-distribution';
 
-/** Base CDN URL (without trailing channel path) */
-const OSS_BASE_URL = 'https://oss.intelli-spectrum.com';
+/** Base update feed URL (without trailing channel path). */
+function getUpdateFeedBaseUrl(): string {
+  return (
+    process.env.CLAWX_UPDATE_FEED_BASE_URL
+    || `${getJunFeiAIBackendOrigin()}/api/clawx/updates/feed`
+  ).replace(/\/+$/, '');
+}
 
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
@@ -73,7 +79,7 @@ export class AppUpdater extends EventEmitter {
     // alpha -> /alpha/alpha-mac.yml, beta -> /beta/beta-mac.yml, etc.
     const version = app.getVersion();
     const channel = detectChannel(version);
-    const feedUrl = `${OSS_BASE_URL}/${channel}`;
+    const feedUrl = `${getUpdateFeedBaseUrl()}/${channel}`;
 
     logger.info(`[Updater] Version: ${version}, channel: ${channel}, feedUrl: ${feedUrl}`);
 

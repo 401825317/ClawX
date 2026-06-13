@@ -1,9 +1,9 @@
-export const JUNFEIAI_PROVIDER_ID = 'junfeiai';
-export const JUNFEIAI_PROVIDER_NAME = 'JunFeiAI';
+export const JUNFEIAI_PROVIDER_ID = 'lingzhiwuxian';
+export const JUNFEIAI_PROVIDER_NAME = '灵智无限';
 export const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
-export const JUNFEIAI_DEFAULT_MODEL = 'gpt-5.5';
-export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-responses';
-export const JUNFEIAI_AUTH_ACCOUNT_ID = 'junfeiai-auth';
+export const JUNFEIAI_DEFAULT_MODEL = 'qwen-latest';
+export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-completions';
+export const JUNFEIAI_AUTH_ACCOUNT_ID = 'lingzhiwuxian-auth';
 
 function normalizeOrigin(value: string): string {
   return value

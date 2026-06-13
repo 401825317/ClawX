@@ -50,6 +50,7 @@ export interface JunFeiAIRuntimePayload {
   apiProtocol?: string;
   defaultModel?: string;
   fallbackModels?: string[];
+  modelFamilies?: Array<{ id?: unknown; name?: unknown }>;
 }
 
 export interface JunFeiAIBootstrapPayload {
@@ -108,18 +109,13 @@ interface JunFeiAIRelayTokenPayload {
   runtime?: JunFeiAIRuntimePayload;
 }
 
-interface JunFeiAIModelListEntry {
-  id?: unknown;
-  object?: unknown;
-  created?: unknown;
-  owned_by?: unknown;
-}
-
-interface JunFeiAIModelListPayload {
-  data?: JunFeiAIModelListEntry[];
-}
-
-const JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR = ['gpt-5.5', 'gpt-5.4'] as const;
+const JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR = [
+  'qwen-latest',
+  'deepseek-latest',
+  'doubao-latest',
+  'kimi-latest',
+  'glm-latest',
+] as const;
 
 type JunFeiAIStandardApiKeyPayload = Record<string, unknown> & {
   key?: unknown;
@@ -157,25 +153,6 @@ export interface JunFeiAITopupOrderStatusPayload {
   tradeNo?: unknown;
   sync?: unknown;
 }
-
-type JunFeiAIPaymentCheckoutInfo = Record<string, unknown> & {
-  methods?: Record<string, JunFeiAIPaymentMethodLimit>;
-  global_min?: unknown;
-  global_max?: unknown;
-  balance_disabled?: unknown;
-  balance_recharge_multiplier?: unknown;
-  recharge_fee_rate?: unknown;
-};
-
-type JunFeiAIPaymentMethodLimit = Record<string, unknown> & {
-  payment_type?: unknown;
-  currency?: unknown;
-  fee_rate?: unknown;
-  daily_limit?: unknown;
-  single_min?: unknown;
-  single_max?: unknown;
-  available?: unknown;
-};
 
 function fallbackBootstrap(): JunFeiAIBootstrapPayload {
   return {
@@ -586,7 +563,7 @@ async function refreshStoredJunFeiAIAuthSession(secret: Extract<Awaited<ReturnTy
   }
 
   const refreshed = normalizeJunFeiAIAuthPayload(
-    await requestJunFeiAI<JunFeiAIRefreshPayload>('/api/v1/auth/refresh', {
+    await requestJunFeiAI<JunFeiAIRefreshPayload>('/api/clawx/auth/refresh', {
       method: 'POST',
       body: JSON.stringify({ refresh_token: refreshToken }),
     }),
@@ -652,16 +629,8 @@ async function createStandardSub2APIKey(accessToken: string, device?: Record<str
   };
 }
 
-async function requireStoredJunFeiAIRuntimeApiKey(): Promise<string> {
-  const secret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
-  if (secret?.type !== 'api_key' || !secret.apiKey.trim()) {
-    throw new Error('请先登录后再获取模型列表');
-  }
-  return secret.apiKey.trim();
-}
-
-function normalizeJunFeiAIModelIds(payload: JunFeiAIModelListPayload): string[] {
-  const raw = Array.isArray(payload?.data) ? payload.data : [];
+function normalizeJunFeiAIModelFamilies(bootstrap: JunFeiAIBootstrapPayload): string[] {
+  const raw = Array.isArray(bootstrap.runtime?.modelFamilies) ? bootstrap.runtime.modelFamilies : [];
   return Array.from(new Set(
     raw
       .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : ''))
@@ -670,28 +639,12 @@ function normalizeJunFeiAIModelIds(payload: JunFeiAIModelListPayload): string[] 
 }
 
 export async function listJunFeiAIModels(): Promise<{ models: string[] }> {
-  const apiKey = await requireStoredJunFeiAIRuntimeApiKey();
-  const origin = getJunFeiAIProviderBaseUrl().replace(/\/+$/, '');
   try {
-    const response = await fetch(`${origin}/models`, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-    });
-    const payload = await response.json().catch(() => null);
-    if (!response.ok) {
-      const message = payload && typeof payload === 'object' && 'message' in payload
-        ? String((payload as { message?: unknown }).message)
-        : `${response.status} ${response.statusText}`;
-      throw new Error(`/v1/models: ${message}`);
-    }
-    return {
-      models: normalizeJunFeiAIModelIds(payload as JunFeiAIModelListPayload),
-    };
+    const bootstrap = applyLocalBootstrapOverrides(await fetchRemoteJunFeiAIBootstrap());
+    const models = normalizeJunFeiAIModelFamilies(bootstrap);
+    return { models: models.length > 0 ? models : [...JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR] };
   } catch (error) {
-    logger.warn('[junfeiai] Failed to fetch remote model list, falling back to bundled defaults:', error);
+    logger.warn('[junfeiai] Failed to fetch remote model families, falling back to bundled defaults:', error);
     return {
       models: [...JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR],
     };
@@ -728,11 +681,12 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
   }
 
   try {
-    const user = await requestJunFeiAI<Record<string, unknown>>('/api/v1/auth/me', {
+    const userPayload = await requestJunFeiAI<Record<string, unknown>>('/api/clawx/user/self', {
       method: 'GET',
       accessToken,
       timeoutMs: 8000,
     });
+    const user = isRecord(userPayload.user) ? userPayload.user : userPayload;
     if (options.markDeviceActivatedFromStoredAuth !== false) {
       await markJunFeiAIDeviceActivated('auth-token');
     }
@@ -974,68 +928,6 @@ function normalizePositiveNumber(value: unknown, fallback: number): number {
   return numeric !== null && numeric > 0 ? numeric : fallback;
 }
 
-function normalizePaymentMethodLabel(type: string): string {
-  switch (type) {
-    case 'alipay':
-    case 'alipay_direct':
-      return '支付宝';
-    case 'wxpay':
-    case 'wxpay_direct':
-      return '微信支付';
-    case 'easypay':
-      return '易支付';
-    case 'airwallex':
-      return 'Airwallex';
-    case 'card':
-      return '银行卡';
-    case 'link':
-      return '支付链接';
-    case 'stripe':
-      return 'Stripe';
-    default:
-      return type;
-  }
-}
-
-function normalizePaymentMethods(methods: unknown): Array<Record<string, unknown>> {
-  if (!isRecord(methods)) {
-    return [];
-  }
-
-  return Object.entries(methods)
-    .flatMap(([key, raw]) => {
-      const item = isRecord(raw) ? raw as JunFeiAIPaymentMethodLimit : {};
-      if (item.available === false) {
-        return [];
-      }
-      const paymentType = String(item.payment_type ?? key).trim();
-      if (!paymentType) {
-        return [];
-      }
-      return [{
-        type: paymentType,
-        name: normalizePaymentMethodLabel(paymentType),
-        currency: String(item.currency ?? '').trim(),
-        fee_rate: getFiniteNumber(item.fee_rate, 0),
-        single_min: getFiniteNumber(item.single_min, 0),
-        single_max: getFiniteNumber(item.single_max, 0),
-        daily_limit: getFiniteNumber(item.daily_limit, 0),
-      }];
-    });
-}
-
-function getUserBalance(user: Record<string, unknown>): number {
-  const balance = jsonNumberAsFinite(user.balance);
-  if (balance !== null && balance >= 0) {
-    return balance;
-  }
-  const shrimpQuota = jsonNumberAsFinite(user.shrimp_quota);
-  if (shrimpQuota !== null && shrimpQuota >= 0) {
-    return shrimpQuota;
-  }
-  return 0;
-}
-
 function getOrderTradeNo(order: Record<string, unknown>): string {
   return String(order.out_trade_no ?? order.trade_no ?? order.order_id ?? order.id ?? '').trim();
 }
@@ -1112,52 +1004,14 @@ function normalizeTopupAuthError(error: unknown): never {
 
 export async function getJunFeiAITopupOverview(): Promise<Record<string, unknown>> {
   const accessToken = await requireStoredJunFeiAIAuthToken();
-  let user: Record<string, unknown>;
-  let checkoutInfo: JunFeiAIPaymentCheckoutInfo;
   try {
-    [user, checkoutInfo] = await Promise.all([
-      requestJunFeiAI<Record<string, unknown>>('/api/v1/auth/me', {
-        method: 'GET',
-        accessToken,
-      }),
-      requestJunFeiAI<JunFeiAIPaymentCheckoutInfo>('/api/v1/payment/checkout-info', {
-        method: 'GET',
-        accessToken,
-      }),
-    ]);
+    return await requestJunFeiAI<Record<string, unknown>>('/api/clawx/billing/checkout-info', {
+      method: 'GET',
+      accessToken,
+    });
   } catch (error) {
     normalizeTopupAuthError(error);
   }
-
-  const shrimpQuota = getUserBalance(user);
-  const rechargeMultiplier = normalizePositiveNumber(checkoutInfo.balance_recharge_multiplier, 1);
-  const methods = normalizePaymentMethods(checkoutInfo.methods);
-  const nextUser = { ...user };
-  nextUser.shrimp_quota = shrimpQuota;
-
-  return {
-    user: nextUser,
-    quotaPerUnit: 1,
-    topupInfo: {
-      payg_current_quota: shrimpQuota,
-      payg_credit_usd_per_cny: rechargeMultiplier,
-      enable_online_topup: checkoutInfo.balance_disabled !== true && methods.length > 0,
-      pay_methods: JSON.stringify(methods),
-      payg_products: [{
-        id: 1,
-        name: '余额充值',
-        description: '充值后自动增加账户余额',
-        enabled: checkoutInfo.balance_disabled !== true,
-        sort_order: 0,
-        stock: null,
-        allowed_group_ids: [1],
-      }],
-      global_min: getFiniteNumber(checkoutInfo.global_min, 0),
-      global_max: getFiniteNumber(checkoutInfo.global_max, 0),
-      recharge_fee_rate: getFiniteNumber(checkoutInfo.recharge_fee_rate, 0),
-      payment_checkout_info: checkoutInfo,
-    },
-  };
 }
 
 export async function createJunFeiAITopupOrder(payload: JunFeiAITopupOrderPayload): Promise<unknown> {
@@ -1165,20 +1019,22 @@ export async function createJunFeiAITopupOrder(payload: JunFeiAITopupOrderPayloa
   const moneyText = parseTopupMoney(payload.money);
   const money = Number(moneyText);
   const epayMethod = parseRequiredString(payload.epayMethod, 'epayMethod');
-  let checkoutInfo: JunFeiAIPaymentCheckoutInfo;
+  let overview: Record<string, unknown>;
   try {
-    checkoutInfo = await requestJunFeiAI<JunFeiAIPaymentCheckoutInfo>('/api/v1/payment/checkout-info', {
+    overview = await requestJunFeiAI<Record<string, unknown>>('/api/clawx/billing/checkout-info', {
       method: 'GET',
       accessToken,
     });
   } catch (error) {
     normalizeTopupAuthError(error);
   }
-  const rechargeMultiplier = normalizePositiveNumber(checkoutInfo.balance_recharge_multiplier, 1);
+  const topupInfo = isRecord(overview.topupInfo) ? overview.topupInfo : {};
+  const quotaPerUnit = normalizePositiveNumber(overview.quotaPerUnit, 1);
+  const rechargeMultiplier = normalizePositiveNumber(topupInfo.payg_credit_usd_per_cny, 1) * quotaPerUnit;
 
   let result: Record<string, unknown>;
   try {
-    result = await requestJunFeiAI<Record<string, unknown>>('/api/v1/payment/orders', {
+    result = await requestJunFeiAI<Record<string, unknown>>('/api/clawx/billing/orders', {
       method: 'POST',
       accessToken,
       body: JSON.stringify({
@@ -1202,7 +1058,7 @@ export async function getJunFeiAITopupOrderStatus(
   const tradeNo = parseRequiredString(payload.tradeNo, 'tradeNo');
   let result: Record<string, unknown>;
   try {
-    result = await requestJunFeiAI<Record<string, unknown>>('/api/v1/payment/orders/verify', {
+    result = await requestJunFeiAI<Record<string, unknown>>('/api/clawx/billing/orders/verify', {
       method: 'POST',
       accessToken,
       body: JSON.stringify({
@@ -1219,7 +1075,7 @@ export async function logoutJunFeiAI(): Promise<void> {
   const secret = await getProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
   if (secret?.type === 'oauth' && secret.refreshToken?.trim()) {
     try {
-      await requestJunFeiAI('/api/v1/auth/logout', {
+      await requestJunFeiAI('/api/clawx/auth/logout', {
         method: 'POST',
         body: JSON.stringify({
           refresh_token: secret.refreshToken.trim(),

@@ -5,7 +5,7 @@ import type {
   ProviderTypeInfo,
 } from './types';
 
-const JUNFEIAI_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
+const LINGZHIWUXIAN_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
 
 export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
@@ -48,29 +48,57 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     },
   },
   {
-    id: 'junfeiai',
-    name: 'JunFeiAI',
-    icon: 'J',
-    placeholder: 'Managed by JunFeiAI login',
-    model: 'GPT',
+    id: 'lingzhiwuxian',
+    name: '灵智无限',
+    icon: '灵',
+    placeholder: '由灵智无限登录自动管理',
+    model: '国内主流模型',
     requiresApiKey: false,
     category: 'compatible',
-    envVar: 'JUNFEIAI_API_KEY',
-    defaultBaseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
-    defaultModelId: 'gpt-5.5',
+    envVar: 'LINGZHIWUXIAN_API_KEY',
+    defaultBaseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
+    defaultModelId: 'qwen-latest',
     showBaseUrl: false,
     showModelId: false,
     supportedAuthModes: ['api_key'],
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: false,
     providerConfig: {
-      baseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
-      api: 'openai-responses',
-      apiKeyEnv: 'JUNFEIAI_API_KEY',
+      baseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
+      api: 'openai-completions',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
       models: [
         {
-          id: 'gpt-5.5',
-          name: 'GPT-5.5',
+          id: 'qwen-latest',
+          name: '通义千问最新版',
+          reasoning: true,
+          input: ['text', 'image'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+        {
+          id: 'deepseek-latest',
+          name: 'DeepSeek 最新版',
+          reasoning: true,
+          input: ['text'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+        {
+          id: 'doubao-latest',
+          name: '豆包最新版',
+          reasoning: false,
+          input: ['text', 'image'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+        {
+          id: 'kimi-latest',
+          name: 'Kimi 最新版',
+          reasoning: true,
+          input: ['text'],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+        {
+          id: 'glm-latest',
+          name: 'GLM 最新版',
           reasoning: true,
           input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

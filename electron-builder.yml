@@ -48,11 +48,11 @@ asarUnpack:
 npmRebuild: false
 
 # Auto-update configuration
-# Primary: Alibaba Cloud OSS (fast for Chinese users, used for auto-update)
-# Fallback: GitHub Releases (backup, used when OSS is unavailable)
+# Primary: new-api ClawX update feed, which redirects to the actual release files.
+# Fallback: GitHub Releases (backup, used when feed is unavailable)
 publish:
   - provider: generic
-    url: https://oss.intelli-spectrum.com/latest
+    url: https://zz-cn.lingzhiwuxian.com/api/clawx/updates/feed/latest
     useMultipleRangeRequest: false
   - provider: github
     owner: ValueCell-ai

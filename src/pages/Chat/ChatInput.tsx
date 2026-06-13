@@ -56,6 +56,16 @@ interface RemoteModelOption {
 }
 
 function formatJunFeiAIModelLabel(modelId: string): string {
+  const labels: Record<string, string> = {
+    'qwen-latest': '通义千问最新版',
+    'deepseek-latest': 'DeepSeek 最新版',
+    'doubao-latest': '豆包最新版',
+    'kimi-latest': 'Kimi 最新版',
+    'glm-latest': 'GLM 最新版',
+  };
+  if (labels[modelId]) {
+    return labels[modelId];
+  }
   return modelId
     .replace(/^gpt-/i, 'GPT-')
     .replace(/-mini$/i, '-Mini');
@@ -322,7 +332,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
 
   useEffect(() => {
     let cancelled = false;
-    const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'junfeiai' && account.enabled);
+    const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'lingzhiwuxian' && account.enabled);
     if (!junfeiaiAccount) {
       setRemoteModelOptions([]);
       return () => {
@@ -339,10 +349,10 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
               .map((model) => (typeof model === 'string' ? model.trim() : ''))
               .filter(Boolean),
           )).map((modelId) => ({
-            modelRef: `junfeiai/${modelId}`,
+            modelRef: `lingzhiwuxian/${modelId}`,
             label: formatJunFeiAIModelLabel(modelId),
-            runtimeProviderKey: 'junfeiai',
-            accountId: 'junfeiai',
+            runtimeProviderKey: 'lingzhiwuxian',
+            accountId: 'lingzhiwuxian',
           }))
           : [];
         setRemoteModelOptions(next);
@@ -527,12 +537,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         setOptimisticModelRef(previousModelRef);
         toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
         throw error;
-      } finally {
-        setSwitchingModelRef(null);
-        if (pendingModelChangeRef.current === pendingChange) {
-          pendingModelChangeRef.current = null;
-        }
-        textareaRef.current?.focus();
       }
     })();
     pendingModelChangeRef.current = pendingChange;
@@ -540,6 +544,12 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       await pendingChange;
     } catch (error) {
       console.error('Failed to switch session model:', error);
+    } finally {
+      setSwitchingModelRef(null);
+      if (pendingModelChangeRef.current === pendingChange) {
+        pendingModelChangeRef.current = null;
+      }
+      textareaRef.current?.focus();
     }
   }, [currentSessionKey, defaultModelRef, effectiveModelRef, switchingModelRef, t, updateSessionModel]);
 

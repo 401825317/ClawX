@@ -16,7 +16,7 @@ export const PROVIDER_TYPES = [
   'moonshot-global',
   'siliconflow',
   'deepseek',
-  'junfeiai',
+  'lingzhiwuxian',
   'minimax-portal',
   'minimax-portal-cn',
   'modelstudio',
@@ -35,7 +35,7 @@ export const BUILTIN_PROVIDER_TYPES = [
   'moonshot-global',
   'siliconflow',
   'deepseek',
-  'junfeiai',
+  'lingzhiwuxian',
   'minimax-portal',
   'minimax-portal-cn',
   'modelstudio',
@@ -136,7 +136,7 @@ export interface ProviderAccount {
 
 import { providerIcons } from '@/assets/providers';
 
-const JUNFEIAI_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
+const LINGZHIWUXIAN_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
 
 /** All supported provider types with UI metadata */
 export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
@@ -167,14 +167,14 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     apiKeyUrl: 'https://platform.openai.com/api-keys',
   },
   {
-    id: 'junfeiai',
-    name: 'JunFeiAI',
-    icon: 'J',
-    placeholder: 'Managed by JunFeiAI login',
-    model: 'GPT',
+    id: 'lingzhiwuxian',
+    name: '灵智无限',
+    icon: '灵',
+    placeholder: '由灵智无限登录自动管理',
+    model: '国内主流模型',
     requiresApiKey: false,
-    defaultBaseUrl: JUNFEIAI_PRODUCTION_BASE_URL,
-    defaultModelId: 'gpt-5.5',
+    defaultBaseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
+    defaultModelId: 'qwen-latest',
     showModelId: false,
   },
   {

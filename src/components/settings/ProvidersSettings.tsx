@@ -198,7 +198,7 @@ export function ProvidersSettings() {
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
-  const managedProviderMode = vendors.length === 1 && vendors[0]?.id === 'junfeiai';
+  const managedProviderMode = vendors.length === 1 && vendors[0]?.id === 'lingzhiwuxian';
   const displayProviders = useMemo(
     () => buildProviderListItems(accounts, statuses, vendors, defaultAccountId),
     [accounts, statuses, vendors, defaultAccountId],
@@ -315,7 +315,7 @@ export function ProvidersSettings() {
               onCancelEdit={() => setEditingProvider(null)}
               onDelete={() => handleDeleteProvider(item.account.id)}
               onSetDefault={() => handleSetDefault(item.account.id)}
-              managed={managedProviderMode && item.account.vendorId === 'junfeiai'}
+              managed={managedProviderMode && item.account.vendorId === 'lingzhiwuxian'}
               onSaveEdits={async (payload) => {
                 const updates: Partial<ProviderAccount> = {};
                 if (payload.updates) {
