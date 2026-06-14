@@ -77,7 +77,7 @@ describe('chat session model switching', () => {
   });
 
   it('updates only the targeted session model via sessions.patch', async () => {
-    gatewayRpcMock.mockImplementation(async (method: string, params?: unknown) => {
+    gatewayRpcMock.mockImplementation(async (method: string, _params?: unknown) => {
       if (method === 'sessions.patch') {
         return {
           ok: true,

@@ -24,6 +24,7 @@ import {
 } from '../../shared/pi-ai-model-cost';
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
+import { JUNFEIAI_PROVIDER_ID } from '../../utils/junfeiai-distribution';
 
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai-codex';
 const OPENAI_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_OAUTH_RUNTIME_PROVIDER}/gpt-5.5`;
@@ -257,7 +258,6 @@ async function syncProviderSecretToRuntime(
   runtimeProviderKey: string,
   apiKey: string | undefined,
 ): Promise<void> {
-  const secret = await getProviderSecret(config.id);
   if (apiKey !== undefined) {
     const trimmedKey = apiKey.trim();
     if (trimmedKey) {
@@ -272,6 +272,7 @@ async function syncProviderSecretToRuntime(
     return;
   }
 
+  const secret = await getProviderSecret(config.id);
   if (secret?.type === 'api_key') {
     await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
     return;
@@ -311,11 +312,16 @@ async function resolveRuntimeSyncContext(config: ProviderConfig): Promise<Runtim
 async function syncRuntimeProviderConfig(
   config: ProviderConfig,
   context: RuntimeProviderSyncContext,
+  apiKey: string | undefined,
 ): Promise<void> {
+  const accountApiKey = config.type === JUNFEIAI_PROVIDER_ID
+    ? (apiKey !== undefined ? (apiKey.trim() || null) : await getApiKey(config.id))
+    : null;
   await syncProviderConfigToOpenClaw(context.runtimeProviderKey, config.model, {
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
     api: context.api,
     apiKeyEnv: context.meta?.apiKeyEnv,
+    apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (accountApiKey || null) : undefined,
     headers: config.headers ?? context.meta?.headers,
   });
 }
@@ -329,7 +335,11 @@ async function syncCustomProviderAgentModel(
     return;
   }
 
-  const resolvedKey = apiKey !== undefined ? (apiKey.trim() || null) : await getApiKey(config.id);
+  if (apiKey !== undefined && !apiKey.trim()) {
+    return;
+  }
+
+  const resolvedKey = apiKey !== undefined ? apiKey.trim() : await getApiKey(config.id);
   if (!resolvedKey || !config.baseUrl) {
     return;
   }
@@ -353,7 +363,7 @@ async function syncProviderToRuntime(
   }
 
   await syncProviderSecretToRuntime(config, context.runtimeProviderKey, apiKey);
-  await syncRuntimeProviderConfig(config, context);
+  await syncRuntimeProviderConfig(config, context, apiKey);
   await syncCustomProviderAgentModel(config, context.runtimeProviderKey, apiKey);
   return context;
 }
@@ -420,24 +430,26 @@ async function buildAgentModelProviderEntry(
 
   let apiKey: string | undefined;
   let authHeader: boolean | undefined;
+  const accountApiKey = (await getApiKey(config.id)) || undefined;
 
   if (isUnregisteredProviderType(config.type)) {
-    apiKey = (await getApiKey(config.id)) || undefined;
+    apiKey = accountApiKey;
   } else if (config.type === 'minimax-portal' || config.type === 'minimax-portal-cn') {
-    const accountApiKey = await getApiKey(config.id);
     if (accountApiKey) {
       apiKey = accountApiKey;
     } else {
       authHeader = true;
       apiKey = 'minimax-oauth';
     }
+  } else if (accountApiKey) {
+    apiKey = accountApiKey;
   }
 
   return {
     baseUrl,
     api,
     models: [piAiModelsJsonModelEntry(modelId)],
-    apiKey,
+    apiKey: apiKey ?? (config.type === JUNFEIAI_PROVIDER_ID ? null : undefined),
     authHeader,
   };
 }
@@ -520,10 +532,12 @@ export async function syncUpdatedProviderToRuntime(
     const modelOverride = config.model ? `${ock}/${config.model}` : undefined;
     if (!isUnregisteredProviderType(config.type)) {
       if (shouldUseExplicitDefaultOverride(config, ock)) {
+        const runtimeApiKey = apiKey !== undefined ? (apiKey.trim() || null) : await getApiKey(config.id);
         await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
           baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
           api: context.api,
           apiKeyEnv: context.meta?.apiKeyEnv,
+          apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (runtimeApiKey || null) : undefined,
           headers: config.headers ?? context.meta?.headers,
         }, fallbackModels);
       } else {
@@ -661,6 +675,7 @@ export async function syncDefaultProviderToRuntime(
         ),
         api: provider.apiProtocol || getProviderConfig(provider.type)?.api,
         apiKeyEnv: getProviderConfig(provider.type)?.apiKeyEnv,
+        apiKey: provider.type === JUNFEIAI_PROVIDER_ID ? (providerKey || null) : undefined,
         headers: provider.headers ?? getProviderConfig(provider.type)?.headers,
       }, fallbackModels);
     } else {

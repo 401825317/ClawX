@@ -1,6 +1,6 @@
 import { invokeIpc } from '@/lib/api-client';
 import { trackUiEvent } from './telemetry';
-import { normalizeAppError } from './error-model';
+import { AppError, mapBackendErrorCode, normalizeAppError } from './error-model';
 
 const HOST_API_PORT = 13210;
 const HOST_API_BASE = `http://127.0.0.1:${HOST_API_PORT}`;
@@ -51,17 +51,18 @@ function headersToRecord(headers?: HeadersInit): Record<string, string> {
 async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
+    let payload: Record<string, unknown> | null = null;
     try {
-      const payload = await response.json() as { error?: string; message?: string };
+      payload = await response.json() as { error?: string; message?: string };
       if (payload?.error) {
-        message = payload.error;
+        message = String(payload.error);
       } else if (payload?.message) {
-        message = payload.message;
+        message = String(payload.message);
       }
     } catch {
       // ignore body parse failure
     }
-    throw normalizeAppError(new Error(message), {
+    throw createProxyAppError(payload, message, {
       source: 'browser-fallback',
       status: response.status,
     });
@@ -78,6 +79,24 @@ function resolveProxyErrorMessage(error: HostApiProxyResponse['error']): string 
   return typeof error === 'string'
     ? error
     : (error?.message || 'Host API proxy request failed');
+}
+
+function getPayloadErrorCode(payload: Record<string, unknown> | null): string | undefined {
+  const raw = payload?.code ?? payload?.errorCode ?? payload?.error_code;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+function createProxyAppError(
+  payload: Record<string, unknown> | null,
+  message: string,
+  details: Record<string, unknown>,
+): AppError {
+  const code = getPayloadErrorCode(payload);
+  return new AppError(mapBackendErrorCode(code), message, undefined, {
+    ...details,
+    ...(code ? { backendCode: code } : {}),
+    ...(payload ? { payload } : {}),
+  });
 }
 
 function parseUnifiedProxyResponse<T>(
@@ -100,7 +119,12 @@ function parseUnifiedProxyResponse<T>(
       : payload && typeof payload.message === 'string'
         ? payload.message
         : data.text || `HTTP ${data.status ?? 'unknown'}`;
-    throw new Error(message);
+    throw createProxyAppError(payload, message, {
+      source: 'ipc-proxy',
+      path,
+      method,
+      status: data.status,
+    });
   }
 
   trackUiEvent('hostapi.fetch', {
@@ -137,7 +161,12 @@ function parseLegacyProxyResponse<T>(
           ? payload.message
           : null)
       || `HTTP ${response.status ?? 'unknown'}`;
-    throw new Error(message);
+    throw createProxyAppError(payload, message, {
+      source: 'ipc-proxy-legacy',
+      path,
+      method,
+      status: response.status,
+    });
   }
 
   trackUiEvent('hostapi.fetch', {

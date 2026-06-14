@@ -1,5 +1,8 @@
 export type AppErrorCode =
   | 'AUTH_INVALID'
+  | 'ACTIVATION_INVALID'
+  | 'ACTIVATION_EXPIRED'
+  | 'DEVICE_AUTH_REQUIRED'
   | 'TIMEOUT'
   | 'RATE_LIMIT'
   | 'PERMISSION'
@@ -24,6 +27,19 @@ export class AppError extends Error {
 
 export function mapBackendErrorCode(code?: string): AppErrorCode {
   switch (code) {
+    case 'invalid_credentials':
+    case 'auth_invalid':
+      return 'AUTH_INVALID';
+    case 'activation_invalid':
+    case 'activation_consumed':
+    case 'activation_ticket_expired':
+    case 'activation_device_mismatch':
+      return 'ACTIVATION_INVALID';
+    case 'activation_expired':
+      return 'ACTIVATION_EXPIRED';
+    case 'device_authorization_required':
+    case 'activation_required':
+      return 'DEVICE_AUTH_REQUIRED';
     case 'TIMEOUT':
       return 'TIMEOUT';
     case 'PERMISSION':
@@ -54,9 +70,32 @@ function classifyMessage(message: string): AppErrorCode {
     lower.includes('invalid authentication')
     || lower.includes('unauthorized')
     || lower.includes('auth failed')
+    || lower.includes('invalid_credentials')
+    || lower.includes('账号或密码错误')
     || lower.includes('401')
   ) {
     return 'AUTH_INVALID';
+  }
+  if (
+    lower.includes('activation_expired')
+    || lower.includes('激活码已过期')
+  ) {
+    return 'ACTIVATION_EXPIRED';
+  }
+  if (
+    lower.includes('activation_invalid')
+    || lower.includes('activation_consumed')
+    || lower.includes('activation_ticket_expired')
+    || lower.includes('activation_device_mismatch')
+    || lower.includes('激活码无效')
+  ) {
+    return 'ACTIVATION_INVALID';
+  }
+  if (
+    lower.includes('device_authorization_required')
+    || lower.includes('activation_required')
+  ) {
+    return 'DEVICE_AUTH_REQUIRED';
   }
   if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('abort')) {
     return 'TIMEOUT';
@@ -99,4 +138,3 @@ export function normalizeAppError(err: unknown, details?: Record<string, unknown
   const message = err instanceof Error ? err.message : String(err);
   return new AppError(classifyMessage(message), message, err, details);
 }
-

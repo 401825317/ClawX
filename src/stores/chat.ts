@@ -7,6 +7,9 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
+import { getManagedAuthStateKey, isManagedAuthReady } from '@/lib/managed-auth';
+import { useManagedAuthStore } from './managed-auth';
+import { useProviderStore } from './providers';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
@@ -70,6 +73,51 @@ export type {
 // during tool-use conversations where streamingMessage is temporarily cleared
 // between tool-result finals and the next delta.
 let _lastChatEventAt = 0;
+
+function managedAuthSendErrorMessage(stateKey: string, detail?: string | null): string {
+  if (stateKey === 'loggedOut') {
+    return 'Please sign in before sending messages.';
+  }
+  if (stateKey === 'activationRequired') {
+    return 'Please activate this device before sending messages.';
+  }
+  if (stateKey === 'relayMissing') {
+    return 'The model service key is not ready. Sign in again or refresh account status.';
+  }
+  if (stateKey === 'error') {
+    return `Unable to verify sign-in status${detail ? `: ${detail}` : '.'}`;
+  }
+  return 'Your sign-in session has expired. Please sign in again before sending messages.';
+}
+
+async function ensureManagedAuthReadyForSend(): Promise<void> {
+  const store = useManagedAuthStore.getState();
+  const providerState = useProviderStore.getState();
+  const shouldEnforce = store.status?.managed === true
+    || providerState.defaultAccountId === 'lingzhiwuxian'
+    || providerState.accounts.some((account) => account.id === 'lingzhiwuxian');
+  if (!shouldEnforce) {
+    return;
+  }
+
+  try {
+    const status = await store.refreshStatus();
+    if (isManagedAuthReady(status)) {
+      return;
+    }
+    throw new Error(managedAuthSendErrorMessage(getManagedAuthStateKey(status), status.authError));
+  } catch (error) {
+    const state = useManagedAuthStore.getState();
+    const stateKey = getManagedAuthStateKey(state.status, {
+      loading: state.loading,
+      error: state.error,
+    });
+    throw new Error(
+      managedAuthSendErrorMessage(stateKey, state.error || (error instanceof Error ? error.message : String(error))),
+      { cause: error },
+    );
+  }
+}
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
 function toMs(ts: number): number {
@@ -3665,6 +3713,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Guard against double-submit before React re-renders with sending=true.
     if (get().sending && targetSessionKey === get().currentSessionKey) {
+      return;
+    }
+
+    try {
+      await ensureManagedAuthReadyForSend();
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : String(error),
+        sending: false,
+      });
       return;
     }
 

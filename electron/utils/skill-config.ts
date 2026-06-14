@@ -71,27 +71,6 @@ async function writeConfig(config: OpenClawConfig): Promise<void> {
     await writeFile(OPENCLAW_CONFIG_PATH, json, 'utf-8');
 }
 
-async function setSkillsEnabled(skillKeys: string[], enabled: boolean): Promise<void> {
-    if (skillKeys.length === 0) {
-        return;
-    }
-    return withConfigLock(async () => {
-        const config = await readConfig();
-        if (!config.skills) {
-            config.skills = {};
-        }
-        if (!config.skills.entries) {
-            config.skills.entries = {};
-        }
-        for (const skillKey of skillKeys) {
-            const entry = config.skills.entries[skillKey] || {};
-            entry.enabled = enabled;
-            config.skills.entries[skillKey] = entry;
-        }
-        await writeConfig(config);
-    });
-}
-
 /**
  * Get skill config
  */

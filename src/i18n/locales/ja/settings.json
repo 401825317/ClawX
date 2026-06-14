@@ -127,13 +127,34 @@
     }
   },
   "managedAuth": {
+    "brand": "サービスアカウント",
     "status": {
       "loggedIn": "ログイン済み",
       "loginExpired": "ログインの有効期限切れ",
       "runtimeActive": "ランタイム有効",
       "activationVerified": "アクティベーションコードを確認しました",
       "activationInvalid": "アクティベーションコードが無効です",
-      "offlineGrace": "オフライン猶予 {{value}}"
+      "offlineGrace": "オフライン猶予 {{value}}",
+      "ready": "ログイン済み",
+      "checking": "確認中",
+      "loggedOut": "未ログイン",
+      "activationRequired": "有効化が必要",
+      "relayMissing": "モデルサービス未準備",
+      "unmanaged": "ログイン不要",
+      "error": "状態エラー"
+    },
+    "accountCard": {
+      "title": "アカウント",
+      "description": "現在のログインアカウント、デバイス認証、モデルサービスキーの状態です。",
+      "currentAccount": "現在のアカウント",
+      "unknownUser": "アカウント情報なし",
+      "service": "サービス",
+      "device": "デバイス認証",
+      "deviceActivated": "有効化済み",
+      "deviceInactive": "未有効化",
+      "modelService": "モデルサービス",
+      "modelServiceReady": "キー準備完了",
+      "modelServiceMissing": "キー利用不可"
     },
     "fields": {
       "email": "メールアドレス",
@@ -149,6 +170,7 @@
       "optional": "任意"
     },
     "actions": {
+      "account": "アカウント",
       "refreshStatus": "JunFeiAI の状態を更新",
       "verify": "検証",
       "logout": "JunFeiAI からログアウト",

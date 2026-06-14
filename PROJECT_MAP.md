@@ -57,6 +57,14 @@ renderer 不直接请求远端 new-api。UI 通过 `hostApiFetch('/api/junfeiai/
 
 兼容策略：如果后端没有 ClawX 兼容路由，部分登录和 key 创建流程会回退到 Sub2API 标准路由，例如 `/api/v1/auth/login`、`/api/v1/keys`。
 
+### 登录、注册、设备授权契约
+
+- 登录状态、设备激活状态、OpenClaw runtime relay key 是三类独立状态。
+- 退出登录、登录过期、token 失效后的恢复弹层只允许登录，不显示注册入口，首次提交登录不要求激活码。
+- 首次设置页允许“登录已有账号”和“注册新账号”；注册新账号时才使用激活码，并由后端控制首注册送额度。
+- 如果后端登录返回 `device_authorization_required`，说明账号密码正确但当前设备未授权；前端再显示激活码输入，用同一登录表单补充设备授权。这个流程不是注册，不发首注册送额度。
+- ClawX 相关错误必须优先使用后端 `code` / `errorCode` 映射到用户文案，不把 `api error`、接口路径、内部 provider 名称直接展示给用户。
+
 ## 常用命令
 
 首次准备：
@@ -106,4 +114,3 @@ pnpm run comms:compare
 - renderer 不新增直接 `window.electron.ipcRenderer.invoke(...)`，不直接 fetch `127.0.0.1:18789` Gateway。
 - 供应商、密钥、OpenClaw runtime 写入优先改 Main/electron service 层。
 - 触达 Gateway、host-api、api-client、runtime send/receive 的改动，要按 `AGENTS.md` 的 harness/comms 规则验证。
-

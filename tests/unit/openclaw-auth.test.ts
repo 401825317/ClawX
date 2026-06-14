@@ -1507,6 +1507,37 @@ describe('anthropic-messages maxTokens', () => {
     expect(models[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
+  it('clears stale apiKey from agent models.json when apiKey is null', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const agentDir = join(testHome, '.openclaw', 'agents', 'main', 'agent');
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, 'models.json'), JSON.stringify({
+      providers: {
+        lingzhiwuxian: {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          api: 'openai-completions',
+          apiKey: 'LINGZHIWUXIAN_API_KEY',
+          models: [{ id: 'qwen-latest', name: 'qwen-latest' }],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const { updateAgentModelProvider } = await import('@electron/utils/openclaw-auth');
+
+    await updateAgentModelProvider('lingzhiwuxian', {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      apiKey: null,
+      models: [{ id: 'qwen-latest', name: 'qwen-latest', cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    });
+
+    const content = await readFile(join(agentDir, 'models.json'), 'utf8');
+    const result = JSON.parse(content) as Record<string, unknown>;
+    const entry = ((result.providers as Record<string, unknown>).lingzhiwuxian) as Record<string, unknown>;
+
+    expect(entry.apiKey).toBeUndefined();
+  });
+
   it('repairs legacy agent models.json anthropic-messages entries during update', async () => {
     await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
     const agentDir = join(testHome, '.openclaw', 'agents', 'main', 'agent');

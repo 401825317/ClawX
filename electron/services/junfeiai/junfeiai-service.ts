@@ -39,9 +39,25 @@ interface Sub2APIEnvelope<T> {
 }
 
 class JunFeiAIHttpError extends Error {
-  constructor(message: string, public readonly status: number) {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+    public readonly responseBody?: unknown,
+  ) {
     super(message);
     this.name = 'JunFeiAIHttpError';
+  }
+}
+
+export class JunFeiAIUserError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'JunFeiAIUserError';
   }
 }
 
@@ -147,6 +163,19 @@ export interface JunFeiAISeedResult {
   };
 }
 
+export function isJunFeiAISeedReady(seed: Pick<
+  JunFeiAISeedResult,
+  'managed' | 'hasRelayToken' | 'hasAuthToken' | 'authValid' | 'activationRequired'
+>): boolean {
+  if (!seed.managed) {
+    return true;
+  }
+  return Boolean(seed.hasRelayToken)
+    && Boolean(seed.hasAuthToken)
+    && Boolean(seed.authValid)
+    && seed.activationRequired !== true;
+}
+
 export interface JunFeiAITopupOrderPayload {
   money?: unknown;
   payMethod?: unknown;
@@ -247,10 +276,16 @@ async function applyLocalDeviceActivationState(
 }
 
 function unwrapEnvelope<T>(payload: unknown): T {
+  if (isRecord(payload) && payload.success === false) {
+    const code = getPayloadErrorCode(payload);
+    const message = getPayloadErrorMessage(payload) || 'Request failed';
+    throw new JunFeiAIHttpError(message, 400, code, payload);
+  }
+
   const envelope = payload as Sub2APIEnvelope<T>;
   if (envelope && typeof envelope === 'object' && 'data' in envelope) {
     if (typeof envelope.code === 'number' && envelope.code !== 0) {
-      throw new JunFeiAIHttpError(envelope.message || `Sub2API error ${envelope.code}`, envelope.code);
+      throw new JunFeiAIHttpError(envelope.message || `API error ${envelope.code}`, envelope.code, String(envelope.code), payload);
     }
     return envelope.data as T;
   }
@@ -259,6 +294,87 @@ function unwrapEnvelope<T>(payload: unknown): T {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function getPayloadString(payload: unknown, ...keys: string[]): string {
+  if (!isRecord(payload)) {
+    return '';
+  }
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return '';
+}
+
+function getPayloadErrorCode(payload: unknown): string {
+  const direct = getPayloadString(payload, 'errorCode', 'error_code', 'code');
+  if (direct) {
+    return direct;
+  }
+  if (isRecord(payload) && isRecord(payload.error)) {
+    return getPayloadString(payload.error, 'code', 'errorCode', 'error_code');
+  }
+  return '';
+}
+
+function getPayloadErrorMessage(payload: unknown): string {
+  const direct = getPayloadString(payload, 'message', 'msg', 'error_description');
+  if (direct) {
+    return direct;
+  }
+  if (isRecord(payload)) {
+    const error = payload.error;
+    if (typeof error === 'string' && error.trim()) {
+      return error.trim();
+    }
+    if (isRecord(error)) {
+      return getPayloadString(error, 'message', 'msg', 'description', 'code');
+    }
+  }
+  return '';
+}
+
+export function toJunFeiAIUserError(error: unknown): JunFeiAIUserError | null {
+  if (error instanceof JunFeiAIUserError) {
+    return error;
+  }
+  if (!(error instanceof JunFeiAIHttpError)) {
+    return null;
+  }
+
+  const code = error.code || getPayloadString(error.responseBody, 'errorCode', 'error_code', 'code');
+  if (code) {
+    return new JunFeiAIUserError(code, error.message, error.status);
+  }
+
+  if (error.status === 401) {
+    return new JunFeiAIUserError('invalid_credentials', error.message, error.status);
+  }
+  if (error.status === 403) {
+    return new JunFeiAIUserError('permission_denied', error.message, error.status);
+  }
+  return null;
+}
+
+export function toJunFeiAIClientError(error: unknown): { status: number; code: string; message: string } | null {
+  const userError = toJunFeiAIUserError(error);
+  if (!userError) {
+    return null;
+  }
+  const status = typeof userError.status === 'number' && userError.status >= 400 && userError.status < 500
+    ? userError.status
+    : 400;
+  return {
+    status,
+    code: userError.code,
+    message: userError.message || userError.code,
+  };
 }
 
 function getUserId(user?: Record<string, unknown> | null): string | undefined {
@@ -588,10 +704,8 @@ async function requestJunFeiAI<T>(
     });
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      const message = payload && typeof payload === 'object' && 'message' in payload
-        ? String((payload as { message?: unknown }).message)
-        : `${response.status} ${response.statusText}`;
-      throw new JunFeiAIHttpError(`${path}: ${message}`, response.status);
+      const message = getPayloadErrorMessage(payload) || `${response.status} ${response.statusText}`;
+      throw new JunFeiAIHttpError(message, response.status, getPayloadErrorCode(payload), payload);
     }
     return unwrapEnvelope<T>(payload);
   } finally {
@@ -913,6 +1027,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   relayTokenExpiresAt?: number;
   gatewayManager?: GatewayManager;
   syncRuntime?: boolean;
+  syncRuntimeOnAuthChange?: boolean;
   markDeviceActivatedFromStoredAuth?: boolean;
 } = {}): Promise<JunFeiAISeedResult> {
   if (!isJunFeiAIManagedDistribution()) {
@@ -959,8 +1074,9 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   }
 
   let runtimeApiKey = options.relayToken?.trim() || undefined;
-  let relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
-  let relayOwnerUserId = relaySecret?.type === 'api_key' ? relaySecret.ownerUserId : undefined;
+  let relaySecret: StoredProviderSecret = null;
+  let relayOwnerUserId: string | undefined;
+  let relaySecretChanged = false;
   const authCanReceiveRelay = authStatus.authValid && !activation.activationRequired;
 
   if (runtimeApiKey) {
@@ -973,15 +1089,21 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       ...(getUserEmail(authUser) ? { ownerEmail: getUserEmail(authUser) } : {}),
       ...(options.relayTokenExpiresAt ? { expiresAt: options.relayTokenExpiresAt } : {}),
     });
+    relaySecretChanged = true;
     relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
     relayOwnerUserId = authUserId;
-  } else if (authCanReceiveRelay && !isRelaySecretUsableForUser(relaySecret, authUser)) {
-    const accessToken = await getStoredJunFeiAIAuthToken();
-    if (accessToken) {
-      const relay = await requestRuntimeToken(accessToken);
-      runtimeApiKey = await saveJunFeiAIRelaySecret(relay, authUser);
-      relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
-      relayOwnerUserId = authUserId;
+  } else if (authCanReceiveRelay) {
+    relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+    relayOwnerUserId = relaySecret?.type === 'api_key' ? relaySecret.ownerUserId : undefined;
+    if (!isRelaySecretUsableForUser(relaySecret, authUser)) {
+      const accessToken = await getStoredJunFeiAIAuthToken();
+      if (accessToken) {
+        const relay = await requestRuntimeToken(accessToken);
+        runtimeApiKey = await saveJunFeiAIRelaySecret(relay, authUser);
+        relaySecretChanged = Boolean(runtimeApiKey);
+        relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+        relayOwnerUserId = authUserId;
+      }
     }
   }
 
@@ -1003,11 +1125,8 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     || relayExpired;
 
   if (shouldClearRuntimeKey) {
-    if (relaySecret?.type === 'api_key') {
-      await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
-      relaySecret = null;
-      relayOwnerUserId = undefined;
-    }
+    await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
+    relayOwnerUserId = undefined;
     if (authStatus.authRejected) {
       await deleteProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
       await clearVerificationCache();
@@ -1015,10 +1134,16 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     runtimeApiKey = undefined;
   }
 
-  if (options.syncRuntime !== false) {
+  const shouldSyncRuntime = options.syncRuntime !== false
+    || (
+      options.syncRuntimeOnAuthChange === true
+      && (relaySecretChanged || shouldClearRuntimeKey)
+    );
+
+  if (shouldSyncRuntime) {
     const apiKey = runtimeApiKey ?? (shouldClearRuntimeKey ? '' : undefined);
     await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, options.gatewayManager);
-    if (!shouldClearRuntimeKey) {
+    if (options.syncRuntime !== false && !shouldClearRuntimeKey) {
       await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
     }
   }
@@ -1378,5 +1503,5 @@ export async function logoutJunFeiAI(gatewayManager?: GatewayManager): Promise<v
   await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
   await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
   await clearVerificationCache();
-  gatewayManager?.debouncedReload();
+  await gatewayManager?.stop();
 }

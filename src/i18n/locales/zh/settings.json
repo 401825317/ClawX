@@ -134,7 +134,27 @@
       "runtimeActive": "运行时已激活",
       "activationVerified": "激活码已验证",
       "activationInvalid": "激活码无效",
-      "offlineGrace": "离线宽限 {{value}}"
+      "offlineGrace": "离线宽限 {{value}}",
+      "ready": "已登录",
+      "checking": "检查中",
+      "loggedOut": "未登录",
+      "activationRequired": "需要激活",
+      "relayMissing": "模型服务未就绪",
+      "unmanaged": "无需登录",
+      "error": "状态异常"
+    },
+    "accountCard": {
+      "title": "账号",
+      "description": "当前登录账号、设备授权和模型服务密钥状态。",
+      "currentAccount": "当前账号",
+      "unknownUser": "未读取到账户信息",
+      "service": "服务",
+      "device": "设备授权",
+      "deviceActivated": "已激活",
+      "deviceInactive": "未激活",
+      "modelService": "模型服务",
+      "modelServiceReady": "密钥已就绪",
+      "modelServiceMissing": "密钥不可用"
     },
     "fields": {
       "email": "邮箱",

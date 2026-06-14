@@ -155,7 +155,7 @@ async function persistInstalledMarketplaceMetadata(params: {
   try {
     existing = JSON.parse(await readFile(originPath, 'utf-8')) as Record<string, unknown>;
   } catch {
-    existing = {};
+    // Metadata is optional; a missing or malformed origin file starts fresh.
   }
 
   const next = {

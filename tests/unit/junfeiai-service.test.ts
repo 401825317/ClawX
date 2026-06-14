@@ -294,6 +294,35 @@ describe('JunFeiAI managed provider service', () => {
     expect(mocks.markJunFeiAIDeviceActivated).not.toHaveBeenCalled();
   });
 
+  it('does not read the relay secret while logged out', async () => {
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return null;
+      }
+      throw new Error(`unexpected secret read for ${accountId}`);
+    });
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: { activationRequired: false },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+      syncRuntime: false,
+      syncRuntimeOnAuthChange: true,
+    });
+
+    expect(result.hasAuthToken).toBe(false);
+    expect(result.authValid).toBe(false);
+    expect(result.hasRelayToken).toBe(false);
+    expect(mocks.getProviderSecret).toHaveBeenCalledWith('lingzhiwuxian-auth');
+    expect(mocks.getProviderSecret).not.toHaveBeenCalledWith('lingzhiwuxian');
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      '',
+      undefined,
+    );
+  });
+
   it('supports separate auth backend and provider base URL in dev mode', async () => {
     vi.stubEnv('VITE_DEV_SERVER_URL', 'http://127.0.0.1:5173');
     vi.stubEnv('CLAWX_JUNFEIAI_BACKEND_ORIGIN', 'http://127.0.0.1:8080');
@@ -507,6 +536,63 @@ describe('JunFeiAI managed provider service', () => {
     expect(mocks.syncDefaultProviderToRuntime).toHaveBeenCalledWith('lingzhiwuxian', undefined);
   });
 
+  it('syncs runtime during status checks when a fresh relay key is issued', async () => {
+    const existing = makeAccount();
+    let relaySecret: unknown = null;
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'access',
+          refreshToken: '',
+          expiresAt: Date.now() + 60_000,
+          subject: '7',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return relaySecret;
+      }
+      return null;
+    });
+    mocks.setProviderSecret.mockImplementation(async (secret: unknown) => {
+      if (
+        secret
+        && typeof secret === 'object'
+        && 'accountId' in secret
+        && secret.accountId === 'lingzhiwuxian'
+      ) {
+        relaySecret = secret;
+      }
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { id: 7, username: 'alice', email: 'alice@example.com' },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { token: 'fresh-relay', expiresIn: 3600 },
+      }), { status: 200 }));
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: { activationRequired: false },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+      syncRuntime: false,
+      syncRuntimeOnAuthChange: true,
+    });
+
+    expect(result.hasRelayToken).toBe(true);
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      'fresh-relay',
+      undefined,
+    );
+    expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
+  });
+
   it('refreshes an expired relay key for the same logged-in user', async () => {
     const existing = makeAccount();
     let relaySecret: unknown = {
@@ -677,6 +763,52 @@ describe('JunFeiAI managed provider service', () => {
     );
     expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
     expect(memoryStore.get('junfeiaiVerificationCache')).toBeNull();
+  });
+
+  it('syncs runtime during status checks when a stored login is rejected', async () => {
+    const existing = makeAccount();
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'rejected-access',
+          refreshToken: 'refresh-token',
+          expiresAt: Date.now() + 60_000,
+          subject: '7',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return {
+          type: 'api_key',
+          accountId: 'lingzhiwuxian',
+          apiKey: 'stale-relay',
+          ownerUserId: '7',
+        };
+      }
+      return null;
+    });
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ message: 'invalid token' }), { status: 401 }));
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: { activationRequired: false },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+      syncRuntime: false,
+      syncRuntimeOnAuthChange: true,
+    });
+
+    expect(result.authRejected).toBe(true);
+    expect(result.hasRelayToken).toBe(false);
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      '',
+      undefined,
+    );
+    expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
   });
 
   it('does nothing when managed provider mode is disabled', async () => {
@@ -1024,7 +1156,7 @@ describe('JunFeiAI managed provider service', () => {
     });
 
     const gatewayManager = {
-      debouncedReload: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
     };
 
     await logoutJunFeiAI(gatewayManager as never);
@@ -1039,7 +1171,7 @@ describe('JunFeiAI managed provider service', () => {
     expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('lingzhiwuxian-auth');
     expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('lingzhiwuxian');
     expect(mocks.removeProviderKeyFromOpenClaw).toHaveBeenCalledWith('lingzhiwuxian');
-    expect(gatewayManager.debouncedReload).toHaveBeenCalled();
+    expect(gatewayManager.stop).toHaveBeenCalled();
     expect(memoryStore.get('junfeiaiVerificationCache')).toBeNull();
   });
 });

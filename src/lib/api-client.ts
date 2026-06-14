@@ -918,6 +918,12 @@ export function toUserMessage(error: unknown): string {
   switch (appError.code) {
     case 'AUTH_INVALID':
       return 'Authentication failed. Check API key or login session and retry.';
+    case 'ACTIVATION_INVALID':
+      return 'Activation code is invalid or unavailable. Contact support for a new code.';
+    case 'ACTIVATION_EXPIRED':
+      return 'Activation code has expired. Contact support for a new code.';
+    case 'DEVICE_AUTH_REQUIRED':
+      return 'This device needs authorization before the model service can be used.';
     case 'TIMEOUT':
       return 'Request timed out. Please retry.';
     case 'RATE_LIMIT':

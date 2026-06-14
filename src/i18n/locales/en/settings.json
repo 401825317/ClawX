@@ -134,7 +134,27 @@
       "runtimeActive": "Runtime active",
       "activationVerified": "Activation code verified",
       "activationInvalid": "Activation code is invalid",
-      "offlineGrace": "offline {{value}}"
+      "offlineGrace": "offline {{value}}",
+      "ready": "Signed in",
+      "checking": "Checking",
+      "loggedOut": "Signed out",
+      "activationRequired": "Activation required",
+      "relayMissing": "Model service not ready",
+      "unmanaged": "No sign-in required",
+      "error": "Status error"
+    },
+    "accountCard": {
+      "title": "Account",
+      "description": "Current account, device authorization, and model service key status.",
+      "currentAccount": "Current account",
+      "unknownUser": "No account information",
+      "service": "Service",
+      "device": "Device authorization",
+      "deviceActivated": "Activated",
+      "deviceInactive": "Not activated",
+      "modelService": "Model service",
+      "modelServiceReady": "Key ready",
+      "modelServiceMissing": "Key unavailable"
     },
     "fields": {
       "email": "Email",

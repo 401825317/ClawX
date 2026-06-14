@@ -14,8 +14,29 @@ import {
   registerJunFeiAI,
   sendJunFeiAIVerificationCode,
   storeJunFeiAIRelayToken,
+  toJunFeiAIClientError,
   verifyJunFeiAIAuth,
 } from '../../services/junfeiai/junfeiai-service';
+
+async function sendJunFeiAIJson<T>(
+  res: ServerResponse,
+  action: () => Promise<T>,
+): Promise<void> {
+  try {
+    sendJson(res, 200, await action());
+  } catch (error) {
+    const clientError = toJunFeiAIClientError(error);
+    if (!clientError) {
+      throw error;
+    }
+    sendJson(res, clientError.status, {
+      success: false,
+      code: clientError.code,
+      errorCode: clientError.code,
+      message: clientError.message,
+    });
+  }
+}
 
 export async function handleJunFeIAIRoutes(
   req: IncomingMessage,
@@ -27,6 +48,7 @@ export async function handleJunFeIAIRoutes(
     sendJson(res, 200, await ensureJunFeiAIProviderSeeded({
       gatewayManager: ctx.gatewayManager,
       syncRuntime: false,
+      syncRuntimeOnAuthChange: true,
     }));
     return true;
   }
@@ -39,27 +61,27 @@ export async function handleJunFeIAIRoutes(
   }
 
   if (url.pathname === '/api/junfeiai/activation/check' && req.method === 'POST') {
-    sendJson(res, 200, await checkJunFeiAIActivation(await parseJsonBody<Record<string, unknown>>(req)));
+    await sendJunFeiAIJson(res, async () => checkJunFeiAIActivation(await parseJsonBody<Record<string, unknown>>(req)));
     return true;
   }
 
   if (url.pathname === '/api/junfeiai/login' && req.method === 'POST') {
-    sendJson(res, 200, await loginJunFeiAI(await parseJsonBody<Record<string, unknown>>(req), ctx.gatewayManager));
+    await sendJunFeiAIJson(res, async () => loginJunFeiAI(await parseJsonBody<Record<string, unknown>>(req), ctx.gatewayManager));
     return true;
   }
 
   if (url.pathname === '/api/junfeiai/register' && req.method === 'POST') {
-    sendJson(res, 200, await registerJunFeiAI(await parseJsonBody<Record<string, unknown>>(req), ctx.gatewayManager));
+    await sendJunFeiAIJson(res, async () => registerJunFeiAI(await parseJsonBody<Record<string, unknown>>(req), ctx.gatewayManager));
     return true;
   }
 
   if (url.pathname === '/api/junfeiai/verification/send-code' && req.method === 'POST') {
-    sendJson(res, 200, await sendJunFeiAIVerificationCode(await parseJsonBody<Record<string, unknown>>(req)));
+    await sendJunFeiAIJson(res, async () => sendJunFeiAIVerificationCode(await parseJsonBody<Record<string, unknown>>(req)));
     return true;
   }
 
   if (url.pathname === '/api/junfeiai/auth/verify' && req.method === 'POST') {
-    sendJson(res, 200, await verifyJunFeiAIAuth(await parseJsonBody<Record<string, unknown>>(req)));
+    await sendJunFeiAIJson(res, async () => verifyJunFeiAIAuth(await parseJsonBody<Record<string, unknown>>(req)));
     return true;
   }
 
@@ -77,7 +99,7 @@ export async function handleJunFeIAIRoutes(
   }
 
   if (url.pathname === '/api/junfeiai/topup/order' && req.method === 'POST') {
-    sendJson(res, 200, await createJunFeiAITopupOrder(await parseJsonBody<Record<string, unknown>>(req)));
+    await sendJunFeiAIJson(res, async () => createJunFeiAITopupOrder(await parseJsonBody<Record<string, unknown>>(req)));
     return true;
   }
 

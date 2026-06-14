@@ -54,7 +54,7 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
-import { ensureJunFeiAIProviderSeeded } from '../services/junfeiai/junfeiai-service';
+import { ensureJunFeiAIProviderSeeded, isJunFeiAISeedReady } from '../services/junfeiai/junfeiai-service';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
@@ -462,15 +462,18 @@ async function initialize(): Promise<void> {
     });
   }
 
+  let managedProviderReadyForGateway = true;
   if (!isE2EMode) {
     try {
       const seed = await ensureJunFeiAIProviderSeeded({ gatewayManager });
       if (seed.managed) {
+        managedProviderReadyForGateway = isJunFeiAISeedReady(seed);
         logger.info(
-          `JunFeiAI provider seeded from ${seed.source}; relayToken=${seed.hasRelayToken ? 'present' : 'missing'}`,
+          `JunFeiAI provider seeded from ${seed.source}; auth=${seed.authValid ? 'valid' : 'missing'} relayToken=${seed.hasRelayToken ? 'present' : 'missing'} activation=${seed.activationRequired ? 'required' : 'ready'}`,
         );
       }
     } catch (error) {
+      managedProviderReadyForGateway = !isJunFeiAIManagedDistribution();
       logger.warn('Failed to seed JunFeiAI provider:', error);
     }
   }
@@ -564,7 +567,7 @@ async function initialize(): Promise<void> {
 
   // Start Gateway automatically (this seeds missing bootstrap files with full templates)
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
-  if (!isE2EMode && gatewayAutoStart) {
+  if (!isE2EMode && gatewayAutoStart && managedProviderReadyForGateway) {
     try {
       await syncAllProviderAuthToRuntime();
       logger.debug('Auto-starting Gateway...');
@@ -576,6 +579,8 @@ async function initialize(): Promise<void> {
     }
   } else if (isE2EMode) {
     logger.info('Gateway auto-start skipped in E2E mode');
+  } else if (!managedProviderReadyForGateway) {
+    logger.info('Gateway auto-start skipped until JunFeiAI account, device authorization, and relay token are ready');
   } else {
     logger.info('Gateway auto-start disabled in settings');
   }

@@ -1208,6 +1208,7 @@ interface RuntimeProviderConfigOverride {
   baseUrl?: string;
   api?: string;
   apiKeyEnv?: string;
+  apiKey?: string | null;
   headers?: Record<string, string>;
   authHeader?: boolean;
 }
@@ -1216,6 +1217,7 @@ type ProviderEntryBuildOptions = {
   baseUrl: string;
   api: string;
   apiKeyEnv?: string;
+  apiKey?: string | null;
   headers?: Record<string, string>;
   authHeader?: boolean;
   request?: Record<string, unknown>;
@@ -1531,7 +1533,15 @@ function upsertOpenClawProviderEntry(
   if (options.api === 'anthropic-messages') {
     ensureAnthropicMessagesProviderDefaults(nextProvider, provider);
   }
-  if (options.apiKeyEnv) nextProvider.apiKey = options.apiKeyEnv;
+  if (options.apiKey !== undefined) {
+    if (options.apiKey) {
+      nextProvider.apiKey = options.apiKey;
+    } else {
+      delete nextProvider.apiKey;
+    }
+  } else if (options.apiKeyEnv) {
+    nextProvider.apiKey = options.apiKeyEnv;
+  }
   if (options.headers !== undefined) {
     if (Object.keys(options.headers).length > 0) {
       nextProvider.headers = options.headers;
@@ -1682,6 +1692,7 @@ export async function syncProviderConfigToOpenClaw(
         baseUrl: override.baseUrl,
         api: override.api,
         apiKeyEnv: override.apiKeyEnv,
+        apiKey: override.apiKey,
         headers: override.headers,
         modelIds: modelId ? [modelId] : [],
       });
@@ -2352,7 +2363,13 @@ async function updateModelsJsonProviderEntriesForAgents(
     if (entry.baseUrl !== undefined) existing.baseUrl = entry.baseUrl;
     if (entry.api !== undefined) existing.api = entry.api;
     if (mergedModels.length > 0) existing.models = mergedModels;
-    if (entry.apiKey !== undefined) existing.apiKey = entry.apiKey;
+    if (entry.apiKey !== undefined) {
+      if (entry.apiKey) {
+        existing.apiKey = entry.apiKey;
+      } else {
+        delete existing.apiKey;
+      }
+    }
     if (entry.authHeader !== undefined) existing.authHeader = entry.authHeader;
     ensureAnthropicMessagesProviderDefaults(existing, providerType);
 

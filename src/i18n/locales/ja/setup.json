@@ -40,6 +40,7 @@
         }
     },
     "auth": {
+        "brand": "サービスアカウント",
         "status": {
             "loggedIn": "ログイン済み",
             "loginExpired": "ログインの有効期限切れ",
@@ -69,8 +70,10 @@
             "sendCode": "コード送信",
             "sendCodeCountdown": "{{seconds}}秒",
             "refresh": "更新",
+            "logout": "ログアウト",
             "registerAndActivate": "登録して有効化",
-            "loginAndActivate": "ログインして有効化"
+            "loginAndActivate": "ログインして有効化",
+            "loginAndAuthorize": "ログインしてデバイスを認証"
         },
         "toast": {
             "statusFailed": "JunFeiAI の状態取得に失敗しました: {{message}}",
@@ -85,7 +88,71 @@
             "activated": "JunFeiAI を有効化しました",
             "loggedIn": "JunFeiAI にログインしました",
             "registerFailed": "JunFeiAI の登録に失敗しました: {{message}}",
-            "loginFailed": "JunFeiAI のログインに失敗しました: {{message}}"
+            "loginFailed": "JunFeiAI のログインに失敗しました: {{message}}",
+            "loggedOut": "ログアウトしました",
+            "logoutFailed": "ログアウトに失敗しました: {{message}}"
+        },
+        "errors": {
+            "invalid_credentials": "ユーザー名またはパスワードが正しくありません。もう一度お試しください。",
+            "missing_credentials": "アカウントとパスワードを入力してください。",
+            "device_authorization_required": "このデバイスにはアクティベーションコードが必要です。コードを入力して認証してください。",
+            "activation_invalid": "アクティベーションコードが無効または期限切れです。サポートにお問い合わせください。",
+            "activation_consumed": "このアクティベーションコードは使用済みです。新しいコードについてサポートにお問い合わせください。",
+            "activation_expired": "このアクティベーションコードは期限切れです。新しいコードについてサポートにお問い合わせください。",
+            "activation_ticket_expired": "アクティベーション確認の有効期限が切れました。コードをもう一度入力してください。",
+            "activation_device_mismatch": "アクティベーション確認がこのデバイスと一致しません。コードをもう一度入力してください。",
+            "registration_disabled": "現在、登録は利用できません。サポートにお問い合わせください。",
+            "login_disabled": "現在、ログインは利用できません。後でもう一度お試しください。",
+            "password_policy": "パスワードは8〜20文字で入力してください。",
+            "invalid_email": "メールアドレスの形式が正しくありません。",
+            "email_taken": "このメールアドレスは登録済みです。ログインしてください。",
+            "verification_invalid": "メール認証コードが正しくないか期限切れです。再取得してください。",
+            "device_required": "このデバイスを識別できません。クライアントを再起動して再試行してください。",
+            "user_exists": "このアカウントは既に存在します。ログインしてください。",
+            "AUTH_INVALID": "ログインの有効期限が切れました。再度ログインしてください。",
+            "TIMEOUT": "リクエストがタイムアウトしました。後でもう一度お試しください。",
+            "RATE_LIMIT": "リクエストが多すぎます。しばらく待ってからお試しください。",
+            "PERMISSION": "このアカウントにはこの操作の権限がありません。",
+            "NETWORK": "ネットワーク接続に失敗しました。接続を確認してください。",
+            "CONFIG": "設定エラーです。クライアントを再起動して再試行してください。",
+            "UNKNOWN": "サービスを一時的に利用できません。後でもう一度お試しください。"
+        }
+    },
+    "authGate": {
+        "state": {
+            "ready": {
+                "title": "アカウント準備完了",
+                "description": "アカウント、デバイス認証、モデルサービスを利用できます。"
+            },
+            "checking": {
+                "title": "ログイン状態を確認中",
+                "description": "現在のアカウントとモデルサービス認証を確認しています。"
+            },
+            "loggedOut": {
+                "title": "続行するにはログインしてください",
+                "description": "このデバイスには有効なログイン情報がありません。ログイン後、ローカルのモデルサービスキーが更新されます。"
+            },
+            "loginExpired": {
+                "title": "ログインの有効期限が切れました",
+                "description": "現在のアカウント認証は無効です。続行するには再ログインしてください。"
+            },
+            "activationRequired": {
+                "title": "このデバイスの有効化が必要です",
+                "description": "モデルサービスを使用する前に、デバイスの有効化とログインを完了してください。"
+            },
+            "relayMissing": {
+                "title": "モデルサービスキーを利用できません",
+                "description": "アカウントはログイン済みですが、利用可能なモデルサービスキーがありません。再ログインまたは状態更新を行ってください。"
+            },
+            "unmanaged": {
+                "title": "管理アカウントは不要です",
+                "description": "このビルドでは管理アカウント認証が有効になっていません。"
+            },
+            "error": {
+                "title": "ログイン状態を確認できません",
+                "description": "ネットワーク接続を確認して再試行してください。",
+                "descriptionWithMessage": "ネットワーク接続を確認して再試行してください: {{message}}"
+            }
         }
     },
     "runtime": {

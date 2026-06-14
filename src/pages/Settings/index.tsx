@@ -3,7 +3,6 @@
  * Application configuration
  */
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   Sun,
   Moon,
@@ -15,6 +14,9 @@ import {
   Copy,
   FileText,
   LogOut,
+  KeyRound,
+  ShieldCheck,
+  UserCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -43,6 +45,14 @@ import { useTranslation } from 'react-i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { hostApiFetch } from '@/lib/host-api';
 import { cn } from '@/lib/utils';
+import {
+  getManagedAuthDisplayName,
+  getManagedAuthServiceName,
+  getManagedAuthStateKey,
+  getManagedAuthUserEmail,
+} from '@/lib/managed-auth';
+import { useManagedAuthStore } from '@/stores/managed-auth';
+import { useProviderStore } from '@/stores/providers';
 type ControlUiInfo = {
   url: string;
   token: string;
@@ -51,7 +61,6 @@ type ControlUiInfo = {
 
 export function Settings() {
   const { t } = useTranslation('settings');
-  const navigate = useNavigate();
   const {
     theme,
     setTheme,
@@ -82,6 +91,12 @@ export function Settings() {
   } = useSettingsStore();
 
   const { status: gatewayStatus, restart: restartGateway } = useGatewayStore();
+  const managedAuthStatus = useManagedAuthStore((state) => state.status);
+  const managedAuthLoading = useManagedAuthStore((state) => state.loading);
+  const managedAuthError = useManagedAuthStore((state) => state.error);
+  const refreshManagedAuthStatus = useManagedAuthStore((state) => state.refreshStatus);
+  const logoutManagedAuth = useManagedAuthStore((state) => state.logout);
+  const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
@@ -126,14 +141,20 @@ export function Settings() {
     }
   };
 
+  const handleManagedAuthRefresh = async () => {
+    try {
+      await refreshManagedAuthStatus();
+      await refreshProviderSnapshot();
+    } catch (error) {
+      toast.error(t('managedAuth.toast.verifyFailed', { message: toUserMessage(error) }));
+    }
+  };
+
   const handleLogout = async () => {
     try {
-      await hostApiFetch('/api/junfeiai/logout', {
-        method: 'POST',
-        body: JSON.stringify({}),
-      });
+      await logoutManagedAuth();
+      await refreshProviderSnapshot();
       toast.success(t('managedAuth.toast.loggedOut'));
-      navigate('/setup');
     } catch (error) {
       toast.error(t('managedAuth.toast.logoutFailed', { message: toUserMessage(error) }));
     }
@@ -297,6 +318,12 @@ export function Settings() {
   useEffect(() => {
     setWsDiagnosticEnabled(getGatewayWsDiagnosticEnabled());
   }, []);
+
+  useEffect(() => {
+    void refreshManagedAuthStatus().catch(() => {
+      // The account card renders the stored error and the auth gate blocks usage if needed.
+    });
+  }, [refreshManagedAuthStatus]);
 
   useEffect(() => {
     if (!devModeUnlocked) return;
@@ -516,6 +543,26 @@ export function Settings() {
     }
   };
 
+  const managedAuthStateKey = getManagedAuthStateKey(managedAuthStatus, {
+    loading: managedAuthLoading,
+    error: managedAuthError,
+  });
+  const managedAuthReady = managedAuthStateKey === 'ready' || managedAuthStateKey === 'unmanaged';
+  const managedAuthDisplayName = getManagedAuthDisplayName(
+    managedAuthStatus,
+    t('managedAuth.accountCard.unknownUser'),
+  );
+  const managedAuthEmail = getManagedAuthUserEmail(managedAuthStatus);
+  const managedAuthServiceName = getManagedAuthServiceName(managedAuthStatus) || t('managedAuth.brand');
+  const managedAuthStatusClassName = cn(
+    'rounded-full px-3 py-1 text-xs font-medium',
+    managedAuthReady
+      ? 'bg-green-500/10 text-green-700 dark:text-green-400'
+      : managedAuthStateKey === 'checking'
+        ? 'bg-blue-500/10 text-blue-700 dark:text-blue-400'
+        : 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
+  );
+
   return (
     <div data-testid="settings-page" className="flex flex-col -m-6 dark:bg-background h-[calc(100vh-2.5rem)] overflow-hidden">
       <div className="w-full max-w-5xl mx-auto flex flex-col h-full p-10 pt-16">
@@ -534,6 +581,106 @@ export function Settings() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto pr-2 pb-10 min-h-0 -mr-2 space-y-12">
+
+          {/* Account */}
+          <div data-testid="settings-managed-auth-section">
+            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h2 className="text-3xl font-serif text-foreground font-normal tracking-tight">
+                  {t('managedAuth.accountCard.title')}
+                </h2>
+                <p className="mt-2 text-meta text-muted-foreground">
+                  {t('managedAuth.accountCard.description')}
+                </p>
+              </div>
+              <span data-testid="settings-managed-auth-status" className={managedAuthStatusClassName}>
+                {t(`managedAuth.status.${managedAuthStateKey}`)}
+              </span>
+            </div>
+
+            <div className="rounded-2xl border border-black/10 bg-transparent p-5 dark:border-white/10">
+              <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex min-w-0 items-start gap-4">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-black/5 text-foreground dark:bg-white/10">
+                    <UserCircle className="h-6 w-6" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase text-muted-foreground">
+                      {t('managedAuth.accountCard.currentAccount')}
+                    </p>
+                    <p className="mt-1 truncate text-xl font-semibold text-foreground">
+                      {managedAuthDisplayName}
+                    </p>
+                    {managedAuthEmail && managedAuthEmail !== managedAuthDisplayName && (
+                      <p className="mt-1 truncate text-meta text-muted-foreground">{managedAuthEmail}</p>
+                    )}
+                    {managedAuthError && (
+                      <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">
+                        {managedAuthError}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleManagedAuthRefresh()}
+                    disabled={managedAuthLoading}
+                    className="rounded-full h-10 px-5 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <RefreshCw className={cn('h-4 w-4 mr-2', managedAuthLoading && 'animate-spin')} />
+                    {t('managedAuth.actions.refreshStatus')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleLogout()}
+                    disabled={managedAuthLoading || !managedAuthStatus?.hasAuthToken}
+                    className="rounded-full h-10 px-5 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <LogOut className="h-4 w-4 mr-2" />
+                    {t('managedAuth.actions.logout')}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div className="rounded-xl bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2 text-meta font-semibold text-foreground">
+                    <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                    {t('managedAuth.accountCard.service')}
+                  </div>
+                  <p className="mt-2 truncate text-meta text-muted-foreground">{managedAuthServiceName}</p>
+                </div>
+                <div className="rounded-xl bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2 text-meta font-semibold text-foreground">
+                    <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                    {t('managedAuth.accountCard.device')}
+                  </div>
+                  <p className="mt-2 text-meta text-muted-foreground">
+                    {managedAuthStatus?.deviceActivated
+                      ? t('managedAuth.accountCard.deviceActivated')
+                      : t('managedAuth.accountCard.deviceInactive')}
+                  </p>
+                </div>
+                <div className="rounded-xl bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2 text-meta font-semibold text-foreground">
+                    <KeyRound className="h-4 w-4 text-muted-foreground" />
+                    {t('managedAuth.accountCard.modelService')}
+                  </div>
+                  <p className="mt-2 text-meta text-muted-foreground">
+                    {managedAuthStatus?.hasRelayToken
+                      ? t('managedAuth.accountCard.modelServiceReady')
+                      : t('managedAuth.accountCard.modelServiceMissing')}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <Separator className="bg-black/5 dark:bg-white/5" />
 
           {/* Appearance */}
           <div>
@@ -1141,25 +1288,6 @@ export function Settings() {
                 {factoryResetting
                   ? t('factoryReset.running', { defaultValue: '正在恢复' })
                   : t('factoryReset.button', { defaultValue: '恢复出厂设置' })}
-              </Button>
-            </div>
-          </div>
-
-          <Separator className="bg-black/5 dark:bg-white/5" />
-
-          {/* Account */}
-          <div>
-            <h2 className="text-3xl font-serif text-foreground mb-6 font-normal tracking-tight">
-              {t('managedAuth.actions.account')}
-            </h2>
-            <div>
-              <Button
-                variant="outline"
-                className="rounded-full h-10 px-5 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5"
-                onClick={() => void handleLogout()}
-              >
-                <LogOut className="h-4 w-4 mr-2" />
-                {t('managedAuth.actions.logout')}
               </Button>
             </div>
           </div>

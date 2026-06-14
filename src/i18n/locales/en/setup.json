@@ -70,8 +70,10 @@
             "sendCode": "Send code",
             "sendCodeCountdown": "{{seconds}}s",
             "refresh": "Refresh",
+            "logout": "Log out",
             "registerAndActivate": "Register and activate",
-            "loginAndActivate": "Login and activate"
+            "loginAndActivate": "Login and activate",
+            "loginAndAuthorize": "Login and authorize device"
         },
         "toast": {
             "statusFailed": "Status check failed: {{message}}",
@@ -89,6 +91,68 @@
             "loginFailed": "Login failed: {{message}}",
             "loggedOut": "Logged out",
             "logoutFailed": "Logout failed: {{message}}"
+        },
+        "errors": {
+            "invalid_credentials": "Username or password is incorrect. Please try again.",
+            "missing_credentials": "Please enter account and password.",
+            "device_authorization_required": "This device needs an activation code. Enter the code to authorize this device.",
+            "activation_invalid": "The activation code is invalid or expired. Please contact support for a new one.",
+            "activation_consumed": "This activation code has already been used. Please contact support for a new one.",
+            "activation_expired": "This activation code has expired. Please contact support for a new one.",
+            "activation_ticket_expired": "Activation verification expired. Please enter the activation code again.",
+            "activation_device_mismatch": "The activation verification does not match this device. Please enter the activation code again.",
+            "registration_disabled": "Registration is currently unavailable. Please contact support.",
+            "login_disabled": "Login is currently unavailable. Please try again later or contact support.",
+            "password_policy": "Password length must be 8-20 characters.",
+            "invalid_email": "Email format is invalid. Please check and try again.",
+            "email_taken": "This email is already registered. Please log in instead.",
+            "verification_invalid": "Email verification code is incorrect or expired. Please request a new one.",
+            "device_required": "Unable to identify this device. Restart the client and try again.",
+            "user_exists": "This account already exists. Please log in instead.",
+            "AUTH_INVALID": "Login has expired. Please log in again.",
+            "TIMEOUT": "Request timed out. Please try again later.",
+            "RATE_LIMIT": "Too many requests. Please wait and try again.",
+            "PERMISSION": "This account does not have permission for this action.",
+            "NETWORK": "Network connection failed. Check your connection and try again.",
+            "CONFIG": "Configuration error. Restart the client and try again.",
+            "UNKNOWN": "Service is temporarily unavailable. Please try again later."
+        }
+    },
+    "authGate": {
+        "state": {
+            "ready": {
+                "title": "Account ready",
+                "description": "Account, device authorization, and model service are available."
+            },
+            "checking": {
+                "title": "Verifying sign-in status",
+                "description": "Checking the current account and model service authorization."
+            },
+            "loggedOut": {
+                "title": "Sign in to continue",
+                "description": "This device has no valid sign-in session. Signing in will refresh the local model service key."
+            },
+            "loginExpired": {
+                "title": "Sign-in expired",
+                "description": "The current account authorization is no longer valid. Sign in again to continue."
+            },
+            "activationRequired": {
+                "title": "Activate this device",
+                "description": "Finish device activation and sign in before using the model service."
+            },
+            "relayMissing": {
+                "title": "Model service key unavailable",
+                "description": "The account is signed in, but no usable model service key is available. Sign in again or refresh status."
+            },
+            "unmanaged": {
+                "title": "Managed account not required",
+                "description": "Managed account authorization is not enabled in this build."
+            },
+            "error": {
+                "title": "Unable to verify sign-in",
+                "description": "Check your network connection and try again.",
+                "descriptionWithMessage": "Check your network connection and try again: {{message}}"
+            }
         }
     },
     "runtime": {

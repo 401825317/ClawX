@@ -127,13 +127,34 @@
     }
   },
   "managedAuth": {
+    "brand": "Сервисный аккаунт",
     "status": {
       "loggedIn": "Вход выполнен",
       "loginExpired": "Сессия истекла",
       "runtimeActive": "Рантайм активен",
       "activationVerified": "Код активации подтверждён",
       "activationInvalid": "Код активации недействителен",
-      "offlineGrace": "офлайн-льгота {{value}}"
+      "offlineGrace": "офлайн-льгота {{value}}",
+      "ready": "Вход выполнен",
+      "checking": "Проверка",
+      "loggedOut": "Выход выполнен",
+      "activationRequired": "Нужна активация",
+      "relayMissing": "Сервис моделей не готов",
+      "unmanaged": "Вход не требуется",
+      "error": "Ошибка статуса"
+    },
+    "accountCard": {
+      "title": "Аккаунт",
+      "description": "Текущий аккаунт, авторизация устройства и статус ключа сервиса моделей.",
+      "currentAccount": "Текущий аккаунт",
+      "unknownUser": "Нет данных аккаунта",
+      "service": "Сервис",
+      "device": "Авторизация устройства",
+      "deviceActivated": "Активировано",
+      "deviceInactive": "Не активировано",
+      "modelService": "Сервис моделей",
+      "modelServiceReady": "Ключ готов",
+      "modelServiceMissing": "Ключ недоступен"
     },
     "fields": {
       "email": "Email",
@@ -149,6 +170,7 @@
       "optional": "Необязательно"
     },
     "actions": {
+      "account": "Аккаунт",
       "refreshStatus": "Обновить статус JunFeiAI",
       "verify": "Проверить",
       "logout": "Выйти из JunFeiAI",

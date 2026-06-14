@@ -134,6 +134,31 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(gateway.debouncedRestart).not.toHaveBeenCalled();
   });
 
+  it('writes the current managed relay key into OpenClaw provider config', async () => {
+    mocks.getApiKey.mockResolvedValue('relay-valid-key');
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    await syncSavedProviderToRuntime(createProvider({
+      id: 'lingzhiwuxian',
+      type: 'lingzhiwuxian',
+      model: 'qwen-latest',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    }), undefined);
+
+    expect(mocks.syncProviderConfigToOpenClaw).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      'qwen-latest',
+      expect.objectContaining({
+        apiKey: 'relay-valid-key',
+        apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      }),
+    );
+  });
+
   it('uses debouncedRestart after deleting provider config', async () => {
     const gateway = createGateway('running');
     await syncDeletedProviderToRuntime(createProvider(), 'moonshot', gateway as GatewayManager);
@@ -176,6 +201,34 @@ describe('provider-runtime-sync refresh strategy', () => {
 
     expect(gateway.debouncedReload).toHaveBeenCalledTimes(1);
     expect(gateway.debouncedRestart).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current managed relay key when switching the default provider', async () => {
+    mocks.getApiKey.mockResolvedValue('relay-valid-key');
+    mocks.getProvider.mockResolvedValue(createProvider({
+      id: 'lingzhiwuxian',
+      type: 'lingzhiwuxian',
+      model: 'qwen-latest',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    }));
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    const gateway = createGateway('running');
+    await syncDefaultProviderToRuntime('lingzhiwuxian', gateway as GatewayManager);
+
+    expect(mocks.setOpenClawDefaultModelWithOverride).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      'lingzhiwuxian/qwen-latest',
+      expect.objectContaining({
+        apiKey: 'relay-valid-key',
+        apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      }),
+      expect.any(Array),
+    );
   });
 
   it('skips refresh after switching default provider when gateway is stopped', async () => {
