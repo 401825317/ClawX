@@ -24,18 +24,33 @@ export function getJunFeiAIDefaultBaseUrl(): string {
   return `${getJunFeiAIDefaultOrigin()}/v1`;
 }
 
+export function isJunFeiAIDevOverrideEnabled(): boolean {
+  return Boolean(process.env.VITE_DEV_SERVER_URL);
+}
+
+function getDevEnvOverride(...keys: string[]): string {
+  if (!isJunFeiAIDevOverrideEnabled()) {
+    return '';
+  }
+  for (const key of keys) {
+    const value = process.env[key]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return '';
+}
+
 export function getJunFeiAIBackendOrigin(): string {
   return normalizeOrigin(
-    process.env.CLAWX_JUNFEIAI_BACKEND_ORIGIN
-      || process.env.CLAWX_JUNFEIAI_ORIGIN
+    getDevEnvOverride('CLAWX_JUNFEIAI_BACKEND_ORIGIN', 'CLAWX_JUNFEIAI_ORIGIN')
       || getJunFeiAIDefaultOrigin(),
   );
 }
 
 export function getJunFeiAIProviderBaseUrl(): string {
   return normalizeProviderBaseUrl(
-    process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL
-      || process.env.CLAWX_JUNFEIAI_BASE_URL
+    getDevEnvOverride('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', 'CLAWX_JUNFEIAI_BASE_URL')
       || `${getJunFeiAIBackendOrigin()}/v1`,
   );
 }

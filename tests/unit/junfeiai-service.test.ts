@@ -197,6 +197,7 @@ describe('JunFeiAI managed provider service', () => {
   });
 
   it('supports separate auth backend and provider base URL in dev mode', async () => {
+    vi.stubEnv('VITE_DEV_SERVER_URL', 'http://127.0.0.1:5173');
     vi.stubEnv('CLAWX_JUNFEIAI_BACKEND_ORIGIN', 'http://127.0.0.1:8080');
     vi.stubEnv('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', 'http://127.0.0.1:18080/v1');
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
@@ -254,6 +255,8 @@ describe('JunFeiAI managed provider service', () => {
   });
 
   it('defaults to the production backend outside Vite development', async () => {
+    vi.stubEnv('CLAWX_JUNFEIAI_BACKEND_ORIGIN', 'http://127.0.0.1:8080');
+    vi.stubEnv('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', 'http://127.0.0.1:18080/v1');
     vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
       data: {
         service: { displayName: 'JunFeiAI Production' },

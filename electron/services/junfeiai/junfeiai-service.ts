@@ -14,6 +14,7 @@ import {
   getJunFeiAIOrigin,
   getJunFeiAIProviderBaseUrl,
   isJunFeiAIManagedDistribution,
+  isJunFeiAIDevOverrideEnabled,
   JUNFEIAI_AUTH_ACCOUNT_ID,
   JUNFEIAI_DEFAULT_API_PROTOCOL,
   getJunFeiAIDefaultBaseUrl,
@@ -386,6 +387,9 @@ function normalizeBaseUrl(raw?: string): string {
 }
 
 function getLocalProviderBaseUrlOverride(): string {
+  if (!isJunFeiAIDevOverrideEnabled()) {
+    return '';
+  }
   return (
     process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL
     || process.env.CLAWX_JUNFEIAI_BASE_URL

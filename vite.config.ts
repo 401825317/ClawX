@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
@@ -39,60 +39,67 @@ function isMainProcessExternal(id: string): boolean {
 }
 
 // https://vitejs.dev/config/
-export default defineConfig({
-  // Required for Electron: all asset URLs must be relative because the renderer
-  // loads via file:// in production. vite-plugin-electron-renderer sets this
-  // automatically, but we declare it explicitly so the intent is clear and the
-  // build remains correct even if plugin order ever changes.
-  base: './',
-  plugins: [
-    react(),
-    electron([
-      {
-        // Main process entry file
-        entry: 'electron/main/index.ts',
-        onstart(options) {
-          options.startup();
-        },
-        vite: {
-          build: {
-            outDir: 'dist-electron/main',
-            rollupOptions: {
-              external: isMainProcessExternal,
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), ['VITE_', 'CLAWX_']);
+  for (const [key, value] of Object.entries(env)) {
+    process.env[key] ??= value;
+  }
+
+  return {
+    // Required for Electron: all asset URLs must be relative because the renderer
+    // loads via file:// in production. vite-plugin-electron-renderer sets this
+    // automatically, but we declare it explicitly so the intent is clear and the
+    // build remains correct even if plugin order ever changes.
+    base: './',
+    plugins: [
+      react(),
+      electron([
+        {
+          // Main process entry file
+          entry: 'electron/main/index.ts',
+          onstart(options) {
+            options.startup();
+          },
+          vite: {
+            build: {
+              outDir: 'dist-electron/main',
+              rollupOptions: {
+                external: isMainProcessExternal,
+              },
             },
           },
         },
-      },
-      {
-        // Preload scripts entry file
-        entry: 'electron/preload/index.ts',
-        onstart(options) {
-          options.reload();
-        },
-        vite: {
-          build: {
-            outDir: 'dist-electron/preload',
-            rollupOptions: {
-              external: ['electron'],
+        {
+          // Preload scripts entry file
+          entry: 'electron/preload/index.ts',
+          onstart(options) {
+            options.reload();
+          },
+          vite: {
+            build: {
+              outDir: 'dist-electron/preload',
+              rollupOptions: {
+                external: ['electron'],
+              },
             },
           },
         },
+      ]),
+      renderer(),
+    ],
+    resolve: {
+      alias: {
+        '@': resolve(__dirname, 'src'),
+        '@electron': resolve(__dirname, 'electron'),
       },
-    ]),
-    renderer(),
-  ],
-  resolve: {
-    alias: {
-      '@': resolve(__dirname, 'src'),
-      '@electron': resolve(__dirname, 'electron'),
+      dedupe: ['react', 'react-dom', 'react-i18next', 'zustand', 'sonner', 'lucide-react'],
     },
-    dedupe: ['react', 'react-dom', 'react-i18next', 'zustand', 'sonner', 'lucide-react'],
-  },
-  server: {
-    port: Number(process.env.VITE_DEV_SERVER_PORT || 5173),
-  },
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-  },
+    server: {
+      port: Number(process.env.VITE_DEV_SERVER_PORT || 5173),
+    },
+    build: {
+      outDir: 'dist',
+      emptyOutDir: true,
+    },
+  };
 });
