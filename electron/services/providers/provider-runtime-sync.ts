@@ -78,6 +78,25 @@ function shouldUseExplicitDefaultOverride(config: ProviderConfig, runtimeProvide
   return Boolean(config.baseUrl || config.apiProtocol || runtimeProviderKey !== config.type);
 }
 
+function getRuntimeApiKeyEnv(config: ProviderConfig, apiKeyEnv?: string): string | undefined {
+  return config.type === JUNFEIAI_PROVIDER_ID ? undefined : apiKeyEnv;
+}
+
+function normalizeRuntimeApiKey(
+  config: ProviderConfig,
+  apiKey: string | null | undefined,
+  apiKeyEnv?: string,
+): string | null {
+  const trimmed = apiKey?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (config.type === JUNFEIAI_PROVIDER_ID && apiKeyEnv && trimmed === apiKeyEnv) {
+    return null;
+  }
+  return trimmed;
+}
+
 export function getOpenClawProviderKey(type: string, providerId: string): string {
   if (isUnregisteredProviderType(type)) {
     // If the providerId is already a runtime key (e.g. re-seeded from openclaw.json
@@ -207,13 +226,29 @@ export async function syncProviderApiKeyToRuntime(
   apiKey: string,
 ): Promise<void> {
   const ock = getOpenClawProviderKey(providerType, providerId);
-  await saveProviderKeyToOpenClaw(ock, apiKey);
+  const runtimeApiKey = normalizeRuntimeApiKey(
+    {
+      id: providerId,
+      name: providerId,
+      type: providerType as ProviderConfig['type'],
+      enabled: true,
+      createdAt: '',
+      updatedAt: '',
+    },
+    apiKey,
+    getProviderConfig(providerType)?.apiKeyEnv,
+  );
+  if (runtimeApiKey) {
+    await saveProviderKeyToOpenClaw(ock, runtimeApiKey);
+  } else {
+    await removeProviderKeyFromOpenClaw(ock);
+  }
 }
 
 export async function syncAllProviderAuthToRuntime(): Promise<void> {
   const accounts = await listProviderAccounts();
   for (const account of accounts) {
-    const runtimeProviderKey = await resolveRuntimeProviderKey({
+    const config: ProviderConfig = {
       id: account.id,
       name: account.label,
       type: account.vendorId,
@@ -224,7 +259,9 @@ export async function syncAllProviderAuthToRuntime(): Promise<void> {
       enabled: account.enabled,
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,
-    });
+    };
+    const runtimeProviderKey = await resolveRuntimeProviderKey(config);
+    const apiKeyEnv = getProviderConfig(config.type)?.apiKeyEnv;
 
     const secret = await getProviderSecret(account.id);
     if (!secret) {
@@ -232,12 +269,22 @@ export async function syncAllProviderAuthToRuntime(): Promise<void> {
     }
 
     if (secret.type === 'api_key') {
-      await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
+      const runtimeApiKey = normalizeRuntimeApiKey(config, secret.apiKey, apiKeyEnv);
+      if (runtimeApiKey) {
+        await saveProviderKeyToOpenClaw(runtimeProviderKey, runtimeApiKey);
+      } else {
+        await removeProviderKeyFromOpenClaw(runtimeProviderKey);
+      }
       continue;
     }
 
     if (secret.type === 'local' && secret.apiKey) {
-      await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
+      const runtimeApiKey = normalizeRuntimeApiKey(config, secret.apiKey, apiKeyEnv);
+      if (runtimeApiKey) {
+        await saveProviderKeyToOpenClaw(runtimeProviderKey, runtimeApiKey);
+      } else {
+        await removeProviderKeyFromOpenClaw(runtimeProviderKey);
+      }
       continue;
     }
 
@@ -258,10 +305,11 @@ async function syncProviderSecretToRuntime(
   runtimeProviderKey: string,
   apiKey: string | undefined,
 ): Promise<void> {
+  const apiKeyEnv = getProviderConfig(config.type)?.apiKeyEnv;
   if (apiKey !== undefined) {
-    const trimmedKey = apiKey.trim();
-    if (trimmedKey) {
-      await saveProviderKeyToOpenClaw(runtimeProviderKey, trimmedKey);
+    const runtimeApiKey = normalizeRuntimeApiKey(config, apiKey, apiKeyEnv);
+    if (runtimeApiKey) {
+      await saveProviderKeyToOpenClaw(runtimeProviderKey, runtimeApiKey);
     } else {
       // An explicit empty string means the caller wants to clear the key.
       // Mirror that intent into OpenClaw auth-profiles so the gateway no
@@ -274,7 +322,12 @@ async function syncProviderSecretToRuntime(
 
   const secret = await getProviderSecret(config.id);
   if (secret?.type === 'api_key') {
-    await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
+    const runtimeApiKey = normalizeRuntimeApiKey(config, secret.apiKey, apiKeyEnv);
+    if (runtimeApiKey) {
+      await saveProviderKeyToOpenClaw(runtimeProviderKey, runtimeApiKey);
+    } else {
+      await removeProviderKeyFromOpenClaw(runtimeProviderKey);
+    }
     return;
   }
 
@@ -290,7 +343,12 @@ async function syncProviderSecretToRuntime(
   }
 
   if (secret?.type === 'local' && secret.apiKey) {
-    await saveProviderKeyToOpenClaw(runtimeProviderKey, secret.apiKey);
+    const runtimeApiKey = normalizeRuntimeApiKey(config, secret.apiKey, apiKeyEnv);
+    if (runtimeApiKey) {
+      await saveProviderKeyToOpenClaw(runtimeProviderKey, runtimeApiKey);
+    } else {
+      await removeProviderKeyFromOpenClaw(runtimeProviderKey);
+    }
   }
 }
 
@@ -315,12 +373,16 @@ async function syncRuntimeProviderConfig(
   apiKey: string | undefined,
 ): Promise<void> {
   const accountApiKey = config.type === JUNFEIAI_PROVIDER_ID
-    ? (apiKey !== undefined ? (apiKey.trim() || null) : await getApiKey(config.id))
+    ? normalizeRuntimeApiKey(
+      config,
+      apiKey !== undefined ? apiKey : await getApiKey(config.id),
+      context.meta?.apiKeyEnv,
+    )
     : null;
   await syncProviderConfigToOpenClaw(context.runtimeProviderKey, config.model, {
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
     api: context.api,
-    apiKeyEnv: context.meta?.apiKeyEnv,
+    apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
     apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (accountApiKey || null) : undefined,
     headers: config.headers ?? context.meta?.headers,
   });
@@ -430,7 +492,7 @@ async function buildAgentModelProviderEntry(
 
   let apiKey: string | undefined;
   let authHeader: boolean | undefined;
-  const accountApiKey = (await getApiKey(config.id)) || undefined;
+  const accountApiKey = normalizeRuntimeApiKey(config, await getApiKey(config.id), meta?.apiKeyEnv) || undefined;
 
   if (isUnregisteredProviderType(config.type)) {
     apiKey = accountApiKey;
@@ -532,11 +594,15 @@ export async function syncUpdatedProviderToRuntime(
     const modelOverride = config.model ? `${ock}/${config.model}` : undefined;
     if (!isUnregisteredProviderType(config.type)) {
       if (shouldUseExplicitDefaultOverride(config, ock)) {
-        const runtimeApiKey = apiKey !== undefined ? (apiKey.trim() || null) : await getApiKey(config.id);
+        const runtimeApiKey = normalizeRuntimeApiKey(
+          config,
+          apiKey !== undefined ? apiKey : await getApiKey(config.id),
+          context.meta?.apiKeyEnv,
+        );
         await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
           baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
           api: context.api,
-          apiKeyEnv: context.meta?.apiKeyEnv,
+          apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
           apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (runtimeApiKey || null) : undefined,
           headers: config.headers ?? context.meta?.headers,
         }, fallbackModels);
@@ -649,7 +715,8 @@ export async function syncDefaultProviderToRuntime(
   }
 
   const ock = await resolveRuntimeProviderKey(provider);
-  const providerKey = await getApiKey(providerId);
+  const providerMeta = getProviderConfig(provider.type);
+  const providerKey = normalizeRuntimeApiKey(provider, await getApiKey(providerId), providerMeta?.apiKeyEnv);
   const fallbackModels = await getProviderFallbackModelRefs(provider);
   const oauthTypes = ['minimax-portal', 'minimax-portal-cn'];
   const browserOAuthRuntimeProvider = await getBrowserOAuthRuntimeProvider(provider);
@@ -670,13 +737,13 @@ export async function syncDefaultProviderToRuntime(
       await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
         baseUrl: normalizeProviderBaseUrl(
           provider,
-          provider.baseUrl || getProviderConfig(provider.type)?.baseUrl,
-          provider.apiProtocol || getProviderConfig(provider.type)?.api,
+          provider.baseUrl || providerMeta?.baseUrl,
+          provider.apiProtocol || providerMeta?.api,
         ),
-        api: provider.apiProtocol || getProviderConfig(provider.type)?.api,
-        apiKeyEnv: getProviderConfig(provider.type)?.apiKeyEnv,
+        api: provider.apiProtocol || providerMeta?.api,
+        apiKeyEnv: getRuntimeApiKeyEnv(provider, providerMeta?.apiKeyEnv),
         apiKey: provider.type === JUNFEIAI_PROVIDER_ID ? (providerKey || null) : undefined,
-        headers: provider.headers ?? getProviderConfig(provider.type)?.headers,
+        headers: provider.headers ?? providerMeta?.headers,
       }, fallbackModels);
     } else {
       await setOpenClawDefaultModel(ock, modelOverride, fallbackModels);

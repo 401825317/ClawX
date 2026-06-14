@@ -13,6 +13,15 @@ type EncryptedProviderSecret = {
   ciphertext: string;
 };
 
+const LOCAL_FILE_SECRET_ACCOUNT_IDS = new Set([
+  'lingzhiwuxian',
+  'lingzhiwuxian-auth',
+]);
+
+function usesLocalFileSecretStorage(accountId: string): boolean {
+  return LOCAL_FILE_SECRET_ACCOUNT_IDS.has(accountId);
+}
+
 function canEncryptSecrets(): boolean {
   try {
     return Boolean(safeStorage?.isEncryptionAvailable?.());
@@ -60,15 +69,29 @@ export class ElectronStoreSecretStore implements SecretStore {
   async get(accountId: string): Promise<ProviderSecret | null> {
     const store = await getClawXProviderStore();
     const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
-    const encryptedSecret = decryptSecret(encryptedSecrets[accountId]);
-    if (encryptedSecret) {
-      return encryptedSecret;
-    }
-
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
     const secret = secrets[accountId];
+    if (usesLocalFileSecretStorage(accountId)) {
+      if (secret) {
+        return secret;
+      }
+      if (encryptedSecrets[accountId]) {
+        delete encryptedSecrets[accountId];
+        store.set('providerSecretsV2', encryptedSecrets);
+      }
+    } else {
+      const encryptedSecret = decryptSecret(encryptedSecrets[accountId]);
+      if (encryptedSecret) {
+        return encryptedSecret;
+      }
+
+      if (secret) {
+        await this.set(secret);
+        return secret;
+      }
+    }
+
     if (secret) {
-      await this.set(secret);
       return secret;
     }
 
@@ -89,16 +112,21 @@ export class ElectronStoreSecretStore implements SecretStore {
 
   async set(secret: ProviderSecret): Promise<void> {
     const store = await getClawXProviderStore();
-    const encryptedSecret = encryptSecret(secret);
     const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
 
-    if (encryptedSecret) {
-      encryptedSecrets[secret.accountId] = encryptedSecret;
-      delete secrets[secret.accountId];
-    } else {
+    if (usesLocalFileSecretStorage(secret.accountId)) {
       secrets[secret.accountId] = secret;
       delete encryptedSecrets[secret.accountId];
+    } else {
+      const encryptedSecret = encryptSecret(secret);
+      if (encryptedSecret) {
+        encryptedSecrets[secret.accountId] = encryptedSecret;
+        delete secrets[secret.accountId];
+      } else {
+        secrets[secret.accountId] = secret;
+        delete encryptedSecrets[secret.accountId];
+      }
     }
 
     store.set('providerSecretsV2', encryptedSecrets);

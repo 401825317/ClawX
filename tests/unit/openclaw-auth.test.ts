@@ -1005,6 +1005,94 @@ describe('syncProviderConfigToOpenClaw', () => {
     expect(load).toEqual(['/tmp/custom-plugin.js']);
     expect(moonshot.baseUrl).toBe('https://api.moonshot.cn/v1');
   });
+
+  it('removes the managed provider env placeholder when no relay token is available', async () => {
+    await writeOpenClawJson({
+      models: {
+        providers: {
+          lingzhiwuxian: {
+            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            api: 'openai-completions',
+            apiKey: 'LINGZHIWUXIAN_API_KEY',
+            models: [{ id: 'qwen-latest', name: 'qwen-latest' }],
+          },
+        },
+      },
+    });
+
+    const { syncProviderConfigToOpenClaw } = await import('@electron/utils/openclaw-auth');
+
+    await syncProviderConfigToOpenClaw('lingzhiwuxian', 'qwen-latest', {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      apiKey: null,
+    });
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+    const entry = providers.lingzhiwuxian as Record<string, unknown>;
+
+    expect(entry.apiKey).toBeUndefined();
+  });
+
+  it('writes the managed provider relay token instead of the env placeholder', async () => {
+    await writeOpenClawJson({
+      models: { providers: {} },
+    });
+
+    const { syncProviderConfigToOpenClaw } = await import('@electron/utils/openclaw-auth');
+
+    await syncProviderConfigToOpenClaw('lingzhiwuxian', 'qwen-latest', {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      apiKey: 'relay-valid-key',
+    });
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+    const entry = providers.lingzhiwuxian as Record<string, unknown>;
+
+    expect(entry.apiKey).toBe('relay-valid-key');
+  });
+
+  it('clears the managed provider env placeholder during default model override sync', async () => {
+    await writeOpenClawJson({
+      agents: {
+        defaults: {
+          model: {
+            primary: 'lingzhiwuxian/qwen-latest',
+            fallbacks: [],
+          },
+        },
+      },
+      models: {
+        providers: {
+          lingzhiwuxian: {
+            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            api: 'openai-completions',
+            apiKey: 'LINGZHIWUXIAN_API_KEY',
+            models: [{ id: 'qwen-latest', name: 'qwen-latest' }],
+          },
+        },
+      },
+    });
+
+    const { setOpenClawDefaultModelWithOverride } = await import('@electron/utils/openclaw-auth');
+
+    await setOpenClawDefaultModelWithOverride('lingzhiwuxian', 'lingzhiwuxian/qwen-latest', {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-completions',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      apiKey: null,
+    });
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+    const entry = providers.lingzhiwuxian as Record<string, unknown>;
+
+    expect(entry.apiKey).toBeUndefined();
+  });
 });
 
 describe('auth-backed provider discovery', () => {

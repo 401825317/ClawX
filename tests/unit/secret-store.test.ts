@@ -20,6 +20,7 @@ vi.mock('electron', () => ({
 
 describe('ElectronStoreSecretStore', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     memoryStore.clear();
     memoryStore.set('apiKeys', {});
     memoryStore.set('providerSecrets', {});
@@ -42,6 +43,26 @@ describe('ElectronStoreSecretStore', () => {
     const encrypted = memoryStore.get('providerSecretsV2') as Record<string, { ciphertext: string }>;
     expect(encrypted.junfeiai.ciphertext).not.toContain('relay-token');
     await expect(store.get('junfeiai')).resolves.toEqual(secret);
+  });
+
+  it('stores managed Lingzhi Wuxian secrets in the local provider file without safeStorage', async () => {
+    const { safeStorage } = await import('electron');
+    const { ElectronStoreSecretStore } = await import('@electron/services/secrets/secret-store');
+    const store = new ElectronStoreSecretStore();
+    const secret: ProviderSecret = {
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'relay-token',
+      ownerUserId: '7',
+    };
+
+    await store.set(secret);
+
+    expect(safeStorage.encryptString).not.toHaveBeenCalled();
+    expect(memoryStore.get('providerSecrets')).toEqual({ lingzhiwuxian: secret });
+    expect(memoryStore.get('providerSecretsV2')).toEqual({});
+    await expect(store.get('lingzhiwuxian')).resolves.toEqual(secret);
+    expect(safeStorage.decryptString).not.toHaveBeenCalled();
   });
 
   it('migrates legacy apiKeys to the encrypted secret store when read', async () => {

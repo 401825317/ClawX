@@ -38,6 +38,7 @@ import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
+import { JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 
 const AUTH_STORE_VERSION = 1;
@@ -1539,6 +1540,8 @@ function upsertOpenClawProviderEntry(
     } else {
       delete nextProvider.apiKey;
     }
+  } else if (provider === JUNFEIAI_PROVIDER_ID) {
+    delete nextProvider.apiKey;
   } else if (options.apiKeyEnv) {
     nextProvider.apiKey = options.apiKeyEnv;
   }
@@ -1881,6 +1884,7 @@ export async function setOpenClawDefaultModelWithOverride(
         baseUrl: override.baseUrl,
         api: override.api,
         apiKeyEnv: override.apiKeyEnv,
+        apiKey: override.apiKey,
         headers: override.headers,
         authHeader: override.authHeader,
         modelIds: [modelId, ...fallbackModelIds],

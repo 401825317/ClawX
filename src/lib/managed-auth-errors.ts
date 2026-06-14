@@ -16,6 +16,7 @@ const BACKEND_CODE_TO_KEY: Record<string, string> = {
   registration_disabled: 'registration_disabled',
   login_disabled: 'login_disabled',
   password_policy: 'password_policy',
+  invalid_username: 'invalid_username',
   invalid_email: 'invalid_email',
   email_taken: 'email_taken',
   verification_invalid: 'verification_invalid',
@@ -88,6 +89,9 @@ function inferManagedAuthErrorKey(message: string): string {
   }
   if (lower.includes('user_exists') || message.includes('用户已存在')) {
     return 'user_exists';
+  }
+  if (lower.includes('invalid_username') || message.includes('用户名格式错误')) {
+    return 'invalid_username';
   }
   if (lower.includes('timeout') || lower.includes('timed out')) {
     return 'TIMEOUT';

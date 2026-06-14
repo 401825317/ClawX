@@ -154,9 +154,36 @@ describe('provider-runtime-sync refresh strategy', () => {
       'qwen-latest',
       expect.objectContaining({
         apiKey: 'relay-valid-key',
-        apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
       }),
     );
+    const options = mocks.syncProviderConfigToOpenClaw.mock.calls.at(-1)?.[2] as Record<string, unknown>;
+    expect(options.apiKeyEnv).toBeUndefined();
+  });
+
+  it('clears managed provider inline key without writing the env placeholder when relay key is missing', async () => {
+    mocks.getApiKey.mockResolvedValue(null);
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    await syncSavedProviderToRuntime(createProvider({
+      id: 'lingzhiwuxian',
+      type: 'lingzhiwuxian',
+      model: 'qwen-latest',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    }), undefined);
+
+    expect(mocks.syncProviderConfigToOpenClaw).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      'qwen-latest',
+      expect.objectContaining({
+        apiKey: null,
+      }),
+    );
+    const options = mocks.syncProviderConfigToOpenClaw.mock.calls.at(-1)?.[2] as Record<string, unknown>;
+    expect(options.apiKeyEnv).toBeUndefined();
   });
 
   it('uses debouncedRestart after deleting provider config', async () => {
@@ -225,10 +252,11 @@ describe('provider-runtime-sync refresh strategy', () => {
       'lingzhiwuxian/qwen-latest',
       expect.objectContaining({
         apiKey: 'relay-valid-key',
-        apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
       }),
       expect.any(Array),
     );
+    const options = mocks.setOpenClawDefaultModelWithOverride.mock.calls.at(-1)?.[2] as Record<string, unknown>;
+    expect(options.apiKeyEnv).toBeUndefined();
   });
 
   it('skips refresh after switching default provider when gateway is stopped', async () => {
