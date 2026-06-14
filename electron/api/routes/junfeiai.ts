@@ -6,6 +6,7 @@ import {
   createJunFeiAITopupOrder,
   ensureJunFeiAIProviderSeeded,
   getJunFeiAITopupOrderStatus,
+  getJunFeiAITopupOrders,
   getJunFeiAITopupOverview,
   listJunFeiAIModels,
   loginJunFeiAI,
@@ -64,6 +65,14 @@ export async function handleJunFeIAIRoutes(
 
   if (url.pathname === '/api/junfeiai/topup/overview' && req.method === 'GET') {
     sendJson(res, 200, await getJunFeiAITopupOverview());
+    return true;
+  }
+
+  if (url.pathname === '/api/junfeiai/topup/orders' && req.method === 'GET') {
+    sendJson(res, 200, await getJunFeiAITopupOrders({
+      page: url.searchParams.get('p') ?? url.searchParams.get('page') ?? 1,
+      pageSize: url.searchParams.get('page_size') ?? url.searchParams.get('pageSize') ?? 20,
+    }));
     return true;
   }
 

@@ -155,6 +155,11 @@ export interface JunFeiAITopupOrderStatusPayload {
   sync?: unknown;
 }
 
+export interface JunFeiAITopupOrdersPayload {
+  page?: unknown;
+  pageSize?: unknown;
+}
+
 function fallbackBootstrap(): JunFeiAIBootstrapPayload {
   return {
     service: {
@@ -1013,6 +1018,25 @@ export async function getJunFeiAITopupOverview(): Promise<Record<string, unknown
       method: 'GET',
       accessToken,
     });
+  } catch (error) {
+    normalizeTopupAuthError(error);
+  }
+}
+
+export async function getJunFeiAITopupOrders(
+  payload: JunFeiAITopupOrdersPayload = {},
+): Promise<Record<string, unknown>> {
+  const accessToken = await requireStoredJunFeiAIAuthToken();
+  const page = Math.max(1, Math.floor(getFiniteNumber(payload.page, 1)));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(getFiniteNumber(payload.pageSize, 20))));
+  try {
+    return await requestJunFeiAI<Record<string, unknown>>(
+      `/api/clawx/billing/orders/history?p=${encodeURIComponent(String(page))}&page_size=${encodeURIComponent(String(pageSize))}`,
+      {
+        method: 'GET',
+        accessToken,
+      },
+    );
   } catch (error) {
     normalizeTopupAuthError(error);
   }

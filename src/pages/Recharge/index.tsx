@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ExternalLink, Loader2, RefreshCw, RotateCcw } from 'lucide-react';
+import { AlertCircle, ChevronLeft, ChevronRight, ExternalLink, History, Loader2, RefreshCw, RotateCcw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { hostApiFetch } from '@/lib/host-api';
@@ -8,6 +8,7 @@ import QRCode from 'qrcode-terminal/vendor/QRCode/index.js';
 import QRErrorCorrectLevel from 'qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel.js';
 
 const ORDER_POLL_INTERVAL_MS = 2_000;
+const HISTORY_PAGE_SIZE = 20;
 
 type PaygProduct = {
   id: number;
@@ -42,6 +43,25 @@ type OrderResult = Record<string, unknown> & {
   status?: string;
   trade_no?: string;
   credit_quota?: unknown;
+};
+
+type TopupHistoryItem = Record<string, unknown> & {
+  id?: number;
+  trade_no?: string;
+  money?: unknown;
+  credit_quota?: unknown;
+  payment_method?: string;
+  payment_provider?: string;
+  status?: string;
+  create_time?: unknown;
+  complete_time?: unknown;
+};
+
+type TopupHistoryResponse = {
+  page?: number;
+  page_size?: number;
+  total?: number;
+  items?: unknown;
 };
 
 type Checkout = {
@@ -187,13 +207,14 @@ function formatCurrency(value: unknown): string {
 function formatDateTime(value: unknown): string {
   const timestamp = Number(value ?? 0);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return '-';
+  const timestampMs = timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
   return new Intl.DateTimeFormat('zh-CN', {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-  }).format(new Date(timestamp));
+  }).format(new Date(timestampMs));
 }
 
 function getQuotaPerYuan(topupInfo: TopupInfo | null, quotaPerUnit: number): number {
@@ -227,6 +248,26 @@ function getPaymentStatusLabel(status: PayStatus): string {
   if (status === 'success') return '已支付';
   if (status === 'failed') return '支付失败';
   return '等待支付';
+}
+
+function normalizeHistoryItems(value: unknown): TopupHistoryItem[] {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => asRecord(item) as TopupHistoryItem)
+    .filter((item) => String(item.trade_no ?? '').trim());
+}
+
+function normalizeHistoryStatus(status: unknown): PayStatus {
+  const normalized = String(status ?? '').trim().toLowerCase();
+  if (normalized === 'success' || normalized === 'completed') return 'success';
+  if (normalized === 'failed' || normalized === 'expired' || normalized === 'cancelled') return 'failed';
+  return 'pending';
+}
+
+function getHistoryMethodLabel(item: TopupHistoryItem): string {
+  const provider = String(item.payment_provider ?? '').trim().toLowerCase();
+  const method = String(item.payment_method ?? '').trim();
+  if (provider === 'wxpay' || method === 'wxpay') return '微信支付';
+  return getPaymentMethodLabel(method || provider || '在线支付');
 }
 
 function formatDurationLabel(ms: number): string {
@@ -371,6 +412,12 @@ export function Recharge() {
   const [checkout, setCheckout] = useState<Checkout | null>(null);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [payStatus, setPayStatus] = useState<PayStatus>('pending');
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [historyItems, setHistoryItems] = useState<TopupHistoryItem[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyTotal, setHistoryTotal] = useState(0);
   const pollTimerRef = useRef<number | null>(null);
   const checkoutTradeNoRef = useRef('');
   const checkingPaymentRef = useRef(false);
@@ -409,11 +456,30 @@ export function Recharge() {
   const hasQrVisual = Boolean(checkout?.qrSvgMarkup || checkout?.qrDataUrl);
   const showOpenPayLink = Boolean(checkout?.canOpenInBrowser && checkout.qrError);
   const checkoutGuidance = checkout ? getCheckoutGuidance(checkout, payStatus) : null;
+  const historyTotalPages = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
 
   const clearPolling = useCallback(() => {
     if (pollTimerRef.current) {
       window.clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+  }, []);
+
+  const loadHistory = useCallback(async (page = 1) => {
+    const nextPage = Math.max(1, Math.floor(page));
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const result = await hostApiFetch<TopupHistoryResponse>(
+        `/api/junfeiai/topup/orders?p=${nextPage}&page_size=${HISTORY_PAGE_SIZE}`,
+      );
+      setHistoryItems(normalizeHistoryItems(result.items));
+      setHistoryTotal(Number.isFinite(Number(result.total)) ? Number(result.total) : 0);
+      setHistoryPage(Number.isFinite(Number(result.page)) ? Math.max(1, Number(result.page)) : nextPage);
+    } catch (loadError) {
+      setHistoryError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setHistoryLoading(false);
     }
   }, []);
 
@@ -453,6 +519,11 @@ export function Recharge() {
       setLoaded(true);
     }
   }, []);
+
+  const handleOpenHistory = useCallback(() => {
+    setHistoryOpen(true);
+    void loadHistory(1);
+  }, [loadHistory]);
 
   const syncOrderStatus = useCallback(async (
     tradeNo: string,
@@ -683,10 +754,16 @@ export function Recharge() {
               <span className="mr-3 text-xs font-medium text-muted-foreground">当前额度</span>
               <strong className="text-xl font-semibold tabular-nums text-foreground">{formatNumber(quotaValue)}</strong>
             </div>
-            <Button variant="outline" onClick={() => void loadOverview()} disabled={loading} className="h-9 rounded-lg">
-              <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
-              {loading ? '刷新中...' : '刷新'}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={handleOpenHistory} disabled={historyLoading} className="h-9 rounded-lg">
+                {historyLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <History className="mr-2 h-4 w-4" />}
+                历史订单
+              </Button>
+              <Button variant="outline" onClick={() => void loadOverview()} disabled={loading} className="h-9 rounded-lg">
+                <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
+                {loading ? '刷新中...' : '刷新'}
+              </Button>
+            </div>
           </div>
 
           {error && (
@@ -981,6 +1058,144 @@ export function Recharge() {
                     取消订单
                   </Button>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {historyOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="recharge-history-title"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setHistoryOpen(false);
+            }
+          }}
+        >
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-black/10 bg-background shadow-xl dark:border-white/10">
+            <div className="flex items-center justify-between gap-3 border-b border-black/10 px-5 py-4 dark:border-white/10">
+              <div>
+                <h3 id="recharge-history-title" className="text-xl font-semibold text-foreground">历史订单</h3>
+                <p className="mt-1 text-xs text-muted-foreground">最近 30 天的充值记录</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => void loadHistory(historyPage)} disabled={historyLoading}>
+                  {historyLoading ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-2 h-3.5 w-3.5" />}
+                  刷新
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setHistoryOpen(false)} aria-label="关闭历史订单">
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              {historyError && (
+                <div className="mb-4 flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{historyError}</span>
+                </div>
+              )}
+
+              {historyLoading && historyItems.length === 0 ? (
+                <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  正在加载历史订单...
+                </div>
+              ) : historyItems.length === 0 ? (
+                <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-black/10 text-sm text-muted-foreground dark:border-white/10">
+                  暂无充值记录
+                </div>
+              ) : (
+                <div className="overflow-hidden rounded-lg border border-black/10 dark:border-white/10">
+                  <div className="hidden grid-cols-[1.1fr_0.7fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-black/10 bg-black/[0.03] px-4 py-2 text-xs font-medium text-muted-foreground dark:border-white/10 dark:bg-white/[0.04] md:grid">
+                    <span>订单号</span>
+                    <span>状态</span>
+                    <span>金额</span>
+                    <span>支付方式</span>
+                    <span>创建时间</span>
+                  </div>
+                  {historyItems.map((item) => {
+                    const status = normalizeHistoryStatus(item.status);
+                    return (
+                      <div
+                        key={String(item.id ?? item.trade_no)}
+                        className="grid gap-3 border-b border-black/10 px-4 py-3 text-sm last:border-b-0 dark:border-white/10 md:grid-cols-[1.1fr_0.7fr_0.8fr_0.8fr_0.8fr] md:items-center"
+                      >
+                        <div className="min-w-0">
+                          <p className="mb-1 text-xs text-muted-foreground md:hidden">订单号</p>
+                          <code className="block truncate rounded bg-black/5 px-2 py-1 text-xs dark:bg-white/10">
+                            {String(item.trade_no ?? '')}
+                          </code>
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs text-muted-foreground md:hidden">状态</p>
+                          <span className={cn(
+                            'inline-flex rounded-full px-2.5 py-1 text-xs font-medium',
+                            status === 'success'
+                              ? 'bg-green-500/10 text-green-700 dark:text-green-300'
+                              : status === 'failed'
+                                ? 'bg-destructive/10 text-destructive'
+                                : 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300',
+                          )}
+                          >
+                            {getPaymentStatusLabel(status)}
+                          </span>
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs text-muted-foreground md:hidden">金额</p>
+                          <strong className="tabular-nums">{formatCurrency(item.money)}</strong>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            到账 {formatNumber(item.credit_quota)} 虾粮
+                          </p>
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs text-muted-foreground md:hidden">支付方式</p>
+                          <span>{getHistoryMethodLabel(item)}</span>
+                        </div>
+                        <div>
+                          <p className="mb-1 text-xs text-muted-foreground md:hidden">创建时间</p>
+                          <span className="tabular-nums">{formatDateTime(item.create_time)}</span>
+                          {status === 'success' && (
+                            <p className="mt-0.5 text-xs text-muted-foreground">
+                              完成 {formatDateTime(item.complete_time)}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-black/10 px-5 py-4 text-sm text-muted-foreground dark:border-white/10">
+              <span>
+                共 {historyTotal} 条，当前第 {historyPage} / {historyTotalPages} 页
+              </span>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={historyLoading || historyPage <= 1}
+                  onClick={() => void loadHistory(Math.max(1, historyPage - 1))}
+                >
+                  <ChevronLeft className="mr-1 h-3.5 w-3.5" />
+                  上一页
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={historyLoading || historyPage >= historyTotalPages}
+                  onClick={() => void loadHistory(Math.min(historyTotalPages, historyPage + 1))}
+                >
+                  下一页
+                  <ChevronRight className="ml-1 h-3.5 w-3.5" />
+                </Button>
               </div>
             </div>
           </div>
