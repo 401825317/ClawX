@@ -977,15 +977,19 @@ function normalizeTopupOrderResult(
   };
 }
 
-function normalizeTopupPaymentStatus(status: unknown): 'pending' | 'success' | 'failed' {
+function normalizeTopupPaymentStatus(status: unknown): 'pending' | 'success' | 'failed' | 'cancelled' | 'expired' {
   const normalized = String(status ?? '').trim().toUpperCase();
   if (normalized === 'SUCCESS' || normalized === 'COMPLETED') {
     return 'success';
   }
+  if (normalized === 'CANCELLED' || normalized === 'CANCELED') {
+    return 'cancelled';
+  }
+  if (normalized === 'EXPIRED') {
+    return 'expired';
+  }
   if (
     normalized === 'FAILED'
-    || normalized === 'EXPIRED'
-    || normalized === 'CANCELLED'
     || normalized === 'REFUNDED'
     || normalized === 'PARTIALLY_REFUNDED'
     || normalized === 'REFUND_FAILED'

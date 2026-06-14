@@ -82,7 +82,7 @@ type Checkout = {
   lastStatusError: string;
 };
 
-type PayStatus = 'pending' | 'success' | 'failed';
+type PayStatus = 'pending' | 'success' | 'failed' | 'cancelled' | 'expired';
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -247,6 +247,8 @@ function getScanTip(method: string): string {
 function getPaymentStatusLabel(status: PayStatus): string {
   if (status === 'success') return '已支付';
   if (status === 'failed') return '支付失败';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'expired') return '已关闭';
   return '等待支付';
 }
 
@@ -259,7 +261,9 @@ function normalizeHistoryItems(value: unknown): TopupHistoryItem[] {
 function normalizeHistoryStatus(status: unknown): PayStatus {
   const normalized = String(status ?? '').trim().toLowerCase();
   if (normalized === 'success' || normalized === 'completed') return 'success';
-  if (normalized === 'failed' || normalized === 'expired' || normalized === 'cancelled') return 'failed';
+  if (normalized === 'cancelled' || normalized === 'canceled') return 'cancelled';
+  if (normalized === 'expired') return 'expired';
+  if (normalized === 'failed') return 'failed';
   return 'pending';
 }
 
@@ -289,8 +293,17 @@ function getCheckoutGuidance(checkout: Checkout, status: PayStatus): {
   title: string;
   subtitle: string;
   detail: string;
-  tone: 'pending' | 'warning' | 'failed';
+  tone: 'pending' | 'warning' | 'failed' | 'neutral';
 } {
+  if (status === 'cancelled' || status === 'expired') {
+    return {
+      title: status === 'cancelled' ? '订单已取消' : '订单已关闭',
+      subtitle: '这笔订单没有完成付款，你可以重新发起充值。',
+      detail: '',
+      tone: 'neutral',
+    };
+  }
+
   if (status === 'failed') {
     return {
       title: '支付未完成',
@@ -554,7 +567,7 @@ export function Recharge() {
       return 'success';
     }
 
-    if (status === 'failed') {
+    if (status === 'failed' || status === 'cancelled' || status === 'expired') {
       clearPolling();
       setCheckout((current) => current && current.tradeNo === currentTradeNo ? {
         ...current,
@@ -566,10 +579,10 @@ export function Recharge() {
       } : current);
       setCheckoutOpen(true);
       setCheckingPayment(false);
-      setPayStatus('failed');
-      setNotice('支付失败，请重新发起订单。');
+      setPayStatus(status);
+      setNotice(`${getPaymentStatusLabel(status)}，请重新发起订单。`);
       setNoticeType('error');
-      return 'failed';
+      return status;
     }
 
     const shouldRefreshPendingState = options.manual || options.pendingNotice || checkingPaymentRef.current;
@@ -604,7 +617,7 @@ export function Recharge() {
 
       try {
         const status = await syncOrderStatus(tradeNo);
-        if (status === 'success' || status === 'failed' || status === 'stale') return;
+        if (status === 'success' || status === 'failed' || status === 'cancelled' || status === 'expired' || status === 'stale') return;
       } catch {
         if (checkoutTradeNoRef.current !== tradeNo) return;
         setCheckout((current) => current && current.tradeNo === tradeNo ? {
@@ -977,7 +990,9 @@ export function Recharge() {
                     ? 'bg-destructive/10 text-destructive'
                     : checkoutGuidance.tone === 'warning'
                       ? 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300'
-                      : 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+                      : checkoutGuidance.tone === 'neutral'
+                        ? 'bg-muted text-muted-foreground'
+                        : 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
                 )}
                 >
                   {getPaymentStatusLabel(payStatus)}
@@ -1140,7 +1155,9 @@ export function Recharge() {
                               ? 'bg-green-500/10 text-green-700 dark:text-green-300'
                               : status === 'failed'
                                 ? 'bg-destructive/10 text-destructive'
-                                : 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300',
+                                : status === 'pending'
+                                  ? 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-300'
+                                  : 'bg-muted text-muted-foreground',
                           )}
                           >
                             {getPaymentStatusLabel(status)}
@@ -1149,9 +1166,6 @@ export function Recharge() {
                         <div>
                           <p className="mb-1 text-xs text-muted-foreground md:hidden">金额</p>
                           <strong className="tabular-nums">{formatCurrency(item.money)}</strong>
-                          <p className="mt-0.5 text-xs text-muted-foreground">
-                            到账 {formatNumber(item.credit_quota)} 虾粮
-                          </p>
                         </div>
                         <div>
                           <p className="mb-1 text-xs text-muted-foreground md:hidden">支付方式</p>
