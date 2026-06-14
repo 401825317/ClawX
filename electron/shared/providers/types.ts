@@ -194,6 +194,10 @@ export type ProviderSecret =
     type: 'api_key';
     accountId: string;
     apiKey: string;
+    ownerUserId?: string;
+    ownerUsername?: string;
+    ownerEmail?: string;
+    expiresAt?: number;
   }
   | {
     type: 'oauth';

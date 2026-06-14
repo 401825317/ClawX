@@ -19,7 +19,10 @@ export type JunFeiAIDeviceActivationState = {
   onboardingCompleted: boolean;
   activatedAt: string;
   lastSeenAt: string;
-  source: 'auth-token' | 'register';
+  source: 'auth-token' | 'login' | 'register';
+  userId?: string;
+  username?: string;
+  email?: string;
 };
 
 export const JUNFEIAI_DEVICE_IDENTITY_FILE = 'clawx-device-identity.json';
@@ -70,7 +73,7 @@ export async function readJunFeiAIDeviceActivationState(): Promise<JunFeiAIDevic
       && parsed.onboardingCompleted === true
       && typeof parsed.activatedAt === 'string'
       && typeof parsed.lastSeenAt === 'string'
-      && (parsed.source === 'auth-token' || parsed.source === 'register')
+      && (parsed.source === 'auth-token' || parsed.source === 'login' || parsed.source === 'register')
     ) {
       return parsed;
     }
@@ -81,10 +84,22 @@ export async function readJunFeiAIDeviceActivationState(): Promise<JunFeiAIDevic
   return null;
 }
 
-export async function markJunFeiAIDeviceActivated(source: 'auth-token' | 'register'): Promise<JunFeiAIDeviceActivationState> {
+export async function markJunFeiAIDeviceActivated(
+  source: 'auth-token' | 'login' | 'register',
+  user?: { id?: unknown; username?: unknown; email?: unknown } | null,
+): Promise<JunFeiAIDeviceActivationState> {
   const device = await getJunFeiAIDevicePayload();
   const existing = await readJunFeiAIDeviceActivationState();
   const now = new Date().toISOString();
+  const userId = typeof user?.id === 'number' || typeof user?.id === 'string'
+    ? String(user.id)
+    : undefined;
+  const username = typeof user?.username === 'string' && user.username.trim()
+    ? user.username.trim()
+    : undefined;
+  const email = typeof user?.email === 'string' && user.email.trim()
+    ? user.email.trim()
+    : undefined;
   const state: JunFeiAIDeviceActivationState = {
     version: 1,
     deviceId: device.id,
@@ -93,6 +108,9 @@ export async function markJunFeiAIDeviceActivated(source: 'auth-token' | 'regist
     activatedAt: existing?.activatedAt ?? now,
     lastSeenAt: now,
     source,
+    ...(userId ? { userId } : {}),
+    ...(username ? { username } : {}),
+    ...(email ? { email } : {}),
   };
   const activationPath = getJunFeiAIDeviceActivationPath();
   await mkdir(dirname(activationPath), { recursive: true });

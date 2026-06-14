@@ -108,7 +108,7 @@ export async function handleJunFeIAIRoutes(
   }
 
   if (url.pathname === '/api/junfeiai/logout' && req.method === 'POST') {
-    await logoutJunFeiAI();
+    await logoutJunFeiAI(ctx.gatewayManager);
     sendJson(res, 200, { success: true });
     return true;
   }

@@ -46,7 +46,7 @@
             "loginExpired": "Login expired",
             "runtimeActive": "Runtime active",
             "checking": "Checking status...",
-            "activatedForDevice": "This device is activated.",
+            "activatedForDevice": "Account signed in, device authorization and model service are ready.",
             "activationVerified": "Activation code verified",
             "activationInvalid": "Activation code is invalid"
         },

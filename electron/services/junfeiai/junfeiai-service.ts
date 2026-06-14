@@ -9,6 +9,7 @@ import {
   syncDefaultProviderToRuntime,
   syncSavedProviderToRuntime,
 } from '../providers/provider-runtime-sync';
+import { removeProviderKeyFromOpenClaw } from '../../utils/openclaw-auth';
 import {
   getJunFeiAIBackendOrigin,
   getJunFeiAIOrigin,
@@ -135,8 +136,11 @@ export interface JunFeiAISeedResult {
   source: 'remote' | 'fallback' | 'provided';
   hasRelayToken: boolean;
   deviceActivated?: boolean;
+  activationRequired?: boolean;
+  relayOwnerUserId?: string;
   hasAuthToken?: boolean;
   authValid?: boolean;
+  authRejected?: boolean;
   authError?: string;
   auth?: {
     user?: Record<string, unknown>;
@@ -159,6 +163,9 @@ export interface JunFeiAITopupOrdersPayload {
   page?: unknown;
   pageSize?: unknown;
 }
+
+type StoredProviderSecret = Awaited<ReturnType<typeof getProviderSecret>>;
+type StoredApiKeySecret = Extract<NonNullable<StoredProviderSecret>, { type: 'api_key' }>;
 
 function fallbackBootstrap(): JunFeiAIBootstrapPayload {
   return {
@@ -196,15 +203,39 @@ function fallbackBootstrap(): JunFeiAIBootstrapPayload {
 
 async function applyLocalDeviceActivationState(
   bootstrap: JunFeiAIBootstrapPayload,
-): Promise<{ bootstrap: JunFeiAIBootstrapPayload; deviceActivated: boolean }> {
+  user?: Record<string, unknown> | null,
+): Promise<{ bootstrap: JunFeiAIBootstrapPayload; deviceActivated: boolean; activationRequired: boolean }> {
   const activationState = await readJunFeiAIDeviceActivationState();
-  const deviceActivated = Boolean(activationState?.activated && activationState.onboardingCompleted);
+  const userId = getUserId(user);
+  const activationUserId = typeof activationState?.userId === 'string' && activationState.userId.trim()
+    ? activationState.userId.trim()
+    : undefined;
+  const deviceActivated = Boolean(
+    activationState?.activated
+    && activationState.onboardingCompleted
+    && userId
+    && (!activationUserId || activationUserId === userId),
+  );
+
+  if (deviceActivated && activationState && !activationUserId && userId) {
+    try {
+      await markJunFeiAIDeviceActivated(activationState.source, getActivationUser(user));
+    } catch (error) {
+      logger.warn('[junfeiai] Failed to bind legacy device activation to current user:', error);
+    }
+  }
+
   if (!deviceActivated) {
-    return { bootstrap, deviceActivated };
+    return {
+      bootstrap,
+      deviceActivated,
+      activationRequired: Boolean(bootstrap.auth?.activationRequired),
+    };
   }
 
   return {
     deviceActivated,
+    activationRequired: false,
     bootstrap: {
       ...bootstrap,
       auth: {
@@ -228,6 +259,59 @@ function unwrapEnvelope<T>(payload: unknown): T {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function getUserId(user?: Record<string, unknown> | null): string | undefined {
+  if (!user) return undefined;
+  const raw = user.id ?? user.userId ?? user.uid ?? user.sub;
+  if (typeof raw === 'number' || typeof raw === 'string') {
+    const id = String(raw).trim();
+    return id || undefined;
+  }
+  return undefined;
+}
+
+function getUsername(user?: Record<string, unknown> | null): string | undefined {
+  const raw = user?.username ?? user?.displayName ?? user?.name;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+function getUserEmail(user?: Record<string, unknown> | null): string | undefined {
+  const raw = user?.email;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
+}
+
+function getAuthUser(auth?: JunFeiAIAuthPayload | null): Record<string, unknown> | undefined {
+  return isRecord(auth?.user) ? auth.user : undefined;
+}
+
+function getActivationUser(user?: Record<string, unknown> | null): { id?: string; username?: string; email?: string } {
+  const id = getUserId(user);
+  const username = getUsername(user);
+  const email = getUserEmail(user);
+  return {
+    ...(id ? { id } : {}),
+    ...(username ? { username } : {}),
+    ...(email ? { email } : {}),
+  };
+}
+
+function getDeviceStatus(device?: Record<string, unknown> | null): string {
+  const raw = device?.status ?? device?.state;
+  return typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+}
+
+function authPayloadIndicatesDeviceActivated(auth: JunFeiAIAuthPayload): boolean {
+  const device = isRecord(auth.device) ? auth.device : null;
+  if (!device) {
+    return auth.auth?.activationRequired === false;
+  }
+  const status = getDeviceStatus(device);
+  return status === 'active'
+    || status === 'activated'
+    || status === 'enabled'
+    || device.activated === true
+    || device.active === true;
 }
 
 function jsonNumberAsFinite(value: unknown): number | null {
@@ -672,15 +756,112 @@ async function requestRuntimeToken(accessToken: string, device?: Record<string, 
   }
 }
 
+function relayTokenExpiresAt(relay: JunFeiAIRelayTokenPayload): number | undefined {
+  return typeof relay.expiresIn === 'number' && relay.expiresIn > 0
+    ? Date.now() + relay.expiresIn * 1000
+    : undefined;
+}
+
+function normalizeComparableString(value: unknown, { lower = false }: { lower?: boolean } = {}): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    return undefined;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return undefined;
+  }
+  return lower ? normalized.toLowerCase() : normalized;
+}
+
+function isRelaySecretExpired(secret: StoredProviderSecret): boolean {
+  return Boolean(
+    secret?.type === 'api_key'
+    && typeof secret.expiresAt === 'number'
+    && secret.expiresAt > 0
+    && secret.expiresAt < Date.now(),
+  );
+}
+
+function relaySecretHasOwner(secret: StoredApiKeySecret): boolean {
+  return Boolean(secret.ownerUserId || secret.ownerEmail || secret.ownerUsername);
+}
+
+function relaySecretMatchesUser(secret: StoredApiKeySecret, user?: Record<string, unknown> | null): boolean {
+  const ownerUserId = normalizeComparableString(secret.ownerUserId);
+  if (ownerUserId) {
+    return ownerUserId === getUserId(user);
+  }
+
+  const ownerEmail = normalizeComparableString(secret.ownerEmail, { lower: true });
+  if (ownerEmail) {
+    return ownerEmail === normalizeComparableString(getUserEmail(user), { lower: true });
+  }
+
+  const ownerUsername = normalizeComparableString(secret.ownerUsername, { lower: true });
+  if (ownerUsername) {
+    return ownerUsername === normalizeComparableString(getUsername(user), { lower: true });
+  }
+
+  return false;
+}
+
+function isRelaySecretUsableForUser(
+  secret: StoredProviderSecret,
+  user?: Record<string, unknown> | null,
+): secret is StoredApiKeySecret {
+  if (secret?.type !== 'api_key' || !secret.apiKey.trim()) {
+    return false;
+  }
+  if (isRelaySecretExpired(secret)) {
+    return false;
+  }
+  if (!relaySecretHasOwner(secret)) {
+    return false;
+  }
+  return relaySecretMatchesUser(secret, user);
+}
+
+async function saveJunFeiAIRelaySecret(
+  relay: JunFeiAIRelayTokenPayload,
+  user?: Record<string, unknown> | null,
+): Promise<string | undefined> {
+  const token = relay.token?.trim();
+  if (!token) {
+    return undefined;
+  }
+  const expiresAt = relayTokenExpiresAt(relay);
+  await setProviderSecret({
+    type: 'api_key',
+    accountId: JUNFEIAI_PROVIDER_ID,
+    apiKey: token,
+    ...(getUserId(user) ? { ownerUserId: getUserId(user) } : {}),
+    ...(getUsername(user) ? { ownerUsername: getUsername(user) } : {}),
+    ...(getUserEmail(user) ? { ownerEmail: getUserEmail(user) } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+  });
+  return token;
+}
+
 async function getJunFeiAIAuthStatusWithOptions(options: {
   markDeviceActivatedFromStoredAuth?: boolean;
 }): Promise<{
   hasAuthToken: boolean;
   authValid: boolean;
+  authRejected?: boolean;
   authError?: string;
   auth?: { user?: Record<string, unknown> };
 }> {
-  const accessToken = await getStoredJunFeiAIAuthToken();
+  let accessToken: string | null;
+  try {
+    accessToken = await getStoredJunFeiAIAuthToken();
+  } catch (error) {
+    return {
+      hasAuthToken: true,
+      authValid: false,
+      authRejected: isJunFeiAIAuthRejection(error),
+      authError: error instanceof Error ? error.message : String(error),
+    };
+  }
   if (!accessToken) {
     return {
       hasAuthToken: false,
@@ -690,14 +871,26 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
   }
 
   try {
-    const userPayload = await requestJunFeiAI<Record<string, unknown>>('/api/clawx/user/self', {
-      method: 'GET',
-      accessToken,
-      timeoutMs: 8000,
-    });
+    let userPayload: Record<string, unknown>;
+    try {
+      userPayload = await requestJunFeiAI<Record<string, unknown>>('/api/clawx/user/self', {
+        method: 'GET',
+        accessToken,
+        timeoutMs: 8000,
+      });
+    } catch (error) {
+      if (!isMissingJunFeiAICompatRoute(error)) {
+        throw error;
+      }
+      userPayload = await requestJunFeiAI<Record<string, unknown>>('/api/v1/auth/me', {
+        method: 'GET',
+        accessToken,
+        timeoutMs: 8000,
+      });
+    }
     const user = isRecord(userPayload.user) ? userPayload.user : userPayload;
-    if (options.markDeviceActivatedFromStoredAuth !== false) {
-      await markJunFeiAIDeviceActivated('auth-token');
+    if (options.markDeviceActivatedFromStoredAuth === true) {
+      await markJunFeiAIDeviceActivated('auth-token', getActivationUser(user));
     }
     return {
       hasAuthToken: true,
@@ -708,6 +901,7 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
     return {
       hasAuthToken: true,
       authValid: false,
+      authRejected: isJunFeiAIAuthRejection(error),
       authError: error instanceof Error ? error.message : String(error),
     };
   }
@@ -716,6 +910,7 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
 export async function ensureJunFeiAIProviderSeeded(options: {
   bootstrap?: JunFeiAIBootstrapPayload;
   relayToken?: string;
+  relayTokenExpiresAt?: number;
   gatewayManager?: GatewayManager;
   syncRuntime?: boolean;
   markDeviceActivatedFromStoredAuth?: boolean;
@@ -747,7 +942,9 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   const authStatus = await getJunFeiAIAuthStatusWithOptions({
     markDeviceActivatedFromStoredAuth: options.markDeviceActivatedFromStoredAuth,
   });
-  const activation = await applyLocalDeviceActivationState(bootstrap);
+  const authUser = authStatus.auth?.user ?? null;
+  const authUserId = getUserId(authUser);
+  const activation = await applyLocalDeviceActivationState(bootstrap, authUser);
   bootstrap = activation.bootstrap;
 
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
@@ -761,18 +958,69 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await setDefaultProvider(JUNFEIAI_PROVIDER_ID);
   }
 
-  if (options.relayToken?.trim()) {
+  let runtimeApiKey = options.relayToken?.trim() || undefined;
+  let relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+  let relayOwnerUserId = relaySecret?.type === 'api_key' ? relaySecret.ownerUserId : undefined;
+  const authCanReceiveRelay = authStatus.authValid && !activation.activationRequired;
+
+  if (runtimeApiKey) {
     await setProviderSecret({
       type: 'api_key',
       accountId: JUNFEIAI_PROVIDER_ID,
-      apiKey: options.relayToken.trim(),
+      apiKey: runtimeApiKey,
+      ...(authUserId ? { ownerUserId: authUserId } : {}),
+      ...(getUsername(authUser) ? { ownerUsername: getUsername(authUser) } : {}),
+      ...(getUserEmail(authUser) ? { ownerEmail: getUserEmail(authUser) } : {}),
+      ...(options.relayTokenExpiresAt ? { expiresAt: options.relayTokenExpiresAt } : {}),
     });
+    relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+    relayOwnerUserId = authUserId;
+  } else if (authCanReceiveRelay && !isRelaySecretUsableForUser(relaySecret, authUser)) {
+    const accessToken = await getStoredJunFeiAIAuthToken();
+    if (accessToken) {
+      const relay = await requestRuntimeToken(accessToken);
+      runtimeApiKey = await saveJunFeiAIRelaySecret(relay, authUser);
+      relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+      relayOwnerUserId = authUserId;
+    }
+  }
+
+  const hasRelayToken = authCanReceiveRelay && (
+    Boolean(runtimeApiKey)
+    || isRelaySecretUsableForUser(relaySecret, authUser)
+  );
+  const relayOwnerMismatch = Boolean(
+    relaySecret?.type === 'api_key'
+    && relaySecretHasOwner(relaySecret)
+    && authUser
+    && !relaySecretMatchesUser(relaySecret, authUser),
+  );
+  const relayExpired = isRelaySecretExpired(relaySecret);
+  const shouldClearRuntimeKey = !authStatus.hasAuthToken
+    || authStatus.authRejected
+    || activation.activationRequired
+    || relayOwnerMismatch
+    || relayExpired;
+
+  if (shouldClearRuntimeKey) {
+    if (relaySecret?.type === 'api_key') {
+      await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
+      relaySecret = null;
+      relayOwnerUserId = undefined;
+    }
+    if (authStatus.authRejected) {
+      await deleteProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
+      await clearVerificationCache();
+    }
+    runtimeApiKey = undefined;
   }
 
   if (options.syncRuntime !== false) {
-    const apiKey = options.relayToken?.trim() || undefined;
+    const apiKey = runtimeApiKey ?? (shouldClearRuntimeKey ? '' : undefined);
     await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, options.gatewayManager);
-    await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
+    if (!shouldClearRuntimeKey) {
+      await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
+    }
   }
 
   return {
@@ -780,8 +1028,10 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     account,
     bootstrap,
     source,
-    hasRelayToken: Boolean(await getProviderSecret(JUNFEIAI_PROVIDER_ID)),
+    hasRelayToken,
     deviceActivated: activation.deviceActivated,
+    activationRequired: activation.activationRequired,
+    relayOwnerUserId,
     ...authStatus,
   };
 }
@@ -810,9 +1060,14 @@ export async function loginJunFeiAI(
   auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
   const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
+  const authUser = getAuthUser(auth);
+  if (authPayloadIndicatesDeviceActivated(auth) || relay.token?.trim()) {
+    await markJunFeiAIDeviceActivated('login', getActivationUser(authUser));
+  }
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,
+    relayTokenExpiresAt: relayTokenExpiresAt(relay),
     gatewayManager,
     markDeviceActivatedFromStoredAuth: false,
   });
@@ -844,11 +1099,13 @@ export async function registerJunFeiAI(
   }
   auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
-  await markJunFeiAIDeviceActivated('register');
+  const authUser = getAuthUser(auth);
+  await markJunFeiAIDeviceActivated('register', getActivationUser(authUser));
   const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,
+    relayTokenExpiresAt: relayTokenExpiresAt(relay),
     gatewayManager,
     markDeviceActivatedFromStoredAuth: false,
   });
@@ -1103,7 +1360,7 @@ export async function getJunFeiAITopupOrderStatus(
   return normalizeTopupOrderStatusResult(result);
 }
 
-export async function logoutJunFeiAI(): Promise<void> {
+export async function logoutJunFeiAI(gatewayManager?: GatewayManager): Promise<void> {
   const secret = await getProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
   if (secret?.type === 'oauth' && secret.refreshToken?.trim()) {
     try {
@@ -1119,5 +1376,7 @@ export async function logoutJunFeiAI(): Promise<void> {
   }
   await deleteProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
   await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
+  await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
   await clearVerificationCache();
+  gatewayManager?.debouncedReload();
 }

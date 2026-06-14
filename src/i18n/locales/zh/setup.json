@@ -46,7 +46,7 @@
             "loginExpired": "登录已过期",
             "runtimeActive": "运行时已激活",
             "checking": "正在检查状态...",
-            "activatedForDevice": "当前设备已完成激活。",
+            "activatedForDevice": "账号已登录，设备授权和模型服务已就绪。",
             "activationVerified": "激活码已验证",
             "activationInvalid": "激活码无效"
         },

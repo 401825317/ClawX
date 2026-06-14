@@ -42,6 +42,26 @@ const PLATFORM_GROUPS = {
   'linux': ['linux-x64', 'linux-arm64']
 };
 
+async function fetchWithRetry(url, attempts = 3, timeoutMs = 60000) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { signal: controller.signal });
+    } catch (error) {
+      lastError = error;
+      echo(chalk.yellow(`Download attempt ${attempt}/${attempts} failed: ${String(error)}`));
+      if (attempt < attempts) {
+        await sleep(2000 * attempt);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw lastError;
+}
+
 async function setupTarget(id) {
   const target = TARGETS[id];
   if (!target) {
@@ -74,7 +94,7 @@ async function setupTarget(id) {
   try {
     // Download
     echo`⬇️ Downloading: ${downloadUrl}`;
-    const response = await fetch(downloadUrl);
+    const response = await fetchWithRetry(downloadUrl);
     if (!response.ok) throw new Error(`Failed to download: ${response.statusText}`);
     const buffer = await response.arrayBuffer();
     await fs.writeFile(archivePath, Buffer.from(buffer));

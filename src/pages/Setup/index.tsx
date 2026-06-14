@@ -666,6 +666,7 @@ type JunFeiAIManagedStatus = {
   authValid?: boolean;
   authError?: string;
   deviceActivated?: boolean;
+  activationRequired?: boolean;
   source?: 'remote' | 'fallback' | 'provided';
   bootstrap?: {
     service?: {
@@ -719,7 +720,8 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   const authValid = Boolean(status?.authValid);
   const deviceActivated = Boolean(status?.deviceActivated);
   const auth = status?.bootstrap?.auth ?? {};
-  const requiresActivation = Boolean(auth.activationRequired) && !deviceActivated;
+  const requiresActivation = Boolean(status?.activationRequired ?? auth.activationRequired) && !deviceActivated;
+  const authReady = hasRelayToken && authValid && !requiresActivation;
   const emailVerifyEnabled = Boolean(auth.emailVerifyEnabled);
   const canRegister = auth.registrationEnabled !== false;
   const canLogin = auth.loginEnabled !== false;
@@ -728,7 +730,9 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
     try {
       const next = await hostApiFetch<JunFeiAIManagedStatus>('/api/junfeiai/status');
       setStatus(next);
-      onStatusChange(Boolean(next.hasRelayToken) && Boolean(next.authValid));
+      const nextActivationRequired = Boolean(next.activationRequired ?? next.bootstrap?.auth?.activationRequired)
+        && !Boolean(next.deviceActivated);
+      onStatusChange(Boolean(next.hasRelayToken) && Boolean(next.authValid) && !nextActivationRequired);
       const serverAuth = next.bootstrap?.auth ?? {};
       if (next.deviceActivated) {
         setMode('login');
@@ -750,8 +754,8 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
   }, [refreshStatus]);
 
   useEffect(() => {
-    onStatusChange(hasRelayToken && authValid);
-  }, [authValid, hasRelayToken, onStatusChange]);
+    onStatusChange(authReady);
+  }, [authReady, onStatusChange]);
 
   useEffect(() => {
     if (verifyCodeCountdown <= 0) {
@@ -824,7 +828,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
       toast.error(t('auth.toast.enterAccountPassword'));
       return;
     }
-    if (mode === 'register' && requiresActivation && !activationTicket && !activationCode.trim()) {
+    if (requiresActivation && !activationTicket && !activationCode.trim()) {
       toast.error(t('auth.toast.enterActivationCode'));
       return;
     }
@@ -880,7 +884,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
           <Loader2 className="h-4 w-4 animate-spin" />
           {t('auth.status.checking')}
         </div>
-      ) : hasRelayToken && authValid ? (
+      ) : authReady ? (
         <div className="flex items-center gap-2 rounded-xl bg-green-500/10 p-4 text-green-700 dark:text-green-400">
           <CheckCircle2 className="h-5 w-5" />
           {t('auth.status.activatedForDevice')}
@@ -934,7 +938,7 @@ function JunFeiAISetupContent({ onStatusChange }: JunFeiAISetupContentProps) {
             </div>
           </div>
 
-          {mode === 'register' && (
+          {(mode === 'register' || requiresActivation) && (
             <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
               <div className="space-y-1.5">
                 <Label className="text-sm text-foreground/80 font-bold">{t('auth.fields.activationCode')}</Label>
