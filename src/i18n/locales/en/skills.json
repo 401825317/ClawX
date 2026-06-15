@@ -22,7 +22,8 @@
     "actions": {
         "enableVisible": "Enable Visible",
         "disableVisible": "Disable Visible",
-        "installSkill": "Install Skills"
+        "installSkill": "Install Skills",
+        "skillMarketplace": "Skill Marketplace"
     },
     "noSkills": "No skills found",
     "noSkillsSearch": "Try a different search term",
@@ -119,6 +120,24 @@
         "sourceLabel": "Source",
         "sourceClawHub": "ClawHub",
         "install": "Install",
+        "installed": "Installed",
+        "installUnavailable": "Install unavailable",
+        "installUnavailableDescription": "The skill marketplace is currently browse-only and cannot install skills from the client.",
+        "unavailable": "Skill marketplace is unavailable. Retry later or check the OpenClaw runtime components.",
+        "homeSubtitle": "Browse ClawHub skills by use case and install them into the local OpenClaw skills directory.",
+        "browseOnlyHomeSubtitle": "Browse ClawHub skills by use case. This runtime does not currently support direct installs from the client.",
+        "searchSubtitle": "Showing ClawHub skills that match your search.",
+        "categoryCount": "{{count}} skills",
+        "categories": {
+            "security": "Security & Risk",
+            "coding": "Development & Debugging",
+            "content": "Content & Docs",
+            "data": "Data & Analysis",
+            "productivity": "Productivity & Collaboration",
+            "industry": "Industry & Business",
+            "media": "Image, Video & Slides",
+            "other": "Other Skills"
+        },
         "publisherLanguageNote": "ClawX shows localized descriptions when ClawHub provides them. Skill names and some metadata may still follow the publisher's original language.",
         "securityNote": "Click skill card to view its documentation and security information on ClawHub before installation.",
         "manualInstallHint": "Network issues? You can always download skill ZIP archives from the ClawHub China mirror and extract them manually into \"{{path}}\".",

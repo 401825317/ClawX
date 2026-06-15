@@ -22,7 +22,8 @@
     "actions": {
         "enableVisible": "批量启用可见项",
         "disableVisible": "批量禁用可见项",
-        "installSkill": "安装技能"
+        "installSkill": "安装技能",
+        "skillMarketplace": "技能市场"
     },
     "noSkills": "未找到技能",
     "noSkillsSearch": "尝试不同的搜索词",
@@ -119,6 +120,24 @@
         "sourceLabel": "来源",
         "sourceClawHub": "ClawHub",
         "install": "安装",
+        "installed": "已安装",
+        "installUnavailable": "暂不可安装",
+        "installUnavailableDescription": "当前技能市场仅支持浏览，暂不能从客户端直接安装技能。",
+        "unavailable": "技能市场暂不可用，请稍后重试或检查 OpenClaw 运行时组件。",
+        "homeSubtitle": "按用途浏览 ClawHub 技能，选择后可直接安装到本机 OpenClaw 技能目录。",
+        "browseOnlyHomeSubtitle": "按用途浏览 ClawHub 技能；当前运行时暂不支持从客户端直接安装。",
+        "searchSubtitle": "正在显示与搜索词匹配的 ClawHub 技能。",
+        "categoryCount": "{{count}} 个技能",
+        "categories": {
+            "security": "安全与风控",
+            "coding": "开发与调试",
+            "content": "内容与文档",
+            "data": "数据与分析",
+            "productivity": "效率与协作",
+            "industry": "行业与业务",
+            "media": "图像、视频与演示",
+            "other": "其他技能"
+        },
         "publisherLanguageNote": "若 ClawHub 提供本地化简介，ClawX 会优先显示；技能名称和部分元数据仍可能保持发布者原文。",
         "securityNote": "安装前请点击技能卡片，在 ClawHub 上查看其文档和安全信息。",
         "manualInstallHint": "遇到网络问题？您可以随时从 ClawHub 中国镜像站下载技能压缩包，并将其解压至 \"{{path}}\" 目录来完成手动安装。",

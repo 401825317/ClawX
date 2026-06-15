@@ -11,7 +11,7 @@ const testGlobal = globalThis as typeof globalThis & {
 
 const fixtureRoots: string[] = [];
 
-function writeRuntimeModule(openclawRoot: string): void {
+function writeLegacyRuntimeModule(openclawRoot: string): void {
   const distDir = join(openclawRoot, 'dist');
   mkdirSync(distDir, { recursive: true });
   writeFileSync(
@@ -28,7 +28,8 @@ export async function r(params) {
       displayName: 'Home Assistant',
       summary: 'Control Home Assistant devices',
       metaContent: {
-        DisplayDescription: '控制 Home Assistant 设备'
+        DisplayDescription: '控制 Home Assistant 设备',
+        Keywords: ['home_automation', 'industry_skills']
       },
       version: null,
       ownerHandle: 'iahmadzain',
@@ -42,6 +43,36 @@ export async function t(params) {
   globalThis.__clawhubInstallParams = params;
   return globalThis.__clawhubInstallResult ?? { ok: true };
 }
+`,
+  );
+}
+
+function writeStatusRuntimeModule(openclawRoot: string): void {
+  const distDir = join(openclawRoot, 'dist');
+  mkdirSync(distDir, { recursive: true });
+  writeFileSync(
+    join(distDir, 'status-test.js'),
+    `
+async function searchSkillsFromClawHub(params) {
+  globalThis.__clawhubSearchParams = params;
+  return [
+    {
+      slug: 'browser-automation',
+      name: 'Browser Automation',
+      description: 'Browse and inspect websites',
+      version: '2.0.0',
+      owner: { handle: 'openclaw' },
+      metaContent: { Keywords: ['automation', 'developer_tools'] }
+    }
+  ];
+}
+
+async function installSkillFromClawHub(params) {
+  globalThis.__clawhubInstallParams = params;
+  return globalThis.__clawhubInstallResult ?? { ok: true };
+}
+
+export { installSkillFromClawHub as r, searchSkillsFromClawHub as s };
 `,
   );
 }
@@ -64,12 +95,16 @@ async function loadExtension(
   return mod.createClawHubMarketplaceExtension() as MarketplaceProviderExtension;
 }
 
-function createFixture() {
+function createFixture(options: { runtime?: 'legacy' | 'status' } = {}) {
   const root = mkdtempSync(join(process.cwd(), '.vitest-clawhub-runtime-'));
   fixtureRoots.push(root);
   const openclawRoot = join(root, 'openclaw');
   const configDir = join(root, '.openclaw');
-  writeRuntimeModule(openclawRoot);
+  if (options.runtime === 'status') {
+    writeStatusRuntimeModule(openclawRoot);
+  } else {
+    writeLegacyRuntimeModule(openclawRoot);
+  }
   return { openclawRoot, configDir };
 }
 
@@ -102,6 +137,35 @@ describe('ClawHub marketplace extension', () => {
     });
   });
 
+  it('supports the OpenClaw 2026.6 status runtime module exports', async () => {
+    const { openclawRoot, configDir } = createFixture({ runtime: 'status' });
+    const extension = await loadExtension(openclawRoot, configDir);
+
+    await expect(extension.getCapability()).resolves.toEqual({
+      mode: 'public-clawhub',
+      canSearch: true,
+      canInstall: true,
+    });
+    await expect(extension.search({ query: 'browser' })).resolves.toEqual([
+      {
+        slug: 'browser-automation',
+        name: 'Browser Automation',
+        description: 'Browse and inspect websites',
+        version: '2.0.0',
+        author: 'openclaw',
+        downloads: undefined,
+        stars: undefined,
+        keywords: ['automation', 'developer_tools'],
+      },
+    ]);
+    await expect(extension.install({ slug: 'browser-automation' })).resolves.toBeUndefined();
+    expect(testGlobal.__clawhubInstallParams).toMatchObject({
+      workspaceDir: configDir,
+      slug: 'browser-automation',
+      baseUrl: 'https://mirror-cn.clawhub.com',
+    });
+  });
+
   it('uses a broad default query for empty marketplace searches and maps ClawHub results', async () => {
     const { openclawRoot, configDir } = createFixture();
     const extension = await loadExtension(openclawRoot, configDir);
@@ -117,6 +181,7 @@ describe('ClawHub marketplace extension', () => {
         author: 'iahmadzain',
         downloads: 123,
         stars: 7,
+        keywords: ['home_automation', 'industry_skills'],
       },
     ]);
     expect(testGlobal.__clawhubSearchParams).toMatchObject({
@@ -150,6 +215,7 @@ describe('ClawHub marketplace extension', () => {
         author: 'iahmadzain',
         downloads: 123,
         stars: 7,
+        keywords: ['home_automation', 'industry_skills'],
       },
     ]);
 
@@ -172,6 +238,7 @@ describe('ClawHub marketplace extension', () => {
         author: 'iahmadzain',
         downloads: 123,
         stars: 7,
+        keywords: ['home_automation', 'industry_skills'],
       },
     ]);
 

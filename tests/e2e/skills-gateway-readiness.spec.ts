@@ -49,7 +49,7 @@ test.describe('Skills page gateway readiness', () => {
     await expect(page.getByRole('heading', { name: 'PDF' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'XLSX' })).toBeVisible();
     await expect(page.getByTestId('skills-gateway-banner')).toHaveAttribute('data-state', 'stopped', { timeout: 3_500 });
-    await expect(page.getByRole('button', { name: /Install Skills/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Skill Marketplace|技能市场|スキルマーケット|Маркет навыков/i })).toBeDisabled();
 
     await page.getByTestId('skills-filter-enabled').click();
     await expect(page.getByRole('heading', { name: 'PDF' })).toBeVisible();

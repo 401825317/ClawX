@@ -40,6 +40,8 @@ type RawClawHubSkill = {
     displayDescription?: unknown;
     summary?: unknown;
     Summary?: unknown;
+    Keywords?: unknown;
+    keywords?: unknown;
   };
 };
 
@@ -76,7 +78,8 @@ type InstallFn = (params: {
 }) => Promise<InstallResult>;
 
 type RuntimeModule = {
-  r?: SearchFn;
+  r?: SearchFn | InstallFn;
+  s?: SearchFn;
   t?: InstallFn;
   searchSkillsFromClawHub?: SearchFn;
   installSkillFromClawHub?: InstallFn;
@@ -87,10 +90,20 @@ type LoadedRuntime = {
   installSkillFromClawHub: InstallFn;
 };
 
+type RuntimeModuleCandidate = {
+  path: string;
+  kind: 'legacy-skills-clawhub' | 'skills-status';
+};
+
 const DEFAULT_MARKETPLACE_QUERY = 'skill';
 const DEFAULT_SEARCH_LIMIT = 30;
 const MAX_SEARCH_LIMIT = 100;
 const OPENCLAW_SKILLS_CLAWHUB_MODULE_RE = /^skills-clawhub(?:-.+)?\.js$/;
+const OPENCLAW_SKILLS_STATUS_MODULE_RE = /^status(?:-.+)?\.js$/;
+const OPENCLAW_SKILLS_STATUS_EXPORT_MARKERS = [
+  'searchSkillsFromClawHub',
+  'installSkillFromClawHub',
+] as const;
 const DEFAULT_CLAWHUB_MIRROR_URL = 'https://mirror-cn.clawhub.com';
 
 let runtimeModulePromise: Promise<LoadedRuntime> | null = null;
@@ -104,6 +117,14 @@ function stringValue(value: unknown): string | undefined {
 function numberValue(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
   return value;
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values = value
+    .map((entry) => stringValue(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  return values.length > 0 ? values : undefined;
 }
 
 function normalizeLimit(value: number | undefined): number {
@@ -205,30 +226,93 @@ function buildLocalizedFetch(language: LanguageCode): typeof fetch {
   };
 }
 
-async function resolveSkillsClawHubModulePath(): Promise<string> {
+function hasRuntimeFunction(value: unknown): value is (...args: unknown[]) => unknown {
+  return typeof value === 'function';
+}
+
+function resolveRuntimeExports(
+  mod: RuntimeModule,
+  candidate: RuntimeModuleCandidate,
+): LoadedRuntime | null {
+  const explicitSearch = mod.searchSkillsFromClawHub;
+  const explicitInstall = mod.installSkillFromClawHub;
+  if (hasRuntimeFunction(explicitSearch) && hasRuntimeFunction(explicitInstall)) {
+    return {
+      searchSkillsFromClawHub: explicitSearch as SearchFn,
+      installSkillFromClawHub: explicitInstall as InstallFn,
+    };
+  }
+
+  const searchSkillsFromClawHub = candidate.kind === 'skills-status'
+    ? mod.s
+    : mod.r;
+  const installSkillFromClawHub = candidate.kind === 'skills-status'
+    ? mod.r
+    : mod.t;
+
+  if (hasRuntimeFunction(searchSkillsFromClawHub) && hasRuntimeFunction(installSkillFromClawHub)) {
+    return {
+      searchSkillsFromClawHub: searchSkillsFromClawHub as SearchFn,
+      installSkillFromClawHub: installSkillFromClawHub as InstallFn,
+    };
+  }
+
+  return null;
+}
+
+async function isSkillsStatusModule(distDir: string, entry: string): Promise<boolean> {
+  if (!OPENCLAW_SKILLS_STATUS_MODULE_RE.test(entry)) return false;
+
+  try {
+    const content = await readFile(join(distDir, entry), 'utf-8');
+    return OPENCLAW_SKILLS_STATUS_EXPORT_MARKERS.every((marker) => content.includes(marker));
+  } catch {
+    return false;
+  }
+}
+
+async function resolveRuntimeModuleCandidates(): Promise<RuntimeModuleCandidate[]> {
   const distDir = join(getOpenClawResolvedDir(), 'dist');
   const entries = await readdir(distDir);
-  const moduleFile = entries.find((entry) => OPENCLAW_SKILLS_CLAWHUB_MODULE_RE.test(entry));
-  if (!moduleFile) {
+  const legacyCandidates = entries
+    .filter((entry) => OPENCLAW_SKILLS_CLAWHUB_MODULE_RE.test(entry))
+    .map((entry): RuntimeModuleCandidate => ({
+      path: join(distDir, entry),
+      kind: 'legacy-skills-clawhub',
+    }));
+  const statusCandidates = (await Promise.all(entries.map(async (entry) => (
+    await isSkillsStatusModule(distDir, entry)
+      ? {
+          path: join(distDir, entry),
+          kind: 'skills-status' as const,
+        }
+      : null
+  )))).filter((candidate): candidate is RuntimeModuleCandidate => candidate !== null);
+  const candidates = [...legacyCandidates, ...statusCandidates];
+
+  if (candidates.length === 0) {
     throw new Error(`OpenClaw ClawHub runtime module not found in ${distDir}`);
   }
-  return join(distDir, moduleFile);
+
+  return candidates;
 }
 
 async function importRuntimeModule(): Promise<LoadedRuntime> {
-  const modulePath = await resolveSkillsClawHubModulePath();
-  const mod = await import(/* @vite-ignore */ pathToFileURL(modulePath).href) as RuntimeModule;
-  const searchSkillsFromClawHub = mod.searchSkillsFromClawHub ?? mod.r;
-  const installSkillFromClawHub = mod.installSkillFromClawHub ?? mod.t;
+  const candidates = await resolveRuntimeModuleCandidates();
+  const errors: string[] = [];
 
-  if (typeof searchSkillsFromClawHub !== 'function' || typeof installSkillFromClawHub !== 'function') {
-    throw new Error(`OpenClaw ClawHub runtime module has incompatible exports: ${modulePath}`);
+  for (const candidate of candidates) {
+    try {
+      const mod = await import(/* @vite-ignore */ pathToFileURL(candidate.path).href) as RuntimeModule;
+      const runtime = resolveRuntimeExports(mod, candidate);
+      if (runtime) return runtime;
+      errors.push(`${candidate.path}: incompatible exports`);
+    } catch (error) {
+      errors.push(`${candidate.path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
-  return {
-    searchSkillsFromClawHub,
-    installSkillFromClawHub,
-  };
+  throw new Error(`OpenClaw ClawHub runtime module has incompatible exports: ${errors.join('; ')}`);
 }
 
 async function loadRuntimeModule(): Promise<LoadedRuntime> {
@@ -271,6 +355,8 @@ function mapSkillResult(entry: RawClawHubSkill, language: LanguageCode): Marketp
     author: stringValue(entry.ownerHandle) ?? stringValue(entry.owner?.displayName) ?? stringValue(entry.owner?.handle),
     downloads: numberValue(entry.downloads),
     stars: numberValue(entry.stars),
+    keywords: stringArrayValue(entry.metaContent?.Keywords)
+      ?? stringArrayValue(entry.metaContent?.keywords),
   };
 }
 

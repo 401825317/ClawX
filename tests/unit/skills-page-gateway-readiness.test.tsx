@@ -22,6 +22,7 @@ const { gatewayState, skillsState } = vi.hoisted(() => ({
   },
   skillsState: {
     skills: [] as Array<Record<string, unknown>>,
+    searchResults: [] as Array<Record<string, unknown>>,
   },
 }));
 
@@ -34,7 +35,7 @@ vi.mock('@/stores/skills', () => ({
     enableSkill: enableSkillMock,
     disableSkill: disableSkillMock,
     setSkillsEnabled: setSkillsEnabledMock,
-    searchResults: [],
+    searchResults: skillsState.searchResults,
     searchSkills: searchSkillsMock,
     installSkill: installSkillMock,
     uninstallSkill: uninstallSkillMock,
@@ -87,6 +88,7 @@ describe('Skills page gateway readiness', () => {
     vi.clearAllMocks();
     gatewayState.status = { state: 'running', port: 18789, gatewayReady: true };
     skillsState.skills = [];
+    skillsState.searchResults = [];
     invokeIpcMock.mockResolvedValue('/tmp/.openclaw/skills');
     hostApiFetchMock.mockImplementation((path: unknown) => {
       if (path === '/api/skills/marketplace/capability') {
@@ -141,7 +143,7 @@ describe('Skills page gateway readiness', () => {
     });
 
     expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText('actions.installSkill')).not.toBeInTheDocument();
+    expect(screen.getByText('actions.skillMarketplace')).toBeDisabled();
   });
 
   it('filters the list via enabled and disabled buttons', async () => {
@@ -260,6 +262,9 @@ describe('Skills page gateway readiness', () => {
         baseDir: '/tmp/pdf',
       },
     ];
+    skillsState.searchResults = [
+      { slug: 'pdf', name: 'PDF', description: 'preinstalled managed skill', version: '1.0.0' },
+    ];
 
     render(<Skills />);
 
@@ -336,7 +341,7 @@ describe('Skills page gateway readiness', () => {
       await vi.advanceTimersByTimeAsync(1_600);
     });
 
-    fireEvent.click(screen.getByText('actions.installSkill'));
+    fireEvent.click(screen.getByTestId('skills-marketplace-button'));
 
     await act(async () => {
       await Promise.resolve();
@@ -344,5 +349,79 @@ describe('Skills page gateway readiness', () => {
     });
 
     expect(screen.queryByRole('button', { name: /uninstall/i })).not.toBeInTheDocument();
+  });
+
+  it('allows browsing but disables install when marketplace cannot install', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.searchResults = [
+      { slug: 'browser-automation', name: 'Browser Automation', description: 'developer tooling', version: '1.0.0', keywords: ['developer_tools'] },
+    ];
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: false } });
+      }
+      if (path === '/api/skills/marketplace/search') {
+        return Promise.resolve({
+          success: true,
+          results: [{ slug: 'browser-automation', name: 'Browser Automation', description: 'developer tooling', version: '1.0.0', keywords: ['developer_tools'] }],
+        });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByTestId('skills-marketplace-button'));
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(screen.getByText('marketplace.securityNote')).toBeInTheDocument();
+    expect(screen.getByText('marketplace.installUnavailableDescription')).toBeInTheDocument();
+    expect(screen.getByText('Browser Automation')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'marketplace.installUnavailable' })).toBeDisabled();
+  });
+
+  it('prioritizes explicit marketplace keywords when grouping categories', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.searchResults = [
+      {
+        slug: 'document-industry',
+        name: 'Document Industry',
+        description: 'document processing for business',
+        version: '1.0.0',
+        keywords: ['document_processing', 'industry_skills'],
+      },
+    ];
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByTestId('skills-marketplace-button'));
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(screen.getAllByText('marketplace.categories.industry')).toHaveLength(2);
+    expect(screen.queryByText('marketplace.categories.content')).not.toBeInTheDocument();
   });
 });

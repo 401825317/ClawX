@@ -68,6 +68,7 @@ export interface MarketplaceSkill {
   author?: string;
   downloads?: number;
   stars?: number;
+  keywords?: string[];
 }
 
 /**

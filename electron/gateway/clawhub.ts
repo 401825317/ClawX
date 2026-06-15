@@ -32,6 +32,7 @@ export interface MarketplaceSkillResult {
     author?: string;
     downloads?: number;
     stars?: number;
+    keywords?: string[];
 }
 
 export type ClawHubSearchParams = MarketplaceSearchParams;

@@ -22,7 +22,8 @@
     "actions": {
         "enableVisible": "表示中を一括有効化",
         "disableVisible": "表示中を一括無効化",
-        "installSkill": "スキルをインストール"
+        "installSkill": "スキルをインストール",
+        "skillMarketplace": "スキルマーケット"
     },
     "noSkills": "スキルが見つかりません",
     "noSkillsSearch": "別の検索語をお試しください",
@@ -119,6 +120,24 @@
         "sourceLabel": "ソース",
         "sourceClawHub": "ClawHub",
         "install": "インストール",
+        "installed": "インストール済み",
+        "installUnavailable": "インストール不可",
+        "installUnavailableDescription": "現在のスキルマーケットは閲覧のみ対応しており、クライアントから直接インストールできません。",
+        "unavailable": "スキルマーケットは現在利用できません。後でもう一度試すか、OpenClaw ランタイムコンポーネントを確認してください。",
+        "homeSubtitle": "用途別に ClawHub スキルを閲覧し、ローカルの OpenClaw スキルディレクトリへインストールできます。",
+        "browseOnlyHomeSubtitle": "用途別に ClawHub スキルを閲覧できます。現在のランタイムはクライアントからの直接インストールに対応していません。",
+        "searchSubtitle": "検索条件に一致する ClawHub スキルを表示しています。",
+        "categoryCount": "{{count}} 件のスキル",
+        "categories": {
+            "security": "セキュリティとリスク",
+            "coding": "開発とデバッグ",
+            "content": "コンテンツとドキュメント",
+            "data": "データと分析",
+            "productivity": "生産性と共同作業",
+            "industry": "業界とビジネス",
+            "media": "画像・動画・スライド",
+            "other": "その他のスキル"
+        },
         "publisherLanguageNote": "ClawHub がローカライズ済みの説明を提供している場合、ClawX はそれを優先表示します。スキル名や一部メタデータは公開元の原文のまま残ることがあります。",
         "securityNote": "インストール前にスキルカードをクリックして、ClawHubでドキュメントとセキュリティ情報を確認してください。",
         "manualInstallHint": "ネットワークに問題がありますか？いつでもClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
