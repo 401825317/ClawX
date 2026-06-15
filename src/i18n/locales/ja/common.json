@@ -63,5 +63,27 @@
         "notRunning": "ゲートウェイが停止中",
         "notRunningDesc": "この機能を使用するには OpenClaw ゲートウェイが実行されている必要があります。自動的に起動するか、設定から起動できます。",
         "warning": "ゲートウェイが停止中です。"
+    },
+    "announcements": {
+        "title": "重要なお知らせ",
+        "description": "ClawX の利用に関わる公式のお知らせです。",
+        "empty": "お知らせはありません。",
+        "openLink": "詳細を見る",
+        "urgent": "緊急のお知らせ",
+        "level": {
+            "normal": "通常",
+            "important": "重要",
+            "urgent": "緊急"
+        }
+    },
+    "support": {
+        "nav": "ヘルプとサポート",
+        "title": "公式サポートへ連絡",
+        "description": "QR コードをスキャンして、アカウント、請求、モデル利用についてお問い合わせください。",
+        "qrAlt": "公式サポート QR コード",
+        "contactQrAlt": "{{name}} QR コード",
+        "copyWechat": "WeChat ID をコピー: {{id}}",
+        "copied": "WeChat ID をコピーしました",
+        "copyFailed": "WeChat ID のコピーに失敗しました"
     }
 }

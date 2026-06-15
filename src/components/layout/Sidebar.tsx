@@ -42,6 +42,8 @@ import { invokeIpc } from '@/lib/api-client';
 import { SIDEBAR_COLLAPSED_WIDTH, MAC_SIDEBAR_CHROME_HEIGHT } from '../../../shared/sidebar-layout';
 import { useTranslation } from 'react-i18next';
 import logoSvg from '@/assets/logo.svg';
+import { AnnouncementBell } from '@/components/client/AnnouncementBell';
+import { SupportContactButton } from '@/components/client/SupportContactButton';
 
 interface NavItemProps {
   to: string;
@@ -355,7 +357,8 @@ export function Sidebar() {
       {/* Top Header Toggle */}
       <div
         className={cn(
-          'flex shrink-0 items-center p-2 h-8',
+          'flex shrink-0 items-center p-2',
+          sidebarCollapsed ? 'min-h-16' : 'h-8',
           sidebarCollapsed ? 'justify-center' : 'justify-between',
         )}
       >
@@ -367,22 +370,28 @@ export function Sidebar() {
             </span>
           </div>
         )}
-        <Button
-          data-testid="sidebar-collapse-toggle"
-          variant="ghost"
-          size="icon"
-          className={cn(
-            'no-drag h-8 w-8 shrink-0 rounded-lg text-foreground/80',
-            'hover:bg-black/5 hover:text-foreground/80 dark:hover:bg-white/5',
-          )}
-          onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-        >
-          {sidebarCollapsed ? (
-            <PanelLeft className="h-[18px] w-[18px]" />
-          ) : (
-            <PanelLeftClose className="h-[18px] w-[18px]" />
-          )}
-        </Button>
+        <div className={cn('flex items-center gap-1', sidebarCollapsed && 'flex-col')}>
+          <AnnouncementBell
+            collapsed={sidebarCollapsed}
+            sidebarOffset={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}
+          />
+          <Button
+            data-testid="sidebar-collapse-toggle"
+            variant="ghost"
+            size="icon"
+            className={cn(
+              'no-drag h-8 w-8 shrink-0 rounded-lg text-foreground/80',
+              'hover:bg-black/5 hover:text-foreground/80 dark:hover:bg-white/5',
+            )}
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+          >
+            {sidebarCollapsed ? (
+              <PanelLeft className="h-[18px] w-[18px]" />
+            ) : (
+              <PanelLeftClose className="h-[18px] w-[18px]" />
+            )}
+          </Button>
+        </div>
       </div>
 
       {/* Navigation */}
@@ -543,6 +552,11 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="mt-auto flex flex-col gap-1 p-2">
+        <SupportContactButton
+          collapsed={sidebarCollapsed}
+          sidebarOffset={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}
+        />
+
         <NavLink
             to="/settings"
             data-testid="sidebar-nav-settings"

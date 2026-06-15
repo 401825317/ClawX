@@ -63,5 +63,27 @@
         "notRunning": "网关未运行",
         "notRunningDesc": "OpenClaw 网关需要运行才能使用此功能。它将自动启动，或者您可以从设置中启动。",
         "warning": "网关未运行。"
+    },
+    "announcements": {
+        "title": "重要公告",
+        "description": "官方发布的关键公告和服务提示。",
+        "empty": "暂无公告。",
+        "openLink": "查看详情",
+        "urgent": "紧急公告",
+        "level": {
+            "normal": "普通",
+            "important": "重要",
+            "urgent": "紧急"
+        }
+    },
+    "support": {
+        "nav": "帮助与客服",
+        "title": "联系官方客服",
+        "description": "扫码添加客服，可咨询账号、充值、模型使用等问题。",
+        "qrAlt": "官方客服二维码",
+        "contactQrAlt": "{{name}}二维码",
+        "copyWechat": "复制微信号：{{id}}",
+        "copied": "微信号已复制",
+        "copyFailed": "复制微信号失败"
     }
 }

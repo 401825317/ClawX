@@ -63,5 +63,27 @@
         "notRunning": "Gateway Not Running",
         "notRunningDesc": "The OpenClaw Gateway needs to be running to use this feature. It will start automatically, or you can start it from Settings.",
         "warning": "Gateway is not running."
+    },
+    "announcements": {
+        "title": "Important Announcements",
+        "description": "Official updates that may affect your ClawX experience.",
+        "empty": "No announcements.",
+        "openLink": "View Details",
+        "urgent": "Urgent Announcement",
+        "level": {
+            "normal": "Normal",
+            "important": "Important",
+            "urgent": "Urgent"
+        }
+    },
+    "support": {
+        "nav": "Help & Support",
+        "title": "Contact Official Support",
+        "description": "Scan the QR code to contact support for account, billing, and model usage questions.",
+        "qrAlt": "Official support QR code",
+        "contactQrAlt": "{{name}} QR code",
+        "copyWechat": "Copy WeChat ID: {{id}}",
+        "copied": "WeChat ID copied",
+        "copyFailed": "Failed to copy WeChat ID"
     }
 }

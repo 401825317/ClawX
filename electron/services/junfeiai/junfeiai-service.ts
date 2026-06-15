@@ -94,6 +94,44 @@ export interface JunFeiAIBootstrapPayload {
     remoteMarketplaceBaseUrl?: string | null;
     requiresRemoteMarketplace?: boolean;
   };
+  client?: JunFeiAIClientConfigPayload;
+}
+
+export interface JunFeiAIClientAnnouncement {
+  id?: string;
+  title?: string;
+  content?: string;
+  level?: 'normal' | 'important' | 'urgent';
+  publishedAt?: string;
+  expiresAt?: string;
+  link?: string;
+  enabled?: boolean;
+}
+
+export interface JunFeiAIClientConfigPayload {
+  announcements?: {
+    enabled?: boolean;
+    items?: JunFeiAIClientAnnouncement[];
+  };
+  support?: {
+    enabled?: boolean;
+    title?: string;
+    description?: string;
+    contacts?: Array<{
+      id?: string;
+      label?: string;
+      description?: string;
+      qrCodeUrl?: string;
+      workHours?: string;
+      wechatId?: string;
+      extraNote?: string;
+      enabled?: boolean;
+    }>;
+    qrCodeUrl?: string;
+    workHours?: string;
+    wechatId?: string;
+    extraNote?: string;
+  };
 }
 
 export interface JunFeiAIAuthPayload extends JunFeiAIBootstrapPayload {
@@ -723,6 +761,24 @@ async function fetchRemoteJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload>
 export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
   const bootstrap = applyLocalBootstrapOverrides(await fetchRemoteJunFeiAIBootstrap());
   return (await applyLocalDeviceActivationState(bootstrap)).bootstrap;
+}
+
+export async function getJunFeiAIClientConfig(): Promise<JunFeiAIClientConfigPayload> {
+  if (!isJunFeiAIManagedDistribution()) {
+    return {};
+  }
+  try {
+    return await requestJunFeiAI<JunFeiAIClientConfigPayload>('/api/clawx/client-config', {
+      method: 'GET',
+      timeoutMs: 8000,
+    });
+  } catch (error) {
+    if (!isMissingJunFeiAICompatRoute(error)) {
+      throw error;
+    }
+    const bootstrap = await fetchRemoteJunFeiAIBootstrap();
+    return bootstrap.client ?? {};
+  }
 }
 
 async function requireStoredJunFeiAIAuthToken(): Promise<string> {

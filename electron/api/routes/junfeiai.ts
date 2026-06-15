@@ -8,6 +8,7 @@ import {
   getJunFeiAITopupOrderStatus,
   getJunFeiAITopupOrders,
   getJunFeiAITopupOverview,
+  getJunFeiAIClientConfig,
   listJunFeiAIModels,
   loginJunFeiAI,
   logoutJunFeiAI,
@@ -113,6 +114,11 @@ export async function handleJunFeIAIRoutes(
 
   if (url.pathname === '/api/junfeiai/models' && req.method === 'GET') {
     sendJson(res, 200, await listJunFeiAIModels());
+    return true;
+  }
+
+  if (url.pathname === '/api/junfeiai/client-config' && req.method === 'GET') {
+    sendJson(res, 200, await getJunFeiAIClientConfig());
     return true;
   }
 

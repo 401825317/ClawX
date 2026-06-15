@@ -29,6 +29,8 @@ import { rendererExtensionRegistry } from './extensions/registry';
 import { loadExternalRendererExtensions } from './extensions/_ext-bridge.generated';
 import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { ManagedAuthGate } from './components/auth/ManagedAuthGate';
+import { ClientConfigInitializer } from './components/client/ClientConfigInitializer';
+import { UrgentAnnouncementDialog } from './components/client/UrgentAnnouncementDialog';
 
 
 /**
@@ -220,6 +222,8 @@ function App() {
         </Routes>
 
         <UpdateNotifier />
+        <ClientConfigInitializer enabled={setupComplete && !skipSetupForE2E} />
+        <UrgentAnnouncementDialog />
         <ManagedAuthGate enabled={setupComplete && !skipSetupForE2E} />
 
         {/* Global toast notifications */}
