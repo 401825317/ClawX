@@ -53,6 +53,19 @@ export interface MarketplaceProvider {
     install(params: MarketplaceInstallParams): Promise<void>;
 }
 
+const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+function normalizeMarketplaceSlug(value: unknown): string {
+    if (typeof value !== 'string') {
+        throw new Error('Marketplace install requires a skill slug');
+    }
+    const slug = value.trim();
+    if (!slug || slug === 'undefined' || slug === 'null' || !VALID_MARKETPLACE_SKILL_SLUG_RE.test(slug)) {
+        throw new Error('Marketplace install requires a valid skill slug');
+    }
+    return slug;
+}
+
 export class ClawHubService {
     private workDir: string;
     private marketplaceProvider: MarketplaceProvider | null = null;
@@ -102,8 +115,9 @@ export class ClawHubService {
      * Install a skill through an extension-provided marketplace.
      */
     async install(params: MarketplaceInstallParams): Promise<void> {
+        const slug = normalizeMarketplaceSlug(params.slug);
         if (this.marketplaceProvider) {
-            return this.marketplaceProvider.install(params);
+            return this.marketplaceProvider.install({ ...params, slug });
         }
         throw new Error('Marketplace install is disabled');
     }

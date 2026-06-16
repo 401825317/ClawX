@@ -389,6 +389,42 @@ describe('Skills page gateway readiness', () => {
     expect(screen.getByRole('button', { name: 'marketplace.installUnavailable' })).toBeDisabled();
   });
 
+  it('installs marketplace results using the normalized skill slug', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.searchResults = [
+      { slug: 'browser-automation', name: 'Browser Automation', description: 'developer tooling', version: '1.0.0', keywords: ['developer_tools'] },
+    ];
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
+      }
+      return Promise.resolve({ success: true });
+    });
+    installSkillMock.mockResolvedValue(undefined);
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByTestId('skills-marketplace-button'));
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'marketplace.install' }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(installSkillMock).toHaveBeenCalledWith('browser-automation');
+  });
+
   it('prioritizes explicit marketplace keywords when grouping categories', async () => {
     gatewayState.status = { state: 'stopped', port: 18789 };
     skillsState.searchResults = [

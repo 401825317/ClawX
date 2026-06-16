@@ -121,6 +121,7 @@
         "sourceClawHub": "ClawHub",
         "install": "Install",
         "installed": "Installed",
+        "invalidSkill": "Incomplete skill metadata",
         "installUnavailable": "Install unavailable",
         "installUnavailableDescription": "The skill marketplace is currently browse-only and cannot install skills from the client.",
         "unavailable": "Skill marketplace is unavailable. Retry later or check the OpenClaw runtime components.",
@@ -138,7 +139,7 @@
             "media": "Image, Video & Slides",
             "other": "Other Skills"
         },
-        "publisherLanguageNote": "ClawX shows localized descriptions when ClawHub provides them. Skill names and some metadata may still follow the publisher's original language.",
+        "publisherLanguageNote": "UClaw shows localized descriptions when ClawHub provides them. Skill names and some metadata may still follow the publisher's original language.",
         "securityNote": "Click skill card to view its documentation and security information on ClawHub before installation.",
         "manualInstallHint": "Network issues? You can always download skill ZIP archives from the ClawHub China mirror and extract them manually into \"{{path}}\".",
         "searching": "Searching ClawHub...",

@@ -41,6 +41,42 @@ describe('skills store error mapping', () => {
     expect(useSkillsStore.getState().searchError).toBe('searchTimeoutError');
   });
 
+  it('normalizes raw ClawHub marketplace results before rendering install buttons', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      results: [
+        {
+          id: 'browser-automation',
+          displayName: 'Browser Automation',
+          summary: 'Browse and inspect websites',
+          metaContent: { Keywords: ['developer_tools'], latest: { version: '2.0.0' } },
+          owner: { handle: 'openclaw' },
+        },
+        {
+          slug: 'undefined',
+          displayName: 'Broken Skill',
+          summary: 'Missing install target',
+        },
+      ],
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    await useSkillsStore.getState().searchSkills('browser');
+
+    expect(useSkillsStore.getState().searchResults).toEqual([
+      {
+        slug: 'browser-automation',
+        name: 'Browser Automation',
+        description: 'Browse and inspect websites',
+        version: '2.0.0',
+        author: 'openclaw',
+        downloads: undefined,
+        stars: undefined,
+        keywords: ['developer_tools'],
+      },
+    ]);
+  });
+
   it('maps installSkill timeout result into installTimeoutError', async () => {
     hostApiFetchMock.mockResolvedValueOnce({ success: false, error: 'request timeout' });
 

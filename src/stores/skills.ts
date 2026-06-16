@@ -36,8 +36,93 @@ type LocalSkillsResult = {
   error?: string;
 };
 
+const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 const GATEWAY_ONLY_APPENDABLE_SOURCES = new Set(['openclaw-plugin', 'openclaw-extra']);
+
+function stringValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values = value
+    .map((entry) => stringValue(entry))
+    .filter((entry): entry is string => Boolean(entry));
+  return values.length > 0 ? values : undefined;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function marketplaceSlugValue(value: unknown): string | undefined {
+  const slug = stringValue(value);
+  if (!slug) return undefined;
+  if (slug === 'undefined' || slug === 'null') return undefined;
+  return VALID_MARKETPLACE_SKILL_SLUG_RE.test(slug) ? slug : undefined;
+}
+
+function normalizeMarketplaceSkillResult(value: unknown): MarketplaceSkill | null {
+  const entry = recordValue(value);
+  if (!entry) return null;
+
+  const metaContent = recordValue(entry.metaContent);
+  const owner = recordValue(entry.owner);
+  const latest = recordValue(metaContent?.latest);
+  const slug = marketplaceSlugValue(entry.slug)
+    ?? marketplaceSlugValue(entry.skillSlug)
+    ?? marketplaceSlugValue(entry.id)
+    ?? marketplaceSlugValue(metaContent?.slug)
+    ?? marketplaceSlugValue(metaContent?.Slug)
+    ?? marketplaceSlugValue(entry.name);
+
+  if (!slug) return null;
+
+  return {
+    slug,
+    name: stringValue(entry.name)
+      ?? stringValue(entry.displayName)
+      ?? stringValue(metaContent?.displayName)
+      ?? stringValue(metaContent?.DisplayName)
+      ?? slug,
+    description: stringValue(entry.description)
+      ?? stringValue(entry.summary)
+      ?? stringValue(metaContent?.DisplayDescription)
+      ?? stringValue(metaContent?.displayDescription)
+      ?? stringValue(metaContent?.summary)
+      ?? stringValue(metaContent?.Summary)
+      ?? '',
+    version: stringValue(entry.version)
+      ?? stringValue(latest?.version)
+      ?? '',
+    author: stringValue(entry.author)
+      ?? stringValue(entry.ownerHandle)
+      ?? stringValue(owner?.displayName)
+      ?? stringValue(owner?.handle)
+      ?? stringValue(metaContent?.owner),
+    downloads: numberValue(entry.downloads),
+    stars: numberValue(entry.stars),
+    keywords: stringArrayValue(entry.keywords)
+      ?? stringArrayValue(metaContent?.Keywords)
+      ?? stringArrayValue(metaContent?.keywords),
+  };
+}
+
+function normalizeMarketplaceSkillResults(values?: unknown[]): MarketplaceSkill[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map(normalizeMarketplaceSkillResult)
+    .filter((skill): skill is MarketplaceSkill => skill !== null);
+}
 
 function mapErrorCodeToSkillErrorKey(
   code: AppError['code'],
@@ -259,12 +344,12 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   searchSkills: async (query: string) => {
     set({ searching: true, searchError: null });
     try {
-      const result = await hostApiFetch<{ success: boolean; results?: MarketplaceSkill[]; error?: string }>('/api/skills/marketplace/search', {
+      const result = await hostApiFetch<{ success: boolean; results?: unknown[]; error?: string }>('/api/skills/marketplace/search', {
         method: 'POST',
         body: JSON.stringify({ query, locale: i18n.language }),
       });
       if (result.success) {
-        set({ searchResults: result.results || [] });
+        set({ searchResults: normalizeMarketplaceSkillResults(result.results) });
       } else {
         throw normalizeAppError(new Error(result.error || 'Search failed'), {
           module: 'skills',

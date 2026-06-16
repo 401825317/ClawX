@@ -121,6 +121,7 @@
         "sourceClawHub": "ClawHub",
         "install": "安装",
         "installed": "已安装",
+        "invalidSkill": "技能信息不完整",
         "installUnavailable": "暂不可安装",
         "installUnavailableDescription": "当前技能市场仅支持浏览，暂不能从客户端直接安装技能。",
         "unavailable": "技能市场暂不可用，请稍后重试或检查 OpenClaw 运行时组件。",
@@ -138,7 +139,7 @@
             "media": "图像、视频与演示",
             "other": "其他技能"
         },
-        "publisherLanguageNote": "若 ClawHub 提供本地化简介，ClawX 会优先显示；技能名称和部分元数据仍可能保持发布者原文。",
+        "publisherLanguageNote": "若 ClawHub 提供本地化简介，UClaw 会优先显示；技能名称和部分元数据仍可能保持发布者原文。",
         "securityNote": "安装前请点击技能卡片，在 ClawHub 上查看其文档和安全信息。",
         "manualInstallHint": "遇到网络问题？您可以随时从 ClawHub 中国镜像站下载技能压缩包，并将其解压至 \"{{path}}\" 目录来完成手动安装。",
         "searching": "正在搜索 ClawHub...",

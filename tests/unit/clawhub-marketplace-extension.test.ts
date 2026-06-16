@@ -5,6 +5,7 @@ import type { MarketplaceProviderExtension } from '@electron/extensions/types';
 
 const testGlobal = globalThis as typeof globalThis & {
   __clawhubSearchParams?: unknown;
+  __clawhubSearchResult?: unknown;
   __clawhubInstallParams?: unknown;
   __clawhubInstallResult?: unknown;
 };
@@ -55,7 +56,7 @@ function writeStatusRuntimeModule(openclawRoot: string): void {
     `
 async function searchSkillsFromClawHub(params) {
   globalThis.__clawhubSearchParams = params;
-  return [
+  return globalThis.__clawhubSearchResult ?? [
     {
       slug: 'browser-automation',
       name: 'Browser Automation',
@@ -115,6 +116,7 @@ describe('ClawHub marketplace extension', () => {
 
   afterEach(() => {
     delete testGlobal.__clawhubSearchParams;
+    delete testGlobal.__clawhubSearchResult;
     delete testGlobal.__clawhubInstallParams;
     delete testGlobal.__clawhubInstallResult;
     for (const root of fixtureRoots.splice(0)) {
@@ -164,6 +166,40 @@ describe('ClawHub marketplace extension', () => {
       slug: 'browser-automation',
       baseUrl: 'https://mirror-cn.clawhub.com',
     });
+  });
+
+  it('normalizes nested marketplace result metadata into installable skill slugs', async () => {
+    const { openclawRoot, configDir } = createFixture({ runtime: 'status' });
+    const extension = await loadExtension(openclawRoot, configDir);
+    testGlobal.__clawhubSearchResult = [
+      {
+        skill: {
+          slug: 'nested-browser',
+          displayName: 'Nested Browser',
+          summary: 'Nested summary',
+        },
+        latestVersion: { version: '3.0.0' },
+        owner: { handle: 'nested-owner' },
+        metaContent: { Keywords: ['developer_tools'] },
+      },
+      {
+        slug: 'undefined',
+        displayName: 'Broken Skill',
+      },
+    ];
+
+    await expect(extension.search({ query: 'browser' })).resolves.toEqual([
+      {
+        slug: 'nested-browser',
+        name: 'Nested Browser',
+        description: 'Nested summary',
+        version: '3.0.0',
+        author: 'nested-owner',
+        downloads: undefined,
+        stars: undefined,
+        keywords: ['developer_tools'],
+      },
+    ]);
   });
 
   it('uses a broad default query for empty marketplace searches and maps ClawHub results', async () => {

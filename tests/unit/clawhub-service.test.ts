@@ -53,6 +53,23 @@ describe('ClawHubService marketplace compatibility', () => {
     expect(provider.install).toHaveBeenCalledWith({ slug: 'pdf' });
   });
 
+  it('rejects missing or placeholder marketplace install slugs before calling the provider', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'clawx-clawhub-home-'));
+    const ClawHubService = await loadServiceForHome(homeDir);
+    const service = new ClawHubService();
+    const provider = {
+      getCapability: vi.fn().mockResolvedValue({ mode: 'enterprise-marketplace', canSearch: true, canInstall: true }),
+      search: vi.fn().mockResolvedValue([]),
+      install: vi.fn().mockResolvedValue(undefined),
+    };
+
+    service.setMarketplaceProvider(provider);
+
+    await expect(service.install({ slug: 'undefined' })).rejects.toThrow('Marketplace install requires a valid skill slug');
+    await expect(service.install({ slug: '' })).rejects.toThrow('Marketplace install requires a valid skill slug');
+    expect(provider.install).not.toHaveBeenCalled();
+  });
+
   it('lists installed managed skills from the filesystem without the clawhub CLI', async () => {
     const homeDir = mkdtempSync(join(tmpdir(), 'clawx-clawhub-home-'));
     const openclawDir = join(homeDir, '.openclaw');

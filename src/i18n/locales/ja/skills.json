@@ -121,6 +121,7 @@
         "sourceClawHub": "ClawHub",
         "install": "インストール",
         "installed": "インストール済み",
+        "invalidSkill": "スキル情報が不完全です",
         "installUnavailable": "インストール不可",
         "installUnavailableDescription": "現在のスキルマーケットは閲覧のみ対応しており、クライアントから直接インストールできません。",
         "unavailable": "スキルマーケットは現在利用できません。後でもう一度試すか、OpenClaw ランタイムコンポーネントを確認してください。",
@@ -138,7 +139,7 @@
             "media": "画像・動画・スライド",
             "other": "その他のスキル"
         },
-        "publisherLanguageNote": "ClawHub がローカライズ済みの説明を提供している場合、ClawX はそれを優先表示します。スキル名や一部メタデータは公開元の原文のまま残ることがあります。",
+        "publisherLanguageNote": "ClawHub がローカライズ済みの説明を提供している場合、UClaw はそれを優先表示します。スキル名や一部メタデータは公開元の原文のまま残ることがあります。",
         "securityNote": "インストール前にスキルカードをクリックして、ClawHubでドキュメントとセキュリティ情報を確認してください。",
         "manualInstallHint": "ネットワークに問題がありますか？いつでもClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
         "searching": "ClawHubを検索中...",

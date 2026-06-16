@@ -54,6 +54,7 @@ function skillFileToTarget(file: SkillFile): FilePreviewTarget {
 const INSTALL_ERROR_CODES = new Set(['installTimeoutError', 'installRateLimitError']);
 const FETCH_ERROR_CODES = new Set(['fetchTimeoutError', 'fetchRateLimitError', 'timeoutError', 'rateLimitError']);
 const SEARCH_ERROR_CODES = new Set(['searchTimeoutError', 'searchRateLimitError', 'timeoutError', 'rateLimitError']);
+const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
 type SkillsViewMode = 'installed' | 'marketplace';
 
@@ -200,10 +201,16 @@ function canUninstallSkill(skill: Skill): boolean {
   return skill.uninstallable === true;
 }
 
+function resolveMarketplaceSkillSlug(skill: MarketplaceSkill): string | null {
+  const slug = typeof skill.slug === 'string' ? skill.slug.trim() : '';
+  if (!slug || slug === 'undefined' || slug === 'null') return null;
+  return VALID_MARKETPLACE_SKILL_SLUG_RE.test(slug) ? slug : null;
+}
+
 function getMarketplaceSkillSearchText(skill: MarketplaceSkill): string {
   return [
     ...(skill.keywords || []),
-    skill.slug,
+    resolveMarketplaceSkillSlug(skill),
     skill.name,
     skill.description,
     skill.author,
@@ -270,11 +277,19 @@ function MarketplaceSkillRow({
   const { t } = useTranslation('skills');
   const isInstalled = Boolean(installedSkill);
   const canUninstallInstalledSkill = installedSkill ? canUninstallSkill(installedSkill) : false;
+  const skillSlug = resolveMarketplaceSkillSlug(skill);
+  const canInstallSkill = Boolean(skillSlug) && canInstall;
 
   return (
     <div
-      className="group flex cursor-pointer flex-row items-center justify-between rounded-xl border-b border-black/5 px-3 py-3.5 transition-colors last:border-0 hover:bg-black/5 dark:border-white/5 dark:hover:bg-white/5"
-      onClick={() => invokeIpc('shell:openExternal', `https://mirror-cn.clawhub.com/s/${skill.slug}`)}
+      className={cn(
+        'group flex flex-row items-center justify-between rounded-xl border-b border-black/5 px-3 py-3.5 transition-colors last:border-0 dark:border-white/5',
+        skillSlug && 'cursor-pointer hover:bg-black/5 dark:hover:bg-white/5',
+      )}
+      onClick={() => {
+        if (!skillSlug) return;
+        invokeIpc('shell:openExternal', `https://mirror-cn.clawhub.com/s/${skillSlug}`);
+      }}
     >
       <div className="flex min-w-0 flex-1 items-start gap-4 pr-4">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-black/5 bg-black/5 dark:border-white/10 dark:bg-white/5">
@@ -294,7 +309,9 @@ function MarketplaceSkillRow({
             <Badge variant="secondary" className="h-5 shrink-0 whitespace-nowrap border-0 bg-black/5 px-1.5 py-0 text-2xs font-medium shadow-none dark:bg-white/10">
               {t(resolveMarketplaceCategory(skill).labelKey)}
             </Badge>
-            <span className="min-w-0 truncate font-mono">{skill.slug}</span>
+            <span className="min-w-0 truncate font-mono">
+              {skillSlug ?? t('marketplace.invalidSkill')}
+            </span>
           </div>
         </div>
       </div>
@@ -308,8 +325,10 @@ function MarketplaceSkillRow({
           <Button
             variant="destructive"
             size="sm"
-            onClick={() => onUninstall(skill.slug)}
-            disabled={installing}
+            onClick={() => {
+              if (skillSlug) onUninstall(skillSlug);
+            }}
+            disabled={installing || !skillSlug}
             className="h-8 shadow-none"
           >
             {installing ? <LoadingSpinner size="sm" /> : <Trash2 className="h-3.5 w-3.5" />}
@@ -319,18 +338,18 @@ function MarketplaceSkillRow({
             variant="default"
             size="sm"
             onClick={() => {
-              if (!canInstall) return;
-              onInstall(skill.slug);
+              if (!canInstallSkill || !skillSlug) return;
+              onInstall(skillSlug);
             }}
-            disabled={installing || isInstalled || !canInstall}
-            title={!canInstall ? t('marketplace.installUnavailable') : undefined}
+            disabled={installing || isInstalled || !canInstallSkill}
+            title={!skillSlug ? t('marketplace.invalidSkill') : !canInstall ? t('marketplace.installUnavailable') : undefined}
             className="h-8 rounded-full px-4 text-xs font-medium shadow-none"
           >
             {installing ? (
               <LoadingSpinner size="sm" />
             ) : isInstalled ? (
               t('marketplace.installed')
-            ) : !canInstall ? (
+            ) : !canInstallSkill ? (
               t('marketplace.installUnavailable')
             ) : (
               t('marketplace.install')
@@ -947,17 +966,20 @@ export function Skills() {
                 </div>
               ) : marketSearchTerm ? (
                 <div className="flex flex-col gap-1">
-                  {searchResults.map((skill) => (
-                    <MarketplaceSkillRow
-                      key={skill.slug}
-                      skill={skill}
-                      installedSkill={safeSkills.find((s) => s.id === skill.slug || s.slug === skill.slug || s.name === skill.name)}
-                      installing={!!installing[skill.slug]}
-                      canInstall={marketplaceCanInstall}
-                      onInstall={handleInstall}
-                      onUninstall={handleUninstall}
-                    />
-                  ))}
+                  {searchResults.map((skill, index) => {
+                    const skillSlug = resolveMarketplaceSkillSlug(skill);
+                    return (
+                      <MarketplaceSkillRow
+                        key={skillSlug ?? `${skill.name}-${index}`}
+                        skill={skill}
+                        installedSkill={safeSkills.find((s) => (skillSlug && (s.id === skillSlug || s.slug === skillSlug)) || s.name === skill.name)}
+                        installing={skillSlug ? !!installing[skillSlug] : false}
+                        canInstall={marketplaceCanInstall}
+                        onInstall={handleInstall}
+                        onUninstall={handleUninstall}
+                      />
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="space-y-7">
@@ -972,17 +994,20 @@ export function Skills() {
                         </span>
                       </div>
                       <div className="flex flex-col gap-1">
-                        {group.skills.slice(0, 8).map((skill) => (
-                          <MarketplaceSkillRow
-                            key={skill.slug}
-                            skill={skill}
-                            installedSkill={safeSkills.find((s) => s.id === skill.slug || s.slug === skill.slug || s.name === skill.name)}
-                            installing={!!installing[skill.slug]}
-                            canInstall={marketplaceCanInstall}
-                            onInstall={handleInstall}
-                            onUninstall={handleUninstall}
-                          />
-                        ))}
+                        {group.skills.slice(0, 8).map((skill, index) => {
+                          const skillSlug = resolveMarketplaceSkillSlug(skill);
+                          return (
+                            <MarketplaceSkillRow
+                              key={skillSlug ?? `${skill.name}-${index}`}
+                              skill={skill}
+                              installedSkill={safeSkills.find((s) => (skillSlug && (s.id === skillSlug || s.slug === skillSlug)) || s.name === skill.name)}
+                              installing={skillSlug ? !!installing[skillSlug] : false}
+                              canInstall={marketplaceCanInstall}
+                              onInstall={handleInstall}
+                              onUninstall={handleUninstall}
+                            />
+                          );
+                        })}
                       </div>
                     </section>
                   ))}

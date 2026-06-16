@@ -18,7 +18,9 @@ import { logger } from '../../utils/logger';
 import { getOpenClawConfigDir, getOpenClawResolvedDir } from '../../utils/paths';
 
 type RawClawHubSkill = {
+  id?: unknown;
   slug?: unknown;
+  skillSlug?: unknown;
   displayName?: unknown;
   name?: unknown;
   summary?: unknown;
@@ -33,15 +35,32 @@ type RawClawHubSkill = {
     handle?: unknown;
     displayName?: unknown;
   };
+  latestVersion?: {
+    version?: unknown;
+  };
+  skill?: {
+    slug?: unknown;
+    displayName?: unknown;
+    name?: unknown;
+    summary?: unknown;
+    description?: unknown;
+  };
   downloads?: unknown;
   stars?: unknown;
   metaContent?: {
+    DisplayName?: unknown;
+    displayName?: unknown;
     DisplayDescription?: unknown;
     displayDescription?: unknown;
     summary?: unknown;
     Summary?: unknown;
+    slug?: unknown;
+    Slug?: unknown;
     Keywords?: unknown;
     keywords?: unknown;
+    latest?: {
+      version?: unknown;
+    };
   };
 };
 
@@ -105,6 +124,7 @@ const OPENCLAW_SKILLS_STATUS_EXPORT_MARKERS = [
   'installSkillFromClawHub',
 ] as const;
 const DEFAULT_CLAWHUB_MIRROR_URL = 'https://mirror-cn.clawhub.com';
+const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 
 let runtimeModulePromise: Promise<LoadedRuntime> | null = null;
 
@@ -112,6 +132,13 @@ function stringValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function marketplaceSlugValue(value: unknown): string | undefined {
+  const slug = stringValue(value);
+  if (!slug) return undefined;
+  if (slug === 'undefined' || slug === 'null') return undefined;
+  return VALID_MARKETPLACE_SKILL_SLUG_RE.test(slug) ? slug : undefined;
 }
 
 function numberValue(value: unknown): number | undefined {
@@ -328,6 +355,8 @@ async function loadRuntimeModule(): Promise<LoadedRuntime> {
 function resolveLocalizedDescription(entry: RawClawHubSkill, language: LanguageCode): string {
   const defaultDescription = stringValue(entry.summary)
     ?? stringValue(entry.description)
+    ?? stringValue(entry.skill?.summary)
+    ?? stringValue(entry.skill?.description)
     ?? '';
   const chineseDescription = stringValue(entry.summaryZh)
     ?? stringValue(entry.descriptionZh)
@@ -344,14 +373,30 @@ function resolveLocalizedDescription(entry: RawClawHubSkill, language: LanguageC
 }
 
 function mapSkillResult(entry: RawClawHubSkill, language: LanguageCode): MarketplaceSkillResult | null {
-  const slug = stringValue(entry.slug);
+  const slug = marketplaceSlugValue(entry.slug)
+    ?? marketplaceSlugValue(entry.skillSlug)
+    ?? marketplaceSlugValue(entry.skill?.slug)
+    ?? marketplaceSlugValue(entry.id)
+    ?? marketplaceSlugValue(entry.metaContent?.slug)
+    ?? marketplaceSlugValue(entry.metaContent?.Slug)
+    ?? marketplaceSlugValue(entry.name)
+    ?? marketplaceSlugValue(entry.skill?.name);
   if (!slug) return null;
 
   return {
     slug,
-    name: stringValue(entry.displayName) ?? stringValue(entry.name) ?? slug,
+    name: stringValue(entry.displayName)
+      ?? stringValue(entry.skill?.displayName)
+      ?? stringValue(entry.metaContent?.displayName)
+      ?? stringValue(entry.metaContent?.DisplayName)
+      ?? stringValue(entry.name)
+      ?? stringValue(entry.skill?.name)
+      ?? slug,
     description: resolveLocalizedDescription(entry, language),
-    version: stringValue(entry.version) ?? '',
+    version: stringValue(entry.version)
+      ?? stringValue(entry.latestVersion?.version)
+      ?? stringValue(entry.metaContent?.latest?.version)
+      ?? '',
     author: stringValue(entry.ownerHandle) ?? stringValue(entry.owner?.displayName) ?? stringValue(entry.owner?.handle),
     downloads: numberValue(entry.downloads),
     stars: numberValue(entry.stars),
