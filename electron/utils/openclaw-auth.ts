@@ -1,7 +1,7 @@
 /**
  * OpenClaw Auth Profiles Utility
- * Writes API keys to configured OpenClaw agent auth-profiles.json files
- * so the OpenClaw Gateway can load them for AI provider calls.
+ * Writes provider credentials to the active OpenClaw auth store and keeps the
+ * legacy auth-profiles.json sidecar in sync for compatibility.
  *
  * All file I/O is asynchronous (fs/promises) to avoid blocking the
  * Electron main thread.  On Windows + NTFS + Defender the synchronous
@@ -9,11 +9,14 @@
  * Responding" hangs.
  */
 import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
-import { constants, readdirSync, readFileSync, existsSync } from 'fs';
+import { constants, readdirSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import { execFile } from 'child_process';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
+import { pathToFileURL } from 'url';
 import { listConfiguredAgentIds } from './agent-config';
 import { getOpenClawResolvedDir } from './paths';
+import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 import {
   getProviderEnvVar,
   getProviderDefaultModel,
@@ -45,6 +48,7 @@ const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
 const LEGACY_MINIMAX_OAUTH_PLUGIN_ID = 'minimax-portal-auth';
 const MERGED_MINIMAX_PLUGIN_ID = 'minimax';
+const OPENCLAW_PROVIDER_AUTH_RUNTIME_SPECIFIER = 'openclaw/plugin-sdk/provider-auth';
 
 interface BundledPluginManifest {
   id: string;
@@ -69,11 +73,66 @@ let _bundledPluginCache: {
   manifestsById: Map<string, BundledPluginManifest>;
 } | null = null;
 let _miniMaxPluginRegistrationCache: MiniMaxPluginRegistration | null = null;
+let _openClawProviderAuthRuntimePromise: Promise<OpenClawProviderAuthRuntime> | null = null;
+
+interface OpenClawRuntimeAuthProfileStore {
+  profiles: Record<string, { type?: string; provider?: string } & Record<string, unknown>>;
+  order?: Record<string, string[]>;
+  lastGood?: Record<string, string>;
+  usageStats?: Record<string, unknown>;
+}
+
+type OpenClawProviderAuthRuntime = {
+  upsertApiKeyProfile(params: {
+    provider: string;
+    input: string;
+    agentDir?: string;
+    options?: {
+      config?: Record<string, unknown>;
+    };
+    profileId?: string;
+    metadata?: Record<string, string>;
+  }): string;
+  updateAuthProfileStoreWithLock(params: {
+    agentDir?: string;
+    saveOptions?: {
+      filterExternalAuthProfiles?: boolean;
+      preserveOrderProfileIds?: Iterable<string>;
+      preserveStateProfileIds?: Iterable<string>;
+      pruneOrderProfileIds?: Iterable<string>;
+      syncExternalCli?: boolean;
+    };
+    updater: (store: OpenClawRuntimeAuthProfileStore) => boolean;
+  }): Promise<OpenClawRuntimeAuthProfileStore | null>;
+  resolveProviderAuthProfileApiKey(params: {
+    provider: string;
+    agentDir?: string;
+    cfg?: Record<string, unknown>;
+    allowKeychainPrompt?: boolean;
+    includeExternalCliAuth?: boolean;
+    profileTypes?: readonly string[];
+  }): Promise<string | undefined>;
+};
 
 export function resetOpenClawPluginDiscoveryCaches(): void {
   _bundledPluginManifestCache = null;
   _bundledPluginCache = null;
   _miniMaxPluginRegistrationCache = null;
+  _openClawProviderAuthRuntimePromise = null;
+}
+
+function getOpenClawAgentDir(agentId: string): string {
+  return join(homedir(), '.openclaw', 'agents', agentId, 'agent');
+}
+
+async function getOpenClawProviderAuthRuntime(): Promise<OpenClawProviderAuthRuntime> {
+  if (!_openClawProviderAuthRuntimePromise) {
+    _openClawProviderAuthRuntimePromise = (async () => {
+      const modulePath = resolveOpenClawRuntimeModulePath(OPENCLAW_PROVIDER_AUTH_RUNTIME_SPECIFIER);
+      return import(pathToFileURL(modulePath).href) as Promise<OpenClawProviderAuthRuntime>;
+    })();
+  }
+  return _openClawProviderAuthRuntimePromise;
 }
 
 function getOpenClawExtensionsRoots(): string[] {
@@ -429,6 +488,102 @@ async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
 
 async function writeAuthProfiles(store: AuthProfilesStore, agentId = 'main'): Promise<void> {
   await writeJsonFile(getAuthProfilesPath(agentId), store);
+  // Sync to OpenClaw SQLite auth store so the agent runtime can read it.
+  await syncAuthProfilesToSqlite(store, agentId).catch((err) => {
+    console.warn(`Failed to sync auth profiles to SQLite (agent: ${agentId}):`, err);
+  });
+}
+
+/**
+ * SQLite path for the OpenClaw agent auth store.
+ *
+ * Must match resolveOpenClawAgentSqlitePath in OpenClaw's sqlite-nSLfAcoh.js:
+ *   path.join(path.dirname(resolveOpenClawStateSqliteDir(...)), 'agents', agentId, 'agent', 'openclaw-agent.sqlite')
+ * resolveOpenClawStateSqliteDir returns ~/.openclaw/state, so dirname gives ~/.openclaw.
+ */
+function getAgentSqlitePath(agentId = 'main'): string {
+  return join(homedir(), '.openclaw', 'agents', agentId, 'agent', 'openclaw-agent.sqlite');
+}
+
+/**
+ * Sync the auth profiles store to OpenClaw's SQLite database.
+ *
+ * OpenClaw 2026.6+ reads auth credentials from openclaw-agent.sqlite
+ * (auth_profile_store / auth_profile_state tables) instead of the legacy
+ * auth-profiles.json. ClawX writes both to keep auth working after version
+ * upgrades.
+ *
+ * Uses /usr/bin/sqlite3 (macOS built-in) via stdin to avoid shell-injection
+ * risks and extra npm dependencies.
+ */
+async function syncAuthProfilesToSqlite(store: AuthProfilesStore, agentId = 'main'): Promise<void> {
+  const dbPath = getAgentSqlitePath(agentId);
+  const now = Date.now();
+  const storeJson = JSON.stringify(store);
+
+  // Build the auth_profile_state payload from the store's order/lastGood metadata
+  const statePayload: { version: number; order: Record<string, string[]>; lastGood: Record<string, string>; usageStats?: Record<string, unknown> } = {
+    version: 1,
+    order: store.order ?? {},
+    lastGood: store.lastGood ?? {},
+  };
+
+  const stateJson = JSON.stringify(statePayload);
+
+  const sql = [
+    'CREATE TABLE IF NOT EXISTS auth_profile_store (',
+    '  store_key TEXT NOT NULL PRIMARY KEY,',
+    '  store_json TEXT NOT NULL,',
+    '  updated_at INTEGER NOT NULL',
+    ');',
+    '',
+    'CREATE TABLE IF NOT EXISTS auth_profile_state (',
+    '  state_key TEXT NOT NULL PRIMARY KEY,',
+    '  state_json TEXT NOT NULL,',
+    '  updated_at INTEGER NOT NULL',
+    ');',
+    '',
+    'CREATE TABLE IF NOT EXISTS schema_meta (',
+    '  meta_key TEXT NOT NULL PRIMARY KEY,',
+    '  role TEXT NOT NULL,',
+    '  schema_version INTEGER NOT NULL,',
+    '  agent_id TEXT,',
+    '  app_version TEXT,',
+    '  created_at INTEGER NOT NULL,',
+    '  updated_at INTEGER NOT NULL',
+    ');',
+    '',
+    `INSERT OR REPLACE INTO auth_profile_store (store_key, store_json, updated_at)`,
+    `VALUES ('__primary__', '${storeJson.replace(/'/g, "''")}', ${now});`,
+    '',
+    `INSERT OR REPLACE INTO auth_profile_state (state_key, state_json, updated_at)`,
+    `VALUES ('__primary__', '${stateJson.replace(/'/g, "''")}', ${now});`,
+    '',
+    `INSERT OR IGNORE INTO schema_meta (meta_key, role, schema_version, agent_id, app_version, created_at, updated_at)`,
+    `VALUES ('main', 'agent', 1, '${agentId.replace(/'/g, "''")}', '2026.6.6', ${now}, ${now});`,
+    '',
+  ].join('\n');
+
+  await new Promise<void>((resolve, reject) => {
+    const dbDir = dirname(dbPath);
+    mkdirSync(dbDir, { recursive: true });
+
+    const child = execFile('/usr/bin/sqlite3', [dbPath], {
+      timeout: 10000,
+      maxBuffer: 5 * 1024 * 1024,
+    }, (error) => {
+      if (error) {
+        reject(new Error(`sqlite3 sync failed: ${error.message}`));
+      } else {
+        resolve();
+      }
+    });
+
+    if (child.stdin) {
+      child.stdin.write(sql);
+      child.stdin.end();
+    }
+  });
 }
 
 function getApiKeyFromAuthProfilesStore(
@@ -457,12 +612,43 @@ function getApiKeyFromAuthProfilesStore(
   return null;
 }
 
+function getApiKeyFromRuntimeAuthStore(
+  store: OpenClawRuntimeAuthProfileStore,
+  provider: string,
+): string | null {
+  const profileIds = [
+    `${provider}:default`,
+    ...(Object.entries(store.order ?? {})
+      .flatMap(([orderProvider, profileIds]) => (orderProvider === provider ? profileIds : []))),
+  ];
+
+  for (const profileId of profileIds) {
+    const profile = store.profiles[profileId];
+    if (profile?.type === 'api_key' && profile.provider === provider) {
+      const key = profile.key;
+      if (typeof key === 'string' && key.trim()) {
+        return key;
+      }
+    }
+  }
+
+  for (const profile of Object.values(store.profiles)) {
+    if (profile.type === 'api_key' && profile.provider === provider) {
+      const key = profile.key;
+      if (typeof key === 'string' && key.trim()) {
+        return key;
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * Read the API key OpenClaw will use for a runtime provider key.
  *
- * This intentionally reads auth-profiles.json rather than ClawX's provider
- * cache, so UI status can reflect providers imported or preserved by the
- * OpenClaw runtime across overwrite installs.
+ * This intentionally reads OpenClaw's own auth store rather than ClawX's
+ * provider cache, so UI status can reflect credentials managed by the runtime.
  */
 export async function getProviderApiKeyFromOpenClaw(
   provider: string,
@@ -472,6 +658,19 @@ export async function getProviderApiKeyFromOpenClaw(
   if (agentIds.length === 0) agentIds.push('main');
 
   for (const id of agentIds) {
+    const runtime = await getOpenClawProviderAuthRuntime().catch(() => null);
+    if (runtime?.resolveProviderAuthProfileApiKey) {
+      const apiKey = await runtime.resolveProviderAuthProfileApiKey({
+        provider,
+        agentDir: getOpenClawAgentDir(id),
+        allowKeychainPrompt: false,
+        includeExternalCliAuth: false,
+      }).catch(() => null);
+      if (apiKey) {
+        return apiKey;
+      }
+    }
+
     const store = await readAuthProfiles(id);
     const apiKey = getApiKeyFromAuthProfilesStore(store, provider);
     if (apiKey) {
@@ -891,7 +1090,7 @@ export async function getOAuthTokenFromOpenClaw(
 }
 
 /**
- * Save a provider API key to OpenClaw's auth-profiles.json
+ * Save a provider API key to OpenClaw's auth store.
  */
 export async function saveProviderKeyToOpenClaw(
   provider: string,
@@ -906,9 +1105,25 @@ export async function saveProviderKeyToOpenClaw(
   if (agentIds.length === 0) agentIds.push('main');
 
   for (const id of agentIds) {
+    const runtime = await getOpenClawProviderAuthRuntime().catch(() => null);
+    const agentDir = getOpenClawAgentDir(id);
+    if (runtime?.upsertApiKeyProfile) {
+      try {
+        runtime.upsertApiKeyProfile({
+          provider,
+          input: apiKey,
+          agentDir,
+          profileId: `${provider}:default`,
+        });
+      } catch (error) {
+        console.warn(`Failed to write API key to OpenClaw auth store for provider "${provider}" (agent "${id}"):`, error);
+      }
+    } else {
+      console.warn(`OpenClaw auth runtime unavailable for provider "${provider}" (agent "${id}"), falling back to auth-profiles.json`);
+    }
+
     const store = await readAuthProfiles(id);
     const profileId = `${provider}:default`;
-
     store.profiles[profileId] = { type: 'api_key', provider, key: apiKey };
 
     if (!store.order) store.order = {};
@@ -922,11 +1137,11 @@ export async function saveProviderKeyToOpenClaw(
 
     await writeAuthProfiles(store, id);
   }
-  console.log(`Saved API key for provider "${provider}" to OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
+  console.log(`Saved API key for provider "${provider}" to OpenClaw auth store (agents: ${agentIds.join(', ')})`);
 }
 
 /**
- * Remove a provider API key from OpenClaw auth-profiles.json
+ * Remove a provider API key from OpenClaw auth store.
  */
 export async function removeProviderKeyFromOpenClaw(
   provider: string,
@@ -936,12 +1151,57 @@ export async function removeProviderKeyFromOpenClaw(
   if (agentIds.length === 0) agentIds.push('main');
 
   for (const id of agentIds) {
+    const runtime = await getOpenClawProviderAuthRuntime().catch(() => null);
+    const agentDir = getOpenClawAgentDir(id);
+    if (runtime?.updateAuthProfileStoreWithLock) {
+      try {
+        await runtime.updateAuthProfileStoreWithLock({
+          agentDir,
+          updater: (store) => {
+            const profileId = `${provider}:default`;
+            const profile = store.profiles[profileId];
+            let changed = false;
+            if (profile?.type === 'api_key') {
+              delete store.profiles[profileId];
+              changed = true;
+            }
+            if (store.order) {
+              for (const [orderProvider, profileIds] of Object.entries(store.order)) {
+                const nextProfileIds = profileIds.filter((profileProfileId) => profileProfileId !== profileId);
+                if (nextProfileIds.length !== profileIds.length) changed = true;
+                if (nextProfileIds.length > 0) {
+                  store.order[orderProvider] = nextProfileIds;
+                } else {
+                  delete store.order[orderProvider];
+                }
+              }
+              if (Object.keys(store.order).length === 0) store.order = undefined;
+            }
+            if (store.lastGood) {
+              for (const [lastGoodProvider, lastGoodProfileId] of Object.entries(store.lastGood)) {
+                if (lastGoodProfileId === profileId) {
+                  delete store.lastGood[lastGoodProvider];
+                  changed = true;
+                }
+              }
+              if (Object.keys(store.lastGood).length === 0) store.lastGood = undefined;
+            }
+            return changed;
+          },
+        });
+      } catch (error) {
+        console.warn(`Failed to remove API key from OpenClaw auth store for provider "${provider}" (agent "${id}"):`, error);
+      }
+    } else {
+      console.warn(`OpenClaw auth runtime unavailable for provider "${provider}" (agent "${id}"), falling back to auth-profiles.json`);
+    }
+
     const store = await readAuthProfiles(id);
     if (removeProfileFromStore(store, `${provider}:default`, 'api_key')) {
       await writeAuthProfiles(store, id);
     }
   }
-  console.log(`Removed API key for provider "${provider}" from OpenClaw auth-profiles (agents: ${agentIds.join(', ')})`);
+  console.log(`Removed API key for provider "${provider}" from OpenClaw auth store (agents: ${agentIds.join(', ')})`);
 }
 
 /**

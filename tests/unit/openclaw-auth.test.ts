@@ -131,8 +131,23 @@ describe('saveProviderKeyToOpenClaw', () => {
       },
     });
     expect(logSpy).toHaveBeenCalledWith(
-      'Saved API key for provider "openrouter" to OpenClaw auth-profiles (agents: main, test3)',
+      'Saved API key for provider "openrouter" to OpenClaw auth store (agents: main, test3)',
     );
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = testHome;
+    try {
+      const { resolveProviderAuthProfileApiKey } = await import('openclaw/plugin-sdk/provider-auth');
+      await expect(resolveProviderAuthProfileApiKey({
+        provider: 'openrouter',
+        agentDir: join(testHome, '.openclaw', 'agents', 'main', 'agent'),
+        allowKeychainPrompt: false,
+        includeExternalCliAuth: false,
+        profileTypes: ['api_key'],
+      })).resolves.toBe('sk-test');
+    } finally {
+      process.env.HOME = previousHome;
+    }
 
     logSpy.mockRestore();
   });
