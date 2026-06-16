@@ -51,15 +51,15 @@
             "activationInvalid": "激活码无效"
         },
         "fields": {
-            "email": "邮箱",
+            "email": "用户名",
             "password": "密码",
             "activationCode": "激活码",
-            "verifyCode": "邮箱验证码"
+            "verifyCode": "验证码"
         },
         "placeholders": {
-            "email": "user@example.com",
+            "email": "请输入用户名",
             "password": "密码",
-            "verifyCode": "输入邮件中的验证码",
+            "verifyCode": "输入验证码",
             "required": "必填",
             "optional": "可选"
         },
@@ -81,7 +81,8 @@
             "activationVerified": "激活码已验证",
             "activationInvalid": "激活码无效",
             "activationCheckFailed": "检查激活码失败：{{message}}",
-            "enterEmailFirst": "请先输入邮箱",
+            "enterEmailFirst": "请先输入用户名",
+            "enterAccountFirst": "请先输入用户名",
             "verifyCodeSent": "验证码已发送",
             "sendVerifyCodeFailed": "发送验证码失败：{{message}}",
             "enterAccountPassword": "请输入账号和密码",

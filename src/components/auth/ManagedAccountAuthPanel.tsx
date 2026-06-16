@@ -152,7 +152,7 @@ export function ManagedAccountAuthPanel({
   const sendVerifyCode = async () => {
     const normalizedAccount = account.trim();
     if (!normalizedAccount) {
-      toast.error(t('auth.toast.enterEmailFirst'));
+      toast.error(t('auth.toast.enterAccountFirst'));
       return;
     }
 
@@ -162,7 +162,6 @@ export function ManagedAccountAuthPanel({
         method: 'POST',
         body: JSON.stringify({
           account: normalizedAccount,
-          email: normalizedAccount,
         }),
       });
       setVerifyCodeCountdown(typeof result.countdown === 'number' && result.countdown > 0 ? result.countdown : 60);
@@ -191,7 +190,7 @@ export function ManagedAccountAuthPanel({
         method: 'POST',
         body: JSON.stringify({
           account: normalizedAccount,
-          email: normalizedAccount,
+          username: normalizedAccount,
           password,
           activationCode: activationCode.trim() || undefined,
           activationTicket: activationTicket || activationCode.trim() || undefined,

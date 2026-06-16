@@ -51,15 +51,15 @@
             "activationInvalid": "Код активации недействителен"
         },
         "fields": {
-            "email": "Email",
+            "email": "Имя пользователя",
             "password": "Пароль",
             "activationCode": "Код активации",
-            "verifyCode": "Код подтверждения email"
+            "verifyCode": "Код подтверждения"
         },
         "placeholders": {
-            "email": "user@example.com",
+            "email": "Введите имя пользователя",
             "password": "Пароль",
-            "verifyCode": "Введите код из письма",
+            "verifyCode": "Введите код подтверждения",
             "required": "Обязательно",
             "optional": "Необязательно"
         },
@@ -81,7 +81,8 @@
             "activationVerified": "Код активации подтверждён",
             "activationInvalid": "Код активации недействителен",
             "activationCheckFailed": "Не удалось проверить код активации: {{message}}",
-            "enterEmailFirst": "Сначала введите email",
+            "enterEmailFirst": "Сначала введите имя пользователя",
+            "enterAccountFirst": "Сначала введите имя пользователя",
             "verifyCodeSent": "Код подтверждения отправлен",
             "sendVerifyCodeFailed": "Не удалось отправить код подтверждения: {{message}}",
             "enterAccountPassword": "Введите аккаунт и пароль",

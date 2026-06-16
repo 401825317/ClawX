@@ -51,15 +51,15 @@
             "activationInvalid": "Activation code is invalid"
         },
         "fields": {
-            "email": "Email",
+            "email": "Username",
             "password": "Password",
             "activationCode": "Activation code",
-            "verifyCode": "Email verification code"
+            "verifyCode": "Verification code"
         },
         "placeholders": {
-            "email": "user@example.com",
+            "email": "Enter username",
             "password": "Password",
-            "verifyCode": "Enter the code from your email",
+            "verifyCode": "Enter verification code",
             "required": "Required",
             "optional": "Optional"
         },
@@ -81,7 +81,8 @@
             "activationVerified": "Activation code verified",
             "activationInvalid": "Activation code is invalid",
             "activationCheckFailed": "Activation check failed: {{message}}",
-            "enterEmailFirst": "Please enter an email first",
+            "enterEmailFirst": "Please enter a username first",
+            "enterAccountFirst": "Please enter a username first",
             "verifyCodeSent": "Verification code sent",
             "sendVerifyCodeFailed": "Send verification code failed: {{message}}",
             "enterAccountPassword": "Please enter account and password",
