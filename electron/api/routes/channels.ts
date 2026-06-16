@@ -25,13 +25,11 @@ import {
   listAgentsSnapshotFromConfig,
 } from '../../utils/agent-config';
 import {
-  ensureDiscordPluginInstalled,
   ensureDingTalkPluginInstalled,
   ensureFeishuPluginInstalled,
   ensureQQBotPluginInstalled,
   ensureWeChatPluginInstalled,
   ensureWeComPluginInstalled,
-  ensureWhatsAppPluginInstalled,
 } from '../../utils/plugin-install';
 import {
   computeChannelRuntimeStatus,
@@ -1473,24 +1471,10 @@ export async function handleChannelRoutes(
           return true;
         }
       }
-      if (storedChannelType === 'discord') {
-        const installResult = await ensureDiscordPluginInstalled();
-        if (!installResult.installed) {
-          sendJson(res, 500, { success: false, error: installResult.warning || 'Discord plugin install failed' });
-          return true;
-        }
-      }
       if (storedChannelType === 'qqbot') {
         const installResult = await ensureQQBotPluginInstalled();
         if (!installResult.installed) {
           sendJson(res, 500, { success: false, error: installResult.warning || 'QQBot plugin install failed' });
-          return true;
-        }
-      }
-      if (storedChannelType === 'whatsapp') {
-        const installResult = await ensureWhatsAppPluginInstalled();
-        if (!installResult.installed) {
-          sendJson(res, 500, { success: false, error: installResult.warning || 'WhatsApp plugin install failed' });
           return true;
         }
       }

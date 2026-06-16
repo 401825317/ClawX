@@ -374,12 +374,10 @@ export function Channels() {
   }, [visibleChannelGroups]);
 
   const configuredGroups = useMemo(() => {
-    const known = displayedChannelTypes
+    return displayedChannelTypes
       .map((type) => groupedByType[type])
       .filter((group): group is ChannelGroupItem => Boolean(group));
-    const unknown = visibleChannelGroups.filter((group) => !displayedChannelTypes.includes(group.channelType as ChannelType));
-    return [...known, ...unknown];
-  }, [visibleChannelGroups, displayedChannelTypes, groupedByType]);
+  }, [displayedChannelTypes, groupedByType]);
 
   const unsupportedGroups = displayedChannelTypes.filter((type) => !configuredTypes.includes(type));
 

@@ -189,7 +189,7 @@
             "description": "通过腾讯官方 OpenClaw 插件扫码连接个人微信",
             "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/GHYZwuPCriF0gWkXwkFcJ9zon3b",
             "instructions": [
-                "点击生成二维码，ClawX 会在 OpenClaw 中安装并启用官方微信插件",
+                "点击生成二维码，UClaw 会在 OpenClaw 中安装并启用官方微信插件",
                 "使用微信扫描下方二维码，并在手机上确认连接",
                 "连接成功后，微信里会自动出现新的「微信 ClawBot」对话",
                 "之后可再次通过扫码流程添加更多微信账号，或重新连接已有账号"
@@ -197,7 +197,7 @@
         },
         "dingtalk": {
             "description": "通过 OpenClaw 渠道插件连接钉钉（Stream 模式）",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/Y5eNwiSiZidkLskrwtJc1rUln0b#doxcnr8KfaA2mNPeQUeHO83eDPh",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/ZbjjdNMAKojKLlxRi4OcHQYrnih",
             "fields": {
                 "clientId": {
                     "label": "Client ID (AppKey)",
@@ -231,7 +231,7 @@
         },
         "feishu": {
             "description": "通过飞书官方推出的 OpenClaw 插件连接飞书/Lark 机器人",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/GKn8wOvHnibpPNkNkPzcAvGlnzK#Py88dTltfoJc1jxAhIBcW3Pkn7b",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/EZT4dxbUYoauAsxflagc9QuTnQd",
             "fields": {
                 "appId": {
                     "label": "应用 ID (App ID)",
@@ -252,7 +252,7 @@
         },
         "wecom": {
             "description": "通过插件连接企业微信机器人",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/JTGnwoV0RixKPtkr4w7c7gpAnDc",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/DfgzdPIkZo33RlxR1PTcQ4Dkn7b",
             "fields": {
                 "botId": {
                     "label": "机器人 Bot ID",
@@ -383,7 +383,7 @@
         },
         "qqbot": {
             "description": "连接 QQ 机器人频道（OpenClaw 3.31 起内置）",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/KPIJwlyiGiupMrkiS9ice39Zn2c",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/XzWGdl9BXou0hrxAiB7ca59mnYe",
             "fields": {
                 "appId": {
                     "label": "App ID",

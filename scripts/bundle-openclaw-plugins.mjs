@@ -7,9 +7,8 @@
  * Current plugins:
  *   - @soimy/dingtalk -> build/openclaw-plugins/dingtalk
  *   - @wecom/wecom-openclaw-plugin -> build/openclaw-plugins/wecom
- *   - @openclaw/discord -> build/openclaw-plugins/discord
+ *   - @larksuite/openclaw-lark -> build/openclaw-plugins/feishu-openclaw-plugin
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
- *   - @openclaw/whatsapp -> build/openclaw-plugins/whatsapp
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
  *
  * The output plugin directory contains:
@@ -42,9 +41,7 @@ const PLUGINS = [
   { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
   { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
   { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
-  { npmName: '@openclaw/discord', pluginId: 'discord' },
   { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-  { npmName: '@openclaw/whatsapp', pluginId: 'whatsapp' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
 ];
 
@@ -241,6 +238,9 @@ function patchPluginId(pluginDir, expectedId) {
 }
 
 echo`📦 Bundling OpenClaw plugin mirrors...`;
+if (fs.existsSync(OUTPUT_ROOT)) {
+  fs.rmSync(OUTPUT_ROOT, { recursive: true, force: true });
+}
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
 for (const plugin of PLUGINS) {

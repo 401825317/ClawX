@@ -44,13 +44,11 @@ vi.mock('@electron/utils/agent-config', () => ({
 }));
 
 vi.mock('@electron/utils/plugin-install', () => ({
-  ensureDiscordPluginInstalled: vi.fn(),
   ensureDingTalkPluginInstalled: vi.fn(),
   ensureFeishuPluginInstalled: vi.fn(),
   ensureQQBotPluginInstalled: vi.fn(),
   ensureWeChatPluginInstalled: vi.fn(),
   ensureWeComPluginInstalled: vi.fn(),
-  ensureWhatsAppPluginInstalled: vi.fn(),
 }));
 
 vi.mock('@electron/utils/wechat-login', () => ({

@@ -213,12 +213,6 @@ const SKIP_PACKAGES = new Set([
   'openclaw',
   'typescript',
   '@playwright/test',
-  // @discordjs/opus is a native .node addon compiled for the system Node.js
-  // ABI. The Gateway runs inside Electron's utilityProcess which has a
-  // different ABI, so the binary fails with "Cannot find native binding".
-  // The package is optional — openclaw gracefully degrades when absent
-  // (only Discord voice features are affected; text chat works fine).
-  '@discordjs/opus',
 ]);
 const SKIP_SCOPES = ['@cloudflare/', '@types/'];
 let skippedDevCount = 0;
@@ -458,25 +452,8 @@ if (mirroredExtRuntimeDeps > 0) {
   echo`   Mirrored ${mirroredExtRuntimeDeps} extension runtime deps into dist/extensions/*/node_modules`;
 }
 
-function patchBundledExtensionPackageJsons(extensionsRoot) {
-  let patchedCount = 0;
-
-  const discordPkgPath = path.join(extensionsRoot, 'discord', 'package.json');
-  if (fs.existsSync(discordPkgPath)) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(discordPkgPath, 'utf8'));
-      if (pkg?.dependencies?.opusscript === '^0.0.8') {
-        pkg.dependencies.opusscript = '^0.1.1';
-        fs.writeFileSync(discordPkgPath, JSON.stringify(pkg, null, 2) + '\n', 'utf8');
-        patchedCount++;
-        echo`   🩹 Patched discord bundled runtime dep range: opusscript ^0.0.8 -> ^0.1.1`;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  return patchedCount;
+function patchBundledExtensionPackageJsons(_extensionsRoot) {
+  return 0;
 }
 
 patchBundledExtensionPackageJsons(extensionsDir);

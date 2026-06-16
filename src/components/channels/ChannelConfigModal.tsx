@@ -103,6 +103,7 @@ export function ChannelConfigModal({
   const meta: ChannelMeta | null = selectedType ? CHANNEL_META[selectedType] : null;
   const shouldUseCredentialValidation = selectedType !== 'feishu';
   const usesManagedQrAccounts = usesPluginManagedQrAccounts(selectedType);
+  const shouldShowDocsButton = Boolean(meta?.docsUrl) && selectedType !== 'wechat';
   const showAccountIdEditor = allowEditAccountId && !usesManagedQrAccounts;
   const resolvedAccountId = usesManagedQrAccounts
     ? (accountId ?? undefined)
@@ -611,15 +612,17 @@ export function ChannelConfigModal({
                       {meta ? t(meta.description.replace('channels:', '')) : ''}
                     </p>
                   </div>
-                  <Button
-                    variant="outline"
-                    className={cn(outlineButtonClasses, 'h-8 px-3 shrink-0')}
-                    onClick={openDocs}
-                  >
-                    <BookOpen className="h-3 w-3 mr-1" />
-                    {t('dialog.viewDocs')}
-                    <ExternalLink className="h-3 w-3 ml-1" />
-                  </Button>
+                  {shouldShowDocsButton && (
+                    <Button
+                      variant="outline"
+                      className={cn(outlineButtonClasses, 'h-8 px-3 shrink-0')}
+                      onClick={openDocs}
+                    >
+                      <BookOpen className="h-3 w-3 mr-1" />
+                      {t('dialog.viewDocs')}
+                      <ExternalLink className="h-3 w-3 ml-1" />
+                    </Button>
+                  )}
                 </div>
                 <ol className="list-decimal pl-5 text-meta text-muted-foreground leading-relaxed space-y-1.5">
                   {meta?.instructions.map((instruction, index) => (

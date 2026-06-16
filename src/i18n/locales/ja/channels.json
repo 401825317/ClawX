@@ -189,7 +189,7 @@
             "description": "Tencent 公式の OpenClaw プラグインを使い、QRコードをスキャンして個人 WeChat に接続します",
             "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/GHYZwuPCriF0gWkXwkFcJ9zon3b",
             "instructions": [
-                "QRコードを生成すると、ClawX が OpenClaw に公式 WeChat プラグインをインストールして有効化します",
+                "QRコードを生成すると、UClaw が OpenClaw に公式 WeChat プラグインをインストールして有効化します",
                 "以下の QR コードを WeChat でスキャンし、スマートフォン側で接続を確認します",
                 "接続が完了すると、WeChat に新しい「WeChat ClawBot」チャットが自動で表示されます",
                 "後から同じ QR フローを使って、別の WeChat アカウントを追加したり既存アカウントを再接続したりできます"
@@ -197,7 +197,7 @@
         },
         "dingtalk": {
             "description": "OpenClaw のチャンネルプラグイン経由で DingTalk に接続します（Stream モード）",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/Y5eNwiSiZidkLskrwtJc1rUln0b#doxcnDgA78n43DbkiQjI1OqUA7b",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/ZbjjdNMAKojKLlxRi4OcHQYrnih",
             "fields": {
                 "clientId": {
                     "label": "Client ID (AppKey)",
@@ -231,7 +231,7 @@
         },
         "feishu": {
             "description": "WebSocket 経由で Feishu/Lark ボットに接続します",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/GKn8wOvHnibpPNkNkPzcAvGlnzK#GdHUdp9t9oqyegxwV8ScLvVGn1c",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/EZT4dxbUYoauAsxflagc9QuTnQd",
             "fields": {
                 "appId": {
                     "label": "App ID",
@@ -251,7 +251,7 @@
         },
         "wecom": {
             "description": "プラグイン経由で WeCom Bot (企業微信) に接続します",
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/JTGnwoV0RixKPtkr4w7c7gpAnDc",
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/DfgzdPIkZo33RlxR1PTcQ4Dkn7b",
             "fields": {
                 "botId": {
                     "label": "ボット ID",
@@ -397,7 +397,7 @@
                 "App ID と Client Secret を取得します",
                 "認証情報を入力します"
             ],
-            "docsUrl": "https://icnnp7d0dymg.feishu.cn/wiki/KPIJwlyiGiupMrkiS9ice39Zn2c"
+            "docsUrl": "https://vcn52x7bsl0f.feishu.cn/docx/XzWGdl9BXou0hrxAiB7ca59mnYe"
         }
     },
     "viewDocs": "ドキュメントを表示"

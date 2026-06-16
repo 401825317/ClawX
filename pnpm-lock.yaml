@@ -35,10 +35,7 @@ importers:
     devDependencies:
       '@buape/carbon':
         specifier: 0.16.0
-        version: 0.16.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)
-      '@discordjs/voice':
-        specifier: ^0.19.2
-        version: 0.19.2(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)
+        version: 0.16.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.1.0(jiti@1.21.7))
@@ -52,23 +49,17 @@ importers:
         specifier: ^1.3.7
         version: 1.3.7
       '@larksuite/openclaw-lark':
-        specifier: 2026.5.20
-        version: 2026.5.20(openclaw@2026.6.6(encoding@0.1.13))
+        specifier: 2026.6.10
+        version: 2026.6.10(openclaw@2026.6.6(encoding@0.1.13))
       '@larksuiteoapi/node-sdk':
         specifier: ^1.61.1
         version: 1.62.0
       '@monaco-editor/react':
         specifier: ^4.7.0
         version: 4.7.0(monaco-editor@0.55.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@openclaw/discord':
-        specifier: 2026.5.20
-        version: 2026.5.20(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(openclaw@2026.6.6(encoding@0.1.13))
       '@openclaw/qqbot':
-        specifier: 2026.5.20
-        version: 2026.5.20(openclaw@2026.6.6(encoding@0.1.13))
-      '@openclaw/whatsapp':
-        specifier: 2026.5.20
-        version: 2026.5.20(openclaw@2026.6.6(encoding@0.1.13))(sharp@0.34.5)
+        specifier: 2026.6.6
+        version: 2026.6.6(openclaw@2026.6.6(encoding@0.1.13))
       '@playwright/test':
         specifier: ^1.56.1
         version: 1.59.0
@@ -112,14 +103,14 @@ importers:
         specifier: ^0.34.48
         version: 0.34.48
       '@soimy/dingtalk':
-        specifier: ^3.6.3
+        specifier: 3.6.4
         version: 3.6.4(openclaw@2026.6.6(encoding@0.1.13))
       '@tencent-connect/qqbot-connector':
         specifier: ^1.1.0
         version: 1.1.0
       '@tencent-weixin/openclaw-weixin':
-        specifier: ^2.4.3
-        version: 2.4.3(openclaw@2026.6.6(encoding@0.1.13))
+        specifier: ^2.4.4
+        version: 2.4.4(openclaw@2026.6.6(encoding@0.1.13))
       '@testing-library/jest-dom':
         specifier: ^6.9.1
         version: 6.9.1
@@ -151,8 +142,8 @@ importers:
         specifier: ^5.1.4
         version: 5.2.0(vite@7.3.1(@types/node@25.5.0)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
       '@wecom/wecom-openclaw-plugin':
-        specifier: ^2026.5.14
-        version: 2026.5.14(openclaw@2026.6.6(encoding@0.1.13))
+        specifier: ^2026.5.25
+        version: 2026.5.25(openclaw@2026.6.6(encoding@0.1.13))
       '@whiskeysockets/baileys':
         specifier: 7.0.0-rc.9
         version: 7.0.0-rc.9(audio-decode@2.2.3)(jimp@1.6.1)(sharp@0.34.5)
@@ -174,9 +165,6 @@ importers:
       diff:
         specifier: ^9.0.0
         version: 9.0.0
-      discord-api-types:
-        specifier: ^0.38.47
-        version: 0.38.47
       electron:
         specifier: ^40.6.0
         version: 40.8.4
@@ -231,9 +219,6 @@ importers:
       openclaw:
         specifier: 2026.6.6
         version: 2026.6.6(encoding@0.1.13)
-      opusscript:
-        specifier: ^0.1.1
-        version: 0.1.1
       pdfjs-dist:
         specifier: ^5.7.284
         version: 5.7.284
@@ -1175,8 +1160,8 @@ packages:
   '@keyv/serialize@1.1.1':
     resolution: {integrity: sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==}
 
-  '@larksuite/openclaw-lark@2026.5.20':
-    resolution: {integrity: sha512-4iTK0ZJXtylJFg+kh6gttKDi6vqKjbwTNrWTo/8Zw0VjtbpZQ2wkWIYF5BQNie/Ehqf1S9D5w4pjIwL9bCzaKg==}
+  '@larksuite/openclaw-lark@2026.6.10':
+    resolution: {integrity: sha512-OdNePiG88jRIUrRAx0h3bF2o5UxLD4c9zlK5Wfn1xirYLic6koGpx7xoRFAgvCMd15DzLQQtekkwO6+xkDupBw==}
     engines: {node: '>=22'}
     hasBin: true
     peerDependencies:
@@ -1436,14 +1421,6 @@ packages:
     resolution: {integrity: sha512-/xGlezI6xfGO9NwuJlnwz/K14qD1kCSAGtacBHnGzeAIuJGazcp45KP5NuyARXoKb7cwulAGWVsbeSxdG/cb0Q==}
     engines: {node: ^18.17.0 || >=20.5.0}
 
-  '@openclaw/discord@2026.5.20':
-    resolution: {integrity: sha512-sQQ5fx5BoMtfqMj6k2wn3z3AwPEzXab5xhedDOiHJWuKZOfXOcIBfkiVl237ASVyopJKdh4LKed5BODmXiR20w==}
-    peerDependencies:
-      openclaw: '>=2026.5.20'
-    peerDependenciesMeta:
-      openclaw:
-        optional: true
-
   '@openclaw/fs-safe@0.3.0':
     resolution: {integrity: sha512-uIBE441CIt1kIURoP9qRGKZ8LkGyfD9ZzeESjwAd29ZPWtghws/5GR3Pjb67jKdcJHP1I6roNXcvnhzAU7lHlA==}
     engines: {node: '>=20.11'}
@@ -1454,21 +1431,19 @@ packages:
     peerDependencies:
       undici: '>=8.3.0 <9'
 
-  '@openclaw/qqbot@2026.5.20':
-    resolution: {integrity: sha512-49UUbzgaacRFgcOAlTranJ2F+6wgRxBwsaUURdgoedgP28V5rbcaNCMBT8fsZpeHO7/w9fyoazR31c1heIC8hA==}
+  '@openclaw/qqbot@2026.6.6':
+    resolution: {integrity: sha512-GM2PRq+zoSPlePCYJNlAyEtUipy25jNwDR5BHDojM80EWw9xfE/+J7jCmuClSq6exsp0bGizP4vxqhygFchzqw==}
     peerDependencies:
-      openclaw: '>=2026.5.20'
+      openclaw: '>=2026.6.6'
     peerDependenciesMeta:
       openclaw:
         optional: true
-
-  '@openclaw/whatsapp@2026.5.20':
-    resolution: {integrity: sha512-pDtwNa0X+8VH+bqQrC771K5mjB7XNryJ+M7PHnHtLaYbLrUH+5Pe+7y4+Tv5IxskdT8cqz2xsWZeerhAXUdvIQ==}
-    peerDependencies:
-      openclaw: '>=2026.5.20'
-    peerDependenciesMeta:
-      openclaw:
-        optional: true
+    bundledDependencies:
+      - '@tencent-connect/qqbot-connector'
+      - mpg123-decoder
+      - silk-wasm
+      - ws
+      - zod
 
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
@@ -2243,8 +2218,8 @@ packages:
     resolution: {integrity: sha512-3nQ2mdyzPRKpBHjd3QiKZDwNzw1F7fBN+rSq8Xms2gg+JWZR4SY2Zdf+doqTyXdyVjG4Y0QM7IA4U42zT9xxzw==}
     engines: {node: '>=18.0.0'}
 
-  '@tencent-weixin/openclaw-weixin@2.4.3':
-    resolution: {integrity: sha512-dPQbidUNWigC6V10vGW4i+GLH09x+6zUhafZRjuxkJ9GDu8o62WBsnUTojp4KqUH756hz+t2v9khiCRSi0dBDw==}
+  '@tencent-weixin/openclaw-weixin@2.4.4':
+    resolution: {integrity: sha512-tb4Ix+6JPLEGlWz90wBWc5MYojISvYWReCeXjCwGCryi0RxVHCZa6ncCHT0xINNrYTOQbpAEN0U+i7UHVTk9XQ==}
     engines: {node: '>=22'}
     peerDependencies:
       openclaw: '>=2026.3.22'
@@ -2516,8 +2491,8 @@ packages:
   '@wecom/aibot-node-sdk@1.0.6':
     resolution: {integrity: sha512-WZJN3Q+s+94Qjc0VW8d5W1cVkA3emYxiqf+mNRO9UEHoF40puHvizreNMtudjFhm7mmkYiK5ue/QzNiCk+xwLA==}
 
-  '@wecom/wecom-openclaw-plugin@2026.5.14':
-    resolution: {integrity: sha512-z5fhanCn0PT3m8lHDMQATljFXzIsML2r2nq0nEu3KM93E163CmgbDzcXr3R766du4B0y3i65ZdIPh+tWAFeA8g==}
+  '@wecom/wecom-openclaw-plugin@2026.5.25':
+    resolution: {integrity: sha512-fyu8wlsTa5mPM5Ok9eINJqLid8xjkL6/2LEmb/6To19nM+S97E2vD6MuHaz7jxkiwTH5NZTEK3qMGtZkXSr5XQ==}
     peerDependencies:
       openclaw: '>=2026.3.28'
     peerDependenciesMeta:
@@ -2738,22 +2713,6 @@ packages:
 
   bail@2.0.2:
     resolution: {integrity: sha512-0xO6mYd7JB2YesxDKplafRpsiOzPt9V02ddPCLbY1xYGPOX24NTyN50qnUxgCPcSoYMhKpAuBTjQoRZCAkUDRw==}
-
-  baileys@7.0.0-rc12:
-    resolution: {integrity: sha512-kttfToIBUKJb5hn57GspFbtlGaOp8wwhij7F8JRtduIL6vIODL5ze7XnsQKT73QwgFOGdJYXAT01x6rz9NNijg==}
-    engines: {node: '>=20.0.0'}
-    peerDependencies:
-      audio-decode: ^2.1.3
-      jimp: ^1.6.1
-      link-preview-js: ^3.0.0
-      sharp: '*'
-    peerDependenciesMeta:
-      audio-decode:
-        optional: true
-      jimp:
-        optional: true
-      link-preview-js:
-        optional: true
 
   balanced-match@1.0.2:
     resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
@@ -4241,11 +4200,8 @@ packages:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
     engines: {node: '>= 0.8.0'}
 
-  libsignal@6.0.0:
-    resolution: {integrity: sha512-d/5V3YFtDljbFMufz4ncyUYGYhJl+vzAe+c2EFFBQ6bz1h8Q3IOMEGXYMzlibU60I+e8GagMMpji18iez3P1hA==}
-
-  libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7}
+  libsignal@git+https://github.com/whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7:
+    resolution: {commit: bcea72df9ec34d9d9140ab30619cf479c7c144c7, repo: https://github.com/whiskeysockets/libsignal-node.git, type: git}
     version: 6.0.0
 
   lie@3.3.0:
@@ -4818,9 +4774,6 @@ packages:
 
   opus-decoder@0.7.11:
     resolution: {integrity: sha512-+e+Jz3vGQLxRTBHs8YJQPRPc1Tr+/aC6coV/DlZylriA29BdHQAYXhvNRKtjftof17OFng0+P4wsFIqQu3a48A==}
-
-  opusscript@0.1.1:
-    resolution: {integrity: sha512-mL0fZZOUnXdZ78woRXp18lApwpp0lF5tozJOD1Wut0dgrA9WuQTgSels/CSmFleaAZrJi/nci5KOVtbuxeWoQA==}
 
   ora@5.4.1:
     resolution: {integrity: sha512-5b6Y85tPxZZ7QytO+BQzysW31HJku27cRIlkbAXaNx+BdcVi+LlRFmVXzeF6a7JCwJpyw5c4b+YSVImQIrBpuQ==}
@@ -5883,9 +5836,6 @@ packages:
     resolution: {integrity: sha512-OZs6gsjF4vMp32qrCbiVSkrFmXtG/AZhY3t0iAMrMBiAZyV9oALtXO8hsrHbMXF9x6L3grlFuwW2oAz7cav+Gw==}
     engines: {node: '>= 0.6'}
 
-  typebox@1.1.38:
-    resolution: {integrity: sha512-pZ0aQPmMmXoUvSbeuWf/Hzsc+avNw/Zd6VeE8CFgkVGWyuHPJvqeJJDeJqLve+K70LvjYIoleGcoJHPT17cWoA==}
-
   typebox@1.1.39:
     resolution: {integrity: sha512-vj0afVtOfLQvv0GR0VxVagYxsXN64btL7Z9XoaG0ZggH3mruMMkOO6hXdgMsjCY3shZgEvooAWVeznQVs5c43w==}
 
@@ -6160,9 +6110,6 @@ packages:
   webidl-conversions@8.0.1:
     resolution: {integrity: sha512-BMhLD/Sw+GbJC21C/UgyaZX41nPt8bUTg+jWyDeg7e7YN4xOM05YPSIXceACnXVtqyEw/LMClUQMtMZ+PGGpqQ==}
     engines: {node: '>=20'}
-
-  whatsapp-rust-bridge@0.5.4:
-    resolution: {integrity: sha512-yYO1qSs0Fe7tGtnxOFHomocUD6IZtoAgmA4oDFyGIRZ67D3QZk3w7swA6XXFXNQngiyrg2k7tul6IrM3eUFh7A==}
 
   whatwg-mimetype@5.0.0:
     resolution: {integrity: sha512-sXcNcHOC51uPGF0P/D4NVtrkjSU2fNsm9iog4ZvZJsL3rjoDAzXZhkm2MWt1y+PUdggKAYVoMAIYcs78wJ51Cw==}
@@ -6551,13 +6498,13 @@ snapshots:
     dependencies:
       css-tree: 3.2.1
 
-  '@buape/carbon@0.16.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)':
+  '@buape/carbon@0.16.0(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)':
     dependencies:
       '@types/node': 25.6.0
       discord-api-types: 0.38.45
     optionalDependencies:
       '@cloudflare/workers-types': 4.20260405.1
-      '@discordjs/voice': 0.19.2(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)
+      '@discordjs/voice': 0.19.2(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)
       '@types/bun': 1.3.11
       '@types/ws': 8.18.1
       ws: 8.20.0
@@ -6645,12 +6592,12 @@ snapshots:
       ajv: 6.14.0
       ajv-keywords: 3.5.2(ajv@6.14.0)
 
-  '@discordjs/voice@0.19.2(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)':
+  '@discordjs/voice@0.19.2(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)':
     dependencies:
       '@snazzah/davey': 0.1.11(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)
       '@types/ws': 8.18.1
       discord-api-types: 0.38.47
-      prism-media: 1.3.5(opusscript@0.1.1)
+      prism-media: 1.3.5
       tslib: 2.8.1
       ws: 8.20.0
     transitivePeerDependencies:
@@ -6662,6 +6609,7 @@ snapshots:
       - node-opus
       - opusscript
       - utf-8-validate
+    optional: true
 
   '@earendil-works/pi-tui@0.78.0':
     dependencies:
@@ -6926,7 +6874,7 @@ snapshots:
       protobufjs: 7.5.8
       ws: 8.21.0
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.29.0(zod@4.3.6)
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -7115,6 +7063,7 @@ snapshots:
       mime: 3.0.0
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/diff@1.6.1':
     dependencies:
@@ -7124,8 +7073,10 @@ snapshots:
       pixelmatch: 5.3.0
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
-  '@jimp/file-ops@1.6.1': {}
+  '@jimp/file-ops@1.6.1':
+    optional: true
 
   '@jimp/js-bmp@1.6.1':
     dependencies:
@@ -7135,6 +7086,7 @@ snapshots:
       bmp-ts: 1.0.9
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/js-gif@1.6.1':
     dependencies:
@@ -7144,6 +7096,7 @@ snapshots:
       omggif: 1.0.10
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/js-jpeg@1.6.1':
     dependencies:
@@ -7152,6 +7105,7 @@ snapshots:
       jpeg-js: 0.4.4
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/js-png@1.6.1':
     dependencies:
@@ -7160,6 +7114,7 @@ snapshots:
       pngjs: 7.0.0
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/js-tiff@1.6.1':
     dependencies:
@@ -7168,12 +7123,14 @@ snapshots:
       utif2: 4.1.0
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-blit@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       '@jimp/utils': 1.6.1
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-blur@1.6.1':
     dependencies:
@@ -7181,11 +7138,13 @@ snapshots:
       '@jimp/utils': 1.6.1
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-circle@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-color@1.6.1':
     dependencies:
@@ -7196,6 +7155,7 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-contain@1.6.1':
     dependencies:
@@ -7207,6 +7167,7 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-cover@1.6.1':
     dependencies:
@@ -7217,6 +7178,7 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-crop@1.6.1':
     dependencies:
@@ -7226,27 +7188,32 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-displace@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       '@jimp/utils': 1.6.1
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-dither@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
+    optional: true
 
   '@jimp/plugin-fisheye@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       '@jimp/utils': 1.6.1
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-flip@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-hash@1.6.1':
     dependencies:
@@ -7262,11 +7229,13 @@ snapshots:
       any-base: 1.1.0
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-mask@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-print@1.6.1':
     dependencies:
@@ -7282,11 +7251,13 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-quantize@1.6.1':
     dependencies:
       image-q: 4.0.0
       zod: 3.25.76
+    optional: true
 
   '@jimp/plugin-resize@1.6.1':
     dependencies:
@@ -7295,6 +7266,7 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-rotate@1.6.1':
     dependencies:
@@ -7306,6 +7278,7 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/plugin-threshold@1.6.1':
     dependencies:
@@ -7317,15 +7290,18 @@ snapshots:
       zod: 3.25.76
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   '@jimp/types@1.6.1':
     dependencies:
       zod: 3.25.76
+    optional: true
 
   '@jimp/utils@1.6.1':
     dependencies:
       '@jimp/types': 1.6.1
       tinycolor2: 1.6.0
+    optional: true
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -7354,7 +7330,7 @@ snapshots:
 
   '@keyv/serialize@1.1.1': {}
 
-  '@larksuite/openclaw-lark@2026.5.20(openclaw@2026.6.6(encoding@0.1.13))':
+  '@larksuite/openclaw-lark@2026.6.10(openclaw@2026.6.6(encoding@0.1.13))':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.66.1
       '@sinclair/typebox': 0.34.49
@@ -7390,7 +7366,7 @@ snapshots:
       lodash.pickby: 4.6.0
       protobufjs: 7.5.8
       qs: 6.15.0
-      ws: 8.20.1
+      ws: 8.21.0
     transitivePeerDependencies:
       - bufferutil
       - debug
@@ -7445,7 +7421,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@modelcontextprotocol/sdk@1.29.0(zod@4.3.6)':
+  '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 1.19.13(hono@4.12.12)
       ajv: 8.20.0
@@ -7462,8 +7438,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.3.6
-      zod-to-json-schema: 3.25.1(zod@4.3.6)
+      zod: 4.4.3
+      zod-to-json-schema: 3.25.1(zod@4.4.3)
     transitivePeerDependencies:
       - supports-color
 
@@ -7609,27 +7585,6 @@ snapshots:
     dependencies:
       semver: 7.7.4
 
-  '@openclaw/discord@2026.5.20(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(openclaw@2026.6.6(encoding@0.1.13))':
-    dependencies:
-      '@discordjs/voice': 0.19.2(@emnapi/core@1.10.0)(@emnapi/runtime@1.9.1)(opusscript@0.1.1)
-      discord-api-types: 0.38.47
-      https-proxy-agent: 9.0.0
-      opusscript: 0.1.1
-      typebox: 1.1.38
-      undici: 8.3.0
-      ws: 8.20.1
-    optionalDependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
-    transitivePeerDependencies:
-      - '@discordjs/opus'
-      - '@emnapi/core'
-      - '@emnapi/runtime'
-      - bufferutil
-      - ffmpeg-static
-      - node-opus
-      - supports-color
-      - utf-8-validate
-
   '@openclaw/fs-safe@0.3.0':
     optionalDependencies:
       jszip: 3.10.1
@@ -7639,34 +7594,9 @@ snapshots:
     dependencies:
       undici: 8.3.0
 
-  '@openclaw/qqbot@2026.5.20(openclaw@2026.6.6(encoding@0.1.13))':
-    dependencies:
-      '@tencent-connect/qqbot-connector': 1.1.0
-      mpg123-decoder: 1.0.3
-      silk-wasm: 3.7.1
-      ws: 8.20.1
-      zod: 4.4.3
+  '@openclaw/qqbot@2026.6.6(openclaw@2026.6.6(encoding@0.1.13))':
     optionalDependencies:
       openclaw: 2026.6.6(encoding@0.1.13)
-    transitivePeerDependencies:
-      - bufferutil
-      - utf-8-validate
-
-  '@openclaw/whatsapp@2026.5.20(openclaw@2026.6.6(encoding@0.1.13))(sharp@0.34.5)':
-    dependencies:
-      audio-decode: 2.2.3
-      baileys: 7.0.0-rc12(audio-decode@2.2.3)(jimp@1.6.1)(sharp@0.34.5)
-      https-proxy-agent: 9.0.0
-      jimp: 1.6.1
-      typebox: 1.1.38
-    optionalDependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
-    transitivePeerDependencies:
-      - bufferutil
-      - link-preview-js
-      - sharp
-      - supports-color
-      - utf-8-validate
 
   '@pinojs/redact@0.4.0': {}
 
@@ -8308,6 +8238,7 @@ snapshots:
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
+    optional: true
 
   '@soimy/dingtalk@3.6.4(openclaw@2026.6.6(encoding@0.1.13))':
     dependencies:
@@ -8337,11 +8268,11 @@ snapshots:
     dependencies:
       qrcode-terminal: 0.12.0
 
-  '@tencent-weixin/openclaw-weixin@2.4.3(openclaw@2026.6.6(encoding@0.1.13))':
+  '@tencent-weixin/openclaw-weixin@2.4.4(openclaw@2026.6.6(encoding@0.1.13))':
     dependencies:
       openclaw: 2026.6.6(encoding@0.1.13)
       qrcode-terminal: 0.12.0
-      zod: 4.3.6
+      zod: 4.4.3
 
   '@testing-library/dom@10.4.1':
     dependencies:
@@ -8376,8 +8307,10 @@ snapshots:
   '@thi.ng/bitstream@2.4.49':
     dependencies:
       '@thi.ng/errors': 2.6.11
+    optional: true
 
-  '@thi.ng/errors@2.6.11': {}
+  '@thi.ng/errors@2.6.11':
+    optional: true
 
   '@tokenizer/inflate@0.4.1':
     dependencies:
@@ -8475,7 +8408,8 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@16.9.1': {}
+  '@types/node@16.9.1':
+    optional: true
 
   '@types/node@24.12.0':
     dependencies:
@@ -8683,27 +8617,30 @@ snapshots:
     dependencies:
       '@wasm-audio-decoders/common': 9.0.7
       codec-parser: 2.5.0
+    optional: true
 
   '@wasm-audio-decoders/ogg-vorbis@0.1.20':
     dependencies:
       '@wasm-audio-decoders/common': 9.0.7
       codec-parser: 2.5.0
+    optional: true
 
   '@wasm-audio-decoders/opus-ml@0.0.2':
     dependencies:
       '@wasm-audio-decoders/common': 9.0.7
+    optional: true
 
   '@wecom/aibot-node-sdk@1.0.6':
     dependencies:
       axios: 1.13.6(debug@4.4.3)
       eventemitter3: 5.0.4
-      ws: 8.20.1
+      ws: 8.21.0
     transitivePeerDependencies:
       - bufferutil
       - debug
       - utf-8-validate
 
-  '@wecom/wecom-openclaw-plugin@2026.5.14(openclaw@2026.6.6(encoding@0.1.13))':
+  '@wecom/wecom-openclaw-plugin@2026.5.25(openclaw@2026.6.6(encoding@0.1.13))':
     dependencies:
       '@wecom/aibot-node-sdk': 1.0.6
       fast-xml-parser: 5.7.3
@@ -8723,7 +8660,7 @@ snapshots:
       '@cacheable/node-cache': 1.7.6
       '@hapi/boom': 9.1.4
       async-mutex: 0.5.0
-      libsignal: https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7
+      libsignal: git+https://github.com/whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7
       lru-cache: 11.2.7
       music-metadata: 11.12.3
       p-queue: 9.1.0
@@ -8821,7 +8758,8 @@ snapshots:
 
   ansi-styles@6.2.3: {}
 
-  any-base@1.1.0: {}
+  any-base@1.1.0:
+    optional: true
 
   any-promise@1.3.0: {}
 
@@ -8927,7 +8865,8 @@ snapshots:
       stubborn-fs: 2.0.0
       when-exit: 2.1.5
 
-  audio-buffer@5.0.0: {}
+  audio-buffer@5.0.0:
+    optional: true
 
   audio-decode@2.2.3:
     dependencies:
@@ -8939,8 +8878,10 @@ snapshots:
       node-wav: 0.0.2
       ogg-opus-decoder: 1.7.3
       qoa-format: 1.0.1
+    optional: true
 
-  audio-type@2.4.1: {}
+  audio-type@2.4.1:
+    optional: true
 
   autoprefixer@10.4.27(postcss@8.5.8):
     dependencies:
@@ -8951,7 +8892,8 @@ snapshots:
       postcss: 8.5.8
       postcss-value-parser: 4.2.0
 
-  await-to-js@3.0.0: {}
+  await-to-js@3.0.0:
+    optional: true
 
   axios@1.13.6(debug@4.4.3):
     dependencies:
@@ -8964,28 +8906,6 @@ snapshots:
   b4a@1.8.0: {}
 
   bail@2.0.2: {}
-
-  baileys@7.0.0-rc12(audio-decode@2.2.3)(jimp@1.6.1)(sharp@0.34.5):
-    dependencies:
-      '@cacheable/node-cache': 1.7.6
-      '@hapi/boom': 9.1.4
-      async-mutex: 0.5.0
-      libsignal: 6.0.0
-      lru-cache: 11.2.7
-      music-metadata: 11.12.3
-      p-queue: 9.1.0
-      pino: 9.14.0
-      protobufjs: 7.5.8
-      sharp: 0.34.5
-      whatsapp-rust-bridge: 0.5.4
-      ws: 8.20.1
-    optionalDependencies:
-      audio-decode: 2.2.3
-      jimp: 1.6.1
-    transitivePeerDependencies:
-      - bufferutil
-      - supports-color
-      - utf-8-validate
 
   balanced-match@1.0.2: {}
 
@@ -9043,7 +8963,8 @@ snapshots:
 
   bluebird@3.4.7: {}
 
-  bmp-ts@1.0.9: {}
+  bmp-ts@1.0.9:
+    optional: true
 
   bn.js@4.12.3: {}
 
@@ -9278,7 +9199,8 @@ snapshots:
 
   clsx@2.1.1: {}
 
-  codec-parser@2.5.0: {}
+  codec-parser@2.5.0:
+    optional: true
 
   codepage@1.15.0: {}
 
@@ -9486,7 +9408,8 @@ snapshots:
 
   discord-api-types@0.38.45: {}
 
-  discord-api-types@0.38.47: {}
+  discord-api-types@0.38.47:
+    optional: true
 
   dlv@1.1.3: {}
 
@@ -9842,7 +9765,8 @@ snapshots:
     dependencies:
       eventsource-parser: 3.0.6
 
-  exif-parser@0.1.12: {}
+  exif-parser@0.1.12:
+    optional: true
 
   expect-type@1.3.0: {}
 
@@ -10175,6 +10099,7 @@ snapshots:
     dependencies:
       image-q: 4.0.0
       omggif: 1.0.10
+    optional: true
 
   glob-parent@5.1.2:
     dependencies:
@@ -10488,6 +10413,7 @@ snapshots:
   image-q@4.0.0:
     dependencies:
       '@types/node': 16.9.1
+    optional: true
 
   image-size@2.0.2: {}
 
@@ -10600,6 +10526,7 @@ snapshots:
       '@jimp/utils': 1.6.1
     transitivePeerDependencies:
       - supports-color
+    optional: true
 
   jiti@1.21.7: {}
 
@@ -10609,7 +10536,8 @@ snapshots:
 
   jose@6.2.2: {}
 
-  jpeg-js@0.4.4: {}
+  jpeg-js@0.4.4:
+    optional: true
 
   js-tokens@4.0.0: {}
 
@@ -10719,12 +10647,7 @@ snapshots:
       prelude-ls: 1.2.1
       type-check: 0.4.0
 
-  libsignal@6.0.0:
-    dependencies:
-      curve25519-js: 0.0.4
-      protobufjs: 7.5.8
-
-  libsignal@https://codeload.github.com/whiskeysockets/libsignal-node/tar.gz/bcea72df9ec34d9d9140ab30619cf479c7c144c7:
+  libsignal@git+https://github.com/whiskeysockets/libsignal-node.git#bcea72df9ec34d9d9140ab30619cf479c7c144c7:
     dependencies:
       curve25519-js: 0.0.4
       protobufjs: 7.5.8
@@ -11257,7 +11180,8 @@ snapshots:
 
   mime@2.6.0: {}
 
-  mime@3.0.0: {}
+  mime@3.0.0:
+    optional: true
 
   mimic-fn@2.1.0: {}
 
@@ -11442,7 +11366,8 @@ snapshots:
 
   node-releases@2.0.36: {}
 
-  node-wav@0.0.2: {}
+  node-wav@0.0.2:
+    optional: true
 
   nopt@8.1.0:
     dependencies:
@@ -11473,8 +11398,10 @@ snapshots:
       '@wasm-audio-decoders/opus-ml': 0.0.2
       codec-parser: 2.5.0
       opus-decoder: 0.7.11
+    optional: true
 
-  omggif@1.0.10: {}
+  omggif@1.0.10:
+    optional: true
 
   on-exit-leak-free@2.1.2: {}
 
@@ -11508,7 +11435,7 @@ snapshots:
       '@homebridge/ciao': 1.3.9
       '@lydell/node-pty': 1.2.0-beta.12
       '@mistralai/mistralai': 2.2.5
-      '@modelcontextprotocol/sdk': 1.29.0(zod@4.3.6)
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@mozilla/readability': 0.6.0
       '@openclaw/fs-safe': 0.3.0
       '@openclaw/proxyline': 0.3.3(undici@8.3.0)
@@ -11577,8 +11504,7 @@ snapshots:
   opus-decoder@0.7.11:
     dependencies:
       '@wasm-audio-decoders/common': 9.0.7
-
-  opusscript@0.1.1: {}
+    optional: true
 
   ora@5.4.1:
     dependencies:
@@ -11630,14 +11556,17 @@ snapshots:
 
   pako@1.0.11: {}
 
-  parse-bmfont-ascii@1.0.6: {}
+  parse-bmfont-ascii@1.0.6:
+    optional: true
 
-  parse-bmfont-binary@1.0.6: {}
+  parse-bmfont-binary@1.0.6:
+    optional: true
 
   parse-bmfont-xml@1.1.6:
     dependencies:
       xml-parse-from-string: 1.0.1
       xml2js: 0.5.0
+    optional: true
 
   parse-entities@4.0.2:
     dependencies:
@@ -11735,6 +11664,7 @@ snapshots:
   pixelmatch@5.3.0:
     dependencies:
       pngjs: 6.0.0
+    optional: true
 
   pkce-challenge@5.0.1: {}
 
@@ -11760,9 +11690,11 @@ snapshots:
 
   pngjs@5.0.0: {}
 
-  pngjs@6.0.0: {}
+  pngjs@6.0.0:
+    optional: true
 
-  pngjs@7.0.0: {}
+  pngjs@7.0.0:
+    optional: true
 
   postcss-import@15.1.0(postcss@8.5.8):
     dependencies:
@@ -11820,9 +11752,8 @@ snapshots:
       ansi-styles: 5.2.0
       react-is: 17.0.2
 
-  prism-media@1.3.5(opusscript@0.1.1):
-    optionalDependencies:
-      opusscript: 0.1.1
+  prism-media@1.3.5:
+    optional: true
 
   proc-log@5.0.0: {}
 
@@ -11896,6 +11827,7 @@ snapshots:
   qoa-format@1.0.1:
     dependencies:
       '@thi.ng/bitstream': 2.4.49
+    optional: true
 
   qrcode-terminal@0.12.0: {}
 
@@ -12350,7 +12282,8 @@ snapshots:
     dependencies:
       semver: 7.7.4
 
-  simple-xml-to-json@1.2.7: {}
+  simple-xml-to-json@1.2.7:
+    optional: true
 
   simple-yenc@1.0.4: {}
 
@@ -12666,7 +12599,8 @@ snapshots:
 
   tinybench@2.9.0: {}
 
-  tinycolor2@1.6.0: {}
+  tinycolor2@1.6.0:
+    optional: true
 
   tinyexec@1.0.4: {}
 
@@ -12759,8 +12693,6 @@ snapshots:
       content-type: 1.0.5
       media-typer: 1.1.0
       mime-types: 3.0.2
-
-  typebox@1.1.38: {}
 
   typebox@1.1.39: {}
 
@@ -12883,6 +12815,7 @@ snapshots:
   utif2@4.1.0:
     dependencies:
       pako: 1.0.11
+    optional: true
 
   util-deprecate@1.0.2: {}
 
@@ -12989,8 +12922,6 @@ snapshots:
 
   webidl-conversions@8.0.1: {}
 
-  whatsapp-rust-bridge@0.5.4: {}
-
   whatwg-mimetype@5.0.0: {}
 
   whatwg-url@16.0.1(@noble/hashes@2.0.1):
@@ -13071,16 +13002,19 @@ snapshots:
 
   xml-naming@0.1.0: {}
 
-  xml-parse-from-string@1.0.1: {}
+  xml-parse-from-string@1.0.1:
+    optional: true
 
   xml2js@0.5.0:
     dependencies:
       sax: 1.6.0
       xmlbuilder: 11.0.1
+    optional: true
 
   xmlbuilder@10.1.1: {}
 
-  xmlbuilder@11.0.1: {}
+  xmlbuilder@11.0.1:
+    optional: true
 
   xmlbuilder@15.1.1: {}
 
@@ -13136,10 +13070,6 @@ snapshots:
 
   yocto-queue@0.1.0: {}
 
-  zod-to-json-schema@3.25.1(zod@4.3.6):
-    dependencies:
-      zod: 4.3.6
-
   zod-to-json-schema@3.25.1(zod@4.4.3):
     dependencies:
       zod: 4.4.3
@@ -13148,7 +13078,8 @@ snapshots:
     dependencies:
       zod: 4.3.6
 
-  zod@3.25.76: {}
+  zod@3.25.76:
+    optional: true
 
   zod@4.3.6: {}
 

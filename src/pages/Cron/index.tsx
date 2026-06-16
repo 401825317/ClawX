@@ -208,7 +208,7 @@ function getDeliveryAccountDisplayName(account: DeliveryChannelAccount, t: TFunc
     : account.name;
 }
 
-const TESTED_CRON_DELIVERY_CHANNELS = new Set<string>(['feishu', 'telegram', 'qqbot', 'wecom', 'wechat']);
+const TESTED_CRON_DELIVERY_CHANNELS = new Set<string>(['feishu', 'qqbot', 'wecom', 'wechat', 'dingtalk']);
 
 function isSupportedCronDeliveryChannel(channelType: string): boolean {
   return TESTED_CRON_DELIVERY_CHANNELS.has(channelType);
