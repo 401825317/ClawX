@@ -166,6 +166,7 @@ interface JunFeiAIRelayTokenPayload {
 }
 
 const JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR = [
+  'smart-latest',
   'qwen-latest',
   'deepseek-latest',
   'doubao-latest',

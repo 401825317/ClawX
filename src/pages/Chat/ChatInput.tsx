@@ -57,6 +57,7 @@ interface RemoteModelOption {
 
 function formatJunFeiAIModelLabel(modelId: string): string {
   const labels: Record<string, string> = {
+    'smart-latest': '智能路由',
     'qwen-latest': '通义千问最新版',
     'deepseek-latest': 'DeepSeek 最新版',
     'doubao-latest': '豆包最新版',
