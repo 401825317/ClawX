@@ -35,7 +35,7 @@ const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
       delete flat['x-openrouter-title'];
       delete flat['X-OpenRouter-Title'];
       flat['HTTP-Referer'] = 'https://claw-x.com';
-      flat['X-OpenRouter-Title'] = 'ClawX';
+      flat['X-OpenRouter-Title'] = 'UClaw';
       init.headers = flat;
     }
     return _f.call(globalThis, input, init);

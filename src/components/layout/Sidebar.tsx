@@ -41,7 +41,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { SIDEBAR_COLLAPSED_WIDTH, MAC_SIDEBAR_CHROME_HEIGHT } from '../../../shared/sidebar-layout';
 import { useTranslation } from 'react-i18next';
-import logoSvg from '@/assets/logo.svg';
+import logoPng from '@/assets/logo-uclaw.png';
 import { AnnouncementBell } from '@/components/client/AnnouncementBell';
 import { SupportContactButton } from '@/components/client/SupportContactButton';
 
@@ -364,9 +364,9 @@ export function Sidebar() {
       >
         {!sidebarCollapsed && (
           <div className="flex items-center gap-2 px-2 overflow-hidden">
-            <img src={logoSvg} alt="ClawX" className="h-5 w-auto shrink-0" />
+            <img src={logoPng} alt="UClaw" className="h-5 w-auto shrink-0" />
             <span className="text-sm font-semibold truncate whitespace-nowrap text-foreground/90">
-              ClawX
+              UClaw
             </span>
           </div>
         )}

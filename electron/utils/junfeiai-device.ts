@@ -49,7 +49,7 @@ export async function getJunFeiAIDevicePayload(): Promise<JunFeiAIDevicePayload>
   const identity = await loadOrCreateDeviceIdentity(getJunFeiAIDeviceIdentityPath());
   return {
     id: identity.deviceId,
-    name: process.env.COMPUTERNAME || process.env.HOSTNAME || 'ClawX Desktop',
+    name: process.env.COMPUTERNAME || process.env.HOSTNAME || 'UClaw Desktop',
     platform: process.platform,
     arch: process.arch,
     appVersion: app.getVersion(),

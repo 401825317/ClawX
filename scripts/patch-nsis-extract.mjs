@@ -30,7 +30,7 @@ export const EXTRACT_APP_PACKAGE_NSH = join(
 const PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail closed';
 const LEGACY_PATCH_MARKER = 'ClawX-patched: extract directly to $INSTDIR';
 const LEGACY_CONTINUE_ON_EXTRACT_FAILURE = 'continuing overwrite install anyway';
-const FATAL_EXTRACT_FAILURE_DETAIL = 'Failed to extract ClawX files after multiple attempts.';
+const FATAL_EXTRACT_FAILURE_DETAIL = 'Failed to extract UClaw files after multiple attempts.';
 
 const PATCHED_EXTRACT_MACRO = [
   '!macro extractUsing7za FILE',
@@ -38,7 +38,7 @@ const PATCHED_EXTRACT_MACRO = [
   '  StrCpy $R9 0',
   '  clawx_extract_attempt:',
   '    IntOp $R9 $R9 + 1',
-  '    DetailPrint "Extracting ClawX application files (attempt $R9, please wait)..."',
+  '    DetailPrint "Extracting UClaw application files (attempt $R9, please wait)..."',
   '    SetOutPath $INSTDIR',
   '    ClearErrors',
   '    Nsis7z::Extract "${FILE}"',
@@ -54,7 +54,7 @@ const PATCHED_EXTRACT_MACRO = [
   '      Sleep 3000',
   '      Goto clawx_extract_attempt',
   '    ${endIf}',
-  '    DetailPrint "Failed to extract ClawX files after multiple attempts."',
+  '    DetailPrint "Failed to extract UClaw files after multiple attempts."',
   '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)" /SD IDOK',
   '    SetErrorLevel 2',
   '    Quit',
@@ -147,7 +147,7 @@ export function patchNsisExtractTemplate(targetPath = EXTRACT_APP_PACKAGE_NSH) {
   }
 
   if (hasStaleExtractPatch(original)) {
-    console.warn('[patch-nsis-extract] Stale ClawX extract patch detected; replacing with fail-closed patch.');
+    console.warn('[patch-nsis-extract] Stale UClaw extract patch detected; replacing with fail-closed patch.');
   } else if (!original.includes('CopyFiles')) {
     console.warn('[patch-nsis-extract] CopyFiles not found — NSIS template may have changed.');
     return false;

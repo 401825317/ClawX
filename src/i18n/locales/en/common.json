@@ -66,7 +66,7 @@
     },
     "announcements": {
         "title": "Important Announcements",
-        "description": "Official updates that may affect your ClawX experience.",
+        "description": "Official updates that may affect your UClaw experience.",
         "empty": "No announcements.",
         "openLink": "View Details",
         "urgent": "Urgent Announcement",

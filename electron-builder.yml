@@ -1,6 +1,6 @@
 appId: app.clawx.desktop
-productName: ClawX
-copyright: Copyright © 2026 ClawX
+productName: UClaw
+copyright: Copyright © 2026 UClaw
 compression: maximum
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 
@@ -48,7 +48,7 @@ asarUnpack:
 npmRebuild: false
 
 # Auto-update configuration
-# Primary: new-api ClawX update feed, which redirects to the actual release files.
+# Primary: new-api UClaw update feed, which redirects to the actual release files.
 # Fallback: GitHub Releases (backup, used when feed is unavailable)
 publish:
   - provider: generic
@@ -83,8 +83,8 @@ mac:
   entitlementsInherit: entitlements.mac.plist
   notarize: true
   extendInfo:
-    NSMicrophoneUsageDescription: ClawX requires microphone access for voice features
-    NSCameraUsageDescription: ClawX requires camera access for video features
+    NSMicrophoneUsageDescription: UClaw requires microphone access for voice features
+    NSCameraUsageDescription: UClaw requires camera access for video features
 
 dmg:
   # Explicit volume size prevents dmg-builder@1.2.0 auto-calculation from
@@ -130,8 +130,8 @@ nsis:
   differentialPackage: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: ClawX
-  uninstallDisplayName: ClawX
+  shortcutName: UClaw
+  uninstallDisplayName: UClaw
   license: LICENSE
   include: scripts/installer.nsh
   installerIcon: resources/icons/icon.ico
@@ -161,13 +161,13 @@ linux:
       arch:
         - x64
   category: Utility
-  maintainer: ClawX Team <public@valuecell.ai>
-  vendor: ClawX
+  maintainer: UClaw Team <public@valuecell.ai>
+  vendor: UClaw
   synopsis: AI Assistant powered by OpenClaw
-  description: ClawX is a graphical AI assistant application that integrates with OpenClaw Gateway to provide intelligent automation and assistance across multiple messaging platforms.
+  description: UClaw is a graphical AI assistant application that integrates with OpenClaw Gateway to provide intelligent automation and assistance across multiple messaging platforms.
   desktop:
     entry:
-      Name: ClawX
+      Name: UClaw
       Comment: AI Assistant powered by OpenClaw
       Categories: Utility;Network;
       Keywords: ai;assistant;automation;chat;

@@ -1,6 +1,6 @@
 {
   "title": "設定",
-  "subtitle": "ClawX の体験をカスタマイズ",
+  "subtitle": "UClaw の体験をカスタマイズ",
   "appearance": {
     "title": "通用",
     "description": "外観とスタイルをカスタマイズ",
@@ -10,7 +10,7 @@
     "system": "システム",
     "language": "言語",
     "launchAtStartup": "システム起動時に自動起動",
-    "launchAtStartupDesc": "ログイン時に ClawX を自動的に起動します"
+    "launchAtStartupDesc": "ログイン時に UClaw を自動的に起動します"
   },
   "aiProviders": {
     "title": "AI プロバイダー",
@@ -37,7 +37,7 @@
     "notRequired": "不要",
     "empty": {
       "title": "プロバイダーが構成されていません",
-      "desc": "ClawX の使用を開始するには AI プロバイダーを追加してください",
+      "desc": "UClaw の使用を開始するには AI プロバイダーを追加してください",
       "cta": "最初のプロバイダーを追加"
     },
     "dialog": {
@@ -60,7 +60,7 @@
       "protocol": "プロトコル",
       "advancedConfig": "詳細設定",
       "userAgent": "User-Agent",
-      "userAgentPlaceholder": "ClawX/1.0",
+      "userAgentPlaceholder": "UClaw/1.0",
       "fallbackModels": "フォールバックモデル",
       "fallbackProviders": "別プロバイダーへのフォールバック",
       "fallbackModelIds": "同一プロバイダーのフォールバックモデル ID",
@@ -210,7 +210,7 @@
     "appLogs": "アプリケーションログ",
     "openFolder": "フォルダーを開く",
     "autoStart": "ゲートウェイ自動起動",
-    "autoStartDesc": "ClawX 起動時にゲートウェイを自動起動",
+    "autoStartDesc": "UClaw 起動時にゲートウェイを自動起動",
     "proxyTitle": "プロキシ",
     "proxyDesc": "Electron と Gateway の通信をローカルプロキシ経由にします。",
     "proxyServer": "プロキシサーバー",
@@ -231,7 +231,7 @@
   },
   "updates": {
     "title": "アップデート",
-    "description": "ClawX を最新に保つ",
+    "description": "UClaw を最新に保つ",
     "autoCheck": "自動更新チェック",
     "autoCheckDesc": "起動時に更新を確認",
     "autoDownload": "更新通知",
@@ -260,13 +260,13 @@
     "whatsNew": "更新内容：",
     "errorDetails": "エラー詳細：",
     "toast": {
-      "availableTitle": "ClawX の更新があります",
+      "availableTitle": "UClaw の更新があります",
       "availableDescription": "バージョン v{{version}} を利用できます。準備ができたらダウンロードしてください。",
-      "downloadedTitle": "ClawX の更新準備ができました",
+      "downloadedTitle": "UClaw の更新準備ができました",
       "downloadedDescription": "バージョン v{{version}} のダウンロードが完了しました。再起動してインストールしてください。",
       "unknownVersion": "新しい"
     },
-    "help": "ClawX は自動的に更新を確認し、ダウンロードやインストールの前に通知します。"
+    "help": "UClaw は自動的に更新を確認し、ダウンロードやインストールの前に通知します。"
   },
   "advanced": {
     "title": "詳細設定",
@@ -293,7 +293,7 @@
     "devMode": "開発者モード",
     "devModeDesc": "開発者ツールとショートカットを表示",
     "telemetry": "匿名利用データ",
-    "telemetryDesc": "ClawX 改善のため、匿名の基本的な利用データの提供を許可します"
+    "telemetryDesc": "UClaw 改善のため、匿名の基本的な利用データの提供を許可します"
   },
   "developer": {
     "title": "開発者",
@@ -355,7 +355,7 @@
   },
   "about": {
     "title": "バージョン情報",
-    "appName": "ClawX",
+    "appName": "UClaw",
     "tagline": "グラフィカル AI アシスタント",
     "basedOn": "OpenClaw ベース",
     "version": "バージョン {{version}}",

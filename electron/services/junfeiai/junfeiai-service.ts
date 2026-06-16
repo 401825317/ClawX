@@ -876,7 +876,7 @@ async function requestRelayToken(accessToken: string, device?: Record<string, un
 
 async function createStandardSub2APIKey(accessToken: string, device?: Record<string, unknown>): Promise<JunFeiAIRelayTokenPayload> {
   const deviceId = isRecord(device) ? String(device.id ?? '').trim() : '';
-  const name = deviceId ? `ClawX ${deviceId}` : 'ClawX';
+  const name = deviceId ? `UClaw ${deviceId}` : 'UClaw';
   const created = await requestJunFeiAI<JunFeiAIStandardApiKeyPayload>('/api/v1/keys', {
     method: 'POST',
     accessToken,

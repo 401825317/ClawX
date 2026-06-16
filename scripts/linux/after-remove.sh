@@ -1,10 +1,11 @@
 #!/bin/bash
 
-# Post-removal script for ClawX on Linux
+# Post-removal script for UClaw on Linux
 
 set -e
 
 # Remove symbolic links
+rm -f /usr/local/bin/uclaw 2>/dev/null || true
 rm -f /usr/local/bin/clawx 2>/dev/null || true
 rm -f /usr/local/bin/openclaw 2>/dev/null || true
 
@@ -24,4 +25,4 @@ if [ -f "$APPARMOR_PROFILE_TARGET" ]; then
     rm -f "$APPARMOR_PROFILE_TARGET"
 fi
 
-echo "ClawX has been removed."
+echo "UClaw has been removed."

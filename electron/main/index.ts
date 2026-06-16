@@ -3,6 +3,7 @@
  * Manages window creation, system tray, and IPC handlers
  */
 import { app, BrowserWindow, nativeImage, session, shell } from 'electron';
+import { existsSync, mkdirSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { join } from 'path';
 import { GatewayManager } from '../gateway/manager';
@@ -58,17 +59,33 @@ import { ensureJunFeiAIProviderSeeded, isJunFeiAISeedReady } from '../services/j
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
+const DISPLAY_APP_NAME = 'UClaw';
 const isE2EMode = process.env.CLAWX_E2E === '1';
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
 let extensionsLoadPromise: Promise<void> | null = null;
 
+function resolveLegacyUserDataPath(): string {
+  const appDataDir = app.getPath('appData');
+  const legacyPaths = [
+    join(appDataDir, 'ClawX'),
+    join(appDataDir, 'clawx'),
+  ];
+  const userDataPath = legacyPaths.find((candidate) => existsSync(candidate)) ?? legacyPaths[0];
+  mkdirSync(userDataPath, { recursive: true });
+  return userDataPath;
+}
+
 if (requestedRemoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', requestedRemoteDebuggingPort);
 }
 
+app.setName(DISPLAY_APP_NAME);
+
 if (isE2EMode && requestedUserDataDir) {
   app.setPath('userData', requestedUserDataDir);
+} else if (!isE2EMode) {
+  app.setPath('userData', resolveLegacyUserDataPath());
 }
 
 // Disable GPU hardware acceleration globally for maximum stability across
@@ -102,7 +119,7 @@ if (process.platform === 'linux') {
 // The losing process must exit immediately so it never reaches Gateway startup.
 const gotElectronLock = isE2EMode ? true : app.requestSingleInstanceLock();
 if (!gotElectronLock) {
-  console.info('[ClawX] Another instance already holds the single-instance lock; exiting duplicate process');
+  console.info('[UClaw] Another instance already holds the single-instance lock; exiting duplicate process');
   app.exit(0);
 }
 let releaseProcessInstanceFileLock: () => void = () => {};
@@ -123,12 +140,12 @@ if (gotElectronLock && !isE2EMode) {
           ? 'unknown lock format/content'
           : 'unknown owner';
       console.info(
-        `[ClawX] Another instance already holds process lock (${fileLock.lockPath}, ${ownerDescriptor}); exiting duplicate process`,
+        `[UClaw] Another instance already holds process lock (${fileLock.lockPath}, ${ownerDescriptor}); exiting duplicate process`,
       );
       app.exit(0);
     }
   } catch (error) {
-    console.warn('[ClawX] Failed to acquire process instance file lock; continuing with Electron single-instance lock only', error);
+    console.warn('[UClaw] Failed to acquire process instance file lock; continuing with Electron single-instance lock only', error);
   }
 }
 const gotTheLock = gotElectronLock && gotFileLock;
@@ -306,7 +323,7 @@ function createMainWindow(): BrowserWindow {
 async function initialize(): Promise<void> {
   // Initialize logger first
   logger.init();
-  logger.info('=== ClawX Application Starting ===');
+  logger.info('=== UClaw Application Starting ===');
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}, pid=${process.pid}, ppid=${process.ppid}`
   );
@@ -641,7 +658,7 @@ if (gotTheLock) {
 
   // When a second instance is launched, focus the existing window instead.
   app.on('second-instance', () => {
-    logger.info('Second ClawX instance detected; redirecting to the existing window');
+    logger.info('Second UClaw instance detected; redirecting to the existing window');
 
     const focusRequest = requestSecondInstanceFocus(
       mainWindowFocusState,

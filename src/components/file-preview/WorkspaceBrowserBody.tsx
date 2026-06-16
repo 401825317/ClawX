@@ -344,7 +344,7 @@ export function WorkspaceBrowserBody({
           <p>
             {directOpen
               ? t('filePreview.errors.largeBinaryOpenHint', {
-                defaultValue: 'This file is {{size}}. ClawX does not provide an inline preview for it. You can confirm to open it directly in your system default app.',
+                defaultValue: 'This file is {{size}}. UClaw does not provide an inline preview for it. You can confirm to open it directly in your system default app.',
                 size: formatFileSize(fileState.size ?? 0) || '> 2MB',
               })
               : t('filePreview.errors.tooLarge', 'File too large; preview disabled')}
@@ -370,7 +370,7 @@ export function WorkspaceBrowserBody({
           <p>
             {directOpen
               ? t('filePreview.errors.largeBinaryOpenHint', {
-                defaultValue: 'This file is {{size}}. ClawX does not provide an inline preview for it. You can confirm to open it directly in your system default app.',
+                defaultValue: 'This file is {{size}}. UClaw does not provide an inline preview for it. You can confirm to open it directly in your system default app.',
                 size: formatFileSize(fileState.size ?? 0) || '> 2MB',
               })
               : t('filePreview.errors.binary', 'Binary files do not support text preview')}
@@ -415,7 +415,7 @@ export function WorkspaceBrowserBody({
             <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
               {directOpen
                 ? t('filePreview.errors.largeBinaryOpenHint', {
-                  defaultValue: 'This file is {{size}}. ClawX does not provide an inline preview for it. You can confirm to open it directly in your system default app.',
+                  defaultValue: 'This file is {{size}}. UClaw does not provide an inline preview for it. You can confirm to open it directly in your system default app.',
                   size: formatFileSize(fileState.size ?? 0) || '> 2MB',
                 })
                 : t(

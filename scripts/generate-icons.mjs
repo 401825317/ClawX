@@ -10,13 +10,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const ICONS_DIR = path.join(PROJECT_ROOT, 'resources', 'icons');
+const PNG_SOURCE = path.join(ICONS_DIR, 'icon-uclaw-source.png');
 const SVG_SOURCE = path.join(ICONS_DIR, 'icon.svg');
 
-echo`🎨 Generating ClawX icons using Node.js...`;
+echo`🎨 Generating UClaw icons using Node.js...`;
 
-// Check if SVG source exists
-if (!fs.existsSync(SVG_SOURCE)) {
-  echo`❌ SVG source not found: ${SVG_SOURCE}`;
+const ICON_SOURCE = fs.existsSync(PNG_SOURCE) ? PNG_SOURCE : SVG_SOURCE;
+
+// Check if icon source exists
+if (!fs.existsSync(ICON_SOURCE)) {
+  echo`❌ Icon source not found: ${PNG_SOURCE} or ${SVG_SOURCE}`;
   process.exit(1);
 }
 
@@ -25,8 +28,8 @@ await fs.ensureDir(ICONS_DIR);
 
 try {
   // 1. Generate Master PNG Buffer (1024x1024)
-  echo`  Processing SVG source...`;
-  const masterPngBuffer = await sharp(SVG_SOURCE)
+  echo`  Processing icon source: ${path.basename(ICON_SOURCE)}`;
+  const masterPngBuffer = await sharp(ICON_SOURCE)
     .resize(1024, 1024)
     .png() // Ensure it's PNG
     .toBuffer();
@@ -82,8 +85,21 @@ try {
   const TRAY_SVG_SOURCE = path.join(ICONS_DIR, 'tray-icon-template.svg');
   
   if (fs.existsSync(TRAY_SVG_SOURCE)) {
-    await sharp(TRAY_SVG_SOURCE)
+    const trayRaw = await sharp(TRAY_SVG_SOURCE)
       .resize(22, 22)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    for (let i = 0; i < trayRaw.data.length; i += 4) {
+      const alpha = trayRaw.data[i + 3];
+      trayRaw.data[i] = 0;
+      trayRaw.data[i + 1] = 0;
+      trayRaw.data[i + 2] = 0;
+      trayRaw.data[i + 3] = alpha < 8 ? 0 : alpha;
+    }
+
+    await sharp(trayRaw.data, { raw: trayRaw.info })
       .png()
       .toFile(path.join(ICONS_DIR, 'tray-icon-Template.png'));
     echo`  ✅ Created tray-icon-Template.png (22x22)`;

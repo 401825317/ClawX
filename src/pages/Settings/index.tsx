@@ -522,9 +522,9 @@ export function Settings() {
       defaultId: 0,
       cancelId: 0,
       title: t('factoryReset.title', { defaultValue: '恢复出厂设置' }),
-      message: t('factoryReset.message', { defaultValue: '确定要把 ClawX 恢复到首次打开状态吗？' }),
+      message: t('factoryReset.message', { defaultValue: '确定要把 UClaw 恢复到首次打开状态吗？' }),
       detail: t('factoryReset.detail', {
-        defaultValue: '这会清理本机的 ClawX 设置、登录状态、Provider 配置、OpenClaw 工作区和技能数据。ClawX 会自动重启，然后重新进入初始化流程。',
+        defaultValue: '这会清理本机的 UClaw 设置、登录状态、Provider 配置、OpenClaw 工作区和技能数据。UClaw 会自动重启，然后重新进入初始化流程。',
       }),
     });
 
@@ -1269,7 +1269,7 @@ export function Settings() {
                 </div>
                 <p className="text-meta text-muted-foreground">
                   {t('factoryReset.description', {
-                    defaultValue: '清理本机 ClawX 配置、登录状态、Provider 配置、OpenClaw 工作区和技能数据，然后自动重启。',
+                    defaultValue: '清理本机 UClaw 配置、登录状态、Provider 配置、OpenClaw 工作区和技能数据，然后自动重启。',
                   })}
                 </p>
                 <p className="text-tiny text-muted-foreground">

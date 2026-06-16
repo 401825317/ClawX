@@ -1,4 +1,4 @@
-; ClawX Custom NSIS Installer/Uninstaller Script
+; UClaw Custom NSIS Installer/Uninstaller Script
 ;
 ; Install: enables long paths, adds resources\cli to user PATH for openclaw CLI.
 ; Uninstall: removes the PATH entry and optionally deletes user data.
@@ -29,7 +29,7 @@ Function ClawXMoveLegacyInstallDir
   ${endIf}
 
   IfFileExists "$R6\" 0 _clawx_legacy_move_done
-    DetailPrint "Moving previous ClawX installation at $R6 out of the way..."
+    DetailPrint "Moving previous UClaw installation at $R6 out of the way..."
     SetOutPath $TEMP
     nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith('$R6', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
     Pop $0
@@ -54,7 +54,7 @@ Function ClawXMoveLegacyInstallDir
       ClearErrors
       Rename "$R6" "$R6._stale_$R8"
       IfErrors 0 _clawx_legacy_stale_moved
-      DetailPrint "Removing previous ClawX installation at $R6..."
+      DetailPrint "Removing previous UClaw installation at $R6..."
       nsExec::ExecToStack 'cmd.exe /c rd /s /q "$R6"'
       Pop $0
       Pop $1
@@ -79,7 +79,7 @@ FunctionEnd
   ; Make stage logs visible on assisted installers (defaults to hidden).
   SetDetailsPrint both
   DetailPrint "Preparing installation..."
-  DetailPrint "Extracting ClawX runtime files. This can take a few minutes on slower disks or while antivirus scanning is active."
+  DetailPrint "Extracting UClaw runtime files. This can take a few minutes on slower disks or while antivirus scanning is active."
 
   ${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}" $R0
 
@@ -194,7 +194,7 @@ FunctionEnd
       ${if} $R7 < 5
         Goto _clawx_verify_closed
       ${endIf}
-      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "ClawX is still running and cannot be replaced safely. Please close ClawX and retry installation." /SD IDCANCEL IDRETRY _clawx_verify_closed
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "UClaw is still running and cannot be replaced safely. Please close UClaw and retry installation." /SD IDCANCEL IDRETRY _clawx_verify_closed
       SetErrorLevel 2
       Quit
     ${endIf}
@@ -260,7 +260,7 @@ FunctionEnd
       RMDir "$INSTDIR"
       IfFileExists "$INSTDIR\" 0 _recreate_clean_instdir
         DetailPrint "Failed to remove previous installation directory; aborting to avoid leaving the old version installed."
-        MessageBox MB_OK|MB_ICONEXCLAMATION "Unable to replace the previous ClawX installation because files are still locked. Please close ClawX and retry installation." /SD IDOK
+        MessageBox MB_OK|MB_ICONEXCLAMATION "Unable to replace the previous UClaw installation because files are still locked. Please close UClaw and retry installation." /SD IDOK
         SetErrorLevel 2
         Quit
       _recreate_clean_instdir:
@@ -326,7 +326,7 @@ FunctionEnd
   ; Now that the new files and current-hive registry entries have been written,
   ; remove stale entries from the opposite hive so Windows Apps & Features does
   ; not continue showing the old version after cross-hive upgrades.
-  DetailPrint "Clearing stale ClawX registry entries from the opposite install scope..."
+  DetailPrint "Clearing stale UClaw registry entries from the opposite install scope..."
   ${if} $installMode == "all"
     DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
     DeleteRegKey HKCU "${INSTALL_REGISTRY_KEY}"
@@ -343,7 +343,7 @@ FunctionEnd
   ClearErrors
 
   ; Async cleanup of old dirs left by the rename loop in customCheckAppRunning.
-  ; Wait 60s before starting deletion to avoid I/O contention with ClawX's
+  ; Wait 60s before starting deletion to avoid I/O contention with UClaw's
   ; first launch (Windows Defender scan, ASAR mapping, etc.).
   ; ExecShell SW_HIDE is completely detached from NSIS and avoids pipe blocking.
   IfFileExists "$INSTDIR._stale_0\" 0 _ci_stale_cleaned
@@ -416,11 +416,11 @@ FunctionEnd
 
   ; Ask user if they want to remove AppData (preserves .openclaw)
   MessageBox MB_YESNO|MB_ICONQUESTION \
-    "Do you want to remove ClawX application data?$\r$\n$\r$\nThis will delete:$\r$\n  • AppData\Local\clawx (local app data)$\r$\n  • AppData\Roaming\clawx (roaming app data)$\r$\n$\r$\nYour .openclaw folder (configuration & skills) will be preserved.$\r$\nSelect 'No' to keep all data for future reinstallation." \
+    "Do you want to remove UClaw application data?$\r$\n$\r$\nThis will delete:$\r$\n  • AppData\Local\clawx (local app data)$\r$\n  • AppData\Roaming\clawx (roaming app data)$\r$\n$\r$\nYour .openclaw folder (configuration & skills) will be preserved.$\r$\nSelect 'No' to keep all data for future reinstallation." \
     /SD IDNO IDYES _cu_removeData IDNO _cu_skipRemove
 
   _cu_removeData:
-    ; Kill any lingering ClawX processes (and their child process trees) to
+    ; Kill any lingering UClaw processes (and their child process trees) to
     ; release file locks on electron-store JSON files, Gateway sockets, etc.
     ${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}" $R0
     ${if} $R0 == 0

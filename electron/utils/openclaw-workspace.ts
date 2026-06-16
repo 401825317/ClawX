@@ -30,15 +30,15 @@ function isCurrentOpenClawPath(p: string): boolean {
 
 export function buildDefaultClawXIdentityContent(): string {
   return [
-    '# IDENTITY.md - ClawX',
+    '# IDENTITY.md - UClaw',
     '',
-    '- **Name:** ClawX',
+    '- **Name:** UClaw',
     '- **Creature:** desktop AI assistant',
     '- **Vibe:** concise, capable, and practical',
     '- **Emoji:** 🐾',
     '- **Avatar:**',
     '',
-    'ClawX uses a default desktop identity instead of chat-first bootstrap.',
+    'UClaw uses a default desktop identity instead of chat-first bootstrap.',
     '',
   ].join('\n');
 }

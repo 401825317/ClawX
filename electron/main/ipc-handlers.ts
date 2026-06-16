@@ -2384,7 +2384,7 @@ async function scheduleFactoryResetAndRelaunch(): Promise<{ success: true; targe
     : process.argv.slice(1).map((arg) => (arg === '.' ? workingDirectory : arg));
   const launcher = await writeFactoryResetLauncher(targets, executablePath, relaunchArgs, workingDirectory);
 
-  logger.warn('Factory reset requested; cleanup will run after ClawX exits', {
+  logger.warn('Factory reset requested; cleanup will run after UClaw exits', {
     targets,
     workingDirectory,
     launcherScript: launcher.scriptPath,
