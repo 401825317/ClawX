@@ -6,6 +6,7 @@
  * stale plugins) and when a user configures a channel.
  */
 import { app } from 'electron';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { existsSync, cpSync, copyFileSync, statSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
 import { readdir, stat, copyFile, mkdir } from 'node:fs/promises';
@@ -248,6 +249,44 @@ function readPluginVersion(pkgJsonPath: string): string | null {
   }
 }
 
+function readPluginContentFingerprint(pluginDir: string): string | null {
+  try {
+    const manifestPath = join(pluginDir, 'openclaw.plugin.json');
+    const pkgJsonPath = join(pluginDir, 'package.json');
+    const manifestRaw = readFileSync(fsPath(manifestPath), 'utf-8');
+    const packageRaw = readFileSync(fsPath(pkgJsonPath), 'utf-8');
+    const manifest = JSON.parse(manifestRaw) as { entry?: string };
+    const pkg = JSON.parse(packageRaw) as {
+      main?: string;
+      module?: string;
+      openclaw?: { extensions?: string[] };
+    };
+
+    const entryFiles = [...new Set([
+      manifest.entry,
+      pkg.main,
+      pkg.module,
+      ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+    ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
+
+    const hash = createHash('sha256');
+    hash.update(manifestRaw);
+    hash.update('\n---manifest---\n');
+    hash.update(packageRaw);
+
+    for (const entryFile of entryFiles) {
+      const entryPath = join(pluginDir, entryFile);
+      if (!existsSync(fsPath(entryPath))) continue;
+      hash.update(`\n---entry:${entryFile}---\n`);
+      hash.update(readFileSync(fsPath(entryPath), 'utf-8'));
+    }
+
+    return hash.digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 // ── pnpm-aware node_modules copy helpers ─────────────────────────────────────
 
 /** Walk up from a path until we find a parent named node_modules. */
@@ -374,13 +413,23 @@ export function ensurePluginInstalled(
     if (!sourceDir) return { installed: true }; // no bundled source to compare, keep existing
     const installedVersion = readPluginVersion(targetPkgJson);
     const sourceVersion = readPluginVersion(join(sourceDir, 'package.json'));
-    if (!sourceVersion || !installedVersion || sourceVersion === installedVersion) {
-      return { installed: true }; // same version or unable to compare
+    if (!sourceVersion || !installedVersion) {
+      return { installed: true }; // unable to compare
     }
-    // Version differs — fall through to overwrite install
-    logger.info(
-      `[plugin] Upgrading ${pluginLabel} plugin: ${installedVersion} → ${sourceVersion}`,
-    );
+    if (sourceVersion !== installedVersion) {
+      logger.info(
+        `[plugin] Upgrading ${pluginLabel} plugin: ${installedVersion} → ${sourceVersion}`,
+      );
+    } else {
+      const installedFingerprint = readPluginContentFingerprint(targetDir);
+      const sourceFingerprint = readPluginContentFingerprint(sourceDir);
+      if (!installedFingerprint || !sourceFingerprint || installedFingerprint === sourceFingerprint) {
+        return { installed: true };
+      }
+      logger.info(
+        `[plugin] Refreshing ${pluginLabel} plugin: bundled content changed without version bump`,
+      );
+    }
   }
 
   // Fresh install or upgrade — try bundled/build sources first

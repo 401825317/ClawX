@@ -217,4 +217,58 @@ describe('plugin installer diagnostics', () => {
       }),
     );
   });
+
+  it('refreshes an installed plugin when bundled content changes without a version bump', async () => {
+    const sourceDir = '/bundle/clawx-openai-image';
+    const targetDir = '/home/test/.openclaw/extensions/clawx-openai-image';
+    const sourceManifest = `${sourceDir}/openclaw.plugin.json`;
+    const sourcePackage = `${sourceDir}/package.json`;
+    const sourceEntry = `${sourceDir}/index.mjs`;
+    const targetManifest = `${targetDir}/openclaw.plugin.json`;
+    const targetPackage = `${targetDir}/package.json`;
+    const targetEntry = `${targetDir}/index.mjs`;
+
+    mockExistsSync.mockImplementation((input: string) => [
+      sourceManifest,
+      sourcePackage,
+      sourceEntry,
+      targetManifest,
+      targetPackage,
+      targetEntry,
+    ].includes(String(input)));
+
+    mockReadFileSync.mockImplementation((input: string) => {
+      switch (String(input)) {
+        case sourceManifest:
+        case targetManifest:
+          return JSON.stringify({ id: 'clawx-openai-image', entry: 'index.mjs' });
+        case sourcePackage:
+        case targetPackage:
+          return JSON.stringify({ name: 'clawx-openai-image-plugin', version: '0.1.4', main: 'index.mjs' });
+        case sourceEntry:
+          return 'export const value = "new";';
+        case targetEntry:
+          return 'export const value = "old";';
+        default:
+          return '{}';
+      }
+    });
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = ensurePluginInstalled('clawx-openai-image', [sourceDir], 'UClaw OpenAI Image');
+
+    expect(result).toEqual({ installed: true });
+    expect(mockRmSync).toHaveBeenCalledWith('/home/test/.openclaw/extensions/clawx-openai-image', {
+      recursive: true,
+      force: true,
+    });
+    expect(mockCpSync).toHaveBeenCalledWith(
+      '/bundle/clawx-openai-image',
+      '/home/test/.openclaw/extensions/clawx-openai-image',
+      { recursive: true, dereference: true },
+    );
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      '[plugin] Refreshing UClaw OpenAI Image plugin: bundled content changed without version bump',
+    );
+  });
 });
