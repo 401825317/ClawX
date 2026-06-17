@@ -64,10 +64,10 @@
     },
     "imageGeneration": {
         "title": "图像生成",
-        "description": "为 image_generate 工具配置一个自定义 OpenAI Images 兼容端点。它与聊天 Provider 完全独立。",
+        "description": "图像生成继续使用独立插件能力，但默认继承当前登录账号的服务地址与鉴权。这里主要配置模型名与超时。",
         "timeout": "超时（毫秒）",
         "agentAuthTitle": "各 Agent 鉴权",
-        "agentAuthDesc": "图像生成使用各 Agent 的 auth-profiles.json 中为此自定义生图端点保存的 API Key。",
+        "agentAuthDesc": "图像生成使用当前登录账号同步到各 Agent 的插件鉴权信息。",
         "agentColumn": "Agent",
         "authColumn": "自定义生图端点鉴权",
         "defaultAgent": "默认",
@@ -94,19 +94,19 @@
         },
         "openAiRelay": {
             "title": "自定义生图端点",
-            "description": "将生图请求发往独立的 OpenAI Images 兼容端点（/v1/images/generations），不会改变任何聊天 Provider。",
+            "description": "生图请求仍走独立插件端点，但默认复用当前登录账号的地址与鉴权，不影响聊天 Provider。",
             "baseUrl": "生图 Base URL",
-            "baseUrlHint": "例如 https://api.example.com/v1；未带 /v1 时会自动补全。",
+            "baseUrlHint": "当前登录账号提供的图像服务地址。",
             "apiKey": "API Key",
             "apiKeyPlaceholder": "sk-...",
             "apiKeyPlaceholderConfigured": "已配置，留空则不修改",
+            "apiKeyInherited": "跟随当前登录账号",
+            "apiKeyInheritedHelp": "图像生成默认复用当前登录账号的鉴权，不需要单独填写 API Key。",
             "model": "模型名",
             "modelHint": "只填写模型 ID，例如 gpt-image-2；不要填写 provider/model。"
         },
         "errors": {
             "invalidTimeout": "超时必须为正数",
-            "relayBaseUrlRequired": "请填写生图 Base URL",
-            "relayApiKeyRequired": "请填写 API Key",
             "relayModelRequired": "请填写模型名",
             "relayModelInvalid": "请只填写模型名，例如 gpt-image-2；不要填写 provider/model。"
         }

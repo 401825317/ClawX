@@ -75,6 +75,10 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'No matching skills found';
     case 'composer.pickAgent':
       return 'Choose agent';
+    case 'composer.chatMode':
+      return 'Chat';
+    case 'composer.imageMode':
+      return 'Image';
     case 'composer.clearTarget':
       return 'Clear target agent';
     case 'composer.targetChip':
@@ -215,7 +219,7 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Hello direct agent' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research');
+    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research', 'chat');
   });
 
   it('switches only the current session model', async () => {
@@ -441,7 +445,7 @@ describe('ChatInput agent targeting', () => {
 
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null);
+    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null, 'chat');
     expect(hostApiFetch).toHaveBeenCalledWith(
       '/api/skills/quick-access',
       expect.objectContaining({
@@ -449,6 +453,90 @@ describe('ChatInput agent targeting', () => {
         body: expect.any(String),
       }),
     );
+  });
+
+  it('toggles image mode on and off from the single image button', () => {
+    const onSend = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'draw a cat poster' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith('draw a cat poster', undefined, null, 'image');
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'normal chat' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat');
+  });
+
+  it('keeps image mode isolated per session', () => {
+    const onSend = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+    chatState.sessions = [
+      { key: 'agent:main:main', model: 'custom-alpha123/model-alpha' },
+      { key: 'agent:main:session-b', model: 'custom-alpha123/model-alpha' },
+    ];
+
+    const view = renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session a image' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenLastCalledWith('session a image', undefined, null, 'image');
+
+    chatState.currentSessionKey = 'agent:main:session-b';
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session b chat' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenLastCalledWith('session b chat', undefined, null, 'chat');
+
+    chatState.currentSessionKey = 'agent:main:main';
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session a image again' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenLastCalledWith('session a image again', undefined, null, 'image');
   });
 
   it('removes the full inline skill token with one backspace', async () => {

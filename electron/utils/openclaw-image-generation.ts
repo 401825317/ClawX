@@ -14,6 +14,7 @@ import { listAgentsSnapshot, type AgentsSnapshot } from './agent-config';
 import { expandPath } from './paths';
 import {
   generateImageInProcess,
+  resolveImageGenerationPrimaryFromConfig,
   listImageGenerationProvidersInProcess,
 } from './openclaw-image-generation-runtime';
 import { OPENAI_CODEX_RUNTIME_PROVIDER_KEY } from './provider-keys';
@@ -21,6 +22,8 @@ import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
+import { getJunFeiAIDefaultBaseUrl, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
+import { getProviderSecret } from '../services/secrets/secret-store';
 
 export interface ImageGenerationModelConfig {
   primary: string | null;
@@ -52,6 +55,7 @@ export interface OpenAiImageRelayConfig {
   model: string;
   providerKey?: string;
   apiKeyConfigured: boolean;
+  inheritedFromManagedAccount?: boolean;
 }
 
 export interface ImageGenerationSettingsSnapshot {
@@ -60,6 +64,25 @@ export interface ImageGenerationSettingsSnapshot {
   defaultAgentId: string;
   agents: ImageGenerationAgentAuthRow[];
   openAiRelay: OpenAiImageRelayConfig;
+}
+
+function isApiKeySecret(
+  secret: Awaited<ReturnType<typeof getProviderSecret>>,
+): secret is Extract<NonNullable<Awaited<ReturnType<typeof getProviderSecret>>>, { type: 'api_key' }> {
+  return Boolean(secret && secret.type === 'api_key' && secret.apiKey?.trim());
+}
+
+async function getManagedImageRelayDefaults(): Promise<{
+  inherited: boolean;
+  baseUrl: string;
+  apiKey: string | null;
+}> {
+  const managedSecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+  return {
+    inherited: isApiKeySecret(managedSecret),
+    baseUrl: getJunFeiAIDefaultBaseUrl(),
+    apiKey: isApiKeySecret(managedSecret) ? managedSecret.apiKey.trim() : null,
+  };
 }
 
 export interface ImageGenerationTestResult {
@@ -325,6 +348,9 @@ export async function getImageGenerationSettingsSnapshot(): Promise<ImageGenerat
   const relayState = readOpenAiCompatibleImageRelayState(openclawConfig as Record<string, unknown>);
   const relayAuthProvider = relayState.providerKey === 'openai' ? 'openai' : CLAWX_OPENAI_IMAGE_PROVIDER_KEY;
   const relayKeyConfigured = await isImageProviderAuthenticated(relayAuthProvider, snapshot.defaultAgentId);
+  const managedDefaults = await getManagedImageRelayDefaults();
+  const effectiveBaseUrl = relayState.baseUrl || managedDefaults.baseUrl;
+  const effectiveProviderKey = relayState.providerKey ?? (managedDefaults.inherited ? CLAWX_OPENAI_IMAGE_PROVIDER_KEY : undefined);
 
   return {
     config,
@@ -332,11 +358,12 @@ export async function getImageGenerationSettingsSnapshot(): Promise<ImageGenerat
     defaultAgentId: snapshot.defaultAgentId,
     agents: await buildAgentAuthRows(snapshot, providerKey),
     openAiRelay: {
-      enabled: relayState.enabled,
-      baseUrl: relayState.baseUrl,
+      enabled: relayState.enabled || managedDefaults.inherited,
+      baseUrl: effectiveBaseUrl,
       model: resolveOpenAiImageRelayModelId(config, openclawConfig as Record<string, unknown>),
-      providerKey: relayState.providerKey,
-      apiKeyConfigured: relayKeyConfigured,
+      providerKey: effectiveProviderKey,
+      apiKeyConfigured: relayKeyConfigured || managedDefaults.inherited,
+      inheritedFromManagedAccount: managedDefaults.inherited,
     },
   };
 }
@@ -357,10 +384,11 @@ export async function applyOpenAiImageRelaySettings(params: {
     imageModelIds.push(CLAWX_OPENAI_IMAGE_DEFAULT_MODEL);
   }
 
+  const managedDefaults = await getManagedImageRelayDefaults();
   await syncOpenAiCompatibleImageRelay({
     enabled: params.enabled,
-    baseUrl: params.enabled ? (params.baseUrl ?? '') : null,
-    apiKey: params.apiKey,
+    baseUrl: params.enabled ? ((params.baseUrl ?? '').trim() || managedDefaults.baseUrl) : null,
+    apiKey: params.apiKey?.trim() || managedDefaults.apiKey || undefined,
     imageModelIds,
   });
   if (params.enabled) {
@@ -453,4 +481,56 @@ export async function runImageGenerationTest(params: {
       result: undefined,
     };
   }
+}
+
+export async function ensureManagedOpenAiImageRelay(): Promise<void> {
+  const config = await readOpenClawConfig();
+  const current = await getImageGenerationSettingsSnapshot();
+  const model = current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
+
+  await applyOpenAiImageRelaySettings({
+    enabled: true,
+    baseUrl: current.openAiRelay.baseUrl,
+    model,
+  });
+
+  const currentModel = await resolveImageGenerationPrimaryFromConfig(config.agents?.defaults?.imageGenerationModel);
+  if (!currentModel) {
+    await setImageGenerationConfig({
+      primary: `${CLAWX_OPENAI_IMAGE_PROVIDER_KEY}/${model}`,
+      fallbacks: [],
+      timeoutMs: current.config.timeoutMs,
+    });
+  }
+}
+
+export async function generateImageForChatSession(params: {
+  sessionKey: string;
+  prompt: string;
+  model?: string;
+  size?: string;
+}): Promise<Awaited<ReturnType<typeof generateImageInProcess>>> {
+  await ensureManagedOpenAiImageRelay();
+
+  const snapshot = await listAgentsSnapshot();
+  const agentId = params.sessionKey.split(':')[1] || snapshot.defaultAgentId;
+  const agent = snapshot.agents.find((entry) => entry.id === agentId);
+  if (!agent) {
+    throw new Error(`Agent "${agentId}" not found`);
+  }
+
+  const config = await readOpenClawConfig();
+  const current = await getImageGenerationSettingsSnapshot();
+  const configuredModel = params.model?.trim()
+    || current.config.primary
+    || `${CLAWX_OPENAI_IMAGE_PROVIDER_KEY}/${current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL}`;
+
+  return generateImageInProcess({
+    config,
+    agentDir: expandPath(agent.agentDir),
+    prompt: params.prompt.trim(),
+    model: configuredModel,
+    timeoutMs: current.config.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
+    size: params.size?.trim() || DEFAULT_TEST_IMAGE_SIZE,
+  });
 }

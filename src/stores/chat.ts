@@ -44,6 +44,7 @@ import {
   DEFAULT_CANONICAL_PREFIX,
   DEFAULT_SESSION_KEY,
   type AttachedFileMeta,
+  type ChatSendMode,
   type ChatSession,
   type ChatState,
   type ContentBlock,
@@ -3705,6 +3706,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     text: string,
     attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>,
     targetAgentId?: string | null,
+    mode: ChatSendMode = 'chat',
   ) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
@@ -3775,6 +3777,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Mark this session as most recently active
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
+
+    if (mode === 'image') {
+      try {
+        const result = await hostApiFetch<{ success: boolean; error?: string }>(
+          '/api/media/image-generation/chat-send',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              sessionKey: currentSessionKey,
+              prompt: trimmed,
+            }),
+          },
+        );
+        if (result.success === false) {
+          throw new Error(result.error || 'Failed to generate image');
+        }
+        set({
+          sending: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        });
+        await get().loadHistory(true);
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+          sending: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        });
+      }
+      return;
+    }
 
     // Runtime progress now comes from Main-owned streamed events. We still
     // keep the no-response safety timeout, but history polling is no longer

@@ -40,6 +40,21 @@ vi.mock('@electron/utils/paths', async () => {
   };
 });
 
+const getProviderSecretMock = vi.fn();
+const listAgentsSnapshotMock = vi.fn();
+
+vi.mock('@electron/services/secrets/secret-store', () => ({
+  getProviderSecret: (...args: unknown[]) => getProviderSecretMock(...args),
+}));
+
+vi.mock('@electron/utils/agent-config', async () => {
+  const actual = await vi.importActual<typeof import('@electron/utils/agent-config')>('@electron/utils/agent-config');
+  return {
+    ...actual,
+    listAgentsSnapshot: (...args: unknown[]) => listAgentsSnapshotMock(...args),
+  };
+});
+
 async function writeOpenClawJson(config: unknown): Promise<void> {
   const openclawDir = join(testHome, '.openclaw');
   await mkdir(openclawDir, { recursive: true });
@@ -54,6 +69,8 @@ async function readOpenClawJson(): Promise<Record<string, unknown>> {
 describe('openclaw-image-generation helpers', () => {
   beforeEach(async () => {
     vi.resetModules();
+    getProviderSecretMock.mockReset();
+    listAgentsSnapshotMock.mockReset();
     await rm(testHome, { recursive: true, force: true });
     await rm(testUserData, { recursive: true, force: true });
   });
@@ -110,6 +127,34 @@ describe('openclaw-image-generation helpers', () => {
       fallbacks: ['google/gemini-3.1-flash-image-preview'],
       timeoutMs: 120_000,
     });
+  });
+
+  it('inherits managed account auth and baseUrl for image relay snapshot', async () => {
+    await writeOpenClawJson({
+      agents: {
+        defaults: {},
+      },
+    });
+    getProviderSecretMock.mockResolvedValue({
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'relay-key',
+    });
+    listAgentsSnapshotMock.mockResolvedValue({
+      agents: [{ id: 'main', name: 'Main', isDefault: true, agentDir: '~/.openclaw/agents/main/agent' }],
+      defaultAgentId: 'main',
+      defaultModelRef: null,
+      configuredChannelTypes: [],
+      channelOwners: {},
+      channelAccountOwners: {},
+    });
+
+    const { getImageGenerationSettingsSnapshot } = await import('@electron/utils/openclaw-image-generation');
+    const snapshot = await getImageGenerationSettingsSnapshot();
+
+    expect(snapshot.openAiRelay.baseUrl).toBe('https://zz-cn.lingzhiwuxian.com/v1');
+    expect(snapshot.openAiRelay.apiKeyConfigured).toBe(true);
+    expect(snapshot.openAiRelay.inheritedFromManagedAccount).toBe(true);
   });
 
 });

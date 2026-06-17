@@ -7,7 +7,7 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown } from 'lucide-react';
+import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Image as ImageIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -27,6 +27,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { rendererExtensionRegistry } from '@/extensions/registry';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
+import type { ChatSendMode } from '@/stores/chat/types';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -42,7 +43,7 @@ export interface FileAttachment {
 }
 
 interface ChatInputProps {
-  onSend: (text: string, attachments?: FileAttachment[], targetAgentId?: string | null) => void;
+  onSend: (text: string, attachments?: FileAttachment[], targetAgentId?: string | null, mode?: ChatSendMode) => void;
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
@@ -231,6 +232,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const [switchingModelRef, setSwitchingModelRef] = useState<string | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
   const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
+  const [sessionSendModes, setSessionSendModes] = useState<Record<string, ChatSendMode>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
@@ -256,6 +258,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     () => (sessions ?? []).find((session) => session.key === currentSessionKey) ?? null,
     [currentSessionKey, sessions],
   );
+  const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
@@ -737,11 +740,11 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-    onSend(textToSend, attachmentsToSend, targetAgentId);
+    onSend(textToSend, attachmentsToSend, targetAgentId, sendMode);
     setTargetAgentId(null);
     setPickerOpen(false);
     setSkillPickerOpen(false);
-  }, [input, attachments, canSend, onSend, targetAgentId]);
+  }, [attachments, canSend, input, onSend, sendMode, targetAgentId]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -1144,6 +1147,30 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                 )}
               </div>
             )}
+
+            <div className="ml-1 flex items-center">
+              <button
+                type="button"
+                data-testid="chat-composer-mode-image"
+                className={cn(
+                  'inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors',
+                  sendMode === 'image'
+                    ? 'bg-black/10 text-foreground dark:bg-white/10'
+                    : 'hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground',
+                )}
+                onClick={() => {
+                  setSessionSendModes((current) => ({
+                    ...current,
+                    [currentSessionKey]: current[currentSessionKey] === 'image' ? 'chat' : 'image',
+                  }));
+                }}
+                disabled={inputDisabled || sending}
+                title={sendMode === 'image' ? t('composer.imageModeActive', 'Image mode on') : t('composer.imageMode', 'Image')}
+              >
+                <ImageIcon className="h-4 w-4 shrink-0" />
+                <span>{t('composer.imageGenerateLabel', '图像生成')}</span>
+              </button>
+            </div>
 
             {/* Send Button — pushed to the right */}
             <Button

@@ -2,7 +2,7 @@
  * Global image generation settings (agents.defaults.imageGenerationModel).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Eye, EyeOff, ImagePlus, Loader2, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { ImagePlus, Loader2, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -45,8 +45,6 @@ export function ImageGenerationSettings() {
   const [timeoutMs, setTimeoutMs] = useState('180000');
   const [relayBaseUrl, setRelayBaseUrl] = useState('');
   const [relayModel, setRelayModel] = useState('gpt-image-2');
-  const [relayApiKey, setRelayApiKey] = useState('');
-  const [showRelayApiKey, setShowRelayApiKey] = useState(false);
   const [testAgentId, setTestAgentId] = useState('');
 
   const load = useCallback(async () => {
@@ -57,8 +55,6 @@ export function ImageGenerationSettings() {
       setTimeoutMs(settings.config.timeoutMs ? String(settings.config.timeoutMs) : '180000');
       setRelayBaseUrl(settings.openAiRelay?.baseUrl ?? '');
       setRelayModel(settings.openAiRelay?.model || 'gpt-image-2');
-      setRelayApiKey('');
-      setShowRelayApiKey(false);
       setTestAgentId(settings.defaultAgentId);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -79,9 +75,8 @@ export function ImageGenerationSettings() {
       timeoutParsed !== savedTimeout
       || relayBaseUrl.trim() !== (snapshot.openAiRelay?.baseUrl ?? '').trim()
       || relayModel.trim() !== (snapshot.openAiRelay?.model ?? '').trim()
-      || relayApiKey.trim().length > 0
     );
-  }, [snapshot, timeoutMs, relayBaseUrl, relayModel, relayApiKey]);
+  }, [snapshot, timeoutMs, relayBaseUrl, relayModel]);
 
   const hasConfiguredRelay = useMemo(() => {
     if (!snapshot) return false;
@@ -99,32 +94,21 @@ export function ImageGenerationSettings() {
       if (timeoutParsed !== null && (!Number.isFinite(timeoutParsed) || timeoutParsed <= 0)) {
         throw new Error(t('imageGeneration.errors.invalidTimeout'));
       }
-      if (!relayBaseUrl.trim()) {
-        throw new Error(t('imageGeneration.errors.relayBaseUrlRequired'));
-      }
       if (!relayModel.trim()) {
         throw new Error(t('imageGeneration.errors.relayModelRequired'));
       }
       if (relayModel.includes('/')) {
         throw new Error(t('imageGeneration.errors.relayModelInvalid'));
       }
-      const existingRelayKeyUsable = snapshot?.openAiRelay?.apiKeyConfigured
-        && snapshot.openAiRelay.providerKey !== 'openai';
-      if (!relayApiKey.trim() && !existingRelayKeyUsable) {
-        throw new Error(t('imageGeneration.errors.relayApiKeyRequired'));
-      }
       const next = await saveImageGenerationSettings({
         timeoutMs: timeoutParsed,
         openAiRelayEnabled: true,
         openAiRelayBaseUrl: relayBaseUrl.trim(),
         openAiRelayModel: relayModel.trim(),
-        openAiRelayApiKey: relayApiKey.trim() || undefined,
       });
       setSnapshot(next);
       setRelayBaseUrl(next.openAiRelay?.baseUrl ?? '');
       setRelayModel(next.openAiRelay?.model || 'gpt-image-2');
-      setRelayApiKey('');
-      setShowRelayApiKey(false);
       toast.success(t('imageGeneration.toast.saved'));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -140,8 +124,6 @@ export function ImageGenerationSettings() {
       setSnapshot(next);
       setRelayBaseUrl('');
       setRelayModel('gpt-image-2');
-      setRelayApiKey('');
-      setShowRelayApiKey(false);
       setClearConfirmOpen(false);
       toast.success(t('imageGeneration.toast.cleared'));
     } catch (error) {
@@ -237,8 +219,7 @@ export function ImageGenerationSettings() {
                   <Input
                     id="image-gen-relay-base-url"
                     value={relayBaseUrl}
-                    onChange={(e) => setRelayBaseUrl(e.target.value)}
-                    placeholder="https://api.example.com/v1"
+                    readOnly
                     className={inputClasses}
                     data-testid="image-generation-relay-base-url"
                   />
@@ -265,10 +246,8 @@ export function ImageGenerationSettings() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-3">
                     <div className="space-y-0.5">
-                      <Label htmlFor="image-gen-relay-api-key" className={labelClasses}>
-                        {snapshot?.openAiRelay?.apiKeyConfigured
-                          ? t('settings:aiProviders.dialog.replaceApiKey')
-                          : t('imageGeneration.openAiRelay.apiKey')}
+                      <Label className={labelClasses}>
+                        {t('imageGeneration.openAiRelay.apiKey')}
                       </Label>
                       <p className="text-xs text-muted-foreground" data-testid="image-generation-api-key-status">
                         {snapshot?.openAiRelay?.apiKeyConfigured
@@ -283,31 +262,17 @@ export function ImageGenerationSettings() {
                       </div>
                     ) : null}
                   </div>
-                  <div className="relative">
-                    <Input
-                      id="image-gen-relay-api-key"
-                      type={showRelayApiKey ? 'text' : 'password'}
-                      value={relayApiKey}
-                      onChange={(e) => setRelayApiKey(e.target.value)}
-                      placeholder={
-                        snapshot?.openAiRelay?.apiKeyConfigured && snapshot.openAiRelay.providerKey !== 'openai'
-                          ? t('settings:aiProviders.dialog.replaceApiKeyHelp')
-                          : t('imageGeneration.openAiRelay.apiKeyPlaceholder')
-                      }
-                      className={cn(inputClasses, 'pr-10')}
-                      autoComplete="off"
-                      data-testid="image-generation-relay-api-key"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowRelayApiKey((value) => !value)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                      {showRelayApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
-                  </div>
+                  <Input
+                    id="image-gen-relay-api-key"
+                    readOnly
+                    value=""
+                    placeholder={t('imageGeneration.openAiRelay.apiKeyInherited')}
+                    className={cn(inputClasses, 'pr-10')}
+                    autoComplete="off"
+                    data-testid="image-generation-relay-api-key"
+                  />
                   <p className="text-xs text-muted-foreground" data-testid="image-generation-api-key-help">
-                    {t('settings:aiProviders.dialog.apiKeyStored')}
+                    {t('imageGeneration.openAiRelay.apiKeyInheritedHelp')}
                   </p>
                 </div>
             </div>

@@ -64,10 +64,10 @@
     },
     "imageGeneration": {
         "title": "Image Generation",
-        "description": "Configure one custom OpenAI Images-compatible endpoint for the image_generate tool. It is independent from chat providers.",
+        "description": "Image generation still uses the independent plugin path, but it now inherits the current signed-in account for service URL and auth. Configure the model name and timeout here.",
         "timeout": "Timeout (ms)",
         "agentAuthTitle": "Per-agent authentication",
-        "agentAuthDesc": "Image generation uses the API key saved for this custom image endpoint in each agent's auth-profiles.json.",
+        "agentAuthDesc": "Image generation uses plugin auth synced from the current signed-in account for each agent.",
         "agentColumn": "Agent",
         "authColumn": "Custom image endpoint auth",
         "defaultAgent": "default",
@@ -94,19 +94,19 @@
         },
         "openAiRelay": {
             "title": "Custom image endpoint",
-            "description": "Send image generation to a dedicated OpenAI Images-compatible endpoint (/v1/images/generations). This does not change any chat provider.",
+            "description": "Image generation still uses a dedicated plugin endpoint, but by default it reuses the current signed-in account's URL and auth. Chat providers stay unchanged.",
             "baseUrl": "Image Base URL",
-            "baseUrlHint": "e.g. https://api.example.com/v1 — /v1 is appended automatically when omitted.",
+            "baseUrlHint": "Provided by the current signed-in account.",
             "apiKey": "API key",
             "apiKeyPlaceholder": "sk-...",
             "apiKeyPlaceholderConfigured": "Already configured — leave blank to keep",
+            "apiKeyInherited": "Inherited from current account",
+            "apiKeyInheritedHelp": "Image generation reuses the current signed-in account's authentication. No separate API key is required here.",
             "model": "Model name",
             "modelHint": "Enter only the model id, for example gpt-image-2. Do not include provider/model."
         },
         "errors": {
             "invalidTimeout": "Timeout must be a positive number",
-            "relayBaseUrlRequired": "Image Base URL is required",
-            "relayApiKeyRequired": "API key is required",
             "relayModelRequired": "Model name is required",
             "relayModelInvalid": "Enter only the model name, for example gpt-image-2. Do not include provider/model."
         }

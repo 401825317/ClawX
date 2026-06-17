@@ -7,12 +7,14 @@ import {
 import { parseJsonBody, sendJson } from '../route-utils';
 import {
   applyOpenAiImageRelaySettings,
+  generateImageForChatSession,
   getImageGenerationSettingsSnapshot,
   listImageGenerationProvidersFromRuntime,
   runImageGenerationTest,
   setImageGenerationConfig,
   type ImageGenerationModelConfig,
 } from '../../utils/openclaw-image-generation';
+import { appendImageGenerationConversation } from '../../utils/chat-session-image-message';
 
 export async function handleMediaRoutes(
   req: IncomingMessage,
@@ -72,10 +74,11 @@ export async function handleMediaRoutes(
       }
 
       const config = await setImageGenerationConfig(next);
+      const snapshot = await getImageGenerationSettingsSnapshot();
       sendJson(res, 200, {
         success: true,
+        ...snapshot,
         config,
-        ...(await getImageGenerationSettingsSnapshot()),
       });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -101,7 +104,46 @@ export async function handleMediaRoutes(
         model?: string;
       }>(req);
       const result = await runImageGenerationTest(body);
-      sendJson(res, result.success ? 200 : 500, { success: result.success, ...result });
+      sendJson(res, result.success ? 200 : 500, result);
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/media/image-generation/chat-send' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{
+        sessionKey?: string;
+        prompt?: string;
+        model?: string;
+      }>(req);
+      const sessionKey = body.sessionKey?.trim() || '';
+      const prompt = body.prompt?.trim() || '';
+      if (!sessionKey) {
+        sendJson(res, 400, { success: false, error: 'sessionKey is required' });
+        return true;
+      }
+      if (!prompt) {
+        sendJson(res, 400, { success: false, error: 'prompt is required' });
+        return true;
+      }
+
+      const result = await generateImageForChatSession({
+        sessionKey,
+        prompt,
+        model: body.model?.trim(),
+      });
+      const outputPaths = result.outputs.map((output) => output.path);
+
+      await appendImageGenerationConversation({
+        sessionKey,
+        prompt,
+        outputPaths,
+        summaryText: '图片已生成。',
+      });
+
+      sendJson(res, 200, { success: true, result });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
