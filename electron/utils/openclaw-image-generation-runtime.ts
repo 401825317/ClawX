@@ -12,6 +12,7 @@ type ImageGenerationRuntimeModule = {
     modelOverride?: string;
     count?: number;
     size?: string;
+    quality?: 'low' | 'medium' | 'high';
     timeoutMs?: number;
   }) => Promise<{
     images: Array<{ buffer: Buffer; mimeType: string; fileName?: string; revisedPrompt?: string }>;
@@ -153,6 +154,7 @@ export async function generateImageInProcess(params: {
   model: string;
   timeoutMs: number;
   size?: string;
+  quality?: 'low' | 'medium' | 'high';
 }): Promise<{
   ok: true;
   capability: 'image.generate';
@@ -181,6 +183,7 @@ export async function generateImageInProcess(params: {
     modelOverride: params.model,
     count: 1,
     size: params.size ?? '1024x1024',
+    quality: params.quality,
     timeoutMs: params.timeoutMs,
   });
 

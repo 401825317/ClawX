@@ -74,6 +74,8 @@ describe('handleMediaRoutes — POST /api/media/image-generation/chat-send', () 
     parseJsonBodyMock.mockResolvedValueOnce({
       sessionKey: 'agent:main:main',
       prompt: '画一张夜景城市海报',
+      size: '2048x2048',
+      quality: 'high',
     });
 
     const { handleMediaRoutes } = await import('@electron/api/routes/media');
@@ -89,6 +91,8 @@ describe('handleMediaRoutes — POST /api/media/image-generation/chat-send', () 
       sessionKey: 'agent:main:main',
       prompt: '画一张夜景城市海报',
       model: undefined,
+      size: '2048x2048',
+      quality: 'high',
     });
     expect(sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),

@@ -117,6 +117,8 @@ export async function handleMediaRoutes(
         sessionKey?: string;
         prompt?: string;
         model?: string;
+        size?: string;
+        quality?: 'low' | 'medium' | 'high';
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -133,6 +135,8 @@ export async function handleMediaRoutes(
         sessionKey,
         prompt,
         model: body.model?.trim(),
+        size: body.size?.trim(),
+        quality: body.quality,
       });
       const outputPaths = result.outputs.map((output) => output.path);
 

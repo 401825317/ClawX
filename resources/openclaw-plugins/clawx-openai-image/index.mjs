@@ -69,7 +69,7 @@ function buildProvider() {
         ],
       },
       output: {
-        qualities: [],
+        qualities: ['low', 'medium', 'high'],
         formats: [],
         backgrounds: [],
       },
@@ -81,6 +81,7 @@ function buildProvider() {
         prompt: req.prompt,
         n: count,
         size: req.size ?? DEFAULT_SIZE,
+        ...(req.quality ? { quality: req.quality } : {}),
       },
     }),
     buildEditRequest: ({ req, inputImages, model, count }) => ({
@@ -90,6 +91,7 @@ function buildProvider() {
         prompt: req.prompt,
         n: count,
         size: req.size ?? DEFAULT_SIZE,
+        ...(req.quality ? { quality: req.quality } : {}),
         images: inputImages.map((image) => ({ image_url: imageToDataUrl(image) })),
       },
     }),

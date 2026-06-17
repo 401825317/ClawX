@@ -79,6 +79,20 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Chat';
     case 'composer.imageMode':
       return 'Image';
+    case 'composer.imageGenerateLabel':
+      return 'Image generation';
+    case 'composer.imageModeActive':
+      return 'Image mode on';
+    case 'composer.imageSizeLabel':
+      return 'Size';
+    case 'composer.imageQualityLabel':
+      return 'Quality';
+    case 'composer.imageQualityLow':
+      return 'Low';
+    case 'composer.imageQualityMedium':
+      return 'Medium';
+    case 'composer.imageQualityHigh':
+      return 'High';
     case 'composer.clearTarget':
       return 'Clear target agent';
     case 'composer.targetChip':
@@ -219,7 +233,7 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Hello direct agent' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research', 'chat');
+    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research', 'chat', undefined);
   });
 
   it('switches only the current session model', async () => {
@@ -445,7 +459,7 @@ describe('ChatInput agent targeting', () => {
 
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null, 'chat');
+    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null, 'chat', undefined);
     expect(hostApiFetch).toHaveBeenCalledWith(
       '/api/skills/quick-access',
       expect.objectContaining({
@@ -474,16 +488,24 @@ describe('ChatInput agent targeting', () => {
     renderChatInput(onSend);
 
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'draw a cat poster' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('draw a cat poster', undefined, null, 'image');
+    expect(onSend).toHaveBeenCalledWith(
+      'draw a cat poster',
+      undefined,
+      null,
+      'image',
+      { size: '1024x1024', quality: 'medium' },
+    );
 
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'normal chat' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat');
+    expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat', undefined);
   });
 
   it('keeps image mode isolated per session', () => {
@@ -509,10 +531,18 @@ describe('ChatInput agent targeting', () => {
     const view = renderChatInput(onSend);
 
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    fireEvent.change(screen.getByTestId('chat-image-size'), { target: { value: '2048x2048' } });
+    fireEvent.change(screen.getByTestId('chat-image-quality'), { target: { value: 'high' } });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session a image' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenLastCalledWith('session a image', undefined, null, 'image');
+    expect(onSend).toHaveBeenLastCalledWith(
+      'session a image',
+      undefined,
+      null,
+      'image',
+      { size: '2048x2048', quality: 'high' },
+    );
 
     chatState.currentSessionKey = 'agent:main:session-b';
     view.rerender(
@@ -521,10 +551,11 @@ describe('ChatInput agent targeting', () => {
       </TooltipProvider>,
     );
 
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session b chat' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenLastCalledWith('session b chat', undefined, null, 'chat');
+    expect(onSend).toHaveBeenLastCalledWith('session b chat', undefined, null, 'chat', undefined);
 
     chatState.currentSessionKey = 'agent:main:main';
     view.rerender(
@@ -533,10 +564,19 @@ describe('ChatInput agent targeting', () => {
       </TooltipProvider>,
     );
 
+    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-image-size')).toHaveValue('2048x2048');
+    expect(screen.getByTestId('chat-image-quality')).toHaveValue('high');
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session a image again' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenLastCalledWith('session a image again', undefined, null, 'image');
+    expect(onSend).toHaveBeenLastCalledWith(
+      'session a image again',
+      undefined,
+      null,
+      'image',
+      { size: '2048x2048', quality: 'high' },
+    );
   });
 
   it('removes the full inline skill token with one backspace', async () => {

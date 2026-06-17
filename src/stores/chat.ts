@@ -44,6 +44,7 @@ import {
   DEFAULT_CANONICAL_PREFIX,
   DEFAULT_SESSION_KEY,
   type AttachedFileMeta,
+  type ChatImageSendOptions,
   type ChatSendMode,
   type ChatSession,
   type ChatState,
@@ -3707,6 +3708,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>,
     targetAgentId?: string | null,
     mode: ChatSendMode = 'chat',
+    imageOptions?: ChatImageSendOptions,
   ) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
@@ -3787,6 +3789,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             body: JSON.stringify({
               sessionKey: currentSessionKey,
               prompt: trimmed,
+              size: imageOptions?.size,
+              quality: imageOptions?.quality,
             }),
           },
         );

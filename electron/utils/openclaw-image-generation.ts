@@ -140,7 +140,6 @@ function parseImageGenerationModelConfig(raw: unknown): ImageGenerationModelConf
   const timeoutMs = typeof raw.timeoutMs === 'number' && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0
     ? Math.floor(raw.timeoutMs)
     : null;
-
   return { primary, fallbacks: [...new Set(fallbacks)], timeoutMs };
 }
 
@@ -150,17 +149,10 @@ function buildImageGenerationModelConfigWrite(
   if (!config.primary && config.fallbacks.length === 0 && config.timeoutMs === null) {
     return undefined;
   }
-
   const next: AgentModelConfigShape = {};
-  if (config.primary) {
-    next.primary = config.primary;
-  }
-  if (config.fallbacks.length > 0) {
-    next.fallbacks = config.fallbacks;
-  }
-  if (config.timeoutMs !== null) {
-    next.timeoutMs = config.timeoutMs;
-  }
+  if (config.primary) next.primary = config.primary;
+  if (config.fallbacks.length > 0) next.fallbacks = config.fallbacks;
+  if (config.timeoutMs !== null) next.timeoutMs = config.timeoutMs;
   return next;
 }
 
@@ -224,7 +216,6 @@ export async function setImageGenerationConfig(
       throw new Error(`Invalid fallback model ref "${fallback}"`);
     }
   }
-
   return withConfigLock(async () => {
     const config = await readOpenClawConfig();
     const agents = (config.agents && typeof config.agents === 'object'
@@ -509,6 +500,7 @@ export async function generateImageForChatSession(params: {
   prompt: string;
   model?: string;
   size?: string;
+  quality?: 'low' | 'medium' | 'high';
 }): Promise<Awaited<ReturnType<typeof generateImageInProcess>>> {
   await ensureManagedOpenAiImageRelay();
 
@@ -532,5 +524,6 @@ export async function generateImageForChatSession(params: {
     model: configuredModel,
     timeoutMs: current.config.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
     size: params.size?.trim() || DEFAULT_TEST_IMAGE_SIZE,
+    quality: params.quality,
   });
 }

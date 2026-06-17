@@ -82,6 +82,7 @@ describe('ClawX OpenAI image plugin request shape', () => {
         prompt: 'paint a fox',
         n: 1,
         size: '1024x1024',
+        quality: 'high',
       });
     } finally {
       server.close();

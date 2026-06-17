@@ -27,7 +27,8 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { rendererExtensionRegistry } from '@/extensions/registry';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
-import type { ChatSendMode } from '@/stores/chat/types';
+import type { ChatImageSendOptions, ChatSendMode } from '@/stores/chat/types';
+import { Select } from '@/components/ui/select';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -43,11 +44,29 @@ export interface FileAttachment {
 }
 
 interface ChatInputProps {
-  onSend: (text: string, attachments?: FileAttachment[], targetAgentId?: string | null, mode?: ChatSendMode) => void;
+  onSend: (
+    text: string,
+    attachments?: FileAttachment[],
+    targetAgentId?: string | null,
+    mode?: ChatSendMode,
+    imageOptions?: ChatImageSendOptions,
+  ) => void;
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
 }
+
+const IMAGE_SIZE_OPTIONS = [
+  { value: '1024x1024', label: '1K' },
+  { value: '2048x2048', label: '2K' },
+  { value: '3840x2160', label: '4K' },
+] as const;
+
+const IMAGE_QUALITY_OPTIONS = [
+  { value: 'low', labelKey: 'composer.imageQualityLow' },
+  { value: 'medium', labelKey: 'composer.imageQualityMedium' },
+  { value: 'high', labelKey: 'composer.imageQualityHigh' },
+] as const;
 
 interface RemoteModelOption {
   modelRef: string;
@@ -233,6 +252,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
   const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
   const [sessionSendModes, setSessionSendModes] = useState<Record<string, ChatSendMode>>({});
+  const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, ChatImageSendOptions>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
@@ -259,6 +279,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     [currentSessionKey, sessions],
   );
   const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
+  const imageOptions = sessionImageOptions[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' };
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
@@ -740,11 +761,11 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-    onSend(textToSend, attachmentsToSend, targetAgentId, sendMode);
+    onSend(textToSend, attachmentsToSend, targetAgentId, sendMode, sendMode === 'image' ? imageOptions : undefined);
     setTargetAgentId(null);
     setPickerOpen(false);
     setSkillPickerOpen(false);
-  }, [attachments, canSend, input, onSend, sendMode, targetAgentId]);
+  }, [attachments, canSend, imageOptions, input, onSend, sendMode, targetAgentId]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -1171,6 +1192,55 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                 <span>{t('composer.imageGenerateLabel', '图像生成')}</span>
               </button>
             </div>
+
+            {sendMode === 'image' && (
+              <div className="ml-2 flex items-center gap-2" data-testid="chat-image-options">
+                <Select
+                  value={imageOptions.size}
+                  onChange={(e) => {
+                    const size = e.target.value as ChatImageSendOptions['size'];
+                    setSessionImageOptions((current) => ({
+                      ...current,
+                      [currentSessionKey]: {
+                        ...(current[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' }),
+                        size,
+                      },
+                    }));
+                  }}
+                  className="h-8 w-[74px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
+                  data-testid="chat-image-size"
+                  aria-label={t('composer.imageSizeLabel')}
+                >
+                  {IMAGE_SIZE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={imageOptions.quality}
+                  onChange={(e) => {
+                    const quality = e.target.value as ChatImageSendOptions['quality'];
+                    setSessionImageOptions((current) => ({
+                      ...current,
+                      [currentSessionKey]: {
+                        ...(current[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' }),
+                        quality,
+                      },
+                    }));
+                  }}
+                  className="h-8 w-[88px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
+                  data-testid="chat-image-quality"
+                  aria-label={t('composer.imageQualityLabel')}
+                >
+                  {IMAGE_QUALITY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {t(option.labelKey)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
 
             {/* Send Button — pushed to the right */}
             <Button

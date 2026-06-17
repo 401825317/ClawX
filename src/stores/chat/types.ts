@@ -107,6 +107,11 @@ export interface ChatRuntimeRunState {
 
 export type ChatSendMode = 'chat' | 'image';
 
+export interface ChatImageSendOptions {
+  size: '1024x1024' | '2048x2048' | '3840x2160';
+  quality: 'low' | 'medium' | 'high';
+}
+
 export interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -161,6 +166,7 @@ export interface ChatState {
     }>,
     targetAgentId?: string | null,
     mode?: ChatSendMode,
+    imageOptions?: ChatImageSendOptions,
   ) => Promise<void>;
   abortRun: () => Promise<void>;
   handleChatEvent: (event: Record<string, unknown>) => void;
