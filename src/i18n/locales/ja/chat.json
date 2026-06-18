@@ -17,6 +17,8 @@
     "toolbar": {
         "refresh": "チャットを更新",
         "currentAgent": "現在の会話相手: {{agent}}",
+        "agentSwitcher": "Agent を選択",
+        "agentRunning": "実行中",
         "workspace": "ワークスペース"
     },
     "generatedFiles": {

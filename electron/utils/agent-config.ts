@@ -8,6 +8,15 @@ import { expandPath, getOpenClawConfigDir } from './paths';
 import * as logger from './logger';
 import { toUiChannelType } from './channel-alias';
 import { ensureClawXIdentityFile } from './openclaw-workspace';
+import {
+  deleteAgentProfile,
+  readAgentProfiles,
+  upsertAgentProfile,
+  writeAgentProfileWorkspaceFiles,
+  type AgentProfile,
+  type AgentProfileInput,
+} from './agent-profile';
+import { appendAgentWelcomeMessage } from './chat-session-welcome-message';
 
 const MAIN_AGENT_ID = 'main';
 const MAIN_AGENT_NAME = 'Main Agent';
@@ -90,6 +99,7 @@ export interface AgentSummary {
   agentDir: string;
   mainSessionKey: string;
   channelTypes: string[];
+  profile?: AgentProfile | null;
 }
 
 export interface AgentsSnapshot {
@@ -99,6 +109,7 @@ export interface AgentsSnapshot {
   configuredChannelTypes: string[];
   channelOwners: Record<string, string>;
   channelAccountOwners: Record<string, string>;
+  createdAgentId?: string;
 }
 
 function resolveModelRef(model: unknown): string | null {
@@ -461,6 +472,7 @@ function listConfiguredAccountIdsForChannel(config: AgentConfigDocument, channel
 async function buildSnapshotFromConfig(config: AgentConfigDocument, preloadedChannels?: string[]): Promise<AgentsSnapshot> {
   const { entries, defaultAgentId } = normalizeAgentsConfig(config);
   const configuredChannels = preloadedChannels ?? await listConfiguredChannels();
+  const profiles = await readAgentProfiles();
   const { channelToAgent, accountToAgent } = getChannelBindingMap(config.bindings);
   const defaultAgentIdNorm = normalizeAgentIdForBinding(defaultAgentId);
   const channelOwners: Record<string, string> = {};
@@ -529,6 +541,7 @@ async function buildSnapshotFromConfig(config: AgentConfigDocument, preloadedCha
       channelTypes: configuredChannels
         .filter((ct) => ownedChannels.has(ct))
         .map((channelType) => toUiChannelType(channelType)),
+      profile: profiles[entry.id] ?? null,
     };
   });
 
@@ -579,7 +592,7 @@ export async function resolveAgentIdFromChannel(channel: string, accountId?: str
 
 export async function createAgent(
   name: string,
-  options?: { inheritWorkspace?: boolean },
+  options?: { inheritWorkspace?: boolean; profile?: AgentProfileInput },
 ): Promise<AgentsSnapshot> {
   return withConfigLock(async () => {
     const config = await readOpenClawConfig() as AgentConfigDocument;
@@ -614,9 +627,20 @@ export async function createAgent(
     };
 
     await provisionAgentFilesystem(config, newAgent, { inheritWorkspace: options?.inheritWorkspace });
+    if (options?.profile) {
+      const profile = await upsertAgentProfile(nextId, options.profile);
+      await writeAgentProfileWorkspaceFiles(newAgent, profile);
+      if (profile.welcomeMessage.trim()) {
+        await appendAgentWelcomeMessage({
+          sessionKey: buildAgentMainSessionKey(config, nextId),
+          content: profile.welcomeMessage,
+          label: profile.personaName || normalizedName,
+        });
+      }
+    }
     await writeOpenClawConfig(config);
     logger.info('Created agent config entry', { agentId: nextId, inheritWorkspace: !!options?.inheritWorkspace });
-    return buildSnapshotFromConfig(config);
+    return { ...(await buildSnapshotFromConfig(config)), createdAgentId: nextId };
   });
 }
 
@@ -728,6 +752,7 @@ export async function deleteAgentConfig(agentId: string): Promise<{ snapshot: Ag
 
     await writeOpenClawConfig(config);
     await deleteAgentChannelAccounts(agentId, ownedLegacyAccounts);
+    await deleteAgentProfile(agentId);
     await removeAgentRuntimeDirectory(agentId);
     // NOTE: workspace directory is NOT deleted here intentionally.
     // The caller (route handler) defers workspace removal until after

@@ -1,6 +1,7 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { Agents } from '../../src/pages/Agents/index';
 
 const hostApiFetchMock = vi.fn();
@@ -9,6 +10,7 @@ const fetchAgentsMock = vi.fn();
 const updateAgentMock = vi.fn();
 const updateAgentModelMock = vi.fn();
 const refreshProviderSnapshotMock = vi.fn();
+const switchSessionMock = vi.fn();
 
 const { gatewayState, agentsState, providersState } = vi.hoisted(() => ({
   gatewayState: {
@@ -52,6 +54,12 @@ vi.mock('@/stores/agents', () => ({
   },
 }));
 
+vi.mock('@/stores/chat', () => ({
+  useChatStore: (selector: (state: { switchSession: typeof switchSessionMock }) => unknown) => selector({
+    switchSession: switchSessionMock,
+  }),
+}));
+
 vi.mock('@/stores/providers', () => ({
   useProviderStore: (selector: (state: typeof providersState & {
     refreshProviderSnapshot: typeof refreshProviderSnapshotMock;
@@ -86,6 +94,14 @@ vi.mock('sonner', () => ({
   },
 }));
 
+function renderAgents() {
+  return render(
+    <MemoryRouter>
+      <Agents />
+    </MemoryRouter>,
+  );
+}
+
 describe('Agents page status refresh', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -115,7 +131,7 @@ describe('Agents page status refresh', () => {
       return vi.fn();
     });
 
-    render(<Agents />);
+    renderAgents();
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
@@ -136,7 +152,11 @@ describe('Agents page status refresh', () => {
   it('refetches channel accounts when the gateway transitions to running after mount', async () => {
     gatewayState.status = { state: 'starting', port: 18789 };
 
-    const { rerender } = render(<Agents />);
+    const { rerender } = render(
+      <MemoryRouter>
+        <Agents />
+      </MemoryRouter>,
+    );
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
@@ -145,7 +165,11 @@ describe('Agents page status refresh', () => {
 
     gatewayState.status = { state: 'running', port: 18789 };
     await act(async () => {
-      rerender(<Agents />);
+      rerender(
+        <MemoryRouter>
+          <Agents />
+        </MemoryRouter>,
+      );
     });
 
     await waitFor(() => {
@@ -189,7 +213,7 @@ describe('Agents page status refresh', () => {
     ];
     providersState.defaultAccountId = 'openrouter-default';
 
-    render(<Agents />);
+    renderAgents();
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
@@ -232,13 +256,21 @@ describe('Agents page status refresh', () => {
       },
     ];
 
-    const { rerender } = render(<Agents />);
+    const { rerender } = render(
+      <MemoryRouter>
+        <Agents />
+      </MemoryRouter>,
+    );
 
     expect(await screen.findByText('Main')).toBeInTheDocument();
 
     agentsState.loading = true;
     await act(async () => {
-      rerender(<Agents />);
+      rerender(
+        <MemoryRouter>
+          <Agents />
+        </MemoryRouter>,
+      );
     });
 
     expect(screen.getByText('Main')).toBeInTheDocument();
@@ -251,7 +283,7 @@ describe('Agents page status refresh', () => {
     refreshProviderSnapshotMock.mockImplementation(() => new Promise(() => {}));
     hostApiFetchMock.mockImplementation(() => new Promise(() => {}));
 
-    const { container } = render(<Agents />);
+    const { container } = renderAgents();
 
     expect(container.querySelector('svg.animate-spin')).toBeTruthy();
     expect(screen.queryByText('title')).not.toBeInTheDocument();

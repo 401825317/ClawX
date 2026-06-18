@@ -14,9 +14,27 @@
     "creating": "Создание...",
     "createDialog": {
         "title": "Добавить агента",
-        "description": "Создайте нового агента по имени. Вы можете опционально унаследовать файлы рабочей области основного агента.",
-        "nameLabel": "Имя агента",
-        "namePlaceholder": "Помощник по коду",
+        "description": "Опишите нужную роль. UClaw незаметно подготовит профиль и создаст агента, готового к чату.",
+        "nameLabel": "Название роли",
+        "namePlaceholder": "Маркетолог",
+        "responsibilityLabel": "Основная ответственность",
+        "responsibilityPlaceholder": "Помогать с маркетинговым контентом, кампаниями, рекламной стратегией и анализом результатов.",
+        "avatarLabel": "Аватар",
+        "avatarOptions": {
+            "strategist": "Маркетолог",
+            "creator": "Дизайнер-художник",
+            "engineer": "Инженер",
+            "ad-buyer": "Специалист по рекламе",
+            "copywriter": "Копирайтер",
+            "slides": "Эксперт по презентациям",
+            "ecommerce": "E-commerce ассистент",
+            "support": "Поддержка",
+            "analyst": "Аналитик данных",
+            "operator": "Операционный менеджер"
+        },
+        "avatarHint": "Выберите образ персонажа. Профиль будет создан автоматически при создании агента.",
+        "createAndOpen": "Создать и открыть чат",
+        "creatingWithProfile": "Создание профиля и агента...",
         "inheritWorkspaceLabel": "Наследовать рабочую область основного агента",
         "inheritWorkspaceDescription": "Копировать SOUL.md, AGENTS.md и т.д. из основного агента"
     },
@@ -57,6 +75,7 @@
     },
     "toast": {
         "agentCreated": "Агент создан",
+        "agentProfileGenerateFailed": "Не удалось создать профиль агента: {{error}}",
         "agentCreateFailed": "Не удалось создать агента: {{error}}",
         "agentDeleted": "Агент удалён",
         "agentDeleteFailed": "Не удалось удалить агента: {{error}}",

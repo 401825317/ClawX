@@ -14,9 +14,27 @@
     "creating": "Creating...",
     "createDialog": {
         "title": "Add Agent",
-        "description": "Create a new agent by name. You can optionally inherit the main agent's workspace bootstrap files.",
-        "nameLabel": "Agent Name",
-        "namePlaceholder": "Coding Helper",
+        "description": "Describe the role you want. UClaw will generate the polished profile privately and create a chat-ready Agent.",
+        "nameLabel": "Role name",
+        "namePlaceholder": "Marketing Expert",
+        "responsibilityLabel": "Primary responsibility",
+        "responsibilityPlaceholder": "Help me handle marketing content, campaigns, paid acquisition strategy, and performance reviews.",
+        "avatarLabel": "Avatar",
+        "avatarOptions": {
+            "strategist": "Marketing expert",
+            "creator": "Design artist",
+            "engineer": "Engineer",
+            "ad-buyer": "Ad buyer",
+            "copywriter": "Copywriter",
+            "slides": "Slides expert",
+            "ecommerce": "E-commerce aide",
+            "support": "Support expert",
+            "analyst": "Data analyst",
+            "operator": "Ops manager"
+        },
+        "avatarHint": "Choose a character look. The profile is generated automatically during creation.",
+        "createAndOpen": "Create and open chat",
+        "creatingWithProfile": "Generating and creating...",
         "inheritWorkspaceLabel": "Inherit main agent workspace",
         "inheritWorkspaceDescription": "Copy SOUL.md, AGENTS.md, etc. from the main agent"
     },
@@ -57,6 +75,7 @@
     },
     "toast": {
         "agentCreated": "Agent created",
+        "agentProfileGenerateFailed": "Failed to generate agent profile: {{error}}",
         "agentCreateFailed": "Failed to create agent: {{error}}",
         "agentDeleted": "Agent deleted",
         "agentDeleteFailed": "Failed to delete agent: {{error}}",

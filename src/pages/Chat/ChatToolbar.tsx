@@ -3,14 +3,15 @@
  * Session selector, new session, refresh, and the workspace browser
  * entry point.  Rendered in the Header when on the Chat page.
  */
-import { useMemo } from 'react';
-import { RefreshCw, Bot, FolderTree, ListTree } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+import { RefreshCw, Bot, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useAgentsStore } from '@/stores/agents';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { cn } from '@/lib/utils';
+import { getAgentAvatar } from '@/lib/agent-avatars';
 import { useTranslation } from 'react-i18next';
 import { WORKSPACE_BROWSER_ENABLED } from '@/components/file-preview/workspace-browser-config';
 
@@ -27,6 +28,9 @@ export function ChatToolbar({
 }: ChatToolbarProps = {}) {
   const refresh = useChatStore((s) => s.refresh);
   const loading = useChatStore((s) => s.loading);
+  const sending = useChatStore((s) => s.sending);
+  const sessions = useChatStore((s) => s.sessions);
+  const switchSession = useChatStore((s) => s.switchSession);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const agents = useAgentsStore((s) => s.agents);
   const openBrowser = useArtifactPanel((s) => s.openBrowser);
@@ -34,20 +38,103 @@ export function ChatToolbar({
   const panelTab = useArtifactPanel((s) => s.tab);
   const closePanel = useArtifactPanel((s) => s.close);
   const { t } = useTranslation('chat');
+  const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
   );
-  const currentAgentName = currentAgent?.name ?? currentAgentId;
+  const currentAgentName = currentAgent?.profile?.personaName ?? currentAgent?.name ?? currentAgentId;
+  const currentAvatar = getAgentAvatar(currentAgent?.profile?.avatarId);
+  const activeAgentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const session of sessions) {
+      if (!session.key.startsWith('agent:')) continue;
+      const agentId = session.key.split(':')[1] || 'main';
+      if (session.hasActiveRun || session.status === 'running' || session.status === 'active') {
+        ids.add(agentId);
+      }
+    }
+    if (sending) ids.add(currentAgentId);
+    return ids;
+  }, [currentAgentId, sending, sessions]);
 
   const browserActive = WORKSPACE_BROWSER_ENABLED && panelOpen && panelTab === 'browser';
   const questionDirectoryAvailable = questionDirectoryCount > 1 && !!onToggleQuestionDirectory;
 
   return (
     <div className="flex items-center gap-2">
-      <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-black/10 bg-white/70 px-3 py-1.5 text-xs font-medium text-foreground/80 dark:border-white/10 dark:bg-white/5">
-        <Bot className="h-3.5 w-3.5 text-primary" />
-        <span>{t('toolbar.currentAgent', { agent: currentAgentName })}</span>
+      <div ref={pickerRef} className="relative hidden sm:block">
+        <Button
+          data-testid="chat-agent-switcher"
+          type="button"
+          variant="outline"
+          onClick={() => setAgentPickerOpen((open) => !open)}
+          className="h-8 rounded-full border-black/10 bg-white/70 px-2.5 text-xs font-medium text-foreground/80 shadow-none hover:bg-black/5 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+          aria-label={t('toolbar.agentSwitcher')}
+          aria-expanded={agentPickerOpen}
+        >
+          {currentAgent?.profile?.avatarId ? (
+            <img src={currentAvatar.src} alt="" className="mr-1.5 h-5 w-5 rounded-full" />
+          ) : (
+            <Bot className="mr-1.5 h-3.5 w-3.5 text-primary" />
+          )}
+          <span className="max-w-[150px] truncate">{currentAgentName}</span>
+          <ChevronDown className="ml-1 h-3.5 w-3.5 text-muted-foreground" />
+        </Button>
+        {agentPickerOpen && (
+          <div className="absolute right-0 top-10 z-50 w-72 rounded-2xl border border-black/10 bg-surface-modal p-2 shadow-xl dark:border-white/10">
+            <div className="px-2 py-1.5 text-tiny uppercase tracking-[0.08em] text-muted-foreground">
+              {t('toolbar.agentSwitcher')}
+            </div>
+            <div className="max-h-80 overflow-y-auto">
+              {(agents ?? []).map((agent) => {
+                const avatar = getAgentAvatar(agent.profile?.avatarId);
+                const name = agent.profile?.personaName || agent.name;
+                const isActive = agent.id === currentAgentId;
+                const isRunning = activeAgentIds.has(agent.id);
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    onClick={() => {
+                      switchSession(agent.mainSessionKey);
+                      setAgentPickerOpen(false);
+                    }}
+                    className={cn(
+                      'flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors',
+                      isActive
+                        ? 'bg-black/5 dark:bg-white/10'
+                        : 'hover:bg-black/5 dark:hover:bg-white/10',
+                    )}
+                  >
+                    <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full border border-black/5 bg-white/70 dark:border-white/10 dark:bg-white/5">
+                      {agent.profile?.avatarId ? (
+                        <img src={avatar.src} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-primary bg-primary/10">
+                          <Bot className="h-4 w-4" />
+                        </div>
+                      )}
+                      {isRunning && (
+                        <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border border-white bg-emerald-500 dark:border-background" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium text-foreground">{name}</span>
+                        {isActive && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {isRunning ? t('toolbar.agentRunning') : (agent.profile?.roleName || agent.modelDisplay)}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
       {WORKSPACE_BROWSER_ENABLED && (
         <Tooltip>

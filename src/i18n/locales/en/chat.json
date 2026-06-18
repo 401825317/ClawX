@@ -17,6 +17,8 @@
     "toolbar": {
         "refresh": "Refresh chat",
         "currentAgent": "Talking to {{agent}}",
+        "agentSwitcher": "Choose Agent",
+        "agentRunning": "Running",
         "workspace": "Workspace"
     },
     "generatedFiles": {

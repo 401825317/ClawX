@@ -14,9 +14,27 @@
     "creating": "作成中...",
     "createDialog": {
         "title": "Agent を追加",
-        "description": "名前だけで新しい Agent を作成できます。メイン Agent のワークスペース初期ファイルを引き継ぐかどうかも選択できます。",
-        "nameLabel": "Agent 名",
-        "namePlaceholder": "Coding Helper",
+        "description": "作りたい役割を説明してください。UClaw がバックグラウンドでプロファイルを整え、会話可能な Agent を作成します。",
+        "nameLabel": "役割名",
+        "namePlaceholder": "マーケティング専門家",
+        "responsibilityLabel": "主な責任",
+        "responsibilityPlaceholder": "マーケティングコンテンツ、キャンペーン企画、広告運用戦略、振り返り分析を手伝う。",
+        "avatarLabel": "アバター",
+        "avatarOptions": {
+            "strategist": "マーケティング専門家",
+            "creator": "デザインアーティスト",
+            "engineer": "エンジニア",
+            "ad-buyer": "広告運用担当",
+            "copywriter": "コピーライター",
+            "slides": "スライド専門家",
+            "ecommerce": "EC アシスタント",
+            "support": "サポート専門家",
+            "analyst": "データ分析担当",
+            "operator": "運用マネージャー"
+        },
+        "avatarHint": "キャラクターの見た目を選びます。プロファイルは作成時に自動生成されます。",
+        "createAndOpen": "作成してチャットへ",
+        "creatingWithProfile": "生成して作成中...",
         "inheritWorkspaceLabel": "メイン Agent のワークスペースを引き継ぐ",
         "inheritWorkspaceDescription": "SOUL.md、AGENTS.md などの初期ファイルをコピーします"
     },
@@ -57,6 +75,7 @@
     },
     "toast": {
         "agentCreated": "Agent を作成しました",
+        "agentProfileGenerateFailed": "Agent プロファイルの生成に失敗しました: {{error}}",
         "agentCreateFailed": "Agent の作成に失敗しました: {{error}}",
         "agentDeleted": "Agent を削除しました",
         "agentDeleteFailed": "Agent の削除に失敗しました: {{error}}",

@@ -1,25 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Bot, Check, Plus, RefreshCw, Settings2, Trash2, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Switch } from '@/components/ui/switch';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { useAgentsStore } from '@/stores/agents';
+import { useChatStore } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
-import type { AgentSummary } from '@/types/agent';
+import type { AgentProfileDraft, AgentSummary } from '@/types/agent';
 import {
   buildRuntimeProviderOptions,
   splitModelRef,
   type RuntimeProviderOption,
 } from '@/lib/model-options';
+import { AGENT_AVATARS, getAgentAvatar } from '@/lib/agent-avatars';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -51,7 +55,9 @@ interface ChannelGroupItem {
 
 export function Agents() {
   const { t } = useTranslation('agents');
+  const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const switchSession = useChatStore((state) => state.switchSession);
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const lastGatewayStateRef = useRef(gatewayStatus.state);
   const {
@@ -60,6 +66,7 @@ export function Agents() {
     error,
     fetchAgents,
     createAgent,
+    generateAgentProfile,
     deleteAgent,
   } = useAgentsStore();
   const [channelGroups, setChannelGroups] = useState<ChannelGroupItem[]>([]);
@@ -152,6 +159,7 @@ export function Agents() {
               {t('refresh')}
             </Button>
             <Button
+              data-testid="agents-add-button"
               onClick={() => setShowAddDialog(true)}
               className="h-9 text-meta font-medium rounded-full px-4 shadow-none"
             >
@@ -197,10 +205,15 @@ export function Agents() {
       {showAddDialog && (
         <AddAgentDialog
           onClose={() => setShowAddDialog(false)}
+          onGenerate={generateAgentProfile}
           onCreate={async (name, options) => {
-            await createAgent(name, options);
+            const createdAgent = await createAgent(name, options);
             setShowAddDialog(false);
             toast.success(t('toast.agentCreated'));
+            if (createdAgent?.mainSessionKey) {
+              switchSession(createdAgent.mainSessionKey);
+              navigate('/');
+            }
           }}
         />
       )}
@@ -267,6 +280,9 @@ function AgentCard({
   const channelsText = boundChannelAccounts.length > 0
     ? boundChannelAccounts.join(', ')
     : t('none');
+  const avatar = getAgentAvatar(agent.profile?.avatarId);
+  const displayName = agent.profile?.personaName || agent.name;
+  const responsibility = agent.profile?.responsibility?.trim();
 
   return (
     <div
@@ -275,13 +291,19 @@ function AgentCard({
         agent.isDefault && 'bg-black/[0.04] dark:bg-white/[0.06]'
       )}
     >
-      <div className="h-[46px] w-[46px] shrink-0 flex items-center justify-center text-primary bg-primary/10 rounded-full shadow-sm mb-3">
-        <Bot className="h-[22px] w-[22px]" />
+      <div className="h-[50px] w-[50px] shrink-0 overflow-hidden rounded-full border border-black/5 bg-white/70 shadow-sm dark:border-white/10 dark:bg-white/5">
+        {agent.profile?.avatarId ? (
+          <img src={avatar.src} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-primary bg-primary/10">
+            <Bot className="h-[22px] w-[22px]" />
+          </div>
+        )}
       </div>
       <div className="flex flex-col flex-1 min-w-0 py-0.5 mt-1">
         <div className="flex items-center justify-between gap-3 mb-1">
           <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold text-foreground truncate">{agent.name}</h2>
+            <h2 className="text-base font-semibold text-foreground truncate">{displayName}</h2>
             {agent.isDefault && (
               <Badge
                 variant="secondary"
@@ -318,6 +340,11 @@ function AgentCard({
             </Button>
           </div>
         </div>
+        {responsibility && (
+          <p className="text-sm text-foreground/75 line-clamp-2 leading-[1.5] mb-1">
+            {responsibility}
+          </p>
+        )}
         <p className="text-sm text-muted-foreground line-clamp-2 leading-[1.5]">
           {t('modelLine', {
             model: agent.modelDisplay,
@@ -359,25 +386,54 @@ function ChannelLogo({ type }: { type: ChannelType }) {
   }
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function AddAgentDialog({
   onClose,
+  onGenerate,
   onCreate,
 }: {
   onClose: () => void;
-  onCreate: (name: string, options: { inheritWorkspace: boolean }) => Promise<void>;
+  onGenerate: (input: { roleName: string; responsibility: string; avatarId: string; locale?: string }) => Promise<AgentProfileDraft>;
+  onCreate: (name: string, options: { inheritWorkspace: boolean; profile: AgentProfileDraft }) => Promise<void>;
 }) {
-  const { t } = useTranslation('agents');
-  const [name, setName] = useState('');
+  const { t, i18n } = useTranslation('agents');
+  const [roleName, setRoleName] = useState('');
+  const [responsibility, setResponsibility] = useState('');
+  const [avatarId, setAvatarId] = useState(AGENT_AVATARS[0].id);
   const [inheritWorkspace, setInheritWorkspace] = useState(false);
   const [saving, setSaving] = useState(false);
+  const selectedAvatar = getAgentAvatar(avatarId);
+
+  const canCreate = roleName.trim().length > 0 && responsibility.trim().length > 0 && !saving;
 
   const handleSubmit = async () => {
-    if (!name.trim()) return;
+    if (!canCreate) return;
     setSaving(true);
+    let generated: AgentProfileDraft;
     try {
-      await onCreate(name.trim(), { inheritWorkspace });
+      generated = await onGenerate({
+        roleName: roleName.trim(),
+        responsibility: responsibility.trim(),
+        avatarId,
+        locale: i18n.language,
+      });
     } catch (error) {
-      toast.error(t('toast.agentCreateFailed', { error: String(error) }));
+      toast.error(t('toast.agentProfileGenerateFailed', { error: getErrorMessage(error) }));
+      setSaving(false);
+      return;
+    }
+
+    try {
+      const profile = { ...generated, avatarId };
+      await onCreate(profile.personaName.trim() || roleName.trim(), {
+        inheritWorkspace,
+        profile,
+      });
+    } catch (error) {
+      toast.error(t('toast.agentCreateFailed', { error: getErrorMessage(error) }));
       setSaving(false);
       return;
     }
@@ -385,62 +441,126 @@ function AddAgentDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-md rounded-3xl border-0 shadow-2xl bg-surface-modal overflow-hidden">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-2xl font-serif font-normal tracking-tight">
-            {t('createDialog.title')}
-          </CardTitle>
-          <CardDescription className="text-sm mt-1 text-foreground/70">
-            {t('createDialog.description')}
-          </CardDescription>
+    <div data-testid="agent-create-dialog" className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+      <Card className="w-full max-w-2xl max-h-[92vh] flex flex-col rounded-3xl border-0 shadow-2xl bg-surface-modal overflow-hidden">
+        <CardHeader className="flex flex-row items-start justify-between gap-4 pb-2 shrink-0">
+          <div>
+            <CardTitle className="text-2xl font-serif font-normal tracking-tight">
+              {t('createDialog.title')}
+            </CardTitle>
+            <CardDescription className="text-sm mt-1 text-foreground/70">
+              {t('createDialog.description')}
+            </CardDescription>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onClose}
+            className="rounded-full h-8 w-8 -mr-2 -mt-2 text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5"
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </CardHeader>
-        <CardContent className="space-y-6 pt-4 p-6">
-          <div className="space-y-2.5">
-            <Label htmlFor="agent-name" className={labelClasses}>{t('createDialog.nameLabel')}</Label>
-            <Input
-              id="agent-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder={t('createDialog.namePlaceholder')}
-              className={inputClasses}
-            />
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="space-y-0.5">
-              <Label htmlFor="inherit-workspace" className={labelClasses}>{t('createDialog.inheritWorkspaceLabel')}</Label>
-              <p className="text-meta text-foreground/60">{t('createDialog.inheritWorkspaceDescription')}</p>
+        <CardContent className="flex-1 overflow-y-auto p-6 pt-4">
+          <div className="grid gap-6 md:grid-cols-[132px_minmax(0,1fr)]">
+            <div className="flex flex-col items-center gap-3">
+              <div className="h-28 w-28 overflow-hidden rounded-full border border-black/10 bg-white/70 shadow-sm dark:border-white/10 dark:bg-white/5">
+                <img src={selectedAvatar.src} alt="" className="h-full w-full object-cover" />
+              </div>
+              <p className="text-center text-xs leading-5 text-foreground/55">
+                {t('createDialog.avatarHint')}
+              </p>
             </div>
-            <Switch
-              id="inherit-workspace"
-              checked={inheritWorkspace}
-              onCheckedChange={setInheritWorkspace}
-            />
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="outline"
-              onClick={onClose}
-              className="h-9 text-meta font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground"
-            >
-              {t('common:actions.cancel')}
-            </Button>
-            <Button
-              onClick={() => void handleSubmit()}
-              disabled={saving || !name.trim()}
-              className="h-9 text-meta font-medium rounded-full px-4 shadow-none"
-            >
-              {saving ? (
-                <>
-                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                  {t('creating')}
-                </>
-              ) : (
-                t('common:actions.save')
-              )}
-            </Button>
+            <div className="space-y-5">
+              <div className="space-y-2.5">
+                <Label htmlFor="agent-role-name" className={labelClasses}>{t('createDialog.nameLabel')}</Label>
+                <Input
+                  data-testid="agent-create-role-name"
+                  id="agent-role-name"
+                  value={roleName}
+                  onChange={(event) => {
+                    setRoleName(event.target.value);
+                  }}
+                  placeholder={t('createDialog.namePlaceholder')}
+                  className={inputClasses}
+                />
+              </div>
+              <div className="space-y-2.5">
+                <Label htmlFor="agent-responsibility" className={labelClasses}>{t('createDialog.responsibilityLabel')}</Label>
+                <Textarea
+                  data-testid="agent-create-responsibility"
+                  id="agent-responsibility"
+                  value={responsibility}
+                  onChange={(event) => {
+                    setResponsibility(event.target.value);
+                  }}
+                  placeholder={t('createDialog.responsibilityPlaceholder')}
+                  className="min-h-[112px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40 resize-none"
+                />
+              </div>
+              <div className="space-y-3">
+                <Label className={labelClasses}>{t('createDialog.avatarLabel')}</Label>
+                <div className="grid grid-cols-3 gap-3">
+                  {AGENT_AVATARS.map((avatar) => (
+                    <button
+                      data-testid={`agent-create-avatar-${avatar.id}`}
+                      key={avatar.id}
+                      type="button"
+                      onClick={() => {
+                        setAvatarId(avatar.id);
+                      }}
+                      className={cn(
+                        'aspect-square rounded-2xl border p-2 transition-all bg-white/50 dark:bg-white/5',
+                        avatarId === avatar.id
+                          ? 'border-primary ring-2 ring-primary/20'
+                          : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/10',
+                      )}
+                      aria-label={t(`createDialog.avatarOptions.${avatar.id}`)}
+                      title={t(`createDialog.avatarOptions.${avatar.id}`)}
+                    >
+                      <img src={avatar.src} alt="" className="h-full w-full object-cover rounded-xl" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center justify-between rounded-2xl border border-black/10 dark:border-white/10 p-4">
+                <div className="space-y-0.5">
+                  <Label htmlFor="inherit-workspace" className={labelClasses}>{t('createDialog.inheritWorkspaceLabel')}</Label>
+                  <p className="text-meta text-foreground/60">{t('createDialog.inheritWorkspaceDescription')}</p>
+                </div>
+                <Switch
+                  id="inherit-workspace"
+                  checked={inheritWorkspace}
+                  onCheckedChange={setInheritWorkspace}
+                />
+              </div>
+            </div>
           </div>
         </CardContent>
+        <div className="flex justify-end gap-2 border-t border-black/10 p-4 dark:border-white/10">
+          <Button
+            variant="outline"
+            onClick={onClose}
+            className="h-9 text-meta font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground"
+          >
+            {t('common:actions.cancel')}
+          </Button>
+          <Button
+            data-testid="agent-create-submit"
+            onClick={() => void handleSubmit()}
+            disabled={!canCreate}
+            className="h-9 text-meta font-medium rounded-full px-4 shadow-none"
+          >
+            {saving ? (
+              <>
+                <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                {t('createDialog.creatingWithProfile')}
+              </>
+            ) : (
+              t('createDialog.createAndOpen')
+            )}
+          </Button>
+        </div>
       </Card>
     </div>
   );

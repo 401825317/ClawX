@@ -39,6 +39,10 @@ vi.mock('@electron/api/route-utils', () => ({
   sendJson: vi.fn(),
 }));
 
+vi.mock('@electron/utils/chat-session-cleanup', () => ({
+  deleteLocalChatSession: vi.fn(() => Promise.resolve()),
+}));
+
 function setPlatform(platform: string): void {
   Object.defineProperty(process, 'platform', { value: platform, writable: true });
 }
@@ -138,4 +142,60 @@ describe('handleAgentRoutes model updates', () => {
       );
     },
   );
+});
+
+describe('handleAgentRoutes profile generation', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.resetModules();
+  });
+
+  it('surfaces assistant errorMessage instead of reporting invalid JSON', async () => {
+    const routeUtils = await import('@electron/api/route-utils');
+    const { handleAgentRoutes } = await import('@electron/api/routes/agents');
+
+    vi.mocked(routeUtils.parseJsonBody).mockResolvedValue({
+      roleName: '营销专家',
+      responsibility: '帮我处理营销内容',
+      avatarId: 'strategist',
+      locale: 'zh-CN',
+    });
+
+    const gatewayManager = {
+      rpc: vi.fn(async (method: string) => {
+        if (method === 'chat.send') return { runId: 'run-1' };
+        if (method === 'chat.history') {
+          return {
+            messages: [
+              {
+                role: 'assistant',
+                content: [{ type: 'text', text: '[assistant turn failed before producing content]' }],
+                stopReason: 'error',
+                errorMessage: '503 No available channel for model qwen-latest under group default',
+              },
+            ],
+          };
+        }
+        if (method === 'chat.abort') return {};
+        throw new Error(`Unexpected rpc method ${method}`);
+      }),
+    };
+
+    const handled = await handleAgentRoutes(
+      { method: 'POST' } as never,
+      {} as never,
+      new URL('http://127.0.0.1/api/agents/generate-profile'),
+      { gatewayManager } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(routeUtils.sendJson).toHaveBeenCalledWith(
+      {},
+      500,
+      {
+        success: false,
+        error: '503 No available channel for model qwen-latest under group default',
+      },
+    );
+  });
 });

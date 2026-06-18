@@ -14,9 +14,27 @@
     "creating": "创建中...",
     "createDialog": {
         "title": "添加 Agent",
-        "description": "输入名称即可创建新 Agent，可选择是否继承主 Agent 的工作区引导文件。",
-        "nameLabel": "Agent 名称",
-        "namePlaceholder": "Coding Helper",
+        "description": "描述你想要的角色，UClaw 会在后台补全专业设定并创建可对话的 Agent。",
+        "nameLabel": "角色名称",
+        "namePlaceholder": "营销专家",
+        "responsibilityLabel": "主要职责",
+        "responsibilityPlaceholder": "帮我处理营销内容、活动策划、投放策略和复盘分析。",
+        "avatarLabel": "头像",
+        "avatarOptions": {
+            "strategist": "营销专家",
+            "creator": "设计艺术家",
+            "engineer": "工程师",
+            "ad-buyer": "千川投手",
+            "copywriter": "文案大师",
+            "slides": "PPT 专家",
+            "ecommerce": "电商助手",
+            "support": "客服专家",
+            "analyst": "数据分析师",
+            "operator": "运营管家"
+        },
+        "avatarHint": "选择一个角色形象。设定会在创建时自动生成，不会打断流程。",
+        "createAndOpen": "创建并进入对话",
+        "creatingWithProfile": "生成并创建中...",
         "inheritWorkspaceLabel": "继承主 Agent 工作区",
         "inheritWorkspaceDescription": "从主 Agent 复制 SOUL.md、AGENTS.md 等引导文件"
     },
@@ -57,6 +75,7 @@
     },
     "toast": {
         "agentCreated": "Agent 已创建",
+        "agentProfileGenerateFailed": "生成 Agent 设定失败：{{error}}",
         "agentCreateFailed": "创建 Agent 失败：{{error}}",
         "agentDeleted": "Agent 已删除",
         "agentDeleteFailed": "删除 Agent 失败：{{error}}",

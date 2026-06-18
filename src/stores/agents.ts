@@ -1,7 +1,12 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import type { ChannelType } from '@/types/channel';
-import type { AgentSummary, AgentsSnapshot } from '@/types/agent';
+import type {
+  AgentProfileDraft,
+  AgentProfileGenerationInput,
+  AgentSummary,
+  AgentsSnapshot,
+} from '@/types/agent';
 
 interface AgentsState {
   agents: AgentSummary[];
@@ -13,7 +18,11 @@ interface AgentsState {
   loading: boolean;
   error: string | null;
   fetchAgents: () => Promise<void>;
-  createAgent: (name: string, options?: { inheritWorkspace?: boolean }) => Promise<void>;
+  createAgent: (
+    name: string,
+    options?: { inheritWorkspace?: boolean; profile?: AgentProfileDraft },
+  ) => Promise<AgentSummary | null>;
+  generateAgentProfile: (input: AgentProfileGenerationInput) => Promise<AgentProfileDraft>;
   updateAgent: (agentId: string, name: string) => Promise<void>;
   updateAgentModel: (agentId: string, modelRef: string | null) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
@@ -56,14 +65,42 @@ export const useAgentsStore = create<AgentsState>((set) => ({
     }
   },
 
-  createAgent: async (name: string, options?: { inheritWorkspace?: boolean }) => {
+  createAgent: async (name: string, options?: { inheritWorkspace?: boolean; profile?: AgentProfileDraft }) => {
     set({ error: null });
     try {
       const snapshot = await hostApiFetch<AgentsSnapshot & { success?: boolean }>('/api/agents', {
         method: 'POST',
-        body: JSON.stringify({ name, inheritWorkspace: options?.inheritWorkspace }),
+        body: JSON.stringify({
+          name,
+          inheritWorkspace: options?.inheritWorkspace,
+          profile: options?.profile,
+        }),
       });
       set(applySnapshot(snapshot));
+      return snapshot.createdAgentId
+        ? snapshot.agents.find((agent) => agent.id === snapshot.createdAgentId) ?? null
+        : null;
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+  },
+
+  generateAgentProfile: async (input: AgentProfileGenerationInput) => {
+    set({ error: null });
+    try {
+      const response = await hostApiFetch<{
+        success?: boolean;
+        profile?: AgentProfileDraft;
+        error?: string;
+      }>('/api/agents/generate-profile', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      if (!response.profile) {
+        throw new Error(response.error || 'Failed to generate agent profile');
+      }
+      return response.profile;
     } catch (error) {
       set({ error: String(error) });
       throw error;

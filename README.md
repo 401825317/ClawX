@@ -107,6 +107,7 @@ Communicate with AI agents through a modern chat experience. Support for multipl
 Skills you insert from the composer appear as `/skill-name` chips; click a chip to open the preview sidebar and read that skill's `SKILL.md`.
 When you target another agent with `@agent`, ClawX switches into that agent's own conversation context directly instead of relaying through the default agent. Agent workspaces stay separate by default, and stronger isolation depends on OpenClaw sandbox settings.
 Each agent can also override its own `provider/model` runtime setting; agents without overrides continue inheriting the global default model.
+From the Agents page, you can create a persona-style agent by entering a rough role and responsibility, choosing a built-in avatar, letting the model generate a polished profile and opening message, and then jumping straight into that agent's dedicated chat.
 
 ### 📡 Multi-Channel Management
 Configure and monitor multiple AI channels simultaneously. Each channel operates independently, allowing you to run specialized agents for different tasks.

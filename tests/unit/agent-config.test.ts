@@ -521,6 +521,37 @@ describe('agent config lifecycle', () => {
 
     await createAgent('Research');
 
-    await expect(readFile(join(testHome, '.openclaw', 'workspace-research', 'IDENTITY.md'), 'utf8')).resolves.toContain('ClawX');
+    await expect(readFile(join(testHome, '.openclaw', 'workspace-research', 'IDENTITY.md'), 'utf8')).resolves.toContain('UClaw');
+  });
+
+  it('persists profile metadata and workspace instructions when creating a profiled agent', async () => {
+    await writeOpenClawJson({
+      session: { mainKey: 'main' },
+      agents: {
+        list: [{ id: 'main', name: 'Main', default: true }],
+      },
+    });
+
+    const { createAgent, listAgentsSnapshot } = await import('@electron/utils/agent-config');
+
+    await createAgent('Marketing Expert', {
+      profile: {
+        roleName: 'Marketing Expert',
+        personaName: 'Mira · Marketing Expert',
+        responsibility: 'Own marketing content and campaign analysis.',
+        capabilities: ['Plan campaigns', 'Write copy', 'Review metrics'],
+        boundaries: ['Ask before changing brand voice'],
+        workspaceInstructions: 'Focus on business outcomes and concrete next steps.',
+        welcomeMessage: 'I am your marketing expert and I just came online.',
+        avatarId: 'strategist',
+      },
+    });
+
+    const snapshot = await listAgentsSnapshot();
+    const created = snapshot.agents.find((agent) => agent.id === 'marketing-expert');
+    expect(created?.profile?.personaName).toBe('Mira · Marketing Expert');
+    await expect(readFile(join(testHome, '.openclaw', 'workspace-marketing-expert', 'UCLAW_AGENT_PROFILE.md'), 'utf8')).resolves.toContain('Marketing Expert');
+    await expect(readFile(join(testHome, '.openclaw', 'workspace-marketing-expert', 'AGENTS.md'), 'utf8')).resolves.toContain('UClaw Agent Persona');
+    await expect(readFile(join(testHome, '.openclaw', 'agents', 'marketing-expert', 'sessions', 'sessions.json'), 'utf8')).resolves.toContain('Mira · Marketing Expert');
   });
 });
