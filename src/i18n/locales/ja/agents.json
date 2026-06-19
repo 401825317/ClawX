@@ -12,6 +12,11 @@
     "deleteAgent": "Agent を削除",
     "settings": "設定",
     "creating": "作成中...",
+    "openChatWithAgent": "{{name}} のチャットを開く",
+    "workStatus": {
+        "running": "タスク実行中…",
+        "completed": "タスク完了"
+    },
     "createDialog": {
         "title": "Agent を追加",
         "description": "作りたい役割を説明してください。UClaw がバックグラウンドでプロファイルを整え、会話可能な Agent を作成します。",

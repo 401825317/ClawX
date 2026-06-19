@@ -12,6 +12,11 @@
     "deleteAgent": "Delete Agent",
     "settings": "Settings",
     "creating": "Creating...",
+    "openChatWithAgent": "Open chat with {{name}}",
+    "workStatus": {
+        "running": "Running task...",
+        "completed": "Task complete"
+    },
     "createDialog": {
         "title": "Add Agent",
         "description": "Describe the role you want. UClaw will generate the polished profile privately and create a chat-ready Agent.",

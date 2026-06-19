@@ -12,6 +12,11 @@
     "deleteAgent": "Удалить агента",
     "settings": "Настройки",
     "creating": "Создание...",
+    "openChatWithAgent": "Открыть чат с {{name}}",
+    "workStatus": {
+        "running": "Задача выполняется...",
+        "completed": "Задача завершена"
+    },
     "createDialog": {
         "title": "Добавить агента",
         "description": "Опишите нужную роль. UClaw незаметно подготовит профиль и создаст агента, готового к чату.",

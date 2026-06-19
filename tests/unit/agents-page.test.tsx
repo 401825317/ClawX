@@ -11,8 +11,9 @@ const updateAgentMock = vi.fn();
 const updateAgentModelMock = vi.fn();
 const refreshProviderSnapshotMock = vi.fn();
 const switchSessionMock = vi.fn();
+const loadSessionsMock = vi.fn();
 
-const { gatewayState, agentsState, providersState } = vi.hoisted(() => ({
+const { gatewayState, agentsState, providersState, chatState } = vi.hoisted(() => ({
   gatewayState: {
     status: { state: 'running', port: 18789 },
   },
@@ -27,6 +28,13 @@ const { gatewayState, agentsState, providersState } = vi.hoisted(() => ({
     statuses: [] as Array<Record<string, unknown>>,
     vendors: [] as Array<Record<string, unknown>>,
     defaultAccountId: '' as string,
+  },
+  chatState: {
+    sessions: [] as Array<Record<string, unknown>>,
+    currentSessionKey: 'agent:main:main',
+    currentAgentId: 'main',
+    sending: false,
+    runtimeRuns: {} as Record<string, Record<string, unknown>>,
   },
 }));
 
@@ -55,8 +63,13 @@ vi.mock('@/stores/agents', () => ({
 }));
 
 vi.mock('@/stores/chat', () => ({
-  useChatStore: (selector: (state: { switchSession: typeof switchSessionMock }) => unknown) => selector({
+  useChatStore: (selector: (state: typeof chatState & {
+    switchSession: typeof switchSessionMock;
+    loadSessions: typeof loadSessionsMock;
+  }) => unknown) => selector({
+    ...chatState,
     switchSession: switchSessionMock,
+    loadSessions: loadSessionsMock,
   }),
 }));
 
@@ -112,6 +125,12 @@ describe('Agents page status refresh', () => {
     providersState.statuses = [];
     providersState.vendors = [];
     providersState.defaultAccountId = '';
+    chatState.sessions = [];
+    chatState.currentSessionKey = 'agent:main:main';
+    chatState.currentAgentId = 'main';
+    chatState.sending = false;
+    chatState.runtimeRuns = {};
+    loadSessionsMock.mockResolvedValue(undefined);
     fetchAgentsMock.mockResolvedValue(undefined);
     updateAgentMock.mockResolvedValue(undefined);
     updateAgentModelMock.mockResolvedValue(undefined);
@@ -135,6 +154,7 @@ describe('Agents page status refresh', () => {
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(loadSessionsMock).toHaveBeenCalledTimes(1);
       expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts');
     });
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
@@ -160,6 +180,7 @@ describe('Agents page status refresh', () => {
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(loadSessionsMock).toHaveBeenCalledTimes(1);
       expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts');
     });
 
@@ -237,6 +258,74 @@ describe('Agents page status refresh', () => {
     expect(updateAgentModelMock).not.toHaveBeenCalled();
     expect((modelIdInput as HTMLInputElement).value).toBe('anthropic/claude-opus-4.6');
     expect(useDefaultButton).toBeDisabled();
+  });
+
+  it('opens the selected agent main session from the agent card', async () => {
+    agentsState.agents = [
+      {
+        id: 'research',
+        name: 'Research',
+        isDefault: false,
+        modelDisplay: 'gpt-5',
+        modelRef: 'openai/gpt-5',
+        overrideModelRef: null,
+        inheritedModel: false,
+        workspace: '~/.openclaw/workspace-research',
+        agentDir: '~/.openclaw/agents/research/agent',
+        mainSessionKey: 'agent:research:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderAgents();
+
+    await waitFor(() => {
+      expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'openChatWithAgent' }));
+
+    expect(switchSessionMock).toHaveBeenCalledWith('agent:research:main');
+  });
+
+  it('shows per-agent work status from chat sessions', async () => {
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'gpt-5',
+        modelRef: 'openai/gpt-5',
+        overrideModelRef: null,
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+      {
+        id: 'research',
+        name: 'Research',
+        isDefault: false,
+        modelDisplay: 'gpt-5',
+        modelRef: 'openai/gpt-5',
+        overrideModelRef: null,
+        inheritedModel: false,
+        workspace: '~/.openclaw/workspace-research',
+        agentDir: '~/.openclaw/agents/research/agent',
+        mainSessionKey: 'agent:research:main',
+        channelTypes: [],
+      },
+    ];
+    chatState.sessions = [
+      { key: 'agent:research:main', status: 'running', hasActiveRun: true },
+      { key: 'agent:main:main', status: 'completed', hasActiveRun: false },
+    ];
+
+    renderAgents();
+
+    expect(await screen.findByText('workStatus.running')).toBeInTheDocument();
+    expect(screen.getByText('workStatus.completed')).toBeInTheDocument();
   });
 
   it('keeps the last agent snapshot visible while a refresh is in flight', async () => {

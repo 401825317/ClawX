@@ -12,6 +12,11 @@
     "deleteAgent": "删除 Agent",
     "settings": "设置",
     "creating": "创建中...",
+    "openChatWithAgent": "进入 {{name}} 的对话",
+    "workStatus": {
+        "running": "正在执行任务…",
+        "completed": "任务已完成"
+    },
     "createDialog": {
         "title": "添加 Agent",
         "description": "描述你想要的角色，UClaw 会在后台补全专业设定并创建可对话的 Agent。",

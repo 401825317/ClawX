@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { AlertCircle, Bot, Check, Plus, RefreshCw, Settings2, Trash2, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,7 @@ import { Switch } from '@/components/ui/switch';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { useAgentsStore } from '@/stores/agents';
 import { useChatStore } from '@/stores/chat';
+import type { ChatRuntimeRunState, ChatSession } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
 import { hostApiFetch } from '@/lib/host-api';
@@ -20,6 +21,7 @@ import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel'
 import type { AgentProfileDraft, AgentSummary } from '@/types/agent';
 import {
   buildRuntimeProviderOptions,
+  formatModelDisplayLabel,
   splitModelRef,
   type RuntimeProviderOption,
 } from '@/lib/model-options';
@@ -53,11 +55,76 @@ interface ChannelGroupItem {
   accounts: ChannelAccountItem[];
 }
 
+type AgentWorkStatus = 'running' | 'completed';
+
+const RUNNING_SESSION_STATUSES = new Set(['running', 'active', 'queued', 'in_progress', 'processing']);
+
+function normalizeAgentId(value: string | undefined | null): string {
+  return (value ?? '').trim().toLowerCase() || 'main';
+}
+
+function getAgentIdFromSessionKey(sessionKey: string | undefined | null): string {
+  if (!sessionKey?.startsWith('agent:')) return 'main';
+  const [, agentId] = sessionKey.split(':');
+  return normalizeAgentId(agentId);
+}
+
+function sessionBelongsToAgent(sessionKey: string | undefined | null, agentId: string): boolean {
+  return getAgentIdFromSessionKey(sessionKey) === normalizeAgentId(agentId);
+}
+
+function isRunningSession(session: ChatSession): boolean {
+  if (session.hasActiveRun === true) return true;
+  const status = session.status?.trim().toLowerCase();
+  return Boolean(status && RUNNING_SESSION_STATUSES.has(status));
+}
+
+function getAgentWorkStatus(
+  agent: AgentSummary,
+  state: {
+    sessions: ChatSession[];
+    currentSessionKey: string;
+    currentAgentId: string;
+    sending: boolean;
+    runtimeRuns: Record<string, ChatRuntimeRunState>;
+  },
+): AgentWorkStatus {
+  const agentId = normalizeAgentId(agent.id);
+  if (state.sending) {
+    const sendingAgentId = normalizeAgentId(state.currentAgentId || getAgentIdFromSessionKey(state.currentSessionKey));
+    if (sendingAgentId === agentId) return 'running';
+  }
+
+  if (
+    state.sessions.some((session) =>
+      sessionBelongsToAgent(session.key, agentId) && isRunningSession(session)
+    )
+  ) {
+    return 'running';
+  }
+
+  if (
+    Object.values(state.runtimeRuns).some((run) =>
+      run.status === 'running' && sessionBelongsToAgent(run.sessionKey, agentId)
+    )
+  ) {
+    return 'running';
+  }
+
+  return 'completed';
+}
+
 export function Agents() {
   const { t } = useTranslation('agents');
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const switchSession = useChatStore((state) => state.switchSession);
+  const loadSessions = useChatStore((state) => state.loadSessions);
+  const sessions = useChatStore((state) => state.sessions);
+  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
+  const currentAgentId = useChatStore((state) => state.currentAgentId);
+  const sending = useChatStore((state) => state.sending);
+  const runtimeRuns = useChatStore((state) => state.runtimeRuns);
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const lastGatewayStateRef = useRef(gatewayStatus.state);
   const {
@@ -88,7 +155,7 @@ export function Agents() {
   useEffect(() => {
     let mounted = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void Promise.all([fetchAgents(), fetchChannelAccounts(), refreshProviderSnapshot()]).finally(() => {
+    void Promise.all([fetchAgents(), fetchChannelAccounts(), refreshProviderSnapshot(), loadSessions()]).finally(() => {
       if (mounted) {
         setHasCompletedInitialLoad(true);
       }
@@ -96,7 +163,7 @@ export function Agents() {
     return () => {
       mounted = false;
     };
-  }, [fetchAgents, fetchChannelAccounts, refreshProviderSnapshot]);
+  }, [fetchAgents, fetchChannelAccounts, loadSessions, refreshProviderSnapshot]);
 
   useEffect(() => {
     const unsubscribe = subscribeHostEvent('gateway:channel-status', () => {
@@ -127,9 +194,26 @@ export function Agents() {
   const visibleAgents = agents;
   const visibleChannelGroups = channelGroups;
   const isUsingStableValue = loading && hasCompletedInitialLoad;
+  const agentWorkStatuses = useMemo(() => {
+    const next = new Map<string, AgentWorkStatus>();
+    for (const agent of visibleAgents) {
+      next.set(agent.id, getAgentWorkStatus(agent, {
+        sessions,
+        currentSessionKey,
+        currentAgentId,
+        sending,
+        runtimeRuns,
+      }));
+    }
+    return next;
+  }, [currentAgentId, currentSessionKey, runtimeRuns, sending, sessions, visibleAgents]);
   const handleRefresh = () => {
-    void Promise.all([fetchAgents(), fetchChannelAccounts()]);
+    void Promise.all([fetchAgents(), fetchChannelAccounts(), loadSessions()]);
   };
+  const openAgentChat = useCallback((agent: AgentSummary) => {
+    switchSession(agent.mainSessionKey);
+    navigate('/');
+  }, [navigate, switchSession]);
 
   if (loading && !hasCompletedInitialLoad) {
     return (
@@ -193,7 +277,9 @@ export function Agents() {
               <AgentCard
                 key={agent.id}
                 agent={agent}
+                workStatus={agentWorkStatuses.get(agent.id) ?? 'completed'}
                 channelGroups={visibleChannelGroups}
+                onOpenChat={() => openAgentChat(agent)}
                 onOpenSettings={() => setActiveAgentId(agent.id)}
                 onDelete={() => setAgentToDelete(agent)}
               />
@@ -255,12 +341,16 @@ export function Agents() {
 
 function AgentCard({
   agent,
+  workStatus,
   channelGroups,
+  onOpenChat,
   onOpenSettings,
   onDelete,
 }: {
   agent: AgentSummary;
+  workStatus: AgentWorkStatus;
   channelGroups: ChannelGroupItem[];
+  onOpenChat: () => void;
   onOpenSettings: () => void;
   onDelete: () => void;
 }) {
@@ -283,27 +373,44 @@ function AgentCard({
   const avatar = getAgentAvatar(agent.profile?.avatarId);
   const displayName = agent.profile?.personaName || agent.name;
   const responsibility = agent.profile?.responsibility?.trim();
+  const openChatLabel = t('openChatWithAgent', { name: displayName });
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    onOpenChat();
+  };
 
   return (
     <div
       className={cn(
-        'group flex items-start gap-4 p-4 rounded-2xl transition-all text-left border relative overflow-hidden bg-transparent border-transparent hover:bg-black/5 dark:hover:bg-white/5',
+        'group relative overflow-hidden rounded-2xl border border-transparent bg-transparent transition-all hover:bg-black/5 focus-within:ring-2 focus-within:ring-blue-500/40 dark:hover:bg-white/5',
         agent.isDefault && 'bg-black/[0.04] dark:bg-white/[0.06]'
       )}
     >
-      <div className="h-[50px] w-[50px] shrink-0 overflow-hidden rounded-full border border-black/5 bg-white/70 shadow-sm dark:border-white/10 dark:bg-white/5">
-        {agent.profile?.avatarId ? (
-          <img src={avatar.src} alt="" className="h-full w-full object-cover" />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-primary bg-primary/10">
-            <Bot className="h-[22px] w-[22px]" />
-          </div>
-        )}
-      </div>
-      <div className="flex flex-col flex-1 min-w-0 py-0.5 mt-1">
-        <div className="flex items-center justify-between gap-3 mb-1">
-          <div className="flex items-center gap-2 min-w-0">
-            <h2 className="text-base font-semibold text-foreground truncate">{displayName}</h2>
+      <div
+        role="button"
+        tabIndex={0}
+        data-testid={`agent-card-${agent.id}`}
+        aria-label={openChatLabel}
+        title={openChatLabel}
+        onClick={onOpenChat}
+        onKeyDown={handleKeyDown}
+        className="flex min-w-0 cursor-pointer items-start gap-4 p-4 pr-24 text-left outline-none"
+      >
+        <div className="h-[50px] w-[50px] shrink-0 overflow-hidden rounded-full border border-black/5 bg-white/70 shadow-sm dark:border-white/10 dark:bg-white/5">
+          {agent.profile?.avatarId ? (
+            <img src={avatar.src} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-primary bg-primary/10">
+              <Bot className="h-[22px] w-[22px]" />
+            </div>
+          )}
+        </div>
+        <div className="flex flex-col flex-1 min-w-0 py-0.5 mt-1">
+          <div className="mb-1 flex min-w-0 flex-wrap items-center gap-2">
+            <h2 className="max-w-full truncate text-base font-semibold text-foreground">{displayName}</h2>
+            <AgentWorkStatusBadge status={workStatus} />
             {agent.isDefault && (
               <Badge
                 variant="secondary"
@@ -314,48 +421,90 @@ function AgentCard({
               </Badge>
             )}
           </div>
-          <div className="flex items-center gap-1 shrink-0">
-            {!agent.isDefault && (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="opacity-0 group-hover:opacity-100 h-7 w-7 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all"
-                onClick={onDelete}
-                title={t('deleteAgent')}
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10 transition-all',
-                !agent.isDefault && 'opacity-0 group-hover:opacity-100',
-              )}
-              onClick={onOpenSettings}
-              title={t('settings')}
-            >
-              <Settings2 className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-        {responsibility && (
-          <p className="text-sm text-foreground/75 line-clamp-2 leading-[1.5] mb-1">
-            {responsibility}
+          {responsibility && (
+            <p className="text-sm text-foreground/75 line-clamp-2 leading-[1.5] mb-1">
+              {responsibility}
+            </p>
+          )}
+          <p className="text-sm text-muted-foreground line-clamp-2 leading-[1.5]">
+            {t('modelLine', {
+              model: agent.modelDisplay,
+              suffix: agent.inheritedModel ? ` (${t('inherited')})` : '',
+            })}
           </p>
+          <p className="text-sm text-muted-foreground line-clamp-2 leading-[1.5]">
+            {t('channelsLine', { channels: channelsText })}
+          </p>
+        </div>
+      </div>
+      <div className="absolute right-4 top-5 flex items-center gap-1 shrink-0">
+        {!agent.isDefault && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="opacity-0 group-hover:opacity-100 h-7 w-7 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all focus-visible:opacity-100"
+            onClick={onDelete}
+            title={t('deleteAgent')}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
         )}
-        <p className="text-sm text-muted-foreground line-clamp-2 leading-[1.5]">
-          {t('modelLine', {
-            model: agent.modelDisplay,
-            suffix: agent.inheritedModel ? ` (${t('inherited')})` : '',
-          })}
-        </p>
-        <p className="text-sm text-muted-foreground line-clamp-2 leading-[1.5]">
-          {t('channelsLine', { channels: channelsText })}
-        </p>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            'h-7 w-7 text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10 transition-all focus-visible:opacity-100',
+            !agent.isDefault && 'opacity-0 group-hover:opacity-100',
+          )}
+          onClick={onOpenSettings}
+          title={t('settings')}
+        >
+          <Settings2 className="h-4 w-4" />
+        </Button>
       </div>
     </div>
+  );
+}
+
+function AgentWorkStatusBadge({ status }: { status: AgentWorkStatus }) {
+  const { t } = useTranslation('agents');
+  const running = status === 'running';
+
+  return (
+    <span
+      data-testid="agent-work-status"
+      className={cn(
+        'inline-flex h-5 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border px-1.5 font-mono text-[10px] font-medium leading-none',
+        running
+          ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+          : 'border-sky-500/20 bg-sky-500/10 text-sky-700 dark:text-sky-300',
+      )}
+    >
+      <PixelWorkStatusIcon status={status} />
+      {t(`workStatus.${status}`)}
+    </span>
+  );
+}
+
+function PixelWorkStatusIcon({ status }: { status: AgentWorkStatus }) {
+  if (status === 'running') {
+    return (
+      <span aria-hidden="true" className="grid h-3 w-3 grid-cols-2 gap-px">
+        <span className="h-[5px] w-[5px] bg-emerald-500 motion-safe:animate-pulse" />
+        <span className="h-[5px] w-[5px] bg-emerald-400 motion-safe:animate-pulse [animation-delay:120ms]" />
+        <span className="h-[5px] w-[5px] bg-emerald-300 motion-safe:animate-pulse [animation-delay:240ms]" />
+        <span className="h-[5px] w-[5px] bg-emerald-500 motion-safe:animate-pulse [animation-delay:360ms]" />
+      </span>
+    );
+  }
+
+  return (
+    <span aria-hidden="true" className="relative h-3 w-3">
+      <span className="absolute left-[1px] top-[6px] h-[3px] w-[3px] bg-sky-500" />
+      <span className="absolute left-[4px] top-[8px] h-[3px] w-[3px] bg-sky-500" />
+      <span className="absolute left-[7px] top-[5px] h-[3px] w-[3px] bg-sky-500" />
+      <span className="absolute left-[10px] top-[2px] h-[3px] w-[3px] bg-sky-500" />
+    </span>
   );
 }
 
@@ -826,6 +975,7 @@ function AgentModelModal({
     ? nextModelRef
     : null;
   const modelChanged = (desiredOverrideModelRef || '') !== currentOverrideModelRef;
+  const defaultModelLabel = formatModelDisplayLabel(defaultModelRef);
 
   const handleRequestClose = () => {
     if (savingModel || modelChanged) {
@@ -882,7 +1032,7 @@ function AgentModelModal({
               {t('settingsDialog.modelLabel')}
             </CardTitle>
             <CardDescription className="text-sm mt-1 text-foreground/70">
-              {t('settingsDialog.modelOverrideDescription', { defaultModel: defaultModelRef || '-' })}
+              {t('settingsDialog.modelOverrideDescription', { defaultModel: defaultModelRef ? defaultModelLabel : '-' })}
             </CardDescription>
           </div>
           <Button
