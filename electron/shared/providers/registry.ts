@@ -57,7 +57,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     category: 'compatible',
     envVar: 'LINGZHIWUXIAN_API_KEY',
     defaultBaseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
-    defaultModelId: 'qwen-latest',
+    defaultModelId: 'smart-latest',
     showBaseUrl: false,
     showModelId: false,
     supportedAuthModes: ['api_key'],

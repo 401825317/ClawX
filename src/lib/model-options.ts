@@ -48,6 +48,36 @@ export function formatModelRefLabel(modelRef: string | null | undefined): string
   return parsed?.modelId || (modelRef || '').trim() || 'Model';
 }
 
+export function formatProviderModelIdLabel(providerKey: string, modelId: string): string {
+  const normalizedProviderKey = providerKey.trim();
+  const normalizedModelId = modelId.trim();
+  if (normalizedProviderKey === 'lingzhiwuxian') {
+    const labels: Record<string, string> = {
+      'smart-latest': '智能路由',
+      'qwen-latest': '通义千问最新版',
+      'deepseek-latest': 'DeepSeek 最新版',
+      'doubao-latest': '豆包最新版',
+      'kimi-latest': 'Kimi 最新版',
+      'glm-latest': 'GLM 最新版',
+    };
+    if (labels[normalizedModelId]) {
+      return labels[normalizedModelId];
+    }
+    return normalizedModelId
+      .replace(/^gpt-/i, 'GPT-')
+      .replace(/-mini$/i, '-Mini');
+  }
+  return normalizedModelId || 'Model';
+}
+
+export function formatModelDisplayLabel(modelRef: string | null | undefined): string {
+  const parsed = splitModelRef(modelRef);
+  if (!parsed) {
+    return (modelRef || '').trim() || 'Model';
+  }
+  return formatProviderModelIdLabel(parsed.providerKey, parsed.modelId);
+}
+
 export function toModelOptionTestId(label: string): string {
   return label.replace(/[^a-zA-Z0-9_-]+/g, '-');
 }
@@ -132,7 +162,7 @@ export function buildConfiguredModelOptions(
     if (deduped.has(modelRef)) continue;
     deduped.set(modelRef, {
       modelRef,
-      label: modelId,
+      label: formatProviderModelIdLabel(runtimeProviderKey, modelId),
       runtimeProviderKey,
       accountId: account.id,
     });

@@ -301,6 +301,62 @@ describe('ChatInput agent targeting', () => {
     });
   });
 
+  it('labels the Lingzhi Wuxian smart routing model in the model picker button', () => {
+    const now = '2025-01-01T00:00:00.000Z';
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: '智能路由',
+        modelRef: 'lingzhiwuxian/smart-latest',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+    agentsState.defaultModelRef = 'lingzhiwuxian/smart-latest';
+    chatState.sessions = [{ key: 'agent:main:main', model: 'lingzhiwuxian/smart-latest' }];
+    providersState.accounts = [
+      {
+        id: 'lingzhiwuxian',
+        vendorId: 'lingzhiwuxian',
+        label: '灵智无限',
+        authMode: 'api_key',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        model: 'smart-latest',
+        enabled: true,
+        isDefault: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: 'beta5678',
+        vendorId: 'custom',
+        label: 'Beta',
+        authMode: 'api_key',
+        baseUrl: 'http://127.0.0.1:2222/v1',
+        model: 'model-beta',
+        enabled: true,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    providersState.statuses = [
+      { id: 'lingzhiwuxian', name: '灵智无限', type: 'lingzhiwuxian', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+      { id: 'beta5678', name: 'Beta', type: 'custom', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+    ];
+    providersState.defaultAccountId = 'lingzhiwuxian';
+    vi.mocked(hostApiFetch).mockRejectedValue(new Error('offline'));
+
+    renderChatInput();
+
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('智能路由');
+  });
+
   it('disables the input while gateway is running but not yet ready', () => {
     gatewayState.status = { state: 'running', port: 18789, gatewayReady: false };
     agentsState.agents = [

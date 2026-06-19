@@ -59,29 +59,36 @@ describe('provider metadata', () => {
 
   it('keeps builtin provider sources in sync', () => {
     expect(BUILTIN_PROVIDER_TYPES).toEqual(
-      expect.arrayContaining(['anthropic', 'openai', 'google', 'openrouter', 'ark', 'moonshot', 'moonshot-global', 'siliconflow', 'deepseek', 'junfeiai', 'minimax-portal', 'minimax-portal-cn', 'modelstudio', 'ollama'])
+      expect.arrayContaining(['anthropic', 'openai', 'google', 'openrouter', 'ark', 'moonshot', 'moonshot-global', 'siliconflow', 'deepseek', 'lingzhiwuxian', 'minimax-portal', 'minimax-portal-cn', 'modelstudio', 'ollama'])
     );
   });
 
-  it('defines JunFeiAI as a managed built-in provider', () => {
-    expect(PROVIDER_TYPES).toContain('junfeiai');
-    expect(BUILTIN_PROVIDER_TYPES).toContain('junfeiai');
-    expect(getProviderEnvVar('junfeiai')).toBe('JUNFEIAI_API_KEY');
-    expect(getProviderConfig('junfeiai')).toEqual(
+  it('defines Lingzhi Wuxian as a managed built-in provider with smart routing by default', () => {
+    expect(PROVIDER_TYPES).toContain('lingzhiwuxian');
+    expect(BUILTIN_PROVIDER_TYPES).toContain('lingzhiwuxian');
+    expect(getProviderEnvVar('lingzhiwuxian')).toBe('LINGZHIWUXIAN_API_KEY');
+    expect(getProviderConfig('lingzhiwuxian')).toEqual(
       expect.objectContaining({
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
-        api: 'openai-responses',
-        apiKeyEnv: 'JUNFEIAI_API_KEY',
+        api: 'openai-completions',
+        apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+        models: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'smart-latest',
+            name: '智能路由',
+          }),
+        ]),
       }),
     );
     expect(PROVIDER_TYPE_INFO).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          id: 'junfeiai',
-          name: 'JunFeiAI',
+          id: 'lingzhiwuxian',
+          name: '灵智无限',
           requiresApiKey: false,
           defaultBaseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
-          defaultModelId: 'gpt-5.5',
+          defaultModelId: 'smart-latest',
+          showModelId: false,
         }),
       ]),
     );

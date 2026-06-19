@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildConfiguredModelOptions,
+  formatModelDisplayLabel,
   formatModelRefLabel,
   resolveRuntimeProviderKey,
 } from '../../src/lib/model-options';
@@ -42,6 +43,12 @@ describe('model option helpers', () => {
     expect(formatModelRefLabel('custom-alpha1234/model-alpha')).toBe('model-alpha');
   });
 
+  it('formats Lingzhi Wuxian smart routing as a user-facing model label', () => {
+    expect(formatModelDisplayLabel('lingzhiwuxian/smart-latest')).toBe('智能路由');
+    expect(formatModelDisplayLabel('lingzhiwuxian/qwen-latest')).toBe('通义千问最新版');
+    expect(formatModelDisplayLabel('custom-alpha1234/model-alpha')).toBe('model-alpha');
+  });
+
   it('builds one configured custom model option per account', () => {
     const options = buildConfiguredModelOptions(
       [
@@ -64,6 +71,30 @@ describe('model option helpers', () => {
         label: 'provider/model-beta',
         runtimeProviderKey: 'custom-beta5678',
         accountId: 'beta5678',
+      },
+    ]);
+  });
+
+  it('labels configured Lingzhi Wuxian models with product names', () => {
+    const options = buildConfiguredModelOptions(
+      [
+        account({
+          id: 'lingzhiwuxian',
+          vendorId: 'lingzhiwuxian',
+          label: '灵智无限',
+          model: 'smart-latest',
+        }),
+      ],
+      [{ ...status('lingzhiwuxian'), type: 'lingzhiwuxian', name: '灵智无限' }],
+      'lingzhiwuxian',
+    );
+
+    expect(options).toEqual([
+      {
+        modelRef: 'lingzhiwuxian/smart-latest',
+        label: '智能路由',
+        runtimeProviderKey: 'lingzhiwuxian',
+        accountId: 'lingzhiwuxian',
       },
     ]);
   });

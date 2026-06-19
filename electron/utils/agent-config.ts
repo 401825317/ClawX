@@ -17,6 +17,7 @@ import {
   type AgentProfileInput,
 } from './agent-profile';
 import { appendAgentWelcomeMessage } from './chat-session-welcome-message';
+import { getProviderBackendConfig } from '../shared/providers/registry';
 
 const MAIN_AGENT_ID = 'main';
 const MAIN_AGENT_NAME = 'Main Agent';
@@ -131,8 +132,17 @@ function formatModelLabel(model: unknown): string | null {
   const modelRef = resolveModelRef(model);
   if (modelRef) {
     const trimmed = modelRef;
-    const parts = trimmed.split('/');
-    return parts[parts.length - 1] || trimmed;
+    const separatorIndex = trimmed.indexOf('/');
+    if (separatorIndex > 0 && separatorIndex < trimmed.length - 1) {
+      const providerKey = trimmed.slice(0, separatorIndex);
+      const modelId = trimmed.slice(separatorIndex + 1);
+      if (providerKey === 'lingzhiwuxian') {
+        const providerModel = getProviderBackendConfig(providerKey)?.models?.find((entry) => entry.id === modelId);
+        return providerModel?.name || modelId;
+      }
+      return modelId;
+    }
+    return trimmed;
   }
 
   return null;

@@ -137,6 +137,32 @@ describe('agent config lifecycle', () => {
     });
   });
 
+  it('uses provider model display names for Lingzhi Wuxian smart routing', async () => {
+    await writeOpenClawJson({
+      agents: {
+        defaults: {
+          model: {
+            primary: 'lingzhiwuxian/smart-latest',
+          },
+        },
+        list: [
+          { id: 'main', name: 'Main', default: true },
+        ],
+      },
+    });
+
+    const { listAgentsSnapshot } = await import('@electron/utils/agent-config');
+    const snapshot = await listAgentsSnapshot();
+
+    expect(snapshot.defaultModelRef).toBe('lingzhiwuxian/smart-latest');
+    expect(snapshot.agents[0]).toMatchObject({
+      id: 'main',
+      modelRef: 'lingzhiwuxian/smart-latest',
+      inheritedModel: true,
+      modelDisplay: '智能路由',
+    });
+  });
+
   it('updates and clears per-agent model overrides', async () => {
     await writeOpenClawJson({
       agents: {

@@ -235,7 +235,7 @@ describe('provider-runtime-sync refresh strategy', () => {
     mocks.getProvider.mockResolvedValue(createProvider({
       id: 'lingzhiwuxian',
       type: 'lingzhiwuxian',
-      model: 'qwen-latest',
+      model: 'smart-latest',
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
     }));
     mocks.getProviderConfig.mockReturnValue({
@@ -249,7 +249,7 @@ describe('provider-runtime-sync refresh strategy', () => {
 
     expect(mocks.setOpenClawDefaultModelWithOverride).toHaveBeenCalledWith(
       'lingzhiwuxian',
-      'lingzhiwuxian/qwen-latest',
+      'lingzhiwuxian/smart-latest',
       expect.objectContaining({
         apiKey: 'relay-valid-key',
       }),

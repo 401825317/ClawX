@@ -174,7 +174,7 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     model: '国内主流模型',
     requiresApiKey: false,
     defaultBaseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
-    defaultModelId: 'qwen-latest',
+    defaultModelId: 'smart-latest',
     showModelId: false,
   },
   {

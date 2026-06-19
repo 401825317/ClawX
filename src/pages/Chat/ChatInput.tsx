@@ -20,7 +20,12 @@ import { useChatStore } from '@/stores/chat';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import { useProviderStore } from '@/stores/providers';
-import { buildConfiguredModelOptions, formatModelRefLabel } from '@/lib/model-options';
+import {
+  buildConfiguredModelOptions,
+  formatModelDisplayLabel,
+  formatProviderModelIdLabel,
+  toModelOptionTestId,
+} from '@/lib/model-options';
 import type { AgentSummary } from '@/types/agent';
 import type { QuickAccessSkill } from '@/types/skill';
 import { useTranslation } from 'react-i18next';
@@ -73,23 +78,6 @@ interface RemoteModelOption {
   label: string;
   runtimeProviderKey: string;
   accountId: string;
-}
-
-function formatJunFeiAIModelLabel(modelId: string): string {
-  const labels: Record<string, string> = {
-    'smart-latest': '智能路由',
-    'qwen-latest': '通义千问最新版',
-    'deepseek-latest': 'DeepSeek 最新版',
-    'doubao-latest': '豆包最新版',
-    'kimi-latest': 'Kimi 最新版',
-    'glm-latest': 'GLM 最新版',
-  };
-  if (labels[modelId]) {
-    return labels[modelId];
-  }
-  return modelId
-    .replace(/^gpt-/i, 'GPT-')
-    .replace(/-mini$/i, '-Mini');
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -304,7 +292,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     return [...deduped.values()];
   }, [baseModelOptions, remoteModelOptions]);
   const effectiveModelRef = optimisticModelRef || currentSession?.model || currentAgent?.modelRef || defaultModelRef || modelOptions[0]?.modelRef || null;
-  const currentModelLabel = formatModelRefLabel(effectiveModelRef);
+  const currentModelLabel = formatModelDisplayLabel(effectiveModelRef);
   const mentionableAgents = useMemo(
     () => (agents ?? []).filter((agent) => agent.id !== currentAgentId),
     [agents, currentAgentId],
@@ -375,7 +363,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
               .filter(Boolean),
           )).map((modelId) => ({
             modelRef: `lingzhiwuxian/${modelId}`,
-            label: formatJunFeiAIModelLabel(modelId),
+            label: formatProviderModelIdLabel('lingzhiwuxian', modelId),
             runtimeProviderKey: 'lingzhiwuxian',
             accountId: 'lingzhiwuxian',
           }))
@@ -1155,7 +1143,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                             'flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-left text-sm font-medium transition-colors',
                             option.modelRef === effectiveModelRef ? 'bg-primary/10 text-foreground' : 'hover:bg-black/5 dark:hover:bg-white/5'
                           )}
-                          data-testid={`chat-model-picker-option-${option.label}`}
+                          data-testid={`chat-model-picker-option-${toModelOptionTestId(option.label)}`}
                         >
                           <span className="truncate">{option.label}</span>
                           {option.modelRef === effectiveModelRef && (
