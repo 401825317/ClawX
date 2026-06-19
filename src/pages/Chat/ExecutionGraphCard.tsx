@@ -20,6 +20,64 @@ interface ExecutionGraphCardProps {
 }
 
 const TOOL_ROW_EXTRA_INDENT_PX = 8;
+const STEP_DETAIL_PREVIEW_MAX_CHARS = 110;
+
+function truncateStepPreviewText(value: string, maxChars = STEP_DETAIL_PREVIEW_MAX_CHARS): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function summarizePreviewLine(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const line = value
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0);
+  return line ? truncateStepPreviewText(line) : undefined;
+}
+
+function summarizeStepDetail(step: TaskStep): string | undefined {
+  const { detail } = step;
+  if (!detail) return undefined;
+  try {
+    const parsed = JSON.parse(detail) as unknown;
+    if (parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>;
+      const command = typeof record.command === 'string' ? record.command : undefined;
+      if (command?.trim()) return summarizePreviewLine(command);
+      const filePath = typeof record.filePath === 'string' ? record.filePath : undefined;
+      if (filePath?.trim()) return summarizePreviewLine(filePath);
+      const path = typeof record.path === 'string' ? record.path : undefined;
+      if (path?.trim()) return summarizePreviewLine(path);
+      const action = typeof record.action === 'string' ? record.action : undefined;
+      if (step.label === 'read' && action?.trim()) return summarizePreviewLine(action);
+      const directText = typeof record.text === 'string' ? record.text : undefined;
+      if (directText?.trim()) return summarizePreviewLine(directText);
+      const message = typeof record.message === 'string' ? record.message : undefined;
+      if (message?.trim()) return summarizePreviewLine(message);
+      const output = typeof record.output === 'string' ? record.output : undefined;
+      if (output?.trim()) return summarizePreviewLine(output);
+      const stdout = typeof record.stdout === 'string' ? record.stdout : undefined;
+      if (stdout?.trim()) return summarizePreviewLine(stdout);
+      const stderr = typeof record.stderr === 'string' ? record.stderr : undefined;
+      if (stderr?.trim()) return summarizePreviewLine(stderr);
+      const content = Array.isArray(record.content) ? record.content : [];
+      const firstContentText = content
+        .map((entry) => (entry && typeof entry === 'object' ? (entry as { text?: unknown }).text : undefined))
+        .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+      if (firstContentText) {
+        const prefix = action ? `${action}: ` : '';
+        return summarizePreviewLine(`${prefix}${firstContentText}`);
+      }
+      if (action?.trim()) return summarizePreviewLine(action);
+      return truncateStepPreviewText(JSON.stringify(parsed));
+    }
+  } catch {
+    // fall through to plain-text summary
+  }
+  return summarizePreviewLine(detail);
+}
 
 function AnimatedDots({ className }: { className?: string }) {
   return (
@@ -57,7 +115,7 @@ function StepDetailCard({ step }: { step: TaskStep }) {
   const isFlatRow = isTool || isSystem;
   const showRunningDots = (isTool || isThinking) && step.status === 'running';
   const hideStatusText = (isTool || isSystem) && step.status === 'completed';
-  const detailPreview = step.detail?.replace(/\s+/g, ' ').trim();
+  const detailPreview = summarizeStepDetail(step);
   const canExpand = hasDetail;
     const displayLabel = isThinking ? t('executionGraph.thinkingLabel') : (isTool ? displayToolLabel : step.label);
 

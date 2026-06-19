@@ -1,6 +1,8 @@
 /**
  * Read/write agents.defaults.imageGenerationModel and per-agent auth readiness.
  */
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { readOpenClawConfig, writeOpenClawConfig } from './channel-config';
 import { withConfigLock } from './config-mutex';
 import {
@@ -96,6 +98,12 @@ export interface ImageGenerationTestResult {
   result?: unknown;
 }
 
+export interface ImageGenerationInputImageRef {
+  filePath: string;
+  fileName?: string;
+  mimeType?: string;
+}
+
 const DEFAULT_TEST_PROMPT = 'A small red circle on a white background, minimal flat illustration.';
 /** Some relays (e.g. gpt-image-2) reject 512×512 as below minimum pixel budget. */
 const DEFAULT_TEST_IMAGE_SIZE = '1024x1024';
@@ -118,6 +126,30 @@ function normalizeModelRef(raw: unknown): string | null {
     return raw.trim();
   }
   return null;
+}
+
+function normalizeInputImageRefs(raw: ImageGenerationInputImageRef[] | undefined): ImageGenerationInputImageRef[] {
+  return (raw ?? [])
+    .map((image) => ({
+      filePath: image.filePath?.trim() || '',
+      fileName: image.fileName?.trim() || undefined,
+      mimeType: image.mimeType?.trim() || undefined,
+    }))
+    .filter((image) => image.filePath.length > 0);
+}
+
+async function loadInputImages(
+  refs: ImageGenerationInputImageRef[],
+): Promise<Array<{ buffer: Buffer; mimeType: string; fileName?: string; metadata?: Record<string, unknown> }>> {
+  return Promise.all(refs.map(async (image) => {
+    const buffer = await readFile(image.filePath);
+    return {
+      buffer,
+      mimeType: image.mimeType || 'image/png',
+      fileName: image.fileName || basename(image.filePath),
+      metadata: { filePath: image.filePath },
+    };
+  }));
 }
 
 function parseImageGenerationModelConfig(raw: unknown): ImageGenerationModelConfig {
@@ -501,6 +533,7 @@ export async function generateImageForChatSession(params: {
   model?: string;
   size?: string;
   quality?: 'low' | 'medium' | 'high';
+  inputImages?: ImageGenerationInputImageRef[];
 }): Promise<Awaited<ReturnType<typeof generateImageInProcess>>> {
   await ensureManagedOpenAiImageRelay();
 
@@ -516,6 +549,8 @@ export async function generateImageForChatSession(params: {
   const configuredModel = params.model?.trim()
     || current.config.primary
     || `${CLAWX_OPENAI_IMAGE_PROVIDER_KEY}/${current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL}`;
+  const inputImageRefs = normalizeInputImageRefs(params.inputImages);
+  const loadedInputImages = await loadInputImages(inputImageRefs);
 
   return generateImageInProcess({
     config,
@@ -525,5 +560,6 @@ export async function generateImageForChatSession(params: {
     timeoutMs: current.config.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
     size: params.size?.trim() || DEFAULT_TEST_IMAGE_SIZE,
     quality: params.quality,
+    inputImages: loadedInputImages,
   });
 }

@@ -1,5 +1,5 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
-import { createOpenAiCompatibleImageGenerationProvider, toImageDataUrl } from 'openclaw/plugin-sdk/image-generation';
+import { createOpenAiCompatibleImageGenerationProvider, imageSourceUploadFileName } from 'openclaw/plugin-sdk/image-generation';
 
 const PROVIDER_ID = 'clawx-openai-image';
 const DEFAULT_MODEL = 'gpt-image-2';
@@ -21,13 +21,6 @@ function resolveCount(req) {
   const raw = Number(req.count ?? 1);
   if (!Number.isFinite(raw)) return 1;
   return Math.max(1, Math.min(4, Math.trunc(raw)));
-}
-
-function imageToDataUrl(image) {
-  return toImageDataUrl({
-    buffer: image.buffer,
-    mimeType: image.mimeType,
-  });
 }
 
 function buildProvider() {
@@ -84,17 +77,31 @@ function buildProvider() {
         ...(req.quality ? { quality: req.quality } : {}),
       },
     }),
-    buildEditRequest: ({ req, inputImages, model, count }) => ({
-      kind: 'json',
-      body: {
-        model,
-        prompt: req.prompt,
-        n: count,
-        size: req.size ?? DEFAULT_SIZE,
-        ...(req.quality ? { quality: req.quality } : {}),
-        images: inputImages.map((image) => ({ image_url: imageToDataUrl(image) })),
-      },
-    }),
+    buildEditRequest: ({ req, inputImages, model, count }) => {
+      const form = new FormData();
+      form.set('model', model);
+      form.set('prompt', req.prompt);
+      form.set('n', String(count));
+      form.set('size', req.size ?? DEFAULT_SIZE);
+      if (req.quality) {
+        form.set('quality', req.quality);
+      }
+
+      inputImages.forEach((image, index) => {
+        const mimeType = String(image.mimeType || 'image/png').trim() || 'image/png';
+        const fieldName = inputImages.length > 1 ? 'image[]' : 'image';
+        form.append(
+          fieldName,
+          new Blob([image.buffer], { type: mimeType }),
+          imageSourceUploadFileName({ image, index }),
+        );
+      });
+
+      return {
+        kind: 'multipart',
+        form,
+      };
+    },
     response: {
       defaultMimeType: 'image/png',
       fileNamePrefix: 'clawx-image',

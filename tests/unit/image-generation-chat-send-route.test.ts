@@ -118,4 +118,48 @@ describe('handleMediaRoutes — POST /api/media/image-generation/chat-send', () 
     expect(transcript).toContain('图片已生成。');
     expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
   });
+
+  it('forwards image edit references and records an edit summary', async () => {
+    parseJsonBodyMock.mockResolvedValueOnce({
+      sessionKey: 'agent:main:main',
+      prompt: '把点改成红色',
+      inputImages: [
+        {
+          fileName: 'dot.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/generated/dot.png',
+        },
+      ],
+    });
+
+    const { handleMediaRoutes } = await import('@electron/api/routes/media');
+    const handled = await handleMediaRoutes(
+      makeReq(),
+      makeRes(),
+      new URL('http://127.0.0.1:13210/api/media/image-generation/chat-send'),
+      {} as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(generateImageForChatSessionMock).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      prompt: '把点改成红色',
+      model: undefined,
+      size: undefined,
+      quality: undefined,
+      inputImages: [
+        {
+          fileName: 'dot.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/generated/dot.png',
+        },
+      ],
+    });
+
+    const sessionsJsonPath = join(testOpenClawConfigDir, 'agents', 'main', 'sessions', 'sessions.json');
+    const sessionsJson = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')) as Record<string, Record<string, unknown>>;
+    const transcriptPath = String(sessionsJson['agent:main:main']?.sessionFile);
+    const transcript = readFileSync(transcriptPath, 'utf8');
+    expect(transcript).toContain('图片已修改。');
+  });
 });

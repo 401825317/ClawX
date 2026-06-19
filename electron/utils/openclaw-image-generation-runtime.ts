@@ -13,6 +13,12 @@ type ImageGenerationRuntimeModule = {
     count?: number;
     size?: string;
     quality?: 'low' | 'medium' | 'high';
+    inputImages?: Array<{
+      buffer: Buffer;
+      mimeType: string;
+      fileName?: string;
+      metadata?: Record<string, unknown>;
+    }>;
     timeoutMs?: number;
   }) => Promise<{
     images: Array<{ buffer: Buffer; mimeType: string; fileName?: string; revisedPrompt?: string }>;
@@ -155,6 +161,12 @@ export async function generateImageInProcess(params: {
   timeoutMs: number;
   size?: string;
   quality?: 'low' | 'medium' | 'high';
+  inputImages?: Array<{
+    buffer: Buffer;
+    mimeType: string;
+    fileName?: string;
+    metadata?: Record<string, unknown>;
+  }>;
 }): Promise<{
   ok: true;
   capability: 'image.generate';
@@ -184,6 +196,7 @@ export async function generateImageInProcess(params: {
     count: 1,
     size: params.size ?? '1024x1024',
     quality: params.quality,
+    inputImages: params.inputImages,
     timeoutMs: params.timeoutMs,
   });
 

@@ -119,6 +119,11 @@ export async function handleMediaRoutes(
         model?: string;
         size?: string;
         quality?: 'low' | 'medium' | 'high';
+        inputImages?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          filePath?: string;
+        }>;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -137,14 +142,26 @@ export async function handleMediaRoutes(
         model: body.model?.trim(),
         size: body.size?.trim(),
         quality: body.quality,
+        inputImages: Array.isArray(body.inputImages)
+          ? body.inputImages
+            .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
+            .map((image) => ({
+              fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
+              mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
+              filePath: image.filePath!.trim(),
+            }))
+          : undefined,
       });
       const outputPaths = result.outputs.map((output) => output.path);
+      const usedEditInput = Array.isArray(body.inputImages) && body.inputImages.some((image) =>
+        typeof image?.filePath === 'string' && image.filePath.trim().length > 0,
+      );
 
       await appendImageGenerationConversation({
         sessionKey,
         prompt,
         outputPaths,
-        summaryText: '图片已生成。',
+        summaryText: usedEditInput ? '图片已修改。' : '图片已生成。',
       });
 
       sendJson(res, 200, { success: true, result });

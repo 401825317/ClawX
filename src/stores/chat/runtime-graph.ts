@@ -8,6 +8,16 @@ import {
 } from './helpers';
 import type { AttachedFileMeta, ChatRuntimeRunState } from './types';
 
+export function shouldFilterRuntimeExecutionGraphEvent(event: ChatRuntimeEvent): boolean {
+  if (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed') {
+    return event.name.trim().toLowerCase() === 'process';
+  }
+  if (event.type === 'command.output') {
+    return event.name?.trim().toLowerCase() === 'process';
+  }
+  return false;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
 }
@@ -88,6 +98,9 @@ export function applyRuntimeEventToRuns(
   currentRuns: Record<string, ChatRuntimeRunState>,
   event: ChatRuntimeEvent,
 ): Record<string, ChatRuntimeRunState> {
+  if (shouldFilterRuntimeExecutionGraphEvent(event)) {
+    return currentRuns;
+  }
   const existing = currentRuns[event.runId] ?? cloneRunState(event.runId, event);
   const nextRun: ChatRuntimeRunState = {
     ...existing,

@@ -88,4 +88,73 @@ describe('ClawX OpenAI image plugin request shape', () => {
       server.close();
     }
   }, 15_000);
+
+  it('sends reference-image edits as multipart image uploads', async () => {
+    let requestContentType = '';
+    let requestBody = Buffer.alloc(0);
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      requestContentType = String(req.headers['content-type'] || '');
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        requestBody = Buffer.concat(chunks);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: [{ b64_json: Buffer.from('fake-image').toString('base64') }],
+        }));
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const plugin = await import('../../resources/openclaw-plugins/clawx-openai-image/index.mjs');
+      let provider: { generateImage: (req: Record<string, unknown>) => Promise<{ images: unknown[] }> } | undefined;
+      plugin.default.register({
+        registerImageGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server failed to bind to a port');
+
+      const result = await provider?.generateImage({
+        provider: 'clawx-openai-image',
+        model: 'gpt-image-2',
+        prompt: 'remove the logo',
+        quality: 'high',
+        cfg: {
+          models: {
+            providers: {
+              'clawx-openai-image': {
+                apiKey: 'test-key',
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+              },
+            },
+          },
+        },
+        inputImages: [
+          {
+            buffer: Buffer.from('fake image bytes'),
+            mimeType: 'image/png',
+            fileName: 'bike.png',
+          },
+        ],
+        agentDir: '/tmp/clawx-openai-image-test-agent',
+        ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+      });
+
+      expect(result?.images).toHaveLength(1);
+      expect(requestContentType).toContain('multipart/form-data');
+      const bodyText = requestBody.toString('utf8');
+      expect(bodyText).toContain('name="image"');
+      expect(bodyText).toContain('filename="bike.png"');
+      expect(bodyText).toContain('name="prompt"');
+      expect(bodyText).toContain('remove the logo');
+      expect(bodyText).toContain('name="model"');
+      expect(bodyText).toContain('gpt-image-2');
+    } finally {
+      server.close();
+    }
+  }, 15_000);
 });

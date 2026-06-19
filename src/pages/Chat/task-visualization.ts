@@ -25,6 +25,11 @@ export interface TaskStep {
   url?: string;
 }
 
+function isFilteredExecutionGraphTool(name: string | undefined | null): boolean {
+  const normalized = typeof name === 'string' ? name.trim().toLowerCase() : '';
+  return normalized === 'process';
+}
+
 /**
  * Detects the index of the "final reply" assistant message in a run segment.
  *
@@ -386,6 +391,9 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
   for (const event of runState.events) {
     switch (event.type) {
       case 'tool.started': {
+        if (isFilteredExecutionGraphTool(event.name)) {
+          break;
+        }
         const input = event.args as Record<string, unknown> | undefined;
         const url = event.name === 'web_fetch' && typeof input?.url === 'string' ? input.url : undefined;
         upsertStep({
@@ -400,6 +408,9 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         break;
       }
       case 'tool.updated': {
+        if (isFilteredExecutionGraphTool(event.name)) {
+          break;
+        }
         upsertStep({
           id: event.toolCallId,
           label: event.name,
@@ -411,6 +422,9 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         break;
       }
       case 'tool.completed': {
+        if (isFilteredExecutionGraphTool(event.name)) {
+          break;
+        }
         upsertStep({
           id: event.toolCallId,
           label: event.name,
@@ -422,6 +436,9 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         break;
       }
       case 'command.output': {
+        if (isFilteredExecutionGraphTool(event.name)) {
+          break;
+        }
         const id = event.itemId || `${event.toolCallId || event.name || 'command'}:output`;
         upsertStep({
           id,
@@ -525,6 +542,9 @@ export function deriveTaskSteps({
     }
 
     toolUses.forEach((tool, index) => {
+      if (isFilteredExecutionGraphTool(tool.name)) {
+        return;
+      }
       const input = tool.input as Record<string, unknown>;
       const url = tool.name === 'web_fetch' && typeof input?.url === 'string' ? input.url : undefined;
       upsertStep({
@@ -559,6 +579,9 @@ export function deriveTaskSteps({
   const activeToolIds = new Set<string>();
   const activeToolNamesWithoutIds = new Set<string>();
   streamingTools.forEach((tool, index) => {
+    if (isFilteredExecutionGraphTool(tool.name)) {
+      return;
+    }
     const id = tool.toolCallId || tool.id || makeToolId('stream-status', tool.name, index);
     activeToolIds.add(id);
     if (!tool.toolCallId && !tool.id) {
@@ -576,6 +599,9 @@ export function deriveTaskSteps({
 
   if (streamMessage) {
     extractToolUse(streamMessage).forEach((tool, index) => {
+      if (isFilteredExecutionGraphTool(tool.name)) {
+        return;
+      }
       const id = tool.id || makeToolId('stream-tool', tool.name, index);
       if (activeToolIds.has(id) || activeToolNamesWithoutIds.has(tool.name)) return;
       const input = tool.input as Record<string, unknown>;

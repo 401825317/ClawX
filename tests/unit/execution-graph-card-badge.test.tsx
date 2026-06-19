@@ -169,4 +169,69 @@ describe('ExecutionGraphCard subagent (system) row', () => {
     expect(pre).not.toBeNull();
     expect(pre!.textContent).toBe(subagentStep.detail);
   });
+
+  it('truncates long inline detail previews until expanded', () => {
+    const longDetail = JSON.stringify({
+      content: [
+        {
+          type: 'text',
+          text: 'This is a very long process detail preview that should be truncated in the inline execution graph row instead of rendering the full payload directly in the list.',
+        },
+      ],
+      details: { status: 'running' },
+    });
+    const longStep: TaskStep = {
+      id: 'exec-long',
+      label: 'exec',
+      kind: 'tool',
+      status: 'running',
+      detail: longDetail,
+      depth: 1,
+    };
+
+    render(
+      <ExecutionGraphCard
+        agentLabel="main"
+        steps={[longStep]}
+        active
+        expanded
+      />,
+    );
+
+    const inlinePreview = screen.getByText(/This is a very long process detail preview/);
+    expect(inlinePreview.textContent).toContain('…');
+    expect(inlinePreview.textContent?.length).toBeLessThan(120);
+    expect(screen.queryByText(longDetail)).toBeNull();
+  });
+
+  it('prefers command/path style fields over raw payload text for tool previews', () => {
+    const execLikeStep: TaskStep = {
+      id: 'exec-command',
+      label: 'exec',
+      kind: 'tool',
+      status: 'running',
+      detail: JSON.stringify({
+        command: 'ffmpeg -i input.mp4 -vf scale=1280:720 output.mp4',
+        content: [
+          {
+            type: 'text',
+            text: 'This verbose payload should not be used as the inline preview when a command is present.',
+          },
+        ],
+      }),
+      depth: 1,
+    };
+
+    render(
+      <ExecutionGraphCard
+        agentLabel="main"
+        steps={[execLikeStep]}
+        active
+        expanded
+      />,
+    );
+
+    expect(screen.getByText(/ffmpeg -i input\.mp4/)).toBeInTheDocument();
+    expect(screen.queryByText(/This verbose payload should not be used/)).toBeNull();
+  });
 });

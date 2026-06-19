@@ -123,6 +123,7 @@ export interface ChatState {
 
   // Streaming
   sending: boolean;
+  pendingImageGenerationLocal: boolean;
   activeRunId: string | null;
   streamingText: string;
   streamingMessage: unknown | null;

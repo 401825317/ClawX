@@ -91,6 +91,9 @@ describe('chat target routing', () => {
       if (url === '/api/chat/send-with-media') {
         return { success: true, result: { runId: 'run-media' } };
       }
+      if (url === '/api/media/image-generation/chat-send') {
+        return { success: true, result: { outputs: [{ path: '/tmp/generated.png' }] } };
+      }
       return { success: true, result: {} };
     });
   });
@@ -249,5 +252,74 @@ describe('chat target routing', () => {
     expect(payload.sessionKey).toBe('agent:research:desk');
     expect(payload.message).toBe('Process the attached file(s).');
     expect(payload.media[0]?.filePath).toBe('/tmp/design.png');
+  });
+
+  it('reuses the latest assistant image as an edit input for image-mode sends without rendering it as a user attachment', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '图片已生成。',
+          _attachedFiles: [
+            {
+              fileName: 'bike.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/bike.png',
+              source: 'message-ref',
+            },
+          ],
+        },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      '把 logo 去掉',
+      undefined,
+      undefined,
+      'image',
+      { size: '1024x1024', quality: 'medium' },
+    );
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      sessionKey: string;
+      prompt: string;
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+
+    expect(payload.sessionKey).toBe('agent:main:main');
+    expect(payload.prompt).toBe('把 logo 去掉');
+    expect(payload.inputImages).toEqual([
+      {
+        fileName: 'bike.png',
+        mimeType: 'image/png',
+        filePath: '/tmp/bike.png',
+      },
+    ]);
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
   });
 });

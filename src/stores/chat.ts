@@ -53,7 +53,7 @@ import {
   type ToolStatus,
 } from './chat/types';
 import type { ChatGet, ChatSet } from './chat/store-api';
-import { applyRuntimeEventToRuns, extractToolCompletedFiles } from './chat/runtime-graph';
+import { applyRuntimeEventToRuns, extractToolCompletedFiles, shouldFilterRuntimeExecutionGraphEvent } from './chat/runtime-graph';
 import { enrichWithToolCallAttachments, shouldDropMessageFromHistory } from './chat/helpers';
 import {
   isGeneratingStatusNarration,
@@ -121,6 +121,69 @@ async function ensureManagedAuthReadyForSend(): Promise<void> {
   }
 }
 
+type PendingImageInput = {
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  stagedPath: string;
+  preview: string | null;
+};
+
+function isImageAttachmentFile(
+  file: Pick<AttachedFileMeta, 'mimeType' | 'filePath' | 'fileName' | 'fileSize' | 'preview'> | undefined | null,
+): file is Required<Pick<AttachedFileMeta, 'mimeType' | 'filePath' | 'fileName' | 'fileSize' | 'preview'>> {
+  return Boolean(
+    file
+    && typeof file.mimeType === 'string'
+    && file.mimeType.startsWith('image/')
+    && typeof file.filePath === 'string'
+    && file.filePath.trim().length > 0
+    && typeof file.fileName === 'string'
+    && typeof file.fileSize === 'number',
+  );
+}
+
+function normalizePendingImageInput(
+  file: Pick<AttachedFileMeta, 'mimeType' | 'filePath' | 'fileName' | 'fileSize' | 'preview'>,
+): PendingImageInput {
+  return {
+    fileName: file.fileName,
+    mimeType: file.mimeType,
+    fileSize: file.fileSize,
+    stagedPath: file.filePath || '',
+    preview: file.preview,
+  };
+}
+
+function resolveImageModeReferenceInputs(
+  explicitAttachments: PendingImageInput[] | undefined,
+  messages: RawMessage[],
+): PendingImageInput[] {
+  const explicitImages = (explicitAttachments ?? []).filter((file) => file.mimeType.startsWith('image/'));
+  if (explicitImages.length > 0) {
+    return explicitImages;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === 'user') continue;
+    const imageFile = (message._attachedFiles ?? []).find((file) => isImageAttachmentFile(file));
+    if (imageFile) {
+      return [normalizePendingImageInput(imageFile)];
+    }
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const imageFile = (message._attachedFiles ?? []).find((file) => isImageAttachmentFile(file));
+    if (imageFile) {
+      return [normalizePendingImageInput(imageFile)];
+    }
+  }
+
+  return [];
+}
+
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
 function toMs(ts: number): number {
   // Timestamps < 1e12 are in seconds (before ~2033); >= 1e12 are milliseconds
@@ -148,6 +211,7 @@ const _pendingLocalSessionKeys = new Set<string>();
 type SessionRunState = Pick<
   ChatState,
   | 'sending'
+  | 'pendingImageGenerationLocal'
   | 'activeRunId'
   | 'pendingFinal'
   | 'lastUserMessageAt'
@@ -159,6 +223,7 @@ type SessionRunState = Pick<
 
 const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
   sending: false,
+  pendingImageGenerationLocal: false,
   activeRunId: null,
   pendingFinal: false,
   lastUserMessageAt: null,
@@ -423,6 +488,7 @@ function clearCachedSessionHistory(sessionKey: string): void {
 function captureSessionRunState(sessionKey: string, state: SessionRunState): void {
   _sessionRunStateCache.set(sessionKey, {
     sending: state.sending,
+    pendingImageGenerationLocal: state.pendingImageGenerationLocal,
     activeRunId: state.activeRunId,
     pendingFinal: state.pendingFinal,
     lastUserMessageAt: state.lastUserMessageAt,
@@ -438,6 +504,7 @@ function getCachedSessionRunState(sessionKey: string): SessionRunState {
   if (!cached) return DEFAULT_SESSION_RUN_STATE;
   return {
     sending: cached.sending,
+    pendingImageGenerationLocal: cached.pendingImageGenerationLocal,
     activeRunId: cached.activeRunId,
     pendingFinal: cached.pendingFinal,
     lastUserMessageAt: cached.lastUserMessageAt,
@@ -455,6 +522,7 @@ function clearCachedSessionRunState(sessionKey: string): void {
 function cloneSessionRunState(state: SessionRunState): SessionRunState {
   return {
     sending: state.sending,
+    pendingImageGenerationLocal: state.pendingImageGenerationLocal,
     activeRunId: state.activeRunId,
     pendingFinal: state.pendingFinal,
     lastUserMessageAt: state.lastUserMessageAt,
@@ -1928,6 +1996,7 @@ function buildSessionSwitchPatch(
     | 'sessionLastActivity'
     | 'thinkingLevel'
     | 'sending'
+    | 'pendingImageGenerationLocal'
     | 'activeRunId'
     | 'pendingFinal'
     | 'lastUserMessageAt'
@@ -2648,6 +2717,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runError: null,
 
   sending: false,
+  pendingImageGenerationLocal: false,
   activeRunId: null,
   streamingText: '',
   streamingMessage: null,
@@ -3736,23 +3806,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const currentSessionKey = targetSessionKey;
+    const currentMessages = get().messages;
     const sendGeneration = ++_sendGenerationCounter;
     _activeSendGenerationBySession.set(currentSessionKey, sendGeneration);
+    const explicitPendingImages = (attachments ?? [])
+      .filter((file) => file.mimeType.startsWith('image/') && file.stagedPath.trim().length > 0)
+      .map((file) => ({
+        fileName: file.fileName,
+        mimeType: file.mimeType,
+        fileSize: file.fileSize,
+        stagedPath: file.stagedPath,
+        preview: file.preview,
+      }));
+    const imageReferenceInputs = mode === 'image'
+      ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
+      : [];
 
     // Add user message optimistically (with local file metadata for UI display)
     const nowMs = Date.now();
     const userMsg: RawMessage = {
       role: 'user',
-      content: trimmed || (attachments?.length ? '(file attached)' : ''),
+      content: mode === 'image' ? trimmed : (trimmed || (attachments?.length ? '(file attached)' : '')),
       timestamp: nowMs / 1000,
       id: crypto.randomUUID(),
-      _attachedFiles: attachments?.map(a => ({
-        fileName: a.fileName,
-        mimeType: a.mimeType,
-        fileSize: a.fileSize,
-        preview: a.preview,
-        filePath: a.stagedPath,
-      })),
+      _attachedFiles: mode === 'image'
+        ? undefined
+        : attachments?.map(a => ({
+          fileName: a.fileName,
+          mimeType: a.mimeType,
+          fileSize: a.fileSize,
+          preview: a.preview,
+          filePath: a.stagedPath,
+        })),
     };
     rememberPendingOptimisticUserMessage(currentSessionKey, userMsg, nowMs);
     set((s) => ({
@@ -3760,6 +3845,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: true,
       error: null,
       runError: null,
+      pendingImageGenerationLocal: mode === 'image',
       streamingText: '',
       streamingMessage: null,
       streamingTools: [],
@@ -3791,6 +3877,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               prompt: trimmed,
               size: imageOptions?.size,
               quality: imageOptions?.quality,
+              inputImages: imageReferenceInputs.map((file) => ({
+                fileName: file.fileName,
+                mimeType: file.mimeType,
+                filePath: file.stagedPath,
+              })),
             }),
           },
         );
@@ -3799,6 +3890,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         set({
           sending: false,
+          pendingImageGenerationLocal: false,
           activeRunId: null,
           streamingText: '',
           streamingMessage: null,
@@ -3812,6 +3904,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({
           error: error instanceof Error ? error.message : String(error),
           sending: false,
+          pendingImageGenerationLocal: false,
           activeRunId: null,
           streamingText: '',
           streamingMessage: null,
@@ -4475,6 +4568,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { activeRunId, currentSessionKey } = initialState;
     const matchesCurrentSession = eventSessionKey != null && eventSessionKey === currentSessionKey;
     const matchesActiveRun = activeRunId != null && event.runId === activeRunId;
+
+    if (shouldFilterRuntimeExecutionGraphEvent(event)) {
+      if (matchesCurrentSession || matchesActiveRun) {
+        _lastChatEventAt = Date.now();
+      }
+      return;
+    }
 
     const runtimeRuns = applyRuntimeEventToRuns(initialState.runtimeRuns, event);
     const nextPatch: Partial<ChatState> = { runtimeRuns };

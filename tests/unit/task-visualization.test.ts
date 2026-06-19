@@ -91,6 +91,29 @@ describe('deriveTaskSteps', () => {
       }),
     ]);
   });
+
+  it('filters noisy process runtime events from execution graph steps', () => {
+    const steps = deriveRuntimeTaskSteps({
+      runId: 'run-1',
+      status: 'running',
+      assistantText: '',
+      thinkingText: '',
+      events: [
+        { type: 'tool.started', runId: 'run-1', sessionKey: 'agent:main:main', toolCallId: 'process-1', name: 'process', args: { action: 'poll' } },
+        { type: 'command.output', runId: 'run-1', sessionKey: 'agent:main:main', toolCallId: 'process-1', itemId: 'process-out', name: 'process', title: 'process output', output: '(no new output)', status: 'running', phase: 'update' },
+        { type: 'tool.completed', runId: 'run-1', sessionKey: 'agent:main:main', toolCallId: 'read-1', name: 'read', result: { summary: 'Done' }, isError: false },
+      ],
+    });
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        id: 'read-1',
+        label: 'read',
+        status: 'completed',
+        kind: 'tool',
+      }),
+    ]);
+  });
   it('builds running steps from streaming tool status without exposing chain-of-thought', () => {
     const streamingTools: ToolStatus[] = [
       {

@@ -177,6 +177,7 @@ export function Chat() {
   const hasMoreHistory = useChatStore((s) => s.hasMoreHistory);
   const loadMoreHistory = useChatStore((s) => s.loadMoreHistory);
   const sending = useChatStore((s) => s.sending);
+  const pendingImageGenerationLocal = useChatStore((s) => s.pendingImageGenerationLocal);
   const error = useChatStore((s) => s.error);
   const runError = useChatStore((s) => s.runError);
   const streamingMessage = useChatStore((s) => s.streamingMessage);
@@ -454,7 +455,7 @@ export function Chat() {
     );
     const hasFinalReply = segmentHasFinalReply(postTriggerMessages);
     const pendingImageGeneration = isLatestRunSegment
-      && isImageGenerationPending(postTriggerMessages, streamingTools);
+      && (pendingImageGenerationLocal || isImageGenerationPending(postTriggerMessages, streamingTools));
     const imageGenerationSettledInHistory = isLatestRunSegment
       && hasDeliveredImageGenerationResult(postTriggerMessages)
       && !pendingImageGeneration;
@@ -698,7 +699,7 @@ export function Chat() {
       streamingReplyText,
       suppressThinking,
     }];
-  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, activeRunId, runtimeRuns]);
+  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, activeRunId, runtimeRuns]);
   const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
@@ -713,10 +714,11 @@ export function Chat() {
         m.role === 'assistant' && extractToolUse(m).length > 0,
       ),
     };
-    pendingImageGeneration = isImageGenerationPending(
-      postTrigger,
-      nextUserIndex === -1 ? streamingTools : [],
-    );
+    pendingImageGeneration = (nextUserIndex === -1 && pendingImageGenerationLocal)
+      || isImageGenerationPending(
+        postTrigger,
+        nextUserIndex === -1 ? streamingTools : [],
+      );
     imageGenerationSettledInHistory = nextUserIndex === -1
       && hasDeliveredImageGenerationResult(postTrigger)
       && !pendingImageGeneration;
