@@ -45,12 +45,51 @@ describe('ClawHubService marketplace compatibility', () => {
 
     service.setMarketplaceProvider(provider);
 
-    await expect(service.search({ query: 'pdf' })).resolves.toEqual([
-      { slug: 'pdf', name: 'PDF', description: 'Docs', version: '1.0.0' },
-    ]);
+    await expect(service.search({ query: 'pdf' })).resolves.toEqual({
+      results: [
+        { slug: 'pdf', name: 'PDF', description: 'Docs', version: '1.0.0' },
+      ],
+      loaded: 1,
+      total: 1,
+      totalKnown: true,
+      query: 'pdf',
+      hasMore: false,
+    });
     await expect(service.install({ slug: 'pdf' })).resolves.toBeUndefined();
     expect(provider.search).toHaveBeenCalledWith({ query: 'pdf' });
     expect(provider.install).toHaveBeenCalledWith({ slug: 'pdf' });
+  });
+
+  it('prefers SkillHub as the default marketplace when multiple providers are registered', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'clawx-clawhub-home-'));
+    const ClawHubService = await loadServiceForHome(homeDir);
+    const service = new ClawHubService();
+    const clawhubProvider = {
+      id: 'clawhub',
+      getCapability: vi.fn().mockResolvedValue({ mode: 'public-clawhub', canSearch: true, canInstall: true }),
+      search: vi.fn().mockResolvedValue([{ slug: 'clawhub-skill', name: 'ClawHub Skill', description: 'Docs', version: '1.0.0' }]),
+      install: vi.fn().mockResolvedValue(undefined),
+    };
+    const skillhubProvider = {
+      id: 'skillhub',
+      getCapability: vi.fn().mockResolvedValue({ mode: 'public-skillhub', canSearch: true, canInstall: true }),
+      search: vi.fn().mockResolvedValue([{ slug: 'skillhub-skill', name: 'SkillHub Skill', description: 'Docs', version: '1.0.0' }]),
+      install: vi.fn().mockResolvedValue(undefined),
+    };
+
+    service.setMarketplaceProviders([clawhubProvider, skillhubProvider]);
+
+    await expect(service.search({ query: '' })).resolves.toMatchObject({
+      results: [
+        { slug: 'skillhub-skill', name: 'SkillHub Skill' },
+      ],
+    });
+    await service.install({ slug: 'clawhub-skill', provider: 'clawhub' });
+
+    expect(skillhubProvider.search).toHaveBeenCalledWith({ query: '' });
+    expect(clawhubProvider.search).not.toHaveBeenCalled();
+    expect(clawhubProvider.install).toHaveBeenCalledWith({ slug: 'clawhub-skill', provider: 'clawhub' });
+    expect(skillhubProvider.install).not.toHaveBeenCalled();
   });
 
   it('rejects missing or placeholder marketplace install slugs before calling the provider', async () => {

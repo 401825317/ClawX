@@ -98,7 +98,7 @@ function isUserInstalledManagedSkill(
   if (preinstalledMeta) {
     return false;
   }
-  return Boolean(originMeta?.provider === 'clawhub');
+  return Boolean(originMeta?.provider === 'clawhub' || originMeta?.provider === 'skillhub');
 }
 
 const MAX_SKILL_FILE_BYTES = 256_000;
@@ -234,7 +234,7 @@ async function readOriginMeta(skillDir: string): Promise<OriginMeta | null> {
   const parsed = await safeReadJson<Record<string, unknown>>(join(skillDir, '.clawhub', 'origin.json'));
   if (!parsed) return null;
   return {
-    provider: 'clawhub',
+    provider: toStringValue(parsed.provider) || 'clawhub',
     slug: toStringValue(parsed.slug),
     installedVersion: toStringValue(parsed.installedVersion) || toStringValue(parsed.version),
     source: toStringValue(parsed.source),

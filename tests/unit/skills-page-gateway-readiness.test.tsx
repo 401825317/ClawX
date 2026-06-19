@@ -7,6 +7,7 @@ const enableSkillMock = vi.fn();
 const disableSkillMock = vi.fn();
 const setSkillsEnabledMock = vi.fn();
 const searchSkillsMock = vi.fn();
+const loadMoreMarketplaceSkillsMock = vi.fn();
 const installSkillMock = vi.fn();
 const uninstallSkillMock = vi.fn();
 const invokeIpcMock = vi.fn();
@@ -23,6 +24,7 @@ const { gatewayState, skillsState } = vi.hoisted(() => ({
   skillsState: {
     skills: [] as Array<Record<string, unknown>>,
     searchResults: [] as Array<Record<string, unknown>>,
+    marketplaceMeta: {} as Record<string, unknown>,
   },
 }));
 
@@ -36,7 +38,9 @@ vi.mock('@/stores/skills', () => ({
     disableSkill: disableSkillMock,
     setSkillsEnabled: setSkillsEnabledMock,
     searchResults: skillsState.searchResults,
+    marketplaceMeta: skillsState.marketplaceMeta,
     searchSkills: searchSkillsMock,
+    loadMoreMarketplaceSkills: loadMoreMarketplaceSkillsMock,
     installSkill: installSkillMock,
     uninstallSkill: uninstallSkillMock,
     searching: false,
@@ -89,6 +93,7 @@ describe('Skills page gateway readiness', () => {
     gatewayState.status = { state: 'running', port: 18789, gatewayReady: true };
     skillsState.skills = [];
     skillsState.searchResults = [];
+    skillsState.marketplaceMeta = {};
     invokeIpcMock.mockResolvedValue('/tmp/.openclaw/skills');
     hostApiFetchMock.mockImplementation((path: unknown) => {
       if (path === '/api/skills/marketplace/capability') {
@@ -144,6 +149,28 @@ describe('Skills page gateway readiness', () => {
 
     expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
     expect(screen.getByText('actions.skillMarketplace')).toBeDisabled();
+  });
+
+  it('opens the skills page in marketplace mode by default when marketplace search is available', async () => {
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
+      }
+      return Promise.resolve({ success: true });
+    });
+    skillsState.searchResults = [
+      { slug: 'video-editor', name: 'Video Editor', description: 'short video editing', version: '1.0.0', keywords: ['video'] },
+    ];
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    expect(screen.getByText('marketplace.title')).toBeInTheDocument();
+    expect(searchSkillsMock).toHaveBeenCalledWith('');
   });
 
   it('filters the list via enabled and disabled buttons', async () => {
@@ -422,20 +449,35 @@ describe('Skills page gateway readiness', () => {
       await Promise.resolve();
     });
 
-    expect(installSkillMock).toHaveBeenCalledWith('browser-automation');
+    expect(installSkillMock).toHaveBeenCalledWith('browser-automation', '1.0.0');
   });
 
-  it('prioritizes explicit marketplace keywords when grouping categories', async () => {
+  it('searches and filters marketplace skills by popular scenario categories', async () => {
     gatewayState.status = { state: 'stopped', port: 18789 };
     skillsState.searchResults = [
       {
-        slug: 'document-industry',
-        name: 'Document Industry',
-        description: 'document processing for business',
+        slug: 'amazon-listing',
+        name: 'Amazon Listing',
+        description: 'amazon product listing keyword optimization',
         version: '1.0.0',
-        keywords: ['document_processing', 'industry_skills'],
+        keywords: ['ecommerce'],
+      },
+      {
+        slug: 'browser-automation',
+        name: 'Browser Automation',
+        description: 'developer tooling',
+        version: '1.0.0',
+        keywords: ['developer_tools'],
       },
     ];
+    skillsState.marketplaceMeta = {
+      catalogTotal: 70414,
+      catalogTotalKnown: true,
+      loaded: 2,
+      hasMore: true,
+      nextCursor: 'cursor-1',
+      query: '',
+    };
     hostApiFetchMock.mockImplementation((path: unknown) => {
       if (path === '/api/skills/marketplace/capability') {
         return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
@@ -457,7 +499,106 @@ describe('Skills page gateway readiness', () => {
       await vi.advanceTimersByTimeAsync(400);
     });
 
-    expect(screen.getAllByText('marketplace.categories.industry')).toHaveLength(2);
-    expect(screen.queryByText('marketplace.categories.content')).not.toBeInTheDocument();
+    expect(screen.getByText('Amazon Listing')).toBeInTheDocument();
+    expect(screen.getByText('Browser Automation')).toBeInTheDocument();
+    expect(screen.getByText('marketplace.totalCount')).toBeInTheDocument();
+    expect(screen.getByText('marketplace.loadMore')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('marketplace.loadMore'));
+    expect(loadMoreMarketplaceSkillsMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('marketplace-category-ecommerce-listing'));
+
+    expect(screen.queryByText('Amazon Listing')).not.toBeInTheDocument();
+    expect(screen.queryByText('Browser Automation')).not.toBeInTheDocument();
+    expect(screen.getByText('marketplace.searching')).toBeInTheDocument();
+    expect(searchSkillsMock).toHaveBeenCalledWith(['amazon listing', 'shopify', 'ecommerce', 'listing', 'product upload']);
+  });
+
+  it('keeps marketplace categories usable when the selected category has no results', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.searchResults = [];
+    skillsState.marketplaceMeta = {
+      catalogTotal: 70414,
+      catalogTotalKnown: true,
+      loaded: 0,
+      query: '3d | blender | modeling | cad | render',
+    };
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByTestId('marketplace-category-three-d-modeling'));
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(screen.getByText('marketplace.noCategoryResults')).toBeInTheDocument();
+    expect(screen.getByTestId('marketplace-category-all')).toBeInTheDocument();
+    expect(screen.getByTestId('marketplace-category-ecommerce-listing')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('marketplace-category-ecommerce-listing'));
+
+    expect(searchSkillsMock).toHaveBeenCalledWith(['3d', 'blender', 'modeling', 'cad', 'render']);
+    expect(searchSkillsMock).toHaveBeenCalledWith(['amazon listing', 'shopify', 'ecommerce', 'listing', 'product upload']);
+  });
+
+  it('does not show stale marketplace results while a category query is pending', async () => {
+    gatewayState.status = { state: 'stopped', port: 18789 };
+    skillsState.searchResults = [
+      {
+        slug: '3d-web-experience',
+        name: '3D Web Experience',
+        description: 'Three.js and interactive 3D scenes',
+        version: '1.0.0',
+        keywords: ['3d'],
+      },
+    ];
+    skillsState.marketplaceMeta = {
+      query: '3d | blender | modeling | cad | render',
+      catalogTotal: 70414,
+      catalogTotalKnown: true,
+      loaded: 1,
+    };
+    hostApiFetchMock.mockImplementation((path: unknown) => {
+      if (path === '/api/skills/marketplace/capability') {
+        return Promise.resolve({ success: true, capability: { canSearch: true, canInstall: true } });
+      }
+      return Promise.resolve({ success: true });
+    });
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_600);
+    });
+
+    fireEvent.click(screen.getByTestId('marketplace-category-three-d-modeling'));
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(400);
+    });
+
+    expect(screen.getByText('3D Web Experience')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('marketplace-category-ecommerce-listing'));
+
+    expect(screen.queryByText('3D Web Experience')).not.toBeInTheDocument();
+    expect(screen.getByText('marketplace.searching')).toBeInTheDocument();
+    expect(screen.getByTestId('marketplace-category-three-d-modeling')).toBeInTheDocument();
+    expect(screen.getByTestId('marketplace-category-ecommerce-listing')).toBeInTheDocument();
   });
 });

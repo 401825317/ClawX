@@ -2,7 +2,8 @@
   "extensions": {
     "main": [
       "builtin/diagnostics",
-      "builtin/clawhub-marketplace"
+      "builtin/clawhub-marketplace",
+      "builtin/skillhub-marketplace"
     ],
     "renderer": []
   }

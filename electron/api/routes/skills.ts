@@ -13,17 +13,18 @@ async function handleMarketplaceCapability(res: ServerResponse, ctx: HostApiCont
   });
 }
 
-async function handleMarketplaceSearch(req: IncomingMessage, res: ServerResponse, ctx: HostApiContext): Promise<void> {
+async function handleMarketplaceSearch(req: IncomingMessage, res: ServerResponse, ctx: HostApiContext, provider?: string): Promise<void> {
   const body = await parseJsonBody<MarketplaceSearchParams>(req);
+  const result = await ctx.clawHubService.search({ ...body, provider: body.provider ?? provider });
   sendJson(res, 200, {
     success: true,
-    results: await ctx.clawHubService.search(body),
+    ...result,
   });
 }
 
-async function handleMarketplaceInstall(req: IncomingMessage, res: ServerResponse, ctx: HostApiContext): Promise<void> {
+async function handleMarketplaceInstall(req: IncomingMessage, res: ServerResponse, ctx: HostApiContext, provider?: string): Promise<void> {
   const body = await parseJsonBody<MarketplaceInstallParams>(req);
-  await ctx.clawHubService.install(body);
+  await ctx.clawHubService.install({ ...body, provider: body.provider ?? provider });
   sendJson(res, 200, { success: true });
 }
 
@@ -182,7 +183,7 @@ export async function handleSkillRoutes(
 
   if (url.pathname === '/api/clawhub/search' && req.method === 'POST') {
     try {
-      await handleMarketplaceSearch(req, res, ctx);
+      await handleMarketplaceSearch(req, res, ctx, 'clawhub');
     } catch (error) {
       sendJson(res, 500, { success: false, error: error instanceof Error ? error.message : String(error) });
     }
@@ -191,7 +192,7 @@ export async function handleSkillRoutes(
 
   if (url.pathname === '/api/clawhub/install' && req.method === 'POST') {
     try {
-      await handleMarketplaceInstall(req, res, ctx);
+      await handleMarketplaceInstall(req, res, ctx, 'clawhub');
     } catch (error) {
       sendJson(res, 500, { success: false, error: error instanceof Error ? error.message : String(error) });
     }

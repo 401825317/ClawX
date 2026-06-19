@@ -60,6 +60,10 @@ class ExtensionRegistry {
     return this.getAll().find(isMarketplaceProviderExtension) as MarketplaceProviderExtension | undefined;
   }
 
+  getMarketplaceProviders(): MarketplaceProviderExtension[] {
+    return this.getAll().filter(isMarketplaceProviderExtension) as MarketplaceProviderExtension[];
+  }
+
   async teardownAll(): Promise<void> {
     for (const ext of this.extensions.values()) {
       try {

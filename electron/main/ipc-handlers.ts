@@ -2129,8 +2129,8 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
   // Search skills
   ipcMain.handle('clawhub:search', async (_, params: ClawHubSearchParams) => {
     try {
-      const results = await clawHubService.search(params);
-      return { success: true, results };
+      const result = await clawHubService.search({ ...params, provider: params.provider ?? 'clawhub' });
+      return { success: true, ...result };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -2139,7 +2139,7 @@ function registerClawHubHandlers(clawHubService: ClawHubService): void {
   // Install skill
   ipcMain.handle('clawhub:install', async (_, params: ClawHubInstallParams) => {
     try {
-      await clawHubService.install(params);
+      await clawHubService.install({ ...params, provider: params.provider ?? 'clawhub' });
       return { success: true };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };

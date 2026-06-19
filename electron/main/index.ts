@@ -397,10 +397,10 @@ async function initialize(): Promise<void> {
     getMainWindow: () => mainWindow,
   });
 
-  // Wire marketplace provider to ClawHubService if an extension provides one
-  const marketplaceProvider = extensionRegistry.getMarketplaceProvider();
-  if (marketplaceProvider) {
-    clawHubService.setMarketplaceProvider(marketplaceProvider);
+  // Wire marketplace providers to ClawHubService if extensions provide them
+  const marketplaceProviders = extensionRegistry.getMarketplaceProviders();
+  if (marketplaceProviders.length > 0) {
+    clawHubService.setMarketplaceProviders(marketplaceProviders);
   }
 
   // Register update handlers

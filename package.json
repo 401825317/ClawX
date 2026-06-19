@@ -90,6 +90,7 @@
     "dependencies": {
         "electron-store": "^11.0.2",
         "electron-updater": "^6.8.3",
+        "jszip": "3.10.1",
         "node-machine-id": "^1.1.12",
         "posthog-node": "^5.28.0",
         "tar": "^6.2.1",

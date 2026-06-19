@@ -11,6 +11,7 @@ import type {
 } from '../types';
 import type {
   MarketplaceSearchParams,
+  MarketplaceSearchResult,
   MarketplaceInstallParams,
   MarketplaceSkillResult,
 } from '../../gateway/clawhub';
@@ -18,7 +19,9 @@ import { logger } from '../../utils/logger';
 import { getOpenClawConfigDir, getOpenClawResolvedDir } from '../../utils/paths';
 
 type RawClawHubSkill = {
+  _creationTime?: unknown;
   id?: unknown;
+  _id?: unknown;
   slug?: unknown;
   skillSlug?: unknown;
   displayName?: unknown;
@@ -34,16 +37,36 @@ type RawClawHubSkill = {
   owner?: {
     handle?: unknown;
     displayName?: unknown;
+    image?: unknown;
   };
   latestVersion?: {
     version?: unknown;
   };
   skill?: {
+    _creationTime?: unknown;
+    _id?: unknown;
     slug?: unknown;
     displayName?: unknown;
     name?: unknown;
     summary?: unknown;
     description?: unknown;
+    tags?: unknown;
+    topics?: unknown;
+    categories?: unknown;
+    capabilityTags?: unknown;
+    stats?: {
+      downloads?: unknown;
+      stars?: unknown;
+      comments?: unknown;
+      installsAllTime?: unknown;
+      installsCurrent?: unknown;
+    };
+    badges?: {
+      highlighted?: unknown;
+      official?: unknown;
+    };
+    createdAt?: unknown;
+    updatedAt?: unknown;
   };
   downloads?: unknown;
   stars?: unknown;
@@ -62,6 +85,7 @@ type RawClawHubSkill = {
       version?: unknown;
     };
   };
+  score?: unknown;
 };
 
 type RawClawHubSkillDetail = {
@@ -115,8 +139,12 @@ type RuntimeModuleCandidate = {
 };
 
 const DEFAULT_MARKETPLACE_QUERY = 'skill';
-const DEFAULT_SEARCH_LIMIT = 30;
+const DEFAULT_BROWSE_LIMIT = 100;
 const MAX_SEARCH_LIMIT = 100;
+const MAX_BROWSE_LIMIT = 500;
+const CLAWHUB_CONVEX_BASE = 'https://wry-manatee-359.convex.cloud';
+const CLAWHUB_CACHE_TTL_MS = 10 * 60 * 1000;
+const CLAWHUB_MAX_PAGE_SIZE = 50;
 const OPENCLAW_SKILLS_CLAWHUB_MODULE_RE = /^skills-clawhub(?:-.+)?\.js$/;
 const OPENCLAW_SKILLS_STATUS_MODULE_RE = /^status(?:-.+)?\.js$/;
 const OPENCLAW_SKILLS_STATUS_EXPORT_MARKERS = [
@@ -124,9 +152,25 @@ const OPENCLAW_SKILLS_STATUS_EXPORT_MARKERS = [
   'installSkillFromClawHub',
 ] as const;
 const DEFAULT_CLAWHUB_MIRROR_URL = 'https://mirror-cn.clawhub.com';
+const DEFAULT_CLAWHUB_INSTALL_URL = 'https://clawhub.ai';
 const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 
 let runtimeModulePromise: Promise<LoadedRuntime> | null = null;
+let clawhubCountCache: { total: number; timestamp: number } | null = null;
+const clawhubCatalogCache = new Map<string, { timestamp: number; catalog: MarketplaceSearchResult }>();
+
+type ClawHubConvexResponse<T> = {
+  status?: string;
+  value?: T;
+  errorMessage?: string;
+  errorData?: unknown;
+};
+
+type ClawHubListPage = {
+  page?: RawClawHubSkill[];
+  hasMore?: boolean;
+  nextCursor?: string;
+};
 
 function stringValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -155,14 +199,168 @@ function stringArrayValue(value: unknown): string[] | undefined {
 }
 
 function normalizeLimit(value: number | undefined): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_SEARCH_LIMIT;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return MAX_SEARCH_LIMIT;
   return Math.min(Math.max(Math.floor(value), 1), MAX_SEARCH_LIMIT);
 }
 
-function resolveMarketplaceBaseUrl(): string {
+function normalizeBrowseLimit(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_BROWSE_LIMIT;
+  return Math.min(Math.max(Math.floor(value), 1), MAX_BROWSE_LIMIT);
+}
+
+function normalizeSort(value: unknown, searching: boolean): string {
+  const sort = stringValue(value)?.toLowerCase();
+  if (searching && sort === 'relevance') return 'relevance';
+  if (sort === 'newest' || sort === 'updated' || sort === 'installs' || sort === 'stars' || sort === 'name') {
+    return sort;
+  }
+  return 'downloads';
+}
+
+function normalizeDir(value: unknown, sort: string): string {
+  const dir = stringValue(value)?.toLowerCase();
+  if (dir === 'asc' || dir === 'desc') return dir;
+  return sort === 'name' ? 'asc' : 'desc';
+}
+
+function resolveConfiguredMarketplaceBaseUrl(): string | undefined {
   return stringValue(process.env.OPENCLAW_CLAWHUB_URL)
-    ?? stringValue(process.env.CLAWHUB_URL)
-    ?? DEFAULT_CLAWHUB_MIRROR_URL;
+    ?? stringValue(process.env.CLAWHUB_URL);
+}
+
+function resolveMarketplaceSearchBaseUrl(): string {
+  return resolveConfiguredMarketplaceBaseUrl() ?? DEFAULT_CLAWHUB_MIRROR_URL;
+}
+
+function resolveMarketplaceInstallBaseUrl(version?: string): string {
+  const configuredUrl = resolveConfiguredMarketplaceBaseUrl();
+  if (configuredUrl) return configuredUrl;
+  return version ? DEFAULT_CLAWHUB_MIRROR_URL : DEFAULT_CLAWHUB_INSTALL_URL;
+}
+
+function isIncompatibleInstallResolutionError(error: string): boolean {
+  return /\bSkill\s+"(?:undefined|null)"\s+is not installable\b/i.test(error);
+}
+
+function normalizeInstallError(error: string, baseUrl: string): string {
+  if (isIncompatibleInstallResolutionError(error)) {
+    return `Marketplace install source returned an incompatible install response for "${baseUrl}"`;
+  }
+  return error;
+}
+
+function isCacheFresh(timestamp: number): boolean {
+  return Date.now() - timestamp < CLAWHUB_CACHE_TTL_MS;
+}
+
+function clawhubCatalogCacheKey(params: {
+  query: string;
+  sort: string;
+  dir: string;
+  cursor?: string;
+  limit: number;
+}): string {
+  return [
+    params.query,
+    params.sort,
+    params.dir,
+    params.cursor ?? '',
+    String(params.limit),
+  ].join('\u001f');
+}
+
+async function runClawHubConvexRequest<T>(
+  endpoint: 'query' | 'action',
+  path: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  const response = await fetch(`${CLAWHUB_CONVEX_BASE}/api/${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept-Encoding': 'identity',
+    },
+    body: JSON.stringify({
+      path,
+      format: 'convex_encoded_json',
+      args: [args],
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`ClawHub ${path} failed with HTTP ${response.status}`);
+  }
+
+  const payload = await response.json() as ClawHubConvexResponse<T>;
+  if (payload.status === 'success' && payload.value !== undefined) {
+    return payload.value;
+  }
+
+  const detail = stringValue(payload.errorMessage);
+  const errorData = payload.errorData === undefined ? '' : JSON.stringify(payload.errorData);
+  throw new Error(`ClawHub ${path} failed${detail ? `: ${detail}` : ''}${errorData ? ` (${errorData})` : ''}`);
+}
+
+async function loadClawHubTotalCount(force?: boolean): Promise<{ total: number; totalKnown: boolean }> {
+  if (!force && clawhubCountCache && isCacheFresh(clawhubCountCache.timestamp)) {
+    return { total: clawhubCountCache.total, totalKnown: true };
+  }
+
+  try {
+    const rawTotal = await runClawHubConvexRequest<number>('query', 'skills:countPublicSkills', {});
+    const total = Math.max(0, Math.round(numberValue(rawTotal) ?? 0));
+    clawhubCountCache = { total, timestamp: Date.now() };
+    return { total, totalKnown: true };
+  } catch (error) {
+    logger.warn('[clawhub] Failed to load marketplace total count:', error);
+    if (clawhubCountCache) {
+      return { total: clawhubCountCache.total, totalKnown: true };
+    }
+    return { total: 0, totalKnown: false };
+  }
+}
+
+async function loadClawHubListPage(params: {
+  sort: string;
+  dir: string;
+  cursor?: string;
+  limit: number;
+}): Promise<ClawHubListPage> {
+  const args: Record<string, unknown> = {
+    numItems: Math.min(params.limit, CLAWHUB_MAX_PAGE_SIZE),
+    sort: params.sort,
+    dir: params.dir,
+  };
+  if (params.cursor) {
+    args.cursor = params.cursor;
+  }
+  return await runClawHubConvexRequest<ClawHubListPage>('query', 'skills:listPublicPageV4', args);
+}
+
+function collectClawHubKeywords(entry: RawClawHubSkill): string[] | undefined {
+  const values = new Set<string>();
+  const add = (value: unknown) => {
+    const cleaned = stringValue(value);
+    if (!cleaned || cleaned.toLowerCase() === 'latest') return;
+    values.add(cleaned);
+  };
+
+  stringArrayValue(entry.metaContent?.Keywords)?.forEach(add);
+  stringArrayValue(entry.metaContent?.keywords)?.forEach(add);
+  stringArrayValue(entry.skill?.topics)?.forEach(add);
+  stringArrayValue(entry.skill?.categories)?.forEach(add);
+  stringArrayValue(entry.skill?.capabilityTags)?.forEach(add);
+  const tags = entry.skill?.tags;
+  if (tags && typeof tags === 'object' && !Array.isArray(tags)) {
+    Object.keys(tags).forEach(add);
+  }
+
+  return values.size > 0 ? [...values] : undefined;
+}
+
+function resolveClawHubOwner(entry: RawClawHubSkill): string | undefined {
+  return stringValue(entry.ownerHandle)
+    ?? stringValue(entry.owner?.displayName)
+    ?? stringValue(entry.owner?.handle);
 }
 
 async function fetchMarketplaceSkillDetail(
@@ -241,7 +439,7 @@ async function resolveMarketplaceLanguage(localeHint?: string): Promise<Language
 }
 
 function buildLocalizedFetch(language: LanguageCode): typeof fetch {
-  return async (input, init) => {
+  return (async (input, init) => {
     const headers = new Headers(init?.headers ?? {});
     if (!headers.has('Accept-Language')) {
       headers.set('Accept-Language', acceptLanguageFor(language));
@@ -250,7 +448,7 @@ function buildLocalizedFetch(language: LanguageCode): typeof fetch {
       ...init,
       headers,
     });
-  };
+  }) as typeof fetch;
 }
 
 function hasRuntimeFunction(value: unknown): value is (...args: unknown[]) => unknown {
@@ -307,11 +505,11 @@ async function resolveRuntimeModuleCandidates(): Promise<RuntimeModuleCandidate[
       path: join(distDir, entry),
       kind: 'legacy-skills-clawhub',
     }));
-  const statusCandidates = (await Promise.all(entries.map(async (entry) => (
+  const statusCandidates = (await Promise.all(entries.map(async (entry): Promise<RuntimeModuleCandidate | null> => (
     await isSkillsStatusModule(distDir, entry)
       ? {
           path: join(distDir, entry),
-          kind: 'skills-status' as const,
+          kind: 'skills-status',
         }
       : null
   )))).filter((candidate): candidate is RuntimeModuleCandidate => candidate !== null);
@@ -397,16 +595,120 @@ function mapSkillResult(entry: RawClawHubSkill, language: LanguageCode): Marketp
       ?? stringValue(entry.latestVersion?.version)
       ?? stringValue(entry.metaContent?.latest?.version)
       ?? '',
-    author: stringValue(entry.ownerHandle) ?? stringValue(entry.owner?.displayName) ?? stringValue(entry.owner?.handle),
-    downloads: numberValue(entry.downloads),
-    stars: numberValue(entry.stars),
-    keywords: stringArrayValue(entry.metaContent?.Keywords)
-      ?? stringArrayValue(entry.metaContent?.keywords),
+    provider: 'clawhub',
+    source: 'clawhub',
+    sourceUrl: `https://mirror-cn.clawhub.com/s/${slug}`,
+    author: resolveClawHubOwner(entry),
+    downloads: numberValue(entry.downloads) ?? numberValue(entry.skill?.stats?.downloads),
+    stars: numberValue(entry.stars) ?? numberValue(entry.skill?.stats?.stars),
+    keywords: collectClawHubKeywords(entry),
   };
 }
 
+function mapConvexSkillResult(entry: RawClawHubSkill, language: LanguageCode): MarketplaceSkillResult | null {
+  const skill = mapSkillResult(entry, language);
+  if (!skill) return null;
+  return {
+    ...skill,
+    keywords: collectClawHubKeywords(entry) ?? skill.keywords,
+  };
+}
+
+async function loadClawHubCatalog(params: {
+  query: string;
+  sort: string;
+  dir: string;
+  cursor?: string;
+  limit: number;
+  force?: boolean;
+  language: LanguageCode;
+}): Promise<MarketplaceSearchResult> {
+  const cacheKey = clawhubCatalogCacheKey(params);
+  if (!params.force) {
+    const cached = clawhubCatalogCache.get(cacheKey);
+    if (cached && isCacheFresh(cached.timestamp)) {
+      return cached.catalog;
+    }
+  }
+
+  let catalog: MarketplaceSearchResult;
+  if (params.query.length === 0) {
+    const loadedEntries: RawClawHubSkill[] = [];
+    let nextCursor = params.cursor;
+    let hasMore = false;
+
+    while (loadedEntries.length < params.limit) {
+      const remaining = params.limit - loadedEntries.length;
+      const page = await loadClawHubListPage({
+        sort: params.sort,
+        dir: params.dir,
+        cursor: nextCursor,
+        limit: remaining,
+      });
+      const batch = Array.isArray(page.page) ? page.page : [];
+      loadedEntries.push(...batch);
+      hasMore = Boolean(page.hasMore && stringValue(page.nextCursor));
+      nextCursor = hasMore ? stringValue(page.nextCursor) : undefined;
+      if (batch.length === 0 || !hasMore) break;
+    }
+
+    const { total, totalKnown } = await loadClawHubTotalCount(params.force);
+    const results = loadedEntries
+      .map((entry) => mapConvexSkillResult(entry, params.language))
+      .filter((skill): skill is MarketplaceSkillResult => skill !== null);
+
+    catalog = {
+      results,
+      total,
+      loaded: results.length,
+      totalKnown,
+      catalogTotal: total,
+      catalogTotalKnown: totalKnown,
+      source: 'clawhub',
+      query: '',
+      sort: params.sort,
+      dir: params.dir,
+      hasMore,
+      nextCursor: nextCursor ?? '',
+    };
+  } else {
+    const effectiveLimit = Math.min(params.limit, MAX_SEARCH_LIMIT);
+    const [entries, catalogCount] = await Promise.all([
+      runClawHubConvexRequest<RawClawHubSkill[]>('action', 'search:searchSkills', {
+        query: params.query,
+        limit: effectiveLimit,
+      }),
+      loadClawHubTotalCount(params.force),
+    ]);
+    const results = (Array.isArray(entries) ? entries : [])
+      .map((entry) => mapConvexSkillResult(entry, params.language))
+      .filter((skill): skill is MarketplaceSkillResult => skill !== null);
+
+    catalog = {
+      results,
+      total: results.length,
+      loaded: results.length,
+      totalKnown: true,
+      catalogTotal: catalogCount.total,
+      catalogTotalKnown: catalogCount.totalKnown,
+      source: 'clawhub',
+      query: params.query,
+      sort: params.sort,
+      dir: params.dir,
+      hasMore: false,
+      nextCursor: '',
+    };
+  }
+
+  clawhubCatalogCache.set(cacheKey, {
+    timestamp: Date.now(),
+    catalog,
+  });
+  return catalog;
+}
+
 class ClawHubMarketplaceExtension implements MarketplaceProviderExtension {
-  readonly id = 'builtin/clawhub-marketplace';
+  readonly id = 'clawhub';
 
   setup(_ctx: ExtensionContext): void {
     // Runtime is loaded lazily so startup still works if OpenClaw is being prepared.
@@ -431,19 +733,47 @@ class ClawHubMarketplaceExtension implements MarketplaceProviderExtension {
     }
   }
 
-  async search(params: MarketplaceSearchParams): Promise<MarketplaceSkillResult[]> {
+  async search(params: MarketplaceSearchParams): Promise<MarketplaceSearchResult> {
     const runtime = await loadRuntimeModule();
     const language = await resolveMarketplaceLanguage(params.locale);
-    const query = stringValue(params.query) ?? DEFAULT_MARKETPLACE_QUERY;
+    const query = stringValue(params.query) ?? '';
+    const sort = normalizeSort(params.sort, query.length > 0);
+    const dir = normalizeDir(params.dir, sort);
+
+    if (!resolveConfiguredMarketplaceBaseUrl()) {
+      return await loadClawHubCatalog({
+        query,
+        sort,
+        dir,
+        cursor: stringValue(params.cursor),
+        limit: query.length === 0 ? normalizeBrowseLimit(params.limit) : normalizeLimit(params.limit),
+        force: params.force,
+        language,
+      });
+    }
+
+    const effectiveQuery = query || DEFAULT_MARKETPLACE_QUERY;
     const skills = await runtime.searchSkillsFromClawHub({
-      query,
+      query: effectiveQuery,
       limit: normalizeLimit(params.limit),
-      baseUrl: resolveMarketplaceBaseUrl(),
+      baseUrl: resolveMarketplaceSearchBaseUrl(),
       fetchImpl: buildLocalizedFetch(language),
     });
-    return skills
+    const results = skills
       .map((skill) => mapSkillResult(skill, language))
       .filter((skill): skill is MarketplaceSkillResult => skill !== null);
+    return {
+      results,
+      total: results.length,
+      loaded: results.length,
+      totalKnown: true,
+      source: 'clawhub',
+      query,
+      sort,
+      dir,
+      hasMore: false,
+      nextCursor: '',
+    };
   }
 
   async install(params: MarketplaceInstallParams): Promise<void> {
@@ -454,11 +784,13 @@ class ClawHubMarketplaceExtension implements MarketplaceProviderExtension {
 
     const runtime = await loadRuntimeModule();
     const language = await resolveMarketplaceLanguage();
-    const baseUrl = resolveMarketplaceBaseUrl();
+    const version = stringValue(params.version);
+    const baseUrl = resolveMarketplaceInstallBaseUrl(version);
+    logger.info(`[clawhub] Installing marketplace skill "${slug}" from ${baseUrl}`);
     const result = await runtime.installSkillFromClawHub({
       workspaceDir: getOpenClawConfigDir(),
       slug,
-      version: stringValue(params.version),
+      version,
       force: params.force,
       baseUrl,
       logger: {
@@ -467,7 +799,7 @@ class ClawHubMarketplaceExtension implements MarketplaceProviderExtension {
     });
 
     if (result && result.ok === false) {
-      throw new Error(result.error || `Failed to install skill "${slug}"`);
+      throw new Error(normalizeInstallError(result.error || `Failed to install skill "${slug}"`, baseUrl));
     }
 
     await persistInstalledMarketplaceMetadata({

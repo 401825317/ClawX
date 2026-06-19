@@ -6,7 +6,7 @@ import type { HostApiContext } from '../api/context';
 import type {
   MarketplaceSearchParams,
   MarketplaceInstallParams,
-  MarketplaceSkillResult,
+  MarketplaceSearchProviderResult,
   ClawHubSearchParams,
   ClawHubInstallParams,
   ClawHubSkillResult,
@@ -44,7 +44,7 @@ export interface MarketplaceCapability {
 
 export interface MarketplaceProviderExtension extends Extension {
   getCapability(): Promise<MarketplaceCapability>;
-  search(params: MarketplaceSearchParams): Promise<MarketplaceSkillResult[]>;
+  search(params: MarketplaceSearchParams): Promise<MarketplaceSearchProviderResult>;
   install(params: MarketplaceInstallParams): Promise<void>;
 }
 
