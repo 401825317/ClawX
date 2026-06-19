@@ -42,6 +42,7 @@ import { GeneratedFilesPanel } from '@/components/file-preview/GeneratedFilesPan
 import type { FilePreviewTarget } from '@/components/file-preview/types';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import type { AttachedFileMeta } from '@/stores/chat/types';
+import { getAgentAvatar } from '@/lib/agent-avatars';
 import { toast } from 'sonner';
 
 const ArtifactPanelLazy = lazy(() =>
@@ -196,6 +197,9 @@ export function Chat() {
     () => (agentsList ?? []).find((a) => a.id === currentAgentId) ?? null,
     [agentsList, currentAgentId],
   );
+  const currentAgentAvatarSrc = currentAgent?.profile?.avatarId
+    ? getAgentAvatar(currentAgent.profile.avatarId).src
+    : null;
   const panelOpen = useArtifactPanel((s) => s.open);
   const panelWidthPct = useArtifactPanel((s) => s.widthPct);
   const openChanges = useArtifactPanel((s) => s.openChanges);
@@ -957,6 +961,7 @@ export function Chat() {
                       <ChatMessage
                         message={msg}
                         textOverride={replyTextOverrides.get(idx)}
+                        assistantAvatarSrc={currentAgentAvatarSrc}
                         suppressAssistantText={isFoldedNarration}
                         suppressToolCards={suppressToolCards}
                         suppressProcessAttachments={suppressToolCards}
@@ -1022,6 +1027,7 @@ export function Chat() {
                   ) && (
                     <ChatMessage
                       suppressToolCards={hasActiveExecutionGraph || runSegmentMessageIndices.size > 0}
+                      assistantAvatarSrc={currentAgentAvatarSrc}
                       message={(() => {
                         const base = streamMsg
                           ? {

@@ -466,6 +466,29 @@ describe('ChatMessage reply styling', () => {
     expect(bubble).not.toBeNull();
     expect(bubble).toHaveTextContent('Keep the prompt bubble.');
   });
+
+  it('renders the selected agent avatar for assistant replies', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'I am your design assistant.',
+    };
+
+    render(<ChatMessage message={message} assistantAvatarSrc="/assets/agent-avatars/creator.webp" />);
+
+    const avatar = screen.getByTestId('assistant-agent-avatar');
+    expect(avatar).toHaveAttribute('src', '/assets/agent-avatars/creator.webp');
+  });
+
+  it('does not render an assistant avatar image for user messages', () => {
+    const message: RawMessage = {
+      role: 'user',
+      content: 'Hello.',
+    };
+
+    render(<ChatMessage message={message} assistantAvatarSrc="/assets/agent-avatars/creator.webp" />);
+
+    expect(screen.queryByTestId('assistant-agent-avatar')).not.toBeInTheDocument();
+  });
 });
 
 describe('ChatMessage image copy', () => {

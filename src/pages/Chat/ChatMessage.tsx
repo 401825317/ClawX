@@ -23,6 +23,7 @@ import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
 interface ChatMessageProps {
   message: RawMessage;
   textOverride?: string;
+  assistantAvatarSrc?: string | null;
   suppressToolCards?: boolean;
   suppressProcessAttachments?: boolean;
   /**
@@ -232,6 +233,7 @@ function imageSrc(img: ExtractedImage): string | null {
 export const ChatMessage = memo(function ChatMessage({
   message,
   textOverride,
+  assistantAvatarSrc,
   suppressToolCards = false,
   suppressProcessAttachments = false,
   suppressAssistantText = false,
@@ -352,8 +354,12 @@ export const ChatMessage = memo(function ChatMessage({
           sit alongside a single line of text. */}
       {!isUser && (
         <div className="flex h-6 shrink-0 items-center">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-black/5 dark:bg-white/5 text-foreground">
-            <Sparkles className="h-4 w-4" />
+          <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-black/5 dark:bg-white/5 text-foreground">
+            {assistantAvatarSrc ? (
+              <img src={assistantAvatarSrc} alt="" data-testid="assistant-agent-avatar" className="h-full w-full object-cover" />
+            ) : (
+              <Sparkles className="h-4 w-4" />
+            )}
           </div>
         </div>
       )}
@@ -915,4 +921,3 @@ function ImageLightbox({
     document.body,
   );
 }
-
