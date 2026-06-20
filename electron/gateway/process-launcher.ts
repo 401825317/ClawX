@@ -1,195 +1,26 @@
 import { app, utilityProcess } from 'electron';
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync } from 'fs';
 import path from 'path';
 import type { GatewayLaunchContext } from './config-sync';
 import type { GatewayLifecycleState } from './process-policy';
 import { logger } from '../utils/logger';
 import { appendNodeRequireToNodeOptions } from '../utils/paths';
 
-const GATEWAY_CHILD_PROCESS_PATCH_SOURCE = `
-(function () {
-  function valueReferencesElectronExecPath(value, execPath) {
-    if (!execPath) return false;
-    if (typeof value === 'string') return value.indexOf(execPath) !== -1;
-    if (Array.isArray(value)) {
-      for (var i = 0; i < value.length; i++) {
-        if (valueReferencesElectronExecPath(value[i], execPath)) return true;
-      }
-    }
-    return false;
-  }
-
-  function ensureElectronRunAsNodeForChildProcess(method, args) {
-    var shouldPatch = false;
-    try {
-      shouldPatch = method === 'fork'
-        || valueReferencesElectronExecPath(args[0], process.execPath)
-        || valueReferencesElectronExecPath(args[1], process.execPath);
-    } catch (e) {
-      shouldPatch = false;
-    }
-    if (!shouldPatch) return args;
-
-    var optIdx = -1;
-    for (var i = 1; i < args.length; i++) {
-      var a = args[i];
-      if (typeof a === 'function') break;
-      if (a && typeof a === 'object' && !Array.isArray(a)) {
-        optIdx = i;
-        break;
-      }
-    }
-
-    var opts = optIdx >= 0 ? Object.assign({}, args[optIdx]) : {};
-    var hasExplicitEnv = Object.prototype.hasOwnProperty.call(opts, 'env');
-    var baseEnv = hasExplicitEnv && opts.env && typeof opts.env === 'object'
-      ? opts.env
-      : process.env;
-    opts.env = Object.assign({}, baseEnv, { ELECTRON_RUN_AS_NODE: '1' });
-
-    if (optIdx >= 0) {
-      args[optIdx] = opts;
-      return args;
-    }
-
-    if (typeof args[args.length - 1] === 'function') {
-      args.splice(args.length - 1, 0, opts);
-    } else {
-      args.push(opts);
-    }
-    return args;
-  }
-
-  try {
-    var cp = require('node:child_process');
-    if (!cp.__clawxElectronRunAsNodePatched) {
-      cp.__clawxElectronRunAsNodePatched = true;
-      var methods = ['spawn', 'exec', 'execFile', 'fork', 'spawnSync', 'execSync', 'execFileSync'];
-      methods.forEach(function(method) {
-        var original = cp[method];
-        if (typeof original !== 'function') return;
-        cp[method] = function() {
-          var args = Array.prototype.slice.call(arguments);
-          ensureElectronRunAsNodeForChildProcess(method, args);
-          if (process.platform === 'win32') {
-            var optIdx = -1;
-            for (var i = 1; i < args.length; i++) {
-              var a = args[i];
-              if (a && typeof a === 'object' && !Array.isArray(a)) {
-                optIdx = i;
-                break;
-              }
-            }
-            if (optIdx >= 0) {
-              args[optIdx].windowsHide = true;
-            } else {
-              var opts = { windowsHide: true };
-              if (typeof args[args.length - 1] === 'function') {
-                args.splice(args.length - 1, 0, opts);
-              } else {
-                args.push(opts);
-              }
-            }
-          }
-          return original.apply(this, args);
-        };
-      });
-      try {
-        var moduleApi = require('node:module');
-        if (typeof moduleApi.syncBuiltinESMExports === 'function') {
-          moduleApi.syncBuiltinESMExports();
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
-  } catch (e) {
-    // ignore
-  }
-})();
-`;
-
-const GATEWAY_FETCH_PRELOAD_SOURCE = `'use strict';
-(function () {
-  var _f = globalThis.fetch;
-  if (typeof _f !== 'function') return;
-  if (globalThis.__clawxFetchPatched) return;
-  globalThis.__clawxFetchPatched = true;
-
-  globalThis.fetch = function clawxFetch(input, init) {
-    var url =
-      typeof input === 'string' ? input
-        : input && typeof input === 'object' && typeof input.url === 'string'
-          ? input.url : '';
-
-    if (url.indexOf('openrouter.ai') !== -1) {
-      init = init ? Object.assign({}, init) : {};
-      var prev = init.headers;
-      var flat = {};
-      if (prev && typeof prev.forEach === 'function') {
-        prev.forEach(function (v, k) { flat[k] = v; });
-      } else if (prev && typeof prev === 'object') {
-        Object.assign(flat, prev);
-      }
-      delete flat['http-referer'];
-      delete flat['HTTP-Referer'];
-      delete flat['x-title'];
-      delete flat['X-Title'];
-      delete flat['x-openrouter-title'];
-      delete flat['X-OpenRouter-Title'];
-      flat['HTTP-Referer'] = 'https://claw-x.com';
-      flat['X-OpenRouter-Title'] = 'UClaw';
-      init.headers = flat;
-    }
-    return _f.call(globalThis, input, init);
-  };
-})();
-${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
-`;
-
 const DEFAULT_CLAWHUB_MIRROR_URL = 'https://mirror-cn.clawhub.com';
 
-export function buildGatewayFetchPreloadSource(): string {
-  return GATEWAY_FETCH_PRELOAD_SOURCE;
+function resolveGatewayStaticScript(name: string): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'app.asar', 'dist-electron', 'main', name);
+  }
+  return path.join(__dirname, name);
 }
 
-export function buildGatewayEntryWrapperSource(): string {
-  return `'use strict';
-${GATEWAY_CHILD_PROCESS_PATCH_SOURCE}
-(async function () {
-  var entry = process.env.CLAWX_OPENCLAW_ENTRY;
-  if (!entry) {
-    throw new Error('CLAWX_OPENCLAW_ENTRY is required to launch OpenClaw Gateway');
-  }
-  process.argv[1] = entry;
-  var pathToFileURL = require('node:url').pathToFileURL;
-  await import(pathToFileURL(entry).href);
-})().catch(function (error) {
-  var message = error && (error.stack || error.message) ? (error.stack || error.message) : String(error);
-  process.stderr.write('[clawx-gateway-wrapper] ' + message + '\\n');
-  process.exit(1);
-});
-`;
+export function getGatewayFetchPreloadPath(): string {
+  return resolveGatewayStaticScript('gateway-fetch-preload.cjs');
 }
 
-function ensureGatewayFetchPreload(): string {
-  const dest = path.join(app.getPath('userData'), 'gateway-fetch-preload.cjs');
-  try {
-    writeFileSync(dest, GATEWAY_FETCH_PRELOAD_SOURCE, 'utf-8');
-  } catch {
-    // best-effort
-  }
-  return dest;
-}
-
-function ensureGatewayEntryWrapper(): string {
-  const dest = path.join(app.getPath('userData'), 'gateway-entry-wrapper.cjs');
-  try {
-    writeFileSync(dest, buildGatewayEntryWrapperSource(), 'utf-8');
-  } catch {
-    // best-effort
-  }
-  return dest;
+export function getGatewayEntryWrapperPath(): string {
+  return resolveGatewayStaticScript('gateway-entry-wrapper.cjs');
 }
 
 export async function launchGatewayProcess(options: {
@@ -245,7 +76,7 @@ export async function launchGatewayProcess(options: {
   runtimeEnv.OPENCLAW_DISABLE_BONJOUR = '1';
   runtimeEnv.CLAWX_OPENCLAW_ENTRY = entryScript;
 
-  const gatewayEntryScript = ensureGatewayEntryWrapper();
+  const gatewayEntryScript = getGatewayEntryWrapperPath();
 
   // Only apply the fetch/child_process preload in dev mode.
   // In packaged builds Electron's UtilityProcess rejects NODE_OPTIONS
@@ -253,7 +84,7 @@ export async function launchGatewayProcess(options: {
   // packaged apps" and the preload never loads.
   if (!app.isPackaged) {
     try {
-      const preloadPath = ensureGatewayFetchPreload();
+      const preloadPath = getGatewayFetchPreloadPath();
       if (existsSync(preloadPath)) {
         runtimeEnv.NODE_OPTIONS = appendNodeRequireToNodeOptions(
           runtimeEnv.NODE_OPTIONS,

@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
-import { existsSync, readFileSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
+import type { Plugin } from 'vite';
 
 function getExtensionPackages(): Set<string> {
   try {
@@ -27,6 +28,26 @@ function getExtensionPackages(): Set<string> {
 }
 
 const extensionPackages = getExtensionPackages();
+
+function copyGatewayStaticScripts(): Plugin {
+  const sourceDir = resolve(__dirname, 'electron/gateway');
+  const outputDir = resolve(__dirname, 'dist-electron/main');
+  const files = [
+    'gateway-child-process-patch.cjs',
+    'gateway-entry-wrapper.cjs',
+    'gateway-fetch-preload.cjs',
+  ];
+
+  return {
+    name: 'copy-gateway-static-scripts',
+    closeBundle() {
+      mkdirSync(outputDir, { recursive: true });
+      for (const file of files) {
+        copyFileSync(resolve(sourceDir, file), resolve(outputDir, file));
+      }
+    },
+  };
+}
 
 function isMainProcessExternal(id: string): boolean {
   if (!id || id.startsWith('\0')) return false;
@@ -61,6 +82,7 @@ export default defineConfig(({ mode }) => {
             options.startup();
           },
           vite: {
+            plugins: [copyGatewayStaticScripts()],
             build: {
               outDir: 'dist-electron/main',
               rollupOptions: {
