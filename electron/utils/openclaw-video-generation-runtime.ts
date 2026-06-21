@@ -264,9 +264,7 @@ function buildDirectVideoRequestBody(params: {
 
   const firstImage = params.inputImages?.find((image) => image.buffer && image.buffer.length > 0);
   if (firstImage?.buffer) {
-    body.input_reference = {
-      image_url: bufferToDataUrl(firstImage.buffer, firstImage.mimeType || 'image/png'),
-    };
+    body.input_reference = bufferToDataUrl(firstImage.buffer, firstImage.mimeType || 'image/png');
   }
 
   return body;

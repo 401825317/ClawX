@@ -105,7 +105,8 @@ describe('generateVideoInProcess direct OpenAI-compatible video path', () => {
       prompt: 'animate this frame',
       model: 'grok-video-1.5',
     });
-    expect(body.input_reference.image_url).toMatch(/^data:image\/png;base64,/);
+    expect(typeof body.input_reference).toBe('string');
+    expect(body.input_reference).toMatch(/^data:image\/png;base64,/);
   });
 
   it('rejects grok-video-1.5 without exactly one reference image before calling the backend', async () => {
