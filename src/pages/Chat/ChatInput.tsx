@@ -32,7 +32,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { rendererExtensionRegistry } from '@/extensions/registry';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
-import type { ChatImageSendOptions, ChatSendMode } from '@/stores/chat/types';
+import type { ChatImageSendOptions, ChatSendMode, ChatVideoSendOptions } from '@/stores/chat/types';
 import { Select } from '@/components/ui/select';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -55,6 +55,7 @@ interface ChatInputProps {
     targetAgentId?: string | null,
     mode?: ChatSendMode,
     imageOptions?: ChatImageSendOptions,
+    videoOptions?: ChatVideoSendOptions,
   ) => void;
   onStop?: () => void;
   disabled?: boolean;
@@ -71,6 +72,18 @@ const IMAGE_QUALITY_OPTIONS = [
   { value: 'low', labelKey: 'composer.imageQualityLow' },
   { value: 'medium', labelKey: 'composer.imageQualityMedium' },
   { value: 'high', labelKey: 'composer.imageQualityHigh' },
+] as const;
+
+const VIDEO_SIZE_OPTIONS = [
+  { value: '1280x720', label: '16:9' },
+  { value: '720x1280', label: '9:16' },
+  { value: '1024x1024', label: '1:1' },
+] as const;
+
+const VIDEO_DURATION_OPTIONS = [
+  { value: 4, label: '4s' },
+  { value: 6, label: '6s' },
+  { value: 10, label: '10s' },
 ] as const;
 
 interface RemoteModelOption {
@@ -241,6 +254,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
   const [sessionSendModes, setSessionSendModes] = useState<Record<string, ChatSendMode>>({});
   const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, ChatImageSendOptions>>({});
+  const [sessionVideoOptions, setSessionVideoOptions] = useState<Record<string, ChatVideoSendOptions>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
@@ -268,6 +282,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   );
   const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
   const imageOptions = sessionImageOptions[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' };
+  const videoOptions = sessionVideoOptions[currentSessionKey] ?? { size: '1280x720', durationSeconds: 4 };
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
@@ -749,11 +764,18 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-    onSend(textToSend, attachmentsToSend, targetAgentId, sendMode, sendMode === 'image' ? imageOptions : undefined);
+    onSend(
+      textToSend,
+      attachmentsToSend,
+      targetAgentId,
+      sendMode,
+      sendMode === 'image' ? imageOptions : undefined,
+      sendMode === 'video' ? videoOptions : undefined,
+    );
     setTargetAgentId(null);
     setPickerOpen(false);
     setSkillPickerOpen(false);
-  }, [attachments, canSend, imageOptions, input, onSend, sendMode, targetAgentId]);
+  }, [attachments, canSend, imageOptions, input, onSend, sendMode, targetAgentId, videoOptions]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -1179,6 +1201,27 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                 <ImageIcon className="h-4 w-4 shrink-0" />
                 <span>{t('composer.imageGenerateLabel', '图像生成')}</span>
               </button>
+              <button
+                type="button"
+                data-testid="chat-composer-mode-video"
+                className={cn(
+                  'ml-1 inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors',
+                  sendMode === 'video'
+                    ? 'bg-black/10 text-foreground dark:bg-white/10'
+                    : 'hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground',
+                )}
+                onClick={() => {
+                  setSessionSendModes((current) => ({
+                    ...current,
+                    [currentSessionKey]: current[currentSessionKey] === 'video' ? 'chat' : 'video',
+                  }));
+                }}
+                disabled={inputDisabled || sending}
+                title={sendMode === 'video' ? t('composer.videoModeActive', 'Video mode on') : t('composer.videoMode', 'Video')}
+              >
+                <Film className="h-4 w-4 shrink-0" />
+                <span>{t('composer.videoGenerateLabel', 'Video')}</span>
+              </button>
             </div>
 
             {sendMode === 'image' && (
@@ -1231,6 +1274,55 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             )}
 
             {/* Send Button — pushed to the right */}
+            {sendMode === 'video' && (
+              <div className="ml-2 flex items-center gap-2" data-testid="chat-video-options">
+                <Select
+                  value={videoOptions.size}
+                  onChange={(e) => {
+                    const size = e.target.value as ChatVideoSendOptions['size'];
+                    setSessionVideoOptions((current) => ({
+                      ...current,
+                      [currentSessionKey]: {
+                        ...(current[currentSessionKey] ?? { size: '1280x720', durationSeconds: 4 }),
+                        size,
+                      },
+                    }));
+                  }}
+                  className="h-8 w-[82px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
+                  data-testid="chat-video-size"
+                  aria-label={t('composer.videoSizeLabel', 'Video size')}
+                >
+                  {VIDEO_SIZE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={String(videoOptions.durationSeconds)}
+                  onChange={(e) => {
+                    const durationSeconds = Number(e.target.value) as ChatVideoSendOptions['durationSeconds'];
+                    setSessionVideoOptions((current) => ({
+                      ...current,
+                      [currentSessionKey]: {
+                        ...(current[currentSessionKey] ?? { size: '1280x720', durationSeconds: 4 }),
+                        durationSeconds,
+                      },
+                    }));
+                  }}
+                  className="h-8 w-[74px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
+                  data-testid="chat-video-duration"
+                  aria-label={t('composer.videoDurationLabel', 'Video duration')}
+                >
+                  {VIDEO_DURATION_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
+
             <Button
               onClick={sending ? handleStop : handleSend}
               disabled={sending ? !canStop : !canSend}

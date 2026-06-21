@@ -401,6 +401,7 @@ export const ChatMessage = memo(function ChatMessage({
           <div className="flex flex-wrap gap-2">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
+              const isVideo = file.mimeType.startsWith('video/');
               // Skip image attachments if we already have images from content blocks
               if (isImage && resolvableContentImages.length > 0) return null;
               if (isImage) {
@@ -418,6 +419,9 @@ export const ChatMessage = memo(function ChatMessage({
                 );
               }
               // Non-image files → file card
+              if (isVideo) {
+                return <VideoPreviewCard key={`local-${i}`} file={file} onOpen={onOpenFile} />;
+              }
               return <FileCard key={`local-${i}`} file={file} onOpen={onOpenFile} />;
             })}
           </div>
@@ -457,6 +461,7 @@ export const ChatMessage = memo(function ChatMessage({
           <div className="flex flex-wrap gap-2">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
+              const isVideo = file.mimeType.startsWith('video/');
               if (isImage && resolvableContentImages.length > 0) return null;
               if (isImage && file.preview) {
                 return (
@@ -472,6 +477,9 @@ export const ChatMessage = memo(function ChatMessage({
               }
               if (isImage && !file.preview) {
                 return <ImagePreviewPlaceholder key={`local-${i}`} file={file} />;
+              }
+              if (isVideo) {
+                return <VideoPreviewCard key={`local-${i}`} file={file} onOpen={onOpenFile} />;
               }
               return <FileCard key={`local-${i}`} file={file} onOpen={onOpenFile} />;
             })}
@@ -752,6 +760,56 @@ function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: At
           {file.mimeType === DIRECTORY_MIME_TYPE ? '文件夹' : file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File'}
         </p>
       </div>
+    </div>
+  );
+}
+
+function mediaSrcFromFilePath(filePath: string | undefined): string | null {
+  if (!filePath) return null;
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed) || /^file:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+  const normalized = trimmed.replace(/\\/g, '/');
+  const fileUrl = normalized.startsWith('/')
+    ? `file://${normalized}`
+    : `file:///${normalized}`;
+  return encodeURI(fileUrl);
+}
+
+function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
+  const src = mediaSrcFromFilePath(file.filePath);
+  const handleOpen = useCallback(() => {
+    if (!file.filePath) return;
+    if (onOpen) {
+      onOpen(file);
+    } else {
+      invokeIpc('shell:openPath', file.filePath);
+    }
+  }, [file, onOpen]);
+
+  if (!src) {
+    return <FileCard file={file} onOpen={onOpen} />;
+  }
+
+  return (
+    <div className="group flex w-full max-w-[360px] flex-col overflow-hidden rounded-xl border border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/5">
+      <video
+        src={src}
+        controls
+        preload="metadata"
+        className="aspect-video w-full bg-black object-contain"
+      />
+      <button
+        type="button"
+        onClick={handleOpen}
+        className="flex items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5"
+        title={file.filePath}
+      >
+        <Film className="h-4 w-4 shrink-0" />
+        <span className="truncate">{file.fileName}</span>
+      </button>
     </div>
   );
 }

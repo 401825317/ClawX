@@ -48,6 +48,7 @@ import {
   type ChatSendMode,
   type ChatSession,
   type ChatState,
+  type ChatVideoSendOptions,
   type ContentBlock,
   type RawMessage,
   type ToolStatus,
@@ -212,6 +213,7 @@ type SessionRunState = Pick<
   ChatState,
   | 'sending'
   | 'pendingImageGenerationLocal'
+  | 'pendingVideoGenerationLocal'
   | 'activeRunId'
   | 'pendingFinal'
   | 'lastUserMessageAt'
@@ -224,6 +226,7 @@ type SessionRunState = Pick<
 const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
   sending: false,
   pendingImageGenerationLocal: false,
+  pendingVideoGenerationLocal: false,
   activeRunId: null,
   pendingFinal: false,
   lastUserMessageAt: null,
@@ -489,6 +492,7 @@ function captureSessionRunState(sessionKey: string, state: SessionRunState): voi
   _sessionRunStateCache.set(sessionKey, {
     sending: state.sending,
     pendingImageGenerationLocal: state.pendingImageGenerationLocal,
+    pendingVideoGenerationLocal: state.pendingVideoGenerationLocal,
     activeRunId: state.activeRunId,
     pendingFinal: state.pendingFinal,
     lastUserMessageAt: state.lastUserMessageAt,
@@ -505,6 +509,7 @@ function getCachedSessionRunState(sessionKey: string): SessionRunState {
   return {
     sending: cached.sending,
     pendingImageGenerationLocal: cached.pendingImageGenerationLocal,
+    pendingVideoGenerationLocal: cached.pendingVideoGenerationLocal,
     activeRunId: cached.activeRunId,
     pendingFinal: cached.pendingFinal,
     lastUserMessageAt: cached.lastUserMessageAt,
@@ -523,6 +528,7 @@ function cloneSessionRunState(state: SessionRunState): SessionRunState {
   return {
     sending: state.sending,
     pendingImageGenerationLocal: state.pendingImageGenerationLocal,
+    pendingVideoGenerationLocal: state.pendingVideoGenerationLocal,
     activeRunId: state.activeRunId,
     pendingFinal: state.pendingFinal,
     lastUserMessageAt: state.lastUserMessageAt,
@@ -1013,7 +1019,17 @@ function extractMediaRefs(text: string): Array<{ filePath: string; mimeType: str
 
 /** Map common file extensions to MIME types */
 function mimeFromExtension(filePath: string): string {
-  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  let pathForExtension = filePath.trim();
+  if (/^https?:\/\//i.test(pathForExtension)) {
+    try {
+      pathForExtension = new URL(pathForExtension).pathname;
+    } catch {
+      pathForExtension = pathForExtension.split(/[?#]/)[0] || pathForExtension;
+    }
+  } else {
+    pathForExtension = pathForExtension.split(/[?#]/)[0] || pathForExtension;
+  }
+  const ext = pathForExtension.split('.').pop()?.toLowerCase() || '';
   const map: Record<string, string> = {
     // Images
     'png': 'image/png',
@@ -1061,6 +1077,12 @@ function mimeFromExtension(filePath: string): string {
   return map[ext] || 'application/octet-stream';
 }
 
+function mimeFromTaggedMediaRef(filePath: string): string {
+  const mimeType = mimeFromExtension(filePath);
+  if (mimeType !== 'application/octet-stream') return mimeType;
+  return /^https?:\/\//i.test(filePath.trim()) ? 'video/mp4' : mimeType;
+}
+
 function extractFilePathsFromToolArgs(args: Record<string, unknown>): string[] {
   const paths: string[] = [];
   const direct = args.file_path ?? args.filePath ?? args.path ?? args.file;
@@ -1082,6 +1104,23 @@ function extractFilePathsFromToolArgs(args: Record<string, unknown>): string[] {
 }
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
+
+function looksLikeRemoteMediaUrl(filePath: string): boolean {
+  return /^https?:\/\//i.test(filePath.trim());
+}
+
+function fileNameFromMediaRef(filePath: string): string {
+  if (looksLikeRemoteMediaUrl(filePath)) {
+    try {
+      const parsed = new URL(filePath);
+      const remoteName = parsed.pathname.split('/').filter(Boolean).pop();
+      if (remoteName) return remoteName;
+    } catch {
+      // Fall through to path-style parsing below.
+    }
+  }
+  return filePath.split(/[\\/]/).pop()?.split(/[?#]/)[0] || 'file';
+}
 
 function trimPathTerminators(filePath: string): string {
   return filePath.replace(/[，。；;,.!?]+$/u, '');
@@ -1116,6 +1155,17 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
   const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/|[A-Za-z]:\\\\)[^\\n"'()\\[\\],<>` + '`' + `]*?\\.(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>` + '`' + `]|[，。；;,.!?])`, 'g');
   let workingText = text;
   let taggedMatch: RegExpExecArray | null;
+  const taggedRemoteRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):(https?:\\/\\/[^\\s\\n"'()\\[\\],<>` + '`' + `]+)`, 'g');
+  while ((taggedMatch = taggedRemoteRegex.exec(text)) !== null) {
+    const p = trimPathTerminators(taggedMatch[1] || '');
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      refs.push({ filePath: p, mimeType: mimeFromTaggedMediaRef(p) });
+    }
+    const start = taggedMatch.index;
+    const end = start + taggedMatch[0].length;
+    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
+  }
   while ((taggedMatch = taggedRegex.exec(text)) !== null) {
     const p = taggedMatch[1];
     if (p && !seen.has(p)) {
@@ -1228,7 +1278,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
 function makeAttachedFile(ref: { filePath: string; mimeType: string }): AttachedFileMeta {
   const cached = _imageCache.get(ref.filePath);
   if (cached) return { ...cached, filePath: ref.filePath };
-  const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
+  const fileName = fileNameFromMediaRef(ref.filePath);
   return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath };
 }
 
@@ -1724,6 +1774,8 @@ function reconcileCurrentSessionIdleFromBackend(
 
   set({
     sending: false,
+    pendingImageGenerationLocal: false,
+    pendingVideoGenerationLocal: false,
     activeRunId: null,
     pendingFinal: false,
     lastUserMessageAt: null,
@@ -1997,6 +2049,7 @@ function buildSessionSwitchPatch(
     | 'thinkingLevel'
     | 'sending'
     | 'pendingImageGenerationLocal'
+    | 'pendingVideoGenerationLocal'
     | 'activeRunId'
     | 'pendingFinal'
     | 'lastUserMessageAt'
@@ -2718,6 +2771,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sending: false,
   pendingImageGenerationLocal: false,
+  pendingVideoGenerationLocal: false,
   activeRunId: null,
   streamingText: '',
   streamingMessage: null,
@@ -2994,6 +3048,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streamingMessage: null,
         streamingTools: [],
         activeRunId: null,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
         error: null,
         runError: null,
         pendingFinal: false,
@@ -3368,6 +3424,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearHistoryPoll();
         set({
           sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
           activeRunId: null,
           pendingFinal: false,
           lastUserMessageAt: null,
@@ -3419,7 +3477,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         if (recentAssistant) {
           clearHistoryPoll();
-          set({ sending: false, activeRunId: null, pendingFinal: false, runError: null });
+          set({
+            sending: false,
+            pendingImageGenerationLocal: false,
+            pendingVideoGenerationLocal: false,
+            activeRunId: null,
+            pendingFinal: false,
+            runError: null,
+          });
           captureSessionRunState(currentSessionKey, DEFAULT_SESSION_RUN_STATE);
         }
       }
@@ -3441,6 +3506,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearHistoryPoll();
           set({
             sending: false,
+            pendingImageGenerationLocal: false,
+            pendingVideoGenerationLocal: false,
             activeRunId: null,
             pendingFinal: false,
             lastUserMessageAt: null,
@@ -3455,6 +3522,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearHistoryPoll();
           set({
             sending: false,
+            pendingImageGenerationLocal: false,
+            pendingVideoGenerationLocal: false,
             activeRunId: null,
             pendingFinal: false,
             lastUserMessageAt: null,
@@ -3471,6 +3540,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearHistoryPoll();
           set({
             sending: false,
+            pendingImageGenerationLocal: false,
+            pendingVideoGenerationLocal: false,
             activeRunId: null,
             pendingFinal: false,
             lastUserMessageAt: null,
@@ -3506,6 +3577,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearHistoryPoll();
         set({
           sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
           activeRunId: null,
           pendingFinal: false,
           lastUserMessageAt: null,
@@ -3779,6 +3852,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     targetAgentId?: string | null,
     mode: ChatSendMode = 'chat',
     imageOptions?: ChatImageSendOptions,
+    videoOptions?: ChatVideoSendOptions,
   ) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
@@ -3821,15 +3895,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const imageReferenceInputs = mode === 'image'
       ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
       : [];
+    const videoReferenceInputs = mode === 'video'
+      ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
+      : [];
 
     // Add user message optimistically (with local file metadata for UI display)
     const nowMs = Date.now();
     const userMsg: RawMessage = {
       role: 'user',
-      content: mode === 'image' ? trimmed : (trimmed || (attachments?.length ? '(file attached)' : '')),
+      content: (mode === 'image' || mode === 'video') ? trimmed : (trimmed || (attachments?.length ? '(file attached)' : '')),
       timestamp: nowMs / 1000,
       id: crypto.randomUUID(),
-      _attachedFiles: mode === 'image'
+      _attachedFiles: (mode === 'image' || mode === 'video')
         ? undefined
         : attachments?.map(a => ({
           fileName: a.fileName,
@@ -3846,6 +3923,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       error: null,
       runError: null,
       pendingImageGenerationLocal: mode === 'image',
+      pendingVideoGenerationLocal: mode === 'video',
       streamingText: '',
       streamingMessage: null,
       streamingTools: [],
@@ -3891,6 +3969,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set({
           sending: false,
           pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
           activeRunId: null,
           streamingText: '',
           streamingMessage: null,
@@ -3905,6 +3984,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
           error: error instanceof Error ? error.message : String(error),
           sending: false,
           pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        });
+      }
+      return;
+    }
+
+    if (mode === 'video') {
+      try {
+        const result = await hostApiFetch<{ success: boolean; error?: string }>(
+          '/api/media/video-generation/chat-send',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              sessionKey: currentSessionKey,
+              prompt: trimmed,
+              size: videoOptions?.size,
+              durationSeconds: videoOptions?.durationSeconds,
+              inputImages: videoReferenceInputs.map((file) => ({
+                fileName: file.fileName,
+                mimeType: file.mimeType,
+                filePath: file.stagedPath,
+              })),
+            }),
+          },
+        );
+        if (result.success === false) {
+          throw new Error(result.error || 'Failed to generate video');
+        }
+        set({
+          sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        });
+        await get().loadHistory(true);
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+          sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
           activeRunId: null,
           streamingText: '',
           streamingMessage: null,
@@ -3981,6 +4114,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         error: 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.',
         sending: false,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
         activeRunId: null,
         lastUserMessageAt: null,
         pendingFinal: false,
@@ -4126,7 +4261,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearHistoryPoll();
     clearErrorRecoveryTimer();
     const { currentSessionKey } = get();
-    set({ sending: false, streamingText: '', streamingMessage: null, pendingFinal: false, lastUserMessageAt: null, pendingToolImages: [] });
+    set({
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      streamingText: '',
+      streamingMessage: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+    });
     set({ streamingTools: [] });
 
     try {
@@ -4261,6 +4405,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               streamingText: '',
               streamingMessage: null,
               sending: false,
+              pendingImageGenerationLocal: false,
+              pendingVideoGenerationLocal: false,
               activeRunId: null,
               pendingFinal: false,
               streamingTools: [],
@@ -4500,6 +4646,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             error: terminalAssistantError ? null : errorMsg,
             runError: terminalAssistantError ? errorMsg : null,
             sending: false,
+            pendingImageGenerationLocal: false,
+            pendingVideoGenerationLocal: false,
             activeRunId: null,
             streamingText: '',
             streamingMessage: null,
@@ -4534,6 +4682,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearErrorRecoveryTimer();
         set({
           sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
           activeRunId: null,
           streamingText: '',
           streamingMessage: null,

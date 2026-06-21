@@ -23,6 +23,7 @@ import {
   X,
   Cpu,
   ImagePlus,
+  Video,
   Moon,
   ChevronRight,
 } from 'lucide-react';
@@ -321,6 +322,7 @@ export function Sidebar() {
     ...(devModeUnlocked
       ? [
         { to: '/image-generation', icon: <ImagePlus className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.imageGeneration'), testId: 'sidebar-nav-image-generation' },
+        { to: '/video-generation', icon: <Video className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.videoGeneration', 'Video Generation'), testId: 'sidebar-nav-video-generation' },
         { to: '/dreams', icon: <Moon className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.openClawDreams'), testId: 'sidebar-nav-dreams' },
       ]
       : []),

@@ -105,11 +105,16 @@ export interface ChatRuntimeRunState {
   events: ChatRuntimeEvent[];
 }
 
-export type ChatSendMode = 'chat' | 'image';
+export type ChatSendMode = 'chat' | 'image' | 'video';
 
 export interface ChatImageSendOptions {
   size: '1024x1024' | '2048x2048' | '3840x2160';
   quality: 'low' | 'medium' | 'high';
+}
+
+export interface ChatVideoSendOptions {
+  size: '1280x720' | '720x1280' | '1024x1024';
+  durationSeconds: 4 | 6 | 10;
 }
 
 export interface ChatState {
@@ -124,6 +129,7 @@ export interface ChatState {
   // Streaming
   sending: boolean;
   pendingImageGenerationLocal: boolean;
+  pendingVideoGenerationLocal: boolean;
   activeRunId: string | null;
   streamingText: string;
   streamingMessage: unknown | null;
@@ -168,6 +174,7 @@ export interface ChatState {
     targetAgentId?: string | null,
     mode?: ChatSendMode,
     imageOptions?: ChatImageSendOptions,
+    videoOptions?: ChatVideoSendOptions,
   ) => Promise<void>;
   abortRun: () => Promise<void>;
   handleChatEvent: (event: Record<string, unknown>) => void;

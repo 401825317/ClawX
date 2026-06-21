@@ -158,3 +158,46 @@ describe('openclaw-image-generation helpers', () => {
   });
 
 });
+
+describe('openclaw-video-generation helpers', () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    getProviderSecretMock.mockReset();
+    listAgentsSnapshotMock.mockReset();
+    await rm(testHome, { recursive: true, force: true });
+    await rm(testUserData, { recursive: true, force: true });
+  });
+
+  it('configures video relay without cross-mode fallback models', async () => {
+    await writeOpenClawJson({
+      agents: {
+        defaults: {},
+      },
+    });
+    getProviderSecretMock.mockResolvedValue({
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'relay-key',
+    });
+
+    const { applyOpenAiVideoRelaySettings, readVideoGenerationConfig } = await import('@electron/utils/openclaw-video-generation');
+    await applyOpenAiVideoRelaySettings({
+      enabled: true,
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      model: 'grok-image-video',
+      timeoutMs: 600_000,
+    });
+
+    const saved = await readOpenClawJson();
+    const defaults = (saved.agents as Record<string, unknown>).defaults as Record<string, unknown>;
+    expect(defaults.videoGenerationModel).toEqual({
+      primary: 'openai/grok-image-video',
+      timeoutMs: 600_000,
+    });
+    expect(await readVideoGenerationConfig()).toEqual({
+      primary: 'openai/grok-image-video',
+      fallbacks: [],
+      timeoutMs: 600_000,
+    });
+  });
+});

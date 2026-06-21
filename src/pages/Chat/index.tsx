@@ -178,6 +178,7 @@ export function Chat() {
   const loadMoreHistory = useChatStore((s) => s.loadMoreHistory);
   const sending = useChatStore((s) => s.sending);
   const pendingImageGenerationLocal = useChatStore((s) => s.pendingImageGenerationLocal);
+  const pendingVideoGenerationLocal = useChatStore((s) => s.pendingVideoGenerationLocal);
   const error = useChatStore((s) => s.error);
   const runError = useChatStore((s) => s.runError);
   const streamingMessage = useChatStore((s) => s.streamingMessage);
@@ -699,10 +700,11 @@ export function Chat() {
       streamingReplyText,
       suppressThinking,
     }];
-  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, activeRunId, runtimeRuns]);
+  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, pendingVideoGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, activeRunId, runtimeRuns]);
   const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
+  let pendingVideoGeneration = false;
   let imageGenerationSettledInHistory = false;
   for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
     if (!isRealUserMessage(messages[idx]) || subagentCompletionInfos[idx]) continue;
@@ -719,6 +721,7 @@ export function Chat() {
         postTrigger,
         nextUserIndex === -1 ? streamingTools : [],
       );
+    pendingVideoGeneration = nextUserIndex === -1 && pendingVideoGenerationLocal;
     imageGenerationSettledInHistory = nextUserIndex === -1
       && hasDeliveredImageGenerationResult(postTrigger)
       && !pendingImageGeneration;
@@ -727,6 +730,7 @@ export function Chat() {
   const streamBlocksHistoryCompletion = hasHistoryCompletionBlockingStream && !imageGenerationSettledInHistory;
   const runSettledInHistory = imageGenerationSettledInHistory || (latestRunSegmentCompletion.hasFinalReply
     && !pendingImageGeneration
+    && !pendingVideoGeneration
     && !streamBlocksHistoryCompletion
     && (
       latestRunSegmentCompletion.hasToolActivity
@@ -739,7 +743,7 @@ export function Chat() {
       imageGenerationSettledInHistory
       || (!hasRunningRuntimeToolStatus && !hasRunningStreamToolStatus)
     );
-  const inputRunActive = sending || pendingImageGeneration || (hasActiveExecutionGraph && !runSettledInHistory);
+  const inputRunActive = sending || pendingImageGeneration || pendingVideoGeneration || (hasActiveExecutionGraph && !runSettledInHistory);
 
   useEffect(() => {
     if (!shouldClearStoreLifecycleFromHistory) return;
@@ -1073,8 +1077,12 @@ export function Chat() {
                     <ImageGeneratingIndicator />
                   )}
 
+                  {pendingVideoGeneration && (
+                    <VideoGeneratingIndicator />
+                  )}
+
                   {/* Typing indicator when sending but no stream content yet */}
-                  {inputRunActive && !pendingFinal && !hasAnyStreamContent && !hasActiveExecutionGraph && !pendingImageGeneration && (
+                  {inputRunActive && !pendingFinal && !hasAnyStreamContent && !hasActiveExecutionGraph && !pendingImageGeneration && !pendingVideoGeneration && (
                     <TypingIndicator />
                   )}
                 </>
@@ -1332,6 +1340,23 @@ function ImageGeneratingIndicator() {
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
           <span>{t('imageGeneration.generating')}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VideoGeneratingIndicator() {
+  const { t } = useTranslation('chat');
+  return (
+    <div className="flex gap-3" data-testid="chat-video-generating-indicator">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
+        <Sparkles className="h-4 w-4" />
+      </div>
+      <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+          <span>{t('videoGeneration.generating', 'Generating video...')}</span>
         </div>
       </div>
     </div>

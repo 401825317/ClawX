@@ -41,6 +41,13 @@ import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
+import {
+  CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
+  CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+  CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
+  isClawXOpenAiVideoModelRef,
+  orderedClawXOpenAiVideoModelIds,
+} from './openclaw-video-relay-constants';
 import { JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 
@@ -2088,6 +2095,76 @@ export async function syncOpenAiCompatibleImageRelay(params: {
   });
 }
 
+/**
+ * Configure OpenClaw's built-in OpenAI-compatible video provider for JunFeiAI.
+ * OpenClaw currently registers that video provider under `openai`, so video
+ * relay cannot use a separate provider key like the image relay does.
+ */
+export async function syncOpenAiCompatibleVideoRelay(params: {
+  enabled: boolean;
+  baseUrl?: string | null;
+  apiKey?: string;
+  videoModelIds?: string[];
+  timeoutMs?: number;
+}): Promise<void> {
+  return withConfigLock(async () => {
+    const config = await readOpenClawJson();
+
+    if (!params.enabled) {
+      const agents = isPlainRecord(config.agents) ? config.agents : null;
+      const defaults = agents && isPlainRecord(agents.defaults) ? agents.defaults : null;
+      const videoGenerationModel = defaults && isPlainRecord(defaults.videoGenerationModel)
+        ? defaults.videoGenerationModel
+        : null;
+      const primary = typeof videoGenerationModel?.primary === 'string'
+        ? videoGenerationModel.primary.trim()
+        : '';
+      if (defaults && isClawXOpenAiVideoModelRef(primary)) {
+        delete defaults.videoGenerationModel;
+        await writeOpenClawJson(config);
+      }
+      if (params.apiKey?.trim()) {
+        await saveProviderKeyToOpenClaw(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, params.apiKey.trim());
+      }
+      return;
+    }
+
+    const baseUrl = normalizeOpenAiRelayBaseUrl(params.baseUrl ?? '');
+    const requestedModelIds = [...new Set((params.videoModelIds ?? [])
+      .map((id) => id.trim())
+      .filter(Boolean))];
+    const modelIds = orderedClawXOpenAiVideoModelIds(
+      requestedModelIds[0] ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
+    );
+
+    upsertOpenClawProviderEntry(config, CLAWX_OPENAI_VIDEO_PROVIDER_KEY, {
+      baseUrl,
+      api: 'openai-responses',
+      modelIds,
+      mergeExistingModels: true,
+      request: { allowPrivateNetwork: true },
+    });
+
+    const agents = (config.agents || {}) as Record<string, unknown>;
+    const defaults = (agents.defaults || {}) as Record<string, unknown>;
+    const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0]}`;
+    const videoGenerationModel: Record<string, unknown> = {
+      primary: primaryModel,
+      timeoutMs: params.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+    };
+    defaults.videoGenerationModel = videoGenerationModel;
+    defaults.mediaGenerationAutoProviderFallback = false;
+    agents.defaults = defaults;
+    config.agents = agents;
+
+    await writeOpenClawJson(config);
+
+    if (params.apiKey?.trim()) {
+      await saveProviderKeyToOpenClaw(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, params.apiKey.trim());
+    }
+  });
+}
+
 export function readOpenAiCompatibleImageRelayState(
   config: Record<string, unknown>,
 ): { enabled: boolean; baseUrl: string; providerKey?: string } {
@@ -2105,6 +2182,28 @@ export function readOpenAiCompatibleImageRelayState(
     return { enabled: false, baseUrl: '', providerKey: undefined };
   }
   return { enabled: true, baseUrl, providerKey: 'openai' };
+}
+
+export function readOpenAiCompatibleVideoRelayState(
+  config: Record<string, unknown>,
+): { enabled: boolean; baseUrl: string; providerKey?: string } {
+  const openai = readModelsProvidersOpenAi(config);
+  const baseUrl = typeof openai?.baseUrl === 'string' ? openai.baseUrl.trim() : '';
+  if (!baseUrl || baseUrl === OFFICIAL_OPENAI_API_BASE_URL) {
+    return { enabled: false, baseUrl: '', providerKey: undefined };
+  }
+  const agents = isPlainRecord(config.agents) ? config.agents : null;
+  const defaults = agents && isPlainRecord(agents.defaults) ? agents.defaults : null;
+  const videoGenerationModel = defaults && isPlainRecord(defaults.videoGenerationModel)
+    ? defaults.videoGenerationModel
+    : null;
+  const primary = typeof videoGenerationModel?.primary === 'string'
+    ? videoGenerationModel.primary.trim()
+    : '';
+  if (!isClawXOpenAiVideoModelRef(primary)) {
+    return { enabled: false, baseUrl: '', providerKey: undefined };
+  }
+  return { enabled: true, baseUrl, providerKey: CLAWX_OPENAI_VIDEO_PROVIDER_KEY };
 }
 
 /**

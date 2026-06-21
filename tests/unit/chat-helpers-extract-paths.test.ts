@@ -52,6 +52,30 @@ MEDIA:C:\Users\Administrator\.openclaw\workspace\japan-kansai-4d3n-plan.svg`);
     ]);
   });
 
+  it('captures MEDIA: tagged remote video content URLs without file extensions', () => {
+    const url = 'https://zz-cn.lingzhiwuxian.com/v1/videos/task_abc/content?expires=86400&signature=xyz';
+    const refs = extractRawFilePaths(`Video ready:\nMEDIA:${url}`);
+
+    expect(refs).toEqual([
+      {
+        filePath: url,
+        mimeType: 'video/mp4',
+      },
+    ]);
+  });
+
+  it('detects video MIME types for MEDIA: tagged remote URLs with query strings', () => {
+    const url = 'https://video.example.com/grok/output.mp4?expires=86400&signature=xyz';
+    const refs = extractRawFilePaths(`Video ready:\nMEDIA:${url}`);
+
+    expect(refs).toEqual([
+      {
+        filePath: url,
+        mimeType: 'video/mp4',
+      },
+    ]);
+  });
+
   it('captures MEDIA: paths that contain ASCII spaces (macOS screenshot default name)', () => {
     // Regression: macOS' default screenshot filename is
     //   "Screenshot YYYY-MM-DD at HH.MM.SS.png" (en locale) or

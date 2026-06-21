@@ -475,7 +475,17 @@ function extractMediaRefs(text: string): Array<{ filePath: string; mimeType: str
 
 /** Map common file extensions to MIME types */
 function mimeFromExtension(filePath: string): string {
-  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  let pathForExtension = filePath.trim();
+  if (/^https?:\/\//i.test(pathForExtension)) {
+    try {
+      pathForExtension = new URL(pathForExtension).pathname;
+    } catch {
+      pathForExtension = pathForExtension.split(/[?#]/)[0] || pathForExtension;
+    }
+  } else {
+    pathForExtension = pathForExtension.split(/[?#]/)[0] || pathForExtension;
+  }
+  const ext = pathForExtension.split('.').pop()?.toLowerCase() || '';
   const map: Record<string, string> = {
     // Images
     'png': 'image/png',
@@ -523,6 +533,12 @@ function mimeFromExtension(filePath: string): string {
     'm4v': 'video/mp4',
   };
   return map[ext] || 'application/octet-stream';
+}
+
+function mimeFromTaggedMediaRef(filePath: string): string {
+  const mimeType = mimeFromExtension(filePath);
+  if (mimeType !== 'application/octet-stream') return mimeType;
+  return /^https?:\/\//i.test(filePath.trim()) ? 'video/mp4' : mimeType;
 }
 
 /** Extract local file paths declared in tool call arguments. */
@@ -680,6 +696,17 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
   const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/|[A-Za-z]:\\\\)[^\\n"'()\\[\\],<>` + '`' + `]*?\\.(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>` + '`' + `]|[，。；;,.!?])`, 'g');
   let workingText = text;
   let taggedMatch: RegExpExecArray | null;
+  const taggedRemoteRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):(https?:\\/\\/[^\\s\\n"'()\\[\\],<>` + '`' + `]+)`, 'g');
+  while ((taggedMatch = taggedRemoteRegex.exec(text)) !== null) {
+    const p = trimPathTerminators(taggedMatch[1] || '');
+    if (p && !seen.has(p)) {
+      seen.add(p);
+      refs.push({ filePath: p, mimeType: mimeFromTaggedMediaRef(p) });
+    }
+    const start = taggedMatch.index;
+    const end = start + taggedMatch[0].length;
+    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
+  }
   while ((taggedMatch = taggedRegex.exec(text)) !== null) {
     const p = taggedMatch[1];
     if (p && !seen.has(p)) {

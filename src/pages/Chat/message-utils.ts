@@ -72,6 +72,7 @@ function cleanUserText(text: string): string {
 function stripAssistantMediaTags(text: string): string {
   if (!text) return text;
   const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
+  const remoteTagged = new RegExp(`(^|[\\s(\\[{>])(?:MEDIA|media):https?:\\/\\/[^\\s\\n"'()\\[\\],<>` + '`' + `]+`, 'g');
   // Mirror the relaxed character class in `chat/helpers.ts::extractRawFilePaths`
   // so paths with ASCII spaces (e.g. macOS' "截屏 2026-05-06 17.46.51.png")
   // are also stripped from the visible bubble. Without this, the bubble
@@ -82,6 +83,7 @@ function stripAssistantMediaTags(text: string): string {
   // Scope to `.openclaw/media/` so normal absolute paths in prose stay visible.
   const bareOpenClawMedia = new RegExp(`(^|[\\s(\\[{>])(?:(?:\\/|~\\/|[A-Za-z]:\\\\)[^\\n"'()\\[\\],<>]*?\\.openclaw[\\\\/]media[\\\\/][^\\n"'()\\[\\],<>]*?\\.(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>]|[，。；;,.!?])`, 'g');
   return text
+    .replace(remoteTagged, (_, lead: string) => lead)
     .replace(tagged, (_, lead: string) => lead)
     .replace(bareOpenClawMedia, (_, lead: string) => lead)
     .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
