@@ -132,6 +132,50 @@ export interface JunFeiAIClientConfigPayload {
     wechatId?: string;
     extraNote?: string;
   };
+  modelOptions?: {
+    text?: {
+      defaultModel?: string;
+      models?: Array<{
+        id?: string;
+        label?: string;
+        description?: string;
+        enabled?: boolean;
+      }>;
+    };
+    image?: {
+      defaultModel?: string;
+      defaultSize?: string;
+      defaultQuality?: string;
+      models?: Array<{
+        id?: string;
+        label?: string;
+        description?: string;
+        sizes?: string[];
+        qualities?: string[];
+        defaultSize?: string;
+        defaultQuality?: string;
+        supportsEditing?: boolean;
+        enabled?: boolean;
+      }>;
+    };
+    video?: {
+      defaultModel?: string;
+      defaultSize?: string;
+      defaultDurationSeconds?: number;
+      models?: Array<{
+        id?: string;
+        label?: string;
+        description?: string;
+        modes?: string[];
+        sizes?: string[];
+        durations?: number[];
+        defaultSize?: string;
+        defaultDurationSeconds?: number;
+        requiresImage?: boolean;
+        enabled?: boolean;
+      }>;
+    };
+  };
 }
 
 export interface JunFeiAIAuthPayload extends JunFeiAIBootstrapPayload {

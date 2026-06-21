@@ -3964,6 +3964,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             body: JSON.stringify({
               sessionKey: currentSessionKey,
               prompt: trimmed,
+              model: imageOptions?.model,
               size: imageOptions?.size,
               quality: imageOptions?.quality,
               inputImages: imageReferenceInputs.map((file) => ({
@@ -4017,6 +4018,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             body: JSON.stringify({
               sessionKey: currentSessionKey,
               prompt: trimmed,
+              model: videoOptions?.model,
               size: videoOptions?.size,
               durationSeconds: videoOptions?.durationSeconds,
               inputImages: videoReferenceInputs.map((file) => ({

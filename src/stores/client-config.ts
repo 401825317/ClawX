@@ -38,18 +38,71 @@ export interface SupportContactItem {
   enabled?: boolean;
 }
 
+export interface ClientTextModelOption {
+  id: string;
+  label: string;
+  description?: string;
+  enabled?: boolean;
+}
+
+export interface ClientImageModelOption {
+  id: string;
+  label: string;
+  description?: string;
+  sizes: string[];
+  qualities: string[];
+  defaultSize?: string;
+  defaultQuality?: string;
+  supportsEditing?: boolean;
+  enabled?: boolean;
+}
+
+export interface ClientVideoModelOption {
+  id: string;
+  label: string;
+  description?: string;
+  modes: string[];
+  sizes: string[];
+  durations: number[];
+  defaultSize?: string;
+  defaultDurationSeconds?: number;
+  requiresImage?: boolean;
+  enabled?: boolean;
+}
+
+export interface ClientModelOptionsConfig {
+  text: {
+    defaultModel: string;
+    models: ClientTextModelOption[];
+  };
+  image: {
+    defaultModel: string;
+    defaultSize: string;
+    defaultQuality: string;
+    models: ClientImageModelOption[];
+  };
+  video: {
+    defaultModel: string;
+    defaultSize: string;
+    defaultDurationSeconds: number;
+    models: ClientVideoModelOption[];
+  };
+}
+
 interface ClientConfigResponse {
   announcements?: {
     enabled?: boolean;
     items?: ClientAnnouncement[];
   };
   support?: SupportContactConfig;
+  modelOptions?: Partial<ClientModelOptionsConfig>;
 }
 
 interface ClientConfigState {
   announcementsEnabled: boolean;
   announcements: ClientAnnouncement[];
   support: SupportContactConfig | null;
+  modelOptions: ClientModelOptionsConfig;
   loading: boolean;
   error: string | null;
   initialized: boolean;
@@ -61,6 +114,78 @@ interface ClientConfigState {
   markAllAnnouncementsRead: () => void;
   markAnnouncementRead: (announcement: ClientAnnouncement) => void;
   dismissUrgent: (announcement: ClientAnnouncement) => void;
+}
+
+export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
+  text: {
+    defaultModel: 'smart-latest',
+    models: [
+      {
+        id: 'smart-latest',
+        label: 'Smart Routing',
+        description: 'Automatically choose a suitable text model.',
+        enabled: true,
+      },
+      { id: 'qwen-latest', label: 'Qwen Latest', enabled: true },
+      { id: 'deepseek-latest', label: 'DeepSeek Latest', enabled: true },
+      { id: 'doubao-latest', label: 'Doubao Latest', enabled: true },
+      { id: 'kimi-latest', label: 'Kimi Latest', enabled: true },
+      { id: 'glm-latest', label: 'GLM Latest', enabled: true },
+    ],
+  },
+  image: {
+    defaultModel: 'gpt-image-2',
+    defaultSize: '1024x1024',
+    defaultQuality: 'medium',
+    models: [
+      {
+        id: 'gpt-image-2',
+        label: 'Image 2',
+        description: 'Image generation and editing.',
+        sizes: ['1024x1024', '2048x2048', '3840x2160'],
+        qualities: ['low', 'medium', 'high'],
+        defaultSize: '1024x1024',
+        defaultQuality: 'medium',
+        supportsEditing: true,
+        enabled: true,
+      },
+    ],
+  },
+  video: {
+    defaultModel: 'grok-image-video',
+    defaultSize: '1280x720',
+    defaultDurationSeconds: 4,
+    models: [
+      {
+        id: 'grok-image-video',
+        label: 'Grok Video',
+        description: 'Supports text-to-video and image-to-video.',
+        modes: ['text-to-video', 'image-to-video'],
+        sizes: ['1280x720', '720x1280', '1024x1024'],
+        durations: [4, 6, 8, 10, 12, 15],
+        defaultSize: '1280x720',
+        defaultDurationSeconds: 4,
+        requiresImage: false,
+        enabled: true,
+      },
+      {
+        id: 'grok-video-1.5',
+        label: 'Grok Video 1.5',
+        description: 'Image-to-video model that requires one reference image.',
+        modes: ['image-to-video'],
+        sizes: ['1280x720', '720x1280', '1024x1024'],
+        durations: [4, 6, 8, 10, 12, 15],
+        defaultSize: '1280x720',
+        defaultDurationSeconds: 4,
+        requiresImage: true,
+        enabled: true,
+      },
+    ],
+  },
+};
+
+function cloneDefaultModelOptions(): ClientModelOptionsConfig {
+  return JSON.parse(JSON.stringify(DEFAULT_CLIENT_MODEL_OPTIONS)) as ClientModelOptionsConfig;
 }
 
 function normalizeLevel(value: unknown): ClientAnnouncementLevel {
@@ -169,6 +294,186 @@ function normalizeSupport(support?: SupportContactConfig): SupportContactConfig 
   };
 }
 
+function normalizeStringList(values: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(values)) {
+    return [...fallback];
+  }
+  const result = Array.from(new Set(
+    values
+      .map((value) => (typeof value === 'string' ? value.trim() : ''))
+      .filter(Boolean),
+  ));
+  return result.length > 0 ? result : [...fallback];
+}
+
+function normalizeDurationList(values: unknown, fallback: number[]): number[] {
+  if (!Array.isArray(values)) {
+    return [...fallback];
+  }
+  const result = Array.from(new Set(
+    values
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0 && value <= 600)
+      .map((value) => Math.floor(value)),
+  ));
+  return result.length > 0 ? result : [...fallback];
+}
+
+function normalizeTextModels(
+  models: unknown,
+  fallback: ClientTextModelOption[],
+): ClientTextModelOption[] {
+  if (!Array.isArray(models)) {
+    return [...fallback];
+  }
+  const seen = new Set<string>();
+  const result = models
+    .map((item): ClientTextModelOption | null => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Partial<ClientTextModelOption>;
+      if (record.enabled === false) return null;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      const label = typeof record.label === 'string' && record.label.trim()
+        ? record.label.trim()
+        : id;
+      return {
+        id,
+        label,
+        description: typeof record.description === 'string' ? record.description.trim() : undefined,
+        enabled: true,
+      };
+    })
+    .filter((item): item is ClientTextModelOption => Boolean(item));
+  return result.length > 0 ? result : [...fallback];
+}
+
+function normalizeImageModels(
+  models: unknown,
+  fallback: ClientImageModelOption[],
+): ClientImageModelOption[] {
+  if (!Array.isArray(models)) {
+    return [...fallback];
+  }
+  const defaultFallback = fallback[0] ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.models[0];
+  const seen = new Set<string>();
+  const result = models
+    .map((item): ClientImageModelOption | null => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Partial<ClientImageModelOption>;
+      if (record.enabled === false) return null;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      const sizes = normalizeStringList(record.sizes, defaultFallback.sizes);
+      const qualities = normalizeStringList(record.qualities, defaultFallback.qualities);
+      const defaultSize = typeof record.defaultSize === 'string' && sizes.includes(record.defaultSize.trim())
+        ? record.defaultSize.trim()
+        : sizes[0];
+      const defaultQuality = typeof record.defaultQuality === 'string' && qualities.includes(record.defaultQuality.trim())
+        ? record.defaultQuality.trim()
+        : qualities[0];
+      return {
+        id,
+        label: typeof record.label === 'string' && record.label.trim() ? record.label.trim() : id,
+        description: typeof record.description === 'string' ? record.description.trim() : undefined,
+        sizes,
+        qualities,
+        defaultSize,
+        defaultQuality,
+        supportsEditing: record.supportsEditing === true,
+        enabled: true,
+      };
+    })
+    .filter((item): item is ClientImageModelOption => Boolean(item));
+  return result.length > 0 ? result : [...fallback];
+}
+
+function normalizeVideoModels(
+  models: unknown,
+  fallback: ClientVideoModelOption[],
+): ClientVideoModelOption[] {
+  if (!Array.isArray(models)) {
+    return [...fallback];
+  }
+  const defaultFallback = fallback[0] ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.models[0];
+  const seen = new Set<string>();
+  const result = models
+    .map((item): ClientVideoModelOption | null => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Partial<ClientVideoModelOption>;
+      if (record.enabled === false) return null;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      const modes = normalizeStringList(record.modes, defaultFallback.modes);
+      const sizes = normalizeStringList(record.sizes, defaultFallback.sizes);
+      const durations = normalizeDurationList(record.durations, defaultFallback.durations);
+      const defaultSize = typeof record.defaultSize === 'string' && sizes.includes(record.defaultSize.trim())
+        ? record.defaultSize.trim()
+        : sizes[0];
+      const rawDuration = Number(record.defaultDurationSeconds);
+      const defaultDurationSeconds = Number.isFinite(rawDuration) && durations.includes(Math.floor(rawDuration))
+        ? Math.floor(rawDuration)
+        : durations[0];
+      return {
+        id,
+        label: typeof record.label === 'string' && record.label.trim() ? record.label.trim() : id,
+        description: typeof record.description === 'string' ? record.description.trim() : undefined,
+        modes,
+        sizes,
+        durations,
+        defaultSize,
+        defaultDurationSeconds,
+        requiresImage: record.requiresImage === true,
+        enabled: true,
+      };
+    })
+    .filter((item): item is ClientVideoModelOption => Boolean(item));
+  return result.length > 0 ? result : [...fallback];
+}
+
+function normalizeModelOptions(payload?: Partial<ClientModelOptionsConfig>): ClientModelOptionsConfig {
+  const defaults = cloneDefaultModelOptions();
+  const textModels = normalizeTextModels(payload?.text?.models, defaults.text.models);
+  const imageModels = normalizeImageModels(payload?.image?.models, defaults.image.models);
+  const videoModels = normalizeVideoModels(payload?.video?.models, defaults.video.models);
+  const textDefault = typeof payload?.text?.defaultModel === 'string'
+    && textModels.some((model) => model.id === payload.text?.defaultModel)
+    ? payload.text.defaultModel
+    : (textModels[0]?.id ?? defaults.text.defaultModel);
+  const imageDefault = typeof payload?.image?.defaultModel === 'string'
+    && imageModels.some((model) => model.id === payload.image?.defaultModel)
+    ? payload.image.defaultModel
+    : (imageModels[0]?.id ?? defaults.image.defaultModel);
+  const selectedImage = imageModels.find((model) => model.id === imageDefault) ?? imageModels[0];
+  const videoDefault = typeof payload?.video?.defaultModel === 'string'
+    && videoModels.some((model) => model.id === payload.video?.defaultModel)
+    ? payload.video.defaultModel
+    : (videoModels[0]?.id ?? defaults.video.defaultModel);
+  const selectedVideo = videoModels.find((model) => model.id === videoDefault) ?? videoModels[0];
+
+  return {
+    text: {
+      defaultModel: textDefault,
+      models: textModels,
+    },
+    image: {
+      defaultModel: imageDefault,
+      defaultSize: selectedImage?.defaultSize ?? defaults.image.defaultSize,
+      defaultQuality: selectedImage?.defaultQuality ?? defaults.image.defaultQuality,
+      models: imageModels,
+    },
+    video: {
+      defaultModel: videoDefault,
+      defaultSize: selectedVideo?.defaultSize ?? defaults.video.defaultSize,
+      defaultDurationSeconds: selectedVideo?.defaultDurationSeconds ?? defaults.video.defaultDurationSeconds,
+      models: videoModels,
+    },
+  };
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -183,6 +488,7 @@ export const useClientConfigStore = create<ClientConfigState>()(
       announcementsEnabled: false,
       announcements: [],
       support: null,
+      modelOptions: cloneDefaultModelOptions(),
       loading: false,
       error: null,
       initialized: false,
@@ -233,6 +539,7 @@ export const useClientConfigStore = create<ClientConfigState>()(
             announcementsEnabled: Boolean(payload.announcements?.enabled),
             announcements: payload.announcements?.enabled === false ? [] : announcements,
             support,
+            modelOptions: normalizeModelOptions(payload.modelOptions),
             loading: false,
             error: null,
             initialized: true,
@@ -246,6 +553,7 @@ export const useClientConfigStore = create<ClientConfigState>()(
             loading: false,
             initialized: true,
             error: errorMessage(error),
+            modelOptions: cloneDefaultModelOptions(),
           });
         }
       },

@@ -20,6 +20,7 @@ import { useChatStore } from '@/stores/chat';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import { useProviderStore } from '@/stores/providers';
+import { useClientConfigStore } from '@/stores/client-config';
 import {
   buildConfiguredModelOptions,
   formatModelDisplayLabel,
@@ -62,33 +63,6 @@ interface ChatInputProps {
   sending?: boolean;
 }
 
-const IMAGE_SIZE_OPTIONS = [
-  { value: '1024x1024', label: '1K' },
-  { value: '2048x2048', label: '2K' },
-  { value: '3840x2160', label: '4K' },
-] as const;
-
-const IMAGE_QUALITY_OPTIONS = [
-  { value: 'low', labelKey: 'composer.imageQualityLow' },
-  { value: 'medium', labelKey: 'composer.imageQualityMedium' },
-  { value: 'high', labelKey: 'composer.imageQualityHigh' },
-] as const;
-
-const VIDEO_SIZE_OPTIONS = [
-  { value: '1280x720', label: '16:9' },
-  { value: '720x1280', label: '9:16' },
-  { value: '1024x1024', label: '1:1' },
-] as const;
-
-const VIDEO_DURATION_OPTIONS = [
-  { value: 4, label: '4s' },
-  { value: 6, label: '6s' },
-  { value: 8, label: '8s' },
-  { value: 10, label: '10s' },
-  { value: 12, label: '12s' },
-  { value: 15, label: '15s' },
-] as const;
-
 interface RemoteModelOption {
   modelRef: string;
   label: string;
@@ -109,6 +83,45 @@ function formatFileSize(bytes: number): string {
 
 function getSkillPrefix(skillName: string): string {
   return `/${skillName}  `;
+}
+
+function formatImageSizeLabel(value: string): string {
+  switch (value) {
+    case '1024x1024':
+      return '1K';
+    case '2048x2048':
+      return '2K';
+    case '3840x2160':
+      return '4K';
+    default:
+      return value;
+  }
+}
+
+function formatVideoSizeLabel(value: string): string {
+  switch (value) {
+    case '1280x720':
+      return '16:9';
+    case '720x1280':
+      return '9:16';
+    case '1024x1024':
+      return '1:1';
+    default:
+      return value;
+  }
+}
+
+function formatImageQualityLabel(value: string, t: ReturnType<typeof useTranslation>['t']): string {
+  switch (value) {
+    case 'low':
+      return t('composer.imageQualityLow', 'Low');
+    case 'medium':
+      return t('composer.imageQualityMedium', 'Medium');
+    case 'high':
+      return t('composer.imageQualityHigh', 'High');
+    default:
+      return value;
+  }
 }
 
 function needsLeadingSkillSpace(value: string, position: number): boolean {
@@ -271,6 +284,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const providerStatuses = useProviderStore((s) => s.statuses);
   const providerDefaultAccountId = useProviderStore((s) => s.defaultAccountId);
   const refreshProviderSnapshot = useProviderStore((s) => s.refreshProviderSnapshot);
+  const clientModelOptions = useClientConfigStore((s) => s.modelOptions);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const sessions = useChatStore((s) => s.sessions);
@@ -284,8 +298,64 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     [currentSessionKey, sessions],
   );
   const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
-  const imageOptions = sessionImageOptions[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' };
-  const videoOptions = sessionVideoOptions[currentSessionKey] ?? { size: '1280x720', durationSeconds: 4 };
+  const imageModelOptions = clientModelOptions.image.models;
+  const selectedImageModel = useMemo(() => {
+    const sessionModel = sessionImageOptions[currentSessionKey]?.model;
+    return imageModelOptions.find((model) => model.id === sessionModel)
+      ?? imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel)
+      ?? imageModelOptions[0];
+  }, [clientModelOptions.image.defaultModel, currentSessionKey, imageModelOptions, sessionImageOptions]);
+  const defaultImageOptions = useMemo<ChatImageSendOptions>(() => ({
+    model: selectedImageModel?.id ?? clientModelOptions.image.defaultModel,
+    size: selectedImageModel?.defaultSize ?? clientModelOptions.image.defaultSize,
+    quality: selectedImageModel?.defaultQuality ?? clientModelOptions.image.defaultQuality,
+  }), [
+    clientModelOptions.image.defaultModel,
+    clientModelOptions.image.defaultQuality,
+    clientModelOptions.image.defaultSize,
+    selectedImageModel,
+  ]);
+  const imageOptions = useMemo<ChatImageSendOptions>(() => {
+    const current = sessionImageOptions[currentSessionKey] ?? defaultImageOptions;
+    const model = selectedImageModel;
+    const size = model?.sizes.includes(current.size) ? current.size : defaultImageOptions.size;
+    const quality = model?.qualities.includes(current.quality) ? current.quality : defaultImageOptions.quality;
+    return {
+      model: model?.id ?? current.model ?? defaultImageOptions.model,
+      size,
+      quality,
+    };
+  }, [currentSessionKey, defaultImageOptions, selectedImageModel, sessionImageOptions]);
+  const videoModelOptions = clientModelOptions.video.models;
+  const selectedVideoModel = useMemo(() => {
+    const sessionModel = sessionVideoOptions[currentSessionKey]?.model;
+    return videoModelOptions.find((model) => model.id === sessionModel)
+      ?? videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel)
+      ?? videoModelOptions[0];
+  }, [clientModelOptions.video.defaultModel, currentSessionKey, sessionVideoOptions, videoModelOptions]);
+  const defaultVideoOptions = useMemo<ChatVideoSendOptions>(() => ({
+    model: selectedVideoModel?.id ?? clientModelOptions.video.defaultModel,
+    size: selectedVideoModel?.defaultSize ?? clientModelOptions.video.defaultSize,
+    durationSeconds: selectedVideoModel?.defaultDurationSeconds ?? clientModelOptions.video.defaultDurationSeconds,
+  }), [
+    clientModelOptions.video.defaultDurationSeconds,
+    clientModelOptions.video.defaultModel,
+    clientModelOptions.video.defaultSize,
+    selectedVideoModel,
+  ]);
+  const videoOptions = useMemo<ChatVideoSendOptions>(() => {
+    const current = sessionVideoOptions[currentSessionKey] ?? defaultVideoOptions;
+    const model = selectedVideoModel;
+    const size = model?.sizes.includes(current.size) ? current.size : defaultVideoOptions.size;
+    const durationSeconds = model?.durations.includes(current.durationSeconds)
+      ? current.durationSeconds
+      : defaultVideoOptions.durationSeconds;
+    return {
+      model: model?.id ?? current.model ?? defaultVideoOptions.model,
+      size,
+      durationSeconds,
+    };
+  }, [currentSessionKey, defaultVideoOptions, selectedVideoModel, sessionVideoOptions]);
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
@@ -294,12 +364,27 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     () => buildConfiguredModelOptions(providerAccounts, providerStatuses, providerDefaultAccountId),
     [providerAccounts, providerDefaultAccountId, providerStatuses],
   );
+  const configuredTextModelOptions = useMemo<RemoteModelOption[]>(() => {
+    const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'lingzhiwuxian' && account.enabled);
+    if (!junfeiaiAccount) {
+      return [];
+    }
+    return clientModelOptions.text.models.map((model) => ({
+      modelRef: `lingzhiwuxian/${model.id}`,
+      label: model.label || formatProviderModelIdLabel('lingzhiwuxian', model.id),
+      runtimeProviderKey: 'lingzhiwuxian',
+      accountId: 'lingzhiwuxian',
+    }));
+  }, [clientModelOptions.text.models, providerAccounts]);
   const modelOptions = useMemo(() => {
-    if (remoteModelOptions.length === 0) {
+    const preferredRemoteOptions = configuredTextModelOptions.length > 0
+      ? configuredTextModelOptions
+      : remoteModelOptions;
+    if (preferredRemoteOptions.length === 0) {
       return baseModelOptions;
     }
     const deduped = new Map<string, RemoteModelOption | typeof baseModelOptions[number]>();
-    for (const option of remoteModelOptions) {
+    for (const option of preferredRemoteOptions) {
       deduped.set(option.modelRef, option);
     }
     for (const option of baseModelOptions) {
@@ -308,9 +393,10 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       }
     }
     return [...deduped.values()];
-  }, [baseModelOptions, remoteModelOptions]);
+  }, [baseModelOptions, configuredTextModelOptions, remoteModelOptions]);
   const effectiveModelRef = optimisticModelRef || currentSession?.model || currentAgent?.modelRef || defaultModelRef || modelOptions[0]?.modelRef || null;
-  const currentModelLabel = formatModelDisplayLabel(effectiveModelRef);
+  const currentModelLabel = modelOptions.find((option) => option.modelRef === effectiveModelRef)?.label
+    ?? formatModelDisplayLabel(effectiveModelRef);
   const mentionableAgents = useMemo(
     () => (agents ?? []).filter((agent) => agent.id !== currentAgentId),
     [agents, currentAgentId],
@@ -364,7 +450,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   useEffect(() => {
     let cancelled = false;
     const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'lingzhiwuxian' && account.enabled);
-    if (!junfeiaiAccount) {
+    if (!junfeiaiAccount || clientModelOptions.text.models.length > 0) {
       setRemoteModelOptions([]);
       return () => {
         cancelled = true;
@@ -397,7 +483,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     return () => {
       cancelled = true;
     };
-  }, [providerAccounts]);
+  }, [clientModelOptions.text.models.length, providerAccounts]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -1230,13 +1316,37 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             {sendMode === 'image' && (
               <div className="ml-2 flex items-center gap-2" data-testid="chat-image-options">
                 <Select
-                  value={imageOptions.size}
+                  value={imageOptions.model}
                   onChange={(e) => {
-                    const size = e.target.value as ChatImageSendOptions['size'];
+                    const nextModel = imageModelOptions.find((model) => model.id === e.target.value) ?? selectedImageModel;
                     setSessionImageOptions((current) => ({
                       ...current,
                       [currentSessionKey]: {
-                        ...(current[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' }),
+                        model: nextModel?.id,
+                        size: nextModel?.defaultSize ?? defaultImageOptions.size,
+                        quality: nextModel?.defaultQuality ?? defaultImageOptions.quality,
+                      },
+                    }));
+                  }}
+                  className="h-8 w-[132px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
+                  data-testid="chat-image-model"
+                  aria-label={t('composer.imageModelLabel', 'Image model')}
+                >
+                  {imageModelOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={imageOptions.size}
+                  onChange={(e) => {
+                    const size = e.target.value;
+                    setSessionImageOptions((current) => ({
+                      ...current,
+                      [currentSessionKey]: {
+                        ...(current[currentSessionKey] ?? defaultImageOptions),
+                        model: imageOptions.model,
                         size,
                       },
                     }));
@@ -1245,20 +1355,21 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                   data-testid="chat-image-size"
                   aria-label={t('composer.imageSizeLabel')}
                 >
-                  {IMAGE_SIZE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
+                  {(selectedImageModel?.sizes ?? [imageOptions.size]).map((size) => (
+                    <option key={size} value={size}>
+                      {formatImageSizeLabel(size)}
                     </option>
                   ))}
                 </Select>
                 <Select
                   value={imageOptions.quality}
                   onChange={(e) => {
-                    const quality = e.target.value as ChatImageSendOptions['quality'];
+                    const quality = e.target.value;
                     setSessionImageOptions((current) => ({
                       ...current,
                       [currentSessionKey]: {
-                        ...(current[currentSessionKey] ?? { size: '1024x1024', quality: 'medium' }),
+                        ...(current[currentSessionKey] ?? defaultImageOptions),
+                        model: imageOptions.model,
                         quality,
                       },
                     }));
@@ -1267,9 +1378,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                   data-testid="chat-image-quality"
                   aria-label={t('composer.imageQualityLabel')}
                 >
-                  {IMAGE_QUALITY_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {t(option.labelKey)}
+                  {(selectedImageModel?.qualities ?? [imageOptions.quality]).map((quality) => (
+                    <option key={quality} value={quality}>
+                      {formatImageQualityLabel(quality, t)}
                     </option>
                   ))}
                 </Select>
@@ -1280,13 +1391,37 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             {sendMode === 'video' && (
               <div className="ml-2 flex items-center gap-2" data-testid="chat-video-options">
                 <Select
-                  value={videoOptions.size}
+                  value={videoOptions.model}
                   onChange={(e) => {
-                    const size = e.target.value as ChatVideoSendOptions['size'];
+                    const nextModel = videoModelOptions.find((model) => model.id === e.target.value) ?? selectedVideoModel;
                     setSessionVideoOptions((current) => ({
                       ...current,
                       [currentSessionKey]: {
-                        ...(current[currentSessionKey] ?? { size: '1280x720', durationSeconds: 4 }),
+                        model: nextModel?.id,
+                        size: nextModel?.defaultSize ?? defaultVideoOptions.size,
+                        durationSeconds: nextModel?.defaultDurationSeconds ?? defaultVideoOptions.durationSeconds,
+                      },
+                    }));
+                  }}
+                  className="h-8 w-[132px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
+                  data-testid="chat-video-model"
+                  aria-label={t('composer.videoModelLabel', 'Video model')}
+                >
+                  {videoModelOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={videoOptions.size}
+                  onChange={(e) => {
+                    const size = e.target.value;
+                    setSessionVideoOptions((current) => ({
+                      ...current,
+                      [currentSessionKey]: {
+                        ...(current[currentSessionKey] ?? defaultVideoOptions),
+                        model: videoOptions.model,
                         size,
                       },
                     }));
@@ -1295,20 +1430,21 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                   data-testid="chat-video-size"
                   aria-label={t('composer.videoSizeLabel', 'Video size')}
                 >
-                  {VIDEO_SIZE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
+                  {(selectedVideoModel?.sizes ?? [videoOptions.size]).map((size) => (
+                    <option key={size} value={size}>
+                      {formatVideoSizeLabel(size)}
                     </option>
                   ))}
                 </Select>
                 <Select
                   value={String(videoOptions.durationSeconds)}
                   onChange={(e) => {
-                    const durationSeconds = Number(e.target.value) as ChatVideoSendOptions['durationSeconds'];
+                    const durationSeconds = Number(e.target.value);
                     setSessionVideoOptions((current) => ({
                       ...current,
                       [currentSessionKey]: {
-                        ...(current[currentSessionKey] ?? { size: '1280x720', durationSeconds: 4 }),
+                        ...(current[currentSessionKey] ?? defaultVideoOptions),
+                        model: videoOptions.model,
                         durationSeconds,
                       },
                     }));
@@ -1317,9 +1453,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                   data-testid="chat-video-duration"
                   aria-label={t('composer.videoDurationLabel', 'Video duration')}
                 >
-                  {VIDEO_DURATION_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
+                  {(selectedVideoModel?.durations ?? [videoOptions.durationSeconds]).map((duration) => (
+                    <option key={duration} value={duration}>
+                      {duration}s
                     </option>
                   ))}
                 </Select>

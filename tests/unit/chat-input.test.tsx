@@ -4,7 +4,7 @@ import { ChatInput } from '@/pages/Chat/ChatInput';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { hostApiFetch } from '@/lib/host-api';
 
-const { agentsState, chatState, gatewayState, providersState, artifactPanelMocks } = vi.hoisted(() => ({
+const { agentsState, chatState, gatewayState, providersState, clientConfigState, artifactPanelMocks } = vi.hoisted(() => ({
   agentsState: {
     agents: [] as Array<Record<string, unknown>>,
     defaultModelRef: null as string | null,
@@ -23,6 +23,50 @@ const { agentsState, chatState, gatewayState, providersState, artifactPanelMocks
     statuses: [] as Array<Record<string, unknown>>,
     defaultAccountId: null as string | null,
     refreshProviderSnapshot: vi.fn(),
+  },
+  clientConfigState: {
+    modelOptions: {
+      text: {
+        defaultModel: 'smart-latest',
+        models: [
+          { id: 'smart-latest', label: 'Smart Routing', enabled: true },
+          { id: 'qwen-latest', label: 'Qwen Latest', enabled: true },
+        ],
+      },
+      image: {
+        defaultModel: 'gpt-image-2',
+        defaultSize: '1024x1024',
+        defaultQuality: 'medium',
+        models: [
+          {
+            id: 'gpt-image-2',
+            label: 'Image 2',
+            sizes: ['1024x1024', '2048x2048', '3840x2160'],
+            qualities: ['low', 'medium', 'high'],
+            defaultSize: '1024x1024',
+            defaultQuality: 'medium',
+            enabled: true,
+          },
+        ],
+      },
+      video: {
+        defaultModel: 'grok-image-video',
+        defaultSize: '1280x720',
+        defaultDurationSeconds: 4,
+        models: [
+          {
+            id: 'grok-image-video',
+            label: 'Grok Video',
+            modes: ['text-to-video', 'image-to-video'],
+            sizes: ['1280x720', '720x1280', '1024x1024'],
+            durations: [4, 6, 8, 10, 12, 15],
+            defaultSize: '1280x720',
+            defaultDurationSeconds: 4,
+            enabled: true,
+          },
+        ],
+      },
+    },
   },
   artifactPanelMocks: {
     openPreview: vi.fn(),
@@ -48,6 +92,14 @@ vi.mock('@/stores/providers', () => ({
 vi.mock('@/stores/artifact-panel', () => ({
   useArtifactPanel: (selector: (state: typeof artifactPanelMocks) => unknown) => selector(artifactPanelMocks),
 }));
+
+vi.mock('@/stores/client-config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/client-config')>();
+  return {
+    ...actual,
+    useClientConfigStore: (selector: (state: typeof clientConfigState) => unknown) => selector(clientConfigState),
+  };
+});
 
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: vi.fn(),
@@ -233,7 +285,7 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Hello direct agent' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research', 'chat', undefined);
+    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research', 'chat', undefined, undefined);
   });
 
   it('switches only the current session model', async () => {
@@ -308,7 +360,7 @@ describe('ChatInput agent targeting', () => {
         id: 'main',
         name: 'Main',
         isDefault: true,
-        modelDisplay: '智能路由',
+        modelDisplay: 'Smart Routing',
         modelRef: 'lingzhiwuxian/smart-latest',
         inheritedModel: true,
         workspace: '~/.openclaw/workspace',
@@ -354,7 +406,7 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput();
 
-    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('智能路由');
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('Smart Routing');
   });
 
   it('disables the input while gateway is running but not yet ready', () => {
@@ -515,7 +567,7 @@ describe('ChatInput agent targeting', () => {
 
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null, 'chat', undefined);
+    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null, 'chat', undefined, undefined);
     expect(hostApiFetch).toHaveBeenCalledWith(
       '/api/skills/quick-access',
       expect.objectContaining({
@@ -553,7 +605,8 @@ describe('ChatInput agent targeting', () => {
       undefined,
       null,
       'image',
-      { size: '1024x1024', quality: 'medium' },
+      { model: 'gpt-image-2', size: '1024x1024', quality: 'medium' },
+      undefined,
     );
 
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
@@ -561,7 +614,7 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'normal chat' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat', undefined);
+    expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat', undefined, undefined);
   });
 
   it('keeps image mode isolated per session', () => {
@@ -597,7 +650,8 @@ describe('ChatInput agent targeting', () => {
       undefined,
       null,
       'image',
-      { size: '2048x2048', quality: 'high' },
+      { model: 'gpt-image-2', size: '2048x2048', quality: 'high' },
+      undefined,
     );
 
     chatState.currentSessionKey = 'agent:main:session-b';
@@ -611,7 +665,7 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session b chat' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenLastCalledWith('session b chat', undefined, null, 'chat', undefined);
+    expect(onSend).toHaveBeenLastCalledWith('session b chat', undefined, null, 'chat', undefined, undefined);
 
     chatState.currentSessionKey = 'agent:main:main';
     view.rerender(
@@ -631,7 +685,8 @@ describe('ChatInput agent targeting', () => {
       undefined,
       null,
       'image',
-      { size: '2048x2048', quality: 'high' },
+      { model: 'gpt-image-2', size: '2048x2048', quality: 'high' },
+      undefined,
     );
   });
 

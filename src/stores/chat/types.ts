@@ -108,12 +108,14 @@ export interface ChatRuntimeRunState {
 export type ChatSendMode = 'chat' | 'image' | 'video';
 
 export interface ChatImageSendOptions {
-  size: '1024x1024' | '2048x2048' | '3840x2160';
-  quality: 'low' | 'medium' | 'high';
+  model?: string;
+  size: string;
+  quality: string;
 }
 
 export interface ChatVideoSendOptions {
-  size: '1280x720' | '720x1280' | '1024x1024';
+  model?: string;
+  size: string;
   durationSeconds: number;
 }
 
