@@ -55,6 +55,11 @@ interface ExtractedImage { url?: string; data?: string; mimeType: string; }
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
 
+function isRemoteHttpUrl(filePath: string | undefined): boolean {
+  const trimmed = filePath?.trim();
+  return !!trimmed && /^https?:\/\//i.test(trimmed);
+}
+
 function isChatPreviewDocument(file: AttachedFileMeta): boolean {
   const name = file.fileName.toLowerCase();
   const mime = file.mimeType.toLowerCase();
@@ -96,6 +101,8 @@ function isHtmlOrMarkdownPreview(file: AttachedFileMeta): boolean {
 /** User-facing artifacts that must stay visible when process output is folded into the graph. */
 function isUserFacingAttachmentWhenFolded(file: AttachedFileMeta): boolean {
   if (file.mimeType.startsWith('image/')) return true;
+  if (file.mimeType.startsWith('video/')) return true;
+  if (file.mimeType.startsWith('audio/')) return true;
   if (isDirectoryAttachment(file)) return true;
   if (isSkillFileAttachment(file)) return true;
   if (isChatPreviewDocument(file)) return true;
@@ -108,6 +115,7 @@ function isUserFacingAttachmentWhenFolded(file: AttachedFileMeta): boolean {
 
 function validationKindForAttachment(file: AttachedFileMeta): 'file' | 'dir' | null {
   if (!file.filePath) return null;
+  if (isRemoteHttpUrl(file.filePath)) return null;
   // User-selected uploads and already enriched attachments are trusted enough
   // for immediate display. Regex-derived message refs start at size 0/null and
   // are validated through main-process stat before becoming clickable cards.
@@ -739,6 +747,8 @@ function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: At
     if (!file.filePath) return;
     if (onOpen) {
       onOpen(file);
+    } else if (isRemoteHttpUrl(file.filePath)) {
+      invokeIpc('shell:openExternal', file.filePath);
     } else {
       invokeIpc('shell:openPath', file.filePath);
     }
@@ -784,6 +794,8 @@ function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (
     if (!file.filePath) return;
     if (onOpen) {
       onOpen(file);
+    } else if (isRemoteHttpUrl(file.filePath)) {
+      invokeIpc('shell:openExternal', file.filePath);
     } else {
       invokeIpc('shell:openPath', file.filePath);
     }

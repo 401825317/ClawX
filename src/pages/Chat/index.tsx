@@ -124,8 +124,12 @@ function isRealUserMessage(msg: RawMessage): boolean {
   return blocks.length === 0 || !blocks.every((b) => b.type === 'tool_result' || b.type === 'toolResult');
 }
 
-function hasUserFacingImageAttachments(msg: RawMessage): boolean {
-  return (msg._attachedFiles ?? []).some((file) => file.mimeType.startsWith('image/'));
+function hasUserFacingMediaAttachments(msg: RawMessage): boolean {
+  return (msg._attachedFiles ?? []).some((file) => (
+    file.mimeType.startsWith('image/')
+    || file.mimeType.startsWith('video/')
+    || file.mimeType.startsWith('audio/')
+  ));
 }
 
 function generatedFileToTarget(file: GeneratedFile): FilePreviewTarget {
@@ -220,6 +224,10 @@ export function Chat() {
   // panel instead of the system default editor.
   const handleOpenAttachedFile = useCallback((file: AttachedFileMeta) => {
     if (!file.filePath) return;
+    if (/^https?:\/\//i.test(file.filePath.trim())) {
+      void invokeIpc('shell:openExternal', file.filePath);
+      return;
+    }
     if (file.mimeType === 'application/x-directory') {
       void invokeIpc('shell:openPath', file.filePath)
         .then((error) => {
@@ -946,9 +954,9 @@ export function Chat() {
                     </div>
                   )}
                   {messages.map((msg, idx) => {
-                    if (isInternalMessage(msg) && !hasUserFacingImageAttachments(msg)) return null;
+                    if (isInternalMessage(msg) && !hasUserFacingMediaAttachments(msg)) return null;
                     const isFoldedNarration = foldedNarrationIndices.has(idx);
-                    if (isFoldedNarration && !hasUserFacingImageAttachments(msg)) return null;
+                    if (isFoldedNarration && !hasUserFacingMediaAttachments(msg)) return null;
                     const suppressToolCards = runSegmentMessageIndices.has(idx);
                     const isToolOnlyAssistant = normalizeMessageRole(msg.role) === 'assistant'
                       && extractToolUse(msg).length > 0

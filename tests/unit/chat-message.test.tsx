@@ -330,6 +330,36 @@ describe('ChatMessage attachment dedupe', () => {
 
     expect(screen.queryByText('debug.log')).not.toBeInTheDocument();
   });
+
+  it('renders remote video MEDIA refs without local file validation', () => {
+    const url = 'https://video.junfeiai.hk-proxy.lingzhiwuxian.com/video/grok/task_demo?exp=1782115630&sig=abc123';
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'Video generated.',
+      _attachedFiles: [
+        {
+          fileName: 'task_demo.mp4',
+          mimeType: 'video/mp4',
+          fileSize: 0,
+          preview: null,
+          filePath: url,
+          source: 'message-ref',
+        },
+      ],
+    };
+
+    const { container } = render(
+      <ChatMessage
+        message={message}
+        suppressProcessAttachments
+      />,
+    );
+
+    const video = container.querySelector('video');
+    expect(video).not.toBeNull();
+    expect(video?.getAttribute('src')).toBe(url);
+    expect(screen.getByText('task_demo.mp4')).toBeInTheDocument();
+  });
 });
 
 describe('ChatMessage LaTeX rendering', () => {
