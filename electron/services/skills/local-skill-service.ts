@@ -4,7 +4,7 @@ import { basename, join, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import YAML from 'yaml';
 import { listAgentsSnapshot } from '../../utils/agent-config';
-import { expandPath, getOpenClawResolvedDir, getOpenClawSkillsDir } from '../../utils/paths';
+import { expandOpenClawPath, getOpenClawResolvedDir, getOpenClawSkillsDir } from '../../utils/paths';
 import { getAllSkillConfigs } from '../../utils/skill-config';
 import type { SkillConfigUpdates } from '../../utils/skill-config';
 import { isJunFeiAIManagedDistribution } from '../../utils/junfeiai-distribution';
@@ -500,7 +500,7 @@ async function buildDescriptors(): Promise<SourceDescriptor[]> {
   const agentsSnapshot = await listAgentsSnapshot();
   const workspaces = dedupePaths(
     agentsSnapshot.agents
-      .map((agent) => expandPath(agent.workspace || ''))
+      .map((agent) => expandOpenClawPath(agent.workspace || ''))
       .filter(Boolean),
   );
 

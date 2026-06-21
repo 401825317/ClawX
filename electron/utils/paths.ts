@@ -3,7 +3,7 @@
  * Cross-platform path resolution helpers
  */
 import { createRequire } from 'node:module';
-import { join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'fs';
 
@@ -38,11 +38,44 @@ function getElectronApp() {
 }
 
 /**
- * Expand ~ to home directory
+ * Resolve OpenClaw's effective home directory. This mirrors OpenClaw's own
+ * tilde semantics: OPENCLAW_HOME becomes the home for ~/.openclaw paths.
+ */
+export function resolveOpenClawEffectiveHomeDir(): string {
+  const explicitHome = process.env.OPENCLAW_HOME?.trim();
+  if (explicitHome) {
+    if (explicitHome === '~' || explicitHome.startsWith('~/') || explicitHome.startsWith('~\\')) {
+      return resolve(explicitHome.replace(/^~(?=$|[\\/])/, resolveOsHomeDir()));
+    }
+    return resolve(explicitHome);
+  }
+  return resolveOsHomeDir();
+}
+
+function resolveOsHomeDir(): string {
+  return homedir()
+    || process.env.HOME?.trim()
+    || process.env.USERPROFILE?.trim()
+    || process.cwd();
+}
+
+/**
+ * Expand ~ to the OS home directory
  */
 export function expandPath(path: string): string {
-  if (path.startsWith('~')) {
-    return path.replace('~', homedir());
+  if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
+    return path.replace(/^~(?=$|[\\/])/, resolveOsHomeDir());
+  }
+  return path;
+}
+
+/**
+ * Expand ~ using OpenClaw's effective home. Use this for OpenClaw config paths
+ * such as ~/.openclaw/workspace and agents.list[].agentDir.
+ */
+export function expandOpenClawPath(path: string): string {
+  if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
+    return path.replace(/^~(?=$|[\\/])/, resolveOpenClawEffectiveHomeDir());
   }
   return path;
 }
@@ -51,7 +84,36 @@ export function expandPath(path: string): string {
  * Get OpenClaw config directory
  */
 export function getOpenClawConfigDir(): string {
-  return join(homedir(), '.openclaw');
+  const explicitStateDir = process.env.OPENCLAW_STATE_DIR?.trim();
+  if (explicitStateDir) {
+    return expandOpenClawPath(explicitStateDir);
+  }
+
+  const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH?.trim()
+    || process.env.OPENCLAW_CONFIG?.trim();
+  if (explicitConfigPath) {
+    return dirname(expandOpenClawPath(explicitConfigPath));
+  }
+
+  return join(resolveOpenClawHomeDir(), '.openclaw');
+}
+
+/**
+ * Get OpenClaw home directory. In portable mode this follows the USB data root.
+ */
+export function resolveOpenClawHomeDir(): string {
+  return resolveOpenClawEffectiveHomeDir();
+}
+
+/**
+ * Get OpenClaw config file path
+ */
+export function getOpenClawConfigPath(): string {
+  const explicitConfigPath = process.env.OPENCLAW_CONFIG_PATH?.trim()
+    || process.env.OPENCLAW_CONFIG?.trim();
+  return explicitConfigPath
+    ? expandOpenClawPath(explicitConfigPath)
+    : join(getOpenClawConfigDir(), 'openclaw.json');
 }
 
 /**
@@ -61,11 +123,23 @@ export function getOpenClawSkillsDir(): string {
   return join(getOpenClawConfigDir(), 'skills');
 }
 
+export function getOpenClawExtensionsDir(): string {
+  return join(getOpenClawConfigDir(), 'extensions');
+}
+
+export function getOpenClawAgentsDir(): string {
+  return join(getOpenClawConfigDir(), 'agents');
+}
+
+export function getOpenClawMediaDir(): string {
+  return join(getOpenClawConfigDir(), 'media');
+}
+
 /**
  * Get ClawX config directory
  */
 export function getClawXConfigDir(): string {
-  return join(homedir(), '.clawx');
+  return process.env.CLAWX_USER_DATA_DIR?.trim() || join(homedir(), '.clawx');
 }
 
 /**

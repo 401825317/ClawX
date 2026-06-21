@@ -16,7 +16,15 @@ import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUnins
 import {
   type ProviderConfig,
 } from '../utils/secure-storage';
-import { getOpenClawStatus, getOpenClawDir, getOpenClawConfigDir, getOpenClawSkillsDir, ensureDir, expandPath } from '../utils/paths';
+import {
+  getOpenClawStatus,
+  getOpenClawDir,
+  getOpenClawConfigDir,
+  getOpenClawSkillsDir,
+  getOpenClawMediaDir,
+  ensureDir,
+  expandPath,
+} from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
 import {
@@ -2215,7 +2223,7 @@ function getFactoryResetTargets(): string[] {
   const targets = [
     app.getPath('userData'),
     join(homedir(), '.clawx'),
-    join(homedir(), '.openclaw'),
+    getOpenClawConfigDir(),
   ];
   const seen = new Set<string>();
 
@@ -2607,8 +2615,11 @@ function mimeToExt(mimeType: string): string {
   return '';
 }
 
-const OUTBOUND_DIR = join(homedir(), '.openclaw', 'media', 'outbound');
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
+
+function getOutboundDir(): string {
+  return join(getOpenClawMediaDir(), 'outbound');
+}
 
 /**
  * Generate a preview data URL for image files.
@@ -2651,7 +2662,8 @@ function registerFileHandlers(): void {
   // Stage files from real disk paths (used with dialog:open)
   ipcMain.handle('file:stage', async (_, filePaths: string[]) => {
     const fsP = await import('fs/promises');
-    await fsP.mkdir(OUTBOUND_DIR, { recursive: true });
+    const outboundDir = getOutboundDir();
+    await fsP.mkdir(outboundDir, { recursive: true });
 
     const results = [];
     for (const filePath of filePaths) {
@@ -2671,7 +2683,7 @@ function registerFileHandlers(): void {
       }
 
       const ext = extname(filePath);
-      const stagedPath = join(OUTBOUND_DIR, `${id}${ext}`);
+      const stagedPath = join(outboundDir, `${id}${ext}`);
       await fsP.copyFile(filePath, stagedPath);
 
       const s = await fsP.stat(stagedPath);
@@ -2693,11 +2705,12 @@ function registerFileHandlers(): void {
     mimeType: string;
   }) => {
     const fsP = await import('fs/promises');
-    await fsP.mkdir(OUTBOUND_DIR, { recursive: true });
+    const outboundDir = getOutboundDir();
+    await fsP.mkdir(outboundDir, { recursive: true });
 
     const id = crypto.randomUUID();
     const ext = extname(payload.fileName) || mimeToExt(payload.mimeType);
-    const stagedPath = join(OUTBOUND_DIR, `${id}${ext}`);
+    const stagedPath = join(outboundDir, `${id}${ext}`);
     const buffer = Buffer.from(payload.base64, 'base64');
     await fsP.writeFile(stagedPath, buffer);
 
@@ -2822,7 +2835,7 @@ async function resolveOutgoingMediaUrl(
     if (!m) return null;
     const attachmentId = decodeURIComponent(m[1]);
     if (!/^[A-Za-z0-9._-]+$/.test(attachmentId)) return null;
-    const recordPath = join(homedir(), '.openclaw', 'media', 'outgoing', 'records', `${attachmentId}.json`);
+    const recordPath = join(getOpenClawMediaDir(), 'outgoing', 'records', `${attachmentId}.json`);
     const fsP = await import('fs/promises');
     const raw = await fsP.readFile(recordPath, 'utf8');
     const record = JSON.parse(raw) as {
@@ -3077,14 +3090,14 @@ function isPathInside(child: string, parent: string): boolean {
  */
 function getFilePreviewWriteRoots(): string[] {
   const roots: string[] = [];
-  const openclawDir = join(homedir(), '.openclaw');
+  const openclawDir = getOpenClawConfigDir();
   roots.push(resolve(openclawDir));
   try {
     roots.push(resolve(app.getPath('userData')));
   } catch {
     // ignore — userData should always exist
   }
-  roots.push(resolve(OUTBOUND_DIR));
+  roots.push(resolve(getOutboundDir()));
   return roots;
 }
 

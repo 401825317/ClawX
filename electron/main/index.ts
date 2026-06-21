@@ -33,6 +33,7 @@ import { getMacTrafficLightPosition, syncMacTrafficLightPosition } from './traff
 import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
+import { applyPortableEnvironment, isPortableMode } from '../utils/portable-mode';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
@@ -61,6 +62,7 @@ import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const DISPLAY_APP_NAME = 'UClaw';
 const isE2EMode = process.env.CLAWX_E2E === '1';
+const portableModeInfo = applyPortableEnvironment();
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
 let extensionsLoadPromise: Promise<void> | null = null;
@@ -82,7 +84,21 @@ if (requestedRemoteDebuggingPort) {
 
 app.setName(DISPLAY_APP_NAME);
 
-if (isE2EMode && requestedUserDataDir) {
+if (portableModeInfo.enabled && portableModeInfo.clawxDataDir) {
+  app.setPath('userData', portableModeInfo.clawxDataDir);
+  if (portableModeInfo.runtimeSessionDataDir) {
+    app.setPath('sessionData', portableModeInfo.runtimeSessionDataDir);
+  }
+  if (portableModeInfo.runtimeLogsDir) {
+    app.setPath('logs', portableModeInfo.runtimeLogsDir);
+  }
+  if (portableModeInfo.runtimeCrashDumpsDir) {
+    app.setPath('crashDumps', portableModeInfo.runtimeCrashDumpsDir);
+  }
+  if (portableModeInfo.runtimeTempDir) {
+    app.setPath('temp', portableModeInfo.runtimeTempDir);
+  }
+} else if (isE2EMode && requestedUserDataDir) {
   app.setPath('userData', requestedUserDataDir);
 } else if (!isE2EMode) {
   app.setPath('userData', resolveLegacyUserDataPath());
@@ -337,7 +353,11 @@ async function initialize(): Promise<void> {
 
     // Apply persisted proxy settings before creating windows or network requests.
     await applyProxySettings();
-    await syncLaunchAtStartupSettingFromStore();
+    if (isPortableMode()) {
+      logger.info('Portable mode enabled: launch-at-startup sync is skipped');
+    } else {
+      await syncLaunchAtStartupSettingFromStore();
+    }
   } else {
     logger.info('Running in E2E mode: startup side effects minimized');
   }
@@ -612,7 +632,7 @@ async function initialize(): Promise<void> {
   }
 
   // Auto-install openclaw CLI and shell completions (non-blocking).
-  if (!isE2EMode) {
+  if (!isE2EMode && !isPortableMode()) {
     void autoInstallCliIfNeeded((installedPath) => {
       mainWindow?.webContents.send('openclaw:cli-installed', installedPath);
     }).then(() => {
@@ -621,6 +641,8 @@ async function initialize(): Promise<void> {
     }).catch((error) => {
       logger.warn('CLI auto-install failed:', error);
     });
+  } else if (isPortableMode()) {
+    logger.info('Portable mode enabled: OpenClaw CLI shell integration is skipped');
   }
 }
 

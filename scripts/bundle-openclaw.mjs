@@ -878,6 +878,7 @@ function patchBundledRuntime(outputDir) {
   const replacePatches = [
     {
       label: 'workspace command runner',
+      optional: true,
       target: () => findFirstFileByName(path.join(outputDir, 'dist'), /^workspace-.*\.js$/),
       search: `\tconst child = spawn(resolvedCommand, finalArgv.slice(1), {
 \t\tstdio,
@@ -910,13 +911,17 @@ function patchBundledRuntime(outputDir) {
   for (const patch of replacePatches) {
     const target = patch.target();
     if (!target || !fs.existsSync(target)) {
-      echo`   ⚠️  Skipped patch for ${patch.label}: target file not found`;
+      if (!patch.optional) {
+        echo`   ⚠️  Skipped patch for ${patch.label}: target file not found`;
+      }
       continue;
     }
 
     const current = fs.readFileSync(target, 'utf8');
     if (!current.includes(patch.search)) {
-      echo`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`;
+      if (!patch.optional) {
+        echo`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`;
+      }
       continue;
     }
 
@@ -931,13 +936,11 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${count} bundled runtime spawn site(s)`;
   }
 
-  const ptyTargets = findFilesByName(
-    path.join(outputDir, 'dist'),
-    /^(subagent-registry|reply|pi-embedded)-.*\.js$/,
-  );
+  const ptyTargets = findFilesByName(path.join(outputDir, 'dist'), /\.js$/);
   const ptyPatches = [
     {
       label: 'pty launcher windowsHide',
+      optional: true,
       search: `\tconst pty = spawn(params.shell, params.args, {
 \t\tcwd: params.cwd,
 \t\tenv: params.env ? toStringEnv(params.env) : void 0,
@@ -948,6 +951,24 @@ function patchBundledRuntime(outputDir) {
       replace: `\tconst pty = spawn(params.shell, params.args, {
 \t\tcwd: params.cwd,
 \t\tenv: params.env ? toStringEnv(params.env) : void 0,
+\t\tname: params.name ?? process.env.TERM ?? "xterm-256color",
+\t\tcols: params.cols ?? 120,
+\t\trows: params.rows ?? 30,
+\t\twindowsHide: true
+\t});`,
+    },
+    {
+      label: 'prepared pty launcher windowsHide',
+      search: `\tconst pty = spawn(preparedSpawn.command, preparedSpawn.args, {
+\t\tcwd: params.cwd,
+\t\tenv: preparedSpawn.env ? toStringEnv(preparedSpawn.env) : void 0,
+\t\tname: params.name ?? process.env.TERM ?? "xterm-256color",
+\t\tcols: params.cols ?? 120,
+\t\trows: params.rows ?? 30
+\t});`,
+      replace: `\tconst pty = spawn(preparedSpawn.command, preparedSpawn.args, {
+\t\tcwd: params.cwd,
+\t\tenv: preparedSpawn.env ? toStringEnv(preparedSpawn.env) : void 0,
 \t\tname: params.name ?? process.env.TERM ?? "xterm-256color",
 \t\tcols: params.cols ?? 120,
 \t\trows: params.rows ?? 30,
@@ -979,7 +1000,7 @@ function patchBundledRuntime(outputDir) {
         ptyCount++;
       }
     }
-    if (!matchedAny) {
+    if (!matchedAny && !patch.optional) {
       echo`   ⚠️  Skipped patch for ${patch.label}: expected source snippet not found`;
     }
   }

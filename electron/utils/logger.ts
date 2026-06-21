@@ -95,7 +95,7 @@ export function initLogger(): void {
       currentLevel = LogLevel.INFO;
     }
 
-    logDir = join(app.getPath('userData'), 'logs');
+    logDir = app.getPath('logs');
 
     if (!existsSync(logDir)) {
       mkdirSync(logDir, { recursive: true });

@@ -13,7 +13,7 @@ import {
 } from './openclaw-auth';
 import { ensureClawXOpenAiImagePluginInstalled } from './plugin-install';
 import { listAgentsSnapshot, type AgentsSnapshot } from './agent-config';
-import { expandPath } from './paths';
+import { expandOpenClawPath } from './paths';
 import {
   generateImageInProcess,
   resolveImageGenerationPrimaryFromConfig,
@@ -432,7 +432,7 @@ export async function listImageGenerationProvidersFromRuntime(): Promise<ImageGe
 function resolveAgentDirForTest(agentId: string, snapshot: AgentsSnapshot): string {
   const entry = snapshot.agents.find((agent) => agent.id === agentId);
   const agentDir = entry?.agentDir || `~/.openclaw/agents/${agentId}/agent`;
-  return expandPath(agentDir);
+  return expandOpenClawPath(agentDir);
 }
 
 export async function runImageGenerationTest(params: {
@@ -554,7 +554,7 @@ export async function generateImageForChatSession(params: {
 
   return generateImageInProcess({
     config,
-    agentDir: expandPath(agent.agentDir),
+    agentDir: expandOpenClawPath(agent.agentDir),
     prompt: params.prompt.trim(),
     model: configuredModel,
     timeoutMs: current.config.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,

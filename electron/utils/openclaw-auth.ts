@@ -12,10 +12,14 @@ import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
 import { constants, readdirSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { execFile } from 'child_process';
 import { dirname, join } from 'path';
-import { homedir } from 'os';
 import { pathToFileURL } from 'url';
 import { listConfiguredAgentIds } from './agent-config';
-import { getOpenClawResolvedDir } from './paths';
+import {
+  getOpenClawAgentsDir,
+  getOpenClawConfigPath,
+  getOpenClawExtensionsDir,
+  getOpenClawResolvedDir,
+} from './paths';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 import {
   getProviderEnvVar,
@@ -129,7 +133,7 @@ export function resetOpenClawPluginDiscoveryCaches(): void {
 }
 
 function getOpenClawAgentDir(agentId: string): string {
-  return join(homedir(), '.openclaw', 'agents', agentId, 'agent');
+  return join(getOpenClawAgentsDir(), agentId, 'agent');
 }
 
 async function getOpenClawProviderAuthRuntime(): Promise<OpenClawProviderAuthRuntime> {
@@ -477,7 +481,7 @@ function removeProfileFromStore(
 // ── Auth Profiles I/O ────────────────────────────────────────────
 
 function getAuthProfilesPath(agentId = 'main'): string {
-  return join(homedir(), '.openclaw', 'agents', agentId, 'agent', AUTH_PROFILE_FILENAME);
+  return join(getOpenClawAgentDir(agentId), AUTH_PROFILE_FILENAME);
 }
 
 async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
@@ -509,7 +513,7 @@ async function writeAuthProfiles(store: AuthProfilesStore, agentId = 'main'): Pr
  * resolveOpenClawStateSqliteDir returns ~/.openclaw/state, so dirname gives ~/.openclaw.
  */
 function getAgentSqlitePath(agentId = 'main'): string {
-  return join(homedir(), '.openclaw', 'agents', agentId, 'agent', 'openclaw-agent.sqlite');
+  return join(getOpenClawAgentDir(agentId), 'openclaw-agent.sqlite');
 }
 
 /**
@@ -619,38 +623,6 @@ function getApiKeyFromAuthProfilesStore(
   return null;
 }
 
-function getApiKeyFromRuntimeAuthStore(
-  store: OpenClawRuntimeAuthProfileStore,
-  provider: string,
-): string | null {
-  const profileIds = [
-    `${provider}:default`,
-    ...(Object.entries(store.order ?? {})
-      .flatMap(([orderProvider, profileIds]) => (orderProvider === provider ? profileIds : []))),
-  ];
-
-  for (const profileId of profileIds) {
-    const profile = store.profiles[profileId];
-    if (profile?.type === 'api_key' && profile.provider === provider) {
-      const key = profile.key;
-      if (typeof key === 'string' && key.trim()) {
-        return key;
-      }
-    }
-  }
-
-  for (const profile of Object.values(store.profiles)) {
-    if (profile.type === 'api_key' && profile.provider === provider) {
-      const key = profile.key;
-      if (typeof key === 'string' && key.trim()) {
-        return key;
-      }
-    }
-  }
-
-  return null;
-}
-
 /**
  * Read the API key OpenClaw will use for a runtime provider key.
  *
@@ -691,7 +663,7 @@ export async function getProviderApiKeyFromOpenClaw(
 // ── Agent Discovery ──────────────────────────────────────────────
 
 async function discoverAgentIds(): Promise<string[]> {
-  const agentsDir = join(homedir(), '.openclaw', 'agents');
+  const agentsDir = getOpenClawAgentsDir();
   try {
     if (!(await fileExists(agentsDir))) return ['main'];
     return await listConfiguredAgentIds();
@@ -702,7 +674,6 @@ async function discoverAgentIds(): Promise<string[]> {
 
 // ── OpenClaw Config Helpers ──────────────────────────────────────
 
-const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const FEISHU_PLUGIN_ID_CANDIDATES = ['openclaw-lark', 'feishu-openclaw-plugin'] as const;
 const VALID_COMPACTION_MODES = new Set(['default', 'safeguard']);
 const BUILTIN_CHANNEL_IDS = new Set([
@@ -897,11 +868,11 @@ async function collectActiveProviderIdsFromConfig(config: Record<string, unknown
 }
 
 async function readOpenClawJson(): Promise<Record<string, unknown>> {
-  return (await readJsonFile<Record<string, unknown>>(OPENCLAW_CONFIG_PATH)) ?? {};
+  return (await readJsonFile<Record<string, unknown>>(getOpenClawConfigPath())) ?? {};
 }
 
 async function resolveInstalledFeishuPluginId(): Promise<string | null> {
-  const extensionRoot = join(homedir(), '.openclaw', 'extensions');
+  const extensionRoot = getOpenClawExtensionsDir();
   for (const dirName of FEISHU_PLUGIN_ID_CANDIDATES) {
     const manifestPath = join(extensionRoot, dirName, 'openclaw.plugin.json');
     const manifest = await readJsonFile<{ id?: unknown }>(manifestPath);
@@ -914,7 +885,7 @@ async function resolveInstalledFeishuPluginId(): Promise<string | null> {
 
 async function discoverInstalledExtensionPluginIds(): Promise<Set<string>> {
   const ids = new Set<string>();
-  const extensionRoot = join(homedir(), '.openclaw', 'extensions');
+  const extensionRoot = getOpenClawExtensionsDir();
 
   let entries: Awaited<ReturnType<typeof readdir>>;
   try {
@@ -1026,7 +997,7 @@ async function writeOpenClawJson(config: Record<string, unknown>): Promise<void>
   commands.restart = true;
   config.commands = commands;
 
-  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+  await writeJsonFile(getOpenClawConfigPath(), config);
 }
 
 // ── Exported Functions (all async) ───────────────────────────────
@@ -1238,7 +1209,7 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
 
   // 2. Remove from models.json (per-agent model registry used by pi-ai directly)
   for (const id of agentIds) {
-    const modelsPath = join(homedir(), '.openclaw', 'agents', id, 'agent', 'models.json');
+    const modelsPath = join(getOpenClawAgentDir(id), 'models.json');
     try {
       if (await fileExists(modelsPath)) {
         const raw = await readFile(modelsPath, 'utf-8');
@@ -2693,7 +2664,7 @@ async function updateModelsJsonProviderEntriesForAgents(
   entry: AgentModelProviderEntry,
 ): Promise<void> {
   for (const agentId of agentIds) {
-    const modelsPath = join(homedir(), '.openclaw', 'agents', agentId, 'agent', 'models.json');
+    const modelsPath = join(getOpenClawAgentDir(agentId), 'models.json');
     let data: Record<string, unknown> = {};
     try {
       data = (await readJsonFile<Record<string, unknown>>(modelsPath)) ?? {};
@@ -2791,7 +2762,8 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // Skip sanitization if the config file does not exist yet.
     // Creating a skeleton config here would overwrite any data written
     // by the Gateway on its first run.
-    if (!(await fileExists(OPENCLAW_CONFIG_PATH))) {
+    const configPath = getOpenClawConfigPath();
+    if (!(await fileExists(configPath))) {
       console.log('[sanitize] openclaw.json does not exist yet, skipping sanitization');
       return;
     }
@@ -2800,7 +2772,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     // which coalesces null → {}.  We need to distinguish a genuinely empty
     // file (valid, proceed normally) from a corrupt/unreadable file (null,
     // bail out to avoid overwriting the user's data with a skeleton config).
-    const rawConfig = await readJsonFile<Record<string, unknown>>(OPENCLAW_CONFIG_PATH);
+    const rawConfig = await readJsonFile<Record<string, unknown>>(configPath);
     if (rawConfig === null) {
       console.log('[sanitize] openclaw.json could not be parsed, skipping sanitization to preserve data');
       return;

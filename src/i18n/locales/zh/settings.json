@@ -239,8 +239,11 @@
     "status": {
       "checking": "正在检查更新...",
       "downloading": "正在下载更新...",
+      "downloadingPortable": "正在下载新版便携包...",
       "available": "可用更新：v{{version}}",
+      "portableAvailable": "新版便携包可用：v{{version}}",
       "downloaded": "准备安装：v{{version}}",
+      "portableDownloaded": "新版便携包已下载：v{{version}}",
       "autoInstalling": "将在 {{seconds}} 秒后重启并安装更新...",
       "failed": "检查更新失败",
       "latest": "您已拥有最新版本",
@@ -250,7 +253,9 @@
       "checking": "检查中...",
       "downloading": "下载中...",
       "download": "下载更新",
+      "downloadPortable": "下载新版便携包",
       "install": "安装并重启",
+      "openDownloadLocation": "打开下载位置",
       "cancelAutoInstall": "取消",
       "later": "稍后",
       "retry": "重试",
@@ -262,11 +267,14 @@
     "toast": {
       "availableTitle": "UClaw 有新版本可用",
       "availableDescription": "v{{version}} 已可下载。准备好后可开始下载。",
+      "portableAvailableDescription": "v{{version}} 便携包已可下载。下载后退出 UClaw，再替换当前 U 盘目录。",
       "downloadedTitle": "UClaw 更新已就绪",
       "downloadedDescription": "v{{version}} 已下载完成。重启即可安装。",
+      "portableDownloadedDescription": "v{{version}} 便携包已下载完成。退出 UClaw 后替换当前 U 盘目录即可更新。",
       "unknownVersion": "新版本"
     },
-    "help": "UClaw 会自动检查更新，并在下载或安装前提示您确认。"
+    "help": "UClaw 会自动检查更新，并在下载或安装前提示您确认。",
+    "portableHelp": "UClaw 会自动检查更新；便携版会下载新版包到 UClawData/updates，退出后替换当前目录即可完成更新。"
   },
   "advanced": {
     "title": "高级",

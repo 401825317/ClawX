@@ -1,9 +1,9 @@
 import { dirname, join } from 'path';
-import { homedir } from 'os';
 import { createRequire } from 'module';
 import { EventEmitter } from 'events';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'fs';
 import { deflateSync } from 'zlib';
+import { getOpenClawConfigDir } from './paths';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 
 const require = createRequire(import.meta.url);
@@ -38,6 +38,11 @@ function getBaileysPackageDir(): string {
         loadBaileys();
     }
     return baileysPackageDir!;
+}
+
+function getWhatsAppCredentialsDir(accountId?: string): string {
+    const root = join(getOpenClawConfigDir(), 'credentials', 'whatsapp');
+    return accountId ? join(root, accountId) : root;
 }
 
 // Types from Baileys (approximate since we don't have types for dynamic require)
@@ -279,7 +284,7 @@ export class WhatsAppLoginManager extends EventEmitter {
             } = loadBaileys();
 
             // Path where OpenClaw expects WhatsApp credentials
-            const authDir = join(homedir(), '.openclaw', 'credentials', 'whatsapp', accountId);
+            const authDir = getWhatsAppCredentialsDir(accountId);
 
             // Ensure directory exists
             if (!existsSync(authDir)) {
@@ -461,12 +466,12 @@ export class WhatsAppLoginManager extends EventEmitter {
         // as configured based solely on the existence of this directory.
         if (shouldCleanup && cleanupAccountId) {
             try {
-                const authDir = join(homedir(), '.openclaw', 'credentials', 'whatsapp', cleanupAccountId);
+                const authDir = getWhatsAppCredentialsDir(cleanupAccountId);
                 if (existsSync(authDir)) {
                     rmSync(authDir, { recursive: true, force: true });
                     console.log(`[WhatsAppLogin] Cleaned up auth dir for cancelled login: ${authDir}`);
                     // Also remove the parent whatsapp dir if it's now empty
-                    const parentDir = join(homedir(), '.openclaw', 'credentials', 'whatsapp');
+                    const parentDir = getWhatsAppCredentialsDir();
                     if (existsSync(parentDir)) {
                         const remaining = readdirSync(parentDir);
                         if (remaining.length === 0) {

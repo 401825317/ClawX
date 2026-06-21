@@ -9,15 +9,13 @@ import { readFile, writeFile, access, mkdir, readdir, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { constants } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
-import { getOpenClawDir, getOpenClawResolvedDir } from './paths';
+import { getOpenClawConfigPath, getOpenClawDir, getOpenClawResolvedDir, getOpenClawSkillsDir } from './paths';
 import { logger } from './logger';
 import { cpAsyncSafe } from './plugin-install';
 import { withConfigLock } from './config-mutex';
 import { isJunFeiAIManagedDistribution } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 
-const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 
 export interface SkillConfigUpdates {
@@ -51,11 +49,12 @@ async function fileExists(p: string): Promise<boolean> {
  * Read the current OpenClaw config
  */
 async function readConfig(): Promise<OpenClawConfig> {
-    if (!(await fileExists(OPENCLAW_CONFIG_PATH))) {
+    const configPath = getOpenClawConfigPath();
+    if (!(await fileExists(configPath))) {
         return {};
     }
     try {
-        const raw = await readFile(OPENCLAW_CONFIG_PATH, 'utf-8');
+        const raw = await readFile(configPath, 'utf-8');
         return parseJsonWithBom<OpenClawConfig>(raw);
     } catch (err) {
         console.error('Failed to read openclaw config:', err);
@@ -68,7 +67,7 @@ async function readConfig(): Promise<OpenClawConfig> {
  */
 async function writeConfig(config: OpenClawConfig): Promise<void> {
     const json = JSON.stringify(config, null, 2);
-    await writeFile(OPENCLAW_CONFIG_PATH, json, 'utf-8');
+    await writeFile(getOpenClawConfigPath(), json, 'utf-8');
 }
 
 /**
@@ -298,7 +297,7 @@ const BUILTIN_SKILLS = [] as const;
  * block the normal startup flow.
  */
 export async function ensureBuiltinSkillsInstalled(): Promise<void> {
-    const skillsRoot = join(homedir(), '.openclaw', 'skills');
+    const skillsRoot = getOpenClawSkillsDir();
 
     for (const { slug, sourceExtension } of BUILTIN_SKILLS) {
         const targetDir = join(skillsRoot, slug);
@@ -365,7 +364,7 @@ export async function removeClawXPreinstalledSkillsAndConfigsWithOptions(options
     removedSlugs: string[];
     removedConfigs: number;
 }> {
-    const targetRoot = options?.skillsRoot || join(homedir(), '.openclaw', 'skills');
+    const targetRoot = options?.skillsRoot || getOpenClawSkillsDir();
     if (!existsSync(targetRoot)) {
         return { removed: 0, removedSlugs: [], removedConfigs: 0 };
     }

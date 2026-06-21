@@ -139,6 +139,9 @@ In **Settings → General**, you can enable **Launch at system startup** so Claw
 ### 🔔 Update Prompts
 ClawX can automatically check for new versions on startup. When an update is available, it shows an in-app prompt; downloading and installing only happen after you choose the action.
 
+### 💾 High-Performance Portable Mode
+Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in state, OpenClaw config, agents, sessions, skills, channel credentials, and update packages in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable runtime data such as Python, uv, temp files, browser cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth.
+
 ---
 
 ## Getting Started
@@ -365,7 +368,9 @@ pnpm run build:vite       # Build frontend only
 pnpm build                # Full production build (with packaging assets)
 pnpm package              # Package for current platform (includes bundled preinstalled skills)
 pnpm package:mac          # Package for macOS
+pnpm package:mac:usb      # Package an install-free high-performance portable macOS folder
 pnpm package:win          # Package for Windows
+pnpm package:win:usb      # Package an install-free high-performance portable Windows folder
 pnpm package:linux        # Package for Linux
 ```
 

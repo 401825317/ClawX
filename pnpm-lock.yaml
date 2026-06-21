@@ -53,16 +53,16 @@ importers:
         version: 1.3.7
       '@larksuite/openclaw-lark':
         specifier: 2026.6.10
-        version: 2026.6.10(openclaw@2026.6.6(encoding@0.1.13))
+        version: 2026.6.10(openclaw@2026.6.9(encoding@0.1.13))
       '@larksuiteoapi/node-sdk':
-        specifier: ^1.61.1
-        version: 1.62.0
+        specifier: ^1.67.0
+        version: 1.67.0
       '@monaco-editor/react':
         specifier: ^4.7.0
         version: 4.7.0(monaco-editor@0.55.1)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@openclaw/qqbot':
-        specifier: 2026.6.6
-        version: 2026.6.6(openclaw@2026.6.6(encoding@0.1.13))
+        specifier: 2026.6.9
+        version: 2026.6.9(openclaw@2026.6.9(encoding@0.1.13))
       '@playwright/test':
         specifier: ^1.56.1
         version: 1.59.0
@@ -107,13 +107,13 @@ importers:
         version: 0.34.48
       '@soimy/dingtalk':
         specifier: 3.6.4
-        version: 3.6.4(openclaw@2026.6.6(encoding@0.1.13))
+        version: 3.6.4(openclaw@2026.6.9(encoding@0.1.13))
       '@tencent-connect/qqbot-connector':
         specifier: ^1.1.0
         version: 1.1.0
       '@tencent-weixin/openclaw-weixin':
         specifier: ^2.4.4
-        version: 2.4.4(openclaw@2026.6.6(encoding@0.1.13))
+        version: 2.4.4(openclaw@2026.6.9(encoding@0.1.13))
       '@testing-library/jest-dom':
         specifier: ^6.9.1
         version: 6.9.1
@@ -146,7 +146,7 @@ importers:
         version: 5.2.0(vite@7.3.1(@types/node@25.5.0)(jiti@1.21.7)(tsx@4.21.0)(yaml@2.9.0))
       '@wecom/wecom-openclaw-plugin':
         specifier: ^2026.5.25
-        version: 2026.5.25(openclaw@2026.6.6(encoding@0.1.13))
+        version: 2026.5.25(openclaw@2026.6.9(encoding@0.1.13))
       '@whiskeysockets/baileys':
         specifier: 7.0.0-rc.9
         version: 7.0.0-rc.9(audio-decode@2.2.3)(jimp@1.6.1)(sharp@0.34.5)
@@ -220,8 +220,8 @@ importers:
         specifier: ^2.1.3
         version: 2.1.3
       openclaw:
-        specifier: 2026.6.6
-        version: 2026.6.6(encoding@0.1.13)
+        specifier: 2026.6.9
+        version: 2026.6.9(encoding@0.1.13)
       pdfjs-dist:
         specifier: ^5.7.284
         version: 5.7.284
@@ -1173,11 +1173,8 @@ packages:
       openclaw:
         optional: true
 
-  '@larksuiteoapi/node-sdk@1.62.0':
-    resolution: {integrity: sha512-ZITiuAkiVgphn6OPO8MHeWV1q7+UNByLmNiYVDIAxF5+HJ8USl4xPinDOq9AMJSEUqdBJtiLdz7UltV5jP+EDg==}
-
-  '@larksuiteoapi/node-sdk@1.66.1':
-    resolution: {integrity: sha512-W1rIAs/8Oc/rEYuWc0sxGvR8iLwd8p5D2RS4ODMqs8htIxK8yIa8sb22EDv/OEBqUpKXZaNLydTz7Oq8HOQROg==}
+  '@larksuiteoapi/node-sdk@1.67.0':
+    resolution: {integrity: sha512-pr3iZbK+CkwgwIhUzt86mZGP/wLCzBDRmCy+Vt+/UAWx/KjwxwrRpfAKm4eOmd0uUd8AcG2mWC/ZSUMu7lZIqg==}
 
   '@lydell/node-pty-darwin-arm64@1.2.0-beta.12':
     resolution: {integrity: sha512-tqaifcY9Cr41SblO1+FLzh8oxxtkNhuW9Dhl22lKme9BreYvKvxEZcdPIXTuqkJc5tagOEC4QHShKmJjLyLXLQ==}
@@ -1434,10 +1431,10 @@ packages:
     peerDependencies:
       undici: '>=8.3.0 <9'
 
-  '@openclaw/qqbot@2026.6.6':
-    resolution: {integrity: sha512-GM2PRq+zoSPlePCYJNlAyEtUipy25jNwDR5BHDojM80EWw9xfE/+J7jCmuClSq6exsp0bGizP4vxqhygFchzqw==}
+  '@openclaw/qqbot@2026.6.9':
+    resolution: {integrity: sha512-hyQsPOUlxamRzqKa54my9MPL3PheNXFUm18l5gLiMrEpYuQC1W4/0eFvZUsn9Nup4dGOXrEhmFjf/V0Fn63P5w==}
     peerDependencies:
-      openclaw: '>=2026.6.6'
+      openclaw: '>=2026.6.9'
     peerDependenciesMeta:
       openclaw:
         optional: true
@@ -4763,8 +4760,8 @@ packages:
       zod:
         optional: true
 
-  openclaw@2026.6.6:
-    resolution: {integrity: sha512-oMYoQ8a7zummw1tD+AX98yYLzqoq0tQmYWHG65AA0ZivgzmOb2oD0cVdhcWP9IT3opkHdJ5vBdWywUe6xWQXtw==}
+  openclaw@2026.6.9:
+    resolution: {integrity: sha512-y0PGUdE87S8QtQXABPDL0CjNKhH3q/R1h9/WiRQkhVCGSBVhs63/M1iZn2DYVyJCAbDyMz3KNyAE0WzSQIWCRg==}
     engines: {node: '>=22.19.0'}
     hasBin: true
 
@@ -5698,6 +5695,10 @@ packages:
     resolution: {integrity: sha512-dzGK0boVlC4W5QFuQN1EFSl3bIDYsk7Tj40U6eIBnK2k/8ml7TZ5agbI5j5+qnoVcAA+rNtBml8SEiLxZpNqRQ==}
     engines: {node: '>=18'}
 
+  tar@7.5.16:
+    resolution: {integrity: sha512-56adEpPMouktRlBLXiaYFFzZ/3+JXa8P9n7WbR+ibIjtviN55mEaOkiysCnPnWm+7kkui1Dn8J9l+g6zV8731w==}
+    engines: {node: '>=18'}
+
   teex@1.0.1:
     resolution: {integrity: sha512-eYE6iEI62Ni1H8oIa7KlDU6uQBtqr4Eajni3wX7rpfXD8ysFx8z0+dri+KWEPWpBsxXfxu58x/0jvTVT1ekOSg==}
 
@@ -5882,8 +5883,8 @@ packages:
     resolution: {integrity: sha512-E9MkTS4xXLnRPYqxH2e6Hr2/49e7WFDKczKcCaFH4VaZs2iNvHMqeIkyUAD9vM8kujy9TjVrRlQ5KkdEJxB2pw==}
     engines: {node: '>=22.19.0'}
 
-  undici@8.3.0:
-    resolution: {integrity: sha512-TkUDgb6tl7KOGZ+7e8E3d2FYgUQgF6z5YypqjWmixVQSQERFcVrVg0ySADm2LVLRh5ljAaHTCR5Fmz3Q34rB7Q==}
+  undici@8.5.0:
+    resolution: {integrity: sha512-xamtWoB1EshgjpmlXd7GGm2VfdDtw1+rD8uhry8pSNW3If6S8E0m2T2+orSKeZXEn/aPJMviCpDBA65WJt8zhg==}
     engines: {node: '>=22.19.0'}
 
   unified@11.0.5:
@@ -6691,7 +6692,7 @@ snapshots:
       ora: 5.4.1
       read-binary-file-arch: 1.0.6
       semver: 7.7.4
-      tar: 7.5.13
+      tar: 7.5.15
       yargs: 17.7.2
     transitivePeerDependencies:
       - supports-color
@@ -7333,35 +7334,21 @@ snapshots:
 
   '@keyv/serialize@1.1.1': {}
 
-  '@larksuite/openclaw-lark@2026.6.10(openclaw@2026.6.6(encoding@0.1.13))':
+  '@larksuite/openclaw-lark@2026.6.10(openclaw@2026.6.9(encoding@0.1.13))':
     dependencies:
-      '@larksuiteoapi/node-sdk': 1.66.1
+      '@larksuiteoapi/node-sdk': 1.67.0
       '@sinclair/typebox': 0.34.49
       image-size: 2.0.2
       undici-types: 8.3.0
       zod: 4.4.3
     optionalDependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
+      openclaw: 2026.6.9(encoding@0.1.13)
     transitivePeerDependencies:
       - bufferutil
       - debug
       - utf-8-validate
 
-  '@larksuiteoapi/node-sdk@1.62.0':
-    dependencies:
-      axios: 1.13.6(debug@4.4.3)
-      lodash.identity: 3.0.0
-      lodash.merge: 4.6.2
-      lodash.pickby: 4.6.0
-      protobufjs: 7.5.4
-      qs: 6.15.0
-      ws: 8.20.0
-    transitivePeerDependencies:
-      - bufferutil
-      - debug
-      - utf-8-validate
-
-  '@larksuiteoapi/node-sdk@1.66.1':
+  '@larksuiteoapi/node-sdk@1.67.0':
     dependencies:
       axios: 1.13.6(debug@4.4.3)
       lodash.identity: 3.0.0
@@ -7593,13 +7580,13 @@ snapshots:
       jszip: 3.10.1
       tar: 7.5.13
 
-  '@openclaw/proxyline@0.3.3(undici@8.3.0)':
+  '@openclaw/proxyline@0.3.3(undici@8.5.0)':
     dependencies:
-      undici: 8.3.0
+      undici: 8.5.0
 
-  '@openclaw/qqbot@2026.6.6(openclaw@2026.6.6(encoding@0.1.13))':
+  '@openclaw/qqbot@2026.6.9(openclaw@2026.6.9(encoding@0.1.13))':
     optionalDependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
+      openclaw: 2026.6.9(encoding@0.1.13)
 
   '@pinojs/redact@0.4.0': {}
 
@@ -8243,7 +8230,7 @@ snapshots:
       - '@emnapi/runtime'
     optional: true
 
-  '@soimy/dingtalk@3.6.4(openclaw@2026.6.6(encoding@0.1.13))':
+  '@soimy/dingtalk@3.6.4(openclaw@2026.6.9(encoding@0.1.13))':
     dependencies:
       axios: 1.13.6(debug@4.4.3)
       dingtalk-stream: 2.1.5
@@ -8252,7 +8239,7 @@ snapshots:
       pdf-parse: 2.4.5
       zod: 4.4.3
     optionalDependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
+      openclaw: 2026.6.9(encoding@0.1.13)
     transitivePeerDependencies:
       - bufferutil
       - debug
@@ -8271,9 +8258,9 @@ snapshots:
     dependencies:
       qrcode-terminal: 0.12.0
 
-  '@tencent-weixin/openclaw-weixin@2.4.4(openclaw@2026.6.6(encoding@0.1.13))':
+  '@tencent-weixin/openclaw-weixin@2.4.4(openclaw@2026.6.9(encoding@0.1.13))':
     dependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
+      openclaw: 2026.6.9(encoding@0.1.13)
       qrcode-terminal: 0.12.0
       zod: 4.4.3
 
@@ -8643,7 +8630,7 @@ snapshots:
       - debug
       - utf-8-validate
 
-  '@wecom/wecom-openclaw-plugin@2026.5.25(openclaw@2026.6.6(encoding@0.1.13))':
+  '@wecom/wecom-openclaw-plugin@2026.5.25(openclaw@2026.6.9(encoding@0.1.13))':
     dependencies:
       '@wecom/aibot-node-sdk': 1.0.6
       fast-xml-parser: 5.7.3
@@ -8651,7 +8638,7 @@ snapshots:
       undici: 7.24.6
       zod: 4.4.3
     optionalDependencies:
-      openclaw: 2026.6.6(encoding@0.1.13)
+      openclaw: 2026.6.9(encoding@0.1.13)
     transitivePeerDependencies:
       - bufferutil
       - debug
@@ -11425,7 +11412,7 @@ snapshots:
       ws: 8.21.0
       zod: 4.4.3
 
-  openclaw@2026.6.6(encoding@0.1.13):
+  openclaw@2026.6.9(encoding@0.1.13):
     dependencies:
       '@agentclientprotocol/sdk': 0.22.1(zod@4.4.3)
       '@anthropic-ai/sdk': 0.100.1(zod@4.4.3)
@@ -11441,13 +11428,12 @@ snapshots:
       '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
       '@mozilla/readability': 0.6.0
       '@openclaw/fs-safe': 0.3.0
-      '@openclaw/proxyline': 0.3.3(undici@8.3.0)
+      '@openclaw/proxyline': 0.3.3(undici@8.5.0)
       chalk: 5.6.2
       chokidar: 5.0.0
       clawpdf: 0.3.0
       commander: 14.0.3
       croner: 10.0.1
-      cross-spawn: 7.0.6
       diff: 9.0.0
       dotenv: 17.4.2
       express: 5.2.1
@@ -11471,12 +11457,12 @@ snapshots:
       qrcode: 1.5.4
       quickjs-wasi: 3.0.0
       rastermill: 0.3.1
-      tar: 7.5.15
+      tar: 7.5.16
       tree-sitter-bash: 0.25.1
       tslog: 4.10.2
       typebox: 1.1.39
       typescript: 6.0.3
-      undici: 8.3.0
+      undici: 8.5.0
       web-push: 3.6.7
       web-tree-sitter: 0.26.9
       ws: 8.21.0
@@ -12559,6 +12545,14 @@ snapshots:
       minizlib: 3.1.0
       yallist: 5.0.0
 
+  tar@7.5.16:
+    dependencies:
+      '@isaacs/fs-minipass': 4.0.1
+      chownr: 3.0.0
+      minipass: 7.1.3
+      minizlib: 3.1.0
+      yallist: 5.0.0
+
   teex@1.0.1:
     dependencies:
       streamx: 2.25.0
@@ -12721,7 +12715,7 @@ snapshots:
 
   undici@8.1.0: {}
 
-  undici@8.3.0: {}
+  undici@8.5.0: {}
 
   unified@11.0.5:
     dependencies:

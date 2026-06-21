@@ -19,7 +19,8 @@
         "renameSessionPlaceholder": "セッションタイトル",
         "saveSessionRename": "セッションタイトルを保存",
         "cancelSessionRename": "名前変更をキャンセル",
-        "imageGeneration": "画像生成"
+        "imageGeneration": "画像生成",
+        "videoGeneration": "動画生成"
     },
     "actions": {
         "save": "保存",

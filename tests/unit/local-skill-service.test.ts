@@ -15,6 +15,7 @@ vi.mock('@electron/utils/agent-config', () => ({
 
 vi.mock('@electron/utils/paths', () => ({
   expandPath: (value: string) => value,
+  expandOpenClawPath: (value: string) => value,
   getOpenClawSkillsDir: () => getOpenClawSkillsDirMock(),
   getOpenClawResolvedDir: () => getOpenClawResolvedDirMock(),
 }));

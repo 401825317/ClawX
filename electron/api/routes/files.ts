@@ -1,10 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog, nativeImage } from 'electron';
 import crypto from 'node:crypto';
-import { basename, extname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { basename, extname, join } from 'node:path';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
+import { getOpenClawMediaDir } from '../../utils/paths';
 
 const EXT_MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
@@ -53,8 +54,11 @@ function mimeToExt(mimeType: string): string {
   return '';
 }
 
-const OUTBOUND_DIR = join(homedir(), '.openclaw', 'media', 'outbound');
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
+
+function getOutboundDir(): string {
+  return join(getOpenClawMediaDir(), 'outbound');
+}
 
 async function generateImagePreview(filePath: string, mimeType: string): Promise<string | null> {
   try {
@@ -94,7 +98,7 @@ async function resolveOutgoingMediaUrl(
     if (!m) return null;
     const attachmentId = decodeURIComponent(m[1]);
     if (!/^[A-Za-z0-9._-]+$/.test(attachmentId)) return null;
-    const recordPath = join(homedir(), '.openclaw', 'media', 'outgoing', 'records', `${attachmentId}.json`);
+    const recordPath = join(getOpenClawMediaDir(), 'outgoing', 'records', `${attachmentId}.json`);
     const fsP = await import('node:fs/promises');
     const raw = await fsP.readFile(recordPath, 'utf8');
     const record = JSON.parse(raw) as {
@@ -123,7 +127,8 @@ export async function handleFileRoutes(
     try {
       const body = await parseJsonBody<{ filePaths: string[] }>(req);
       const fsP = await import('node:fs/promises');
-      await fsP.mkdir(OUTBOUND_DIR, { recursive: true });
+      const outboundDir = getOutboundDir();
+      await fsP.mkdir(outboundDir, { recursive: true });
       const results = [];
       for (const filePath of body.filePaths) {
         const id = crypto.randomUUID();
@@ -142,7 +147,7 @@ export async function handleFileRoutes(
         }
 
         const ext = extname(filePath);
-        const stagedPath = join(OUTBOUND_DIR, `${id}${ext}`);
+        const stagedPath = join(outboundDir, `${id}${ext}`);
         await fsP.copyFile(filePath, stagedPath);
         const s = await fsP.stat(stagedPath);
         const mimeType = getMimeType(ext);
@@ -162,10 +167,11 @@ export async function handleFileRoutes(
     try {
       const body = await parseJsonBody<{ base64: string; fileName: string; mimeType: string }>(req);
       const fsP = await import('node:fs/promises');
-      await fsP.mkdir(OUTBOUND_DIR, { recursive: true });
+      const outboundDir = getOutboundDir();
+      await fsP.mkdir(outboundDir, { recursive: true });
       const id = crypto.randomUUID();
       const ext = extname(body.fileName) || mimeToExt(body.mimeType);
-      const stagedPath = join(OUTBOUND_DIR, `${id}${ext}`);
+      const stagedPath = join(outboundDir, `${id}${ext}`);
       const buffer = Buffer.from(body.base64, 'base64');
       await fsP.writeFile(stagedPath, buffer);
       const mimeType = body.mimeType || getMimeType(ext);

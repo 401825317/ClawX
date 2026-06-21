@@ -10,6 +10,7 @@ export interface UpdateInfo {
   version: string;
   releaseDate?: string;
   releaseNotes?: string | null;
+  downloadUrl?: string;
 }
 
 export interface ProgressInfo {
@@ -31,10 +32,12 @@ export type UpdateStatus =
 
 interface UpdateState {
   status: UpdateStatus;
+  mode: 'installed' | 'portable';
   currentVersion: string;
   updateInfo: UpdateInfo | null;
   progress: ProgressInfo | null;
   error: string | null;
+  downloadPath: string | null;
   isInitialized: boolean;
   /** Seconds remaining before auto-install, or null if inactive. */
   autoInstallCountdown: number | null;
@@ -54,10 +57,12 @@ let updateInitPromise: Promise<void> | null = null;
 
 export const useUpdateStore = create<UpdateState>((set, get) => ({
   status: 'idle',
+  mode: 'installed',
   currentVersion: '0.0.0',
   updateInfo: null,
   progress: null,
   error: null,
+  downloadPath: null,
   isInitialized: false,
   autoInstallCountdown: null,
 
@@ -78,15 +83,19 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       try {
         const status = await invokeIpc<{
           status: UpdateStatus;
+          mode?: 'installed' | 'portable';
           info?: UpdateInfo;
           progress?: ProgressInfo;
           error?: string;
+          downloadPath?: string;
         }>('update:status');
         set({
           status: status.status,
+          mode: status.mode || 'installed',
           updateInfo: status.info || null,
           progress: status.progress || null,
           error: status.error || null,
+          downloadPath: status.downloadPath || null,
         });
       } catch (error) {
         console.error('Failed to get update status:', error);
@@ -98,15 +107,19 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       window.electron.ipcRenderer.on('update:status-changed', (data) => {
         const status = data as {
           status: UpdateStatus;
+          mode?: 'installed' | 'portable';
           info?: UpdateInfo;
           progress?: ProgressInfo;
           error?: string;
+          downloadPath?: string;
         };
         set({
           status: status.status,
+          mode: status.mode || get().mode,
           updateInfo: status.info || null,
           progress: status.progress || null,
           error: status.error || null,
+          downloadPath: status.downloadPath || null,
         });
       });
 
@@ -151,18 +164,22 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         error?: string;
         status?: {
           status: UpdateStatus;
+          mode?: 'installed' | 'portable';
           info?: UpdateInfo;
           progress?: ProgressInfo;
           error?: string;
+          downloadPath?: string;
         };
       };
       
       if (result.status) {
         set({
           status: result.status.status,
+          mode: result.status.mode || get().mode,
           updateInfo: result.status.info || null,
           progress: result.status.progress || null,
           error: result.status.error || null,
+          downloadPath: result.status.downloadPath || null,
         });
       } else if (!result.success) {
         set({ status: 'error', error: result.error || 'Failed to check for updates' });
@@ -186,10 +203,30 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
       const result = await invokeIpc<{
         success: boolean;
         error?: string;
+        downloadPath?: string;
+        status?: {
+          status: UpdateStatus;
+          mode?: 'installed' | 'portable';
+          info?: UpdateInfo;
+          progress?: ProgressInfo;
+          error?: string;
+          downloadPath?: string;
+        };
       }>('update:download');
       
       if (!result.success) {
         set({ status: 'error', error: result.error || 'Failed to download update' });
+      } else if (result.status) {
+        set({
+          status: result.status.status,
+          mode: result.status.mode || get().mode,
+          updateInfo: result.status.info || get().updateInfo,
+          progress: result.status.progress || null,
+          error: result.status.error || null,
+          downloadPath: result.status.downloadPath || result.downloadPath || get().downloadPath,
+        });
+      } else if (result.downloadPath) {
+        set({ downloadPath: result.downloadPath });
       }
     } catch (error) {
       set({ status: 'error', error: String(error) });

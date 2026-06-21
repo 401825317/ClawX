@@ -21,6 +21,7 @@ export function UpdateSettings() {
   const { t } = useTranslation('settings');
   const {
     status,
+    mode,
     currentVersion,
     updateInfo,
     progress,
@@ -69,11 +70,15 @@ export function UpdateSettings() {
       case 'checking':
         return t('updates.status.checking');
       case 'downloading':
-        return t('updates.status.downloading');
+        return mode === 'portable' ? t('updates.status.downloadingPortable') : t('updates.status.downloading');
       case 'available':
-        return t('updates.status.available', { version: updateInfo?.version });
+        return mode === 'portable'
+          ? t('updates.status.portableAvailable', { version: updateInfo?.version })
+          : t('updates.status.available', { version: updateInfo?.version });
       case 'downloaded':
-        return t('updates.status.downloaded', { version: updateInfo?.version });
+        return mode === 'portable'
+          ? t('updates.status.portableDownloaded', { version: updateInfo?.version })
+          : t('updates.status.downloaded', { version: updateInfo?.version });
       case 'error':
         return error || t('updates.status.failed');
       case 'not-available':
@@ -103,7 +108,7 @@ export function UpdateSettings() {
         return (
           <Button onClick={downloadUpdate} size="sm">
             <Download className="h-4 w-4 mr-2" />
-            {t('updates.action.download')}
+            {mode === 'portable' ? t('updates.action.downloadPortable') : t('updates.action.download')}
           </Button>
         );
       case 'downloaded':
@@ -118,7 +123,7 @@ export function UpdateSettings() {
         return (
           <Button onClick={installUpdate} size="sm" variant="default">
             <Rocket className="h-4 w-4 mr-2" />
-            {t('updates.action.install')}
+            {mode === 'portable' ? t('updates.action.openDownloadLocation') : t('updates.action.install')}
           </Button>
         );
       case 'error':
@@ -210,7 +215,7 @@ export function UpdateSettings() {
 
       {/* Help Text */}
       <p className="text-xs text-muted-foreground">
-        {t('updates.help')}
+        {mode === 'portable' ? t('updates.portableHelp') : t('updates.help')}
       </p>
     </div>
   );

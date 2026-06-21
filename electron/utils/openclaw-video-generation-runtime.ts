@@ -315,7 +315,7 @@ async function fetchJsonWithTimeout(params: {
       : {}) as DirectVideoTaskPayload;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`${params.label} timed out`);
+      throw new Error(`${params.label} timed out`, { cause: error });
     }
     throw error;
   } finally {

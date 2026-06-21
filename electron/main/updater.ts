@@ -7,11 +7,18 @@
  * to point at the channel-specific OSS directory (e.g. /alpha/, /beta/).
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
-import { BrowserWindow, app, ipcMain } from 'electron';
+import { BrowserWindow, app, ipcMain, shell } from 'electron';
 import { logger } from '../utils/logger';
 import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
 import { getJunFeiAIBackendOrigin } from '../utils/junfeiai-distribution';
+import { createWriteStream } from 'node:fs';
+import { mkdir, rename, rm, stat } from 'node:fs/promises';
+import { basename, extname, join } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { getPortableModeInfo, getPortableUpdatesDir, isPortableMode } from '../utils/portable-mode';
+import { proxyAwareFetch } from '../utils/proxy-fetch';
 
 /** Base update feed URL (without trailing channel path). */
 function getUpdateFeedBaseUrl(): string {
@@ -21,11 +28,20 @@ function getUpdateFeedBaseUrl(): string {
   ).replace(/\/+$/, '');
 }
 
+function getUpdateApiBaseUrl(): string {
+  return (
+    process.env.CLAWX_UPDATE_API_BASE_URL
+    || `${getJunFeiAIBackendOrigin()}/api/clawx/updates`
+  ).replace(/\/+$/, '');
+}
+
 export interface UpdateStatus {
   status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
-  info?: UpdateInfo;
+  mode?: 'installed' | 'portable';
+  info?: UpdateInfo | PortableUpdateInfo;
   progress?: ProgressInfo;
   error?: string;
+  downloadPath?: string;
 }
 
 export interface UpdaterEvents {
@@ -47,9 +63,82 @@ function detectChannel(version: string): string {
   return match ? match[1] : 'latest';
 }
 
+function platformForUpdateApi(): 'mac' | 'win' | 'linux' {
+  if (process.platform === 'darwin') return 'mac';
+  if (process.platform === 'win32') return 'win';
+  return 'linux';
+}
+
+function normalizeUpdateChannel(channel: string): string {
+  return channel === 'stable' ? 'latest' : channel;
+}
+
+type BackendEnvelope<T> = {
+  success?: boolean;
+  message?: string;
+  data?: T;
+};
+
+export interface PortableUpdateInfo {
+  version: string;
+  releaseDate?: string;
+  releaseNotes?: string | null;
+  downloadUrl?: string;
+  feedUrl?: string;
+  channel?: string;
+  platform?: string;
+  mandatory?: boolean;
+}
+
+function isPortableUpdateInfo(value: unknown): value is PortableUpdateInfo {
+  return Boolean(
+    value
+      && typeof value === 'object'
+      && typeof (value as PortableUpdateInfo).version === 'string',
+  );
+}
+
+function compareSemverLike(a: string, b: string): number {
+  const parse = (value: string) => value
+    .replace(/^v/i, '')
+    .split(/[.-]/)
+    .map((part) => {
+      const parsed = Number.parseInt(part, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    });
+  const left = parse(a);
+  const right = parse(b);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function filenameFromDownloadUrl(downloadUrl: string, version: string): string {
+  try {
+    const parsed = new URL(downloadUrl);
+    const name = sanitizePortableUpdateFilename(basename(decodeURIComponent(parsed.pathname)));
+    if (name && name !== '/' && extname(name)) return name;
+  } catch {
+    const name = sanitizePortableUpdateFilename(basename(downloadUrl));
+    if (name && extname(name)) return name;
+  }
+  const extension = process.platform === 'win32' ? 'zip' : 'zip';
+  return `UClaw-${version}-${platformForUpdateApi()}-${process.arch}-portable.${extension}`;
+}
+
+function sanitizePortableUpdateFilename(name: string): string {
+  return Array.from(name)
+    .map((char) => (char.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(char) ? '-' : char))
+    .join('')
+    .trim();
+}
+
 export class AppUpdater extends EventEmitter {
   private mainWindow: BrowserWindow | null = null;
-  private status: UpdateStatus = { status: 'idle' };
+  private status: UpdateStatus = { status: 'idle', mode: isPortableMode() ? 'portable' : 'installed' };
   private autoInstallTimer: NodeJS.Timeout | null = null;
   private autoInstallCountdown = 0;
 
@@ -149,11 +238,14 @@ export class AppUpdater extends EventEmitter {
    * Update status and notify renderer
    */
   private updateStatus(newStatus: Partial<UpdateStatus>): void {
+    const has = (key: keyof UpdateStatus) => Object.prototype.hasOwnProperty.call(newStatus, key);
     this.status = {
       status: newStatus.status ?? this.status.status,
-      info: newStatus.info,
-      progress: newStatus.progress,
-      error: newStatus.error,
+      mode: newStatus.mode ?? this.status.mode ?? (isPortableMode() ? 'portable' : 'installed'),
+      info: has('info') ? newStatus.info : this.status.info,
+      progress: has('progress') ? newStatus.progress : this.status.progress,
+      error: has('error') ? newStatus.error : this.status.error,
+      downloadPath: has('downloadPath') ? newStatus.downloadPath : this.status.downloadPath,
     };
     this.sendToRenderer('update:status-changed', this.status);
   }
@@ -175,7 +267,11 @@ export class AppUpdater extends EventEmitter {
    * null without emitting any events, so we must detect this and force a
    * final status so the UI never gets stuck in 'checking'.
    */
-  async checkForUpdates(): Promise<UpdateInfo | null> {
+  async checkForUpdates(): Promise<UpdateInfo | PortableUpdateInfo | null> {
+    if (isPortableMode()) {
+      return await this.checkPortableForUpdates();
+    }
+
     try {
       const result = await autoUpdater.checkForUpdates();
 
@@ -203,14 +299,154 @@ export class AppUpdater extends EventEmitter {
     }
   }
 
+  private async checkPortableForUpdates(): Promise<PortableUpdateInfo | null> {
+    try {
+      this.updateStatus({ status: 'checking', mode: 'portable', progress: undefined, error: undefined });
+      const currentVersion = app.getVersion();
+      const channel = normalizeUpdateChannel(detectChannel(currentVersion));
+      const platform = platformForUpdateApi();
+      const url = new URL(`${getUpdateApiBaseUrl()}/latest`);
+      url.searchParams.set('channel', channel);
+      url.searchParams.set('platform', platform);
+
+      const response = await proxyAwareFetch(url);
+      if (!response.ok) {
+        throw new Error(`Update check failed (${response.status})`);
+      }
+
+      const envelope = await response.json() as BackendEnvelope<PortableUpdateInfo>;
+      if (envelope.success === false) {
+        throw new Error(envelope.message || 'Update check failed');
+      }
+      const info = envelope.data;
+      if (!isPortableUpdateInfo(info) || !info.version) {
+        this.updateStatus({ status: 'not-available', mode: 'portable', info: undefined });
+        return null;
+      }
+      if (compareSemverLike(info.version, currentVersion) <= 0) {
+        this.updateStatus({ status: 'not-available', mode: 'portable', info });
+        return info;
+      }
+
+      this.updateStatus({ status: 'available', mode: 'portable', info });
+      return info;
+    } catch (error) {
+      logger.error('[Updater] Portable update check failed:', error);
+      this.updateStatus({
+        status: 'error',
+        mode: 'portable',
+        error: (error as Error).message || String(error),
+      });
+      throw error;
+    }
+  }
+
   /**
    * Download available update
    */
-  async downloadUpdate(): Promise<void> {
+  async downloadUpdate(): Promise<{ downloadPath?: string }> {
+    if (isPortableMode()) {
+      return await this.downloadPortableUpdate();
+    }
+
     try {
       await autoUpdater.downloadUpdate();
+      return {};
     } catch (error) {
       logger.error('[Updater] Download update failed:', error);
+      throw error;
+    }
+  }
+
+  private async downloadPortableUpdate(): Promise<{ downloadPath: string }> {
+    try {
+      const info = isPortableUpdateInfo(this.status.info)
+        ? this.status.info
+        : await this.checkPortableForUpdates();
+      if (!isPortableUpdateInfo(info) || !info.downloadUrl) {
+        throw new Error('No portable update download URL is available');
+      }
+
+      const updatesDir = getPortableUpdatesDir();
+      if (!updatesDir) {
+        throw new Error('Portable updates directory is not available');
+      }
+      await mkdir(updatesDir, { recursive: true });
+
+      const response = await proxyAwareFetch(info.downloadUrl);
+      if (!response.ok || !response.body) {
+        throw new Error(`Download failed (${response.status})`);
+      }
+
+      const filename = filenameFromDownloadUrl(info.downloadUrl, info.version);
+      const targetPath = join(updatesDir, filename);
+      const partialPath = `${targetPath}.download`;
+      await rm(partialPath, { force: true });
+      const total = Number.parseInt(response.headers.get('content-length') || '0', 10) || 0;
+      let transferred = 0;
+      let lastTransferred = 0;
+      let lastTimestamp = Date.now();
+
+      this.updateStatus({
+        status: 'downloading',
+        mode: 'portable',
+        info,
+        progress: {
+          total,
+          delta: 0,
+          transferred: 0,
+          percent: 0,
+          bytesPerSecond: 0,
+        },
+      });
+
+      const bodyStream = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]);
+      bodyStream.on('data', (chunk: Buffer | string) => {
+        const delta = Buffer.byteLength(chunk);
+        transferred += delta;
+        const now = Date.now();
+        const elapsedSeconds = Math.max((now - lastTimestamp) / 1000, 0.001);
+        const bytesPerSecond = Math.round((transferred - lastTransferred) / elapsedSeconds);
+        lastTimestamp = now;
+        lastTransferred = transferred;
+        this.updateStatus({
+          status: 'downloading',
+          mode: 'portable',
+          info,
+          progress: {
+            total,
+            delta,
+            transferred,
+            percent: total > 0 ? Math.min(100, (transferred / total) * 100) : 0,
+            bytesPerSecond,
+          },
+        });
+      });
+
+      await pipeline(bodyStream, createWriteStream(partialPath));
+      await rename(partialPath, targetPath);
+      const downloaded = await stat(targetPath);
+      this.updateStatus({
+        status: 'downloaded',
+        mode: 'portable',
+        info,
+        downloadPath: targetPath,
+        progress: {
+          total: total || downloaded.size,
+          delta: 0,
+          transferred: downloaded.size,
+          percent: 100,
+          bytesPerSecond: 0,
+        },
+      });
+      return { downloadPath: targetPath };
+    } catch (error) {
+      logger.error('[Updater] Portable update download failed:', error);
+      this.updateStatus({
+        status: 'error',
+        mode: 'portable',
+        error: (error as Error).message || String(error),
+      });
       throw error;
     }
   }
@@ -227,9 +463,25 @@ export class AppUpdater extends EventEmitter {
    * the window cleanly while ShipIt runs independently to replace the app.
    */
   quitAndInstall(): void {
+    if (isPortableMode()) {
+      void this.openDownloadedUpdate();
+      return;
+    }
+
     logger.info('[Updater] quitAndInstall called');
     setQuitting();
     autoUpdater.quitAndInstall();
+  }
+
+  async openDownloadedUpdate(): Promise<void> {
+    if (this.status.downloadPath) {
+      shell.showItemInFolder(this.status.downloadPath);
+      return;
+    }
+    const updatesDir = getPortableModeInfo().updatesDir;
+    if (updatesDir) {
+      await shell.openPath(updatesDir);
+    }
   }
 
   /**
@@ -324,17 +576,21 @@ export function registerUpdateHandlers(
   // Download update
   ipcMain.handle('update:download', async () => {
     try {
-      await updater.downloadUpdate();
-      return { success: true };
+      const result = await updater.downloadUpdate();
+      return { success: true, ...result, status: updater.getStatus() };
     } catch (error) {
       return { success: false, error: String(error) };
     }
   });
 
   // Install update and restart
-  ipcMain.handle('update:install', () => {
+  ipcMain.handle('update:install', async () => {
+    if (isPortableMode()) {
+      await updater.openDownloadedUpdate();
+      return { success: true, status: updater.getStatus() };
+    }
     updater.quitAndInstall();
-    return { success: true };
+    return { success: true, status: updater.getStatus() };
   });
 
   // Set update channel

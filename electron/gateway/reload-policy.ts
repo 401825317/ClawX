@@ -1,7 +1,6 @@
 import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { parseJsonWithBom } from '../utils/json';
+import { getOpenClawConfigPath } from '../utils/paths';
 
 export type GatewayReloadMode = 'hybrid' | 'reload' | 'restart' | 'off';
 
@@ -15,7 +14,6 @@ export const DEFAULT_GATEWAY_RELOAD_POLICY: GatewayReloadPolicy = {
   debounceMs: 1200,
 };
 
-const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const MAX_DEBOUNCE_MS = 60_000;
 
 function normalizeMode(value: unknown): GatewayReloadMode {
@@ -55,10 +53,9 @@ export function parseGatewayReloadPolicy(config: unknown): GatewayReloadPolicy {
 
 export async function loadGatewayReloadPolicy(): Promise<GatewayReloadPolicy> {
   try {
-    const raw = await readFile(OPENCLAW_CONFIG_PATH, 'utf-8');
+    const raw = await readFile(getOpenClawConfigPath(), 'utf-8');
     return parseGatewayReloadPolicy(parseJsonWithBom(raw));
   } catch {
     return { ...DEFAULT_GATEWAY_RELOAD_POLICY };
   }
 }
-

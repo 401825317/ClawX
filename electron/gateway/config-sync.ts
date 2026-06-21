@@ -1,7 +1,6 @@
 import { app } from 'electron';
 import path from 'path';
 import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, symlinkSync } from 'fs';
-import { homedir } from 'os';
 import { join } from 'path';
 
 function fsPath(filePath: string): string {
@@ -22,6 +21,7 @@ import {
   getOpenClawConfigDir,
   getOpenClawDir,
   getOpenClawEntryPath,
+  getOpenClawExtensionsDir,
   getOpenClawResolvedDir,
   getOpenClawSkillsDir,
   isOpenClawPresent,
@@ -87,8 +87,9 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 const BUILTIN_CHANNEL_EXTENSIONS = ['discord', 'telegram', 'qqbot'];
 
 function cleanupStaleBuiltInExtensions(): void {
+  const extensionsRoot = getOpenClawExtensionsDir();
   for (const ext of BUILTIN_CHANNEL_EXTENSIONS) {
-    const extDir = join(homedir(), '.openclaw', 'extensions', ext);
+    const extDir = join(extensionsRoot, ext);
     if (existsSync(fsPath(extDir))) {
       logger.info(`[plugin] Removing stale built-in extension copy: ${ext}`);
       try {
@@ -148,7 +149,8 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
     if (!pluginInfo) continue;
     const { dirName, npmName } = pluginInfo;
 
-    const targetDir = join(homedir(), '.openclaw', 'extensions', dirName);
+    const extensionsRoot = getOpenClawExtensionsDir();
+    const targetDir = join(extensionsRoot, dirName);
     const targetManifest = join(targetDir, 'openclaw.plugin.json');
     const isInstalled = existsSync(fsPath(targetManifest));
     const installedVersion = isInstalled ? readPluginVersion(join(targetDir, 'package.json')) : null;
@@ -163,7 +165,7 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
       if (!isInstalled || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
         logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (bundled)`);
         try {
-          mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
+          mkdirSync(fsPath(extensionsRoot), { recursive: true });
           rmSync(fsPath(targetDir), { recursive: true, force: true });
           cpSyncSafe(bundledDir, targetDir);
           fixupPluginManifest(targetDir);
@@ -194,7 +196,7 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
       logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (dev/node_modules)`);
 
       try {
-        mkdirSync(fsPath(join(homedir(), '.openclaw', 'extensions')), { recursive: true });
+        mkdirSync(fsPath(extensionsRoot), { recursive: true });
         copyPluginFromNodeModules(npmPkgPath, targetDir, npmName);
         fixupPluginManifest(targetDir);
       } catch (err) {
@@ -220,7 +222,7 @@ function cleanupUnconfiguredChannelPlugins(configuredChannels: string[]): boolea
     if (configuredSet.has(channelType)) continue;
 
     const { dirName } = pluginInfo;
-    const targetDir = join(homedir(), '.openclaw', 'extensions', dirName);
+    const targetDir = join(getOpenClawExtensionsDir(), dirName);
     if (!existsSync(fsPath(targetDir))) continue;
 
     logger.info(`[plugin] Removing unconfigured channel plugin: ${channelType} (${dirName})`);
@@ -286,7 +288,7 @@ function buildPluginMaintenanceCacheKey(openclawDir: string, configuredChannels:
     openclawDir,
     cwd: process.cwd(),
     configuredChannels: [...configuredChannels].sort(),
-    extensionsDir: directoryChildrenSignature(join(homedir(), '.openclaw', 'extensions')),
+    extensionsDir: directoryChildrenSignature(getOpenClawExtensionsDir()),
     sourceSignatures: buildPluginSourceSignatures(configuredChannels),
   });
 }

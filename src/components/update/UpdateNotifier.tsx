@@ -17,6 +17,7 @@ const DOWNLOADED_TOAST_ID = 'clawx-update-downloaded';
 export function UpdateNotifier() {
   const { t } = useTranslation('settings');
   const status = useUpdateStore((state) => state.status);
+  const mode = useUpdateStore((state) => state.mode);
   const updateInfo = useUpdateStore((state) => state.updateInfo);
   const downloadUpdate = useUpdateStore((state) => state.downloadUpdate);
   const installUpdate = useUpdateStore((state) => state.installUpdate);
@@ -46,8 +47,10 @@ export function UpdateNotifier() {
           <UpdateToast
             variant="available"
             title={t('updates.toast.availableTitle')}
-            description={t('updates.toast.availableDescription', { version })}
-            primaryActionLabel={t('updates.action.download')}
+            description={mode === 'portable'
+              ? t('updates.toast.portableAvailableDescription', { version })
+              : t('updates.toast.availableDescription', { version })}
+            primaryActionLabel={mode === 'portable' ? t('updates.action.downloadPortable') : t('updates.action.download')}
             dismissLabel={dismissLabel}
             onPrimaryAction={() => {
               toast.dismiss(toastId);
@@ -77,8 +80,10 @@ export function UpdateNotifier() {
           <UpdateToast
             variant="downloaded"
             title={t('updates.toast.downloadedTitle')}
-            description={t('updates.toast.downloadedDescription', { version })}
-            primaryActionLabel={t('updates.action.install')}
+            description={mode === 'portable'
+              ? t('updates.toast.portableDownloadedDescription', { version })
+              : t('updates.toast.downloadedDescription', { version })}
+            primaryActionLabel={mode === 'portable' ? t('updates.action.openDownloadLocation') : t('updates.action.install')}
             dismissLabel={dismissLabel}
             onPrimaryAction={() => {
               toast.dismiss(toastId);
@@ -97,7 +102,7 @@ export function UpdateNotifier() {
         },
       );
     }
-  }, [downloadUpdate, installUpdate, status, t, updateInfo?.version]);
+  }, [downloadUpdate, installUpdate, mode, status, t, updateInfo?.version]);
 
   return null;
 }

@@ -30,6 +30,7 @@ vi.mock('@electron/utils/openclaw-auth', () => ({
 
 vi.mock('@electron/utils/paths', () => ({
   expandPath: (value: string) => value,
+  expandOpenClawPath: (value: string) => value,
 }));
 
 vi.mock('@electron/services/secrets/secret-store', () => ({

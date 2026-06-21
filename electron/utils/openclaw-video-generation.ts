@@ -10,7 +10,7 @@ import {
   syncOpenAiCompatibleVideoRelay,
 } from './openclaw-auth';
 import { listAgentsSnapshot, type AgentsSnapshot } from './agent-config';
-import { expandPath } from './paths';
+import { expandOpenClawPath } from './paths';
 import {
   generateVideoInProcess,
   listVideoGenerationProvidersInProcess,
@@ -428,7 +428,7 @@ export async function listVideoGenerationProvidersFromRuntime(): Promise<VideoGe
 function resolveAgentDirForTest(agentId: string, snapshot: AgentsSnapshot): string {
   const entry = snapshot.agents.find((agent) => agent.id === agentId);
   const agentDir = entry?.agentDir || `~/.openclaw/agents/${agentId}/agent`;
-  return expandPath(agentDir);
+  return expandOpenClawPath(agentDir);
 }
 
 export async function runVideoGenerationTest(params: {
@@ -565,7 +565,7 @@ export async function generateVideoForChatSession(params: {
 
   return generateVideoInProcess({
     config,
-    agentDir: expandPath(agent.agentDir),
+    agentDir: expandOpenClawPath(agent.agentDir),
     prompt: params.prompt.trim(),
     model: configuredModel,
     timeoutMs: current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,

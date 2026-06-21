@@ -140,6 +140,9 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 ### 🔔 更新提示
 ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。
 
+### 💾 高性能便携模式
+macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、OpenClaw 配置、Agent、会话、技能、通道凭据和更新包保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；Python、uv、临时文件、浏览器和编译缓存会放到当前电脑的本机缓存目录 `UClawRuntime/`，这些缓存可重建，避免 U盘被频繁读写拖慢或快速占满。
+
 ---
 
 ## 快速上手
@@ -366,7 +369,9 @@ pnpm run build:vite       # 仅构建前端
 pnpm build                # 完整生产构建（含打包资源）
 pnpm package              # 为当前平台打包（包含预装技能资源）
 pnpm package:mac          # 为 macOS 打包
+pnpm package:mac:usb      # 为 macOS 生成免安装高性能便携包
 pnpm package:win          # 为 Windows 打包
+pnpm package:win:usb      # 为 Windows 生成免安装高性能便携包
 pnpm package:linux        # 为 Linux 打包
 ```
 
