@@ -322,4 +322,69 @@ describe('chat target routing', () => {
     ]);
     expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
   });
+
+  it('shows explicitly pasted image references for video-mode sends', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      '让这张图动起来',
+      [{
+        fileName: 'frame.png',
+        mimeType: 'image/png',
+        fileSize: 1024,
+        stagedPath: '/tmp/frame.png',
+        preview: 'data:image/png;base64,abc',
+      }],
+      undefined,
+      'video',
+      undefined,
+      { size: '1280x720', durationSeconds: 15 },
+    );
+
+    const videoSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/video-generation/chat-send');
+    expect(videoSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (videoSendCall?.[1] as { body: string }).body,
+    ) as {
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      durationSeconds?: number;
+    };
+
+    expect(payload.durationSeconds).toBe(15);
+    expect(payload.inputImages).toEqual([
+      {
+        fileName: 'frame.png',
+        mimeType: 'image/png',
+        filePath: '/tmp/frame.png',
+      },
+    ]);
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles?.[0]).toMatchObject({
+      fileName: 'frame.png',
+      mimeType: 'image/png',
+      filePath: '/tmp/frame.png',
+      preview: 'data:image/png;base64,abc',
+    });
+  });
 });

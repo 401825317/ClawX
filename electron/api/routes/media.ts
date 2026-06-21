@@ -149,6 +149,15 @@ export async function handleMediaRoutes(
         sendJson(res, 400, { success: false, error: 'prompt is required' });
         return true;
       }
+      const inputImages = Array.isArray(body.inputImages)
+        ? body.inputImages
+          .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
+          .map((image) => ({
+            fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
+            mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
+            filePath: image.filePath!.trim(),
+          }))
+        : undefined;
 
       const result = await generateImageForChatSession({
         sessionKey,
@@ -156,25 +165,17 @@ export async function handleMediaRoutes(
         model: body.model?.trim(),
         size: body.size?.trim(),
         quality: body.quality,
-        inputImages: Array.isArray(body.inputImages)
-          ? body.inputImages
-            .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
-            .map((image) => ({
-              fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
-              mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
-              filePath: image.filePath!.trim(),
-            }))
-          : undefined,
+        inputImages,
       });
       const outputPaths = result.outputs.map((output) => output.path);
-      const usedEditInput = Array.isArray(body.inputImages) && body.inputImages.some((image) =>
-        typeof image?.filePath === 'string' && image.filePath.trim().length > 0,
-      );
+      const inputPaths = (inputImages ?? []).map((image) => image.filePath);
+      const usedEditInput = inputPaths.length > 0;
 
       await appendImageGenerationConversation({
         sessionKey,
         prompt,
         outputPaths,
+        inputPaths,
         summaryText: usedEditInput ? '图片已修改。' : '图片已生成。',
       });
 
@@ -299,6 +300,15 @@ export async function handleMediaRoutes(
         sendJson(res, 400, { success: false, error: 'prompt is required' });
         return true;
       }
+      const inputImages = Array.isArray(body.inputImages)
+        ? body.inputImages
+          .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
+          .map((image) => ({
+            fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
+            mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
+            filePath: image.filePath!.trim(),
+          }))
+        : undefined;
 
       const result = await generateVideoForChatSession({
         sessionKey,
@@ -308,28 +318,20 @@ export async function handleMediaRoutes(
         durationSeconds: typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
           ? Math.max(1, Math.floor(body.durationSeconds))
           : undefined,
-        inputImages: Array.isArray(body.inputImages)
-          ? body.inputImages
-            .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
-            .map((image) => ({
-              fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
-              mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
-              filePath: image.filePath!.trim(),
-            }))
-          : undefined,
+        inputImages,
       });
       const outputLocations = result.outputs
         .map((output) => output.path || output.url || '')
         .filter((value) => value.trim().length > 0);
-      const usedImageInput = Array.isArray(body.inputImages) && body.inputImages.some((image) =>
-        typeof image?.filePath === 'string' && image.filePath.trim().length > 0,
-      );
+      const inputPaths = (inputImages ?? []).map((image) => image.filePath);
+      const usedImageInput = inputPaths.length > 0;
 
       await appendImageGenerationConversation({
         sessionKey,
         prompt,
         outputPaths: outputLocations,
-        summaryText: usedImageInput ? 'Video generated from image.' : 'Video generated.',
+        inputPaths,
+        summaryText: usedImageInput ? '已基于参考图生成视频。' : '视频已生成。',
       });
 
       sendJson(res, 200, { success: true, result });

@@ -45,7 +45,7 @@ describe('generateVideoInProcess direct OpenAI-compatible video path', () => {
       model: 'openai/grok-image-video',
       timeoutMs: 60_000,
       size: '1280x720',
-      durationSeconds: 4,
+      durationSeconds: 15,
       directOpenAiCompatible: {
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         apiKey: 'test-key',
@@ -60,7 +60,7 @@ describe('generateVideoInProcess direct OpenAI-compatible video path', () => {
       prompt: 'make a four-second neon motorcycle video',
       model: 'grok-image-video',
       size: '1280x720',
-      seconds: '4',
+      seconds: '15',
     });
     expect(result.outputs).toEqual([
       expect.objectContaining({

@@ -146,6 +146,17 @@ function buildAssistantText(summaryText: string | undefined, outputPaths: string
   return lines.join('\n\n');
 }
 
+function buildUserText(prompt: string, inputPaths: string[]): string {
+  const lines = [prompt];
+  for (const inputPath of inputPaths) {
+    const trimmed = inputPath.trim();
+    if (trimmed) {
+      lines.push(`[media attached: ${trimmed} (image/png) | ${trimmed}]`);
+    }
+  }
+  return lines.join('\n\n');
+}
+
 function buildMessageEntry(params: {
   id: string;
   parentId: string | null;
@@ -172,11 +183,13 @@ export async function appendImageGenerationConversation(params: {
   sessionKey: string;
   prompt: string;
   outputPaths: string[];
+  inputPaths?: string[];
   summaryText?: string;
 }): Promise<void> {
   const sessionKey = params.sessionKey.trim();
   const prompt = params.prompt.trim();
   const outputPaths = params.outputPaths.map((value) => value.trim()).filter(Boolean);
+  const inputPaths = (params.inputPaths ?? []).map((value) => value.trim()).filter(Boolean);
   if (!sessionKey || !prompt) {
     throw new Error('sessionKey and prompt are required');
   }
@@ -205,6 +218,7 @@ export async function appendImageGenerationConversation(params: {
   const nowMs = Date.now();
   const userMessageId = randomUUID();
   const assistantMessageId = randomUUID();
+  const userText = buildUserText(prompt, inputPaths);
   const assistantText = buildAssistantText(params.summaryText, outputPaths);
 
   const nextLines = [
@@ -212,7 +226,7 @@ export async function appendImageGenerationConversation(params: {
       id: userMessageId,
       parentId: priorMessageId,
       role: 'user',
-      content: prompt,
+      content: userText,
       timestampMs: nowMs,
       idempotencySuffix: 'user',
     }),

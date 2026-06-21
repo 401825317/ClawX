@@ -83,7 +83,10 @@ const VIDEO_SIZE_OPTIONS = [
 const VIDEO_DURATION_OPTIONS = [
   { value: 4, label: '4s' },
   { value: 6, label: '6s' },
+  { value: 8, label: '8s' },
   { value: 10, label: '10s' },
+  { value: 12, label: '12s' },
+  { value: 15, label: '15s' },
 ] as const;
 
 interface RemoteModelOption {

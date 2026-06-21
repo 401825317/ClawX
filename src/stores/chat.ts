@@ -3898,6 +3898,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const videoReferenceInputs = mode === 'video'
       ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
       : [];
+    const visibleGenerationAttachments = (mode === 'image' || mode === 'video')
+      ? explicitPendingImages
+      : [];
 
     // Add user message optimistically (with local file metadata for UI display)
     const nowMs = Date.now();
@@ -3907,7 +3910,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       timestamp: nowMs / 1000,
       id: crypto.randomUUID(),
       _attachedFiles: (mode === 'image' || mode === 'video')
-        ? undefined
+        ? (visibleGenerationAttachments.length > 0
+          ? visibleGenerationAttachments.map(a => ({
+            fileName: a.fileName,
+            mimeType: a.mimeType,
+            fileSize: a.fileSize,
+            preview: a.preview,
+            filePath: a.stagedPath,
+          }))
+          : undefined)
         : attachments?.map(a => ({
           fileName: a.fileName,
           mimeType: a.mimeType,

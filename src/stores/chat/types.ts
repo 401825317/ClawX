@@ -114,7 +114,7 @@ export interface ChatImageSendOptions {
 
 export interface ChatVideoSendOptions {
   size: '1280x720' | '720x1280' | '1024x1024';
-  durationSeconds: 4 | 6 | 10;
+  durationSeconds: number;
 }
 
 export interface ChatState {

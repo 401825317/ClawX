@@ -115,7 +115,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     expect(existsSync(transcriptPath)).toBe(true);
     const transcript = readFileSync(transcriptPath, 'utf8');
     expect(transcript).toContain('make a short product video');
-    expect(transcript).toContain('Video generated.');
+    expect(transcript).toContain('视频已生成。');
     expect(transcript).toContain('MEDIA:https://zz-cn.lingzhiwuxian.com/v1/videos/task_abc/content?expires=86400&signature=xyz');
   });
 
@@ -157,6 +157,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     const sessionsJson = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')) as Record<string, Record<string, unknown>>;
     const transcriptPath = String(sessionsJson['agent:main:main']?.sessionFile);
     const transcript = readFileSync(transcriptPath, 'utf8');
-    expect(transcript).toContain('Video generated from image.');
+    expect(transcript).toContain('已基于参考图生成视频。');
+    expect(transcript).toContain('[media attached: /tmp/frame.png (image/png) | /tmp/frame.png]');
   });
 });
