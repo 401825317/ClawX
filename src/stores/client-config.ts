@@ -122,15 +122,15 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
     models: [
       {
         id: 'smart-latest',
-        label: 'Smart Routing',
-        description: 'Automatically choose a suitable text model.',
+        label: '智能路由',
+        description: '自动选择合适的文本模型。',
         enabled: true,
       },
-      { id: 'qwen-latest', label: 'Qwen Latest', enabled: true },
-      { id: 'deepseek-latest', label: 'DeepSeek Latest', enabled: true },
-      { id: 'doubao-latest', label: 'Doubao Latest', enabled: true },
-      { id: 'kimi-latest', label: 'Kimi Latest', enabled: true },
-      { id: 'glm-latest', label: 'GLM Latest', enabled: true },
+      { id: 'qwen-latest', label: '通义千问', enabled: true },
+      { id: 'deepseek-latest', label: 'DeepSeek', enabled: true },
+      { id: 'doubao-latest', label: '豆包', enabled: true },
+      { id: 'kimi-latest', label: 'Kimi', enabled: true },
+      { id: 'glm-latest', label: '智谱 GLM', enabled: true },
     ],
   },
   image: {

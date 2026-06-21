@@ -411,7 +411,7 @@ async function generateDirectOpenAiCompatibleVideo(params: {
         inputImages: params.inputImages,
       })),
     },
-    timeoutMs: Math.min(120_000, params.timeoutMs),
+    timeoutMs: Math.max(1, params.timeoutMs),
     label: 'Video generation request',
   });
   const taskId = extractTaskId(submitted);

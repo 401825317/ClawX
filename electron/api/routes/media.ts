@@ -313,7 +313,6 @@ export async function handleMediaRoutes(
       const result = await generateVideoForChatSession({
         sessionKey,
         prompt,
-        model: body.model?.trim(),
         size: body.size?.trim(),
         durationSeconds: typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
           ? Math.max(1, Math.floor(body.durationSeconds))

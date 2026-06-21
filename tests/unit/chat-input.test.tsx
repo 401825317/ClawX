@@ -29,8 +29,8 @@ const { agentsState, chatState, gatewayState, providersState, clientConfigState,
       text: {
         defaultModel: 'smart-latest',
         models: [
-          { id: 'smart-latest', label: 'Smart Routing', enabled: true },
-          { id: 'qwen-latest', label: 'Qwen Latest', enabled: true },
+          { id: 'smart-latest', label: '智能路由', enabled: true },
+          { id: 'qwen-latest', label: '通义千问', enabled: true },
         ],
       },
       image: {
@@ -360,7 +360,7 @@ describe('ChatInput agent targeting', () => {
         id: 'main',
         name: 'Main',
         isDefault: true,
-        modelDisplay: 'Smart Routing',
+        modelDisplay: '智能路由',
         modelRef: 'lingzhiwuxian/smart-latest',
         inheritedModel: true,
         workspace: '~/.openclaw/workspace',
@@ -406,7 +406,7 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput();
 
-    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('Smart Routing');
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('智能路由');
   });
 
   it('disables the input while gateway is running but not yet ready', () => {
@@ -597,6 +597,9 @@ describe('ChatInput agent targeting', () => {
 
     fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
     expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-image-model')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-image-size')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-image-quality')).toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'draw a cat poster' } });
     fireEvent.click(screen.getByTitle('Send'));
 
@@ -615,6 +618,42 @@ describe('ChatInput agent targeting', () => {
     fireEvent.click(screen.getByTitle('Send'));
 
     expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat', undefined, undefined);
+  });
+
+  it('keeps video parameters selectable while using the configured default model', () => {
+    const onSend = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
+    expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-video-model')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('chat-video-size'), { target: { value: '720x1280' } });
+    fireEvent.change(screen.getByTestId('chat-video-duration'), { target: { value: '10' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'make a vertical product video' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith(
+      'make a vertical product video',
+      undefined,
+      null,
+      'video',
+      undefined,
+      { size: '720x1280', durationSeconds: 10 },
+    );
   });
 
   it('keeps image mode isolated per session', () => {

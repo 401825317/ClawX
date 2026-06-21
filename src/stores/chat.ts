@@ -4018,7 +4018,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             body: JSON.stringify({
               sessionKey: currentSessionKey,
               prompt: trimmed,
-              model: videoOptions?.model,
               size: videoOptions?.size,
               durationSeconds: videoOptions?.durationSeconds,
               inputImages: videoReferenceInputs.map((file) => ({

@@ -370,9 +370,11 @@ describe('chat target routing', () => {
     ) as {
       inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       durationSeconds?: number;
+      model?: string;
     };
 
     expect(payload.durationSeconds).toBe(15);
+    expect(payload.model).toBeUndefined();
     expect(payload.inputImages).toEqual([
       {
         fileName: 'frame.png',

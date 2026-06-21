@@ -300,11 +300,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
   const imageModelOptions = clientModelOptions.image.models;
   const selectedImageModel = useMemo(() => {
-    const sessionModel = sessionImageOptions[currentSessionKey]?.model;
-    return imageModelOptions.find((model) => model.id === sessionModel)
-      ?? imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel)
+    return imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel)
       ?? imageModelOptions[0];
-  }, [clientModelOptions.image.defaultModel, currentSessionKey, imageModelOptions, sessionImageOptions]);
+  }, [clientModelOptions.image.defaultModel, imageModelOptions]);
   const defaultImageOptions = useMemo<ChatImageSendOptions>(() => ({
     model: selectedImageModel?.id ?? clientModelOptions.image.defaultModel,
     size: selectedImageModel?.defaultSize ?? clientModelOptions.image.defaultSize,
@@ -328,18 +326,14 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   }, [currentSessionKey, defaultImageOptions, selectedImageModel, sessionImageOptions]);
   const videoModelOptions = clientModelOptions.video.models;
   const selectedVideoModel = useMemo(() => {
-    const sessionModel = sessionVideoOptions[currentSessionKey]?.model;
-    return videoModelOptions.find((model) => model.id === sessionModel)
-      ?? videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel)
+    return videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel)
       ?? videoModelOptions[0];
-  }, [clientModelOptions.video.defaultModel, currentSessionKey, sessionVideoOptions, videoModelOptions]);
+  }, [clientModelOptions.video.defaultModel, videoModelOptions]);
   const defaultVideoOptions = useMemo<ChatVideoSendOptions>(() => ({
-    model: selectedVideoModel?.id ?? clientModelOptions.video.defaultModel,
     size: selectedVideoModel?.defaultSize ?? clientModelOptions.video.defaultSize,
     durationSeconds: selectedVideoModel?.defaultDurationSeconds ?? clientModelOptions.video.defaultDurationSeconds,
   }), [
     clientModelOptions.video.defaultDurationSeconds,
-    clientModelOptions.video.defaultModel,
     clientModelOptions.video.defaultSize,
     selectedVideoModel,
   ]);
@@ -351,7 +345,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       ? current.durationSeconds
       : defaultVideoOptions.durationSeconds;
     return {
-      model: model?.id ?? current.model ?? defaultVideoOptions.model,
       size,
       durationSeconds,
     };
@@ -1316,29 +1309,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             {sendMode === 'image' && (
               <div className="ml-2 flex items-center gap-2" data-testid="chat-image-options">
                 <Select
-                  value={imageOptions.model}
-                  onChange={(e) => {
-                    const nextModel = imageModelOptions.find((model) => model.id === e.target.value) ?? selectedImageModel;
-                    setSessionImageOptions((current) => ({
-                      ...current,
-                      [currentSessionKey]: {
-                        model: nextModel?.id,
-                        size: nextModel?.defaultSize ?? defaultImageOptions.size,
-                        quality: nextModel?.defaultQuality ?? defaultImageOptions.quality,
-                      },
-                    }));
-                  }}
-                  className="h-8 w-[132px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
-                  data-testid="chat-image-model"
-                  aria-label={t('composer.imageModelLabel', 'Image model')}
-                >
-                  {imageModelOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-                <Select
                   value={imageOptions.size}
                   onChange={(e) => {
                     const size = e.target.value;
@@ -1391,29 +1361,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             {sendMode === 'video' && (
               <div className="ml-2 flex items-center gap-2" data-testid="chat-video-options">
                 <Select
-                  value={videoOptions.model}
-                  onChange={(e) => {
-                    const nextModel = videoModelOptions.find((model) => model.id === e.target.value) ?? selectedVideoModel;
-                    setSessionVideoOptions((current) => ({
-                      ...current,
-                      [currentSessionKey]: {
-                        model: nextModel?.id,
-                        size: nextModel?.defaultSize ?? defaultVideoOptions.size,
-                        durationSeconds: nextModel?.defaultDurationSeconds ?? defaultVideoOptions.durationSeconds,
-                      },
-                    }));
-                  }}
-                  className="h-8 w-[132px] rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none"
-                  data-testid="chat-video-model"
-                  aria-label={t('composer.videoModelLabel', 'Video model')}
-                >
-                  {videoModelOptions.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-                <Select
                   value={videoOptions.size}
                   onChange={(e) => {
                     const size = e.target.value;
@@ -1421,7 +1368,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                       ...current,
                       [currentSessionKey]: {
                         ...(current[currentSessionKey] ?? defaultVideoOptions),
-                        model: videoOptions.model,
                         size,
                       },
                     }));
@@ -1444,7 +1390,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                       ...current,
                       [currentSessionKey]: {
                         ...(current[currentSessionKey] ?? defaultVideoOptions),
-                        model: videoOptions.model,
                         durationSeconds,
                       },
                     }));

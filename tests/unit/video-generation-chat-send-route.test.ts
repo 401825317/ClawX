@@ -97,7 +97,6 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     expect(generateVideoForChatSessionMock).toHaveBeenCalledWith({
       sessionKey: 'agent:main:main',
       prompt: 'make a short product video',
-      model: undefined,
       size: '1280x720',
       durationSeconds: 4,
       inputImages: undefined,
@@ -123,6 +122,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       sessionKey: 'agent:main:main',
       prompt: 'animate this frame',
+      model: 'grok-image-video',
       inputImages: [
         {
           fileName: 'frame.png',
@@ -152,6 +152,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
         },
       ],
     }));
+    expect(generateVideoForChatSessionMock.mock.calls[0]?.[0]).not.toHaveProperty('model');
 
     const sessionsJsonPath = join(testOpenClawConfigDir, 'agents', 'main', 'sessions', 'sessions.json');
     const sessionsJson = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')) as Record<string, Record<string, unknown>>;
