@@ -87,6 +87,23 @@ describe('openclaw-image-generation helpers', () => {
     expect(isValidImageModelRef('no-slash')).toBe(false);
   });
 
+  it('normalizes chat image models to the managed OpenAI image relay', async () => {
+    const {
+      IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS,
+      resolveChatImageTimeoutMs,
+      toManagedOpenAiImageModelRef,
+    } = await import('@electron/utils/openclaw-image-generation');
+
+    expect(IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS).toBe(240_000);
+    expect(resolveChatImageTimeoutMs(null)).toBe(240_000);
+    expect(resolveChatImageTimeoutMs(120_000)).toBe(240_000);
+    expect(resolveChatImageTimeoutMs(300_000)).toBe(300_000);
+    expect(toManagedOpenAiImageModelRef('gpt-image-2')).toBe('clawx-openai-image/gpt-image-2');
+    expect(toManagedOpenAiImageModelRef('openai/gpt-image-2')).toBe('clawx-openai-image/gpt-image-2');
+    expect(toManagedOpenAiImageModelRef('litellm/gpt-image-2')).toBe('clawx-openai-image/gpt-image-2');
+    expect(toManagedOpenAiImageModelRef(null)).toBe('clawx-openai-image/gpt-image-2');
+  });
+
   it('reads and writes agents.defaults.imageGenerationModel', async () => {
     await writeOpenClawJson({
       agents: {

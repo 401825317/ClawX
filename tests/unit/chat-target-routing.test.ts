@@ -254,7 +254,7 @@ describe('chat target routing', () => {
     expect(payload.media[0]?.filePath).toBe('/tmp/design.png');
   });
 
-  it('reuses the latest assistant image as an edit input for image-mode sends without rendering it as a user attachment', async () => {
+  it('does not reuse the latest assistant image for image-mode sends without explicit attachments', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
     useChatStore.setState({
@@ -313,6 +313,57 @@ describe('chat target routing', () => {
 
     expect(payload.sessionKey).toBe('agent:main:main');
     expect(payload.prompt).toBe('把 logo 去掉');
+    expect(payload.inputImages).toEqual([]);
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
+  });
+
+  it('forwards explicitly pasted image references for image-mode sends', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      'remove logo',
+      [{
+        fileName: 'bike.png',
+        mimeType: 'image/png',
+        fileSize: 1024,
+        stagedPath: '/tmp/bike.png',
+        preview: 'data:image/png;base64,abc',
+      }],
+      undefined,
+      'image',
+      { size: '1024x1024', quality: 'medium' },
+    );
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+
     expect(payload.inputImages).toEqual([
       {
         fileName: 'bike.png',
@@ -320,7 +371,12 @@ describe('chat target routing', () => {
         filePath: '/tmp/bike.png',
       },
     ]);
-    expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles?.[0]).toMatchObject({
+      fileName: 'bike.png',
+      mimeType: 'image/png',
+      filePath: '/tmp/bike.png',
+      preview: 'data:image/png;base64,abc',
+    });
   });
 
   it('shows explicitly pasted image references for video-mode sends', async () => {
