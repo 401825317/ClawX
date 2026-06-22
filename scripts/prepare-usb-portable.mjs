@@ -53,4 +53,4 @@ fs.writeFileSync(path.join(portableRoot, 'portable.flag'), 'UClaw USB portable m
 fs.writeFileSync(path.join(dataDir, '.keep'), '', 'utf-8');
 
 console.log(`[prepare-usb-portable] Added portable.flag and UClawData to ${path.relative(ROOT, portableRoot)}.`);
-console.log('[prepare-usb-portable] Runtime caches are created on the host machine as UClawRuntime.');
+console.log('[prepare-usb-portable] Runtime caches and update downloads are created on the host machine as UClawRuntime.');

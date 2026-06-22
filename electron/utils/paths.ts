@@ -64,7 +64,7 @@ function resolveOsHomeDir(): string {
  */
 export function expandPath(path: string): string {
   if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
-    return path.replace(/^~(?=$|[\\/])/, resolveOsHomeDir());
+    return resolve(path.replace(/^~(?=$|[\\/])/, resolveOsHomeDir()));
   }
   return path;
 }
@@ -75,7 +75,7 @@ export function expandPath(path: string): string {
  */
 export function expandOpenClawPath(path: string): string {
   if (path === '~' || path.startsWith('~/') || path.startsWith('~\\')) {
-    return path.replace(/^~(?=$|[\\/])/, resolveOpenClawEffectiveHomeDir());
+    return resolve(path.replace(/^~(?=$|[\\/])/, resolveOpenClawEffectiveHomeDir()));
   }
   return path;
 }

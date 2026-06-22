@@ -13,12 +13,17 @@ import { EventEmitter } from 'events';
 import { setQuitting } from './app-state';
 import { getJunFeiAIBackendOrigin } from '../utils/junfeiai-distribution';
 import { createWriteStream } from 'node:fs';
-import { mkdir, rename, rm, stat } from 'node:fs/promises';
-import { basename, extname, join } from 'node:path';
+import { mkdir, rename, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { getPortableModeInfo, getPortableUpdatesDir, isPortableMode } from '../utils/portable-mode';
+import { getPortableUpdatesDir, isPortableMode } from '../utils/portable-mode';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
+import {
+  assertPortableUpdateZipFilename,
+  filenameFromPortableUpdateInfo,
+  verifyPortableUpdatePackage,
+} from './portable-update-security';
 
 /** Base update feed URL (without trailing channel path). */
 function getUpdateFeedBaseUrl(): string {
@@ -84,9 +89,18 @@ export interface PortableUpdateInfo {
   releaseDate?: string;
   releaseNotes?: string | null;
   downloadUrl?: string;
+  download_url?: string;
   feedUrl?: string;
+  feed_url?: string;
   channel?: string;
   platform?: string;
+  arch?: string;
+  packageType?: string;
+  package_type?: string;
+  fileName?: string;
+  file_name?: string;
+  sha512?: string;
+  size?: number;
   mandatory?: boolean;
 }
 
@@ -114,26 +128,6 @@ function compareSemverLike(a: string, b: string): number {
     if (diff !== 0) return diff;
   }
   return 0;
-}
-
-function filenameFromDownloadUrl(downloadUrl: string, version: string): string {
-  try {
-    const parsed = new URL(downloadUrl);
-    const name = sanitizePortableUpdateFilename(basename(decodeURIComponent(parsed.pathname)));
-    if (name && name !== '/' && extname(name)) return name;
-  } catch {
-    const name = sanitizePortableUpdateFilename(basename(downloadUrl));
-    if (name && extname(name)) return name;
-  }
-  const extension = process.platform === 'win32' ? 'zip' : 'zip';
-  return `UClaw-${version}-${platformForUpdateApi()}-${process.arch}-portable.${extension}`;
-}
-
-function sanitizePortableUpdateFilename(name: string): string {
-  return Array.from(name)
-    .map((char) => (char.charCodeAt(0) < 32 || /[<>:"/\\|?*]/.test(char) ? '-' : char))
-    .join('')
-    .trim();
 }
 
 export class AppUpdater extends EventEmitter {
@@ -308,6 +302,8 @@ export class AppUpdater extends EventEmitter {
       const url = new URL(`${getUpdateApiBaseUrl()}/latest`);
       url.searchParams.set('channel', channel);
       url.searchParams.set('platform', platform);
+      url.searchParams.set('package_type', 'portable_zip');
+      url.searchParams.set('arch', process.arch);
 
       const response = await proxyAwareFetch(url);
       if (!response.ok) {
@@ -359,12 +355,17 @@ export class AppUpdater extends EventEmitter {
   }
 
   private async downloadPortableUpdate(): Promise<{ downloadPath: string }> {
+    let partialPathToCleanup: string | null = null;
     try {
       const info = isPortableUpdateInfo(this.status.info)
         ? this.status.info
         : await this.checkPortableForUpdates();
-      if (!isPortableUpdateInfo(info) || !info.downloadUrl) {
+      const downloadUrl = info?.downloadUrl || info?.download_url;
+      if (!isPortableUpdateInfo(info) || !downloadUrl) {
         throw new Error('No portable update download URL is available');
+      }
+      if ((info.packageType || info.package_type) !== 'portable_zip') {
+        throw new Error('Portable update metadata must use package_type=portable_zip');
       }
 
       const updatesDir = getPortableUpdatesDir();
@@ -373,14 +374,20 @@ export class AppUpdater extends EventEmitter {
       }
       await mkdir(updatesDir, { recursive: true });
 
-      const response = await proxyAwareFetch(info.downloadUrl);
+      const response = await proxyAwareFetch(downloadUrl);
       if (!response.ok || !response.body) {
         throw new Error(`Download failed (${response.status})`);
       }
 
-      const filename = filenameFromDownloadUrl(info.downloadUrl, info.version);
+      const filename = filenameFromPortableUpdateInfo(
+        { ...info, downloadUrl },
+        platformForUpdateApi(),
+        process.arch,
+      );
+      assertPortableUpdateZipFilename(filename);
       const targetPath = join(updatesDir, filename);
       const partialPath = `${targetPath}.download`;
+      partialPathToCleanup = partialPath;
       await rm(partialPath, { force: true });
       const total = Number.parseInt(response.headers.get('content-length') || '0', 10) || 0;
       let transferred = 0;
@@ -424,23 +431,27 @@ export class AppUpdater extends EventEmitter {
       });
 
       await pipeline(bodyStream, createWriteStream(partialPath));
+      const verified = await verifyPortableUpdatePackage(partialPath, info);
       await rename(partialPath, targetPath);
-      const downloaded = await stat(targetPath);
+      partialPathToCleanup = null;
       this.updateStatus({
         status: 'downloaded',
         mode: 'portable',
         info,
         downloadPath: targetPath,
         progress: {
-          total: total || downloaded.size,
+          total: total || verified.size,
           delta: 0,
-          transferred: downloaded.size,
+          transferred: verified.size,
           percent: 100,
           bytesPerSecond: 0,
         },
       });
       return { downloadPath: targetPath };
     } catch (error) {
+      if (partialPathToCleanup) {
+        await rm(partialPathToCleanup, { force: true }).catch(() => {});
+      }
       logger.error('[Updater] Portable update download failed:', error);
       this.updateStatus({
         status: 'error',
@@ -478,7 +489,7 @@ export class AppUpdater extends EventEmitter {
       shell.showItemInFolder(this.status.downloadPath);
       return;
     }
-    const updatesDir = getPortableModeInfo().updatesDir;
+    const updatesDir = getPortableUpdatesDir();
     if (updatesDir) {
       await shell.openPath(updatesDir);
     }

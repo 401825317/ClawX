@@ -28,6 +28,21 @@ function getExtensionPackages(): Set<string> {
 }
 
 const extensionPackages = getExtensionPackages();
+const mainProcessBundledPackages = new Set([
+  'core-util-is',
+  'immediate',
+  'inherits',
+  'isarray',
+  'jszip',
+  'lie',
+  'pako',
+  'process-nextick-args',
+  'readable-stream',
+  'safe-buffer',
+  'setimmediate',
+  'string_decoder',
+  'util-deprecate',
+]);
 
 function copyGatewayStaticScripts(): Plugin {
   const sourceDir = resolve(__dirname, 'electron/gateway');
@@ -53,6 +68,9 @@ function isMainProcessExternal(id: string): boolean {
   if (!id || id.startsWith('\0')) return false;
   if (id.startsWith('.') || id.startsWith('/') || /^[A-Za-z]:[\\/]/.test(id)) return false;
   if (id.startsWith('@/') || id.startsWith('@electron/')) return false;
+  for (const pkg of mainProcessBundledPackages) {
+    if (id === pkg || id.startsWith(pkg + '/')) return false;
+  }
   for (const pkg of extensionPackages) {
     if (id === pkg || id.startsWith(pkg + '/')) return false;
   }

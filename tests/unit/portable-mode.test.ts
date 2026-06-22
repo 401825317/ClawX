@@ -62,6 +62,7 @@ describe('portable mode', () => {
       openclawConfigDir: join(root, 'UClawData', 'openclaw-home', '.openclaw'),
       updatesDir: join(root, 'UClawData', 'updates'),
       runtimeRootDir: join(root, 'LocalRuntime'),
+      runtimeUpdatesDir: join(root, 'LocalRuntime', 'updates'),
       runtimeSessionDataDir: join(root, 'LocalRuntime', 'electron-session'),
       runtimeLogsDir: join(root, 'LocalRuntime', 'logs'),
       runtimeCrashDumpsDir: join(root, 'LocalRuntime', 'crash-dumps'),
@@ -90,6 +91,7 @@ describe('portable mode', () => {
     expect(process.env.OPENCLAW_CONFIG_PATH).toBe(join(root, 'UClawData', 'openclaw-home', '.openclaw', 'openclaw.json'));
     expect(process.env.OPENCLAW_CONFIG).toBe(process.env.OPENCLAW_CONFIG_PATH);
     expect(process.env.CLAWX_RUNTIME_CACHE_DIR).toBe(join(root, 'LocalRuntime'));
+    expect(process.env.CLAWX_UPDATE_DOWNLOAD_DIR).toBe(join(root, 'LocalRuntime', 'updates'));
     expect(process.env.UV_PYTHON_INSTALL_DIR).toBe(join(root, 'LocalRuntime', 'python'));
     expect(process.env.UV_CACHE_DIR).toBe(join(root, 'LocalRuntime', 'uv-cache'));
     expect(process.env.UV_TOOL_DIR).toBe(join(root, 'LocalRuntime', 'uv-tools'));
@@ -103,23 +105,22 @@ describe('portable mode', () => {
   });
 
   it('uses the folder beside the macOS app bundle as the packaged portable root', async () => {
-    const volumeRoot = join(root, 'mac-volume');
+    const volumeRoot = '/Volumes/UClawUSB';
     vi.unstubAllEnvs();
+    vi.stubEnv('CLAWX_PORTABLE', '1');
     vi.stubEnv('CLAWX_RUNTIME_CACHE_ROOT', join(root, 'MacRuntime'));
     Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
     Object.defineProperty(process, 'execPath', {
-      value: join(volumeRoot, 'UClaw.app', 'Contents', 'MacOS', 'UClaw'),
+      value: `${volumeRoot}/UClaw.app/Contents/MacOS/UClaw`,
       configurable: true,
     });
-    await mkdir(volumeRoot, { recursive: true });
-    await writeFile(join(volumeRoot, 'portable.flag'), 'portable', 'utf-8');
 
     const { getPortableModeInfo } = await importPortableMode();
 
     expect(getPortableModeInfo()).toMatchObject({
       enabled: true,
       rootDir: volumeRoot,
-      dataDir: join(volumeRoot, 'UClawData'),
+      dataDir: `${volumeRoot}/UClawData`,
     });
   });
 
@@ -140,6 +141,7 @@ describe('portable mode', () => {
       rootDir: String.raw`X:\UClaw`,
       dataDir: win32.join(String.raw`X:\UClaw`, 'UClawData'),
       updatesDir: win32.join(String.raw`X:\UClaw`, 'UClawData', 'updates'),
+      runtimeUpdatesDir: win32.join(String.raw`C:\Users\tester\AppData\Local\UClawRuntime`, 'updates'),
     });
   });
 });

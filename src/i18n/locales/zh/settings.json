@@ -274,7 +274,7 @@
       "unknownVersion": "新版本"
     },
     "help": "UClaw 会自动检查更新，并在下载或安装前提示您确认。",
-    "portableHelp": "UClaw 会自动检查更新；便携版会下载新版包到 UClawData/updates，退出后替换当前目录即可完成更新。"
+    "portableHelp": "UClaw 会自动检查更新；便携版会把新版包下载到本机运行缓存，退出后替换当前 U 盘目录即可完成更新。"
   },
   "advanced": {
     "title": "高级",

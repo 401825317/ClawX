@@ -274,7 +274,7 @@
       "unknownVersion": "new"
     },
     "help": "UClaw checks for updates automatically and prompts you before downloading or installing.",
-    "portableHelp": "UClaw checks for updates automatically. Portable builds download the new package to UClawData/updates; quit the app and replace the current folder to update."
+    "portableHelp": "UClaw checks for updates automatically. Portable builds download the new package to the local runtime update cache; quit the app and replace the current USB folder to update."
   },
   "advanced": {
     "title": "Advanced",

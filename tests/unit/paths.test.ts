@@ -1,5 +1,5 @@
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 async function importPaths() {
@@ -80,25 +80,20 @@ describe('OpenClaw path helpers', () => {
   });
 
   it('resolves OPENCLAW_HOME values that are relative to the OS home', async () => {
-    const osHome = join(root, 'os-home');
-    vi.stubEnv('HOME', osHome);
     vi.stubEnv('OPENCLAW_HOME', '~/portable-openclaw');
 
     const { expandOpenClawPath, resolveOpenClawEffectiveHomeDir } = await importPaths();
 
-    expect(resolveOpenClawEffectiveHomeDir()).toBe(join(osHome, 'portable-openclaw'));
+    expect(resolveOpenClawEffectiveHomeDir()).toBe(join(homedir(), 'portable-openclaw'));
     expect(expandOpenClawPath('~/.openclaw/agents/main/agent')).toBe(
-      join(osHome, 'portable-openclaw', '.openclaw', 'agents', 'main', 'agent'),
+      join(homedir(), 'portable-openclaw', '.openclaw', 'agents', 'main', 'agent'),
     );
   });
 
   it('keeps normal tilde expansion on the OS home when OPENCLAW_HOME is unset', async () => {
-    const osHome = join(root, 'normal-home');
-    vi.stubEnv('HOME', osHome);
-
     const { expandPath, resolveOpenClawHomeDir } = await importPaths();
 
-    expect(resolveOpenClawHomeDir()).toBe(osHome);
-    expect(expandPath('~/Downloads')).toBe(join(osHome, 'Downloads'));
+    expect(resolveOpenClawHomeDir()).toBe(homedir());
+    expect(expandPath('~/Downloads')).toBe(join(homedir(), 'Downloads'));
   });
 });

@@ -19,6 +19,7 @@ export type PortableModeInfo = {
   openclawConfigDir: string | null;
   updatesDir: string | null;
   runtimeRootDir: string | null;
+  runtimeUpdatesDir: string | null;
   runtimeSessionDataDir: string | null;
   runtimeLogsDir: string | null;
   runtimeCrashDumpsDir: string | null;
@@ -118,6 +119,7 @@ export function getPortableModeInfo(): PortableModeInfo {
         openclawConfigDir: path.join(dataDir, 'openclaw-home', '.openclaw'),
         updatesDir: path.join(dataDir, 'updates'),
         runtimeRootDir,
+        runtimeUpdatesDir: path.join(runtimeRootDir, 'updates'),
         runtimeSessionDataDir: path.join(runtimeRootDir, 'electron-session'),
         runtimeLogsDir: path.join(runtimeRootDir, 'logs'),
         runtimeCrashDumpsDir: path.join(runtimeRootDir, 'crash-dumps'),
@@ -140,6 +142,7 @@ export function getPortableModeInfo(): PortableModeInfo {
         openclawConfigDir: null,
         updatesDir: null,
         runtimeRootDir: null,
+        runtimeUpdatesDir: null,
         runtimeSessionDataDir: null,
         runtimeLogsDir: null,
         runtimeCrashDumpsDir: null,
@@ -173,6 +176,7 @@ export function ensurePortableDataDirs(): PortableModeInfo {
     info.openclawConfigDir,
     info.updatesDir,
     info.runtimeRootDir,
+    info.runtimeUpdatesDir,
     info.runtimeSessionDataDir,
     info.runtimeLogsDir,
     info.runtimeCrashDumpsDir,
@@ -210,6 +214,9 @@ export function applyPortableEnvironment(): PortableModeInfo {
   if (info.runtimeRootDir) {
     process.env.CLAWX_RUNTIME_CACHE_DIR = info.runtimeRootDir;
   }
+  if (info.runtimeUpdatesDir) {
+    process.env.CLAWX_UPDATE_DOWNLOAD_DIR = info.runtimeUpdatesDir;
+  }
   if (info.runtimePythonDir) {
     process.env.UV_PYTHON_INSTALL_DIR = info.runtimePythonDir;
   }
@@ -241,5 +248,9 @@ export function applyPortableEnvironment(): PortableModeInfo {
 }
 
 export function getPortableUpdatesDir(): string | null {
-  return getPortableModeInfo().updatesDir;
+  return getPortableUpdateDownloadsDir();
+}
+
+export function getPortableUpdateDownloadsDir(): string | null {
+  return getPortableModeInfo().runtimeUpdatesDir;
 }
