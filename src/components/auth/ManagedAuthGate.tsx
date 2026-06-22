@@ -21,6 +21,7 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
   const loading = useManagedAuthStore((state) => state.loading);
   const initialized = useManagedAuthStore((state) => state.initialized);
   const error = useManagedAuthStore((state) => state.error);
+  const loadLocalStatus = useManagedAuthStore((state) => state.loadLocalStatus);
   const refreshStatus = useManagedAuthStore((state) => state.refreshStatus);
   const onSetupPage = location.pathname.startsWith('/setup');
   const shouldCheck = enabled && !onSetupPage;
@@ -33,7 +34,7 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
     }
 
     let cancelled = false;
-    const run = async () => {
+    const runRemoteVerify = async () => {
       try {
         await refreshStatus();
       } catch {
@@ -43,16 +44,27 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
       }
     };
 
-    void run();
+    const runInitialCheck = async () => {
+      try {
+        await loadLocalStatus();
+      } catch {
+        // Fall through to remote verification. The store keeps the local error.
+      }
+      if (!cancelled) {
+        void runRemoteVerify();
+      }
+    };
+
+    void runInitialCheck();
     const timer = window.setInterval(() => {
-      void run();
+      void runRemoteVerify();
     }, 5 * 60 * 1000);
 
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [refreshStatus, shouldCheck]);
+  }, [loadLocalStatus, refreshStatus, shouldCheck]);
 
   if (!shouldCheck || ready) {
     return null;

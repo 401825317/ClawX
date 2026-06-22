@@ -9,6 +9,7 @@ import {
   getJunFeiAITopupOrders,
   getJunFeiAITopupOverview,
   getJunFeiAIClientConfig,
+  getJunFeiAILocalStatus,
   listJunFeiAIModels,
   loginJunFeiAI,
   logoutJunFeiAI,
@@ -45,6 +46,11 @@ export async function handleJunFeIAIRoutes(
   url: URL,
   ctx: HostApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/junfeiai/status/local' && req.method === 'GET') {
+    sendJson(res, 200, await getJunFeiAILocalStatus());
+    return true;
+  }
+
   if (url.pathname === '/api/junfeiai/status' && req.method === 'GET') {
     sendJson(res, 200, await ensureJunFeiAIProviderSeeded({
       gatewayManager: ctx.gatewayManager,

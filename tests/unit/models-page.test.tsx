@@ -85,6 +85,7 @@ describe('Models page auto refresh', () => {
       await Promise.resolve();
     });
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/usage/recent-token-history?limit=300');
 
     await act(async () => {
       vi.advanceTimersByTime(15_000);
@@ -92,5 +93,6 @@ describe('Models page auto refresh', () => {
     });
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
+    expect(hostApiFetchMock).toHaveBeenLastCalledWith('/api/usage/recent-token-history?limit=300');
   });
 });

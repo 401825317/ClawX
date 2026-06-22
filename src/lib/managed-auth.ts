@@ -18,7 +18,10 @@ export type ManagedAuthStatus = {
   authError?: string;
   deviceActivated?: boolean;
   activationRequired?: boolean;
-  source?: 'remote' | 'fallback' | 'provided';
+  source?: 'remote' | 'fallback' | 'provided' | 'local';
+  localOnly?: boolean;
+  lastVerifiedAt?: number;
+  offlineGraceExpiresAt?: number;
   bootstrap?: {
     service?: {
       name?: string;
@@ -94,6 +97,16 @@ export function isManagedAuthReady(status: ManagedAuthStatus | null | undefined)
     && !isManagedActivationRequired(status);
 }
 
+export function isManagedAuthLocallyReady(status: ManagedAuthStatus | null | undefined): boolean {
+  if (status?.managed === false) {
+    return true;
+  }
+  return Boolean(status?.localOnly)
+    && Boolean(status?.hasAuthToken)
+    && Boolean(status?.hasRelayToken)
+    && !isManagedActivationRequired(status);
+}
+
 export function getManagedAuthUser(status: ManagedAuthStatus | null | undefined): ManagedAuthUser | null {
   return status?.auth?.user ?? null;
 }
@@ -124,11 +137,14 @@ export function getManagedAuthStateKey(
   if (!status) {
     return 'checking';
   }
-  if (options.error) {
-    return 'error';
-  }
   if (status?.managed === false) {
     return 'unmanaged';
+  }
+  if (isManagedAuthLocallyReady(status)) {
+    return 'ready';
+  }
+  if (options.error) {
+    return 'error';
   }
   if (isManagedAuthReady(status)) {
     return 'ready';

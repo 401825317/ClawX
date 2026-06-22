@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
-import type { ManagedAuthStatus } from '@/lib/managed-auth';
+import { isManagedAuthLocallyReady, type ManagedAuthStatus } from '@/lib/managed-auth';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -9,8 +9,10 @@ function errorMessage(error: unknown): string {
 interface ManagedAuthStore {
   status: ManagedAuthStatus | null;
   loading: boolean;
+  verifying: boolean;
   initialized: boolean;
   error: string | null;
+  loadLocalStatus: () => Promise<ManagedAuthStatus>;
   refreshStatus: () => Promise<ManagedAuthStatus>;
   logout: () => Promise<void>;
   setStatus: (status: ManagedAuthStatus | null) => void;
@@ -19,13 +21,14 @@ interface ManagedAuthStore {
 export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
   status: null,
   loading: false,
+  verifying: false,
   initialized: false,
   error: null,
 
-  refreshStatus: async () => {
+  loadLocalStatus: async () => {
     set({ loading: true, error: null });
     try {
-      const status = await hostApiFetch<ManagedAuthStatus>('/api/junfeiai/status');
+      const status = await hostApiFetch<ManagedAuthStatus>('/api/junfeiai/status/local');
       set({ status, loading: false, initialized: true, error: null });
       return status;
     } catch (error) {
@@ -33,6 +36,29 @@ export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
         loading: false,
         initialized: true,
         error: errorMessage(error),
+      });
+      throw error;
+    }
+  },
+
+  refreshStatus: async () => {
+    const hasInitialized = get().initialized;
+    set({
+      loading: !hasInitialized,
+      verifying: true,
+      error: null,
+    });
+    try {
+      const status = await hostApiFetch<ManagedAuthStatus>('/api/junfeiai/status');
+      set({ status, loading: false, verifying: false, initialized: true, error: null });
+      return status;
+    } catch (error) {
+      const previousStatus = get().status;
+      set({
+        loading: false,
+        verifying: false,
+        initialized: true,
+        error: isManagedAuthLocallyReady(previousStatus) ? null : errorMessage(error),
       });
       throw error;
     }
@@ -53,6 +79,7 @@ export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
           authValid: false,
         },
         loading: false,
+        verifying: false,
         initialized: true,
         error: null,
       });
@@ -61,6 +88,7 @@ export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
       } catch (error) {
         set({
           loading: false,
+          verifying: false,
           initialized: true,
           error: errorMessage(error),
         });
@@ -68,6 +96,7 @@ export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
     } catch (error) {
       set({
         loading: false,
+        verifying: false,
         initialized: true,
         error: errorMessage(error),
       });

@@ -509,9 +509,12 @@ type DirectoryEntry = {
 
 const CHANNEL_TARGET_CACHE_TTL_MS = 60_000;
 const CHANNEL_TARGET_CACHE_ENABLED = process.env.VITEST !== 'true';
+const CHANNEL_STATUS_CACHE_TTL_MS = 5_000;
+const CHANNEL_STATUS_CACHE_ENABLED = process.env.VITEST !== 'true';
 const channelTargetCache = new Map<string, { expiresAt: number; targets: ChannelTargetOptionView[] }>();
 let lastChannelsStatusOkAt: number | undefined;
 let lastChannelsStatusFailureAt: number | undefined;
+let cachedGatewayChannelStatus: { expiresAt: number; status: GatewayChannelStatusPayload } | null = null;
 
 export async function buildChannelAccountsView(
   ctx: HostApiContext,
@@ -536,11 +539,21 @@ export async function buildChannelAccountsView(
       const probe = options?.probe === true;
       // 8s timeout — fail fast when Gateway is busy with AI tasks.
       const rpcStartedAt = Date.now();
-      gatewayStatus = await ctx.gatewayManager.rpc<GatewayChannelStatusPayload>(
-        'channels.status',
-        { probe },
-        probe ? 5000 : 8000,
-      );
+      if (CHANNEL_STATUS_CACHE_ENABLED && !probe && cachedGatewayChannelStatus && cachedGatewayChannelStatus.expiresAt > rpcStartedAt) {
+        gatewayStatus = cachedGatewayChannelStatus.status;
+      } else {
+        gatewayStatus = await ctx.gatewayManager.rpc<GatewayChannelStatusPayload>(
+          'channels.status',
+          { probe },
+          probe ? 5000 : 8000,
+        );
+        cachedGatewayChannelStatus = !CHANNEL_STATUS_CACHE_ENABLED || probe
+          ? null
+          : {
+            expiresAt: Date.now() + CHANNEL_STATUS_CACHE_TTL_MS,
+            status: gatewayStatus,
+          };
+      }
       lastChannelsStatusOkAt = Date.now();
       logger.info(
         `[channels.accounts] channels.status probe=${probe ? '1' : '0'} elapsedMs=${Date.now() - rpcStartedAt} snapshot=${buildGatewayStatusSnapshot(gatewayStatus)}`

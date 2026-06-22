@@ -34,6 +34,8 @@ const { gatewayState, agentsState, providersState, chatState } = vi.hoisted(() =
     currentSessionKey: 'agent:main:main',
     currentAgentId: 'main',
     sending: false,
+    activeRunId: null as string | null,
+    pendingFinal: false,
     runtimeRuns: {} as Record<string, Record<string, unknown>>,
   },
 }));
@@ -129,6 +131,8 @@ describe('Agents page status refresh', () => {
     chatState.currentSessionKey = 'agent:main:main';
     chatState.currentAgentId = 'main';
     chatState.sending = false;
+    chatState.activeRunId = null;
+    chatState.pendingFinal = false;
     chatState.runtimeRuns = {};
     loadSessionsMock.mockResolvedValue(undefined);
     fetchAgentsMock.mockResolvedValue(undefined);
@@ -154,8 +158,8 @@ describe('Agents page status refresh', () => {
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
-      expect(loadSessionsMock).toHaveBeenCalledTimes(1);
-      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts');
+      expect(loadSessionsMock).not.toHaveBeenCalled();
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts?mode=config');
     });
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:channel-status', expect.any(Function));
 
@@ -164,8 +168,48 @@ describe('Agents page status refresh', () => {
     });
 
     await waitFor(() => {
-      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts');
+      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config');
       expect(channelFetchCalls).toHaveLength(2);
+    });
+  });
+
+  it('defers channel account refresh while chat work is active', async () => {
+    chatState.sending = true;
+    let channelStatusHandler: (() => void) | undefined;
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: () => void) => {
+      if (eventName === 'gateway:channel-status') {
+        channelStatusHandler = handler;
+      }
+      return vi.fn();
+    });
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <Agents />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(1);
+    });
+
+    await act(async () => {
+      channelStatusHandler?.();
+    });
+
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(1);
+
+    chatState.sending = false;
+    await act(async () => {
+      rerender(
+        <MemoryRouter>
+          <Agents />
+        </MemoryRouter>,
+      );
+    });
+
+    await waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(2);
     });
   });
 
@@ -180,8 +224,8 @@ describe('Agents page status refresh', () => {
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
-      expect(loadSessionsMock).toHaveBeenCalledTimes(1);
-      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts');
+      expect(loadSessionsMock).not.toHaveBeenCalled();
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts?mode=config');
     });
 
     gatewayState.status = { state: 'running', port: 18789 };
@@ -194,7 +238,7 @@ describe('Agents page status refresh', () => {
     });
 
     await waitFor(() => {
-      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts');
+      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config');
       expect(channelFetchCalls).toHaveLength(2);
     });
   });

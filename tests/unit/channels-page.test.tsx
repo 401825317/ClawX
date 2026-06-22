@@ -8,14 +8,30 @@ const toastSuccessMock = vi.fn();
 const toastErrorMock = vi.fn();
 const toastWarningMock = vi.fn();
 
-const { gatewayState } = vi.hoisted(() => ({
+const { gatewayState, chatState } = vi.hoisted(() => ({
   gatewayState: {
     status: { state: 'running', port: 18789 },
+  },
+  chatState: {
+    sending: false,
+    activeRunId: null as string | null,
+    pendingFinal: false,
+    runtimeRuns: {} as Record<string, { status?: string }>,
   },
 }));
 
 vi.mock('@/stores/gateway', () => ({
   useGatewayStore: (selector: (state: typeof gatewayState) => unknown) => selector(gatewayState),
+}));
+
+vi.mock('@/stores/chat', () => ({
+  hasActiveChatWork: (state: typeof chatState) => (
+    state.sending
+    || state.activeRunId != null
+    || state.pendingFinal
+    || Object.values(state.runtimeRuns).some((run) => run.status === 'running')
+  ),
+  useChatStore: (selector: (state: typeof chatState) => unknown) => selector(chatState),
 }));
 
 vi.mock('@/lib/host-api', () => ({
@@ -58,6 +74,10 @@ describe('Channels page status refresh', () => {
       configurable: true,
     });
     gatewayState.status = { state: 'running', port: 18789 };
+    chatState.sending = false;
+    chatState.activeRunId = null;
+    chatState.pendingFinal = false;
+    chatState.runtimeRuns = {};
     hostApiFetchMock.mockImplementation(async (path: string) => {
       if (path.startsWith('/api/channels/accounts')) {
         return {
@@ -211,6 +231,34 @@ describe('Channels page status refresh', () => {
       const agentFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/agents');
       expect(channelFetchCalls).toHaveLength(2);
       expect(agentFetchCalls).toHaveLength(1);
+    });
+  });
+
+  it('defers runtime channel refresh while chat work is active', async () => {
+    chatState.sending = true;
+    subscribeHostEventMock.mockImplementation(() => vi.fn());
+
+    const { rerender } = render(<Channels />);
+
+    await waitFor(() => {
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts?mode=config');
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/agents');
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+
+    expect(hostApiFetchMock.mock.calls.some(([path]) => path === '/api/channels/accounts')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config').length).toBeGreaterThanOrEqual(1);
+
+    chatState.sending = false;
+    await act(async () => {
+      rerender(<Channels />);
+    });
+
+    await waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.some(([path]) => path === '/api/channels/accounts')).toBe(true);
     });
   });
 

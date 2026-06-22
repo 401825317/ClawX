@@ -240,6 +240,7 @@ const _sessionRunStateCache = new Map<string, SessionRunState>();
 let _sendGenerationCounter = 0;
 const _activeSendGenerationBySession = new Map<string, number>();
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
+const SESSION_LABEL_HYDRATION_BATCH_SIZE = 40;
 const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const CHAT_EVENT_DEDUPE_TTL_MS = 30_000;
 const HISTORY_PAGE_SIZE = 200;
@@ -270,6 +271,19 @@ type SessionLabelSummary = {
   firstUserText: string | null;
   lastTimestamp: number | null;
 };
+
+function getSessionLabelHydrationActivityMs(
+  session: ChatSession,
+  sessionLastActivity: Record<string, number>,
+): number {
+  const localActivity = sessionLastActivity[session.key];
+  if (typeof localActivity === 'number' && Number.isFinite(localActivity)) {
+    return localActivity;
+  }
+  return typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
+    ? session.updatedAt
+    : 0;
+}
 
 function getSessionBackendLabel(session: ChatSession): string {
   return toSessionLabel(session.label || session.derivedTitle || '');
@@ -2958,6 +2972,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ),
             }))
             .filter((entry) => entry.candidate != null)
+            .sort((left, right) => (
+              getSessionLabelHydrationActivityMs(right.session, existingSessionActivity)
+              - getSessionLabelHydrationActivityMs(left.session, existingSessionActivity)
+            ))
+            .slice(0, SESSION_LABEL_HYDRATION_BATCH_SIZE)
             .map((entry) => ({
               session: entry.session,
               version: entry.candidate!.version,
@@ -4873,4 +4892,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
 export function syncCachedSessionRunIdle(sessionKey: string): void {
   captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
+}
+
+export function hasActiveChatWork(state: Pick<
+  ChatState,
+  'sending' | 'activeRunId' | 'pendingFinal' | 'runtimeRuns'
+>): boolean {
+  return state.sending
+    || state.activeRunId != null
+    || state.pendingFinal
+    || Object.values(state.runtimeRuns).some((run) => run.status === 'running');
 }

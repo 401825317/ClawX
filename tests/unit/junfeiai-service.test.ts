@@ -68,6 +68,7 @@ vi.mock('@electron/utils/junfeiai-device', () => ({
 import {
   createJunFeiAITopupOrder,
   ensureJunFeiAIProviderSeeded,
+  getJunFeiAILocalStatus,
   getJunFeiAITopupOrderStatus,
   getJunFeiAITopupOverview,
   loginJunFeiAI,
@@ -533,7 +534,7 @@ describe('JunFeiAI managed provider service', () => {
       'bob-relay',
       undefined,
     );
-    expect(mocks.syncDefaultProviderToRuntime).toHaveBeenCalledWith('lingzhiwuxian', undefined);
+    expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
   });
 
   it('syncs runtime during status checks when a fresh relay key is issued', async () => {
@@ -660,7 +661,7 @@ describe('JunFeiAI managed provider service', () => {
       'fresh-relay',
       undefined,
     );
-    expect(mocks.syncDefaultProviderToRuntime).toHaveBeenCalledWith('lingzhiwuxian', undefined);
+    expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
   });
 
   it('clears a stored relay key while the logged-in device still requires activation', async () => {
@@ -809,6 +810,118 @@ describe('JunFeiAI managed provider service', () => {
       undefined,
     );
     expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
+  });
+
+  it('does not sync runtime during a no-change background status check', async () => {
+    const existing = makeAccount({
+      label: '灵智无限',
+      metadata: { resourceUrl: 'https://zz-cn.lingzhiwuxian.com' },
+      fallbackModels: [],
+    });
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'access',
+          refreshToken: '',
+          expiresAt: Date.now() + 60_000,
+          subject: '7',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return {
+          type: 'api_key',
+          accountId: 'lingzhiwuxian',
+          apiKey: 'relay',
+          ownerUserId: '7',
+        };
+      }
+      return null;
+    });
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      data: { id: 7, username: 'alice' },
+    }), { status: 200 }));
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: { activationRequired: false },
+        runtime: {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          apiProtocol: 'openai-responses',
+          defaultModel: 'gpt-5.5',
+        },
+      },
+      syncRuntime: false,
+      syncRuntimeOnAuthChange: true,
+    });
+
+    expect(result.authValid).toBe(true);
+    expect(result.hasRelayToken).toBe(true);
+    expect(mocks.saveProviderAccount).not.toHaveBeenCalled();
+    expect(mocks.setDefaultProvider).not.toHaveBeenCalled();
+    expect(mocks.syncSavedProviderToRuntime).not.toHaveBeenCalled();
+    expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
+  });
+
+  it('builds local status without network verification', async () => {
+    const existing = makeAccount();
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.readJunFeiAIDeviceActivationState.mockResolvedValue({
+      activated: true,
+      onboardingCompleted: true,
+      activatedAt: '2026-06-07T00:00:00.000Z',
+      userId: '7',
+    });
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'access',
+          refreshToken: '',
+          expiresAt: Date.now() + 60_000,
+          subject: '7',
+          email: 'alice@example.com',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return {
+          type: 'api_key',
+          accountId: 'lingzhiwuxian',
+          apiKey: 'relay',
+          ownerUserId: '7',
+        };
+      }
+      return null;
+    });
+    memoryStore.set('junfeiaiVerificationCache', {
+      verifiedAt: Date.now(),
+      graceSeconds: 3600,
+      payload: {
+        valid: true,
+        user: { id: 7, email: 'alice@example.com' },
+      },
+    });
+
+    const result = await getJunFeiAILocalStatus();
+
+    expect(result).toMatchObject({
+      managed: true,
+      localOnly: true,
+      source: 'local',
+      hasAuthToken: true,
+      hasRelayToken: true,
+      authValid: true,
+      deviceActivated: true,
+      activationRequired: false,
+      auth: {
+        user: { id: 7, email: 'alice@example.com' },
+      },
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('does nothing when managed provider mode is disabled', async () => {
@@ -1111,7 +1224,7 @@ describe('JunFeiAI managed provider service', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ Authorization: 'Bearer jwt-access' }),
-        body: JSON.stringify({ name: 'ClawX device-1' }),
+        body: JSON.stringify({ name: 'UClaw device-1' }),
       }),
     );
     expect(mocks.setProviderSecret).toHaveBeenCalledWith(expect.objectContaining({

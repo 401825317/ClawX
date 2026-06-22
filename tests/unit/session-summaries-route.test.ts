@@ -1,18 +1,22 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { HostApiContext } from '@electron/api/context';
-import { handleSessionRoutes } from '@electron/api/routes/sessions';
 
-const readFileMock = vi.fn();
-const parseJsonBodyMock = vi.fn();
-
-vi.mock('node:fs/promises', () => ({
-  readFile: (...args: unknown[]) => readFileMock(...args),
-}));
+const {
+  parseJsonBodyMock,
+  testOpenClawConfigDir,
+} = vi.hoisted(() => {
+  return {
+    parseJsonBodyMock: vi.fn(),
+    testOpenClawConfigDir: `${process.env.TEMP || process.env.TMPDIR || '/tmp'}/clawx-session-summaries-${Math.random().toString(36).slice(2)}`,
+  };
+});
 
 vi.mock('@electron/utils/paths', () => ({
-  getOpenClawConfigDir: () => '/mock/.openclaw',
+  getOpenClawConfigDir: () => testOpenClawConfigDir,
 }));
 
 vi.mock('@electron/api/route-utils', async () => {
@@ -50,6 +54,7 @@ function createResponse() {
 describe('POST /api/sessions/summaries', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    rmSync(testOpenClawConfigDir, { recursive: true, force: true });
   });
 
   it('strips sender metadata and ignores internal untrusted injections when building titles', async () => {
@@ -57,38 +62,38 @@ describe('POST /api/sessions/summaries', () => {
       sessionKeys: ['agent:main:session-a'],
     });
 
-    readFileMock.mockImplementation(async (path: string) => {
-      if (path.endsWith('/agents/main/sessions/sessions.json')) {
-        return JSON.stringify({
-          sessions: [
-            { key: 'agent:main:session-a', file: 'session-a.jsonl' },
-          ],
-        });
-      }
-      if (path.endsWith('/agents/main/sessions/session-a.jsonl')) {
-        return [
-          JSON.stringify({
-            type: 'message',
-            message: {
-              role: 'user',
-              timestamp: 1700000000,
-              content: 'System (untrusted): internal noise',
-            },
-          }),
-          JSON.stringify({
-            type: 'message',
-            message: {
-              role: 'user',
-              timestamp: 1700000002,
-              content: 'Sender (untrusted): Alice\n\nHello from Alice',
-            },
-          }),
-        ].join('\n');
-      }
-      throw new Error(`Unexpected readFile path: ${path}`);
-    });
+    const sessionsDir = join(testOpenClawConfigDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:main:session-a', file: 'session-a.jsonl' },
+      ],
+    }), 'utf8');
+    writeFileSync(
+      join(sessionsDir, 'session-a.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'user',
+            timestamp: 1700000000,
+            content: 'System (untrusted): internal noise',
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'user',
+            timestamp: 1700000002,
+            content: 'Sender (untrusted): Alice\n\nHello from Alice',
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
 
     const response = createResponse();
+    const { handleSessionRoutes } = await import('@electron/api/routes/sessions');
     const handled = await handleSessionRoutes(
       { method: 'POST' } as IncomingMessage,
       response.res,
@@ -115,30 +120,30 @@ describe('POST /api/sessions/summaries', () => {
       sessionKeys: ['agent:main:session-json'],
     });
 
-    readFileMock.mockImplementation(async (path: string) => {
-      if (path.endsWith('/agents/main/sessions/sessions.json')) {
-        return JSON.stringify({
-          sessions: [
-            { key: 'agent:main:session-json', file: 'session-json.jsonl' },
-          ],
-        });
-      }
-      if (path.endsWith('/agents/main/sessions/session-json.jsonl')) {
-        return [
-          JSON.stringify({
-            type: 'message',
-            message: {
-              role: 'user',
-              timestamp: 1700000010,
-              content: 'Sender (untrusted): ```json\n{"name":"Alice","id":"u1"}\n```\n\nActual user title',
-            },
-          }),
-        ].join('\n');
-      }
-      throw new Error(`Unexpected readFile path: ${path}`);
-    });
+    const sessionsDir = join(testOpenClawConfigDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: [
+        { key: 'agent:main:session-json', file: 'session-json.jsonl' },
+      ],
+    }), 'utf8');
+    writeFileSync(
+      join(sessionsDir, 'session-json.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'user',
+            timestamp: 1700000010,
+            content: 'Sender (untrusted): ```json\n{"name":"Alice","id":"u1"}\n```\n\nActual user title',
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
 
     const response = createResponse();
+    const { handleSessionRoutes } = await import('@electron/api/routes/sessions');
     await handleSessionRoutes(
       { method: 'POST' } as IncomingMessage,
       response.res,
@@ -155,6 +160,59 @@ describe('POST /api/sessions/summaries', () => {
           lastTimestamp: 1700000010000,
         },
       ],
+    });
+  });
+
+  it('bounds summary requests and reads transcripts through head/tail chunks', async () => {
+    const requestedSessionKeys = Array.from({ length: 120 }, (_, index) => `agent:main:session-${index}`);
+    parseJsonBodyMock.mockResolvedValue({
+      sessionKeys: requestedSessionKeys,
+    });
+
+    const sessionsDir = join(testOpenClawConfigDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      sessions: requestedSessionKeys.map((key, index) => ({ key, file: `session-${index}.jsonl` })),
+    }), 'utf8');
+
+    for (let index = 0; index < 120; index += 1) {
+      const rows = [
+        JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'user',
+            timestamp: 1700000000 + index,
+            content: `first title ${index}`,
+          },
+        }),
+      ];
+      for (let line = 0; line < 600; line += 1) {
+        rows.push(JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'assistant',
+            timestamp: 1700001000 + line,
+            content: 'x'.repeat(80),
+          },
+        }));
+      }
+      writeFileSync(join(sessionsDir, `session-${index}.jsonl`), rows.join('\n'), 'utf8');
+    }
+
+    const response = createResponse();
+    const { handleSessionRoutes } = await import('@electron/api/routes/sessions');
+    await handleSessionRoutes(
+      { method: 'POST' } as IncomingMessage,
+      response.res,
+      new URL('http://127.0.0.1/api/sessions/summaries'),
+      {} as HostApiContext,
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json.summaries).toHaveLength(80);
+    expect(response.json.summaries?.[0]).toMatchObject({
+      sessionKey: 'agent:main:session-0',
+      firstUserText: 'first title 0',
     });
   });
 });

@@ -57,6 +57,7 @@ interface ChannelGroupItem {
 
 type AgentWorkStatus = 'running' | 'completed';
 
+const AGENTS_BUSY_REFRESH_DEFER_MS = 30_000;
 const RUNNING_SESSION_STATUSES = new Set(['running', 'active', 'queued', 'in_progress', 'processing']);
 
 function normalizeAgentId(value: string | undefined | null): string {
@@ -69,18 +70,13 @@ function getAgentIdFromSessionKey(sessionKey: string | undefined | null): string
   return normalizeAgentId(agentId);
 }
 
-function sessionBelongsToAgent(sessionKey: string | undefined | null, agentId: string): boolean {
-  return getAgentIdFromSessionKey(sessionKey) === normalizeAgentId(agentId);
-}
-
 function isRunningSession(session: ChatSession): boolean {
   if (session.hasActiveRun === true) return true;
   const status = session.status?.trim().toLowerCase();
   return Boolean(status && RUNNING_SESSION_STATUSES.has(status));
 }
 
-function getAgentWorkStatus(
-  agent: AgentSummary,
+function getRunningAgentIds(
   state: {
     sessions: ChatSession[];
     currentSessionKey: string;
@@ -88,30 +84,36 @@ function getAgentWorkStatus(
     sending: boolean;
     runtimeRuns: Record<string, ChatRuntimeRunState>;
   },
-): AgentWorkStatus {
-  const agentId = normalizeAgentId(agent.id);
+): string[] {
+  const ids = new Set<string>();
   if (state.sending) {
     const sendingAgentId = normalizeAgentId(state.currentAgentId || getAgentIdFromSessionKey(state.currentSessionKey));
-    if (sendingAgentId === agentId) return 'running';
+    ids.add(sendingAgentId);
   }
 
-  if (
-    state.sessions.some((session) =>
-      sessionBelongsToAgent(session.key, agentId) && isRunningSession(session)
-    )
-  ) {
-    return 'running';
+  for (const session of state.sessions) {
+    if (isRunningSession(session)) {
+      ids.add(getAgentIdFromSessionKey(session.key));
+    }
   }
 
-  if (
-    Object.values(state.runtimeRuns).some((run) =>
-      run.status === 'running' && sessionBelongsToAgent(run.sessionKey, agentId)
-    )
-  ) {
-    return 'running';
+  for (const run of Object.values(state.runtimeRuns)) {
+    if (run.status === 'running') {
+      ids.add(getAgentIdFromSessionKey(run.sessionKey));
+    }
   }
 
-  return 'completed';
+  return Array.from(ids).sort();
+}
+
+function getRunningAgentKey(state: {
+  sessions: ChatSession[];
+  currentSessionKey: string;
+  currentAgentId: string;
+  sending: boolean;
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+}): string {
+  return getRunningAgentIds(state).join('|');
 }
 
 export function Agents() {
@@ -119,12 +121,7 @@ export function Agents() {
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const switchSession = useChatStore((state) => state.switchSession);
-  const loadSessions = useChatStore((state) => state.loadSessions);
-  const sessions = useChatStore((state) => state.sessions);
-  const currentSessionKey = useChatStore((state) => state.currentSessionKey);
-  const currentAgentId = useChatStore((state) => state.currentAgentId);
-  const sending = useChatStore((state) => state.sending);
-  const runtimeRuns = useChatStore((state) => state.runtimeRuns);
+  const runningAgentKey = useChatStore(getRunningAgentKey);
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const lastGatewayStateRef = useRef(gatewayStatus.state);
   const {
@@ -142,36 +139,84 @@ export function Agents() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [agentToDelete, setAgentToDelete] = useState<AgentSummary | null>(null);
+  const deferredChannelRefreshRef = useRef<number | null>(null);
+  const hasActiveRunRef = useRef(false);
 
-  const fetchChannelAccounts = useCallback(async () => {
+  const runningAgentIds = useMemo(
+    () => new Set(runningAgentKey ? runningAgentKey.split('|') : []),
+    [runningAgentKey],
+  );
+  const hasActiveRun = runningAgentIds.size > 0;
+  hasActiveRunRef.current = hasActiveRun;
+
+  const clearDeferredChannelRefresh = useCallback(() => {
+    if (deferredChannelRefreshRef.current != null) {
+      window.clearTimeout(deferredChannelRefreshRef.current);
+      deferredChannelRefreshRef.current = null;
+    }
+  }, []);
+
+  const scheduleChannelRefreshWhenIdle = useCallback((callback: () => void) => {
+    clearDeferredChannelRefresh();
+    deferredChannelRefreshRef.current = window.setTimeout(() => {
+      deferredChannelRefreshRef.current = null;
+      callback();
+    }, AGENTS_BUSY_REFRESH_DEFER_MS);
+  }, [clearDeferredChannelRefresh]);
+
+  const fetchChannelAccounts = useCallback(async (options?: { deferIfBusy?: boolean }) => {
+    if (options?.deferIfBusy === true && hasActiveRunRef.current) {
+      scheduleChannelRefreshWhenIdle(() => {
+        void fetchChannelAccounts({ deferIfBusy: true });
+      });
+      return;
+    }
     try {
-      const response = await hostApiFetch<{ success: boolean; channels?: ChannelGroupItem[] }>('/api/channels/accounts');
+      const response = await hostApiFetch<{ success: boolean; channels?: ChannelGroupItem[] }>('/api/channels/accounts?mode=config');
       setChannelGroups(response.channels || []);
     } catch {
       // Keep the last rendered snapshot when channel account refresh fails.
     }
-  }, []);
+  }, [scheduleChannelRefreshWhenIdle]);
 
   useEffect(() => {
     let mounted = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void Promise.all([fetchAgents(), fetchChannelAccounts(), refreshProviderSnapshot(), loadSessions()]).finally(() => {
+    void Promise.all([fetchAgents(), fetchChannelAccounts()]).finally(() => {
       if (mounted) {
         setHasCompletedInitialLoad(true);
       }
     });
+    void refreshProviderSnapshot();
     return () => {
       mounted = false;
     };
-  }, [fetchAgents, fetchChannelAccounts, loadSessions, refreshProviderSnapshot]);
+  }, [fetchAgents, fetchChannelAccounts, refreshProviderSnapshot]);
 
   useEffect(() => {
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+    let pending = false;
+
     const unsubscribe = subscribeHostEvent('gateway:channel-status', () => {
-      void fetchChannelAccounts();
+      if (throttleTimer) {
+        pending = true;
+        return;
+      }
+      void fetchChannelAccounts({ deferIfBusy: true });
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        if (pending) {
+          pending = false;
+          void fetchChannelAccounts({ deferIfBusy: true });
+        }
+      }, 2000);
     });
     return () => {
       if (typeof unsubscribe === 'function') {
         unsubscribe();
+      }
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
       }
     };
   }, [fetchChannelAccounts]);
@@ -182,9 +227,18 @@ export function Agents() {
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      void fetchChannelAccounts();
+      void fetchChannelAccounts({ deferIfBusy: true });
     }
   }, [fetchChannelAccounts, gatewayStatus.state]);
+
+  useEffect(() => {
+    if (hasActiveRun) return;
+    if (deferredChannelRefreshRef.current == null) return;
+    clearDeferredChannelRefresh();
+    void fetchChannelAccounts();
+  }, [clearDeferredChannelRefresh, fetchChannelAccounts, hasActiveRun]);
+
+  useEffect(() => clearDeferredChannelRefresh, [clearDeferredChannelRefresh]);
 
   const activeAgent = useMemo(
     () => agents.find((agent) => agent.id === activeAgentId) ?? null,
@@ -197,18 +251,12 @@ export function Agents() {
   const agentWorkStatuses = useMemo(() => {
     const next = new Map<string, AgentWorkStatus>();
     for (const agent of visibleAgents) {
-      next.set(agent.id, getAgentWorkStatus(agent, {
-        sessions,
-        currentSessionKey,
-        currentAgentId,
-        sending,
-        runtimeRuns,
-      }));
+      next.set(agent.id, runningAgentIds.has(normalizeAgentId(agent.id)) ? 'running' : 'completed');
     }
     return next;
-  }, [currentAgentId, currentSessionKey, runtimeRuns, sending, sessions, visibleAgents]);
+  }, [runningAgentIds, visibleAgents]);
   const handleRefresh = () => {
-    void Promise.all([fetchAgents(), fetchChannelAccounts(), loadSessions()]);
+    void Promise.all([fetchAgents(), fetchChannelAccounts(), refreshProviderSnapshot()]);
   };
   const openAgentChat = useCallback((agent: AgentSummary) => {
     switchSession(agent.mainSessionKey);

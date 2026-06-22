@@ -216,10 +216,85 @@ describe('chat store session label summary hydration', () => {
 
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/sessions/summaries', {
       method: 'POST',
-      body: JSON.stringify({ sessionKeys: ['agent:main:session-a', 'agent:main:session-b'] }),
+      body: JSON.stringify({ sessionKeys: ['agent:main:session-b', 'agent:main:session-a'] }),
     });
     expect(useChatStore.getState().sessionLabels['agent:main:session-a']).toBe('Alpha title');
     expect(useChatStore.getState().sessionLabels['agent:main:session-b']).toBe('Beta title');
+  });
+
+  it('hydrates only the most recent sidebar session titles in one load to avoid startup fan-out', async () => {
+    const sessions = Array.from({ length: 60 }, (_, index) => ({
+      key: `agent:main:session-${index}`,
+      displayName: 'ClawX',
+      updatedAt: index + 1,
+    }));
+
+    gatewayRpcMock.mockImplementation(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [
+            ...sessions,
+            { key: 'agent:main:main', displayName: 'ClawX', updatedAt: 1000 },
+          ],
+        };
+      }
+
+      if (method === 'chat.history') {
+        return {
+          messages: [{ role: 'user', content: 'visible chat', timestamp: Date.now() }],
+        };
+      }
+
+      throw new Error(`Unexpected gateway RPC: ${method}`);
+    });
+
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/chat/sessions') {
+        return {
+          success: true,
+          result: {
+            sessions: [
+              ...sessions,
+              { key: 'agent:main:main', displayName: 'ClawX', updatedAt: 1000 },
+            ],
+          },
+        };
+      }
+      return { success: true, summaries: [] };
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+      runError: null,
+    });
+
+    await useChatStore.getState().loadSessions();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const summaryCall = hostApiFetchMock.mock.calls.find(([path]) => path === '/api/sessions/summaries');
+    expect(summaryCall).toBeTruthy();
+    const body = JSON.parse((summaryCall?.[1] as { body: string }).body) as { sessionKeys: string[] };
+    expect(body.sessionKeys).toHaveLength(40);
+    expect(body.sessionKeys[0]).toBe('agent:main:session-59');
+    expect(body.sessionKeys.at(-1)).toBe('agent:main:session-20');
   });
 
   it('hydrates session labels through the host API instead of gateway chat.history fan-out', async () => {

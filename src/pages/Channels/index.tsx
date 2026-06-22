@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useGatewayStore } from '@/stores/gateway';
+import { hasActiveChatWork, useChatStore } from '@/stores/chat';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
@@ -102,6 +103,7 @@ type FetchPageDataOptions = {
   probe?: boolean;
   configOnly?: boolean;
   forceAgentsRefresh?: boolean;
+  deferIfBusy?: boolean;
 };
 
 function removeDeletedTarget(groups: ChannelGroupItem[], target: DeleteTarget): ChannelGroupItem[] {
@@ -125,6 +127,8 @@ const DEFAULT_GATEWAY_HEALTH: GatewayHealthSummary = {
   reasons: [],
   consecutiveHeartbeatMisses: 0,
 };
+const CHANNELS_RUNTIME_FETCH_DELAY_MS = 350;
+const CHANNELS_BUSY_RUNTIME_DEFER_MS = 2500;
 
 function isStaleNotRunningHealthForRunningGateway(
   gatewayHealth: GatewayHealthSummary,
@@ -140,6 +144,7 @@ function isStaleNotRunningHealthForRunningGateway(
 export function Channels() {
   const { t } = useTranslation('channels');
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const hasActiveRun = useChatStore(hasActiveChatWork);
   const lastGatewayStateRef = useRef(gatewayStatus.state);
 
   const [loading, setLoading] = useState(true);
@@ -161,6 +166,8 @@ export function Channels() {
   const convergenceRefreshTimersRef = useRef<number[]>([]);
   const fetchInFlightRef = useRef(false);
   const queuedFetchOptionsRef = useRef<FetchPageDataOptions | null>(null);
+  const deferredRuntimeRefreshRef = useRef<number | null>(null);
+  const hasActiveRunRef = useRef(hasActiveRun);
   const agentsFetchInFlightRef = useRef<Promise<void> | null>(null);
   const hasLoadedAgentsRef = useRef(false);
 
@@ -180,6 +187,22 @@ export function Channels() {
   channelGroupsRef.current = channelGroups;
   const agentsRef = useRef(agents);
   agentsRef.current = agents;
+  hasActiveRunRef.current = hasActiveRun;
+
+  const clearDeferredRuntimeRefresh = useCallback(() => {
+    if (deferredRuntimeRefreshRef.current != null) {
+      window.clearTimeout(deferredRuntimeRefreshRef.current);
+      deferredRuntimeRefreshRef.current = null;
+    }
+  }, []);
+
+  const scheduleRuntimeRefreshWhenIdle = useCallback((callback: () => void, delayMs = CHANNELS_BUSY_RUNTIME_DEFER_MS) => {
+    clearDeferredRuntimeRefresh();
+    deferredRuntimeRefreshRef.current = window.setTimeout(() => {
+      deferredRuntimeRefreshRef.current = null;
+      callback();
+    }, delayMs);
+  }, [clearDeferredRuntimeRefresh]);
 
   const ensureAgentsLoaded = useCallback(async () => {
     if (hasLoadedAgentsRef.current) return;
@@ -217,17 +240,26 @@ export function Channels() {
       // If either request needs runtime data, do not keep config-only mode.
       configOnly: Boolean(base?.configOnly) && Boolean(incoming?.configOnly),
       forceAgentsRefresh: Boolean(base?.forceAgentsRefresh) || Boolean(incoming?.forceAgentsRefresh),
+      deferIfBusy: Boolean(base?.deferIfBusy) || Boolean(incoming?.deferIfBusy),
     };
   };
 
   const fetchPageData = useCallback(async (options?: FetchPageDataOptions) => {
+    const wantsRuntime = options?.configOnly !== true;
+    const probe = options?.probe === true;
+    if (wantsRuntime && options?.deferIfBusy === true && hasActiveRunRef.current && !probe) {
+      scheduleRuntimeRefreshWhenIdle(() => {
+        void fetchPageData({ ...options, deferIfBusy: true });
+      }, 30_000);
+      void fetchPageData({ ...options, configOnly: true, probe: false, deferIfBusy: false });
+      return;
+    }
     if (fetchInFlightRef.current) {
       queuedFetchOptionsRef.current = mergeFetchOptions(queuedFetchOptionsRef.current, options);
       return;
     }
     fetchInFlightRef.current = true;
     const startedAt = Date.now();
-    const probe = options?.probe === true;
     const configOnly = options?.configOnly === true;
     console.info(`[channels-ui] fetch start mode=${configOnly ? 'config' : 'runtime'} probe=${probe ? '1' : '0'}`);
     // Only show loading spinner on first load (stale-while-revalidate).
@@ -286,7 +318,7 @@ export function Channels() {
     }
   // Stable reference — reads state via refs, no deps needed.
    
-  }, [ensureAgentsLoaded]);
+  }, [ensureAgentsLoaded, scheduleRuntimeRefreshWhenIdle]);
 
   const clearConvergenceRefreshTimers = useCallback(() => {
     convergenceRefreshTimersRef.current.forEach((timerId) => {
@@ -308,7 +340,7 @@ export function Channels() {
       { delay: 10500, probe: false },
     ].forEach(({ delay, probe }) => {
       const timerId = window.setTimeout(() => {
-        void fetchPageData({ probe });
+        void fetchPageData({ probe, deferIfBusy: !probe });
       }, delay);
       convergenceRefreshTimersRef.current.push(timerId);
     });
@@ -316,14 +348,20 @@ export function Channels() {
 
   useEffect(() => {
     void fetchPageData({ configOnly: true });
-    void fetchPageData();
+    const timer = window.setTimeout(() => {
+      void fetchPageData({ deferIfBusy: true });
+    }, CHANNELS_RUNTIME_FETCH_DELAY_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
   }, [fetchPageData]);
 
   useEffect(() => {
     return () => {
       clearConvergenceRefreshTimers();
+      clearDeferredRuntimeRefresh();
     };
-  }, [clearConvergenceRefreshTimers]);
+  }, [clearConvergenceRefreshTimers, clearDeferredRuntimeRefresh]);
 
   useEffect(() => {
     // Throttle channel-status events to avoid flooding fetchPageData during AI tasks.
@@ -335,12 +373,12 @@ export function Channels() {
         pending = true;
         return;
       }
-      void fetchPageData();
+      void fetchPageData({ deferIfBusy: true });
       throttleTimer = setTimeout(() => {
         throttleTimer = null;
         if (pending) {
           pending = false;
-          void fetchPageData();
+          void fetchPageData({ deferIfBusy: true });
         }
       }, 2000);
     });
@@ -359,10 +397,17 @@ export function Channels() {
     lastGatewayStateRef.current = gatewayStatus.state;
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
-      void fetchPageData();
+      void fetchPageData({ deferIfBusy: true });
       scheduleConvergenceRefresh();
     }
   }, [fetchPageData, gatewayStatus.state, scheduleConvergenceRefresh]);
+
+  useEffect(() => {
+    if (hasActiveRun) return;
+    if (deferredRuntimeRefreshRef.current == null) return;
+    clearDeferredRuntimeRefresh();
+    void fetchPageData();
+  }, [clearDeferredRuntimeRefresh, fetchPageData, hasActiveRun]);
 
   const configuredTypes = useMemo(
     () => visibleChannelGroups.map((group) => group.channelType),

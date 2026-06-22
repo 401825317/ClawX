@@ -246,6 +246,27 @@ export interface JunFeiAISeedResult {
   };
 }
 
+export interface JunFeiAILocalStatusResult {
+  managed: boolean;
+  account: ProviderAccount | null;
+  bootstrap: JunFeiAIBootstrapPayload;
+  source: 'local' | 'fallback';
+  hasRelayToken: boolean;
+  deviceActivated?: boolean;
+  activationRequired?: boolean;
+  relayOwnerUserId?: string;
+  hasAuthToken?: boolean;
+  authValid?: boolean;
+  authRejected?: boolean;
+  authError?: string;
+  auth?: {
+    user?: Record<string, unknown>;
+  };
+  localOnly: true;
+  lastVerifiedAt?: number;
+  offlineGraceExpiresAt?: number;
+}
+
 export function isJunFeiAISeedReady(seed: Pick<
   JunFeiAISeedResult,
   'managed' | 'hasRelayToken' | 'hasAuthToken' | 'authValid' | 'activationRequired'
@@ -651,6 +672,25 @@ async function getOfflineGracePayload(): Promise<Record<string, unknown> | null>
   };
 }
 
+function getCachedVerificationWindow(cache: JunFeiAIVerificationCache | null): {
+  lastVerifiedAt?: number;
+  offlineGraceExpiresAt?: number;
+  valid: boolean;
+  user?: Record<string, unknown>;
+} {
+  if (!cache || cache.graceSeconds <= 0) {
+    return { valid: false };
+  }
+  const expiresAt = cache.verifiedAt + cache.graceSeconds * 1000;
+  const payloadUser = isRecord(cache.payload.user) ? cache.payload.user : undefined;
+  return {
+    lastVerifiedAt: cache.verifiedAt,
+    offlineGraceExpiresAt: expiresAt,
+    valid: Date.now() <= expiresAt,
+    ...(payloadUser ? { user: payloadUser } : {}),
+  };
+}
+
 function canUseOfflineGraceForError(error: unknown): boolean {
   if (error instanceof JunFeiAIHttpError) {
     return error.status >= 500 || error.status === 408;
@@ -844,6 +884,60 @@ export async function getStoredJunFeiAIAuthToken(): Promise<string | null> {
     return refreshed?.accessToken ?? null;
   }
   return secret.accessToken;
+}
+
+export async function getJunFeiAILocalStatus(): Promise<JunFeiAILocalStatusResult> {
+  if (!isJunFeiAIManagedDistribution()) {
+    return {
+      managed: false,
+      account: null,
+      bootstrap: fallbackBootstrap(),
+      source: 'fallback',
+      hasRelayToken: false,
+      deviceActivated: false,
+      localOnly: true,
+    };
+  }
+
+  const bootstrap = applyLocalBootstrapOverrides(fallbackBootstrap());
+  const authSecret = await getProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
+  const relaySecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+  const account = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
+  const authUser = authSecret?.type === 'oauth'
+    ? {
+      ...(authSecret.subject ? { id: authSecret.subject } : {}),
+      ...(authSecret.email ? { email: authSecret.email } : {}),
+    }
+    : undefined;
+  const activation = await applyLocalDeviceActivationState(bootstrap, authUser ?? null);
+  const verificationCache = getCachedVerificationWindow(await readVerificationCache());
+  const hasAuthToken = Boolean(
+    authSecret?.type === 'oauth'
+    && authSecret.accessToken
+    && (authSecret.expiresAt <= 0 || authSecret.expiresAt > Date.now()),
+  );
+  const hasRelayToken = isRelaySecretUsableForUser(relaySecret, authUser);
+  const relayOwnerUserId = relaySecret?.type === 'api_key' ? relaySecret.ownerUserId : undefined;
+  const user = verificationCache.user ?? authUser;
+
+  return {
+    managed: true,
+    account,
+    bootstrap: activation.bootstrap,
+    source: 'local',
+    hasRelayToken,
+    deviceActivated: activation.deviceActivated,
+    activationRequired: activation.activationRequired,
+    relayOwnerUserId,
+    hasAuthToken,
+    authValid: hasAuthToken && verificationCache.valid,
+    authRejected: false,
+    authError: hasAuthToken && !verificationCache.valid ? 'Account verification is pending' : undefined,
+    ...(user ? { auth: { user } } : {}),
+    localOnly: true,
+    lastVerifiedAt: verificationCache.lastVerifiedAt,
+    offlineGraceExpiresAt: verificationCache.offlineGraceExpiresAt,
+  };
 }
 
 async function storeJunFeiAIAuthSession(auth: JunFeiAIAuthPayload): Promise<void> {
@@ -1165,11 +1259,13 @@ export async function ensureJunFeiAIProviderSeeded(options: {
 
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
   const account = buildAccount(bootstrap, existing);
+  const providerChanged = accountChanged(existing, account);
   if (accountChanged(existing, account)) {
     await saveProviderAccount(account);
   }
 
   const defaultProvider = await getDefaultProvider();
+  const defaultProviderChanged = defaultProvider !== JUNFEIAI_PROVIDER_ID;
   if (defaultProvider !== JUNFEIAI_PROVIDER_ID) {
     await setDefaultProvider(JUNFEIAI_PROVIDER_ID);
   }
@@ -1226,6 +1322,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     || relayExpired;
 
   if (shouldClearRuntimeKey) {
+    const hadRelaySecret = relaySecret?.type === 'api_key';
     await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
     relayOwnerUserId = undefined;
     if (authStatus.authRejected) {
@@ -1233,18 +1330,30 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       await clearVerificationCache();
     }
     runtimeApiKey = undefined;
+    relaySecretChanged = relaySecretChanged || hadRelaySecret;
   }
 
-  const shouldSyncRuntime = options.syncRuntime !== false
+  const runtimeChanged = providerChanged || defaultProviderChanged || relaySecretChanged || shouldClearRuntimeKey;
+  const shouldSyncRuntime = options.syncRuntime === true
+    || (
+      options.syncRuntime !== false
+      && runtimeChanged
+    )
     || (
       options.syncRuntimeOnAuthChange === true
-      && (relaySecretChanged || shouldClearRuntimeKey)
+      && runtimeChanged
     );
 
   if (shouldSyncRuntime) {
     const apiKey = runtimeApiKey ?? (shouldClearRuntimeKey ? '' : undefined);
-    await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, options.gatewayManager);
-    if (options.syncRuntime !== false && !shouldClearRuntimeKey) {
+    const shouldSyncProviderConfig = options.syncRuntime === true
+      || providerChanged
+      || relaySecretChanged
+      || shouldClearRuntimeKey;
+    if (shouldSyncProviderConfig) {
+      await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, options.gatewayManager);
+    }
+    if ((defaultProviderChanged || options.syncRuntime === true) && !shouldClearRuntimeKey) {
       await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
     }
   }

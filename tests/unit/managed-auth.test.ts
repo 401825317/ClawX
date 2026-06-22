@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   getManagedAuthDisplayName,
   getManagedAuthStateKey,
+  isManagedAuthLocallyReady,
   isManagedAuthReady,
   type ManagedAuthStatus,
 } from '@/lib/managed-auth';
@@ -49,6 +50,20 @@ describe('managed auth helpers', () => {
     const staleReady: ManagedAuthStatus = { managed: true, authValid: true, hasRelayToken: true };
 
     expect(getManagedAuthStateKey(staleReady, { error: 'fetch failed' })).toBe('error');
+  });
+
+  it('allows a local-only ready snapshot to survive background refresh errors', () => {
+    const localReady: ManagedAuthStatus = {
+      managed: true,
+      localOnly: true,
+      hasAuthToken: true,
+      hasRelayToken: true,
+      authValid: false,
+    };
+
+    expect(isManagedAuthReady(localReady)).toBe(false);
+    expect(isManagedAuthLocallyReady(localReady)).toBe(true);
+    expect(getManagedAuthStateKey(localReady, { error: 'fetch failed' })).toBe('ready');
   });
 
   it('uses stable account display-name priority', () => {

@@ -15,6 +15,9 @@ const SAFE_SESSION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const RECENT_TRANSCRIPT_INITIAL_READ_BYTES = 256 * 1024;
 const RECENT_TRANSCRIPT_MAX_READ_BYTES = 8 * 1024 * 1024;
 const RECENT_TRANSCRIPT_MAX_SCAN_LINES = 5_000;
+const SESSION_SUMMARY_MAX_KEYS = 80;
+const SESSION_SUMMARY_CONCURRENCY = 4;
+const SESSION_SUMMARY_RECENT_MESSAGE_LIMIT = 500;
 
 type SessionSummary = {
   sessionKey: string;
@@ -116,6 +119,22 @@ function parseRecentMessagesFromTailChunk(chunk: string, readStart: number, limi
   return collected.reverse();
 }
 
+function parseMessagesFromHeadChunk(chunk: string, readEnd: number, fileSize: number, limit: number): TranscriptMessage[] {
+  const lines = chunk.split(/\r?\n/);
+  if (readEnd < fileSize) lines.pop();
+
+  const collected: TranscriptMessage[] = [];
+  for (const line of lines) {
+    if (!line?.trim()) continue;
+    const message = parseMessageLine(line);
+    if (message) {
+      collected.push(message);
+      if (collected.length >= limit) break;
+    }
+  }
+  return collected;
+}
+
 function readRecentTranscriptMessages(transcriptPath: string, limit: number): TranscriptMessage[] {
   const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
   let fd: number | null = null;
@@ -146,28 +165,60 @@ function readRecentTranscriptMessages(transcriptPath: string, limit: number): Tr
   }
 }
 
-async function readAllTranscriptMessages(transcriptPath: string): Promise<TranscriptMessage[]> {
-  const fsP = await import('node:fs/promises');
-  const raw = await fsP.readFile(transcriptPath, 'utf8');
-  return raw.split(/\r?\n/).filter(Boolean).flatMap((line) => {
-    const message = parseMessageLine(line);
-    return message ? [message] : [];
-  });
+function readTranscriptHeadMessages(transcriptPath: string, limit: number): TranscriptMessage[] {
+  const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
+  let fd: number | null = null;
+  try {
+    fd = openSync(transcriptPath, 'r');
+    const size = fstatSync(fd).size;
+    if (size === 0) return [];
+
+    const readLen = Math.min(size, RECENT_TRANSCRIPT_INITIAL_READ_BYTES);
+    const buffer = Buffer.allocUnsafe(readLen);
+    readSync(fd, buffer, 0, readLen, 0);
+    return parseMessagesFromHeadChunk(buffer.toString('utf8'), readLen, size, boundedLimit);
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
-function summarizeTranscriptMessages(sessionKey: string, messages: TranscriptMessage[]): SessionSummary {
+function summarizeTranscriptMessages(
+  sessionKey: string,
+  firstMessages: TranscriptMessage[],
+  recentMessages: TranscriptMessage[],
+): SessionSummary {
   let firstUserText: string | null = null;
   let lastTimestamp: number | null = null;
 
-  for (const message of messages) {
+  for (let index = recentMessages.length - 1; index >= 0; index -= 1) {
+    const message = recentMessages[index];
     const normalizedTs = normalizeTimestamp(message.timestamp);
     if (normalizedTs != null) {
       lastTimestamp = normalizedTs;
+      break;
     }
-    if (firstUserText == null && message.role === 'user') {
+  }
+
+  for (const message of firstMessages) {
+    if (message.role !== 'user') {
+      continue;
+    }
+    const text = cleanSummaryUserText(extractMessageText(message.content));
+    if (text && !isInternalSummaryText(text)) {
+      firstUserText = text;
+      break;
+    }
+  }
+
+  if (firstUserText == null) {
+    for (const message of recentMessages) {
+      if (message.role !== 'user') {
+        continue;
+      }
       const text = cleanSummaryUserText(extractMessageText(message.content));
       if (text && !isInternalSummaryText(text)) {
         firstUserText = text;
+        break;
       }
     }
   }
@@ -256,11 +307,32 @@ async function loadSessionSummary(sessionKey: string): Promise<SessionSummary> {
       return { sessionKey, firstUserText: null, lastTimestamp: null };
     }
 
-    const messages = await readAllTranscriptMessages(transcriptPath);
-    return summarizeTranscriptMessages(sessionKey, messages);
+    const firstMessages = readTranscriptHeadMessages(transcriptPath, SESSION_SUMMARY_RECENT_MESSAGE_LIMIT);
+    const recentMessages = readRecentTranscriptMessages(transcriptPath, SESSION_SUMMARY_RECENT_MESSAGE_LIMIT);
+    return summarizeTranscriptMessages(sessionKey, firstMessages, recentMessages);
   } catch {
     return { sessionKey, firstUserText: null, lastTimestamp: null };
   }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index]);
+    }
+  }));
+
+  return results;
 }
 
 async function loadSessionTranscriptByKey(sessionKey: string, limit: number): Promise<unknown[] | null> {
@@ -291,12 +363,17 @@ export async function handleSessionRoutes(
       const sessionKeys = Array.isArray(body.sessionKeys)
         ? body.sessionKeys.filter((value): value is string => typeof value === 'string' && value.startsWith('agent:'))
         : [];
-      if (sessionKeys.length === 0) {
+      const boundedSessionKeys = Array.from(new Set(sessionKeys)).slice(0, SESSION_SUMMARY_MAX_KEYS);
+      if (boundedSessionKeys.length === 0) {
         sendJson(res, 200, { success: true, summaries: [] });
         return true;
       }
 
-      const summaries = await Promise.all(sessionKeys.map((sessionKey) => loadSessionSummary(sessionKey)));
+      const summaries = await mapWithConcurrency(
+        boundedSessionKeys,
+        SESSION_SUMMARY_CONCURRENCY,
+        loadSessionSummary,
+      );
       sendJson(res, 200, { success: true, summaries });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

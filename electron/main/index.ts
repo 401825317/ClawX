@@ -56,7 +56,7 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
-import { ensureJunFeiAIProviderSeeded, isJunFeiAISeedReady } from '../services/junfeiai/junfeiai-service';
+import { ensureJunFeiAIProviderSeeded, getJunFeiAILocalStatus, isJunFeiAISeedReady } from '../services/junfeiai/junfeiai-service';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
@@ -66,6 +66,18 @@ const portableModeInfo = applyPortableEnvironment();
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
 let extensionsLoadPromise: Promise<void> | null = null;
+
+type JunFeiAILocalStatus = Awaited<ReturnType<typeof getJunFeiAILocalStatus>>;
+
+function isJunFeiAILocalStatusReadyForGateway(status: JunFeiAILocalStatus): boolean {
+  if (!status.managed) {
+    return true;
+  }
+  return Boolean(status.account)
+    && Boolean(status.hasAuthToken)
+    && Boolean(status.hasRelayToken)
+    && status.activationRequired !== true;
+}
 
 function resolveLegacyUserDataPath(): string {
   const appDataDir = app.getPath('appData');
@@ -502,16 +514,16 @@ async function initialize(): Promise<void> {
   let managedProviderReadyForGateway = true;
   if (!isE2EMode) {
     try {
-      const seed = await ensureJunFeiAIProviderSeeded({ gatewayManager });
-      if (seed.managed) {
-        managedProviderReadyForGateway = isJunFeiAISeedReady(seed);
+      const localStatus = await getJunFeiAILocalStatus();
+      if (localStatus.managed) {
+        managedProviderReadyForGateway = isJunFeiAILocalStatusReadyForGateway(localStatus);
         logger.info(
-          `JunFeiAI provider seeded from ${seed.source}; auth=${seed.authValid ? 'valid' : 'missing'} relayToken=${seed.hasRelayToken ? 'present' : 'missing'} activation=${seed.activationRequired ? 'required' : 'ready'}`,
+          `JunFeiAI local startup status; authToken=${localStatus.hasAuthToken ? 'present' : 'missing'} relayToken=${localStatus.hasRelayToken ? 'present' : 'missing'} activation=${localStatus.activationRequired ? 'required' : 'ready'} cachedAuth=${localStatus.authValid ? 'valid' : 'pending'}`,
         );
       }
     } catch (error) {
       managedProviderReadyForGateway = !isJunFeiAIManagedDistribution();
-      logger.warn('Failed to seed JunFeiAI provider:', error);
+      logger.warn('Failed to read local JunFeiAI provider status:', error);
     }
   }
 
@@ -620,6 +632,38 @@ async function initialize(): Promise<void> {
     logger.info('Gateway auto-start skipped until JunFeiAI account, device authorization, and relay token are ready');
   } else {
     logger.info('Gateway auto-start disabled in settings');
+  }
+
+  if (!isE2EMode) {
+    void ensureJunFeiAIProviderSeeded({
+      gatewayManager,
+      syncRuntime: false,
+      syncRuntimeOnAuthChange: true,
+    }).then(async (seed) => {
+      if (!seed.managed) {
+        return;
+      }
+      logger.info(
+        `JunFeiAI provider verified from ${seed.source}; auth=${seed.authValid ? 'valid' : 'missing'} relayToken=${seed.hasRelayToken ? 'present' : 'missing'} activation=${seed.activationRequired ? 'required' : 'ready'}`,
+      );
+      if (
+        gatewayAutoStart
+        && isJunFeiAISeedReady(seed)
+        && gatewayManager.getStatus().state === 'stopped'
+      ) {
+        try {
+          await syncAllProviderAuthToRuntime();
+          logger.debug('Auto-starting Gateway after JunFeiAI background verification...');
+          await gatewayManager.start();
+          logger.info('Gateway auto-start after JunFeiAI verification succeeded');
+        } catch (error) {
+          logger.error('Gateway auto-start after JunFeiAI verification failed:', error);
+          mainWindow?.webContents.send('gateway:error', String(error));
+        }
+      }
+    }).catch((error) => {
+      logger.warn('Failed to verify JunFeiAI provider in background:', error);
+    });
   }
 
   // Merge ClawX context snippets into the workspace bootstrap files.

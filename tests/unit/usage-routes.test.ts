@@ -17,7 +17,7 @@ describe('handleUsageRoutes', () => {
     vi.resetAllMocks();
   });
 
-  it('passes undefined limit when query param is missing', async () => {
+  it('passes the default limit when query param is missing', async () => {
     getRecentTokenUsageHistoryMock.mockResolvedValueOnce([{ totalTokens: 1 }]);
     const { handleUsageRoutes } = await import('@electron/api/routes/usage');
 
@@ -29,7 +29,7 @@ describe('handleUsageRoutes', () => {
     );
 
     expect(handled).toBe(true);
-    expect(getRecentTokenUsageHistoryMock).toHaveBeenCalledWith(undefined);
+    expect(getRecentTokenUsageHistoryMock).toHaveBeenCalledWith(300);
     expect(sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
       200,
