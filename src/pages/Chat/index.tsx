@@ -166,6 +166,21 @@ function hasRunningRuntimeTool(run: ChatRuntimeRunState | null): boolean {
 // steps without tripping React's set-state-in-effect lint rule.
 const graphStepCacheStore = new Map<string, Record<string, GraphStepCacheEntry>>();
 const streamingTimestampStore = new Map<string, number>();
+const CHAT_SESSION_CACHE_MAX_SESSIONS = 16;
+const EMPTY_CHILD_TRANSCRIPTS: Record<string, RawMessage[]> = {};
+const EMPTY_GRAPH_STEP_CACHE: Record<string, GraphStepCacheEntry> = {};
+
+function setBoundedSessionEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntries = CHAT_SESSION_CACHE_MAX_SESSIONS): void {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, value);
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value as K | undefined;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
 
 export function Chat() {
   const { t } = useTranslation('chat');
@@ -217,8 +232,9 @@ export function Chat() {
   useEffect(() => {
     closeArtifactPanel();
   }, [currentSessionKey, closeArtifactPanel]);
-  const [childTranscripts, setChildTranscripts] = useState<Record<string, RawMessage[]>>({});
+  const [childTranscriptsBySession, setChildTranscriptsBySession] = useState<Record<string, Record<string, RawMessage[]>>>({});
   const [questionDirectoryOpenSessionKey, setQuestionDirectoryOpenSessionKey] = useState<string | null>(null);
+  const childTranscripts = childTranscriptsBySession[currentSessionKey] ?? EMPTY_CHILD_TRANSCRIPTS;
 
   // Callback for file cards in chat messages — opens the in-app preview
   // panel instead of the system default editor.
@@ -250,7 +266,7 @@ export function Chat() {
   // remount and reset. `undefined` values mean "user hasn't toggled, let the
   // card pick a default from its own `active` prop."
   const [graphExpandedOverrides, setGraphExpandedOverrides] = useState<Record<string, boolean>>({});
-  const graphStepCache: Record<string, GraphStepCacheEntry> = graphStepCacheStore.get(currentSessionKey) ?? {};
+  const graphStepCache: Record<string, GraphStepCacheEntry> = graphStepCacheStore.get(currentSessionKey) ?? EMPTY_GRAPH_STEP_CACHE;
   const minLoading = useMinLoading(loading && messages.length > 0);
   const { contentRef, scrollRef, scrollToBottom, isAtBottom } = useStickToBottomInstant(currentSessionKey, sending);
 
@@ -305,11 +321,25 @@ export function Chat() {
       }),
     ).then((results) => {
       if (cancelled) return;
-      setChildTranscripts((current) => {
-        const next = { ...current };
+      setChildTranscriptsBySession((current) => {
+        const currentSessionTranscripts = current[currentSessionKey] ?? {};
+        let changed = false;
+        const nextSessionTranscripts = { ...currentSessionTranscripts };
         for (const result of results) {
           if (!result) continue;
-          next[result.sessionId] = result.messages;
+          nextSessionTranscripts[result.sessionId] = result.messages;
+          changed = true;
+        }
+        if (!changed) return current;
+        const next = {
+          ...current,
+          [currentSessionKey]: nextSessionTranscripts,
+        };
+        const sessionKeys = Object.keys(next);
+        while (sessionKeys.length > CHAT_SESSION_CACHE_MAX_SESSIONS) {
+          const oldestKey = sessionKeys.shift();
+          if (!oldestKey) break;
+          delete next[oldestKey];
         }
         return next;
       });
@@ -318,7 +348,7 @@ export function Chat() {
     return () => {
       cancelled = true;
     };
-  }, [messages, childTranscripts]);
+  }, [messages, childTranscripts, currentSessionKey]);
 
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as unknown as { role?: string; content?: unknown; timestamp?: number }
@@ -330,7 +360,7 @@ export function Chat() {
       return;
     }
     if (!streamingTimestampStore.has(currentSessionKey)) {
-      streamingTimestampStore.set(currentSessionKey, streamTimestamp || Date.now() / 1000);
+      setBoundedSessionEntry(streamingTimestampStore, currentSessionKey, streamTimestamp || Date.now() / 1000);
     }
   }, [currentSessionKey, sending, streamTimestamp]);
 
@@ -421,12 +451,16 @@ export function Chat() {
     [messages, nextUserMessageIndexes, isRunTrigger],
   );
 
-  // Indices of intermediate assistant process messages that are represented
-  // in the ExecutionGraphCard (narration text and/or thinking). We suppress
-  // them from the chat stream so they don't appear duplicated below the graph.
-  const foldedNarrationIndices = new Set<number>();
-
-  const userRunCards: UserRunCard[] = messages.flatMap((message, idx) => {
+  const {
+    userRunCards,
+    foldedNarrationIndices,
+    userRunCardsByTriggerIndex,
+  } = useMemo(() => {
+    // Indices of intermediate assistant process messages that are represented
+    // in the ExecutionGraphCard (narration text and/or thinking). We suppress
+    // them from the chat stream so they don't appear duplicated below the graph.
+    const foldedNarrationIndices = new Set<number>();
+    const userRunCards = messages.flatMap((message, idx): UserRunCard[] => {
     if (!isRealUserMessage(message) || subagentCompletionInfos[idx]) return [];
 
     const runKey = message.id
@@ -708,7 +742,22 @@ export function Chat() {
       streamingReplyText,
       suppressThinking,
     }];
-  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, pendingVideoGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, activeRunId, runtimeRuns]);
+    });
+    const userRunCardsByTriggerIndex = new Map<number, UserRunCard[]>();
+    for (const card of userRunCards) {
+      const existing = userRunCardsByTriggerIndex.get(card.triggerIndex);
+      if (existing) {
+        existing.push(card);
+      } else {
+        userRunCardsByTriggerIndex.set(card.triggerIndex, [card]);
+      }
+    }
+    return {
+      userRunCards,
+      foldedNarrationIndices,
+      userRunCardsByTriggerIndex,
+    };
+  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns]);
   const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
@@ -883,7 +932,7 @@ export function Chat() {
       changed = true;
     }
     if (changed) {
-      graphStepCacheStore.set(currentSessionKey, next);
+      setBoundedSessionEntry(graphStepCacheStore, currentSessionKey, next);
     }
   }, [userRunCards, messages, currentSessionKey]);
 
@@ -981,9 +1030,7 @@ export function Chat() {
                         suppressProcessAttachments={suppressToolCards}
                         onOpenFile={handleOpenAttachedFile}
                       />
-                      {userRunCards
-                        .filter((card) => card.triggerIndex === idx)
-                        .map((card) => {
+                      {(userRunCardsByTriggerIndex.get(idx) ?? []).map((card) => {
                           const triggerMsg = messages[card.triggerIndex];
                           const runKey = triggerMsg?.id
                             ? `msg-${triggerMsg.id}`

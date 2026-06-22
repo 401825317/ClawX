@@ -288,26 +288,30 @@ export function Sidebar() {
     () => Object.fromEntries((agents ?? []).map((agent) => [agent.id, agent.name])),
     [agents],
   );
-  const sessionBuckets: Array<{ key: SessionBucketKey; label: string; sessions: typeof sessions }> = [
-    { key: 'today', label: t('chat:historyBuckets.today'), sessions: [] },
-    { key: 'withinWeek', label: t('chat:historyBuckets.withinWeek'), sessions: [] },
-    { key: 'withinMonth', label: t('chat:historyBuckets.withinMonth'), sessions: [] },
-    { key: 'older', label: t('chat:historyBuckets.older'), sessions: [] },
-  ];
-  const sessionBucketMap = Object.fromEntries(sessionBuckets.map((bucket) => [bucket.key, bucket])) as Record<
-    SessionBucketKey,
-    (typeof sessionBuckets)[number]
-  >;
+  const sessionBuckets = useMemo<Array<{ key: SessionBucketKey; label: string; sessions: typeof sessions }>>(() => {
+    const buckets: Array<{ key: SessionBucketKey; label: string; sessions: typeof sessions }> = [
+      { key: 'today', label: t('chat:historyBuckets.today'), sessions: [] },
+      { key: 'withinWeek', label: t('chat:historyBuckets.withinWeek'), sessions: [] },
+      { key: 'withinMonth', label: t('chat:historyBuckets.withinMonth'), sessions: [] },
+      { key: 'older', label: t('chat:historyBuckets.older'), sessions: [] },
+    ];
+    const sessionBucketMap = Object.fromEntries(buckets.map((bucket) => [bucket.key, bucket])) as Record<
+      SessionBucketKey,
+      (typeof buckets)[number]
+    >;
 
-  for (const { session, activityMs } of sessions
-    .map((session) => ({
-      session,
-      activityMs: getSessionActivityMs(session, sessionLastActivity),
-    }))
-    .sort((a, b) => b.activityMs - a.activityMs)) {
-    const bucketKey = getSessionBucket(activityMs, nowMs);
-    sessionBucketMap[bucketKey].sessions.push(session);
-  }
+    for (const { session, activityMs } of sessions
+      .map((session) => ({
+        session,
+        activityMs: getSessionActivityMs(session, sessionLastActivity),
+      }))
+      .sort((a, b) => b.activityMs - a.activityMs)) {
+      const bucketKey = getSessionBucket(activityMs, nowMs);
+      sessionBucketMap[bucketKey].sessions.push(session);
+    }
+
+    return buckets;
+  }, [sessions, sessionLastActivity, nowMs, t]);
 
   const hiddenRoutes = rendererExtensionRegistry.getHiddenRoutes();
   const extraNavItems = rendererExtensionRegistry.getExtraNavItems();

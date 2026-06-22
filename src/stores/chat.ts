@@ -244,6 +244,8 @@ const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const CHAT_EVENT_DEDUPE_TTL_MS = 30_000;
 const HISTORY_PAGE_SIZE = 200;
 const HISTORY_MAX_RENDERED_MESSAGES = 1_000;
+const SESSION_HISTORY_CACHE_MAX_SESSIONS = 16;
+const SESSION_RUN_STATE_CACHE_MAX_SESSIONS = 32;
 const _chatEventDedupe = new Map<string, number>();
 const OPTIMISTIC_USER_MESSAGE_TTL_MS = 30 * 60 * 1000;
 /** Max skew between the renderer optimistic send time and Gateway transcript timestamps. */
@@ -468,15 +470,40 @@ function cloneHistoryMessages(messages: RawMessage[]): RawMessage[] {
   }));
 }
 
+function setBoundedMapEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, value);
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value as K | undefined;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
+
+function getBoundedMapEntry<K, V>(map: Map<K, V>, key: K): V | undefined {
+  const value = map.get(key);
+  if (value === undefined) return undefined;
+  map.delete(key);
+  map.set(key, value);
+  return value;
+}
+
 function cacheSessionHistory(sessionKey: string, messages: RawMessage[], thinkingLevel: string | null): void {
-  _sessionHistoryCache.set(sessionKey, {
-    messages: cloneHistoryMessages(messages),
-    thinkingLevel,
-  });
+  setBoundedMapEntry(
+    _sessionHistoryCache,
+    sessionKey,
+    {
+      messages: cloneHistoryMessages(messages),
+      thinkingLevel,
+    },
+    SESSION_HISTORY_CACHE_MAX_SESSIONS,
+  );
 }
 
 function getCachedSessionHistory(sessionKey: string): { messages: RawMessage[]; thinkingLevel: string | null } | null {
-  const cached = _sessionHistoryCache.get(sessionKey);
+  const cached = getBoundedMapEntry(_sessionHistoryCache, sessionKey);
   if (!cached) return null;
   return {
     messages: cloneHistoryMessages(cached.messages),
@@ -489,22 +516,27 @@ function clearCachedSessionHistory(sessionKey: string): void {
 }
 
 function captureSessionRunState(sessionKey: string, state: SessionRunState): void {
-  _sessionRunStateCache.set(sessionKey, {
-    sending: state.sending,
-    pendingImageGenerationLocal: state.pendingImageGenerationLocal,
-    pendingVideoGenerationLocal: state.pendingVideoGenerationLocal,
-    activeRunId: state.activeRunId,
-    pendingFinal: state.pendingFinal,
-    lastUserMessageAt: state.lastUserMessageAt,
-    streamingText: state.streamingText,
-    streamingMessage: state.streamingMessage,
-    streamingTools: [...state.streamingTools],
-    pendingToolImages: state.pendingToolImages.map((file) => ({ ...file })),
-  });
+  setBoundedMapEntry(
+    _sessionRunStateCache,
+    sessionKey,
+    {
+      sending: state.sending,
+      pendingImageGenerationLocal: state.pendingImageGenerationLocal,
+      pendingVideoGenerationLocal: state.pendingVideoGenerationLocal,
+      activeRunId: state.activeRunId,
+      pendingFinal: state.pendingFinal,
+      lastUserMessageAt: state.lastUserMessageAt,
+      streamingText: state.streamingText,
+      streamingMessage: state.streamingMessage,
+      streamingTools: [...state.streamingTools],
+      pendingToolImages: state.pendingToolImages.map((file) => ({ ...file })),
+    },
+    SESSION_RUN_STATE_CACHE_MAX_SESSIONS,
+  );
 }
 
 function getCachedSessionRunState(sessionKey: string): SessionRunState {
-  const cached = _sessionRunStateCache.get(sessionKey);
+  const cached = getBoundedMapEntry(_sessionRunStateCache, sessionKey);
   if (!cached) return DEFAULT_SESSION_RUN_STATE;
   return {
     sending: cached.sending,
