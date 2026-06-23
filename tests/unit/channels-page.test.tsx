@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Channels } from '@/pages/Channels/index';
+import { clearChannelsAccountsCacheForTests } from '@/pages/Channels/channel-accounts-cache';
 
 const hostApiFetchMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
@@ -67,6 +68,7 @@ function createDeferred<T>() {
 describe('Channels page status refresh', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearChannelsAccountsCacheForTests();
     Object.defineProperty(globalThis.navigator, 'clipboard', {
       value: {
         writeText: vi.fn(),
@@ -226,12 +228,10 @@ describe('Channels page status refresh', () => {
       channelStatusHandler?.();
     });
 
-    await waitFor(() => {
-      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts');
-      const agentFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/agents');
-      expect(channelFetchCalls).toHaveLength(2);
-      expect(agentFetchCalls).toHaveLength(1);
-    });
+    const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts');
+    const agentFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/agents');
+    expect(channelFetchCalls).toHaveLength(1);
+    expect(agentFetchCalls).toHaveLength(1);
   });
 
   it('defers runtime channel refresh while chat work is active', async () => {
@@ -277,12 +277,10 @@ describe('Channels page status refresh', () => {
       rerender(<Channels />);
     });
 
-    await waitFor(() => {
-      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts');
-      const agentFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/agents');
-      expect(channelFetchCalls).toHaveLength(2);
-      expect(agentFetchCalls).toHaveLength(1);
-    });
+    const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts');
+    const agentFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/agents');
+    expect(channelFetchCalls).toHaveLength(1);
+    expect(agentFetchCalls).toHaveLength(1);
   });
 
   it('renders channel data without waiting for slow agents request', async () => {
@@ -327,6 +325,74 @@ describe('Channels page status refresh', () => {
 
     await act(async () => {
       agentsDeferred.resolve({ success: true, agents: [] });
+    });
+  });
+
+  it('reuses a recent automatic channel snapshot across quick remounts', async () => {
+    subscribeHostEventMock.mockImplementation(() => vi.fn());
+
+    const first = render(<Channels />);
+    await waitFor(() => {
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts?mode=config');
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    await waitFor(() => {
+      expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts');
+    });
+
+    const configCallsAfterFirstMount = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config').length;
+    const runtimeCallsAfterFirstMount = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts').length;
+
+    first.unmount();
+    render(<Channels />);
+    await waitFor(() => {
+      expect(screen.getByText('Feishu / Lark')).toBeInTheDocument();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(configCallsAfterFirstMount);
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts')).toHaveLength(runtimeCallsAfterFirstMount);
+  });
+
+  it('coalesces concurrent channel account snapshots', async () => {
+    const response = {
+      success: true,
+      gatewayHealth: {
+        state: 'healthy',
+        reasons: [],
+        consecutiveHeartbeatMisses: 0,
+      },
+      channels: [],
+    };
+    const { fetchChannelsAccounts } = await import('@/pages/Channels/channel-accounts-cache');
+    hostApiFetchMock.mockResolvedValueOnce(response);
+
+    const [first, second] = await Promise.all([
+      fetchChannelsAccounts('/api/channels/accounts'),
+      fetchChannelsAccounts('/api/channels/accounts'),
+    ]);
+
+    expect(first).toBe(response);
+    expect(second).toBe(response);
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts')).toHaveLength(1);
+  });
+
+  it('bypasses the channel snapshot cache on manual refresh', async () => {
+    subscribeHostEventMock.mockImplementation(() => vi.fn());
+
+    render(<Channels />);
+    await waitFor(() => {
+      expect(screen.getByText('Feishu / Lark')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
+
+    await waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?probe=1')).toHaveLength(1);
     });
   });
 

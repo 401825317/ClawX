@@ -134,6 +134,14 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(gateway.debouncedRestart).not.toHaveBeenCalled();
   });
 
+  it('does not start gateway when saving provider config while gateway is stopped', async () => {
+    const gateway = createGateway('stopped');
+    await syncSavedProviderToRuntime(createProvider(), undefined, gateway as GatewayManager);
+
+    expect(gateway.debouncedReload).not.toHaveBeenCalled();
+    expect(gateway.debouncedRestart).not.toHaveBeenCalled();
+  });
+
   it('writes the current managed relay key into OpenClaw provider config', async () => {
     mocks.getApiKey.mockResolvedValue('relay-valid-key');
     mocks.getProviderConfig.mockReturnValue({

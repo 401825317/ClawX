@@ -31,6 +31,7 @@ import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { hostApiFetch } from '@/lib/host-api';
+import { fetchChannelsAccounts } from '@/pages/Channels/channel-accounts-cache';
 import { useCronStore } from '@/stores/cron';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
@@ -874,7 +875,7 @@ export function Cron() {
 
   const fetchConfiguredChannels = useCallback(async () => {
     try {
-      const response = await hostApiFetch<{ success: boolean; channels?: DeliveryChannelGroup[]; error?: string }>(
+      const response = await fetchChannelsAccounts<{ success: boolean; channels?: DeliveryChannelGroup[]; error?: string }>(
         '/api/channels/accounts',
       );
       if (!response.success) {
@@ -948,7 +949,7 @@ export function Cron() {
             <Button
               variant="outline"
               onClick={() => {
-                void fetchJobs();
+                void fetchJobs({ force: true });
                 void fetchConfiguredChannels();
               }}
               disabled={!isGatewayRunning}

@@ -63,10 +63,12 @@ function createUsageEntry(totalTokens: number) {
 }
 
 describe('Models page auto refresh', () => {
+  let gatewayConnectedAt = 1;
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
-    gatewayState.status = { state: 'running', port: 18789, connectedAt: 1, pid: 1234 };
+    gatewayState.status = { state: 'running', port: 18789, connectedAt: gatewayConnectedAt++, pid: 1234 };
     Object.defineProperty(document, 'visibilityState', {
       configurable: true,
       value: 'visible',
@@ -84,6 +86,12 @@ describe('Models page auto refresh', () => {
     await act(async () => {
       await Promise.resolve();
     });
+    expect(hostApiFetchMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+      await Promise.resolve();
+    });
     expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
     expect(hostApiFetchMock).toHaveBeenCalledWith('/api/usage/recent-token-history?limit=300');
 
@@ -91,8 +99,35 @@ describe('Models page auto refresh', () => {
       vi.advanceTimersByTime(15_000);
       await Promise.resolve();
     });
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+      await Promise.resolve();
+    });
 
     expect(hostApiFetchMock).toHaveBeenCalledTimes(2);
     expect(hostApiFetchMock).toHaveBeenLastCalledWith('/api/usage/recent-token-history?limit=300');
+  });
+
+  it('reuses recent token usage while remounting the page', async () => {
+    const first = render(<Models />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+      await Promise.resolve();
+    });
+
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    render(<Models />);
+
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+      await Promise.resolve();
+    });
+
+    expect(hostApiFetchMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -509,7 +509,7 @@ type DirectoryEntry = {
 
 const CHANNEL_TARGET_CACHE_TTL_MS = 60_000;
 const CHANNEL_TARGET_CACHE_ENABLED = process.env.VITEST !== 'true';
-const CHANNEL_STATUS_CACHE_TTL_MS = 5_000;
+const CHANNEL_STATUS_CACHE_TTL_MS = 15_000;
 const CHANNEL_STATUS_CACHE_ENABLED = process.env.VITEST !== 'true';
 const channelTargetCache = new Map<string, { expiresAt: number; targets: ChannelTargetOptionView[] }>();
 let lastChannelsStatusOkAt: number | undefined;

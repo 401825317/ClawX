@@ -206,7 +206,7 @@ export function ProvidersSettings() {
 
   // Fetch providers on mount
   useEffect(() => {
-    refreshProviderSnapshot();
+    void refreshProviderSnapshot({ quiet: true });
   }, [refreshProviderSnapshot]);
 
   const handleAddProvider = async (

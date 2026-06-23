@@ -26,8 +26,13 @@ const WINDOWS_USAGE_FETCH_MAX_ATTEMPTS = 3;
 const USAGE_FETCH_RETRY_DELAY_MS = 1500;
 const USAGE_AUTO_REFRESH_INTERVAL_MS = 15_000;
 const USAGE_HISTORY_FETCH_LIMIT = 300;
+const USAGE_INITIAL_FETCH_DELAY_MS = 250;
+const USAGE_HISTORY_CACHE_TTL_MS = 30_000;
 
 const HIDDEN_USAGE_MARKERS = ['gateway-injected', 'delivery-mirror'];
+
+let usageHistoryCache: { runtimeKey: string; fetchedAt: number; entries: UsageHistoryEntry[] } | null = null;
+let usageHistoryInFlight: Promise<UsageHistoryEntry[]> | null = null;
 
 function isHiddenUsageSource(source?: string): boolean {
   if (!source) return false;
@@ -153,10 +158,23 @@ export function Models() {
       return;
     }
 
-    dispatchFetch({ type: 'start' });
     const generation = usageFetchGenerationRef.current + 1;
     usageFetchGenerationRef.current = generation;
     const restartMarker = `${gatewayStatus.pid ?? 'na'}:${gatewayStatus.connectedAt ?? 'na'}`;
+    const shouldForceRefresh = usageRefreshNonce > 0;
+    const cachedUsage = usageHistoryCache;
+
+    if (
+      !shouldForceRefresh
+      && cachedUsage
+      && cachedUsage.runtimeKey === restartMarker
+      && Date.now() - cachedUsage.fetchedAt < USAGE_HISTORY_CACHE_TTL_MS
+    ) {
+      dispatchFetch({ type: 'done', data: cachedUsage.entries });
+      return;
+    }
+
+    dispatchFetch({ type: 'start' });
     trackUiEvent('models.token_usage_fetch_started', {
       generation,
       restartMarker,
@@ -180,12 +198,31 @@ export function Models() {
         restartMarker,
       });
       try {
-        const entries = await hostApiFetch<UsageHistoryEntry[]>(
-          `/api/usage/recent-token-history?limit=${USAGE_HISTORY_FETCH_LIMIT}`,
-        );
+        if (!usageHistoryInFlight) {
+          const promise = hostApiFetch<UsageHistoryEntry[]>(
+            `/api/usage/recent-token-history?limit=${USAGE_HISTORY_FETCH_LIMIT}`,
+          );
+          usageHistoryInFlight = promise;
+          promise
+            .finally(() => {
+              if (usageHistoryInFlight === promise) {
+                usageHistoryInFlight = null;
+              }
+            })
+            .catch(() => {
+              // The active fetch attempt handles the error; this catch only
+              // prevents the cleanup chain from surfacing as unhandled.
+            });
+        }
+        const entries = await usageHistoryInFlight;
         if (usageFetchGenerationRef.current !== generation) return;
 
         const normalized = Array.isArray(entries) ? entries : [];
+        usageHistoryCache = {
+          runtimeKey: restartMarker,
+          fetchedAt: Date.now(),
+          entries: normalized,
+        };
         setUsagePage(1);
         trackUiEvent('models.token_usage_fetch_succeeded', {
           generation,
@@ -245,9 +282,13 @@ export function Models() {
       }
     };
 
-    void fetchUsageHistoryWithRetry(1);
+    usageFetchTimerRef.current = setTimeout(() => {
+      usageFetchTimerRef.current = null;
+      void fetchUsageHistoryWithRetry(1);
+    }, USAGE_INITIAL_FETCH_DELAY_MS);
 
     return () => {
+      usageFetchGenerationRef.current += 1;
       clearTimeout(safetyTimeout);
       if (usageFetchTimerRef.current) {
         clearTimeout(usageFetchTimerRef.current);

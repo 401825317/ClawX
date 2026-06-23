@@ -140,7 +140,7 @@ function App() {
 
   // Initialize provider snapshot on mount
   useEffect(() => {
-    initProviders();
+    void initProviders();
   }, [initProviders]);
 
   // Redirect to setup wizard if not complete

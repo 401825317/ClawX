@@ -57,6 +57,7 @@ const INSTALL_ERROR_CODES = new Set(['installTimeoutError', 'installRateLimitErr
 const FETCH_ERROR_CODES = new Set(['fetchTimeoutError', 'fetchRateLimitError', 'timeoutError', 'rateLimitError']);
 const SEARCH_ERROR_CODES = new Set(['searchTimeoutError', 'searchRateLimitError', 'timeoutError', 'rateLimitError']);
 const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const SKILLS_GATEWAY_MERGE_DELAY_MS = 300;
 
 type SkillsViewMode = 'installed' | 'marketplace';
 
@@ -719,9 +720,10 @@ export function Skills() {
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setInterval> | null = null;
+    let gatewayMergeTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const attemptFetch = async () => {
-      const ok = await fetchSkills();
+    const attemptFetch = async (includeGateway = false) => {
+      const ok = await fetchSkills({ includeGateway });
       if (cancelled || !ok) return;
       setSkillsFeatureReady(true);
       if (retryTimer) {
@@ -732,10 +734,15 @@ export function Skills() {
 
     setSkillsFeatureReady(false);
     void attemptFetch();
+    if (gatewayRunning && gatewayReportedReady) {
+      gatewayMergeTimer = setTimeout(() => {
+        void attemptFetch(true);
+      }, SKILLS_GATEWAY_MERGE_DELAY_MS);
+    }
 
     if (gatewayRunning && !gatewayReportedReady) {
       retryTimer = setInterval(() => {
-        void attemptFetch();
+        void attemptFetch(true);
       }, 5_000);
     }
 
@@ -743,6 +750,9 @@ export function Skills() {
       cancelled = true;
       if (retryTimer) {
         clearInterval(retryTimer);
+      }
+      if (gatewayMergeTimer) {
+        clearTimeout(gatewayMergeTimer);
       }
     };
   }, [fetchSkills, gatewayReportedReady, gatewayRunning, gatewayRuntimeKey]);

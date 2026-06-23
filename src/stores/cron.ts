@@ -8,6 +8,8 @@ import { useChatStore } from './chat';
 import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/cron';
 
 let _fetchJobsInFlight: Promise<void> | null = null;
+let _lastFetchJobsAt = 0;
+const CRON_JOBS_FETCH_TTL_MS = 10_000;
 
 interface CronState {
   jobs: CronJob[];
@@ -15,7 +17,7 @@ interface CronState {
   error: string | null;
 
   // Actions
-  fetchJobs: () => Promise<void>;
+  fetchJobs: (options?: { force?: boolean }) => Promise<void>;
   createJob: (input: CronJobCreateInput) => Promise<CronJob>;
   updateJob: (id: string, input: CronJobUpdateInput) => Promise<void>;
   deleteJob: (id: string) => Promise<void>;
@@ -29,9 +31,14 @@ export const useCronStore = create<CronState>((set) => ({
   loading: false,
   error: null,
 
-  fetchJobs: async () => {
+  fetchJobs: async (options?: { force?: boolean }) => {
     if (_fetchJobsInFlight) {
       await _fetchJobsInFlight;
+      return;
+    }
+
+    const now = Date.now();
+    if (!options?.force && _lastFetchJobsAt > 0 && now - _lastFetchJobsAt < CRON_JOBS_FETCH_TTL_MS) {
       return;
     }
 
@@ -55,6 +62,7 @@ export const useCronStore = create<CronState>((set) => ({
         const allJobs = [...result, ...extraJobs];
 
         set({ jobs: allJobs, loading: false });
+        _lastFetchJobsAt = Date.now();
       } catch (error) {
         // Preserve previous jobs on error so the user sees stale data instead of nothing.
         set({ error: String(error), loading: false });
@@ -140,8 +148,7 @@ export const useCronStore = create<CronState>((set) => ({
       });
       // Refresh jobs after trigger to update lastRun/nextRun state
       try {
-        const result = await hostApiFetch<CronJob[]>('/api/cron/jobs');
-        set({ jobs: result });
+        await useCronStore.getState().fetchJobs({ force: true });
       } catch {
         // Ignore refresh error
       }

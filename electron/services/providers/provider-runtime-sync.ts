@@ -572,6 +572,7 @@ export async function syncSavedProviderToRuntime(
   scheduleGatewayRefresh(
     gatewayManager,
     `Scheduling Gateway reload after saving provider "${context.runtimeProviderKey}" config`,
+    { onlyIfRunning: true },
   );
 }
 
@@ -627,6 +628,7 @@ export async function syncUpdatedProviderToRuntime(
   scheduleGatewayRefresh(
     gatewayManager,
     `Scheduling Gateway reload after updating provider "${ock}" config`,
+    { onlyIfRunning: true },
   );
 }
 

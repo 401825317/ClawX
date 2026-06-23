@@ -9,7 +9,7 @@
  * Responding" hangs.
  */
 import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
-import { constants, readdirSync, readFileSync, existsSync, mkdirSync } from 'fs';
+import { constants, readdirSync, readFileSync, existsSync } from 'fs';
 import { execFile } from 'child_process';
 import { dirname, join } from 'path';
 import { pathToFileURL } from 'url';
@@ -499,6 +499,9 @@ async function readAuthProfiles(agentId = 'main'): Promise<AuthProfilesStore> {
 
 async function writeAuthProfiles(store: AuthProfilesStore, agentId = 'main'): Promise<void> {
   await writeJsonFile(getAuthProfilesPath(agentId), store);
+  if (process.platform === 'win32') {
+    return;
+  }
   // Sync to OpenClaw SQLite auth store so the agent runtime can read it.
   await syncAuthProfilesToSqlite(store, agentId).catch((err) => {
     console.warn(`Failed to sync auth profiles to SQLite (agent: ${agentId}):`, err);
@@ -577,23 +580,23 @@ async function syncAuthProfilesToSqlite(store: AuthProfilesStore, agentId = 'mai
 
   await new Promise<void>((resolve, reject) => {
     const dbDir = dirname(dbPath);
-    mkdirSync(dbDir, { recursive: true });
+    void ensureDir(dbDir).then(() => {
+      const child = execFile('/usr/bin/sqlite3', [dbPath], {
+        timeout: 10000,
+        maxBuffer: 5 * 1024 * 1024,
+      }, (error) => {
+        if (error) {
+          reject(new Error(`sqlite3 sync failed: ${error.message}`));
+        } else {
+          resolve();
+        }
+      });
 
-    const child = execFile('/usr/bin/sqlite3', [dbPath], {
-      timeout: 10000,
-      maxBuffer: 5 * 1024 * 1024,
-    }, (error) => {
-      if (error) {
-        reject(new Error(`sqlite3 sync failed: ${error.message}`));
-      } else {
-        resolve();
+      if (child.stdin) {
+        child.stdin.write(sql);
+        child.stdin.end();
       }
-    });
-
-    if (child.stdin) {
-      child.stdin.write(sql);
-      child.stdin.end();
-    }
+    }, reject);
   });
 }
 
@@ -735,6 +738,10 @@ function expandProviderKeysForDeletion(provider: string): string[] {
 
 function normalizePluginPathForCompare(pluginPath: string): string {
   return pluginPath.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function isAbsolutePluginPath(pluginPath: string): boolean {
+  return /^([A-Za-z]:)?\//.test(normalizePluginPathForCompare(pluginPath));
 }
 
 function isBundledOpenClawPluginPath(pluginPath: string): boolean {
@@ -1129,7 +1136,9 @@ export async function removeProviderKeyFromOpenClaw(
   if (agentIds.length === 0) agentIds.push('main');
 
   for (const id of agentIds) {
+    const sidecarStore = await readAuthProfiles(id);
     const runtime = await getOpenClawProviderAuthRuntime().catch(() => null);
+    let runtimeStoreTouched = false;
     const agentDir = getOpenClawAgentDir(id);
     if (runtime?.updateAuthProfileStoreWithLock) {
       try {
@@ -1167,6 +1176,7 @@ export async function removeProviderKeyFromOpenClaw(
             return changed;
           },
         });
+        runtimeStoreTouched = true;
       } catch (error) {
         console.warn(`Failed to remove API key from OpenClaw auth store for provider "${provider}" (agent "${id}"):`, error);
       }
@@ -1174,9 +1184,8 @@ export async function removeProviderKeyFromOpenClaw(
       console.warn(`OpenClaw auth runtime unavailable for provider "${provider}" (agent "${id}"), falling back to auth-profiles.json`);
     }
 
-    const store = await readAuthProfiles(id);
-    if (removeProfileFromStore(store, `${provider}:default`, 'api_key')) {
-      await writeAuthProfiles(store, id);
+    if (removeProfileFromStore(sidecarStore, `${provider}:default`, 'api_key') || runtimeStoreTouched) {
+      await writeAuthProfiles(sidecarStore, id);
     }
   }
   console.log(`Removed API key for provider "${provider}" from OpenClaw auth store (agents: ${agentIds.join(', ')})`);
@@ -2806,7 +2815,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       if (Array.isArray(plugins)) {
         const validPlugins: unknown[] = [];
         for (const p of plugins) {
-          if (typeof p === 'string' && p.startsWith('/')) {
+          if (typeof p === 'string' && isAbsolutePluginPath(p)) {
             if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
               console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
               modified = true;
@@ -2823,7 +2832,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         if (Array.isArray(pluginsObj.load)) {
           const validLoad: unknown[] = [];
           for (const p of pluginsObj.load) {
-            if (typeof p === 'string' && p.startsWith('/')) {
+            if (typeof p === 'string' && isAbsolutePluginPath(p)) {
               if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                 console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
                 modified = true;
@@ -2842,7 +2851,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
             const validPaths: unknown[] = [];
             const countBefore = loadObj.paths.length;
             for (const p of loadObj.paths) {
-              if (typeof p === 'string' && p.startsWith('/')) {
+              if (typeof p === 'string' && isAbsolutePluginPath(p)) {
                 if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                   console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from plugins.load.paths`);
                   modified = true;

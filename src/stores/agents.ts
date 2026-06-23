@@ -17,7 +17,7 @@ interface AgentsState {
   channelAccountOwners: Record<string, string>;
   loading: boolean;
   error: string | null;
-  fetchAgents: () => Promise<void>;
+  fetchAgents: (options?: { force?: boolean; quiet?: boolean }) => Promise<void>;
   createAgent: (
     name: string,
     options?: { inheritWorkspace?: boolean; profile?: AgentProfileDraft },
@@ -42,6 +42,10 @@ function applySnapshot(snapshot: AgentsSnapshot | undefined) {
   } : {};
 }
 
+const AGENTS_FETCH_TTL_MS = 10_000;
+let agentsFetchInFlight: Promise<void> | null = null;
+let lastAgentsFetchAt = 0;
+
 export const useAgentsStore = create<AgentsState>((set) => ({
   agents: [],
   defaultAgentId: 'main',
@@ -52,17 +56,37 @@ export const useAgentsStore = create<AgentsState>((set) => ({
   loading: false,
   error: null,
 
-  fetchAgents: async () => {
-    set({ loading: true, error: null });
-    try {
-      const snapshot = await hostApiFetch<AgentsSnapshot & { success?: boolean }>('/api/agents');
-      set({
-        ...applySnapshot(snapshot),
-        loading: false,
-      });
-    } catch (error) {
-      set({ loading: false, error: String(error) });
+  fetchAgents: async (options?: { force?: boolean; quiet?: boolean }) => {
+    if (agentsFetchInFlight) {
+      await agentsFetchInFlight;
+      return;
     }
+    const now = Date.now();
+    if (!options?.force && now - lastAgentsFetchAt < AGENTS_FETCH_TTL_MS) {
+      return;
+    }
+
+    if (!options?.quiet) {
+      set({ loading: true, error: null });
+    }
+
+    agentsFetchInFlight = (async () => {
+      try {
+        const snapshot = await hostApiFetch<AgentsSnapshot & { success?: boolean }>('/api/agents');
+        set({
+          ...applySnapshot(snapshot),
+          loading: false,
+          error: null,
+        });
+        lastAgentsFetchAt = Date.now();
+      } catch (error) {
+        set({ loading: false, error: String(error) });
+      } finally {
+        agentsFetchInFlight = null;
+      }
+    })();
+
+    await agentsFetchInFlight;
   },
 
   createAgent: async (name: string, options?: { inheritWorkspace?: boolean; profile?: AgentProfileDraft }) => {

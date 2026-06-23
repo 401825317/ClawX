@@ -9,14 +9,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Switch } from '@/components/ui/switch';
-import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { useAgentsStore } from '@/stores/agents';
 import { useChatStore } from '@/stores/chat';
 import type { ChatRuntimeRunState, ChatSession } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
-import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
+import { fetchChannelsAccounts } from '@/pages/Channels/channel-accounts-cache';
 import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
 import type { AgentProfileDraft, AgentSummary } from '@/types/agent';
 import {
@@ -56,6 +55,7 @@ interface ChannelGroupItem {
 }
 
 type AgentWorkStatus = 'running' | 'completed';
+type FetchChannelAccountsOptions = { deferIfBusy?: boolean; force?: boolean };
 
 const AGENTS_BUSY_REFRESH_DEFER_MS = 30_000;
 const RUNNING_SESSION_STATUSES = new Set(['running', 'active', 'queued', 'in_progress', 'processing']);
@@ -134,20 +134,22 @@ export function Agents() {
     deleteAgent,
   } = useAgentsStore();
   const [channelGroups, setChannelGroups] = useState<ChannelGroupItem[]>([]);
-  const [hasCompletedInitialLoad, setHasCompletedInitialLoad] = useState(() => agents.length > 0);
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [agentToDelete, setAgentToDelete] = useState<AgentSummary | null>(null);
   const deferredChannelRefreshRef = useRef<number | null>(null);
   const hasActiveRunRef = useRef(false);
+  const fetchChannelAccountsRef = useRef<((options?: FetchChannelAccountsOptions) => Promise<void>) | null>(null);
 
   const runningAgentIds = useMemo(
     () => new Set(runningAgentKey ? runningAgentKey.split('|') : []),
     [runningAgentKey],
   );
   const hasActiveRun = runningAgentIds.size > 0;
-  hasActiveRunRef.current = hasActiveRun;
+  useEffect(() => {
+    hasActiveRunRef.current = hasActiveRun;
+  }, [hasActiveRun]);
 
   const clearDeferredChannelRefresh = useCallback(() => {
     if (deferredChannelRefreshRef.current != null) {
@@ -164,34 +166,39 @@ export function Agents() {
     }, AGENTS_BUSY_REFRESH_DEFER_MS);
   }, [clearDeferredChannelRefresh]);
 
-  const fetchChannelAccounts = useCallback(async (options?: { deferIfBusy?: boolean }) => {
+  const fetchChannelAccounts = useCallback(async (options?: FetchChannelAccountsOptions) => {
     if (options?.deferIfBusy === true && hasActiveRunRef.current) {
       scheduleChannelRefreshWhenIdle(() => {
-        void fetchChannelAccounts({ deferIfBusy: true });
+        void fetchChannelAccountsRef.current?.({ deferIfBusy: true });
       });
       return;
     }
     try {
-      const response = await hostApiFetch<{ success: boolean; channels?: ChannelGroupItem[] }>('/api/channels/accounts?mode=config');
+      const response = await fetchChannelsAccounts<{ success: boolean; channels?: ChannelGroupItem[] }>(
+        '/api/channels/accounts?mode=config',
+        { force: options?.force === true },
+      );
       setChannelGroups(response.channels || []);
     } catch {
       // Keep the last rendered snapshot when channel account refresh fails.
     }
   }, [scheduleChannelRefreshWhenIdle]);
+  useEffect(() => {
+    fetchChannelAccountsRef.current = fetchChannelAccounts;
+    return () => {
+      if (fetchChannelAccountsRef.current === fetchChannelAccounts) {
+        fetchChannelAccountsRef.current = null;
+      }
+    };
+  }, [fetchChannelAccounts]);
 
   useEffect(() => {
-    let mounted = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void Promise.all([fetchAgents(), fetchChannelAccounts()]).finally(() => {
-      if (mounted) {
-        setHasCompletedInitialLoad(true);
-      }
-    });
-    void refreshProviderSnapshot();
-    return () => {
-      mounted = false;
-    };
-  }, [fetchAgents, fetchChannelAccounts, refreshProviderSnapshot]);
+    const timer = window.setTimeout(() => {
+      void Promise.all([fetchAgents({ quiet: agents.length > 0 }), fetchChannelAccounts({ deferIfBusy: true })]);
+      void refreshProviderSnapshot({ quiet: true });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [agents.length, fetchAgents, fetchChannelAccounts, refreshProviderSnapshot]);
 
   useEffect(() => {
     let throttleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,16 +233,22 @@ export function Agents() {
     lastGatewayStateRef.current = gatewayStatus.state;
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void fetchChannelAccounts({ deferIfBusy: true });
+      const timer = window.setTimeout(() => {
+        void fetchChannelAccounts({ deferIfBusy: true });
+      }, 0);
+      return () => window.clearTimeout(timer);
     }
+    return undefined;
   }, [fetchChannelAccounts, gatewayStatus.state]);
 
   useEffect(() => {
     if (hasActiveRun) return;
     if (deferredChannelRefreshRef.current == null) return;
     clearDeferredChannelRefresh();
-    void fetchChannelAccounts();
+    const timer = window.setTimeout(() => {
+      void fetchChannelAccounts();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [clearDeferredChannelRefresh, fetchChannelAccounts, hasActiveRun]);
 
   useEffect(() => clearDeferredChannelRefresh, [clearDeferredChannelRefresh]);
@@ -247,7 +260,7 @@ export function Agents() {
 
   const visibleAgents = agents;
   const visibleChannelGroups = channelGroups;
-  const isUsingStableValue = loading && hasCompletedInitialLoad;
+  const isUsingStableValue = loading;
   const agentWorkStatuses = useMemo(() => {
     const next = new Map<string, AgentWorkStatus>();
     for (const agent of visibleAgents) {
@@ -256,20 +269,12 @@ export function Agents() {
     return next;
   }, [runningAgentIds, visibleAgents]);
   const handleRefresh = () => {
-    void Promise.all([fetchAgents(), fetchChannelAccounts(), refreshProviderSnapshot()]);
+    void Promise.all([fetchAgents({ force: true }), fetchChannelAccounts({ force: true }), refreshProviderSnapshot({ force: true })]);
   };
   const openAgentChat = useCallback((agent: AgentSummary) => {
     switchSession(agent.mainSessionKey);
     navigate('/');
   }, [navigate, switchSession]);
-
-  if (loading && !hasCompletedInitialLoad) {
-    return (
-      <div className="flex flex-col -m-6 dark:bg-background min-h-[calc(100vh-2.5rem)] items-center justify-center">
-        <LoadingSpinner size="lg" />
-      </div>
-    );
-  }
 
   return (
     <div data-testid="agents-page" className="flex flex-col -m-6 dark:bg-background h-[calc(100vh-2.5rem)] overflow-hidden">

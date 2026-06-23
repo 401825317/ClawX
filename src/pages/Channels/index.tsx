@@ -18,6 +18,7 @@ import {
   type ChannelType,
 } from '@/types/channel';
 import { usesPluginManagedQrAccounts } from '@/lib/channel-alias';
+import { fetchChannelsAccounts, getCachedChannelsAccounts, invalidateChannelsAccountsCache } from './channel-accounts-cache';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 
@@ -89,6 +90,13 @@ function isGatewayDiagnosticSnapshot(value: unknown): value is GatewayDiagnostic
   );
 }
 
+type ChannelsAccountsResponse = {
+  success: boolean;
+  channels?: ChannelGroupItem[];
+  gatewayHealth?: GatewayHealthSummary;
+  error?: string;
+};
+
 interface AgentItem {
   id: string;
   name: string;
@@ -104,6 +112,7 @@ type FetchPageDataOptions = {
   configOnly?: boolean;
   forceAgentsRefresh?: boolean;
   deferIfBusy?: boolean;
+  force?: boolean;
 };
 
 function removeDeletedTarget(groups: ChannelGroupItem[], target: DeleteTarget): ChannelGroupItem[] {
@@ -129,6 +138,7 @@ const DEFAULT_GATEWAY_HEALTH: GatewayHealthSummary = {
 };
 const CHANNELS_RUNTIME_FETCH_DELAY_MS = 350;
 const CHANNELS_BUSY_RUNTIME_DEFER_MS = 2500;
+const CHANNELS_AUTO_REFRESH_DELAY_MS = 120;
 
 function isStaleNotRunningHealthForRunningGateway(
   gatewayHealth: GatewayHealthSummary,
@@ -170,6 +180,8 @@ export function Channels() {
   const hasActiveRunRef = useRef(hasActiveRun);
   const agentsFetchInFlightRef = useRef<Promise<void> | null>(null);
   const hasLoadedAgentsRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const fetchGenerationRef = useRef(0);
 
   const displayedChannelTypes = getPrimaryChannels();
   const displayedGatewayHealth = isStaleNotRunningHealthForRunningGateway(gatewayHealth, gatewayStatus.state)
@@ -203,6 +215,16 @@ export function Channels() {
       callback();
     }, delayMs);
   }, [clearDeferredRuntimeRefresh]);
+
+  const applyChannelsPayload = useCallback((channelsPayload: ChannelsAccountsResponse) => {
+    if (!channelsPayload.success) {
+      throw new Error(channelsPayload.error || 'Failed to load channels');
+    }
+    setChannelGroups(channelsPayload.channels || []);
+    setGatewayHealth(channelsPayload.gatewayHealth || DEFAULT_GATEWAY_HEALTH);
+    setDiagnosticsSnapshot(null);
+    setShowDiagnostics(false);
+  }, []);
 
   const ensureAgentsLoaded = useCallback(async () => {
     if (hasLoadedAgentsRef.current) return;
@@ -241,10 +263,12 @@ export function Channels() {
       configOnly: Boolean(base?.configOnly) && Boolean(incoming?.configOnly),
       forceAgentsRefresh: Boolean(base?.forceAgentsRefresh) || Boolean(incoming?.forceAgentsRefresh),
       deferIfBusy: Boolean(base?.deferIfBusy) || Boolean(incoming?.deferIfBusy),
+      force: Boolean(base?.force) || Boolean(incoming?.force),
     };
   };
 
   const fetchPageData = useCallback(async (options?: FetchPageDataOptions) => {
+    if (!isMountedRef.current) return;
     const wantsRuntime = options?.configOnly !== true;
     const probe = options?.probe === true;
     if (wantsRuntime && options?.deferIfBusy === true && hasActiveRunRef.current && !probe) {
@@ -255,13 +279,15 @@ export function Channels() {
       return;
     }
     if (fetchInFlightRef.current) {
-      queuedFetchOptionsRef.current = mergeFetchOptions(queuedFetchOptionsRef.current, options);
+      if (isMountedRef.current) {
+        queuedFetchOptionsRef.current = mergeFetchOptions(queuedFetchOptionsRef.current, options);
+      }
       return;
     }
     fetchInFlightRef.current = true;
+    const fetchGeneration = fetchGenerationRef.current;
     const startedAt = Date.now();
     const configOnly = options?.configOnly === true;
-    console.info(`[channels-ui] fetch start mode=${configOnly ? 'config' : 'runtime'} probe=${probe ? '1' : '0'}`);
     // Only show loading spinner on first load (stale-while-revalidate).
     const hasData = channelGroupsRef.current.length > 0 || agentsRef.current.length > 0;
     if (!hasData) {
@@ -278,30 +304,21 @@ export function Channels() {
         : options?.probe
           ? '/api/channels/accounts?probe=1'
           : '/api/channels/accounts';
-      const channelsRes = await hostApiFetch<{ success: boolean; channels?: ChannelGroupItem[]; error?: string }>(
-        channelsPath
-      );
-
-      type ChannelsResponse = {
-        success: boolean;
-        channels?: ChannelGroupItem[];
-        gatewayHealth?: GatewayHealthSummary;
-        error?: string;
-      };
-      const channelsPayload = channelsRes as ChannelsResponse;
-
-      if (!channelsPayload.success) {
-        throw new Error(channelsPayload.error || 'Failed to load channels');
+      if (!options?.force && !options?.probe) {
+        const cachedPayload = getCachedChannelsAccounts<ChannelsAccountsResponse>(channelsPath);
+        if (cachedPayload) {
+          applyChannelsPayload(cachedPayload);
+          return;
+        }
       }
+      const channelsPayload = await fetchChannelsAccounts<ChannelsAccountsResponse>(channelsPath, {
+        force: options?.force === true || options?.probe === true || options?.forceAgentsRefresh === true,
+      });
 
-      setChannelGroups(channelsPayload.channels || []);
-      setGatewayHealth(channelsPayload.gatewayHealth || DEFAULT_GATEWAY_HEALTH);
-      setDiagnosticsSnapshot(null);
-      setShowDiagnostics(false);
-      console.info(
-        `[channels-ui] fetch ok mode=${configOnly ? 'config' : 'runtime'} probe=${probe ? '1' : '0'} elapsedMs=${Date.now() - startedAt} view=${(channelsPayload.channels || []).map((item) => `${item.channelType}:${item.status}`).join(',')}`
-      );
+      if (!isMountedRef.current || fetchGeneration !== fetchGenerationRef.current) return;
+      applyChannelsPayload(channelsPayload);
     } catch (fetchError) {
+      if (!isMountedRef.current || fetchGeneration !== fetchGenerationRef.current) return;
       // Preserve previous data on error — don't clear channelGroups/agents.
       setError(String(fetchError));
       console.warn(
@@ -309,16 +326,22 @@ export function Channels() {
       );
     } finally {
       fetchInFlightRef.current = false;
-      setLoading(false);
+      if (isMountedRef.current && fetchGeneration === fetchGenerationRef.current) {
+        setLoading(false);
+      }
       const queued = queuedFetchOptionsRef.current;
-      if (queued) {
+      if (queued && isMountedRef.current && fetchGeneration === fetchGenerationRef.current) {
         queuedFetchOptionsRef.current = null;
-        void fetchPageData(queued);
+        window.setTimeout(() => {
+          void fetchPageData(queued);
+        }, CHANNELS_AUTO_REFRESH_DELAY_MS);
+      } else if (!isMountedRef.current || fetchGeneration !== fetchGenerationRef.current) {
+        queuedFetchOptionsRef.current = null;
       }
     }
   // Stable reference — reads state via refs, no deps needed.
    
-  }, [ensureAgentsLoaded, scheduleRuntimeRefreshWhenIdle]);
+  }, [applyChannelsPayload, ensureAgentsLoaded, scheduleRuntimeRefreshWhenIdle]);
 
   const clearConvergenceRefreshTimers = useCallback(() => {
     convergenceRefreshTimersRef.current.forEach((timerId) => {
@@ -333,11 +356,9 @@ export function Channels() {
     // First few rounds use probe=true to force runtime connectivity checks,
     // then fall back to cached pulls to reduce load.
     [
-      { delay: 1200, probe: true },
       { delay: 2600, probe: false },
-      { delay: 4500, probe: false },
       { delay: 7000, probe: false },
-      { delay: 10500, probe: false },
+      { delay: 12000, probe: false },
     ].forEach(({ delay, probe }) => {
       const timerId = window.setTimeout(() => {
         void fetchPageData({ probe, deferIfBusy: !probe });
@@ -347,6 +368,7 @@ export function Channels() {
   }, [clearConvergenceRefreshTimers, fetchPageData]);
 
   useEffect(() => {
+    isMountedRef.current = true;
     void fetchPageData({ configOnly: true });
     const timer = window.setTimeout(() => {
       void fetchPageData({ deferIfBusy: true });
@@ -358,6 +380,10 @@ export function Channels() {
 
   useEffect(() => {
     return () => {
+      isMountedRef.current = false;
+      fetchGenerationRef.current += 1;
+      queuedFetchOptionsRef.current = null;
+      fetchInFlightRef.current = false;
       clearConvergenceRefreshTimers();
       clearDeferredRuntimeRefresh();
     };
@@ -427,7 +453,8 @@ export function Channels() {
   const unsupportedGroups = displayedChannelTypes.filter((type) => !configuredTypes.includes(type));
 
   const handleRefresh = () => {
-    void fetchPageData({ probe: true, forceAgentsRefresh: true });
+    invalidateChannelsAccountsCache();
+    void fetchPageData({ probe: true, forceAgentsRefresh: true, force: true });
   };
 
   const fetchDiagnosticsSnapshot = useCallback(async (): Promise<GatewayDiagnosticSnapshot> => {
@@ -457,7 +484,8 @@ export function Channels() {
       setDiagnosticsSnapshot(null);
       setShowDiagnostics(false);
       toast.success(t('health.restartTriggered'));
-      void fetchPageData({ probe: true });
+      invalidateChannelsAccountsCache();
+      void fetchPageData({ probe: true, force: true });
     } catch (restartError) {
       toast.error(t('health.restartFailed', { error: String(restartError) }));
     }
@@ -525,7 +553,8 @@ export function Channels() {
           body: JSON.stringify({ channelType, accountId, agentId }),
         });
       }
-      await fetchPageData();
+      invalidateChannelsAccountsCache();
+      await fetchPageData({ force: true });
       toast.success(t('toast.bindingUpdated'));
     } catch (bindError) {
       toast.error(t('toast.configFailed', { error: String(bindError) }));
@@ -542,11 +571,12 @@ export function Channels() {
         method: 'DELETE',
       });
       setChannelGroups((prev) => removeDeletedTarget(prev, deleteTarget));
+      invalidateChannelsAccountsCache();
       toast.success(deleteTarget.accountId ? t('toast.accountDeleted') : t('toast.channelDeleted'));
       // Channel reload is debounced in main process; pull again shortly to
       // converge with runtime state without flashing deleted rows back in.
       window.setTimeout(() => {
-        void fetchPageData();
+        void fetchPageData({ force: true });
       }, 1200);
     } catch (deleteError) {
       toast.error(t('toast.configFailed', { error: String(deleteError) }));
@@ -924,7 +954,8 @@ export function Channels() {
             setInitialConfigValuesForModal(undefined);
           }}
           onChannelSaved={async () => {
-            await fetchPageData({ probe: true });
+            invalidateChannelsAccountsCache();
+            await fetchPageData({ probe: true, force: true });
             scheduleConvergenceRefresh();
             setShowConfigModal(false);
             setSelectedChannelType(null);

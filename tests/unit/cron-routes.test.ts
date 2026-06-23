@@ -11,6 +11,7 @@ vi.mock('@electron/api/route-utils', () => ({
 
 describe('handleCronRoutes', () => {
   beforeEach(() => {
+    vi.resetModules();
     vi.resetAllMocks();
   });
 
@@ -205,5 +206,43 @@ describe('handleCronRoutes', () => {
         id: 'job-wechat',
       }),
     );
+  });
+
+  it('reuses the recent cron jobs response to avoid repeated Gateway list calls', async () => {
+    const rpc = vi.fn().mockResolvedValue({
+      jobs: [{
+        id: 'job-cached',
+        name: 'Cached job',
+        enabled: true,
+        createdAtMs: 1,
+        updatedAtMs: 2,
+        schedule: { kind: 'cron', expr: '0 9 * * *' },
+        payload: { kind: 'agentTurn', message: 'Summarize today' },
+        state: {},
+      }],
+    });
+
+    const { handleCronRoutes } = await import('@electron/api/routes/cron');
+    await handleCronRoutes(
+      { method: 'GET' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:13210/api/cron/jobs'),
+      {
+        gatewayManager: { rpc },
+      } as never,
+    );
+    await handleCronRoutes(
+      { method: 'GET' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:13210/api/cron/jobs'),
+      {
+        gatewayManager: { rpc },
+      } as never,
+    );
+
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith('cron.list', { includeDisabled: true }, 8000);
+    expect(sendJsonMock).toHaveBeenCalledTimes(2);
+    expect(sendJsonMock.mock.calls[1]?.[2]).toEqual(sendJsonMock.mock.calls[0]?.[2]);
   });
 });

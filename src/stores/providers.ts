@@ -35,7 +35,7 @@ interface ProviderState {
 
   // Actions
   init: () => Promise<void>;
-  refreshProviderSnapshot: () => Promise<void>;
+  refreshProviderSnapshot: (options?: { force?: boolean; quiet?: boolean }) => Promise<void>;
   createAccount: (account: ProviderAccount, apiKey?: string) => Promise<void>;
   removeAccount: (accountId: string) => Promise<void>;
   validateAccountApiKey: (
@@ -70,6 +70,10 @@ interface ProviderState {
   getApiKey: (providerId: string) => Promise<string | null>;
 }
 
+const PROVIDER_SNAPSHOT_TTL_MS = 10_000;
+let providerSnapshotInFlight: Promise<void> | null = null;
+let lastProviderSnapshotFetchAt = 0;
+
 export const useProviderStore = create<ProviderState>((set, get) => ({
   statuses: [],
   accounts: [],
@@ -79,25 +83,47 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
   error: null,
 
   init: async () => {
-    await get().refreshProviderSnapshot();
+    await get().refreshProviderSnapshot({ force: true });
   },
 
-  refreshProviderSnapshot: async () => {
-    set({ loading: true, error: null });
-    
-    try {
-      const snapshot = await fetchProviderSnapshot();
-      
-      set({ 
-        statuses: snapshot.statuses ?? [],
-        accounts: snapshot.accounts ?? [],
-        vendors: snapshot.vendors ?? [],
-        defaultAccountId: snapshot.defaultAccountId ?? null,
-        loading: false 
-      });
-    } catch (error) {
-      set({ error: String(error), loading: false });
+  refreshProviderSnapshot: async (options?: { force?: boolean; quiet?: boolean }) => {
+    if (providerSnapshotInFlight) {
+      await providerSnapshotInFlight;
+      return;
     }
+
+    const now = Date.now();
+    if (!options?.force && now - lastProviderSnapshotFetchAt < PROVIDER_SNAPSHOT_TTL_MS) {
+      return;
+    }
+
+    const hasSnapshot = get().accounts.length > 0 || get().statuses.length > 0 || get().vendors.length > 0;
+    if (!options?.quiet && !hasSnapshot) {
+      set({ loading: true, error: null });
+    } else {
+      set({ error: null });
+    }
+
+    providerSnapshotInFlight = (async () => {
+      try {
+        const snapshot = await fetchProviderSnapshot();
+        lastProviderSnapshotFetchAt = Date.now();
+
+        set({
+          statuses: snapshot.statuses ?? [],
+          accounts: snapshot.accounts ?? [],
+          vendors: snapshot.vendors ?? [],
+          defaultAccountId: snapshot.defaultAccountId ?? null,
+          loading: false,
+        });
+      } catch (error) {
+        set({ error: String(error), loading: false });
+      } finally {
+        providerSnapshotInFlight = null;
+      }
+    })();
+
+    await providerSnapshotInFlight;
   },
 
   fetchProviders: async () => get().refreshProviderSnapshot(),
@@ -144,7 +170,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to create provider account');
       }
 
-      await get().refreshProviderSnapshot();
+      await get().refreshProviderSnapshot({ force: true });
     } catch (error) {
       console.error('Failed to add account:', error);
       throw error;
@@ -186,7 +212,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to update provider account');
       }
 
-      await get().refreshProviderSnapshot();
+      await get().refreshProviderSnapshot({ force: true });
     } catch (error) {
       console.error('Failed to update account:', error);
       throw error;
@@ -205,7 +231,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to delete provider account');
       }
 
-      await get().refreshProviderSnapshot();
+      await get().refreshProviderSnapshot({ force: true });
     } catch (error) {
       console.error('Failed to delete account:', error);
       throw error;
@@ -251,7 +277,7 @@ export const useProviderStore = create<ProviderState>((set, get) => ({
         throw new Error(result.error || 'Failed to delete API key');
       }
 
-      await get().refreshProviderSnapshot();
+      await get().refreshProviderSnapshot({ force: true });
     } catch (error) {
       console.error('Failed to delete API key:', error);
       throw error;

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { Agents } from '../../src/pages/Agents/index';
+import { clearChannelsAccountsCacheForTests } from '@/pages/Channels/channel-accounts-cache';
 
 const hostApiFetchMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
@@ -120,6 +121,7 @@ function renderAgents() {
 describe('Agents page status refresh', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearChannelsAccountsCacheForTests();
     gatewayState.status = { state: 'running', port: 18789 };
     agentsState.agents = [];
     agentsState.defaultModelRef = null;
@@ -158,6 +160,7 @@ describe('Agents page status refresh', () => {
 
     await waitFor(() => {
       expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(fetchAgentsMock).toHaveBeenCalledWith({ quiet: false });
       expect(loadSessionsMock).not.toHaveBeenCalled();
       expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts?mode=config');
     });
@@ -167,10 +170,8 @@ describe('Agents page status refresh', () => {
       channelStatusHandler?.();
     });
 
-    await waitFor(() => {
-      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config');
-      expect(channelFetchCalls).toHaveLength(2);
-    });
+    const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config');
+    expect(channelFetchCalls).toHaveLength(1);
   });
 
   it('defers channel account refresh while chat work is active', async () => {
@@ -189,15 +190,13 @@ describe('Agents page status refresh', () => {
       </MemoryRouter>,
     );
 
-    await waitFor(() => {
-      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(1);
-    });
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(0);
 
     await act(async () => {
       channelStatusHandler?.();
     });
 
-    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(1);
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(0);
 
     chatState.sending = false;
     await act(async () => {
@@ -209,7 +208,7 @@ describe('Agents page status refresh', () => {
     });
 
     await waitFor(() => {
-      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(2);
+      expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config')).toHaveLength(1);
     });
   });
 
@@ -223,7 +222,7 @@ describe('Agents page status refresh', () => {
     );
 
     await waitFor(() => {
-      expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(fetchAgentsMock).toHaveBeenCalledWith({ quiet: false });
       expect(loadSessionsMock).not.toHaveBeenCalled();
       expect(hostApiFetchMock).toHaveBeenCalledWith('/api/channels/accounts?mode=config');
     });
@@ -237,10 +236,8 @@ describe('Agents page status refresh', () => {
       );
     });
 
-    await waitFor(() => {
-      const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config');
-      expect(channelFetchCalls).toHaveLength(2);
-    });
+    const channelFetchCalls = hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/channels/accounts?mode=config');
+    expect(channelFetchCalls).toHaveLength(1);
   });
 
   it('uses "Use default model" as form fill only and disables it when already default', async () => {
@@ -281,7 +278,7 @@ describe('Agents page status refresh', () => {
     renderAgents();
 
     await waitFor(() => {
-      expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(fetchAgentsMock).toHaveBeenCalledWith({ quiet: true });
     });
 
     fireEvent.click(screen.getByTitle('settings'));
@@ -324,7 +321,7 @@ describe('Agents page status refresh', () => {
     renderAgents();
 
     await waitFor(() => {
-      expect(fetchAgentsMock).toHaveBeenCalledTimes(1);
+      expect(fetchAgentsMock).toHaveBeenCalledWith({ quiet: true });
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'openChatWithAgent' }));
@@ -410,15 +407,16 @@ describe('Agents page status refresh', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
-  it('keeps the blocking spinner during the initial load before any stable snapshot exists', async () => {
+  it('keeps the page interactive while the initial refresh is pending', async () => {
     agentsState.loading = true;
     fetchAgentsMock.mockImplementation(() => new Promise(() => {}));
     refreshProviderSnapshotMock.mockImplementation(() => new Promise(() => {}));
     hostApiFetchMock.mockImplementation(() => new Promise(() => {}));
 
-    const { container } = renderAgents();
+    renderAgents();
 
-    expect(container.querySelector('svg.animate-spin')).toBeTruthy();
-    expect(screen.queryByText('title')).not.toBeInTheDocument();
+    expect(screen.getByText('title')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'refresh' })).toBeInTheDocument();
+    expect(screen.getByTestId('agents-add-button')).toBeInTheDocument();
   });
 });

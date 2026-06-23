@@ -56,6 +56,8 @@ const MARKETPLACE_QUERY_SEARCH_LIMIT = 80;
 const MARKETPLACE_CATEGORY_QUERY_LIMIT = 24;
 const MARKETPLACE_LOAD_MORE_LIMIT = 100;
 const DEFAULT_MARKETPLACE_PROVIDER = 'skillhub';
+const SKILLS_FETCH_TTL_MS = 15_000;
+const MARKETPLACE_SEARCH_CACHE_TTL_MS = 60_000;
 
 type MarketplaceSearchQuery = string | string[];
 type MarketplaceSearchResponse = {
@@ -63,6 +65,19 @@ type MarketplaceSearchResponse = {
   results?: unknown[];
   error?: string;
 } & MarketplaceCatalogMeta;
+
+type FetchSkillsOptions = { includeGateway?: boolean; force?: boolean };
+type MarketplaceSearchSnapshot = {
+  searchResults: MarketplaceSkill[];
+  marketplaceMeta: MarketplaceCatalogMeta;
+};
+
+let skillsFetchInFlight: Promise<boolean> | null = null;
+let skillsGatewayMergeInFlight: Promise<GatewaySkillsStatusResult> | null = null;
+let lastSkillsFetchAt = 0;
+let lastSkillsGatewayMergeAt = 0;
+const marketplaceSearchCache = new Map<string, { createdAt: number; snapshot: MarketplaceSearchSnapshot }>();
+const marketplaceSearchInFlight = new Map<string, Promise<MarketplaceSearchSnapshot>>();
 
 function stringValue(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -378,6 +393,103 @@ function mergeGatewaySkills(localSkills: Skill[], gatewaySkills?: GatewaySkillSt
   });
 }
 
+function getMarketplaceSearchCacheKey(query: MarketplaceSearchQuery): string {
+  const entries = (Array.isArray(query) ? query : [query])
+    .map((entry) => entry.trim())
+    .filter((entry, index, all) => entry.length > 0 || (all.length === 1 && index === 0))
+    .filter((entry, index, all) => all.indexOf(entry) === index);
+  return JSON.stringify({ provider: DEFAULT_MARKETPLACE_PROVIDER, locale: i18n.language, queries: entries });
+}
+
+function getCachedMarketplaceSearch(query: MarketplaceSearchQuery): MarketplaceSearchSnapshot | null {
+  const cached = marketplaceSearchCache.get(getMarketplaceSearchCacheKey(query));
+  if (!cached) return null;
+  if (Date.now() - cached.createdAt >= MARKETPLACE_SEARCH_CACHE_TTL_MS) {
+    return null;
+  }
+  return cached.snapshot;
+}
+
+function cacheMarketplaceSearch(query: MarketplaceSearchQuery, snapshot: MarketplaceSearchSnapshot): void {
+  marketplaceSearchCache.set(getMarketplaceSearchCacheKey(query), {
+    createdAt: Date.now(),
+    snapshot,
+  });
+}
+
+function fetchGatewaySkillsStatus(): Promise<GatewaySkillsStatusResult> {
+  if (!skillsGatewayMergeInFlight) {
+    const promise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
+    skillsGatewayMergeInFlight = promise;
+    promise
+      .finally(() => {
+        if (skillsGatewayMergeInFlight === promise) {
+          skillsGatewayMergeInFlight = null;
+        }
+      })
+      .catch(() => {
+        // The caller handles the failure; this catch only prevents the cleanup
+        // chain from surfacing as an unhandled rejection.
+      });
+  }
+  return skillsGatewayMergeInFlight;
+}
+
+async function fetchMarketplaceSearchSnapshot(query: MarketplaceSearchQuery): Promise<MarketplaceSearchSnapshot> {
+  const normalizedQueries = (Array.isArray(query) ? query : [query])
+    .map((entry) => entry.trim())
+    .filter((entry, index, entries) => entry.length > 0 || (entries.length === 1 && index === 0))
+    .filter((entry, index, entries) => entries.indexOf(entry) === index);
+
+  if (normalizedQueries.length > 1) {
+    const results = await Promise.all(normalizedQueries.map((normalizedQuery) => (
+      hostApiFetch<MarketplaceSearchResponse>('/api/skills/marketplace/search', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: DEFAULT_MARKETPLACE_PROVIDER,
+          query: normalizedQuery,
+          limit: MARKETPLACE_CATEGORY_QUERY_LIMIT,
+          locale: i18n.language,
+        }),
+      })
+    )));
+    const failed = results.find((result) => !result.success);
+    if (failed) {
+      throw normalizeAppError(new Error(failed.error || 'Search failed'), {
+        module: 'skills',
+        operation: 'search',
+      });
+    }
+    const searchResults = mergeMarketplaceSkillResults(results.map((result) => normalizeMarketplaceSkillResults(result.results)));
+    return {
+      searchResults,
+      marketplaceMeta: buildMarketplaceMetaFromAggregatedResults(results, normalizedQueries, searchResults),
+    };
+  }
+
+  const normalizedQuery = normalizedQueries[0] ?? '';
+  const result = await hostApiFetch<MarketplaceSearchResponse>('/api/skills/marketplace/search', {
+    method: 'POST',
+    body: JSON.stringify({
+      provider: DEFAULT_MARKETPLACE_PROVIDER,
+      query: normalizedQuery,
+      limit: normalizedQuery.length === 0 ? MARKETPLACE_HOME_SEARCH_LIMIT : MARKETPLACE_QUERY_SEARCH_LIMIT,
+      locale: i18n.language,
+    }),
+  });
+  if (!result.success) {
+    throw normalizeAppError(new Error(result.error || 'Search failed'), {
+      module: 'skills',
+      operation: 'search',
+    });
+  }
+  const searchResults = normalizeMarketplaceSkillResults(result.results);
+  return {
+    searchResults,
+    marketplaceMeta: buildMarketplaceMetaFromResult(result, normalizedQuery, searchResults),
+  };
+}
+
 interface SkillsState {
   skills: Skill[];
   searchResults: MarketplaceSkill[];
@@ -388,7 +500,7 @@ interface SkillsState {
   installing: Record<string, boolean>;
   error: string | null;
 
-  fetchSkills: (options?: { includeGateway?: boolean }) => Promise<boolean>;
+  fetchSkills: (options?: FetchSkillsOptions) => Promise<boolean>;
   searchSkills: (query: MarketplaceSearchQuery) => Promise<void>;
   loadMoreMarketplaceSkills: () => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
@@ -410,123 +522,116 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   installing: {},
   error: null,
 
-  fetchSkills: async (options?: { includeGateway?: boolean }) => {
+  fetchSkills: async (options?: FetchSkillsOptions) => {
     const includeGateway = options?.includeGateway === true;
-    if (get().skills.length === 0) {
-      set({ loading: true, error: null });
-    }
+    const hasSkills = get().skills.length > 0;
+    const now = Date.now();
+    const canUseCachedLocal = !options?.force && hasSkills && now - lastSkillsFetchAt < SKILLS_FETCH_TTL_MS;
+    const canUseCachedGateway = !includeGateway || (!options?.force && now - lastSkillsGatewayMergeAt < SKILLS_FETCH_TTL_MS);
 
-    const gatewayDataPromise = includeGateway
-      ? useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status')
-      : null;
-
-    try {
-      const localResult = await hostApiFetch<LocalSkillsResult>('/api/skills/local');
-      if (!localResult.success) {
-        throw new Error(localResult.error || 'Failed to fetch local skills');
-      }
-
-      const localSkills = Array.isArray(localResult.skills) ? localResult.skills : [];
-      set({ skills: localSkills, loading: false, error: null });
-
-      if (gatewayDataPromise) {
-        void gatewayDataPromise
-          .then((gatewayData) => {
-            set((state) => ({
-              skills: mergeGatewaySkills(state.skills, gatewayData.skills),
-              loading: false,
-            }));
-          })
-          .catch(() => {
-            // Local data is already rendered; runtime merge is best-effort only.
-          });
-      }
-
+    if (canUseCachedLocal && canUseCachedGateway) {
       return true;
-    } catch (error) {
-      console.error('Failed to fetch local skills:', error);
-      if (!gatewayDataPromise) {
-        const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
-        const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
-        set((prev) => ({ loading: false, error: errorKey ?? appError.message, skills: prev.skills }));
-        return false;
-      }
-      try {
-        const gatewayData = await gatewayDataPromise;
-        const gatewaySkills = mergeGatewaySkills([], gatewayData.skills);
-        set({ skills: gatewaySkills, loading: false, error: null });
-        return true;
-      } catch (gatewayError) {
-        console.error('Failed to fetch gateway skills fallback:', gatewayError);
-        const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
-        const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
-        set((prev) => ({ loading: false, error: errorKey ?? appError.message, skills: prev.skills }));
-        return false;
-      }
     }
+
+    if (skillsFetchInFlight) {
+      return await skillsFetchInFlight;
+    }
+
+    if (!hasSkills) {
+      set({ loading: true, error: null });
+    } else {
+      set({ error: null });
+    }
+
+    skillsFetchInFlight = (async () => {
+      const gatewayDataPromise = includeGateway && !canUseCachedGateway
+        ? fetchGatewaySkillsStatus()
+        : null;
+
+      try {
+        let localSkills = get().skills;
+        if (!canUseCachedLocal) {
+          const localResult = await hostApiFetch<LocalSkillsResult>('/api/skills/local');
+          if (!localResult.success) {
+            throw new Error(localResult.error || 'Failed to fetch local skills');
+          }
+
+          localSkills = Array.isArray(localResult.skills) ? localResult.skills : [];
+          lastSkillsFetchAt = Date.now();
+          set({ skills: localSkills, loading: false, error: null });
+        }
+
+        if (gatewayDataPromise) {
+          void gatewayDataPromise
+            .then((gatewayData) => {
+              lastSkillsGatewayMergeAt = Date.now();
+              set((state) => ({
+                skills: mergeGatewaySkills(state.skills, gatewayData.skills),
+                loading: false,
+              }));
+            })
+            .catch(() => {
+              // Local data is already rendered; runtime merge is best-effort only.
+            });
+        } else {
+          set({ loading: false, error: null });
+        }
+
+        return true;
+      }
+      catch (error) {
+        console.error('Failed to fetch local skills:', error);
+        if (!gatewayDataPromise) {
+          const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
+          const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
+          set((prev) => ({ loading: false, error: errorKey ?? appError.message, skills: prev.skills }));
+          return false;
+        }
+        try {
+          const gatewayData = await gatewayDataPromise;
+          lastSkillsGatewayMergeAt = Date.now();
+          const gatewaySkills = mergeGatewaySkills([], gatewayData.skills);
+          set({ skills: gatewaySkills, loading: false, error: null });
+          return true;
+        } catch (gatewayError) {
+          console.error('Failed to fetch gateway skills fallback:', gatewayError);
+          const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
+          const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
+          set((prev) => ({ loading: false, error: errorKey ?? appError.message, skills: prev.skills }));
+          return false;
+        }
+      }
+    })().finally(() => {
+      skillsFetchInFlight = null;
+    });
+
+    return await skillsFetchInFlight;
   },
 
   searchSkills: async (query: MarketplaceSearchQuery) => {
+    const cacheKey = getMarketplaceSearchCacheKey(query);
+    const cached = getCachedMarketplaceSearch(query);
+    if (cached) {
+      set({ ...cached, searching: false, searchError: null });
+      return;
+    }
+
     set({ searching: true, searchError: null });
     try {
-      const normalizedQueries = (Array.isArray(query) ? query : [query])
-        .map((entry) => entry.trim())
-        .filter((entry, index, entries) => entry.length > 0 || (entries.length === 1 && index === 0))
-        .filter((entry, index, entries) => entries.indexOf(entry) === index);
-
-      if (normalizedQueries.length > 1) {
-        const results = await Promise.all(normalizedQueries.map((normalizedQuery) => (
-          hostApiFetch<MarketplaceSearchResponse>('/api/skills/marketplace/search', {
-            method: 'POST',
-            body: JSON.stringify({
-              provider: DEFAULT_MARKETPLACE_PROVIDER,
-              query: normalizedQuery,
-              limit: MARKETPLACE_CATEGORY_QUERY_LIMIT,
-              locale: i18n.language,
-            }),
-          })
-        )));
-        const failed = results.find((result) => !result.success);
-        if (failed) {
-          throw normalizeAppError(new Error(failed.error || 'Search failed'), {
-            module: 'skills',
-            operation: 'search',
-          });
-        }
-        const searchResults = mergeMarketplaceSkillResults(results.map((result) => normalizeMarketplaceSkillResults(result.results)));
-        set({
-          searchResults,
-          marketplaceMeta: buildMarketplaceMetaFromAggregatedResults(results, normalizedQueries, searchResults),
-        });
-        return;
+      let searchPromise = marketplaceSearchInFlight.get(cacheKey);
+      if (!searchPromise) {
+        searchPromise = fetchMarketplaceSearchSnapshot(query);
+        marketplaceSearchInFlight.set(cacheKey, searchPromise);
       }
-
-      const normalizedQuery = normalizedQueries[0] ?? '';
-      const result = await hostApiFetch<MarketplaceSearchResponse>('/api/skills/marketplace/search', {
-        method: 'POST',
-        body: JSON.stringify({
-          provider: DEFAULT_MARKETPLACE_PROVIDER,
-          query: normalizedQuery,
-          limit: normalizedQuery.length === 0 ? MARKETPLACE_HOME_SEARCH_LIMIT : MARKETPLACE_QUERY_SEARCH_LIMIT,
-          locale: i18n.language,
-        }),
-      });
-      if (!result.success) {
-        throw normalizeAppError(new Error(result.error || 'Search failed'), {
-          module: 'skills',
-          operation: 'search',
-        });
-      }
-      const searchResults = normalizeMarketplaceSkillResults(result.results);
-      set({
-        searchResults,
-        marketplaceMeta: buildMarketplaceMetaFromResult(result, normalizedQuery, searchResults),
-      });
+      const snapshot = await searchPromise;
+      cacheMarketplaceSearch(query, snapshot);
+      set({ ...snapshot, searchError: null });
     } catch (error) {
       const appError = normalizeAppError(error, { module: 'skills', operation: 'search' });
       const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'search');
       set({ searchError: errorKey ?? appError.message });
     } finally {
+      marketplaceSearchInFlight.delete(cacheKey);
       set({ searching: false });
     }
   },
@@ -611,7 +716,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         throw new Error(errorKey ?? appError.message);
       }
       await get().setSkillsEnabled([slug], true);
-      await get().fetchSkills({ includeGateway: true });
+      await get().fetchSkills({ includeGateway: true, force: true });
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -634,7 +739,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (!result.success) {
         throw new Error(result.error || 'Uninstall failed');
       }
-      await get().fetchSkills({ includeGateway: true });
+      await get().fetchSkills({ includeGateway: true, force: true });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;

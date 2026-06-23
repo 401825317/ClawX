@@ -62,6 +62,15 @@ interface CronSessionFallbackMessage {
   isError?: boolean;
 }
 
+type CronJobsResponse = Array<ReturnType<typeof transformCronJob> & { _fromFallback?: true }>;
+
+const CRON_JOBS_ROUTE_CACHE_TTL_MS = 10_000;
+let cronJobsRouteCache: { expiresAt: number; response: CronJobsResponse } | null = null;
+
+function invalidateCronJobsRouteCache(): void {
+  cronJobsRouteCache = null;
+}
+
 function parseCronSessionKey(sessionKey: string): CronSessionKeyParts | null {
   if (!sessionKey.startsWith('agent:')) return null;
   const parts = sessionKey.split(':');
@@ -458,6 +467,12 @@ export async function handleCronRoutes(
   }
 
   if (url.pathname === '/api/cron/jobs' && req.method === 'GET') {
+    const cached = cronJobsRouteCache;
+    if (cached && Date.now() < cached.expiresAt) {
+      sendJson(res, 200, cached.response);
+      return true;
+    }
+
     try {
       let jobs: GatewayCronJob[] = [];
       let usedFallback = false;
@@ -589,7 +604,12 @@ export async function handleCronRoutes(
         }
       }
 
-      sendJson(res, 200, jobs.map((job) => ({ ...transformCronJob(job), ...(usedFallback ? { _fromFallback: true } : {}) })));
+      const response = jobs.map((job) => ({ ...transformCronJob(job), ...(usedFallback ? { _fromFallback: true as const } : {}) }));
+      cronJobsRouteCache = {
+        expiresAt: Date.now() + CRON_JOBS_ROUTE_CACHE_TTL_MS,
+        response,
+      };
+      sendJson(res, 200, response);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -627,6 +647,7 @@ export async function handleCronRoutes(
         agentId,
         delivery,
       });
+      invalidateCronJobsRouteCache();
       sendJson(res, 200, result && typeof result === 'object' ? transformCronJob(result as GatewayCronJob) : result);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -654,6 +675,7 @@ export async function handleCronRoutes(
         return true;
       }
       const result = await ctx.gatewayManager.rpc('cron.update', { id, patch });
+      invalidateCronJobsRouteCache();
       sendJson(res, 200, result && typeof result === 'object' ? transformCronJob(result as GatewayCronJob) : result);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -664,7 +686,9 @@ export async function handleCronRoutes(
   if (url.pathname.startsWith('/api/cron/jobs/') && req.method === 'DELETE') {
     try {
       const id = decodeURIComponent(url.pathname.slice('/api/cron/jobs/'.length));
-      sendJson(res, 200, await ctx.gatewayManager.rpc('cron.remove', { id }));
+      const result = await ctx.gatewayManager.rpc('cron.remove', { id });
+      invalidateCronJobsRouteCache();
+      sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -674,7 +698,9 @@ export async function handleCronRoutes(
   if (url.pathname === '/api/cron/toggle' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ id: string; enabled: boolean }>(req);
-      sendJson(res, 200, await ctx.gatewayManager.rpc('cron.update', { id: body.id, patch: { enabled: body.enabled } }));
+      const result = await ctx.gatewayManager.rpc('cron.update', { id: body.id, patch: { enabled: body.enabled } });
+      invalidateCronJobsRouteCache();
+      sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -684,7 +710,9 @@ export async function handleCronRoutes(
   if (url.pathname === '/api/cron/trigger' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ id: string }>(req);
-      sendJson(res, 200, await ctx.gatewayManager.rpc('cron.run', { id: body.id, mode: 'force' }));
+      const result = await ctx.gatewayManager.rpc('cron.run', { id: body.id, mode: 'force' });
+      invalidateCronJobsRouteCache();
+      sendJson(res, 200, result);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
