@@ -1991,11 +1991,11 @@ function ensurePluginRegistrationEnabled(config: Record<string, unknown>, plugin
   entries[pluginId] = entry;
   plugins.entries = entries;
 
-  if (Array.isArray(plugins.allow)) {
-    const allow = (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string');
-    if (!allow.includes(pluginId)) {
-      plugins.allow = [...allow, pluginId];
-    }
+  const allow = Array.isArray(plugins.allow)
+    ? (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  if (!allow.includes(pluginId)) {
+    plugins.allow = [...allow, pluginId];
   }
 
   config.plugins = plugins;

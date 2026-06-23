@@ -1862,6 +1862,7 @@ describe('syncOpenAiCompatibleImageRelay', () => {
 
     const plugins = result.plugins as Record<string, unknown>;
     const entries = plugins.entries as Record<string, unknown>;
+    expect(plugins.allow).toEqual(['clawx-openai-image']);
     expect((entries['clawx-openai-image'] as Record<string, unknown>).enabled).toBe(true);
 
     const auth = await readAuthProfiles('main');
