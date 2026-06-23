@@ -1,7 +1,9 @@
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS } from '../../electron/shared/skills/bundled-allowlist';
 
 const state = vi.hoisted(() => ({
   homeDir: '',
@@ -39,19 +41,37 @@ describe('bundled OpenClaw skill trimming', () => {
     state.openclawDir = '';
   });
 
+  it('keeps the build-time OpenClaw skill allowlist in sync with runtime trimming', async () => {
+    const scriptAllowlist = await import(pathToFileURL(join(process.cwd(), 'scripts/openclaw-bundled-skill-allowlist.mjs')).href);
+
+    expect(scriptAllowlist.UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS);
+    expect(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(expect.arrayContaining(['diagram-maker', 'summarize', 'weather']));
+  });
+
 
   it('physically trims non-allowlisted bundled skills from a bundled skills root', async () => {
     const root = mkdtempSync(join(tmpdir(), 'clawx-bundled-skills-'));
     mkdirSync(join(root, 'skill-creator'), { recursive: true });
+    mkdirSync(join(root, 'weather'), { recursive: true });
+    mkdirSync(join(root, 'diagram-maker'), { recursive: true });
+    mkdirSync(join(root, 'summarize'), { recursive: true });
     mkdirSync(join(root, 'browser-use'), { recursive: true });
     writeFileSync(join(root, 'skill-creator', 'SKILL.md'), '---\nname: skill-creator\ndescription: keep\n---\n');
+    writeFileSync(join(root, 'weather', 'SKILL.md'), '---\nname: weather\ndescription: keep\n---\n');
+    writeFileSync(join(root, 'diagram-maker', 'SKILL.md'), '---\nname: diagram-maker\ndescription: keep\n---\n');
+    writeFileSync(join(root, 'summarize', 'SKILL.md'), '---\nname: summarize\ndescription: keep\n---\n');
     writeFileSync(join(root, 'browser-use', 'SKILL.md'), '---\nname: browser-use\ndescription: remove\n---\n');
 
     const { trimBundledOpenClawSkills } = await import('@electron/utils/skill-config');
     const result = await trimBundledOpenClawSkills({ bundledSkillsRoot: root });
 
-    expect(result).toMatchObject({ removed: 1, removedSlugs: ['browser-use'], kept: ['skill-creator'] });
+    expect(result.removed).toBe(1);
+    expect(result.removedSlugs).toEqual(['browser-use']);
+    expect(result.kept).toEqual(expect.arrayContaining(['diagram-maker', 'skill-creator', 'summarize', 'weather']));
     expect(existsSync(join(root, 'skill-creator'))).toBe(true);
+    expect(existsSync(join(root, 'weather'))).toBe(true);
+    expect(existsSync(join(root, 'diagram-maker'))).toBe(true);
+    expect(existsSync(join(root, 'summarize'))).toBe(true);
     expect(existsSync(join(root, 'browser-use'))).toBe(false);
   });
 

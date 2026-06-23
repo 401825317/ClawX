@@ -10,6 +10,7 @@ import type { SkillConfigUpdates } from '../../utils/skill-config';
 import { isJunFeiAIManagedDistribution } from '../../utils/junfeiai-distribution';
 import { getSetting } from '../../utils/store';
 import { resolveSupportedLanguage, type LanguageCode } from '../../../shared/language';
+import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from '../../shared/skills/bundled-allowlist';
 
 export interface LocalSkillMarketplaceMeta {
   provider: string;
@@ -102,7 +103,7 @@ function isUserInstalledManagedSkill(
 }
 
 const MAX_SKILL_FILE_BYTES = 256_000;
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
+const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET;
 
 async function pathExists(targetPath: string): Promise<boolean> {
   try {

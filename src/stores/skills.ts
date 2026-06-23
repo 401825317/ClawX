@@ -37,7 +37,19 @@ type LocalSkillsResult = {
 };
 
 const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
+const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set([
+  'diagram-maker',
+  'healthcheck',
+  'meme-maker',
+  'session-logs',
+  'skill-creator',
+  'spike',
+  'summarize',
+  'taskflow',
+  'taskflow-inbox-triage',
+  'video-frames',
+  'weather',
+]);
 const GATEWAY_ONLY_APPENDABLE_SOURCES = new Set(['openclaw-plugin', 'openclaw-extra']);
 const MARKETPLACE_HOME_SEARCH_LIMIT = 100;
 const MARKETPLACE_QUERY_SEARCH_LIMIT = 80;
@@ -376,7 +388,7 @@ interface SkillsState {
   installing: Record<string, boolean>;
   error: string | null;
 
-  fetchSkills: () => Promise<boolean>;
+  fetchSkills: (options?: { includeGateway?: boolean }) => Promise<boolean>;
   searchSkills: (query: MarketplaceSearchQuery) => Promise<void>;
   loadMoreMarketplaceSkills: () => Promise<void>;
   installSkill: (slug: string, version?: string) => Promise<void>;
@@ -398,12 +410,15 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   installing: {},
   error: null,
 
-  fetchSkills: async () => {
+  fetchSkills: async (options?: { includeGateway?: boolean }) => {
+    const includeGateway = options?.includeGateway === true;
     if (get().skills.length === 0) {
       set({ loading: true, error: null });
     }
 
-    const gatewayDataPromise = useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status');
+    const gatewayDataPromise = includeGateway
+      ? useGatewayStore.getState().rpc<GatewaySkillsStatusResult>('skills.status')
+      : null;
 
     try {
       const localResult = await hostApiFetch<LocalSkillsResult>('/api/skills/local');
@@ -414,20 +429,28 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       const localSkills = Array.isArray(localResult.skills) ? localResult.skills : [];
       set({ skills: localSkills, loading: false, error: null });
 
-      void gatewayDataPromise
-        .then((gatewayData) => {
-          set((state) => ({
-            skills: mergeGatewaySkills(state.skills, gatewayData.skills),
-            loading: false,
-          }));
-        })
-        .catch(() => {
-          // Local data is already rendered; runtime merge is best-effort only.
-        });
+      if (gatewayDataPromise) {
+        void gatewayDataPromise
+          .then((gatewayData) => {
+            set((state) => ({
+              skills: mergeGatewaySkills(state.skills, gatewayData.skills),
+              loading: false,
+            }));
+          })
+          .catch(() => {
+            // Local data is already rendered; runtime merge is best-effort only.
+          });
+      }
 
       return true;
     } catch (error) {
       console.error('Failed to fetch local skills:', error);
+      if (!gatewayDataPromise) {
+        const appError = normalizeAppError(error, { module: 'skills', operation: 'fetch' });
+        const errorKey = mapErrorCodeToSkillErrorKey(appError.code, 'fetch');
+        set((prev) => ({ loading: false, error: errorKey ?? appError.message, skills: prev.skills }));
+        return false;
+      }
       try {
         const gatewayData = await gatewayDataPromise;
         const gatewaySkills = mergeGatewaySkills([], gatewayData.skills);
@@ -588,7 +611,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
         throw new Error(errorKey ?? appError.message);
       }
       await get().setSkillsEnabled([slug], true);
-      await get().fetchSkills();
+      await get().fetchSkills({ includeGateway: true });
     } catch (error) {
       console.error('Install error:', error);
       throw error;
@@ -611,7 +634,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
       if (!result.success) {
         throw new Error(result.error || 'Uninstall failed');
       }
-      await get().fetchSkills();
+      await get().fetchSkills({ includeGateway: true });
     } catch (error) {
       console.error('Uninstall error:', error);
       throw error;

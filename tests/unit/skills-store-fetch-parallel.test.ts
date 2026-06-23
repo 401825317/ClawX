@@ -31,7 +31,23 @@ describe('skills store local-first fetch', () => {
     vi.clearAllMocks();
   });
 
-  it('starts local and gateway requests together, then returns after local skills load', async () => {
+  it('loads local skills without touching gateway by default', async () => {
+    hostApiFetchMock.mockResolvedValueOnce({
+      success: true,
+      skills: [{ id: 'pdf', name: 'PDF', description: 'local', enabled: true }],
+    });
+
+    const { useSkillsStore } = await import('@/stores/skills');
+    useSkillsStore.setState({ skills: [], loading: false, error: null });
+
+    await expect(useSkillsStore.getState().fetchSkills()).resolves.toBe(true);
+
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/skills/local');
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(useSkillsStore.getState().skills[0]).toMatchObject({ id: 'pdf', description: 'local', enabled: true });
+  });
+
+  it('starts local and gateway requests together when runtime merge is requested', async () => {
     const gatewayDeferred = deferred<{ skills: Array<Record<string, unknown>> }>();
     const localDeferred = deferred<{ success: boolean; skills: Array<Record<string, unknown>> }>();
     rpcMock.mockReturnValueOnce(gatewayDeferred.promise);
@@ -43,7 +59,7 @@ describe('skills store local-first fetch', () => {
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.setState({ skills: [], loading: false, error: null });
 
-    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    const fetchPromise = useSkillsStore.getState().fetchSkills({ includeGateway: true });
     await Promise.resolve();
 
     expect(rpcMock).toHaveBeenCalledWith('skills.status');
@@ -80,13 +96,16 @@ describe('skills store local-first fetch', () => {
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.setState({ skills: [], loading: false, error: null });
 
-    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    const fetchPromise = useSkillsStore.getState().fetchSkills({ includeGateway: true });
     await expect(fetchPromise).resolves.toBe(true);
 
     gatewayDeferred.resolve({
       skills: [
         { skillKey: 'browser-use', slug: 'browser-use', name: 'browser-use', bundled: true, disabled: false },
+        { skillKey: 'diagram-maker', slug: 'diagram-maker', name: 'diagram-maker', bundled: true, disabled: false },
         { skillKey: 'skill-creator', slug: 'skill-creator', name: 'skill-creator', bundled: true, disabled: false },
+        { skillKey: 'summarize', slug: 'summarize', name: 'summarize', bundled: true, disabled: false },
+        { skillKey: 'weather', slug: 'weather', name: 'weather', bundled: true, disabled: false },
       ],
     });
     await Promise.resolve();
@@ -103,7 +122,7 @@ describe('skills store local-first fetch', () => {
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.setState({ skills: [], loading: false, error: null });
 
-    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    const fetchPromise = useSkillsStore.getState().fetchSkills({ includeGateway: true });
     await expect(fetchPromise).resolves.toBe(true);
 
     gatewayDeferred.resolve({
@@ -137,7 +156,7 @@ describe('skills store local-first fetch', () => {
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.setState({ skills: [], loading: false, error: null });
 
-    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    const fetchPromise = useSkillsStore.getState().fetchSkills({ includeGateway: true });
     await expect(fetchPromise).resolves.toBe(true);
 
     gatewayDeferred.resolve({
@@ -176,7 +195,7 @@ describe('skills store local-first fetch', () => {
     const { useSkillsStore } = await import('@/stores/skills');
     useSkillsStore.setState({ skills: [], loading: false, error: null });
 
-    const fetchPromise = useSkillsStore.getState().fetchSkills();
+    const fetchPromise = useSkillsStore.getState().fetchSkills({ includeGateway: true });
     await expect(fetchPromise).resolves.toBe(true);
 
     gatewayDeferred.resolve({

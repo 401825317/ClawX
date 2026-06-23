@@ -18,12 +18,12 @@
 
 import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
+import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
 
 function isJunFeiAIManagedDistribution() {
   return process.env.CLAWX_MANAGED_PROVIDER !== '0';
@@ -66,12 +66,12 @@ function trimBundledOpenClawSkills(skillsRoot) {
   if (isJunFeiAIManagedDistribution()) {
     return { removed: 0, kept: ['*'] };
   }
-  if (!fs.existsSync(skillsRoot)) return { removed: 0, kept: [...BUNDLED_OPENCLAW_SKILL_ALLOWLIST] };
+  if (!fs.existsSync(skillsRoot)) return { removed: 0, kept: [...UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET] };
 
   let removed = 0;
   for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    if (BUNDLED_OPENCLAW_SKILL_ALLOWLIST.has(entry.name)) continue;
+    if (UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET.has(entry.name)) continue;
 
     const skillDir = path.join(skillsRoot, entry.name);
     if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) continue;
@@ -79,7 +79,7 @@ function trimBundledOpenClawSkills(skillsRoot) {
     removed += 1;
   }
 
-  return { removed, kept: [...BUNDLED_OPENCLAW_SKILL_ALLOWLIST] };
+  return { removed, kept: [...UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET] };
 }
 
 function removeDirRobust(targetDir) {

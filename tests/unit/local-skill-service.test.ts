@@ -41,7 +41,7 @@ describe('local skill service', () => {
     vi.unstubAllGlobals();
   });
 
-  it('includes bundled skill-creator but filters out other bundled openclaw skills', async () => {
+  it('includes allowlisted bundled OpenClaw skills but filters out other bundled skills', async () => {
     const root = mkdtempSync(join(tmpdir(), 'clawx-local-skills-'));
     const managedRoot = join(root, 'managed');
     const bundledRoot = join(root, 'openclaw');
@@ -51,6 +51,15 @@ describe('local skill service', () => {
 
     mkdirSync(join(bundledRoot, 'skills', 'skill-creator'), { recursive: true });
     writeFileSync(join(bundledRoot, 'skills', 'skill-creator', 'SKILL.md'), '---\nname: skill-creator\ndescription: bundled creator\n---\n');
+
+    mkdirSync(join(bundledRoot, 'skills', 'weather'), { recursive: true });
+    writeFileSync(join(bundledRoot, 'skills', 'weather', 'SKILL.md'), '---\nname: weather\ndescription: bundled weather\n---\n');
+
+    mkdirSync(join(bundledRoot, 'skills', 'diagram-maker'), { recursive: true });
+    writeFileSync(join(bundledRoot, 'skills', 'diagram-maker', 'SKILL.md'), '---\nname: diagram-maker\ndescription: bundled diagrams\n---\n');
+
+    mkdirSync(join(bundledRoot, 'skills', 'summarize'), { recursive: true });
+    writeFileSync(join(bundledRoot, 'skills', 'summarize', 'SKILL.md'), '---\nname: summarize\ndescription: bundled summary\n---\n');
 
     mkdirSync(join(bundledRoot, 'skills', 'other-bundled'), { recursive: true });
     writeFileSync(join(bundledRoot, 'skills', 'other-bundled', 'SKILL.md'), '---\nname: other-bundled\ndescription: should not appear\n---\n');
@@ -63,8 +72,23 @@ describe('local skill service', () => {
     const { listLocalSkills } = await import('@electron/services/skills/local-skill-service');
     const skills = await listLocalSkills();
 
-    expect(skills.map((skill) => skill.id)).toEqual(['pdf', 'skill-creator']);
+    expect(skills.map((skill) => skill.id)).toEqual(['pdf', 'diagram-maker', 'skill-creator', 'summarize', 'weather']);
+    expect(skills.find((skill) => skill.id === 'diagram-maker')).toMatchObject({
+      source: 'openclaw-bundled',
+      isBundled: true,
+      enabled: true,
+    });
     expect(skills.find((skill) => skill.id === 'skill-creator')).toMatchObject({
+      source: 'openclaw-bundled',
+      isBundled: true,
+      enabled: true,
+    });
+    expect(skills.find((skill) => skill.id === 'summarize')).toMatchObject({
+      source: 'openclaw-bundled',
+      isBundled: true,
+      enabled: true,
+    });
+    expect(skills.find((skill) => skill.id === 'weather')).toMatchObject({
       source: 'openclaw-bundled',
       isBundled: true,
       enabled: true,

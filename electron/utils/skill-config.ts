@@ -15,8 +15,12 @@ import { cpAsyncSafe } from './plugin-install';
 import { withConfigLock } from './config-mutex';
 import { isJunFeiAIManagedDistribution } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
+import {
+    UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS,
+    UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET,
+} from '../shared/skills/bundled-allowlist';
 
-const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = new Set(['skill-creator']);
+const BUNDLED_OPENCLAW_SKILL_ALLOWLIST = UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET;
 
 export interface SkillConfigUpdates {
     enabled?: boolean;
@@ -235,7 +239,7 @@ export async function trimBundledOpenClawSkills(options?: { bundledSkillsRoot?: 
         return { removed: 0, removedSlugs: [], kept: ['*'] };
     }
     if (!existsSync(bundledSkillsRoot)) {
-        return { removed: 0, removedSlugs: [], kept: Array.from(BUNDLED_OPENCLAW_SKILL_ALLOWLIST) };
+        return { removed: 0, removedSlugs: [], kept: [...UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS] };
     }
 
     try {
@@ -258,10 +262,10 @@ export async function trimBundledOpenClawSkills(options?: { bundledSkillsRoot?: 
             removedSlugs.push(slug);
         }
 
-        return { removed, removedSlugs, kept: Array.from(BUNDLED_OPENCLAW_SKILL_ALLOWLIST) };
+        return { removed, removedSlugs, kept: [...UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS] };
     } catch (error) {
         logger.warn('Failed to trim bundled OpenClaw skills:', error);
-        return { removed: 0, removedSlugs: [], kept: Array.from(BUNDLED_OPENCLAW_SKILL_ALLOWLIST) };
+        return { removed: 0, removedSlugs: [], kept: [...UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS] };
     }
 }
 
