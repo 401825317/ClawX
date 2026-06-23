@@ -92,7 +92,13 @@ describe('chat target routing', () => {
         return { success: true, result: { runId: 'run-media' } };
       }
       if (url === '/api/media/image-generation/chat-send') {
-        return { success: true, result: { outputs: [{ path: '/tmp/generated.png' }] } };
+        return { success: true, jobId: 'job-image', job: { id: 'job-image', status: 'queued' } };
+      }
+      if (url === '/api/media/video-generation/chat-send') {
+        return { success: true, jobId: 'job-video', job: { id: 'job-video', status: 'queued' } };
+      }
+      if (url === '/api/media/generation-jobs/job-image' || url === '/api/media/generation-jobs/job-video') {
+        return { success: true, job: { id: url.endsWith('job-image') ? 'job-image' : 'job-video', status: 'succeeded' } };
       }
       return { success: true, result: {} };
     });

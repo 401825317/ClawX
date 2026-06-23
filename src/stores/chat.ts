@@ -239,6 +239,42 @@ const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
 const _sessionRunStateCache = new Map<string, SessionRunState>();
 let _sendGenerationCounter = 0;
 const _activeSendGenerationBySession = new Map<string, number>();
+
+type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+type MediaGenerationJobSnapshot = {
+  id: string;
+  status: MediaGenerationJobStatus;
+  error?: string;
+};
+type MediaGenerationSendResponse = {
+  success: boolean;
+  error?: string;
+  jobId?: string;
+  job?: MediaGenerationJobSnapshot;
+};
+
+const MEDIA_GENERATION_JOB_POLL_INTERVAL_MS = 1500;
+
+async function waitForMediaGenerationJob(jobId: string): Promise<MediaGenerationJobSnapshot> {
+  for (;;) {
+    const response = await hostApiFetch<{ success: boolean; error?: string; job?: MediaGenerationJobSnapshot }>(
+      `/api/media/generation-jobs/${encodeURIComponent(jobId)}`,
+    );
+    if (response.success === false) {
+      throw new Error(response.error || 'Failed to check media generation job');
+    }
+    if (!response.job) {
+      throw new Error('Media generation job response missing job');
+    }
+    if (response.job.status === 'succeeded') {
+      return response.job;
+    }
+    if (response.job.status === 'failed') {
+      throw new Error(response.job.error || 'Media generation failed');
+    }
+    await sleep(MEDIA_GENERATION_JOB_POLL_INTERVAL_MS);
+  }
+}
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const SESSION_LABEL_HYDRATION_BATCH_SIZE = 40;
 const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
@@ -4008,7 +4044,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (mode === 'image') {
       try {
-        const result = await hostApiFetch<{ success: boolean; error?: string }>(
+        const result = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/image-generation/chat-send',
           {
             method: 'POST',
@@ -4028,6 +4064,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         );
         if (result.success === false) {
           throw new Error(result.error || 'Failed to generate image');
+        }
+        if (result.jobId) {
+          await waitForMediaGenerationJob(result.jobId);
         }
         set({
           sending: false,
@@ -4062,7 +4101,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (mode === 'video') {
       try {
-        const result = await hostApiFetch<{ success: boolean; error?: string }>(
+        const result = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/video-generation/chat-send',
           {
             method: 'POST',
@@ -4081,6 +4120,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         );
         if (result.success === false) {
           throw new Error(result.error || 'Failed to generate video');
+        }
+        if (result.jobId) {
+          await waitForMediaGenerationJob(result.jobId);
         }
         set({
           sending: false,

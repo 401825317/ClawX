@@ -1,29 +1,17 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 
 const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
-const generateVideoForChatSessionMock = vi.fn();
-
-const testOpenClawConfigDir = join(tmpdir(), 'clawx-tests', 'video-generation-chat-send-route-openclaw');
+const enqueueMediaGenerationJobMock = vi.fn();
 
 vi.mock('@electron/api/route-utils', () => ({
   parseJsonBody: (...args: unknown[]) => parseJsonBodyMock(...args),
   sendJson: (...args: unknown[]) => sendJsonMock(...args),
 }));
 
-vi.mock('@electron/utils/paths', () => ({
-  getOpenClawConfigDir: () => testOpenClawConfigDir,
-  getOpenClawDir: () => testOpenClawConfigDir,
-  getOpenClawResolvedDir: () => testOpenClawConfigDir,
-}));
-
 vi.mock('@electron/utils/openclaw-image-generation', () => ({
   applyOpenAiImageRelaySettings: vi.fn(),
-  generateImageForChatSession: vi.fn(),
   getImageGenerationSettingsSnapshot: vi.fn(),
   listImageGenerationProvidersFromRuntime: vi.fn(),
   runImageGenerationTest: vi.fn(),
@@ -32,11 +20,15 @@ vi.mock('@electron/utils/openclaw-image-generation', () => ({
 
 vi.mock('@electron/utils/openclaw-video-generation', () => ({
   applyOpenAiVideoRelaySettings: vi.fn(),
-  generateVideoForChatSession: (...args: unknown[]) => generateVideoForChatSessionMock(...args),
   getVideoGenerationSettingsSnapshot: vi.fn(),
   listVideoGenerationProvidersFromRuntime: vi.fn(),
   runVideoGenerationTest: vi.fn(),
   setVideoGenerationConfig: vi.fn(),
+}));
+
+vi.mock('@electron/utils/media-generation-jobs', () => ({
+  enqueueMediaGenerationJob: (...args: unknown[]) => enqueueMediaGenerationJobMock(...args),
+  getMediaGenerationJob: vi.fn(),
 }));
 
 function makeReq(method = 'POST'): IncomingMessage {
@@ -53,31 +45,17 @@ function makeRes(): ServerResponse {
 describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    rmSync(testOpenClawConfigDir, { recursive: true, force: true });
-    mkdirSync(join(testOpenClawConfigDir, 'agents', 'main', 'sessions'), { recursive: true });
-    generateVideoForChatSessionMock.mockResolvedValue({
-      ok: true,
-      capability: 'video.generate',
-      transport: 'local',
-      provider: 'openai',
-      model: 'grok-image-video',
-      attempts: [],
-      outputs: [
-        {
-          url: 'https://zz-cn.lingzhiwuxian.com/v1/videos/task_abc/content?expires=86400&signature=xyz',
-          mimeType: 'video/mp4',
-          size: 456,
-        },
-      ],
-      ignoredOverrides: [],
+    enqueueMediaGenerationJobMock.mockReturnValue({
+      id: 'job-video-1',
+      kind: 'video',
+      sessionKey: 'agent:main:main',
+      status: 'queued',
+      createdAt: 1,
+      updatedAt: 1,
     });
   });
 
-  afterAll(() => {
-    rmSync(testOpenClawConfigDir, { recursive: true, force: true });
-  });
-
-  it('writes prompt and remote MEDIA video refs into the session transcript', async () => {
+  it('enqueues a video generation job and returns immediately', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       sessionKey: 'agent:main:main',
       prompt: 'make a short product video',
@@ -94,7 +72,8 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(generateVideoForChatSessionMock).toHaveBeenCalledWith({
+    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
+      kind: 'video',
       sessionKey: 'agent:main:main',
       prompt: 'make a short product video',
       size: '1280x720',
@@ -103,19 +82,9 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     });
     expect(sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
-      200,
-      expect.objectContaining({ success: true }),
+      202,
+      expect.objectContaining({ success: true, jobId: 'job-video-1' }),
     );
-
-    const sessionsJsonPath = join(testOpenClawConfigDir, 'agents', 'main', 'sessions', 'sessions.json');
-    expect(existsSync(sessionsJsonPath)).toBe(true);
-    const sessionsJson = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')) as Record<string, Record<string, unknown>>;
-    const transcriptPath = String(sessionsJson['agent:main:main']?.sessionFile);
-    expect(existsSync(transcriptPath)).toBe(true);
-    const transcript = readFileSync(transcriptPath, 'utf8');
-    expect(transcript).toContain('make a short product video');
-    expect(transcript).toContain('视频已生成。');
-    expect(transcript).toContain('MEDIA:https://zz-cn.lingzhiwuxian.com/v1/videos/task_abc/content?expires=86400&signature=xyz');
   });
 
   it('forwards image references for image-to-video requests', async () => {
@@ -141,7 +110,8 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(generateVideoForChatSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'video',
       sessionKey: 'agent:main:main',
       prompt: 'animate this frame',
       inputImages: [
@@ -152,13 +122,6 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
         },
       ],
     }));
-    expect(generateVideoForChatSessionMock.mock.calls[0]?.[0]).not.toHaveProperty('model');
-
-    const sessionsJsonPath = join(testOpenClawConfigDir, 'agents', 'main', 'sessions', 'sessions.json');
-    const sessionsJson = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')) as Record<string, Record<string, unknown>>;
-    const transcriptPath = String(sessionsJson['agent:main:main']?.sessionFile);
-    const transcript = readFileSync(transcriptPath, 'utf8');
-    expect(transcript).toContain('已基于参考图生成视频。');
-    expect(transcript).toContain('[media attached: /tmp/frame.png (image/png) | /tmp/frame.png]');
+    expect(enqueueMediaGenerationJobMock.mock.calls[0]?.[0]).not.toHaveProperty('model');
   });
 });

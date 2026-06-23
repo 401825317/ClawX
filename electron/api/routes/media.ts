@@ -12,7 +12,6 @@ import {
 import { parseJsonBody, sendJson } from '../route-utils';
 import {
   applyOpenAiImageRelaySettings,
-  generateImageForChatSession,
   getImageGenerationSettingsSnapshot,
   listImageGenerationProvidersFromRuntime,
   runImageGenerationTest,
@@ -21,14 +20,16 @@ import {
 } from '../../utils/openclaw-image-generation';
 import {
   applyOpenAiVideoRelaySettings,
-  generateVideoForChatSession,
   getVideoGenerationSettingsSnapshot,
   listVideoGenerationProvidersFromRuntime,
   runVideoGenerationTest,
   setVideoGenerationConfig,
   type VideoGenerationModelConfig,
 } from '../../utils/openclaw-video-generation';
-import { appendImageGenerationConversation } from '../../utils/chat-session-image-message';
+import {
+  enqueueMediaGenerationJob,
+  getMediaGenerationJob,
+} from '../../utils/media-generation-jobs';
 
 export async function handleMediaRoutes(
   req: IncomingMessage,
@@ -36,6 +37,17 @@ export async function handleMediaRoutes(
   url: URL,
   _ctx: HostApiContext,
 ): Promise<boolean> {
+  if (url.pathname.startsWith('/api/media/generation-jobs/') && req.method === 'GET') {
+    const jobId = decodeURIComponent(url.pathname.slice('/api/media/generation-jobs/'.length)).trim();
+    const job = jobId ? getMediaGenerationJob(jobId) : null;
+    if (!job) {
+      sendJson(res, 404, { success: false, error: 'Media generation job not found' });
+      return true;
+    }
+    sendJson(res, 200, { success: true, job });
+    return true;
+  }
+
   if (url.pathname === '/api/media/image-generation' && req.method === 'GET') {
     try {
       sendJson(res, 200, { success: true, ...(await getImageGenerationSettingsSnapshot()) });
@@ -159,7 +171,8 @@ export async function handleMediaRoutes(
           }))
         : undefined;
 
-      const result = await generateImageForChatSession({
+      const job = enqueueMediaGenerationJob({
+        kind: 'image',
         sessionKey,
         prompt,
         model: body.model?.trim(),
@@ -167,19 +180,7 @@ export async function handleMediaRoutes(
         quality: body.quality,
         inputImages,
       });
-      const outputPaths = result.outputs.map((output) => output.path);
-      const inputPaths = (inputImages ?? []).map((image) => image.filePath);
-      const usedEditInput = inputPaths.length > 0;
-
-      await appendImageGenerationConversation({
-        sessionKey,
-        prompt,
-        outputPaths,
-        inputPaths,
-        summaryText: usedEditInput ? '图片已修改。' : '图片已生成。',
-      });
-
-      sendJson(res, 200, { success: true, result });
+      sendJson(res, 202, { success: true, jobId: job.id, job });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -310,7 +311,8 @@ export async function handleMediaRoutes(
           }))
         : undefined;
 
-      const result = await generateVideoForChatSession({
+      const job = enqueueMediaGenerationJob({
+        kind: 'video',
         sessionKey,
         prompt,
         size: body.size?.trim(),
@@ -319,21 +321,8 @@ export async function handleMediaRoutes(
           : undefined,
         inputImages,
       });
-      const outputLocations = result.outputs
-        .map((output) => output.path || output.url || '')
-        .filter((value) => value.trim().length > 0);
-      const inputPaths = (inputImages ?? []).map((image) => image.filePath);
-      const usedImageInput = inputPaths.length > 0;
 
-      await appendImageGenerationConversation({
-        sessionKey,
-        prompt,
-        outputPaths: outputLocations,
-        inputPaths,
-        summaryText: usedImageInput ? '已基于参考图生成视频。' : '视频已生成。',
-      });
-
-      sendJson(res, 200, { success: true, result });
+      sendJson(res, 202, { success: true, jobId: job.id, job });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

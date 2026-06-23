@@ -46,12 +46,14 @@ const mainProcessBundledPackages = new Set([
 
 function copyGatewayStaticScripts(): Plugin {
   const sourceDir = resolve(__dirname, 'electron/gateway');
+  const electronDir = resolve(__dirname, 'electron');
   const outputDir = resolve(__dirname, 'dist-electron/main');
   const files = [
     'gateway-child-process-patch.cjs',
     'gateway-entry-wrapper.cjs',
     'gateway-fetch-preload.cjs',
   ];
+  const electronFiles = ['media-generation-worker.cjs'];
 
   return {
     name: 'copy-gateway-static-scripts',
@@ -59,6 +61,9 @@ function copyGatewayStaticScripts(): Plugin {
       mkdirSync(outputDir, { recursive: true });
       for (const file of files) {
         copyFileSync(resolve(sourceDir, file), resolve(outputDir, file));
+      }
+      for (const file of electronFiles) {
+        copyFileSync(resolve(electronDir, file), resolve(outputDir, file));
       }
     },
   };
@@ -120,6 +125,17 @@ export default defineConfig(({ mode }) => {
               outDir: 'dist-electron/preload',
               rollupOptions: {
                 external: ['electron'],
+              },
+            },
+          },
+        },
+        {
+          entry: 'electron/utils/media-generation-worker-entry.ts',
+          vite: {
+            build: {
+              outDir: 'dist-electron/main',
+              rollupOptions: {
+                external: isMainProcessExternal,
               },
             },
           },
