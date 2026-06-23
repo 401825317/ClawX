@@ -47,6 +47,7 @@ import {
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import { acquireProcessInstanceFileLock } from './process-instance-lock';
+import { shouldDisableHardwareAcceleration } from './hardware-acceleration';
 import { ensureBuiltinSkillsInstalled, removeClawXPreinstalledSkillsAndConfigs, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
 import { ensureWeChatPluginInstalled } from '../utils/plugin-install';
 
@@ -116,21 +117,18 @@ if (portableModeInfo.enabled && portableModeInfo.clawxDataDir) {
   app.setPath('userData', resolveLegacyUserDataPath());
 }
 
-// Disable GPU hardware acceleration globally for maximum stability across
-// all GPU configurations (no GPU, integrated, discrete).
-//
-// Rationale (following VS Code's philosophy):
-// - Page/file loading is async data fetching — zero GPU dependency.
-// - The original per-platform GPU branching was added to avoid CPU rendering
-//   competing with sync I/O on Windows, but all file I/O is now async
-//   (fs/promises), so that concern no longer applies.
-// - Software rendering is deterministic across all hardware; GPU compositing
-//   behaviour varies between vendors (Intel, AMD, NVIDIA, Apple Silicon) and
-//   driver versions, making it the #1 source of rendering bugs in Electron.
-//
-// Users who want GPU acceleration can pass `--enable-gpu` on the CLI or
-// set `"disable-hardware-acceleration": false` in the app config (future).
-app.disableHardwareAcceleration();
+// Windows keeps GPU acceleration enabled by default so Chromium can composite
+// large Markdown/history views without pushing all rendering work onto the CPU.
+// Non-Windows keeps the previous software-rendering default. Users can override
+// with CLAWX_DISABLE_GPU/UCLAW_DISABLE_GPU or --disable-gpu, and can opt in on
+// other platforms with CLAWX_ENABLE_GPU/UCLAW_ENABLE_GPU or --enable-gpu.
+if (shouldDisableHardwareAcceleration({
+  platform: process.platform,
+  env: process.env,
+  hasSwitch: (name) => app.commandLine.hasSwitch(name),
+})) {
+  app.disableHardwareAcceleration();
+}
 
 // On Linux, set CHROME_DESKTOP so Chromium can find the correct .desktop file.
 // On Wayland this maps the running window to clawx.desktop (→ icon + app grouping);

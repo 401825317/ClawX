@@ -86,4 +86,56 @@ describe('token usage session scan', () => {
       ]),
     );
   });
+
+  it('reuses a recent usage scan instead of rereading transcripts immediately', async () => {
+    const openclawDir = join(testHome, '.openclaw');
+    await mkdir(openclawDir, { recursive: true });
+    await writeFile(join(openclawDir, 'openclaw.json'), JSON.stringify({
+      agents: {
+        list: [
+          { id: 'main', name: 'Main', default: true },
+        ],
+      },
+    }, null, 2), 'utf8');
+
+    const sessionsDir = join(openclawDir, 'agents', 'main', 'sessions');
+    const transcriptPath = join(sessionsDir, 'cached-session.jsonl');
+    await mkdir(sessionsDir, { recursive: true });
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        type: 'message',
+        timestamp: '2026-03-12T12:19:00.000Z',
+        message: {
+          role: 'assistant',
+          model: 'gpt-5',
+          provider: 'openai',
+          usage: { total: 100 },
+        },
+      }),
+      'utf8',
+    );
+
+    const { getRecentTokenUsageHistory } = await import('@electron/utils/token-usage');
+    const firstEntries = await getRecentTokenUsageHistory(10);
+    expect(firstEntries[0]).toMatchObject({ totalTokens: 100 });
+
+    await writeFile(
+      transcriptPath,
+      JSON.stringify({
+        type: 'message',
+        timestamp: '2026-03-12T12:20:00.000Z',
+        message: {
+          role: 'assistant',
+          model: 'gpt-5',
+          provider: 'openai',
+          usage: { total: 200 },
+        },
+      }),
+      'utf8',
+    );
+
+    const secondEntries = await getRecentTokenUsageHistory(10);
+    expect(secondEntries[0]).toMatchObject({ totalTokens: 100 });
+  });
 });

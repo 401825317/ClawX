@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { openSync, closeSync, fstatSync, readSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getOpenClawConfigDir } from '../../utils/paths';
 import {
@@ -16,8 +16,11 @@ const RECENT_TRANSCRIPT_INITIAL_READ_BYTES = 256 * 1024;
 const RECENT_TRANSCRIPT_MAX_READ_BYTES = 8 * 1024 * 1024;
 const RECENT_TRANSCRIPT_MAX_SCAN_LINES = 5_000;
 const SESSION_SUMMARY_MAX_KEYS = 80;
-const SESSION_SUMMARY_CONCURRENCY = 4;
+const SESSION_SUMMARY_CONCURRENCY = 2;
 const SESSION_SUMMARY_RECENT_MESSAGE_LIMIT = 500;
+const TRANSCRIPT_CACHE_TTL_MS = 2_000;
+const TRANSCRIPT_CACHE_MAX_ENTRIES = 96;
+const TRANSCRIPT_FILE_READ_CONCURRENCY = 2;
 
 type SessionSummary = {
   sessionKey: string;
@@ -31,10 +34,103 @@ type TranscriptMessage = {
   timestamp?: unknown;
 };
 
+type TranscriptCacheEntry = {
+  mtimeMs: number;
+  size: number;
+  messages: TranscriptMessage[];
+  createdAt: number;
+};
+
 type ParsedTranscriptLine = {
   type?: string;
   message?: TranscriptMessage;
 };
+
+const transcriptMessageCache = new Map<string, TranscriptCacheEntry>();
+let transcriptFileReadsInFlight = 0;
+const transcriptFileReadQueue: Array<() => void> = [];
+
+function transcriptCacheKey(kind: 'head' | 'tail', transcriptPath: string, limit: number): string {
+  return `${kind}:${limit}:${transcriptPath}`;
+}
+
+function pruneTranscriptMessageCache(now = Date.now()): void {
+  for (const [key, entry] of transcriptMessageCache) {
+    if (now - entry.createdAt > TRANSCRIPT_CACHE_TTL_MS) {
+      transcriptMessageCache.delete(key);
+    }
+  }
+
+  while (transcriptMessageCache.size > TRANSCRIPT_CACHE_MAX_ENTRIES) {
+    const oldestKey = transcriptMessageCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    transcriptMessageCache.delete(oldestKey);
+  }
+}
+
+async function acquireTranscriptFileReadSlot(): Promise<void> {
+  if (transcriptFileReadsInFlight < TRANSCRIPT_FILE_READ_CONCURRENCY) {
+    transcriptFileReadsInFlight += 1;
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    transcriptFileReadQueue.push(resolve);
+  });
+}
+
+function releaseTranscriptFileReadSlot(): void {
+  const next = transcriptFileReadQueue.shift();
+  if (next) {
+    next();
+    return;
+  }
+
+  transcriptFileReadsInFlight = Math.max(0, transcriptFileReadsInFlight - 1);
+}
+
+async function withTranscriptFileReadLimit<T>(task: () => Promise<T>): Promise<T> {
+  await acquireTranscriptFileReadSlot();
+  try {
+    return await task();
+  } finally {
+    releaseTranscriptFileReadSlot();
+  }
+}
+
+async function getCachedTranscriptMessages(
+  key: string,
+  stat: { mtimeMs: number; size: number },
+): Promise<TranscriptMessage[] | null> {
+  const entry = transcriptMessageCache.get(key);
+  if (!entry) return null;
+  const now = Date.now();
+  if (
+    now - entry.createdAt > TRANSCRIPT_CACHE_TTL_MS
+    || entry.mtimeMs !== stat.mtimeMs
+    || entry.size !== stat.size
+  ) {
+    transcriptMessageCache.delete(key);
+    return null;
+  }
+  transcriptMessageCache.delete(key);
+  transcriptMessageCache.set(key, entry);
+  return entry.messages.map((message) => ({ ...message }));
+}
+
+function setCachedTranscriptMessages(
+  key: string,
+  stat: { mtimeMs: number; size: number },
+  messages: TranscriptMessage[],
+): void {
+  transcriptMessageCache.set(key, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    messages: messages.map((message) => ({ ...message })),
+    createdAt: Date.now(),
+  });
+  pruneTranscriptMessageCache();
+}
 
 function extractMessageText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -135,51 +231,64 @@ function parseMessagesFromHeadChunk(chunk: string, readEnd: number, fileSize: nu
   return collected;
 }
 
-function readRecentTranscriptMessages(transcriptPath: string, limit: number): TranscriptMessage[] {
+async function readRecentTranscriptMessages(transcriptPath: string, limit: number): Promise<TranscriptMessage[]> {
   const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
-  let fd: number | null = null;
-  try {
-    fd = openSync(transcriptPath, 'r');
-    const size = fstatSync(fd).size;
-    if (size === 0) return [];
+  return await withTranscriptFileReadLimit(async () => {
+    const handle = await open(transcriptPath, 'r');
+    try {
+      const stat = await handle.stat();
+      const size = stat.size;
+      const cacheKey = transcriptCacheKey('tail', transcriptPath, boundedLimit);
+      const cached = await getCachedTranscriptMessages(cacheKey, stat);
+      if (cached) return cached;
+      if (size === 0) return [];
 
-    let readBytes = Math.min(size, Math.max(RECENT_TRANSCRIPT_INITIAL_READ_BYTES, boundedLimit * 2048));
-    while (readBytes <= size) {
-      const readStart = Math.max(0, size - readBytes);
-      const readLen = size - readStart;
-      const buffer = Buffer.allocUnsafe(readLen);
-      readSync(fd, buffer, 0, readLen, readStart);
-      const messages = parseRecentMessagesFromTailChunk(buffer.toString('utf8'), readStart, boundedLimit);
-      if (
-        messages.length >= boundedLimit
-        || readStart === 0
-        || readBytes >= RECENT_TRANSCRIPT_MAX_READ_BYTES
-      ) {
-        return messages;
+      let readBytes = Math.min(size, Math.max(RECENT_TRANSCRIPT_INITIAL_READ_BYTES, boundedLimit * 2048));
+      while (readBytes <= size) {
+        const readStart = Math.max(0, size - readBytes);
+        const readLen = size - readStart;
+        const buffer = Buffer.allocUnsafe(readLen);
+        await handle.read(buffer, 0, readLen, readStart);
+        const messages = parseRecentMessagesFromTailChunk(buffer.toString('utf8'), readStart, boundedLimit);
+        if (
+          messages.length >= boundedLimit
+          || readStart === 0
+          || readBytes >= RECENT_TRANSCRIPT_MAX_READ_BYTES
+        ) {
+          setCachedTranscriptMessages(cacheKey, stat, messages);
+          return messages;
+        }
+        readBytes = Math.min(size, readBytes * 2);
       }
-      readBytes = Math.min(size, readBytes * 2);
+      return [];
+    } finally {
+      await handle.close();
     }
-    return [];
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
+  });
 }
 
-function readTranscriptHeadMessages(transcriptPath: string, limit: number): TranscriptMessage[] {
+async function readTranscriptHeadMessages(transcriptPath: string, limit: number): Promise<TranscriptMessage[]> {
   const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
-  let fd: number | null = null;
-  try {
-    fd = openSync(transcriptPath, 'r');
-    const size = fstatSync(fd).size;
-    if (size === 0) return [];
+  return await withTranscriptFileReadLimit(async () => {
+    const handle = await open(transcriptPath, 'r');
+    try {
+      const stat = await handle.stat();
+      const size = stat.size;
+      const cacheKey = transcriptCacheKey('head', transcriptPath, boundedLimit);
+      const cached = await getCachedTranscriptMessages(cacheKey, stat);
+      if (cached) return cached;
+      if (size === 0) return [];
 
-    const readLen = Math.min(size, RECENT_TRANSCRIPT_INITIAL_READ_BYTES);
-    const buffer = Buffer.allocUnsafe(readLen);
-    readSync(fd, buffer, 0, readLen, 0);
-    return parseMessagesFromHeadChunk(buffer.toString('utf8'), readLen, size, boundedLimit);
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
+      const readLen = Math.min(size, RECENT_TRANSCRIPT_INITIAL_READ_BYTES);
+      const buffer = Buffer.allocUnsafe(readLen);
+      await handle.read(buffer, 0, readLen, 0);
+      const messages = parseMessagesFromHeadChunk(buffer.toString('utf8'), readLen, size, boundedLimit);
+      setCachedTranscriptMessages(cacheKey, stat, messages);
+      return messages;
+    } finally {
+      await handle.close();
+    }
+  });
 }
 
 function summarizeTranscriptMessages(
@@ -307,8 +416,10 @@ async function loadSessionSummary(sessionKey: string): Promise<SessionSummary> {
       return { sessionKey, firstUserText: null, lastTimestamp: null };
     }
 
-    const firstMessages = readTranscriptHeadMessages(transcriptPath, SESSION_SUMMARY_RECENT_MESSAGE_LIMIT);
-    const recentMessages = readRecentTranscriptMessages(transcriptPath, SESSION_SUMMARY_RECENT_MESSAGE_LIMIT);
+    const [firstMessages, recentMessages] = await Promise.all([
+      readTranscriptHeadMessages(transcriptPath, SESSION_SUMMARY_RECENT_MESSAGE_LIMIT),
+      readRecentTranscriptMessages(transcriptPath, SESSION_SUMMARY_RECENT_MESSAGE_LIMIT),
+    ]);
     return summarizeTranscriptMessages(sessionKey, firstMessages, recentMessages);
   } catch {
     return { sessionKey, firstUserText: null, lastTimestamp: null };
@@ -345,7 +456,7 @@ async function loadSessionTranscriptByKey(sessionKey: string, limit: number): Pr
     const transcriptPath = resolveSessionTranscriptPathByKey(sessionKey, sessionsDir, sessionsJson);
     if (!transcriptPath) return null;
 
-    return readRecentTranscriptMessages(transcriptPath, limit);
+    return await readRecentTranscriptMessages(transcriptPath, limit);
   } catch {
     return null;
   }
@@ -409,7 +520,7 @@ export async function handleSessionRoutes(
       }
 
       const transcriptPath = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions', `${sessionId}.jsonl`);
-      const messages = readRecentTranscriptMessages(transcriptPath, limit);
+      const messages = await readRecentTranscriptMessages(transcriptPath, limit);
 
       sendJson(res, 200, { success: true, messages });
     } catch (error) {
