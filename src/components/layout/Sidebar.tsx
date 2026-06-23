@@ -3,8 +3,8 @@
  * Navigation sidebar with menu items.
  * No longer fixed - sits inside the flex layout below the title bar.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Network,
   Bot,
@@ -45,6 +45,7 @@ import { useTranslation } from 'react-i18next';
 import logoPng from '@/assets/logo-uclaw.png';
 import { AnnouncementBell } from '@/components/client/AnnouncementBell';
 import { SupportContactButton } from '@/components/client/SupportContactButton';
+import type { ChatSession } from '@/stores/chat/types';
 
 interface NavItemProps {
   to: string;
@@ -56,22 +57,33 @@ interface NavItemProps {
   testId?: string;
 }
 
-function NavItem({ to, icon, label, badge, collapsed, onClick, testId }: NavItemProps) {
+function isRouteActive(pathname: string, targetPath: string): boolean {
+  if (targetPath === '/') return pathname === '/';
+  return pathname === targetPath || pathname.startsWith(`${targetPath}/`);
+}
+
+const NavItem = memo(function NavItem({ to, icon, label, badge, collapsed, onClick, testId }: NavItemProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const isActive = isRouteActive(location.pathname, to);
+
   return (
-    <NavLink
-      to={to}
-      onClick={onClick}
+    <button
+      type="button"
+      onClick={() => {
+        onClick?.();
+        startTransition(() => {
+          navigate(to);
+        });
+      }}
       data-testid={testId}
-      className={({ isActive }) =>
-        cn(
-          'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors',
-          'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
-          isActive
-            ? 'bg-black/5 dark:bg-white/10 text-foreground'
-            : '',
-          collapsed && 'justify-center px-0'
-        )
-      }
+      aria-current={isActive ? 'page' : undefined}
+      className={cn(
+        'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors',
+        'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
+        isActive ? 'bg-black/5 dark:bg-white/10 text-foreground' : '',
+        collapsed && 'justify-center px-0',
+      )}
     >
       <>
         <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
@@ -88,9 +100,9 @@ function NavItem({ to, icon, label, badge, collapsed, onClick, testId }: NavItem
           </>
         )}
       </>
-    </NavLink>
+    </button>
   );
-}
+});
 
 const INITIAL_NOW_MS = Date.now();
 const DEFAULT_EXPANDED_SESSION_BUCKETS: Record<SessionBucketKey, boolean> = {
@@ -106,7 +118,313 @@ function getAgentIdFromSessionKey(sessionKey: string): string {
   return agentId || 'main';
 }
 
-export function Sidebar() {
+type SessionBucketGroup = {
+  key: SessionBucketKey;
+  label: string;
+  sessions: ChatSession[];
+};
+
+function resolveSessionLabel(
+  sessionLabels: Record<string, string>,
+  key: string,
+  displayName?: string,
+  label?: string,
+): string {
+  return sessionLabels[key] ?? label ?? displayName ?? key;
+}
+
+const SessionRow = memo(function SessionRow({
+  session,
+  sessionLabel,
+  agentName,
+  labels,
+  isActive,
+  isEditing,
+  editingLabel,
+  onClick,
+  onStartRename,
+  onEditingLabelChange,
+  onRenameKeyDown,
+  onRenameSubmit,
+  onRenameCancel,
+  onDelete,
+}: {
+  session: ChatSession;
+  sessionLabel: string;
+  agentName: string;
+  labels: {
+    renamePlaceholder: string;
+    saveRename: string;
+    cancelRename: string;
+    rename: string;
+    delete: string;
+  };
+  isActive: boolean;
+  isEditing: boolean;
+  editingLabel: string;
+  onClick: (sessionKey: string) => void;
+  onStartRename: (key: string, currentLabel: string) => void;
+  onEditingLabelChange: (value: string) => void;
+  onRenameKeyDown: (event: React.KeyboardEvent) => void;
+  onRenameSubmit: () => void;
+  onRenameCancel: () => void;
+  onDelete: (session: { key: string; label: string }) => void;
+}) {
+  if (isEditing) {
+    return (
+      <div className="group relative flex items-center">
+        <div className="flex w-full items-center gap-1 px-1.5 py-1">
+          <Input
+            autoFocus
+            value={editingLabel}
+            onChange={(event) => onEditingLabelChange(event.target.value)}
+            onKeyDown={onRenameKeyDown}
+            onBlur={onRenameSubmit}
+            className="h-7 min-w-0 flex-1 text-meta"
+            aria-label={labels.renamePlaceholder}
+          />
+          <button
+            aria-label={labels.saveRename}
+            onMouseDown={(event) => { event.preventDefault(); onRenameSubmit(); }}
+            className="flex shrink-0 items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground"
+          >
+            <Check className="h-3.5 w-3.5" />
+          </button>
+          <button
+            aria-label={labels.cancelRename}
+            onMouseDown={(event) => { event.preventDefault(); onRenameCancel(); }}
+            className="flex shrink-0 items-center justify-center rounded p-0.5 text-muted-foreground hover:text-destructive"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group relative flex items-center">
+      <button
+        data-testid={`sidebar-session-${session.key}`}
+        onClick={() => onClick(session.key)}
+        onDoubleClick={() => onStartRename(session.key, sessionLabel)}
+        className={cn(
+          'w-full text-left rounded-lg px-2.5 py-1.5 text-meta transition-colors pr-16',
+          'hover:bg-black/5 dark:hover:bg-white/5',
+          isActive
+            ? 'bg-black/5 dark:bg-white/10 text-foreground font-medium'
+            : 'text-foreground/75',
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-2xs font-medium text-foreground/70 dark:bg-white/[0.08]">
+            {agentName}
+          </span>
+          <span className="truncate">{sessionLabel}</span>
+        </div>
+      </button>
+      <div className={cn(
+        'absolute right-1 flex items-center gap-0.5 transition-opacity',
+        'opacity-0 group-hover:opacity-100',
+      )}>
+        <button
+          aria-label={labels.rename}
+          onClick={(event) => {
+            event.stopPropagation();
+            onStartRename(session.key, sessionLabel);
+          }}
+          className="flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+        <button
+          aria-label={labels.delete}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete({
+              key: session.key,
+              label: sessionLabel,
+            });
+          }}
+          className="flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+});
+
+const SessionHistoryList = memo(function SessionHistoryList({
+  buckets,
+  expandedBuckets,
+  activeSessionKey,
+  sessionLabels,
+  agentNameById,
+  editingSessionKey,
+  editingLabel,
+  onToggleBucket,
+  onSessionClick,
+  onStartRename,
+  onEditingLabelChange,
+  onRenameKeyDown,
+  onRenameSubmit,
+  onRenameCancel,
+  onDeleteSession,
+}: {
+  buckets: SessionBucketGroup[];
+  expandedBuckets: Record<SessionBucketKey, boolean>;
+  activeSessionKey: string | null;
+  sessionLabels: Record<string, string>;
+  agentNameById: Record<string, string>;
+  editingSessionKey: string | null;
+  editingLabel: string;
+  onToggleBucket: (bucketKey: SessionBucketKey) => void;
+  onSessionClick: (sessionKey: string) => void;
+  onStartRename: (key: string, currentLabel: string) => void;
+  onEditingLabelChange: (value: string) => void;
+  onRenameKeyDown: (event: React.KeyboardEvent) => void;
+  onRenameSubmit: () => void;
+  onRenameCancel: () => void;
+  onDeleteSession: (session: { key: string; label: string }) => void;
+}) {
+  const { t } = useTranslation(['common']);
+  const rowLabels = useMemo(() => ({
+    renamePlaceholder: t('common:sidebar.renameSessionPlaceholder'),
+    saveRename: t('common:sidebar.saveSessionRename'),
+    cancelRename: t('common:sidebar.cancelSessionRename'),
+    rename: t('common:sidebar.renameSession'),
+    delete: t('common:sidebar.deleteSession'),
+  }), [t]);
+
+  return (
+    <div className="mt-4 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 space-y-1">
+      {buckets.map((bucket) => {
+        const isBucketExpanded = expandedBuckets[bucket.key] ?? false;
+        return (
+          <div key={bucket.key} data-testid={`session-bucket-${bucket.key}`} className="pt-2">
+            <button
+              type="button"
+              data-testid={`session-bucket-toggle-${bucket.key}`}
+              aria-expanded={isBucketExpanded}
+              onClick={() => onToggleBucket(bucket.key)}
+              className={cn(
+                'flex w-full items-center gap-1 rounded-md px-2.5 py-1 text-left text-tiny font-medium',
+                'text-muted-foreground/60 tracking-tight transition-colors',
+                'hover:bg-black/5 hover:text-muted-foreground dark:hover:bg-white/5',
+              )}
+            >
+              <ChevronRight
+                className={cn(
+                  'h-3 w-3 shrink-0 transition-transform',
+                  isBucketExpanded && 'rotate-90',
+                )}
+              />
+              <span>{bucket.label}</span>
+            </button>
+            {isBucketExpanded && bucket.sessions.map((session) => {
+              const agentId = getAgentIdFromSessionKey(session.key);
+              const sessionLabel = resolveSessionLabel(sessionLabels, session.key, session.displayName, session.label);
+              return (
+                <SessionRow
+                  key={session.key}
+                  session={session}
+                  sessionLabel={sessionLabel}
+                  agentName={agentNameById[agentId] || agentId}
+                  labels={rowLabels}
+                  isActive={activeSessionKey === session.key}
+                  isEditing={editingSessionKey === session.key}
+                  editingLabel={editingLabel}
+                  onClick={onSessionClick}
+                  onStartRename={onStartRename}
+                  onEditingLabelChange={onEditingLabelChange}
+                  onRenameKeyDown={onRenameKeyDown}
+                  onRenameSubmit={onRenameSubmit}
+                  onRenameCancel={onRenameCancel}
+                  onDelete={onDeleteSession}
+                />
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+const SidebarNavigation = memo(function SidebarNavigation({ collapsed }: { collapsed: boolean }) {
+  const navigate = useNavigate();
+  const newSession = useChatStore((state) => state.newSession);
+  const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
+  const { t } = useTranslation(['common', 'chat']);
+  const hiddenRoutes = useMemo(() => rendererExtensionRegistry.getHiddenRoutes(), []);
+  const extraNavItems = useMemo(() => rendererExtensionRegistry.getExtraNavItems(), []);
+  const navItems = useMemo(() => {
+    const coreNavItems = [
+      { to: '/models', icon: <Cpu className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.models'), testId: 'sidebar-nav-models' },
+      { to: '/agents', icon: <Bot className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.agents'), testId: 'sidebar-nav-agents' },
+      { to: '/channels', icon: <Network className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.channels'), testId: 'sidebar-nav-channels' },
+      { to: '/skills', icon: <Puzzle className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.skills'), testId: 'sidebar-nav-skills' },
+      { to: '/recharge', icon: <CreditCard className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.recharge'), testId: 'sidebar-nav-recharge' },
+      { to: '/cron', icon: <Clock className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
+      ...(devModeUnlocked
+        ? [
+          { to: '/image-generation', icon: <ImagePlus className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.imageGeneration'), testId: 'sidebar-nav-image-generation' },
+          { to: '/video-generation', icon: <Video className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.videoGeneration', 'Video Generation'), testId: 'sidebar-nav-video-generation' },
+          { to: '/dreams', icon: <Moon className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.openClawDreams'), testId: 'sidebar-nav-dreams' },
+        ]
+        : []),
+    ];
+
+    return [
+      ...coreNavItems.filter((item) => !hiddenRoutes.has(item.to)),
+      ...extraNavItems.map((item) => ({
+        to: item.to,
+        icon: <item.icon className="h-4 w-4" strokeWidth={2} />,
+        label: item.labelI18nKey ? t(item.labelI18nKey) : item.label,
+        testId: item.testId,
+      })),
+    ];
+  }, [devModeUnlocked, extraNavItems, hiddenRoutes, t]);
+
+  const handleNewChat = useCallback(() => {
+    const { messages } = useChatStore.getState();
+    if (messages.length > 0) newSession();
+    startTransition(() => {
+      navigate('/');
+    });
+  }, [navigate, newSession]);
+
+  return (
+    <nav className="flex flex-col gap-1 px-2">
+      <button
+        type="button"
+        data-testid="sidebar-new-chat"
+        onClick={handleNewChat}
+        className={cn(
+          'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-2 transition-colors',
+          'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
+          collapsed && 'justify-center px-0',
+        )}
+      >
+        <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
+          <Plus className="h-4 w-4" strokeWidth={2} />
+        </div>
+        {!collapsed && <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">{t('sidebar.newChat')}</span>}
+      </button>
+
+      {navItems.map((item) => (
+        <NavItem
+          key={item.to}
+          {...item}
+          collapsed={collapsed}
+        />
+      ))}
+    </nav>
+  );
+});
+
+function SidebarComponent() {
   const isMac = window.electron?.platform === 'darwin';
   const sidebarCollapsed = useSettingsStore((state) => state.sidebarCollapsed);
   const setSidebarCollapsed = useSettingsStore((state) => state.setSidebarCollapsed);
@@ -121,7 +439,6 @@ export function Sidebar() {
   const sessionLabels = useChatStore((s) => s.sessionLabels);
   const sessionLastActivity = useChatStore((s) => s.sessionLastActivity);
   const switchSession = useChatStore((s) => s.switchSession);
-  const newSession = useChatStore((s) => s.newSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const loadSessions = useChatStore((s) => s.loadSessions);
@@ -161,10 +478,6 @@ export function Sidebar() {
   }, [isMac, sidebarCollapsed]);
 
   const navigate = useNavigate();
-  const isOnChat = useLocation().pathname === '/';
-
-  const getSessionLabel = (key: string, displayName?: string, label?: string) =>
-    sessionLabels[key] ?? label ?? displayName ?? key;
 
   const openControlUi = async (path: string, label: string) => {
     try {
@@ -204,15 +517,19 @@ export function Sidebar() {
   }, []);
 
   useEffect(() => {
-    void fetchAgents();
-  }, [fetchAgents]);
+    if (agents.length > 0) return;
+    const timer = window.setTimeout(() => {
+      void fetchAgents({ quiet: true });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [agents.length, fetchAgents]);
 
-  const handleStartRename = (key: string, currentLabel: string) => {
+  const handleStartRename = useCallback((key: string, currentLabel: string) => {
     setEditingSessionKey(key);
     setEditingLabel(currentLabel);
-  };
+  }, []);
 
-  const handleRenameSubmit = async () => {
+  const handleRenameSubmit = useCallback(async () => {
     if (!editingSessionKey || !editingLabel.trim()) {
       setEditingSessionKey(null);
       return;
@@ -223,27 +540,42 @@ export function Sidebar() {
       console.error('Failed to rename session:', err);
     }
     setEditingSessionKey(null);
-  };
+  }, [editingLabel, editingSessionKey, renameSession]);
 
-  const handleRenameCancel = () => {
+  const handleRenameCancel = useCallback(() => {
     setEditingSessionKey(null);
-  };
+  }, []);
 
-  const handleRenameKeyDown = (e: React.KeyboardEvent) => {
+  const handleRenameKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       e.preventDefault();
       void handleRenameSubmit();
     } else if (e.key === 'Escape') {
       handleRenameCancel();
     }
-  };
+  }, [handleRenameCancel, handleRenameSubmit]);
 
-  const toggleSessionBucket = (bucketKey: SessionBucketKey) => {
+  const toggleSessionBucket = useCallback((bucketKey: SessionBucketKey) => {
     setExpandedSessionBuckets((current) => ({
       ...current,
       [bucketKey]: !current[bucketKey],
     }));
-  };
+  }, []);
+
+  const handleSessionClick = useCallback((sessionKey: string) => {
+    if (currentSessionKey === sessionKey) {
+      void loadHistory(false);
+    } else {
+      switchSession(sessionKey);
+    }
+    startTransition(() => {
+      navigate('/');
+    });
+  }, [currentSessionKey, loadHistory, navigate, switchSession]);
+
+  const submitRenameFromList = useCallback(() => {
+    void handleRenameSubmit();
+  }, [handleRenameSubmit]);
 
   const stopResizing = useCallback(() => {
     stopResizeRef.current?.();
@@ -288,8 +620,8 @@ export function Sidebar() {
     () => Object.fromEntries((agents ?? []).map((agent) => [agent.id, agent.name])),
     [agents],
   );
-  const sessionBuckets = useMemo<Array<{ key: SessionBucketKey; label: string; sessions: typeof sessions }>>(() => {
-    const buckets: Array<{ key: SessionBucketKey; label: string; sessions: typeof sessions }> = [
+  const sessionBuckets = useMemo<SessionBucketGroup[]>(() => {
+    const buckets: SessionBucketGroup[] = [
       { key: 'today', label: t('chat:historyBuckets.today'), sessions: [] },
       { key: 'withinWeek', label: t('chat:historyBuckets.withinWeek'), sessions: [] },
       { key: 'withinMonth', label: t('chat:historyBuckets.withinMonth'), sessions: [] },
@@ -312,35 +644,6 @@ export function Sidebar() {
 
     return buckets;
   }, [sessions, sessionLastActivity, nowMs, t]);
-
-  const hiddenRoutes = rendererExtensionRegistry.getHiddenRoutes();
-  const extraNavItems = rendererExtensionRegistry.getExtraNavItems();
-
-  const coreNavItems = [
-    { to: '/models', icon: <Cpu className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.models'), testId: 'sidebar-nav-models' },
-    { to: '/agents', icon: <Bot className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.agents'), testId: 'sidebar-nav-agents' },
-    { to: '/channels', icon: <Network className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.channels'), testId: 'sidebar-nav-channels' },
-    { to: '/skills', icon: <Puzzle className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.skills'), testId: 'sidebar-nav-skills' },
-    { to: '/recharge', icon: <CreditCard className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.recharge'), testId: 'sidebar-nav-recharge' },
-    { to: '/cron', icon: <Clock className="h-4 w-4" strokeWidth={2} />, label: t('sidebar.cronTasks'), testId: 'sidebar-nav-cron' },
-    ...(devModeUnlocked
-      ? [
-        { to: '/image-generation', icon: <ImagePlus className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.imageGeneration'), testId: 'sidebar-nav-image-generation' },
-        { to: '/video-generation', icon: <Video className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.videoGeneration', 'Video Generation'), testId: 'sidebar-nav-video-generation' },
-        { to: '/dreams', icon: <Moon className="h-4 w-4" strokeWidth={2} />, label: t('common:sidebar.openClawDreams'), testId: 'sidebar-nav-dreams' },
-      ]
-      : []),
-  ];
-
-  const navItems = [
-    ...coreNavItems.filter((item) => !hiddenRoutes.has(item.to)),
-    ...extraNavItems.map((item) => ({
-      to: item.to,
-      icon: <item.icon className="h-4 w-4" strokeWidth={2} />,
-      label: item.labelI18nKey ? t(item.labelI18nKey) : item.label,
-      testId: item.testId,
-    })),
-  ];
 
   return (
     <aside
@@ -400,162 +703,28 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex flex-col gap-1 px-2">
-        <button
-          type="button"
-          data-testid="sidebar-new-chat"
-          onClick={() => {
-            const { messages } = useChatStore.getState();
-            if (messages.length > 0) newSession();
-            navigate('/');
-          }}
-          className={cn(
-            'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-2 transition-colors',
-            'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
-            sidebarCollapsed && 'justify-center px-0',
-          )}
-        >
-          <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
-            <Plus className="h-4 w-4" strokeWidth={2} />
-          </div>
-          {!sidebarCollapsed && <span className="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">{t('sidebar.newChat')}</span>}
-        </button>
+      <SidebarNavigation collapsed={sidebarCollapsed} />
 
-        {navItems.map((item) => (
-          <NavItem
-            key={item.to}
-            {...item}
-            collapsed={sidebarCollapsed}
-          />
-        ))}
-      </nav>
-
-      {/* Session list — below Settings, only when expanded */}
+      {/* Session list - below Settings, only when expanded */}
       {!sidebarCollapsed && sessions.length > 0 && (
-        <div className="mt-4 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 space-y-1">
-          {sessionBuckets.map((bucket) => {
-            const isBucketExpanded = expandedSessionBuckets[bucket.key] ?? false;
-            return (
-              <div key={bucket.key} data-testid={`session-bucket-${bucket.key}`} className="pt-2">
-                <button
-                  type="button"
-                  data-testid={`session-bucket-toggle-${bucket.key}`}
-                  aria-expanded={isBucketExpanded}
-                  onClick={() => toggleSessionBucket(bucket.key)}
-                  className={cn(
-                    'flex w-full items-center gap-1 rounded-md px-2.5 py-1 text-left text-tiny font-medium',
-                    'text-muted-foreground/60 tracking-tight transition-colors',
-                    'hover:bg-black/5 hover:text-muted-foreground dark:hover:bg-white/5',
-                  )}
-                >
-                  <ChevronRight
-                    className={cn(
-                      'h-3 w-3 shrink-0 transition-transform',
-                      isBucketExpanded && 'rotate-90',
-                    )}
-                  />
-                  <span>{bucket.label}</span>
-                </button>
-                {isBucketExpanded && bucket.sessions.map((s) => {
-                  const agentId = getAgentIdFromSessionKey(s.key);
-                  const agentName = agentNameById[agentId] || agentId;
-                  const isEditing = editingSessionKey === s.key;
-                  const sessionLabel = getSessionLabel(s.key, s.displayName, s.label);
-                  return (
-                    <div key={s.key} className="group relative flex items-center">
-                      {isEditing ? (
-                        <div className="flex w-full items-center gap-1 px-1.5 py-1">
-                          <Input
-                            autoFocus
-                            value={editingLabel}
-                            onChange={(e) => setEditingLabel(e.target.value)}
-                            onKeyDown={handleRenameKeyDown}
-                            onBlur={() => void handleRenameSubmit()}
-                            className="h-7 min-w-0 flex-1 text-meta"
-                            aria-label={t('common:sidebar.renameSessionPlaceholder')}
-                          />
-                          <button
-                            aria-label={t('common:sidebar.saveSessionRename')}
-                            onMouseDown={(e) => { e.preventDefault(); void handleRenameSubmit(); }}
-                            className="flex shrink-0 items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground"
-                          >
-                            <Check className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            aria-label={t('common:sidebar.cancelSessionRename')}
-                            onMouseDown={(e) => { e.preventDefault(); handleRenameCancel(); }}
-                            className="flex shrink-0 items-center justify-center rounded p-0.5 text-muted-foreground hover:text-destructive"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => {
-                              if (currentSessionKey === s.key) {
-                                void loadHistory(false);
-                              } else {
-                                switchSession(s.key);
-                              }
-                              navigate('/');
-                            }}
-                            onDoubleClick={() => handleStartRename(s.key, sessionLabel)}
-                            className={cn(
-                              'w-full text-left rounded-lg px-2.5 py-1.5 text-meta transition-colors pr-16',
-                              'hover:bg-black/5 dark:hover:bg-white/5',
-                              isOnChat && currentSessionKey === s.key
-                                ? 'bg-black/5 dark:bg-white/10 text-foreground font-medium'
-                                : 'text-foreground/75',
-                            )}
-                          >
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span className="shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-2xs font-medium text-foreground/70 dark:bg-white/[0.08]">
-                                {agentName}
-                              </span>
-                              <span className="truncate">{sessionLabel}</span>
-                            </div>
-                          </button>
-                          <div className={cn(
-                            'absolute right-1 flex items-center gap-0.5 transition-opacity',
-                            'opacity-0 group-hover:opacity-100',
-                          )}>
-                            <button
-                              aria-label={t('common:sidebar.renameSession')}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleStartRename(s.key, sessionLabel);
-                              }}
-                              className="flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/10"
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              aria-label={t('common:sidebar.deleteSession')}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSessionToDelete({
-                                  key: s.key,
-                                  label: sessionLabel,
-                                });
-                              }}
-                              className="flex items-center justify-center rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
+        <SessionHistoryList
+          buckets={sessionBuckets}
+          expandedBuckets={expandedSessionBuckets}
+          activeSessionKey={currentSessionKey}
+          sessionLabels={sessionLabels}
+          agentNameById={agentNameById}
+          editingSessionKey={editingSessionKey}
+          editingLabel={editingLabel}
+          onToggleBucket={toggleSessionBucket}
+          onSessionClick={handleSessionClick}
+          onStartRename={handleStartRename}
+          onEditingLabelChange={setEditingLabel}
+          onRenameKeyDown={handleRenameKeyDown}
+          onRenameSubmit={submitRenameFromList}
+          onRenameCancel={handleRenameCancel}
+          onDeleteSession={setSessionToDelete}
+        />
       )}
-
       {/* Footer */}
       <div className="mt-auto flex flex-col gap-1 p-2">
         <SupportContactButton
@@ -563,25 +732,13 @@ export function Sidebar() {
           sidebarOffset={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}
         />
 
-        <NavLink
-            to="/settings"
-            data-testid="sidebar-nav-settings"
-            className={({ isActive }) =>
-              cn(
-                'sidebar-nav-text flex items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors',
-                'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
-                isActive && 'bg-black/5 dark:bg-white/10 text-foreground',
-                sidebarCollapsed ? 'justify-center px-0' : ''
-              )
-            }
-          >
-          <>
-            <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
-              <SettingsIcon className="h-4 w-4" strokeWidth={2} />
-            </div>
-            {!sidebarCollapsed && <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{t('sidebar.settings')}</span>}
-          </>
-        </NavLink>
+        <NavItem
+          to="/settings"
+          icon={<SettingsIcon className="h-4 w-4" strokeWidth={2} />}
+          label={t('sidebar.settings')}
+          collapsed={sidebarCollapsed}
+          testId="sidebar-nav-settings"
+        />
 
         {devModeUnlocked && (
           <Button
@@ -644,3 +801,5 @@ export function Sidebar() {
     </aside>
   );
 }
+
+export const Sidebar = memo(SidebarComponent);

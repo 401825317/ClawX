@@ -257,3 +257,17 @@ export async function installIpcMocks(
     config,
   );
 }
+
+export async function emitIpcEvent(
+  app: ElectronApplication,
+  channel: string,
+  payload: unknown,
+): Promise<void> {
+  await app.evaluate(
+    async ({ BrowserWindow }, event) => {
+      const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+      win?.webContents.send(event.channel, event.payload);
+    },
+    { channel, payload },
+  );
+}
