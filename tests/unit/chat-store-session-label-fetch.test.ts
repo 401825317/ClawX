@@ -142,6 +142,32 @@ describe('chat store session label summary hydration', () => {
     expect(backgroundHistoryCalls).toHaveLength(0);
   });
 
+  it('deduplicates repeated session rename persistence for the same label', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-a',
+      sessions: [
+        { key: 'agent:main:session-a', displayName: 'Session A', updatedAt: 1000 },
+      ],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+    });
+
+    hostApiFetchMock.mockImplementation(async (path: string) => {
+      if (path === '/api/sessions/rename') {
+        return { success: true };
+      }
+      return { success: true, summaries: [] };
+    });
+
+    await useChatStore.getState().renameSession('agent:main:session-a', 'Pinned title');
+    await useChatStore.getState().renameSession('agent:main:session-a', 'Pinned title');
+
+    expect(hostApiFetchMock.mock.calls.filter(([path]) => path === '/api/sessions/rename')).toHaveLength(1);
+    expect(useChatStore.getState().sessionLabels['agent:main:session-a']).toBe('Pinned title');
+  });
+
   it('hydrates existing sidebar session titles as soon as sessions load', async () => {
     gatewayRpcMock.mockImplementation(async (method: string) => {
       if (method === 'sessions.list') {

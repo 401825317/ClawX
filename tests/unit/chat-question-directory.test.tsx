@@ -28,6 +28,7 @@ const chatState = {
     { role: 'user', content: 'hello' },
     { role: 'assistant', content: 'reply 2' },
   ],
+  sessions: [{ key: 'agent:main:main' }],
   currentSessionKey: 'agent:main:main',
   currentAgentId: 'main',
   sessionLabels: {},

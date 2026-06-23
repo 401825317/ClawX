@@ -119,6 +119,14 @@ export interface ChatVideoSendOptions {
   durationSeconds: number;
 }
 
+export interface ChatSendAttachment {
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  stagedPath: string;
+  preview: string | null;
+}
+
 export interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -166,13 +174,7 @@ export interface ChatState {
   loadMoreHistory: () => Promise<void>;
   sendMessage: (
     text: string,
-    attachments?: Array<{
-      fileName: string;
-      mimeType: string;
-      fileSize: number;
-      stagedPath: string;
-      preview: string | null;
-    }>,
+    attachments?: ChatSendAttachment[],
     targetAgentId?: string | null,
     mode?: ChatSendMode,
     imageOptions?: ChatImageSendOptions,

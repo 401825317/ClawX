@@ -254,6 +254,8 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
     useChatStore.getState().switchSession('agent:main:b');
+    await flushAsyncImports();
+    loadHistory.mockClear();
 
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
@@ -283,6 +285,20 @@ describe('gateway store event wiring', () => {
   });
 
   it('clears cached inactive-session run state when run.ended arrives while another session is selected', async () => {
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/chat/sessions') {
+        return Promise.resolve({
+          success: true,
+          result: {
+            sessions: [
+              { key: 'agent:main:a' },
+              { key: 'agent:main:b' },
+            ],
+          },
+        });
+      }
+      return Promise.resolve({ state: 'running', port: 18789 });
+    });
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -305,6 +321,8 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
     useChatStore.getState().switchSession('agent:main:b');
+    await flushAsyncImports();
+    loadHistory.mockClear();
 
     const { useGatewayStore } = await import('@/stores/gateway');
     await useGatewayStore.getState().init();
@@ -323,6 +341,8 @@ describe('gateway store event wiring', () => {
     expect(useChatStore.getState().sending).toBe(false);
     expect(useChatStore.getState().activeRunId).toBeNull();
     expect(useChatStore.getState().runtimeRuns['run-a']?.status).toBe('completed');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(loadHistory).toHaveBeenCalledTimes(1);
   });
 
   it('clears chat sending state on terminal run.ended runtime event', async () => {

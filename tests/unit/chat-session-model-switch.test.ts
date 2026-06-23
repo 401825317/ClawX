@@ -136,6 +136,64 @@ describe('chat session model switching', () => {
     expect(sessions.find((session) => session.key === 'agent:main:session-b')?.model).toBe('custom-alpha123/model-alpha');
   });
 
+  it('applies the selected session model optimistically and rolls back on persistence failure', async () => {
+    let rejectPatch!: (reason?: unknown) => void;
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'sessions.patch') {
+        return new Promise((_resolve, reject) => {
+          rejectPatch = reject;
+        });
+      }
+      if (method === 'chat.history') {
+        return Promise.resolve({ messages: [] });
+      }
+      if (method === 'sessions.list') {
+        return Promise.resolve({ sessions: [] });
+      }
+      return Promise.reject(new Error(`Unexpected gateway RPC: ${method}`));
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-a',
+      currentAgentId: 'main',
+      sessions: [
+        { key: 'agent:main:session-a', model: 'custom-alpha123/model-alpha' },
+        { key: 'agent:main:session-b', model: 'custom-alpha123/model-alpha' },
+      ],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    const pendingUpdate = useChatStore.getState()
+      .updateSessionModel('agent:main:session-a', 'custom-beta5678/model-beta');
+
+    expect(useChatStore.getState().sessions.find((session) => session.key === 'agent:main:session-a')?.model)
+      .toBe('custom-beta5678/model-beta');
+    expect(useChatStore.getState().sessions.find((session) => session.key === 'agent:main:session-b')?.model)
+      .toBe('custom-alpha123/model-alpha');
+
+    rejectPatch(new Error('patch failed'));
+    await expect(pendingUpdate).rejects.toThrow('patch failed');
+
+    expect(useChatStore.getState().sessions.find((session) => session.key === 'agent:main:session-a')?.model)
+      .toBe('custom-alpha123/model-alpha');
+  });
+
   it('creates a pending local session before persisting its model override', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

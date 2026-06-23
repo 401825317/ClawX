@@ -353,6 +353,78 @@ describe('ChatInput agent targeting', () => {
     });
   });
 
+  it('keeps the composer usable while the selected model is persisted in the background', async () => {
+    const now = '2025-01-01T00:00:00.000Z';
+    const onSend = vi.fn();
+    let resolveModelUpdate!: () => void;
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'model-alpha',
+        modelRef: 'custom-alpha123/model-alpha',
+        overrideModelRef: 'custom-alpha123/model-alpha',
+        inheritedModel: false,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+    agentsState.defaultModelRef = 'custom-alpha123/model-alpha';
+    chatState.sessions = [{ key: 'agent:main:main', model: 'custom-alpha123/model-alpha' }];
+    providersState.accounts = [
+      {
+        id: 'alpha1234',
+        vendorId: 'custom',
+        label: 'Alpha',
+        authMode: 'api_key',
+        baseUrl: 'http://127.0.0.1:1111/v1',
+        model: 'model-alpha',
+        enabled: true,
+        isDefault: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: 'beta5678',
+        vendorId: 'custom',
+        label: 'Beta',
+        authMode: 'api_key',
+        baseUrl: 'http://127.0.0.1:2222/v1',
+        model: 'model-beta',
+        enabled: true,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    providersState.statuses = [
+      { id: 'alpha1234', name: 'Alpha', type: 'custom', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+      { id: 'beta5678', name: 'Beta', type: 'custom', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+    ];
+    providersState.defaultAccountId = 'alpha1234';
+    chatState.updateSessionModel.mockImplementation(() => new Promise<void>((resolve) => {
+      resolveModelUpdate = resolve;
+    }));
+
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(await screen.findByRole('button', { name: 'model-beta' }));
+
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('model-beta');
+    expect(screen.getByTestId('chat-model-picker-button')).not.toBeDisabled();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'send after model click' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith('send after model click', undefined, null, 'chat', undefined, undefined);
+
+    resolveModelUpdate();
+  });
+
   it('labels the Lingzhi Wuxian smart routing model in the model picker button', () => {
     const now = '2025-01-01T00:00:00.000Z';
     agentsState.agents = [

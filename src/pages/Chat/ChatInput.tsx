@@ -265,7 +265,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
-  const [switchingModelRef, setSwitchingModelRef] = useState<string | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
   const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
   const [sessionSendModes, setSessionSendModes] = useState<Record<string, ChatSendMode>>({});
@@ -275,7 +274,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
-  const pendingModelChangeRef = useRef<Promise<void> | null>(null);
+  const modelChangeVersionRef = useRef(0);
   const isComposingRef = useRef(false);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
@@ -416,7 +415,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const openArtifactPreview = useArtifactPanel((s) => s.openPreview);
 
   useEffect(() => {
-    void refreshProviderSnapshot();
+    void refreshProviderSnapshot({ quiet: true });
   }, [refreshProviderSnapshot]);
 
   useEffect(() => {
@@ -427,7 +426,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         if (cancelled) return;
         const latest = status as { state?: string };
         if (latest?.state === 'running') {
-          void refreshProviderSnapshot();
+          void refreshProviderSnapshot({ quiet: true });
         }
       })
       .catch(() => {});
@@ -628,7 +627,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   }, [skillPickerOpen, loadQuickSkills]);
 
   const handleSelectModel = useCallback(async (modelRef: string) => {
-    if (switchingModelRef) return;
     if (modelRef === effectiveModelRef) {
       setModelPickerOpen(false);
       textareaRef.current?.focus();
@@ -637,31 +635,24 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
 
     const previousModelRef = effectiveModelRef;
     const desiredOverride = modelRef === (defaultModelRef || '').trim() ? null : modelRef;
-    setSwitchingModelRef(modelRef);
+    const changeVersion = modelChangeVersionRef.current + 1;
+    modelChangeVersionRef.current = changeVersion;
     setOptimisticModelRef(modelRef);
     setModelPickerOpen(false);
-    const pendingChange = (async () => {
+    textareaRef.current?.focus();
+
+    void (async () => {
       try {
         await updateSessionModel(currentSessionKey, desiredOverride);
       } catch (error) {
-        setOptimisticModelRef(previousModelRef);
+        if (modelChangeVersionRef.current === changeVersion) {
+          setOptimisticModelRef(previousModelRef);
+        }
         toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
-        throw error;
+        console.error('Failed to switch session model:', error);
       }
     })();
-    pendingModelChangeRef.current = pendingChange;
-    try {
-      await pendingChange;
-    } catch (error) {
-      console.error('Failed to switch session model:', error);
-    } finally {
-      setSwitchingModelRef(null);
-      if (pendingModelChangeRef.current === pendingChange) {
-        pendingModelChangeRef.current = null;
-      }
-      textareaRef.current?.focus();
-    }
-  }, [currentSessionKey, defaultModelRef, effectiveModelRef, switchingModelRef, t, updateSessionModel]);
+  }, [currentSessionKey, defaultModelRef, effectiveModelRef, t, updateSessionModel]);
 
   // ── File staging via native dialog / Electron drag-drop paths ──
 
@@ -804,13 +795,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const canStop = sending && !inputDisabled && !!onStop;
 
   const handleSend = useCallback(async () => {
-    if (pendingModelChangeRef.current) {
-      try {
-        await pendingModelChangeRef.current;
-      } catch {
-        return;
-      }
-    }
     if (!canSend) return;
     const readyAttachments = attachments.filter(a => a.status === 'ready');
     const textToSend = input.trim();
@@ -1213,19 +1197,16 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                   data-testid="chat-model-picker-button"
                   className={cn(
                     'inline-flex h-8 max-w-[220px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50',
-                    (modelPickerOpen || switchingModelRef) && 'text-foreground',
+                    modelPickerOpen && 'text-foreground',
                   )}
                   onClick={() => {
                     setPickerOpen(false);
                     setSkillPickerOpen(false);
                     setModelPickerOpen((open) => !open);
                   }}
-                  disabled={inputDisabled || sending || !currentAgent || !!switchingModelRef}
+                  disabled={inputDisabled || sending || !currentAgent}
                   title={t('composer.pickModel')}
                 >
-                  {switchingModelRef ? (
-                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                  ) : null}
                   <span className="truncate">{currentModelLabel}</span>
                   <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', modelPickerOpen && 'rotate-180')} />
                 </button>

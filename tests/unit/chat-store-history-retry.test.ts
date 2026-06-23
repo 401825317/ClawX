@@ -89,13 +89,13 @@ describe('useChatStore startup history retry', () => {
     expect(gatewayRpcMock).toHaveBeenNthCalledWith(
       1,
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       35_000,
     );
     expect(gatewayRpcMock).toHaveBeenNthCalledWith(
       2,
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       undefined,
     );
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 191_800);
@@ -152,7 +152,7 @@ describe('useChatStore startup history retry', () => {
     ]);
     expect(gatewayRpcMock).toHaveBeenCalledWith(
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       35_000,
     );
 
@@ -398,7 +398,7 @@ describe('useChatStore startup history retry', () => {
     expect(gatewayRpcMock).toHaveBeenNthCalledWith(
       2,
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       undefined,
     );
     expect(setTimeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 15_000);
@@ -492,6 +492,111 @@ describe('useChatStore startup history retry', () => {
     useChatStore.getState().switchSession('agent:main:other');
 
     expect(useChatStore.getState().messages.map((message) => message.content)).toEqual(['cached history']);
+  });
+
+  it('switchSession restores only the recent cached window to keep sidebar switching responsive', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    const cachedMessages = Array.from({ length: 120 }, (_, index) => ({
+      role: 'assistant' as const,
+      content: `cached-${index}`,
+      timestamp: 1000 + index,
+    }));
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:other',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }, { key: 'agent:main:other' }],
+      messages: cachedMessages,
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    gatewayRpcMock.mockResolvedValue({ messages: [] });
+
+    useChatStore.getState().switchSession('agent:main:main');
+    useChatStore.getState().switchSession('agent:main:other');
+
+    const restoredMessages = useChatStore.getState().messages;
+    expect(restoredMessages).toHaveLength(24);
+    expect(restoredMessages[0]?.content).toBe('cached-96');
+    expect(restoredMessages.at(-1)?.content).toBe('cached-119');
+    expect(useChatStore.getState().hasMoreHistory).toBe(true);
+  });
+
+  it('drops stale switchSession history results after rapid sidebar switching', async () => {
+    vi.useRealTimers();
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-a',
+      currentAgentId: 'main',
+      sessions: [
+        { key: 'agent:main:session-a' },
+        { key: 'agent:main:session-b' },
+        { key: 'agent:main:session-c' },
+      ],
+      messages: [{ role: 'assistant', content: 'session a cached', timestamp: 1000 }],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    let resolveSessionB: ((value: { messages: Array<{ role: string; content: string; timestamp: number }> }) => void) | null = null;
+    gatewayRpcMock.mockImplementation(async (method: string, params?: { sessionKey?: string }) => {
+      if (method === 'config.get') return {};
+      if (method !== 'chat.history') {
+        throw new Error(`Unexpected gateway RPC: ${method}`);
+      }
+      if (params?.sessionKey === 'agent:main:session-b') {
+        return await new Promise((resolve) => {
+          resolveSessionB = resolve;
+        });
+      }
+      if (params?.sessionKey === 'agent:main:session-c') {
+        return { messages: [{ role: 'assistant', content: 'session c fresh', timestamp: 3000 }] };
+      }
+      return { messages: [] };
+    });
+
+    useChatStore.getState().switchSession('agent:main:session-b');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    useChatStore.getState().switchSession('agent:main:session-c');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().messages.map((message) => message.content)).toEqual(['session c fresh']);
+    });
+
+    resolveSessionB?.({
+      messages: [{ role: 'assistant', content: 'stale session b payload', timestamp: 2000 }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(useChatStore.getState().currentSessionKey).toBe('agent:main:session-c');
+    expect(useChatStore.getState().messages.map((message) => message.content)).toEqual(['session c fresh']);
+
+    vi.useFakeTimers();
   });
 
   it('does not re-arm Thinking state for stale main-session heartbeat tool history', async () => {
@@ -686,7 +791,7 @@ describe('useChatStore startup history retry', () => {
 
     expect(gatewayRpcMock).toHaveBeenLastCalledWith(
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       35_000,
     );
     expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 191_800);
@@ -763,17 +868,17 @@ describe('useChatStore startup history retry', () => {
     expect(historyCalls).toHaveLength(3);
     expect(historyCalls[0]).toEqual([
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       35_000,
     ]);
     expect(historyCalls[1]).toEqual([
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       35_000,
     ]);
     expect(historyCalls[2]).toEqual([
       'chat.history',
-      chatHistoryRpcParams('agent:main:main', 200),
+      chatHistoryRpcParams('agent:main:main', 100),
       35_000,
     ]);
     expect(useChatStore.getState().messages.map((message) => message.content)).toEqual(['restored after retry']);

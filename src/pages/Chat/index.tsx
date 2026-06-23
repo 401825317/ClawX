@@ -92,6 +92,7 @@ type QuestionDirectoryItem = {
 };
 
 const QUESTION_DIRECTORY_RENDER_LIMIT = 300;
+const CHILD_TRANSCRIPT_LOAD_LIMIT = 3;
 
 function getPrimaryMessageStepTexts(steps: TaskStep[]): string[] {
   return steps
@@ -284,14 +285,20 @@ export function Chat() {
   }, [cleanupEmptySession]);
 
   useEffect(() => {
-    void fetchAgents();
-  }, [fetchAgents]);
+    if (agents.length > 0) return;
+    const timer = window.setTimeout(() => {
+      void fetchAgents({ quiet: true });
+    }, 750);
+    return () => window.clearTimeout(timer);
+  }, [agents.length, fetchAgents]);
 
   useEffect(() => {
     const completions = messages
       .map((message) => parseSubagentCompletionInfo(message))
       .filter((value): value is NonNullable<typeof value> => value != null);
-    const missing = completions.filter((completion) => !childTranscripts[completion.sessionId]);
+    const missing = completions
+      .filter((completion) => !childTranscripts[completion.sessionId])
+      .slice(0, CHILD_TRANSCRIPT_LOAD_LIMIT);
     if (missing.length === 0) return;
 
     let cancelled = false;

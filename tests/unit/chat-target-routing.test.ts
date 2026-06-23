@@ -10,6 +10,16 @@ const { gatewayRpcMock, hostApiFetchMock, agentsState } = vi.hoisted(() => ({
   },
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 vi.mock('@/stores/gateway', () => ({
   useGatewayStore: {
     getState: () => ({
@@ -139,11 +149,6 @@ describe('chat target routing', () => {
     expect(state.sessions.some((session) => session.key === 'agent:research:desk')).toBe(true);
     expect(state.messages.at(-1)?.content).toBe('Hello direct agent');
 
-    const historyCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/history');
-    expect(JSON.parse((historyCall?.[1] as { body: string } | undefined)?.body ?? '{}')).toEqual(
-      chatHistoryRpcParams('agent:research:desk', 200),
-    );
-
     const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
     const sendPayload = JSON.parse((sendCall?.[1] as { body: string } | undefined)?.body ?? '{}');
     expect(sendPayload).toMatchObject({
@@ -152,6 +157,15 @@ describe('chat target routing', () => {
       deliver: false,
     });
     expect(typeof (sendPayload as { idempotencyKey?: unknown }).idempotencyKey).toBe('string');
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/history')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(50);
+    await vi.waitFor(() => {
+      const historyCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/history');
+      expect(JSON.parse((historyCall?.[1] as { body: string } | undefined)?.body ?? '{}')).toEqual(
+        chatHistoryRpcParams('agent:research:desk', 100),
+      );
+    });
   });
 
   it('uses the long chat.send timeout when falling back to Gateway RPC', async () => {
@@ -197,6 +211,138 @@ describe('chat target routing', () => {
       }),
       CHAT_SEND_RPC_TIMEOUT_MS,
     );
+  });
+
+  it('does not block sending on managed-auth remote refresh when local status is ready', async () => {
+    const remoteStatus = deferred<unknown>();
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/junfeiai/status') {
+        return remoteStatus.promise;
+      }
+      if (url === '/api/chat/history') {
+        return { success: true, result: { messages: [] } };
+      }
+      if (url === '/api/chat/send') {
+        return { success: true, result: { runId: 'run-managed-fast-path' } };
+      }
+      return { success: true, result: {} };
+    });
+
+    const { useManagedAuthStore } = await import('@/stores/managed-auth');
+    const { useProviderStore } = await import('@/stores/providers');
+    const { useChatStore } = await import('@/stores/chat');
+
+    useManagedAuthStore.setState({
+      status: {
+        managed: true,
+        localOnly: true,
+        hasAuthToken: true,
+        hasRelayToken: true,
+        authValid: false,
+      },
+      initialized: true,
+      loading: false,
+      verifying: false,
+      error: null,
+    });
+    useProviderStore.setState({
+      defaultAccountId: 'lingzhiwuxian',
+      accounts: [{
+        id: 'lingzhiwuxian',
+        vendorId: 'lingzhiwuxian',
+        label: 'LingZhiWuXian',
+        authMode: 'api_key',
+        enabled: true,
+        isDefault: true,
+        createdAt: '2026-03-11T12:00:00.000Z',
+        updatedAt: '2026-03-11T12:00:00.000Z',
+      }],
+    });
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('send without waiting for remote auth');
+
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/junfeiai/status')).toBe(true);
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    expect(sendCall).toBeTruthy();
+    const sendPayload = JSON.parse((sendCall?.[1] as { body: string } | undefined)?.body ?? '{}');
+    expect(sendPayload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      message: 'send without waiting for remote auth',
+    });
+  });
+
+  it('does not queue or block a Windows cross-session send while another session is running', async () => {
+    window.electron.platform = 'win32';
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [
+        { key: 'agent:main:main' },
+        { key: 'agent:research:desk' },
+      ],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {
+        'run-main-active': {
+          runId: 'run-main-active',
+          sessionKey: 'agent:main:main',
+          status: 'running',
+          startedAt: Date.now(),
+          assistantText: '',
+          thinkingText: '',
+          events: [{
+            type: 'run.started',
+            runId: 'run-main-active',
+            sessionKey: 'agent:main:main',
+            ts: Date.now(),
+          }],
+        },
+      },
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('send now on research', undefined, 'research');
+
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/chat/send')).toHaveLength(1);
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    const sendPayload = JSON.parse((sendCall?.[1] as { body: string } | undefined)?.body ?? '{}');
+    expect(sendPayload).toMatchObject({
+      sessionKey: 'agent:research:desk',
+      message: 'send now on research',
+    });
+    expect('queuedSends' in useChatStore.getState()).toBe(false);
   });
 
   it('uses the selected agent main session for attachment sends', async () => {

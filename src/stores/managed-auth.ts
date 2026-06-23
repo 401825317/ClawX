@@ -54,11 +54,13 @@ export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
       return status;
     } catch (error) {
       const previousStatus = get().status;
+      const keepLocalReady = isManagedAuthLocallyReady(previousStatus);
       set({
         loading: false,
         verifying: false,
         initialized: true,
-        error: isManagedAuthLocallyReady(previousStatus) ? null : errorMessage(error),
+        ...(keepLocalReady ? { status: previousStatus } : {}),
+        error: keepLocalReady ? null : errorMessage(error),
       });
       throw error;
     }

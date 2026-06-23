@@ -4,6 +4,7 @@ import { PORTS } from '../../utils/config';
 import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-device-pairing';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../utils/store';
+import { logger } from '../../utils/logger';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
@@ -127,6 +128,8 @@ export async function handleGatewayRoutes(
   }
 
   if (url.pathname === '/api/chat/send' && req.method === 'POST') {
+    const startedAt = Date.now();
+    let sessionKeyForLog = 'unknown';
     try {
       const body = await parseJsonBody<{
         sessionKey: string;
@@ -134,6 +137,7 @@ export async function handleGatewayRoutes(
         deliver?: boolean;
         idempotencyKey: string;
       }>(req);
+      sessionKeyForLog = body.sessionKey;
       const result = await runGatewayRpc<{ runId?: string }>(
         ctx,
         'chat.send',
@@ -145,8 +149,20 @@ export async function handleGatewayRoutes(
         },
         CHAT_SEND_RPC_TIMEOUT_MS,
       );
+      logger.info('[metric] chat.send.rpc', {
+        sessionKey: sessionKeyForLog,
+        elapsedMs: Date.now() - startedAt,
+        runId: result.runId ?? null,
+        media: false,
+      });
       sendJson(res, 200, { success: true, result });
     } catch (error) {
+      logger.warn('[metric] chat.send.rpc.failed', {
+        sessionKey: sessionKeyForLog,
+        elapsedMs: Date.now() - startedAt,
+        media: false,
+        error: String(error),
+      });
       sendJson(res, 500, { success: false, error: String(error) });
     }
     return true;
@@ -164,6 +180,8 @@ export async function handleGatewayRoutes(
   }
 
   if (url.pathname === '/api/chat/send-with-media' && req.method === 'POST') {
+    const startedAt = Date.now();
+    let sessionKeyForLog = 'unknown';
     try {
       const body = await parseJsonBody<{
         sessionKey: string;
@@ -172,6 +190,7 @@ export async function handleGatewayRoutes(
         idempotencyKey: string;
         media?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       }>(req);
+      sessionKeyForLog = body.sessionKey;
       const VISION_MIME_TYPES = new Set([
         'image/png', 'image/jpeg', 'image/bmp', 'image/webp',
       ]);
@@ -204,9 +223,22 @@ export async function handleGatewayRoutes(
       if (imageAttachments.length > 0) {
         rpcParams.attachments = imageAttachments;
       }
-      const result = await runGatewayRpc(ctx, 'chat.send', rpcParams, CHAT_SEND_RPC_TIMEOUT_MS);
+      const result = await runGatewayRpc<{ runId?: string }>(ctx, 'chat.send', rpcParams, CHAT_SEND_RPC_TIMEOUT_MS);
+      logger.info('[metric] chat.send.rpc', {
+        sessionKey: sessionKeyForLog,
+        elapsedMs: Date.now() - startedAt,
+        runId: result.runId ?? null,
+        media: true,
+        mediaCount: body.media?.length ?? 0,
+      });
       sendJson(res, 200, { success: true, result });
     } catch (error) {
+      logger.warn('[metric] chat.send.rpc.failed', {
+        sessionKey: sessionKeyForLog,
+        elapsedMs: Date.now() - startedAt,
+        media: true,
+        error: String(error),
+      });
       sendJson(res, 500, { success: false, error: String(error) });
     }
     return true;

@@ -7,7 +7,7 @@ import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
-import { getManagedAuthStateKey, isManagedAuthReady } from '@/lib/managed-auth';
+import { getManagedAuthStateKey, isManagedAuthLocallyReady, isManagedAuthReady } from '@/lib/managed-auth';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
@@ -45,6 +45,7 @@ import {
   DEFAULT_SESSION_KEY,
   type AttachedFileMeta,
   type ChatImageSendOptions,
+  type ChatSendAttachment,
   type ChatSendMode,
   type ChatSession,
   type ChatState,
@@ -76,6 +77,9 @@ export type {
 // during tool-use conversations where streamingMessage is temporarily cleared
 // between tool-result finals and the next delta.
 let _lastChatEventAt = 0;
+let _managedAuthBackgroundVerifyInFlight: Promise<void> | null = null;
+let _lastManagedAuthBackgroundVerifyAt = 0;
+const MANAGED_AUTH_BACKGROUND_VERIFY_MIN_INTERVAL_MS = 60_000;
 
 function managedAuthSendErrorMessage(stateKey: string, detail?: string | null): string {
   if (stateKey === 'loggedOut') {
@@ -93,33 +97,60 @@ function managedAuthSendErrorMessage(stateKey: string, detail?: string | null): 
   return 'Your sign-in session has expired. Please sign in again before sending messages.';
 }
 
-async function ensureManagedAuthReadyForSend(): Promise<void> {
+function scheduleManagedAuthBackgroundVerify(refreshStatus: () => Promise<unknown>): void {
+  const now = Date.now();
+  if (
+    _managedAuthBackgroundVerifyInFlight
+    || now - _lastManagedAuthBackgroundVerifyAt < MANAGED_AUTH_BACKGROUND_VERIFY_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+
+  _lastManagedAuthBackgroundVerifyAt = now;
+  _managedAuthBackgroundVerifyInFlight = refreshStatus()
+    .then(() => undefined)
+    .catch((error) => {
+      console.warn('[managed-auth] background status refresh failed:', error);
+    })
+    .finally(() => {
+      _managedAuthBackgroundVerifyInFlight = null;
+    });
+}
+
+function ensureManagedAuthReadyForSend(): Promise<void> | null {
   const store = useManagedAuthStore.getState();
   const providerState = useProviderStore.getState();
   const shouldEnforce = store.status?.managed === true
     || providerState.defaultAccountId === 'lingzhiwuxian'
     || providerState.accounts.some((account) => account.id === 'lingzhiwuxian');
   if (!shouldEnforce) {
-    return;
+    return null;
   }
 
-  try {
-    const status = await store.refreshStatus();
-    if (isManagedAuthReady(status)) {
-      return;
-    }
-    throw new Error(managedAuthSendErrorMessage(getManagedAuthStateKey(status), status.authError));
-  } catch (error) {
-    const state = useManagedAuthStore.getState();
-    const stateKey = getManagedAuthStateKey(state.status, {
-      loading: state.loading,
-      error: state.error,
-    });
-    throw new Error(
-      managedAuthSendErrorMessage(stateKey, state.error || (error instanceof Error ? error.message : String(error))),
-      { cause: error },
-    );
+  if (isManagedAuthReady(store.status) || isManagedAuthLocallyReady(store.status)) {
+    scheduleManagedAuthBackgroundVerify(store.refreshStatus);
+    return null;
   }
+
+  return (async () => {
+    try {
+      const status = await store.refreshStatus();
+      if (isManagedAuthReady(status)) {
+        return;
+      }
+      throw new Error(managedAuthSendErrorMessage(getManagedAuthStateKey(status), status.authError));
+    } catch (error) {
+      const state = useManagedAuthStore.getState();
+      const stateKey = getManagedAuthStateKey(state.status, {
+        loading: state.loading,
+        error: state.error,
+      });
+      throw new Error(
+        managedAuthSendErrorMessage(stateKey, state.error || (error instanceof Error ? error.message : String(error))),
+        { cause: error },
+      );
+    }
+  })();
 }
 
 type PendingImageInput = {
@@ -207,6 +238,10 @@ const _lastHistoryLoadAtBySession = new Map<string, number>();
 const _forceNextHistoryLoadBySession = new Set<string>();
 const _foregroundHistoryLoadSeen = new Set<string>();
 const _sessionHistoryCache = new Map<string, { messages: RawMessage[]; thinkingLevel: string | null }>();
+const _historyLoadGenerationBySession = new Map<string, number>();
+let _historyLoadGenerationCounter = 0;
+let _deferredHistoryLoadTimer: ReturnType<typeof setTimeout> | null = null;
+const _sessionsNeedingTerminalHistoryRefresh = new Set<string>();
 const _pendingLocalSessionKeys = new Set<string>();
 
 type SessionRunState = Pick<
@@ -279,8 +314,10 @@ const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const SESSION_LABEL_HYDRATION_BATCH_SIZE = 40;
 const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const CHAT_EVENT_DEDUPE_TTL_MS = 30_000;
-const HISTORY_PAGE_SIZE = 200;
-const HISTORY_MAX_RENDERED_MESSAGES = 1_000;
+const HISTORY_PAGE_SIZE = 100;
+const HISTORY_MAX_RENDERED_MESSAGES = 500;
+const SESSION_SWITCH_RESTORE_MESSAGE_LIMIT = 24;
+const PREVIEW_HYDRATION_MESSAGE_LIMIT = 80;
 const SESSION_HISTORY_CACHE_MAX_SESSIONS = 16;
 const SESSION_RUN_STATE_CACHE_MAX_SESSIONS = 32;
 const _chatEventDedupe = new Map<string, number>();
@@ -293,6 +330,7 @@ const ERROR_RECOVERY_DELAY_MS = 12_000;
 const LLM_IDLE_HINT_MS = 120_000;
 /** Wait past one LLM idle window before declaring a hard no-response failure. */
 const NO_RESPONSE_SAFETY_TIMEOUT_MS = 130_000;
+const SESSION_RENAME_DEDUPE_TTL_MS = 60_000;
 
 type PendingOptimisticUserMessage = {
   message: RawMessage;
@@ -301,6 +339,8 @@ type PendingOptimisticUserMessage = {
 };
 
 const _pendingOptimisticUserMessages = new Map<string, PendingOptimisticUserMessage[]>();
+const _sessionRenameInFlight = new Map<string, Promise<void>>();
+const _sessionRenameLastPersisted = new Map<string, { label: string; at: number }>();
 
 type SessionLabelSummary = {
   sessionKey: string;
@@ -341,6 +381,40 @@ function applySessionBackendLabels(set: ChatSet, sessions: ChatSession[]): void 
       ),
     },
   }));
+}
+
+async function persistSessionRenameOnce(key: string, label: string): Promise<void> {
+  const cacheKey = `${key}\n${label}`;
+  const now = Date.now();
+  const recent = _sessionRenameLastPersisted.get(key);
+  if (recent?.label === label && now - recent.at < SESSION_RENAME_DEDUPE_TTL_MS) {
+    return;
+  }
+
+  const existing = _sessionRenameInFlight.get(cacheKey);
+  if (existing) {
+    await existing;
+    return;
+  }
+
+  const promise = (async () => {
+    const result = await hostApiFetch<{
+      success: boolean;
+      error?: string;
+    }>('/api/sessions/rename', {
+      method: 'POST',
+      body: JSON.stringify({ sessionKey: key, label }),
+    });
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to rename session');
+    }
+    _sessionRenameLastPersisted.set(key, { label, at: Date.now() });
+  })().finally(() => {
+    _sessionRenameInFlight.delete(cacheKey);
+  });
+
+  _sessionRenameInFlight.set(cacheKey, promise);
+  await promise;
 }
 
 async function fetchSessionLabelSummaries(sessionKeys: string[]): Promise<SessionLabelSummary[]> {
@@ -405,6 +479,7 @@ async function refreshVisibleSessionSummaries(
 ): Promise<void> {
   const sessions = get().sessions;
   const currentSessionKey = get().currentSessionKey;
+  const knownSessionKeys = new Set(sessions.map((session) => session.key));
   const targetKeys = (sessionKeys && sessionKeys.length > 0
     ? sessionKeys
     : sessions.map((session) => session.key)
@@ -414,7 +489,14 @@ async function refreshVisibleSessionSummaries(
 
   try {
     const summaries = await fetchSessionLabelSummaries(targetKeys);
-    applySessionLabelSummaries(set, summaries);
+    const currentKnownSessionKeys = new Set(get().sessions.map((session) => session.key));
+    applySessionLabelSummaries(
+      set,
+      summaries.filter((summary) => (
+        knownSessionKeys.has(summary.sessionKey)
+        && currentKnownSessionKeys.has(summary.sessionKey)
+      )),
+    );
   } catch (error) {
     console.warn('[session summaries] refresh failed:', error);
   }
@@ -460,7 +542,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 async function loadLocalHistoryFallback(
   sessionKey: string,
-  limit = 200,
+  limit = HISTORY_PAGE_SIZE,
   options: { timeoutMs?: number; logTimeout?: boolean } = {},
 ): Promise<RawMessage[]> {
   const fallbackPromise = isCronSessionKey(sessionKey)
@@ -507,6 +589,67 @@ function clearHistoryPoll(): void {
     clearTimeout(_historyPollTimer);
     _historyPollTimer = null;
   }
+}
+
+function nextHistoryLoadGeneration(sessionKey: string): number {
+  _historyLoadGenerationCounter += 1;
+  _historyLoadGenerationBySession.set(sessionKey, _historyLoadGenerationCounter);
+  return _historyLoadGenerationCounter;
+}
+
+function isCurrentHistoryLoad(sessionKey: string, generation: number): boolean {
+  return _historyLoadGenerationBySession.get(sessionKey) === generation;
+}
+
+function deferHistoryLoad(get: ChatGet, quiet = false): void {
+  if (_deferredHistoryLoadTimer) {
+    clearTimeout(_deferredHistoryLoadTimer);
+  }
+  _deferredHistoryLoadTimer = setTimeout(() => {
+    _deferredHistoryLoadTimer = null;
+    void get().loadHistory(quiet);
+  }, 50);
+}
+
+function deferSessionSwitchHistoryLoad(get: ChatGet): void {
+  if (_deferredHistoryLoadTimer) {
+    clearTimeout(_deferredHistoryLoadTimer);
+  }
+  _deferredHistoryLoadTimer = setTimeout(() => {
+    _deferredHistoryLoadTimer = null;
+    void get().loadHistory(true);
+  }, 120);
+}
+
+function chatRunLooksRecentlyActive(run: ChatState['runtimeRuns'][string], now = Date.now()): boolean {
+  if (run.status !== 'running') return false;
+  const lastEventTs = run.events.reduce<number | null>((latest, event) => {
+    const ts = typeof event.ts === 'number' ? toMs(event.ts) : null;
+    if (ts == null || !Number.isFinite(ts)) return latest;
+    return latest == null ? ts : Math.max(latest, ts);
+  }, null);
+  const activityTs = lastEventTs
+    ?? (typeof run.startedAt === 'number' ? toMs(run.startedAt) : null);
+  if (activityTs == null) return true;
+  return now - activityTs < LLM_IDLE_HINT_MS + NO_RESPONSE_SAFETY_TIMEOUT_MS;
+}
+
+function clearActiveSendGeneration(sessionKey: string): void {
+  _activeSendGenerationBySession.delete(sessionKey);
+}
+
+function markSessionRunIdle(sessionKey: string): void {
+  clearActiveSendGeneration(sessionKey);
+  captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
+}
+
+function markSessionNeedsTerminalHistoryRefresh(sessionKey: string): void {
+  _sessionsNeedingTerminalHistoryRefresh.add(sessionKey);
+  forceNextHistoryLoad(sessionKey);
+}
+
+function consumeSessionNeedsTerminalHistoryRefresh(sessionKey: string): boolean {
+  return _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
 }
 
 function forceNextHistoryLoad(sessionKey: string): void {
@@ -563,6 +706,7 @@ function getCachedSessionHistory(sessionKey: string): { messages: RawMessage[]; 
 
 function clearCachedSessionHistory(sessionKey: string): void {
   _sessionHistoryCache.delete(sessionKey);
+  _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
 }
 
 function captureSessionRunState(sessionKey: string, state: SessionRunState): void {
@@ -604,6 +748,7 @@ function getCachedSessionRunState(sessionKey: string): SessionRunState {
 
 function clearCachedSessionRunState(sessionKey: string): void {
   _sessionRunStateCache.delete(sessionKey);
+  _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
 }
 
 function cloneSessionRunState(state: SessionRunState): SessionRunState {
@@ -647,7 +792,8 @@ function updateCachedSessionRunStateFromRuntimeEvent(event: ChatRuntimeEvent): v
   }
 
   if (event.type === 'run.ended' && (matchesCachedRun || isCurrentUntrackedSend)) {
-    _sessionRunStateCache.set(sessionKey, DEFAULT_SESSION_RUN_STATE);
+    markSessionRunIdle(sessionKey);
+    markSessionNeedsTerminalHistoryRefresh(sessionKey);
   }
 }
 
@@ -820,13 +966,13 @@ function normalizeStreamingMessage(message: unknown): unknown {
  * Keeping this aligned with `cleanUserText` in `pages/Chat/message-utils.ts`
  * is important: the user bubble renders the cleaned text, so the comparison
  * used to dedupe optimistic vs server echoes must operate on the same
- * cleaned form — otherwise the same visible message renders twice.
+ * cleaned form  - otherwise the same visible message renders twice.
  *
  * Order matters: the `[media attached: ...]` lines are commonly emitted
  * BETWEEN the Sender block and the `[Mon ... GMT+8]` timestamp prefix.
  * If we strip the timestamp before the media-attached lines, the timestamp
  * regex (`^\s*\[(?:Mon|...)]`) can never match because the leading `[` is
- * `[media attached:` instead — leaving the timestamp in the normalized
+ * `[media attached:` instead  - leaving the timestamp in the normalized
  * comparison text and breaking optimistic-vs-echo dedupe.
  */
 function stripInboundMediaVisionEnvelope(text: string): string {
@@ -1215,7 +1361,7 @@ function trimPathTerminators(filePath: string): string {
  *
  * Also recognises the `MEDIA:` / `media:` prefix the OpenClaw runtime
  * emits for produced artifacts (e.g.
- * `MEDIA:/tmp/desktop_screenshot.png`, `MEDIA:C:\Users\me\out.svg`) — without this the leading colon
+ * `MEDIA:/tmp/desktop_screenshot.png`, `MEDIA:C:\Users\me\out.svg`)  - without this the leading colon
  * trips the URL guard on the unix regex below and the artifact never
  * surfaces as an attachment. Mirrors `chat/helpers.ts::extractRawFilePaths`.
  */
@@ -1260,10 +1406,10 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
     const end = start + taggedMatch[0].length;
     workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
   }
-  // Unix absolute paths (/... or ~/...) — lookbehind rejects mid-token slashes
+  // Unix absolute paths (/... or ~/...)  - lookbehind rejects mid-token slashes
   // (e.g. "path/to/file.mp4", "https://example.com/file.mp4")
   const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
-  // Windows absolute paths (C:\... D:\...) — lookbehind rejects drive letter glued to a word
+  // Windows absolute paths (C:\... D:\...)  - lookbehind rejects drive letter glued to a word
   const winRegex = new RegExp(`(?<![\\w])([A-Za-z]:\\\\[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
   const skillPathBoundary = '(?=$|\\s|[\\x5b\\x5d"\'`(),<>，。；;,.!?])';
   const skillPathPart = '[^\\\\/\\s\\n"\'`()\\x5b\\x5d,<>]+';
@@ -1371,7 +1517,7 @@ function makeAttachedFile(ref: { filePath: string; mimeType: string }): Attached
 function getToolCallFilePath(msg: RawMessage, toolCallId: string): string | undefined {
   if (!toolCallId) return undefined;
 
-  // Anthropic/normalized format — toolCall blocks in content array
+  // Anthropic/normalized format  - toolCall blocks in content array
   const content = msg.content;
   if (Array.isArray(content)) {
     for (const block of content as ContentBlock[]) {
@@ -1385,7 +1531,7 @@ function getToolCallFilePath(msg: RawMessage, toolCallId: string): string | unde
     }
   }
 
-  // OpenAI format — tool_calls array on the message itself
+  // OpenAI format  - tool_calls array on the message itself
   const msgAny = msg as unknown as Record<string, unknown>;
   const toolCalls = msgAny.tool_calls ?? msgAny.toolCalls;
   if (Array.isArray(toolCalls)) {
@@ -1467,7 +1613,7 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
       // 1. Image/file content blocks in the structured content array.
       //    Images embedded inside a tool result are the model's vision data
       //    (e.g. `read /tmp/foo.png` re-encoded as JPEG so the model can "see"
-      //    the file) — they are NOT user-facing artifacts. The agent surfaces
+      //    the file)  - they are NOT user-facing artifacts. The agent surfaces
       //    user-facing images through `MEDIA:/path` text + the Gateway's
       //    `assistant-media` injection. Surfacing the vision data here would
       //    duplicate every screenshot the agent inspects.
@@ -1541,7 +1687,7 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
   // Gateway-injected `assistant-media` bubble (i.e. has at least one
   // `image` content block carrying a flat URL). When that bubble exists,
   // the canonical user-facing rendering of the artifact is the bubble
-  // itself — anything the agent emitted via `MEDIA:/path` in its prior
+  // itself  - anything the agent emitted via `MEDIA:/path` in its prior
   // text turn would just duplicate the same image, so image-typed raw
   // refs on that prior message should be dropped here.
   const nextHasGatewayMediaBubble = messages.map((_, idx) => {
@@ -1556,12 +1702,12 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     const text = getMessageText(msg.content);
 
     // Path 0: Gateway-injected outgoing media on this same message
-    // (an `assistant-media` bubble — image block with flat `url`).
+    // (an `assistant-media` bubble  - image block with flat `url`).
     const gatewayMediaFiles: AttachedFileMeta[] = msg.role === 'assistant'
       ? extractImagesAsAttachedFiles(msg.content).filter(file => file.gatewayUrl)
       : [];
 
-    // Path 1: [media attached: path (mime) | path] — guaranteed format from attachment button
+    // Path 1: [media attached: path (mime) | path]  - guaranteed format from attachment button
     const mediaRefs = extractMediaRefs(text);
     const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
 
@@ -1593,7 +1739,7 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
 
     // Dedup vs Gateway-injected bubble: if the very next assistant message
     // is a Gateway `assistant-media` bubble, drop image-typed raw refs on
-    // *this* message — the bubble already covers them.
+    // *this* message  - the bubble already covers them.
     if (msg.role === 'assistant' && nextHasGatewayMediaBubble[idx]) {
       rawRefs = rawRefs.filter(r => !r.mimeType.startsWith('image/'));
     }
@@ -1658,7 +1804,7 @@ function collectMissingPreviewRefs(messages: RawMessage[]): PreviewRef[] {
       }
     }
 
-    // Path 2: [media attached: ...] patterns (legacy — in case filePath wasn't stored)
+    // Path 2: [media attached: ...] patterns (legacy  - in case filePath wasn't stored)
     if (msg.role === 'user') {
       const text = getMessageText(msg.content);
       const refs = extractMediaRefs(text);
@@ -1749,7 +1895,7 @@ function markMissingImagePreviewsUnavailable(messages: RawMessage[]): boolean {
  * Handles both [media attached: ...] patterns and raw filePath entries.
  */
 async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
-  // See helpers.ts loadMissingPreviews for the canonical comment block —
+  // See helpers.ts loadMissingPreviews for the canonical comment block  -
   // this monolithic copy is kept in sync so legacy chat.ts callers also
   // resolve Gateway-injected outgoing media URLs into local previews.
   let updatedAny = false;
@@ -2166,6 +2312,10 @@ function buildSessionSwitchPatch(
     ? state.sessions.filter((session) => session.key !== state.currentSessionKey)
     : state.sessions;
   const cachedNextSession = getCachedSessionHistory(nextSessionKey);
+  const cachedMessages = cachedNextSession?.messages ?? [];
+  const restoredCachedMessages = cachedMessages.length > SESSION_SWITCH_RESTORE_MESSAGE_LIMIT
+    ? cachedMessages.slice(-SESSION_SWITCH_RESTORE_MESSAGE_LIMIT)
+    : cachedMessages;
   const cachedRunState = getCachedSessionRunState(nextSessionKey);
 
   return {
@@ -2178,8 +2328,11 @@ function buildSessionSwitchPatch(
     sessionLastActivity: leavingEmpty
       ? clearSessionEntryFromMap(state.sessionLastActivity, state.currentSessionKey)
       : state.sessionLastActivity,
-    messages: cachedNextSession?.messages ?? [],
-    hasMoreHistory: cachedNextSession ? cachedNextSession.messages.length >= HISTORY_PAGE_SIZE : false,
+    messages: restoredCachedMessages,
+    hasMoreHistory: cachedNextSession
+      ? cachedNextSession.messages.length >= HISTORY_PAGE_SIZE
+        || cachedNextSession.messages.length > restoredCachedMessages.length
+      : false,
     loadingMoreHistory: false,
     thinkingLevel: cachedNextSession?.thinkingLevel ?? state.thinkingLevel ?? null,
     ...cachedRunState,
@@ -2207,9 +2360,9 @@ function isToolOnlyMessage(message: RawMessage | undefined): boolean {
   const hasOpenAITools = Array.isArray(toolCalls) && toolCalls.length > 0;
 
   if (!Array.isArray(content)) {
-    // Content is not an array — check if there's OpenAI-format tool_calls
+    // Content is not an array  - check if there's OpenAI-format tool_calls
     if (hasOpenAITools) {
-      // Has tool calls but content might be empty/string — treat as tool-only
+      // Has tool calls but content might be empty/string  - treat as tool-only
       // if there's no meaningful text content
       const textContent = typeof content === 'string' ? content.trim() : '';
       return textContent.length === 0;
@@ -2231,7 +2384,7 @@ function isToolOnlyMessage(message: RawMessage | undefined): boolean {
       continue;
     }
     // Only actual image output disqualifies a tool-only message.
-    // Thinking blocks are internal reasoning that can accompany tool_use — they
+    // Thinking blocks are internal reasoning that can accompany tool_use  - they
     // should NOT prevent the message from being treated as an intermediate tool step.
     if (block.type === 'image') {
       hasNonToolContent = true;
@@ -2261,7 +2414,7 @@ function isInternalMessage(msg: { role?: unknown; content?: unknown; idempotency
     //   - idempotencyKey: '<runId>:assistant-media'
     //   - content: text-only `MEDIA:<staging path>` (NOT an image-url block)
     // The staging path lives in `~/.openclaw/media/outbound/` which has a
-    // 120s TTL — the file is gone by the time the user reads the chat.
+    // 120s TTL  - the file is gone by the time the user reads the chat.
     // The original `MEDIA:/tmp/...` path is already on the previous
     // assistant message (the agent's actual reply), so the fallback is
     // pure duplicate noise. Hide it in the UI so it neither shows a
@@ -2275,7 +2428,7 @@ function isInternalMessage(msg: { role?: unknown; content?: unknown; idempotency
           (block) => block.type === 'image' && typeof block.url === 'string' && !!block.url,
         );
       // Real gateway-media bubbles (with an image-url block) ARE the
-      // canonical render — keep them. Only hide the text-only fallback.
+      // canonical render  - keep them. Only hide the text-only fallback.
       if (!hasImageUrlBlock) return true;
     }
     if (!text.trim() && Array.isArray(msg.content)) {
@@ -2295,10 +2448,10 @@ function isInternalMessage(msg: { role?: unknown; content?: unknown; idempotency
 /**
  * Detect runtime-injected system messages that should be hidden from the chat UI.
  * These are injected by the OpenClaw runtime as user-role messages and include:
- *   - "System (untrusted): ..." — exec results, tool output, etc.
- *   - "An async command you ran earlier has completed" — async completion notices
- *   - "Current time: ..." followed by nothing else — periodic heartbeat time pings
- *   - "Handle the result internally. Do not relay it to the user" — internal directives
+ *   - "System (untrusted): ..."  - exec results, tool output, etc.
+ *   - "An async command you ran earlier has completed"  - async completion notices
+ *   - "Current time: ..." followed by nothing else  - periodic heartbeat time pings
+ *   - "Handle the result internally. Do not relay it to the user"  - internal directives
  */
 function isRuntimeSystemInjection(text: string): boolean {
   if (!text) return false;
@@ -2348,7 +2501,7 @@ function pickFilePathFromInput(input: unknown): string | null {
 /**
  * Scan a streaming message for Write/Edit tool_use blocks and trigger
  * async baseline reads from disk for each target file.  Called on every
- * `delta` event; `captureBaseline` is idempotent — duplicate calls for
+ * `delta` event; `captureBaseline` is idempotent  - duplicate calls for
  * the same path are no-ops.
  */
 function isBaselineRealUserMessage(message: RawMessage | undefined): boolean {
@@ -2430,7 +2583,7 @@ function extractToolUseUpdates(message: unknown): ToolStatus[] {
   const msg = message as Record<string, unknown>;
   const updates: ToolStatus[] = [];
 
-  // Path 1: Anthropic/normalized format — tool blocks inside content array
+  // Path 1: Anthropic/normalized format  - tool blocks inside content array
   const content = msg.content;
   if (Array.isArray(content)) {
     for (const block of content as ContentBlock[]) {
@@ -2445,7 +2598,7 @@ function extractToolUseUpdates(message: unknown): ToolStatus[] {
     }
   }
 
-  // Path 2: OpenAI format — tool_calls array on the message itself
+  // Path 2: OpenAI format  - tool_calls array on the message itself
   if (updates.length === 0) {
     const toolCalls = msg.tool_calls ?? msg.toolCalls;
     if (Array.isArray(toolCalls)) {
@@ -2575,13 +2728,13 @@ function collectToolUpdates(message: unknown, eventState: string): ToolStatus[] 
 
 /**
  * True when an assistant message carries user-visible final output (text or
- * image). NOTE: `thinking` blocks are intentionally excluded — they are the
+ * image). NOTE: `thinking` blocks are intentionally excluded  - they are the
  * model's internal monologue and frequently precede tool calls in models like
  * MiniMax-M2.7 and gpt-5.5. Treating thinking as "final content" causes the
  * history-poll closer in applyLoadedMessages and the runtime final handler to
  * misclassify intermediate `[thinking, toolCall]` turns as completed replies,
  * which prematurely tears down the `sending` / `activeRunId` / `pendingFinal`
- * lifecycle flags and makes the Thinking… indicator vanish mid-tool-chain.
+ * lifecycle flags and makes the Thinking indicator vanish mid-tool-chain.
  */
 function messageHasImageContent(message: RawMessage | undefined): boolean {
   if (!message) return false;
@@ -2775,7 +2928,7 @@ function segmentHasOpenToolRun(segmentMessages: RawMessage[]): boolean {
   }
 
   // The tool run is closed if any assistant message after the last tool call
-  // is a non-tool response — either with visible content or a thinking-only
+  // is a non-tool response  - either with visible content or a thinking-only
   // terminal turn (the model ended without producing more tool calls).
   return !segmentMessages.some((message, index) => {
     if (index <= lastToolUseOffset) return false;
@@ -2968,7 +3121,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // history/run state immediately. Without this, a background loadSessions
             // can retarget currentSessionKey (e.g. to a cron heartbeat session)
             // while messages[] still holds the prior conversation until
-            // chat.history returns — which looks like cross-session contamination.
+            // chat.history returns  - which looks like cross-session contamination.
             clearHistoryPoll();
             set((state) => ({
               ...buildSessionSwitchPatch(state, nextSessionKey),
@@ -3057,7 +3210,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           if (previousSessionKey !== nextSessionKey) {
-            void get().loadHistory();
+            deferHistoryLoad(get);
           }
         }
       } catch (err) {
@@ -3084,13 +3237,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearHistoryPoll();
     clearBaselines();
     set((s) => buildSessionSwitchPatch(s, key));
-    get().loadHistory();
+    deferSessionSwitchHistoryLoad(get);
   },
 
   // ── Delete session ──
   //
   // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
-  // RPC — confirmed by inspecting client.ts, protocol.ts and the full codebase.
+  // RPC  - confirmed by inspecting client.ts, protocol.ts and the full codebase.
   // Deletion is therefore performed locally: the renderer drops the session
   // from the sidebar / labels / activity maps and the Main process hard-deletes
   // the on-disk transcript so it stops appearing in sessions.list and stops
@@ -3099,6 +3252,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deleteSession: async (key: string) => {
     clearCachedSessionHistory(key);
     clearCachedSessionRunState(key);
+    clearActiveSendGeneration(key);
     clearSessionLabelHydrationTracking(key);
     clearPendingOptimisticUserMessages(key);
     // Hard-delete the session's JSONL transcript on disk.
@@ -3124,7 +3278,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const remaining = sessions.filter((s) => s.key !== key);
 
     if (currentSessionKey === key) {
-      // Switched away from deleted session — pick the first remaining or create new
+      // Switched away from deleted session  - pick the first remaining or create new
       const next = remaining[0];
       set((s) => ({
         sessions: remaining,
@@ -3189,27 +3343,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       throw new Error('Session label cannot be empty');
     }
 
+    const current = get();
+    const session = current.sessions.find((entry) => entry.key === key);
+    const currentLabel = toSessionLabel(
+      current.sessionLabels[key] || session?.label || session?.derivedTitle || '',
+      50,
+    );
+    if (currentLabel === normalized) {
+      set((s) => ({
+        sessions: s.sessions.map((entry) =>
+          entry.key === key && entry.label !== normalized ? { ...entry, label: normalized } : entry,
+        ),
+        sessionLabels: s.sessionLabels[key] === normalized
+          ? s.sessionLabels
+          : { ...s.sessionLabels, [key]: normalized },
+      }));
+      return;
+    }
+
     try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        error?: string;
-      }>('/api/sessions/rename', {
-        method: 'POST',
-        body: JSON.stringify({ sessionKey: key, label: normalized }),
-      });
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to rename session');
-      }
+      await persistSessionRenameOnce(key, normalized);
     } catch (err) {
       console.error(`[renameSession] API call failed for ${key}:`, err);
       throw err;
     }
 
-    const session = get().sessions.find((entry) => entry.key === key);
-    if (session) {
+    const updatedSession = get().sessions.find((entry) => entry.key === key);
+    if (updatedSession) {
       finishSessionLabelHydration(
         key,
-        getSessionLabelHydrationVersion(session, get().sessionLastActivity),
+        getSessionLabelHydrationVersion(updatedSession, get().sessionLastActivity),
         'backend-label',
       );
     }
@@ -3224,12 +3387,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   updateSessionModel: async (key: string, modelRef: string | null) => {
     const normalizedModelRef = typeof modelRef === 'string' ? modelRef.trim() : '';
-    const effectiveModelRef = await persistSessionModelSelection(key, normalizedModelRef || null);
     const updatedAt = Date.now();
+    const previousSessions = get().sessions;
+    const optimisticModelRef = normalizedModelRef || resolveEffectiveAgentModelRefForSession(key);
 
     set((state) => ({
-      sessions: upsertSessionWithModel(state.sessions, key, effectiveModelRef, updatedAt),
+      sessions: upsertSessionWithModel(state.sessions, key, optimisticModelRef, updatedAt),
     }));
+
+    try {
+      const effectiveModelRef = await persistSessionModelSelection(key, normalizedModelRef || null);
+      set((state) => ({
+        sessions: upsertSessionWithModel(state.sessions, key, effectiveModelRef, Date.now()),
+      }));
+    } catch (error) {
+      set({ sessions: previousSessions });
+      throw error;
+    }
   },
 
   // ── Cleanup empty session on navigate away ──
@@ -3266,12 +3440,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const foregroundLoadKey = getHistoryForegroundLoadKey(currentSessionKey);
     const isInitialForegroundLoad = !quiet && !_foregroundHistoryLoadSeen.has(foregroundLoadKey);
     const historyTimeoutOverride = getStartupHistoryTimeoutOverride(isInitialForegroundLoad);
-    const forceLoad = _forceNextHistoryLoadBySession.delete(currentSessionKey);
+    const forceLoadRequested = _forceNextHistoryLoadBySession.has(currentSessionKey)
+      || _sessionsNeedingTerminalHistoryRefresh.has(currentSessionKey);
     const existingLoad = _historyLoadInFlight.get(currentSessionKey);
     const shouldShowForegroundLoading = !quiet && get().messages.length === 0;
     if (existingLoad) {
       await existingLoad;
-      if (!forceLoad) {
+      if (!forceLoadRequested) {
         return;
       }
       if (get().currentSessionKey !== currentSessionKey) {
@@ -3279,11 +3454,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
+    const forcedByExplicitRequest = _forceNextHistoryLoadBySession.delete(currentSessionKey);
+    const forcedByTerminalRefresh = consumeSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+    const forceLoad = forcedByExplicitRequest || forcedByTerminalRefresh;
+
     const lastLoadAt = _lastHistoryLoadAtBySession.get(currentSessionKey) || 0;
     if (!forceLoad && quiet && Date.now() - lastLoadAt < HISTORY_LOAD_MIN_INTERVAL_MS) {
       return;
     }
 
+    const historyLoadGeneration = nextHistoryLoadGeneration(currentSessionKey);
+    const isCurrentLoad = () => (
+      get().currentSessionKey === currentSessionKey
+      && isCurrentHistoryLoad(currentSessionKey, historyLoadGeneration)
+    );
     if (shouldShowForegroundLoading) set({ loading: true, error: null, runError: null });
 
     // Safety guard: if history loading takes too long, force loading to false
@@ -3291,11 +3475,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     let loadingTimedOut = false;
     const loadingSafetyTimer = shouldShowForegroundLoading ? setTimeout(() => {
       loadingTimedOut = true;
-      set({ loading: false });
+      if (isCurrentLoad()) set({ loading: false });
     }, getHistoryLoadingSafetyTimeout(isInitialForegroundLoad)) : null;
 
     const loadPromise = (async () => {
-      const isCurrentSession = () => get().currentSessionKey === currentSessionKey;
+      const isCurrentSession = isCurrentLoad;
       const getPreviewMergeKey = (message: RawMessage): string => (
         `${message.id ?? ''}|${message.role}|${message.timestamp ?? ''}|${getMessageText(message.content)}`
       );
@@ -3498,11 +3682,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       // Async: load missing image previews from disk (updates in background)
-      loadMissingPreviews(finalMessages).then((updated) => {
+      const previewHydrationMessages = finalMessages.slice(-PREVIEW_HYDRATION_MESSAGE_LIMIT);
+      loadMissingPreviews(previewHydrationMessages).then((updated) => {
         if (!isCurrentSession()) return;
         if (updated) {
           set((state) => ({
-            messages: mergeHydratedMessages(state.messages, finalMessages),
+            messages: mergeHydratedMessages(state.messages, previewHydrationMessages),
           }));
         }
       });
@@ -3517,6 +3702,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingFinal: false,
           lastUserMessageAt: null,
         });
+        markSessionRunIdle(currentSessionKey);
         return true;
       }
 
@@ -3533,7 +3719,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       // Promote pendingFinal only when there's a *final-looking* assistant
-      // message after the user — i.e. one that has actual user-visible output
+      // message after the user  - i.e. one that has actual user-visible output
       // (text/image) AND is not still waiting on a tool result. This used to
       // promote on *any* assistant message after the user, which fired on the
       // very first `[thinking, toolCall]` intermediate turn and then paired
@@ -3555,7 +3741,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // rounds. Without `hasPendingToolUse` the closer matches the first
       // `[thinking, toolCall]` intermediate turn (because thinking *used to*
       // count as non-tool content), clears `sending` / `activeRunId` /
-      // `pendingFinal`, and makes the Thinking… indicator vanish mid-chain.
+    // `pendingFinal`, and makes the Thinking indicator vanish mid-chain.
       if (pendingFinal || get().pendingFinal) {
         const recentAssistant = [...openRunSegment].reverse().find((msg) => {
           if (msg.role !== 'assistant') return false;
@@ -3572,7 +3758,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             pendingFinal: false,
             runError: null,
           });
-          captureSessionRunState(currentSessionKey, DEFAULT_SESSION_RUN_STATE);
+          markSessionRunIdle(currentSessionKey);
         }
       }
 
@@ -3604,7 +3790,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             streamingTools: [],
             pendingToolImages: [],
           });
-          captureSessionRunState(currentSessionKey, DEFAULT_SESSION_RUN_STATE);
+          markSessionRunIdle(currentSessionKey);
         } else if (hasConclusiveReply && !segmentHasOpenToolRun(openSegment)) {
           clearHistoryPoll();
           set({
@@ -3616,7 +3802,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             lastUserMessageAt: null,
             runError: null,
           });
-          captureSessionRunState(currentSessionKey, DEFAULT_SESSION_RUN_STATE);
+          markSessionRunIdle(currentSessionKey);
         }
         // Also unstick when all tool calls are resolved but the model's
         // terminal response was thinking-only (no visible content). The
@@ -3634,7 +3820,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             lastUserMessageAt: null,
             runError: null,
           });
-          captureSessionRunState(currentSessionKey, DEFAULT_SESSION_RUN_STATE);
+          markSessionRunIdle(currentSessionKey);
         }
       }
 
@@ -3670,6 +3856,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingFinal: false,
           lastUserMessageAt: null,
         });
+        markSessionRunIdle(currentSessionKey);
       }
       return true;
       };
@@ -3680,7 +3867,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const applyLocalFallbackMessages = async (
         options: { onlyWhileGatewayPending?: boolean; logTimeout?: boolean } = {},
       ): Promise<boolean> => {
-        const fallbackMessages = await loadLocalHistoryFallback(currentSessionKey, 200, {
+        const fallbackMessages = await loadLocalHistoryFallback(currentSessionKey, HISTORY_PAGE_SIZE, {
           logTimeout: options.logTimeout,
         });
         if (
@@ -3695,7 +3882,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!applied) return false;
 
         localFallbackApplied = true;
-        set({ hasMoreHistory: fallbackMessages.length >= HISTORY_PAGE_SIZE });
+        if (isCurrentSession()) {
+          set({ hasMoreHistory: fallbackMessages.length >= HISTORY_PAGE_SIZE });
+        }
         if (isInitialForegroundLoad) {
           _foregroundHistoryLoadSeen.add(foregroundLoadKey);
           void refreshVisibleSessionSummaries(set, get);
@@ -3777,7 +3966,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (rawMessages.length === 0 && isCronSessionKey(currentSessionKey)) {
             rawMessages = fallbackMessages.length > 0
               ? fallbackMessages
-              : await loadLocalHistoryFallback(currentSessionKey, 200);
+              : await loadLocalHistoryFallback(currentSessionKey, HISTORY_PAGE_SIZE);
           } else if (rawMessages.length > 0) {
             rawMessages = await hydrateGatewayHistoryFromTranscript(
               currentSessionKey,
@@ -3788,13 +3977,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           if (rawMessages.length === 0 && localFallbackApplied && !isCronSessionKey(currentSessionKey)) {
-            set({ loading: false });
+            if (isCurrentSession()) set({ loading: false });
             return;
           }
 
           const applied = applyLoadedMessages(rawMessages, thinkingLevel);
           if (applied) {
-            set({ hasMoreHistory: rawMessages.length >= HISTORY_PAGE_SIZE });
+            if (isCurrentSession()) set({ hasMoreHistory: rawMessages.length >= HISTORY_PAGE_SIZE });
           }
           if (applied && isInitialForegroundLoad) {
             _foregroundHistoryLoadSeen.add(foregroundLoadKey);
@@ -3816,19 +4005,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (appliedLateFallback) {
             if (fallbackMessages.length > 0) {
               localFallbackApplied = true;
-              set({ hasMoreHistory: fallbackMessages.length >= HISTORY_PAGE_SIZE });
+              if (isCurrentSession()) {
+                set({ hasMoreHistory: fallbackMessages.length >= HISTORY_PAGE_SIZE });
+              }
               if (isInitialForegroundLoad) {
                 _foregroundHistoryLoadSeen.add(foregroundLoadKey);
                 void refreshVisibleSessionSummaries(set, get);
               }
             }
           } else if (localFallbackApplied) {
-            set({ loading: false });
+            if (isCurrentSession()) set({ loading: false });
           } else if (errorKind === 'timeout' && isInitialForegroundLoad) {
             // Keep startup usable while Gateway RPC routing catches up.  The
             // Sidebar/gateway event refreshes will retry quietly instead of
             // showing a transient "RPC timeout: chat.history" error.
-            set({ loading: false });
+            if (isCurrentSession()) set({ loading: false });
           } else {
             applyLoadFailure(
               (lastError instanceof Error ? lastError.message : String(lastError))
@@ -3840,7 +4031,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.warn('Failed to load chat history:', err);
         const applied = await applyLocalFallbackMessages();
         if (!applied && localFallbackApplied) {
-          set({ loading: false });
+          if (isCurrentSession()) set({ loading: false });
         } else if (!applied) {
           applyLoadFailure(String(err));
         }
@@ -3909,11 +4100,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         hasMoreHistory: rawMessages.length >= nextLimit && nextLimit < HISTORY_MAX_RENDERED_MESSAGES,
       });
       cacheSessionHistory(currentSessionKey, enrichedMessages, get().thinkingLevel);
-      void loadMissingPreviews(enrichedMessages).then((updated) => {
+      const previewHydrationMessages = enrichedMessages.slice(-PREVIEW_HYDRATION_MESSAGE_LIMIT);
+      void loadMissingPreviews(previewHydrationMessages).then((updated) => {
         if (!updated || get().currentSessionKey !== currentSessionKey) return;
         set((state) => ({
           messages: state.messages.map((message) => {
-            const match = enrichedMessages.find((candidate) => (
+            const match = previewHydrationMessages.find((candidate) => (
               `${candidate.id ?? ''}|${candidate.role}|${candidate.timestamp ?? ''}|${getMessageText(candidate.content)}`
               === `${message.id ?? ''}|${message.role}|${message.timestamp ?? ''}|${getMessageText(message.content)}`
             ));
@@ -3935,7 +4127,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   sendMessage: async (
     text: string,
-    attachments?: Array<{ fileName: string; mimeType: string; fileSize: number; stagedPath: string; preview: string | null }>,
+    attachments?: ChatSendAttachment[],
     targetAgentId?: string | null,
     mode: ChatSendMode = 'chat',
     imageOptions?: ChatImageSendOptions,
@@ -3944,26 +4136,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
 
-    const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId) ?? get().currentSessionKey;
+    const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
+      ?? get().currentSessionKey;
 
     // Guard against double-submit before React re-renders with sending=true.
     if (get().sending && targetSessionKey === get().currentSessionKey) {
       return;
     }
 
-    try {
-      await ensureManagedAuthReadyForSend();
-    } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : String(error),
-        sending: false,
-      });
-      return;
+    const managedAuthReady = ensureManagedAuthReadyForSend();
+    if (managedAuthReady) {
+      try {
+        await managedAuthReady;
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+          sending: false,
+        });
+        return;
+      }
     }
 
     if (targetSessionKey !== get().currentSessionKey) {
       set((s) => buildSessionSwitchPatch(s, targetSessionKey));
-      await get().loadHistory(true);
+      deferHistoryLoad(get, true);
     }
 
     const currentSessionKey = targetSessionKey;
@@ -4081,6 +4277,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         await get().loadHistory(true);
+        markSessionRunIdle(currentSessionKey);
       } catch (error) {
         set({
           error: error instanceof Error ? error.message : String(error),
@@ -4095,6 +4292,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           lastUserMessageAt: null,
           pendingToolImages: [],
         });
+        markSessionRunIdle(currentSessionKey);
       }
       return;
     }
@@ -4137,6 +4335,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         await get().loadHistory(true);
+        markSessionRunIdle(currentSessionKey);
       } catch (error) {
         set({
           error: error instanceof Error ? error.message : String(error),
@@ -4151,6 +4350,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           lastUserMessageAt: null,
           pendingToolImages: [],
         });
+        markSessionRunIdle(currentSessionKey);
       }
       return;
     }
@@ -4189,7 +4389,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (sendAgeMs >= LLM_IDLE_HINT_MS && !state.runError && !hasProgress) {
         set({
-          runError: 'The model did not respond within 120 seconds. Retrying…',
+          runError: 'The model did not respond within 120 seconds. Retrying...',
         });
       }
 
@@ -4227,6 +4427,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streamingMessage: null,
         streamingText: '',
       });
+      markSessionRunIdle(currentSessionKey);
     };
     setTimeout(checkStuck, 30_000);
 
@@ -4246,14 +4447,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearSendGenerationIfCurrent();
         clearHistoryPoll();
         set({ error: errorMsg, sending: false });
+        markSessionRunIdle(currentSessionKey);
         return;
       }
 
       if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
         const cached = _sessionRunStateCache.get(currentSessionKey);
         if (cached?.lastUserMessageAt === nowMs) {
-          clearSendGenerationIfCurrent();
-          _sessionRunStateCache.set(currentSessionKey, DEFAULT_SESSION_RUN_STATE);
+          markSessionRunIdle(currentSessionKey);
           return;
         }
       }
@@ -4267,9 +4468,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const idempotencyKey = crypto.randomUUID();
       const hasMedia = attachments && attachments.length > 0;
-      if (hasMedia) {
-        console.log('[sendMessage] Media paths:', attachments!.map(a => a.stagedPath));
-      }
 
       // Cache image attachments BEFORE the IPC call to avoid race condition:
       // history may reload (via Gateway event) before the RPC returns.
@@ -4316,8 +4514,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         result = { success: true, result: rpcResult };
       }
 
-      console.log(`[sendMessage] RPC result: success=${result.success}, runId=${result.result?.runId || 'none'}`);
-
       if (!result.success) {
         const errorMsg = result.error || 'Failed to send message';
         if (isRecoverableChatSendTimeout(errorMsg)) {
@@ -4335,12 +4531,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           && (latest.activeRunId == null || latest.activeRunId === returnedRunId);
 
         if (sendStillCurrent && canAttachToCurrentSession) {
+          clearSendGenerationIfCurrent();
           set({ activeRunId: returnedRunId });
         } else if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
           const cached = _sessionRunStateCache.get(currentSessionKey);
           if (cached?.sending
             && cached.lastUserMessageAt === nowMs
             && (cached.activeRunId == null || cached.activeRunId === returnedRunId)) {
+            clearSendGenerationIfCurrent();
             captureSessionRunState(currentSessionKey, { ...cached, activeRunId: returnedRunId });
           }
         } else {
@@ -4349,6 +4547,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             sessionKey: currentSessionKey,
           });
         }
+      } else {
+        clearSendGenerationIfCurrent();
       }
     } catch (err) {
       const errStr = String(err);
@@ -4377,6 +4577,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingToolImages: [],
     });
     set({ streamingTools: [] });
+    markSessionRunIdle(currentSessionKey);
 
     try {
       await abortChatRunViaHostApi(currentSessionKey);
@@ -4392,21 +4593,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const eventState = String(event.state || '');
     const eventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
     const { activeRunId, currentSessionKey } = get();
+    const terminalEvent = eventState === 'final'
+      || eventState === 'error'
+      || eventState === 'aborted'
+      || (event.message && typeof event.message === 'object'
+        && getMessageStopReason(event.message as Record<string, unknown>) != null);
 
     // Only process events for the current session (when sessionKey is present)
     if (eventSessionKey != null && eventSessionKey !== currentSessionKey) {
+      if (terminalEvent) {
+        markSessionRunIdle(eventSessionKey);
+        markSessionNeedsTerminalHistoryRefresh(eventSessionKey);
+      }
       return;
     }
 
     // Only process events for the active run (or if no active run set).
     // Inbound channel traffic (Feishu/Telegram/etc.) on the current session uses a
-    // different runId than a stale desktop activeRunId — still refresh history on finals.
+    // different runId than a stale desktop activeRunId  - still refresh history on finals.
     if (activeRunId && runId && runId !== activeRunId) {
       const isCurrentSession = eventSessionKey == null || eventSessionKey === currentSessionKey;
-      const inboundTerminal = eventState === 'final' || eventState === 'error'
-        || (event.message && typeof event.message === 'object'
-          && getMessageStopReason(event.message as Record<string, unknown>) != null);
-      if (isCurrentSession && inboundTerminal) {
+      if (isCurrentSession && terminalEvent) {
         void get().loadHistory(true);
       }
       return;
@@ -4434,7 +4641,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Only pause the history poll when we receive actual streaming data.
     // The gateway sends "agent" events with { phase, startedAt } that carry
-    // no message — these must NOT kill the poll, since the poll is our only
+    // no message  - these must NOT kill the poll, since the poll is our only
     // way to track progress when the gateway doesn't stream intermediate turns.
     const hasUsefulData = resolvedState === 'delta' || resolvedState === 'final'
       || resolvedState === 'error' || resolvedState === 'aborted';
@@ -4466,7 +4673,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         const updates = collectToolUpdates(event.message, resolvedState);
         // Capture baseline file content from disk before the runtime
-        // executes Write tool calls — enables proper before/after diff.
+        // executes Write tool calls  - enables proper before/after diff.
         captureBaselinesFromMessage(
           event.message,
           getBaselineRunKeyForMessages(currentSessionKey, get().messages),
@@ -4502,7 +4709,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const updates = collectToolUpdates(normalizedFinalMessage, resolvedState);
           // Filter out internal-only final responses (NO_REPLY, HEARTBEAT_OK, etc.)
           // before adding to messages. Without this guard, the internal token appears
-          // briefly in the UI until loadHistory replaces the message list — and if the
+          // briefly in the UI until loadHistory replaces the message list  - and if the
           // quiet-mode reload is debounced away, the token can stay visible permanently.
           if (isInternalMessage(normalizedFinalMessage)) {
             const sessionKeyForReload = get().currentSessionKey;
@@ -4518,6 +4725,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               pendingToolImages: [],
             });
             clearHistoryPoll();
+            markSessionRunIdle(sessionKeyForReload);
             forceNextHistoryLoad(sessionKeyForReload);
             void get().loadHistory(true);
             break;
@@ -4532,7 +4740,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Mirror `enrichWithToolResultFiles`: collect non-image artifacts
             // for the next assistant message. Images embedded inside a tool
             // result (read tool's vision data) and raw image paths in the
-            // tool's stdout (sips / ls / file output) are NOT user-facing —
+            // tool's stdout (sips / ls / file output) are NOT user-facing  -
             // the canonical render is the Gateway-injected `assistant-media`
             // bubble that follows the agent's `MEDIA:` text. Surfacing those
             // intermediate images here would duplicate every screenshot the
@@ -4591,10 +4799,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // When the model ends its turn with only `thinking` blocks (no text,
           // no images, no tool calls), `hasOutput` is false and `toolOnly` is
           // false. This is a valid terminal state (the model decided not to
-          // produce user-visible content — common after image_generate +
+          // produce user-visible content  - common after image_generate +
           // message-send tool chains on MiniMax-M2.7). Without this flag the
           // lifecycle stays armed indefinitely, leaving the UI stuck on
-          // "Thinking…" even though the run is complete.
+          // "Thinking..." even though the run is complete.
           const isEmptyTerminalResponse = !toolOnly && !hasOutput && !pendingTool;
           const clearLifecycle = hasOutput || isEmptyTerminalResponse;
           const msgId = normalizedFinalMessage.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
@@ -4666,8 +4874,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // delayed follow-up can pick up the Gateway's `assistant-media`
           // bubble that may still be getting written.
           if (clearLifecycle && !toolOnly) {
+            const sessionKeyAtFinal = get().currentSessionKey;
             clearHistoryPoll();
-            captureSessionRunState(get().currentSessionKey, DEFAULT_SESSION_RUN_STATE);
+            markSessionRunIdle(sessionKeyAtFinal);
+            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
             void get().loadHistory(true);
 
             // OpenClaw's gateway processes `MEDIA:/path` markers in the
@@ -4681,7 +4891,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             //   3. `appendAssistantTranscriptMessage` writes a follow-up
             //      `assistant-media` message to the session JSONL, with
             //      `idempotencyKey: "<runId>:assistant-media"`.
-            // That follow-up message is **only persisted** — it is NOT
+            // That follow-up message is **only persisted**  - it is NOT
             // re-broadcast as a streaming event. The streaming `final`
             // we just consumed only contains the agent's text. The
             // assistant-media bubble can only be retrieved via
@@ -4692,7 +4902,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // gateway's write and almost always misses the bubble.
             //
             // CRITICAL: we cannot detect from the streaming final alone
-            // whether the agent emitted a `MEDIA:/path` marker — OpenClaw's
+            // whether the agent emitted a `MEDIA:/path` marker  - OpenClaw's
             // `splitTrailingDirective` (selection-D8_ELZa7.js line ~904)
             // strips `MEDIA:/...` lines from the broadcast text BEFORE it
             // reaches the client, so the streaming `final` text is always
@@ -4707,7 +4917,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // history snapshot and is a no-op for the UI.
             // `forceNextHistoryLoad` bypasses `HISTORY_LOAD_MIN_INTERVAL_MS`
             // so the call is not suppressed by the throttle.
-            const sessionKeyAtFinal = get().currentSessionKey;
             setTimeout(() => {
               if (get().currentSessionKey !== sessionKeyAtFinal) {
                 return;
@@ -4764,7 +4973,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           clearHistoryPoll();
           clearErrorRecoveryTimer();
+          markSessionRunIdle(sessionKeyAtError);
           if (wasSending) {
+            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtError);
             void get().loadHistory(true);
           }
         };
@@ -4797,10 +5008,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           lastUserMessageAt: null,
           pendingToolImages: [],
         });
+        markSessionRunIdle(get().currentSessionKey);
         break;
       }
       default: {
-        // Unknown or empty state — if we're currently sending and receive an event
+        // Unknown or empty state  - if we're currently sending and receive an event
         // with a message, attempt to process it as streaming data. This handles
         // edge cases where the Gateway sends events without a state field.
         const { sending } = get();
@@ -4916,6 +5128,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           nextPatch.streamingText = '';
           nextPatch.pendingToolImages = [];
         }
+        markSessionRunIdle(currentSessionKey);
+        markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
       }
     }
 
@@ -4933,7 +5147,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 }));
 
 export function syncCachedSessionRunIdle(sessionKey: string): void {
-  captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
+  markSessionRunIdle(sessionKey);
 }
 
 export function hasActiveChatWork(state: Pick<
@@ -4943,5 +5157,5 @@ export function hasActiveChatWork(state: Pick<
   return state.sending
     || state.activeRunId != null
     || state.pendingFinal
-    || Object.values(state.runtimeRuns).some((run) => run.status === 'running');
+    || Object.values(state.runtimeRuns).some((run) => chatRunLooksRecentlyActive(run));
 }
