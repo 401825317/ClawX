@@ -4176,7 +4176,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         preview: file.preview,
       }));
     const imageReferenceInputs = mode === 'image'
-      ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
+      ? explicitPendingImages
       : [];
     const videoReferenceInputs = mode === 'video'
       ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
