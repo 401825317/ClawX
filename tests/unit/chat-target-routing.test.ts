@@ -469,6 +469,92 @@ describe('chat target routing', () => {
     expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
   });
 
+  it('auto-routes explicit image generation text to the image generation endpoint', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('帮我生成一张产品海报');
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      sessionKey: string;
+      prompt: string;
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+
+    expect(payload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      prompt: '帮我生成一张产品海报',
+      inputImages: [],
+    });
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+  });
+
+  it('keeps image lookup requests on the normal chat path', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('帮我搜索几张参考图片');
+
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    expect(sendCall).toBeTruthy();
+    const payload = JSON.parse((sendCall?.[1] as { body: string }).body) as {
+      sessionKey: string;
+      message: string;
+    };
+
+    expect(payload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      message: '帮我搜索几张参考图片',
+    });
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+  });
+
   it('forwards explicitly pasted image references for image-mode sends', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

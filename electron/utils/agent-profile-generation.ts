@@ -89,6 +89,30 @@ export function buildAgentProfilePrompt(input: AgentProfileGenerationInput): str
   ].join('\n');
 }
 
+export function buildFallbackAgentProfile(input: AgentProfileGenerationInput): GeneratedAgentProfile {
+  const roleName = normalizeText(input.roleName) || 'Agent';
+  const responsibility = normalizeText(input.responsibility) || roleName;
+  const avatarId = normalizeText(input.avatarId) || 'strategist';
+
+  return {
+    roleName,
+    personaName: roleName,
+    responsibility,
+    capabilities: [
+      `Plan and execute work related to ${roleName}`,
+      'Break down requests into clear next steps',
+      'Review outputs for quality and follow-up actions',
+    ],
+    boundaries: [
+      'Ask for clarification when requirements are ambiguous',
+      'Confirm before taking high-impact actions',
+    ],
+    workspaceInstructions: `Focus on ${responsibility}. Keep responses concrete, actionable, and aligned with the user-provided role.`,
+    welcomeMessage: `I am your ${roleName} Agent. I can help with ${responsibility}. What should we work on first?`,
+    avatarId,
+  };
+}
+
 function stripJsonFence(text: string): string {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);

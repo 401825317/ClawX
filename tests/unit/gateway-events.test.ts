@@ -126,6 +126,7 @@ describe('gateway store event wiring', () => {
       type: 'tool.completed',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
+      ts: 1773281731500,
       toolCallId: 'call-1',
       name: 'read',
       result: { summary: 'done' },
@@ -139,6 +140,7 @@ describe('gateway store event wiring', () => {
     expect(useChatStore.getState().pendingFinal).toBe(true);
     expect(useChatStore.getState().lastUserMessageAt).toBe(1773281731000);
     expect(useChatStore.getState().streamingTools).toEqual([]);
+    expect(useChatStore.getState().runtimeRuns['run-1']?.lastEventAt).toBe(1773281731500);
     expect(useChatStore.getState().runtimeRuns['run-1']?.events).toEqual([
       expect.objectContaining({ type: 'tool.completed', toolCallId: 'call-1', name: 'read' }),
     ]);

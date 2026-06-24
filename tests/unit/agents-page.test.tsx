@@ -4,12 +4,15 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom';
 import { Agents } from '../../src/pages/Agents/index';
 import { clearChannelsAccountsCacheForTests } from '@/pages/Channels/channel-accounts-cache';
+import { toast } from 'sonner';
 
 const hostApiFetchMock = vi.fn();
 const subscribeHostEventMock = vi.fn();
 const fetchAgentsMock = vi.fn();
 const updateAgentMock = vi.fn();
 const updateAgentModelMock = vi.fn();
+const createAgentMock = vi.fn();
+const generateAgentProfileMock = vi.fn();
 const refreshProviderSnapshotMock = vi.fn();
 const switchSessionMock = vi.fn();
 const loadSessionsMock = vi.fn();
@@ -50,7 +53,8 @@ vi.mock('@/stores/agents', () => ({
     fetchAgents: typeof fetchAgentsMock;
     updateAgent: typeof updateAgentMock;
     updateAgentModel: typeof updateAgentModelMock;
-    createAgent: ReturnType<typeof vi.fn>;
+    createAgent: typeof createAgentMock;
+    generateAgentProfile: typeof generateAgentProfileMock;
     deleteAgent: ReturnType<typeof vi.fn>;
   }) => unknown) => {
     const state = {
@@ -58,7 +62,8 @@ vi.mock('@/stores/agents', () => ({
       fetchAgents: fetchAgentsMock,
       updateAgent: updateAgentMock,
       updateAgentModel: updateAgentModelMock,
-      createAgent: vi.fn(),
+      createAgent: createAgentMock,
+      generateAgentProfile: generateAgentProfileMock,
       deleteAgent: vi.fn(),
     };
     return typeof selector === 'function' ? selector(state) : state;
@@ -99,6 +104,7 @@ vi.mock('@/lib/host-events', () => ({
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
+    i18n: { language: 'zh-CN' },
   }),
 }));
 
@@ -140,6 +146,17 @@ describe('Agents page status refresh', () => {
     fetchAgentsMock.mockResolvedValue(undefined);
     updateAgentMock.mockResolvedValue(undefined);
     updateAgentModelMock.mockResolvedValue(undefined);
+    createAgentMock.mockResolvedValue(null);
+    generateAgentProfileMock.mockResolvedValue({
+      roleName: 'Research',
+      personaName: 'Research Agent',
+      responsibility: 'Research work',
+      capabilities: [],
+      boundaries: [],
+      workspaceInstructions: '',
+      welcomeMessage: '',
+      avatarId: 'analyst',
+    });
     refreshProviderSnapshotMock.mockResolvedValue(undefined);
     hostApiFetchMock.mockResolvedValue({
       success: true,
@@ -329,6 +346,54 @@ describe('Agents page status refresh', () => {
     expect(switchSessionMock).toHaveBeenCalledWith('agent:research:main');
   });
 
+  it('does not turn post-create session open failures into create failures', async () => {
+    createAgentMock.mockResolvedValue({
+      id: 'research',
+      name: 'Research',
+      isDefault: false,
+      modelDisplay: 'gpt-5',
+      modelRef: 'openai/gpt-5',
+      overrideModelRef: null,
+      inheritedModel: false,
+      workspace: '~/.openclaw/workspace-research',
+      agentDir: '~/.openclaw/agents/research/agent',
+      mainSessionKey: 'agent:research:main',
+      channelTypes: [],
+    });
+    switchSessionMock.mockImplementation(() => {
+      throw new Error('RPC timeout: chat.history');
+    });
+
+    renderAgents();
+
+    fireEvent.click(screen.getByTestId('agents-add-button'));
+    fireEvent.change(screen.getByTestId('agent-create-role-name'), { target: { value: 'Research' } });
+    fireEvent.change(screen.getByTestId('agent-create-responsibility'), { target: { value: 'Research work' } });
+    await waitFor(() => {
+      expect(screen.getByTestId('agent-create-submit')).not.toBeDisabled();
+    });
+    fireEvent.click(screen.getByTestId('agent-create-submit'));
+
+    await waitFor(() => {
+      expect(generateAgentProfileMock).toHaveBeenCalledTimes(1);
+      expect(createAgentMock).toHaveBeenCalledTimes(1);
+    });
+    expect(toast.success).toHaveBeenCalledWith('toast.agentCreated');
+    expect(toast.error).not.toHaveBeenCalledWith(
+      'toast.agentCreateFailed',
+      expect.anything(),
+    );
+    expect(screen.queryByTestId('agent-create-dialog')).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(switchSessionMock).toHaveBeenCalledWith('agent:research:main');
+    });
+    expect(toast.error).not.toHaveBeenCalledWith(
+      'toast.agentCreateFailed',
+      expect.anything(),
+    );
+  });
+
   it('shows per-agent work status from chat sessions', async () => {
     agentsState.agents = [
       {
@@ -367,6 +432,44 @@ describe('Agents page status refresh', () => {
 
     expect(await screen.findByText('workStatus.running')).toBeInTheDocument();
     expect(screen.getByText('workStatus.completed')).toBeInTheDocument();
+  });
+
+  it('does not keep an agent running from a stale runtime run', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1773281731000);
+    agentsState.agents = [
+      {
+        id: 'research',
+        name: 'Research',
+        isDefault: false,
+        modelDisplay: 'gpt-5',
+        modelRef: 'openai/gpt-5',
+        overrideModelRef: null,
+        inheritedModel: false,
+        workspace: '~/.openclaw/workspace-research',
+        agentDir: '~/.openclaw/agents/research/agent',
+        mainSessionKey: 'agent:research:main',
+        channelTypes: [],
+      },
+    ];
+    chatState.runtimeRuns = {
+      'run-stale': {
+        runId: 'run-stale',
+        sessionKey: 'agent:research:main',
+        status: 'running',
+        startedAt: 1773281431000,
+        lastEventAt: 1773281431000,
+        assistantText: '',
+        thinkingText: '',
+        events: [],
+      },
+    };
+
+    renderAgents();
+
+    expect(await screen.findByText('Research')).toBeInTheDocument();
+    expect(screen.queryByText('workStatus.running')).not.toBeInTheDocument();
+    expect(screen.getByText('workStatus.completed')).toBeInTheDocument();
+    nowSpy.mockRestore();
   });
 
   it('keeps the last agent snapshot visible while a refresh is in flight', async () => {

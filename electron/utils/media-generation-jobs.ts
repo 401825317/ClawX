@@ -3,8 +3,8 @@ import { existsSync } from 'fs';
 import path from 'node:path';
 import { app, utilityProcess } from 'electron';
 import { appendImageGenerationConversation } from './chat-session-image-message';
-import { logger } from './logger';
 import { getElectronStoreUserDataEnvKey } from './electron-store-options';
+import { logger } from './logger';
 import type {
   MediaGenerationJobPayload,
   MediaGenerationJobSnapshot,
@@ -19,6 +19,9 @@ type InternalMediaGenerationJob = MediaGenerationJobSnapshot & {
 const jobs = new Map<string, InternalMediaGenerationJob>();
 const queue: string[] = [];
 const MAX_JOB_HISTORY = 50;
+const MAX_WORKER_OUTPUT_CHARS = 4096;
+const MAX_WORKER_LOG_CHARS = 1024;
+const MAX_JOB_ERROR_CHARS = 12_000;
 
 let activeJobId: string | null = null;
 
@@ -66,7 +69,71 @@ function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
   job.status = 'failed';
   job.updatedAt = now;
   job.completedAt = now;
-  job.error = error;
+  job.error = truncateText(error, MAX_JOB_ERROR_CHARS);
+}
+
+function chunkToText(data: unknown): string {
+  if (typeof data === 'string') return data;
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  return String(data);
+}
+
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function normalizeCapturedText(text: string): string {
+  return text.replace(/\0/g, '').trim();
+}
+
+function createBoundedOutputCapture(maxChars: number) {
+  let text = '';
+  let omittedChars = 0;
+
+  return {
+    append(data: unknown): void {
+      const chunk = chunkToText(data);
+      if (!chunk) return;
+      const overflow = text.length + chunk.length - maxChars;
+      if (overflow <= 0) {
+        text += chunk;
+        return;
+      }
+
+      omittedChars += overflow;
+      text = chunk.length >= maxChars
+        ? chunk.slice(-maxChars)
+        : `${text}${chunk}`.slice(-maxChars);
+    },
+    format(label: string): string | null {
+      const normalized = normalizeCapturedText(text);
+      if (!normalized) return null;
+      const suffix = omittedChars > 0
+        ? ` (last ${maxChars} chars; truncated ${omittedChars} chars)`
+        : '';
+      return `${label}${suffix}:\n${normalized}`;
+    },
+  };
+}
+
+function formatWorkerLogChunk(data: unknown): string {
+  return truncateText(normalizeCapturedText(chunkToText(data)), MAX_WORKER_LOG_CHARS);
+}
+
+function appendWorkerOutputToError(
+  error: string,
+  output: {
+    stdout: ReturnType<typeof createBoundedOutputCapture>;
+    stderr: ReturnType<typeof createBoundedOutputCapture>;
+  },
+): string {
+  const sections = [error || 'Media generation failed'];
+  const stderr = output.stderr.format('Worker stderr');
+  if (stderr) sections.push(stderr);
+  const stdout = output.stdout.format('Worker stdout');
+  if (stdout) sections.push(stdout);
+  return truncateText(sections.join('\n\n'), MAX_JOB_ERROR_CHARS);
 }
 
 function getOutputLocations(result: unknown): string[] {
@@ -132,6 +199,10 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
   }
 
   await new Promise<void>((resolve) => {
+    const workerOutput = {
+      stdout: createBoundedOutputCapture(MAX_WORKER_OUTPUT_CHARS),
+      stderr: createBoundedOutputCapture(MAX_WORKER_OUTPUT_CHARS),
+    };
     const child = utilityProcess.fork(wrapperPath, [], {
       cwd: process.cwd(),
       stdio: 'pipe',
@@ -154,7 +225,10 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
       }
 
       if (!response.success) {
-        markJobFailed(job, response.error || 'Media generation failed');
+        markJobFailed(job, appendWorkerOutputToError(
+          response.error || 'Media generation failed',
+          workerOutput,
+        ));
         resolve();
         return;
       }
@@ -187,22 +261,36 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
       void finish(message);
     });
 
-    child.on('exit', (code: number) => {
+    child.on('exit', (code: number | null) => {
       if (settled) return;
-      markJobFailed(job, `Media generation worker exited before completion (code=${code})`);
+      markJobFailed(job, appendWorkerOutputToError(
+        `Media generation worker exited before completion (code=${code})`,
+        workerOutput,
+      ));
       settled = true;
       resolve();
     });
 
     child.on('error', (...args: unknown[]) => {
       if (settled) return;
-      markJobFailed(job, `Media generation worker error: ${args.map(String).join(' ')}`);
+      markJobFailed(job, appendWorkerOutputToError(
+        `Media generation worker error: ${args.map((arg) => arg instanceof Error ? arg.message : String(arg)).join(' ')}`,
+        workerOutput,
+      ));
       settled = true;
       resolve();
     });
 
+    child.stdout?.on('data', (data) => {
+      workerOutput.stdout.append(data);
+    });
+
     child.stderr?.on('data', (data) => {
-      logger.warn(`[media-generation-worker] ${String(data).trim()}`);
+      workerOutput.stderr.append(data);
+      const line = formatWorkerLogChunk(data);
+      if (line) {
+        logger.warn(`[media-generation-worker] ${line}`);
+      }
     });
   });
 

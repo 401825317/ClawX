@@ -34,6 +34,10 @@ vi.mock('@electron/services/providers/provider-runtime-sync', () => ({
   syncAgentModelOverrideToRuntime: vi.fn(),
 }));
 
+vi.mock('@electron/utils/openclaw-workspace', () => ({
+  ensureClawXContext: vi.fn(),
+}));
+
 vi.mock('@electron/api/route-utils', () => ({
   parseJsonBody: vi.fn(),
   sendJson: vi.fn(),
@@ -144,10 +148,169 @@ describe('handleAgentRoutes model updates', () => {
   );
 });
 
+describe('handleAgentRoutes agent creation', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.resetModules();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    Object.defineProperty(process, 'platform', { value: originalPlatform, writable: true });
+  });
+
+  it('returns the created snapshot before running post-create gateway work', async () => {
+    const routeUtils = await import('@electron/api/route-utils');
+    const agentConfig = await import('@electron/utils/agent-config');
+    const runtimeSync = await import('@electron/services/providers/provider-runtime-sync');
+    const workspace = await import('@electron/utils/openclaw-workspace');
+    const { handleAgentRoutes } = await import('@electron/api/routes/agents');
+
+    vi.mocked(routeUtils.parseJsonBody).mockResolvedValue({
+      name: 'Research',
+      inheritWorkspace: true,
+      profile: { personaName: 'Research' },
+    });
+    vi.mocked(agentConfig.createAgent).mockResolvedValue({
+      agents: [
+        {
+          id: 'research',
+          name: 'Research',
+          isDefault: false,
+          modelDisplay: 'gpt-5',
+          modelRef: 'openai/gpt-5',
+          overrideModelRef: null,
+          inheritedModel: false,
+          workspace: '~/.openclaw/workspace-research',
+          agentDir: '~/.openclaw/agents/research/agent',
+          mainSessionKey: 'agent:research:main',
+          channelTypes: [],
+        },
+      ],
+      defaultAgentId: 'main',
+      defaultModelRef: 'openai/gpt-5',
+      configuredChannelTypes: [],
+      channelOwners: {},
+      channelAccountOwners: {},
+      createdAgentId: 'research',
+    });
+    vi.mocked(runtimeSync.syncAllProviderAuthToRuntime).mockResolvedValue(undefined);
+    vi.mocked(workspace.ensureClawXContext).mockResolvedValue(undefined);
+
+    const gatewayManager = {
+      getStatus: vi.fn(() => ({ state: 'running', pid: 1234, port: 18789 })),
+      debouncedReload: vi.fn(),
+    };
+
+    const handled = await handleAgentRoutes(
+      { method: 'POST' } as never,
+      {} as never,
+      new URL('http://127.0.0.1/api/agents'),
+      { gatewayManager } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(agentConfig.createAgent).toHaveBeenCalledWith('Research', {
+      inheritWorkspace: true,
+      profile: { personaName: 'Research' },
+    });
+    expect(routeUtils.sendJson).toHaveBeenCalledWith(
+      {},
+      200,
+      expect.objectContaining({
+        success: true,
+        createdAgentId: 'research',
+      }),
+    );
+    expect(runtimeSync.syncAllProviderAuthToRuntime).not.toHaveBeenCalled();
+    expect(gatewayManager.debouncedReload).not.toHaveBeenCalled();
+    expect(workspace.ensureClawXContext).not.toHaveBeenCalled();
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(runtimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledTimes(1);
+    expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
+    expect(workspace.ensureClawXContext).toHaveBeenCalledWith({ waitForAllConfiguredWorkspaces: true });
+  });
+});
+
 describe('handleAgentRoutes profile generation', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.resetModules();
+  });
+
+  it('uses a local fallback profile when chat.history times out', async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const routeUtils = await import('@electron/api/route-utils');
+      const { handleAgentRoutes } = await import('@electron/api/routes/agents');
+
+      vi.mocked(routeUtils.parseJsonBody).mockResolvedValue({
+        roleName: 'Research',
+        responsibility: 'Research work',
+        avatarId: 'strategist',
+        locale: 'en-US',
+      });
+
+      const gatewayManager = {
+        rpc: vi.fn(async (method: string) => {
+          if (method === 'chat.send') return { runId: 'run-1' };
+          if (method === 'chat.history') throw new Error('RPC timeout: chat.history');
+          if (method === 'chat.abort') return {};
+          throw new Error(`Unexpected rpc method ${method}`);
+        }),
+      };
+
+      const handledPromise = handleAgentRoutes(
+        { method: 'POST' } as never,
+        {} as never,
+        new URL('http://127.0.0.1/api/agents/generate-profile'),
+        { gatewayManager } as never,
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      const handled = await handledPromise;
+
+      expect(handled).toBe(true);
+      expect(gatewayManager.rpc).toHaveBeenCalledWith(
+        'chat.history',
+        expect.objectContaining({
+          sessionKey: expect.stringMatching(/^agent:main:uclaw-profile-/),
+          limit: 20,
+          maxChars: 80_000,
+        }),
+        6_000,
+      );
+      expect(gatewayManager.rpc).toHaveBeenCalledWith(
+        'chat.abort',
+        expect.objectContaining({
+          sessionKey: expect.stringMatching(/^agent:main:uclaw-profile-/),
+        }),
+        15_000,
+      );
+      expect(routeUtils.sendJson).toHaveBeenCalledWith(
+        {},
+        200,
+        {
+          success: true,
+          profile: expect.objectContaining({
+            roleName: 'Research',
+            personaName: 'Research',
+            responsibility: 'Research work',
+            avatarId: 'strategist',
+          }),
+        },
+      );
+    } finally {
+      warnSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('surfaces assistant errorMessage instead of reporting invalid JSON', async () => {

@@ -113,4 +113,37 @@ describe('media generation jobs', () => {
     expect(transcript).toContain('图片已生成。');
     expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
   });
+
+  it('includes bounded worker stdout and stderr when the worker exits before completion', async () => {
+    let child: MockUtilityProcess | null = null;
+    forkMock.mockImplementationOnce(() => {
+      child = new MockUtilityProcess();
+      child.postMessage = vi.fn();
+      queueMicrotask(() => child?.emit('spawn'));
+      return child;
+    });
+
+    const { enqueueMediaGenerationJob } = await import('@electron/utils/media-generation-jobs');
+    const queued = enqueueMediaGenerationJob({
+      kind: 'video',
+      sessionKey: 'agent:main:main',
+      prompt: 'make a short clip',
+    });
+
+    await vi.waitFor(() => {
+      expect(child?.postMessage).toHaveBeenCalledTimes(1);
+    });
+
+    child?.stdout.emit('data', Buffer.from('provider selected: openai/grok-image-video\n'));
+    child?.stderr.emit('data', Buffer.from(`provider failure: ${'x'.repeat(5000)} quota exhausted\n`));
+    child?.emit('exit', 1);
+
+    const failed = await waitForJobStatus(queued.id, 'failed') as { error?: string };
+    expect(failed.error).toContain('Media generation worker exited before completion (code=1)');
+    expect(failed.error).toContain('Worker stderr (last 4096 chars; truncated');
+    expect(failed.error).toContain('quota exhausted');
+    expect(failed.error).toContain('Worker stdout:');
+    expect(failed.error).toContain('provider selected: openai/grok-image-video');
+    expect(failed.error?.length).toBeLessThanOrEqual(12_050);
+  });
 });

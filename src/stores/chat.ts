@@ -80,6 +80,9 @@ let _lastChatEventAt = 0;
 let _managedAuthBackgroundVerifyInFlight: Promise<void> | null = null;
 let _lastManagedAuthBackgroundVerifyAt = 0;
 const MANAGED_AUTH_BACKGROUND_VERIFY_MIN_INTERVAL_MS = 60_000;
+const IMAGE_GENERATION_INTENT_PATTERN = /(?:生成|绘制|画|制作|做|设计|create|generate|draw|make|design|render)[\s\S]{0,24}(?:图片|图像|插画|海报|封面|头像|壁纸|图标|logo|icon|banner|poster|image|picture|illustration|photo|artwork)/i;
+const IMAGE_LOOKUP_INTENT_PATTERN = /(?:搜索|搜|查找|找|检索|浏览器|网页|素材|参考图|参考图片|search|find|look up|browse|reference)/i;
+const IMAGE_NEGATION_INTENT_PATTERN = /(?:不要|不用|别|不需要|do not|don't|dont|no need)[\s\S]{0,12}(?:生成|绘制|画|制作|图片|图像|image|picture)/i;
 
 function managedAuthSendErrorMessage(stateKey: string, detail?: string | null): string {
   if (stateKey === 'loggedOut') {
@@ -151,6 +154,20 @@ function ensureManagedAuthReadyForSend(): Promise<void> | null {
       );
     }
   })();
+}
+
+function shouldAutoUseImageGenerationMode(
+  text: string,
+  mode: ChatSendMode,
+  attachments?: ChatSendAttachment[],
+): boolean {
+  if (mode !== 'chat') return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (attachments?.some((file) => !file.mimeType.startsWith('image/'))) return false;
+  if (IMAGE_NEGATION_INTENT_PATTERN.test(trimmed)) return false;
+  if (IMAGE_LOOKUP_INTENT_PATTERN.test(trimmed)) return false;
+  return IMAGE_GENERATION_INTENT_PATTERN.test(trimmed);
 }
 
 type PendingImageInput = {
@@ -623,6 +640,9 @@ function deferSessionSwitchHistoryLoad(get: ChatGet): void {
 
 function chatRunLooksRecentlyActive(run: ChatState['runtimeRuns'][string], now = Date.now()): boolean {
   if (run.status !== 'running') return false;
+  if (typeof run.lastEventAt === 'number' && Number.isFinite(run.lastEventAt)) {
+    return now - toMs(run.lastEventAt) < LLM_IDLE_HINT_MS + NO_RESPONSE_SAFETY_TIMEOUT_MS;
+  }
   const lastEventTs = run.events.reduce<number | null>((latest, event) => {
     const ts = typeof event.ts === 'number' ? toMs(event.ts) : null;
     if (ts == null || !Number.isFinite(ts)) return latest;
@@ -4135,6 +4155,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   ) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
+    const effectiveMode: ChatSendMode = shouldAutoUseImageGenerationMode(trimmed, mode, attachments)
+      ? 'image'
+      : mode;
 
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
       ?? get().currentSessionKey;
@@ -4175,13 +4198,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         stagedPath: file.stagedPath,
         preview: file.preview,
       }));
-    const imageReferenceInputs = mode === 'image'
+    const imageReferenceInputs = effectiveMode === 'image'
       ? explicitPendingImages
       : [];
-    const videoReferenceInputs = mode === 'video'
+    const videoReferenceInputs = effectiveMode === 'video'
       ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
       : [];
-    const visibleGenerationAttachments = (mode === 'image' || mode === 'video')
+    const visibleGenerationAttachments = (effectiveMode === 'image' || effectiveMode === 'video')
       ? explicitPendingImages
       : [];
 
@@ -4189,10 +4212,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const nowMs = Date.now();
     const userMsg: RawMessage = {
       role: 'user',
-      content: (mode === 'image' || mode === 'video') ? trimmed : (trimmed || (attachments?.length ? '(file attached)' : '')),
+      content: (effectiveMode === 'image' || effectiveMode === 'video') ? trimmed : (trimmed || (attachments?.length ? '(file attached)' : '')),
       timestamp: nowMs / 1000,
       id: crypto.randomUUID(),
-      _attachedFiles: (mode === 'image' || mode === 'video')
+      _attachedFiles: (effectiveMode === 'image' || effectiveMode === 'video')
         ? (visibleGenerationAttachments.length > 0
           ? visibleGenerationAttachments.map(a => ({
             fileName: a.fileName,
@@ -4216,8 +4239,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: true,
       error: null,
       runError: null,
-      pendingImageGenerationLocal: mode === 'image',
-      pendingVideoGenerationLocal: mode === 'video',
+      pendingImageGenerationLocal: effectiveMode === 'image',
+      pendingVideoGenerationLocal: effectiveMode === 'video',
       streamingText: '',
       streamingMessage: null,
       streamingTools: [],
@@ -4238,7 +4261,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Mark this session as most recently active
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
-    if (mode === 'image') {
+    if (effectiveMode === 'image') {
       try {
         const result = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/image-generation/chat-send',
@@ -4297,7 +4320,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    if (mode === 'video') {
+    if (effectiveMode === 'video') {
       try {
         const result = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/video-generation/chat-send',

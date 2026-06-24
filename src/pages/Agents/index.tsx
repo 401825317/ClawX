@@ -58,6 +58,7 @@ type AgentWorkStatus = 'running' | 'completed';
 type FetchChannelAccountsOptions = { deferIfBusy?: boolean; force?: boolean };
 
 const AGENTS_BUSY_REFRESH_DEFER_MS = 30_000;
+const AGENTS_RUNTIME_RUN_ACTIVE_WINDOW_MS = 2 * 60_000;
 const RUNNING_SESSION_STATUSES = new Set(['running', 'active', 'queued', 'in_progress', 'processing']);
 
 function normalizeAgentId(value: string | undefined | null): string {
@@ -76,6 +77,27 @@ function isRunningSession(session: ChatSession): boolean {
   return Boolean(status && RUNNING_SESSION_STATUSES.has(status));
 }
 
+function toMs(timestamp: number): number {
+  return timestamp < 1e12 ? timestamp * 1000 : timestamp;
+}
+
+function getRuntimeRunActivityMs(run: ChatRuntimeRunState): number | null {
+  if (typeof run.lastEventAt === 'number' && Number.isFinite(run.lastEventAt)) {
+    return toMs(run.lastEventAt);
+  }
+  if (typeof run.startedAt === 'number' && Number.isFinite(run.startedAt)) {
+    return toMs(run.startedAt);
+  }
+  return null;
+}
+
+function isRuntimeRunRecentlyActive(run: ChatRuntimeRunState, now = Date.now()): boolean {
+  if (run.status !== 'running') return false;
+  const activityMs = getRuntimeRunActivityMs(run);
+  if (activityMs == null) return true;
+  return now - activityMs < AGENTS_RUNTIME_RUN_ACTIVE_WINDOW_MS;
+}
+
 function getRunningAgentIds(
   state: {
     sessions: ChatSession[];
@@ -86,6 +108,7 @@ function getRunningAgentIds(
   },
 ): string[] {
   const ids = new Set<string>();
+  const now = Date.now();
   if (state.sending) {
     const sendingAgentId = normalizeAgentId(state.currentAgentId || getAgentIdFromSessionKey(state.currentSessionKey));
     ids.add(sendingAgentId);
@@ -98,7 +121,7 @@ function getRunningAgentIds(
   }
 
   for (const run of Object.values(state.runtimeRuns)) {
-    if (run.status === 'running') {
+    if (isRuntimeRunRecentlyActive(run, now)) {
       ids.add(getAgentIdFromSessionKey(run.sessionKey));
     }
   }
@@ -350,8 +373,14 @@ export function Agents() {
             setShowAddDialog(false);
             toast.success(t('toast.agentCreated'));
             if (createdAgent?.mainSessionKey) {
-              switchSession(createdAgent.mainSessionKey);
-              navigate('/');
+              window.setTimeout(() => {
+                try {
+                  switchSession(createdAgent.mainSessionKey);
+                  navigate('/');
+                } catch (error) {
+                  console.warn('[agents] Failed to open newly created agent session:', error);
+                }
+              }, 0);
             }
           }}
         />

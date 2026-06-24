@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import {
   assignChannelToAgent,
   clearChannelBinding,
@@ -18,6 +20,7 @@ import { ensureClawXContext } from '../../utils/openclaw-workspace';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../../shared/chat-timeouts';
 import {
   buildAgentProfilePrompt,
+  buildFallbackAgentProfile,
   isAgentProfileGenerationFailureText,
   normalizeAgentProfileGenerationFailureText,
   parseGeneratedAgentProfile,
@@ -33,11 +36,49 @@ function scheduleGatewayReload(ctx: HostApiContext, reason: string): void {
   void reason;
 }
 
-import { exec } from 'child_process';
-import { promisify } from 'util';
+const postCreateTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleAgentCreationPostCommitTasks(ctx: HostApiContext, agentId?: string): void {
+  const taskKey = agentId?.trim() || 'unknown';
+  const existingTimer = postCreateTaskTimers.get(taskKey);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const timer = setTimeout(() => {
+    postCreateTaskTimers.delete(taskKey);
+
+    try {
+      syncAllProviderAuthToRuntime().catch((err) => {
+        console.warn('[agents] Failed to sync provider auth after agent creation:', err);
+      });
+    } catch (err) {
+      console.warn('[agents] Failed to schedule provider auth sync after agent creation:', err);
+    }
+
+    try {
+      scheduleGatewayReload(ctx, 'create-agent');
+    } catch (err) {
+      console.warn('[agents] Failed to schedule gateway reload after agent creation:', err);
+    }
+
+    try {
+      void ensureClawXContext({ waitForAllConfiguredWorkspaces: true }).catch((err) => {
+        console.warn('[agents] Failed to ensure ClawX context after agent creation:', err);
+      });
+    } catch (err) {
+      console.warn('[agents] Failed to schedule ClawX context after agent creation:', err);
+    }
+  }, 0);
+
+  postCreateTaskTimers.set(taskKey, timer);
+}
+
 const execAsync = promisify(exec);
 const PROFILE_GENERATION_TIMEOUT_MS = 180_000;
 const PROFILE_GENERATION_POLL_MS = 1_000;
+const PROFILE_GENERATION_HISTORY_TIMEOUT_MS = 6_000;
+const PROFILE_GENERATION_MAX_HISTORY_TIMEOUTS = 2;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -94,6 +135,12 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isChatHistoryTimeout(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('rpc timeout: chat.history')
+    || (message.includes('chat.history') && message.includes('timeout'));
+}
+
 async function isSessionActive(ctx: HostApiContext, sessionKey: string): Promise<boolean> {
   try {
     const result = await ctx.gatewayManager.rpc<Record<string, unknown>>(
@@ -137,6 +184,7 @@ async function generateAgentProfileViaGateway(
     locale: input.locale,
   });
   let lastParseError: Error | null = null;
+  let consecutiveHistoryTimeouts = 0;
 
   try {
     await ctx.gatewayManager.rpc<{ runId?: string }>(
@@ -153,15 +201,33 @@ async function generateAgentProfileViaGateway(
     const deadline = Date.now() + PROFILE_GENERATION_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(PROFILE_GENERATION_POLL_MS);
-      const history = await ctx.gatewayManager.rpc<Record<string, unknown>>(
-        'chat.history',
-        {
+      let history: Record<string, unknown>;
+      try {
+        history = await ctx.gatewayManager.rpc<Record<string, unknown>>(
+          'chat.history',
+          {
+            sessionKey,
+            limit: 20,
+            maxChars: 80_000,
+          },
+          PROFILE_GENERATION_HISTORY_TIMEOUT_MS,
+        );
+        consecutiveHistoryTimeouts = 0;
+      } catch (error) {
+        if (!isChatHistoryTimeout(error)) {
+          throw error;
+        }
+        consecutiveHistoryTimeouts += 1;
+        console.warn('[agents] chat.history timed out while generating Agent profile', {
           sessionKey,
-          limit: 20,
-          maxChars: 80_000,
-        },
-        20_000,
-      );
+          consecutiveHistoryTimeouts,
+          error: getErrorMessage(error),
+        });
+        if (consecutiveHistoryTimeouts >= PROFILE_GENERATION_MAX_HISTORY_TIMEOUTS) {
+          return buildFallbackAgentProfile(input);
+        }
+        continue;
+      }
       const failure = extractLatestAssistantFailure(history);
       if (failure) {
         throw new Error(normalizeAgentProfileGenerationFailureText(failure));
@@ -308,20 +374,10 @@ export async function handleAgentRoutes(
         inheritWorkspace: body.inheritWorkspace,
         profile: body.profile,
       });
-      // Sync provider API keys to the new agent's auth-profiles.json so the
-      // embedded runner can authenticate with LLM providers when messages
-      // arrive via channel bots (e.g. Feishu). Without this, the copied
-      // auth-profiles.json may contain a stale key → 401 from the LLM.
-      syncAllProviderAuthToRuntime().catch((err) => {
-        console.warn('[agents] Failed to sync provider auth after agent creation:', err);
-      });
-      scheduleGatewayReload(ctx, 'create-agent');
-      // Ensure newly provisioned workspaces get ClawX context merge/cleanup
-      // even when gateway status events do not fire (e.g. in-process reload).
-      void ensureClawXContext({ waitForAllConfiguredWorkspaces: true }).catch((err) => {
-        console.warn('[agents] Failed to ensure ClawX context after agent creation:', err);
-      });
       sendJson(res, 200, { success: true, ...snapshot });
+      // Post-create runtime warmup is best-effort. The API response only
+      // depends on the config snapshot being created successfully.
+      scheduleAgentCreationPostCommitTasks(ctx, snapshot.createdAgentId);
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

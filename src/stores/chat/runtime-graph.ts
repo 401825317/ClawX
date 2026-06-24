@@ -23,11 +23,13 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function cloneRunState(runId: string, event: ChatRuntimeEvent): ChatRuntimeRunState {
+  const eventTs = typeof event.ts === 'number' ? event.ts : Date.now();
   return {
     runId,
     sessionKey: event.sessionKey,
     status: event.type === 'run.ended' ? event.status : 'running',
     startedAt: event.type === 'run.started' ? event.startedAt : undefined,
+    lastEventAt: eventTs,
     endedAt: event.type === 'run.ended' ? event.endedAt : undefined,
     assistantText: '',
     thinkingText: '',
@@ -105,6 +107,7 @@ export function applyRuntimeEventToRuns(
   const nextRun: ChatRuntimeRunState = {
     ...existing,
     sessionKey: event.sessionKey ?? existing.sessionKey,
+    lastEventAt: typeof event.ts === 'number' ? event.ts : Date.now(),
     events: sameRuntimeEvent(existing.events.at(-1), event)
       ? existing.events
       : [...existing.events, event],

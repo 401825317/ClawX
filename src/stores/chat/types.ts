@@ -99,6 +99,7 @@ export interface ChatRuntimeRunState {
   sessionKey?: string;
   status: 'running' | 'completed' | 'error' | 'aborted';
   startedAt?: number;
+  lastEventAt?: number;
   endedAt?: number;
   assistantText: string;
   thinkingText: string;
