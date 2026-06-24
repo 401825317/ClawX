@@ -3,6 +3,7 @@
  * Handles window state persistence and multi-window management
  */
 import { BrowserWindow, screen } from 'electron';
+import { withElectronStoreProcessOptions } from '../utils/electron-store-options';
 import { parseJsonWithBom } from '../utils/json';
 
 interface WindowState {
@@ -20,7 +21,7 @@ let windowStateStore: any = null;
 async function getStore() {
   if (!windowStateStore) {
     const Store = (await import('electron-store')).default;
-    windowStateStore = new Store<{ windowState: WindowState }>({
+    windowStateStore = new Store<{ windowState: WindowState }>(withElectronStoreProcessOptions({
       name: 'window-state',
       deserialize: parseJsonWithBom,
       defaults: {
@@ -30,7 +31,7 @@ async function getStore() {
           isMaximized: false,
         },
       },
-    });
+    }));
   }
   return windowStateStore;
 }

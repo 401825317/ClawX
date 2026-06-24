@@ -4,6 +4,7 @@ import path from 'node:path';
 import { app, utilityProcess } from 'electron';
 import { appendImageGenerationConversation } from './chat-session-image-message';
 import { logger } from './logger';
+import { getElectronStoreUserDataEnvKey } from './electron-store-options';
 import type {
   MediaGenerationJobPayload,
   MediaGenerationJobSnapshot,
@@ -137,6 +138,7 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
       env: {
         ...process.env,
         CLAWX_MEDIA_GENERATION_WORKER_ENTRY: entryPath,
+        [getElectronStoreUserDataEnvKey()]: app.getPath('userData'),
       } as NodeJS.ProcessEnv,
       serviceName: 'UClaw Media Generation',
     });

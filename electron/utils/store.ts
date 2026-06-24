@@ -6,6 +6,7 @@
 import { randomBytes } from 'crypto';
 import { app } from 'electron';
 import { resolveSupportedLanguage } from '../../shared/language';
+import { withElectronStoreProcessOptions } from './electron-store-options';
 import { parseJsonWithBom } from './json';
 
 // Lazy-load electron-store (ESM module)
@@ -117,11 +118,11 @@ function createDefaultSettings(): AppSettings {
 async function getSettingsStore() {
   if (!settingsStoreInstance) {
     const Store = (await import('electron-store')).default;
-    settingsStoreInstance = new Store<AppSettings>({
+    settingsStoreInstance = new Store<AppSettings>(withElectronStoreProcessOptions({
       name: 'settings',
       deserialize: parseJsonWithBom,
       defaults: createDefaultSettings(),
-    });
+    }));
   }
   return settingsStoreInstance;
 }

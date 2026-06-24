@@ -40,6 +40,7 @@ class MockUtilityProcess extends EventEmitter {
 vi.mock('electron', () => ({
   app: {
     isPackaged: false,
+    getPath: vi.fn((name: string) => name === 'userData' ? '/tmp/uclaw-test-user-data' : '/tmp/uclaw-test-other'),
   },
   utilityProcess: {
     fork: (...args: unknown[]) => forkMock(...args),
@@ -97,6 +98,11 @@ describe('media generation jobs', () => {
     const completed = await waitForJobStatus(queued.id, 'succeeded');
     expect(completed).toEqual(expect.objectContaining({ status: 'succeeded' }));
     expect(forkMock).toHaveBeenCalledTimes(1);
+    expect(forkMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      env: expect.objectContaining({
+        CLAWX_ELECTRON_STORE_CWD: '/tmp/uclaw-test-user-data',
+      }),
+    }));
 
     const sessionsJsonPath = join(testOpenClawConfigDir, 'agents', 'main', 'sessions', 'sessions.json');
     expect(existsSync(sessionsJsonPath)).toBe(true);
