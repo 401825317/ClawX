@@ -255,6 +255,7 @@
       "download": "更新をダウンロード",
       "downloadPortable": "ポータブル版をダウンロード",
       "install": "インストールして再起動",
+      "installPortable": "更新して再起動",
       "openDownloadLocation": "ダウンロード場所を開く",
       "cancelAutoInstall": "キャンセル",
       "later": "後で",
@@ -267,14 +268,14 @@
     "toast": {
       "availableTitle": "UClaw の更新があります",
       "availableDescription": "バージョン v{{version}} を利用できます。準備ができたらダウンロードしてください。",
-      "portableAvailableDescription": "バージョン v{{version}} のポータブル版を利用できます。ダウンロード後に UClaw を終了し、現在の USB フォルダーを置き換えてください。",
+      "portableAvailableDescription": "バージョン v{{version}} のポータブル版を利用できます。ダウンロード後、確認すると UClaw が自動で更新できます。",
       "downloadedTitle": "UClaw の更新準備ができました",
       "downloadedDescription": "バージョン v{{version}} のダウンロードが完了しました。再起動してインストールしてください。",
-      "portableDownloadedDescription": "バージョン v{{version}} のポータブル版をダウンロードしました。UClaw を終了し、現在の USB フォルダーを置き換えると更新できます。",
+      "portableDownloadedDescription": "バージョン v{{version}} のポータブル版をダウンロードしました。UClaw がポータブルフォルダーを更新して自動で再起動します。",
       "unknownVersion": "新しい"
     },
     "help": "UClaw は自動的に更新を確認し、ダウンロードやインストールの前に通知します。",
-    "portableHelp": "UClaw は自動的に更新を確認します。ポータブル版では新版をローカルの実行時更新キャッシュに保存し、終了後に現在の USB フォルダーを置き換えて更新します。"
+    "portableHelp": "UClaw は自動的に更新を確認します。ポータブル版では新版をローカルの実行時更新キャッシュに保存し、UClawData を保持したまま、確認後に更新して再起動します。"
   },
   "advanced": {
     "title": "詳細設定",

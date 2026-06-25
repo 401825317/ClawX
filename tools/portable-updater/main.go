@@ -1,0 +1,678 @@
+package main
+
+import (
+	"archive/zip"
+	"crypto/sha512"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+)
+
+const (
+	defaultDataDirName = "UClawData"
+	backupDirName     = ".uclaw-update-backups"
+	resultSuffix       = ".result.json"
+)
+
+var startUpdatedApp = defaultStartUpdatedApp
+
+type updateTask struct {
+	ZipPath       string `json:"zipPath"`
+	RootDir       string `json:"rootDir"`
+	DataDirName   string `json:"dataDirName"`
+	LaunchPath    string `json:"launchPath"`
+	TargetVersion string `json:"targetVersion"`
+	Sha512        string `json:"sha512"`
+	Size          int64  `json:"size"`
+	ParentPID     int    `json:"parentPid"`
+	LogPath       string `json:"logPath"`
+	StagingDir    string `json:"stagingDir"`
+}
+
+type updateResult struct {
+	Success       bool   `json:"success"`
+	Error         string `json:"error,omitempty"`
+	BackupDir     string `json:"backupDir,omitempty"`
+	StagingDir    string `json:"stagingDir,omitempty"`
+	LaunchedPath  string `json:"launchedPath,omitempty"`
+	TargetVersion string `json:"targetVersion,omitempty"`
+	FinishedAt    string `json:"finishedAt"`
+}
+
+type updater struct {
+	task     updateTask
+	taskPath string
+	logFile  *os.File
+}
+
+func main() {
+	taskPath := flag.String("task", "", "path to a portable update task JSON file")
+	flag.Parse()
+
+	if strings.TrimSpace(*taskPath) == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "missing --task")
+		os.Exit(2)
+	}
+
+	code := run(*taskPath)
+	os.Exit(code)
+}
+
+func run(taskPath string) int {
+	task, err := readTask(taskPath)
+	u := &updater{task: task, taskPath: taskPath}
+	if task.LogPath != "" {
+		if logFile, openErr := openLog(task.LogPath); openErr == nil {
+			u.logFile = logFile
+			defer logFile.Close()
+		}
+	}
+
+	if err != nil {
+		u.logf("failed to read task: %v", err)
+		u.writeResult(updateResult{Success: false, Error: err.Error()})
+		return 1
+	}
+	if err := validateTask(&task); err != nil {
+		u.logf("invalid task: %v", err)
+		u.writeResult(updateResult{Success: false, Error: err.Error(), TargetVersion: task.TargetVersion})
+		return 1
+	}
+	u.task = task
+
+	u.logf("portable update started: version=%s root=%s zip=%s", task.TargetVersion, task.RootDir, task.ZipPath)
+	if task.ParentPID > 0 {
+		waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
+			u.logf(format, args...)
+		})
+	} else {
+		time.Sleep(2 * time.Second)
+	}
+
+	result := updateResult{TargetVersion: task.TargetVersion}
+	backupDir, stagingDir, launchedPath, err := u.apply()
+	result.BackupDir = backupDir
+	result.StagingDir = stagingDir
+	result.LaunchedPath = launchedPath
+	if err != nil {
+		result.Success = false
+		result.Error = err.Error()
+		u.logf("portable update failed: %v", err)
+		u.writeResult(result)
+		return 1
+	}
+
+	result.Success = true
+	u.logf("portable update completed; launched %s", launchedPath)
+	u.writeResult(result)
+	return 0
+}
+
+func readTask(path string) (updateTask, error) {
+	var task updateTask
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return task, err
+	}
+	if err := json.Unmarshal(raw, &task); err != nil {
+		return task, err
+	}
+	return task, nil
+}
+
+func validateTask(task *updateTask) error {
+	task.ZipPath = strings.TrimSpace(task.ZipPath)
+	task.RootDir = strings.TrimSpace(task.RootDir)
+	task.DataDirName = strings.TrimSpace(task.DataDirName)
+	task.LaunchPath = strings.TrimSpace(task.LaunchPath)
+	task.Sha512 = strings.ToLower(strings.TrimSpace(task.Sha512))
+	if task.DataDirName == "" {
+		task.DataDirName = defaultDataDirName
+	}
+	if task.ZipPath == "" || task.RootDir == "" || task.LaunchPath == "" {
+		return errors.New("zipPath, rootDir and launchPath are required")
+	}
+	if !filepath.IsAbs(task.ZipPath) || !filepath.IsAbs(task.RootDir) || !filepath.IsAbs(task.LaunchPath) {
+		return errors.New("zipPath, rootDir and launchPath must be absolute")
+	}
+	if task.DataDirName == "." || task.DataDirName == ".." || strings.ContainsAny(task.DataDirName, `/\`) {
+		return errors.New("dataDirName must be a single directory name")
+	}
+	if task.Size <= 0 {
+		return errors.New("size must be positive")
+	}
+	if task.Sha512 == "" {
+		return errors.New("sha512 is required")
+	}
+	if _, err := os.Stat(task.ZipPath); err != nil {
+		return fmt.Errorf("zip does not exist: %w", err)
+	}
+	if info, err := os.Stat(task.RootDir); err != nil || !info.IsDir() {
+		if err != nil {
+			return fmt.Errorf("rootDir is not available: %w", err)
+		}
+		return errors.New("rootDir is not a directory")
+	}
+	if _, err := os.Stat(filepath.Join(task.RootDir, "portable.flag")); err != nil {
+		return errors.New("rootDir is missing portable.flag")
+	}
+	if rel, err := filepath.Rel(task.RootDir, task.LaunchPath); err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return errors.New("launchPath must be inside rootDir")
+	}
+	return nil
+}
+
+func openLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+}
+
+func (u *updater) logf(format string, args ...any) {
+	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	if u.logFile != nil {
+		_, _ = u.logFile.WriteString(line)
+	}
+	_, _ = os.Stderr.WriteString(line)
+}
+
+func (u *updater) writeResult(result updateResult) {
+	result.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	raw, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		u.logf("failed to marshal result: %v", err)
+		return
+	}
+	if err := os.WriteFile(u.taskPath+resultSuffix, append(raw, '\n'), 0o600); err != nil {
+		u.logf("failed to write result: %v", err)
+	}
+}
+
+func (u *updater) apply() (backupDir string, stagingDir string, launchedPath string, err error) {
+	if err := verifyZip(u.task.ZipPath, u.task.Size, u.task.Sha512); err != nil {
+		return "", "", "", err
+	}
+
+	stagingDir, err = u.prepareStagingDir()
+	if err != nil {
+		return "", "", "", err
+	}
+	u.logf("extracting update zip to %s", stagingDir)
+	if err := extractZip(u.task.ZipPath, stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", stagingDir, "", err
+	}
+	if err := u.validateStaging(stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return "", stagingDir, "", err
+	}
+
+	backupDir = filepath.Join(u.task.RootDir, backupDirName, time.Now().UTC().Format("20060102-150405"))
+	u.logf("backing up current app files to %s", backupDir)
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return backupDir, stagingDir, "", err
+	}
+
+	replacementEntries, err := replacementEntrySet(stagingDir, u.task.DataDirName)
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return backupDir, stagingDir, "", err
+	}
+
+	moved, err := u.moveCurrentFilesToBackup(backupDir, replacementEntries)
+	if err != nil {
+		u.logf("backup failed; rolling back moved entries")
+		_ = moveEntriesBack(backupDir, u.task.RootDir, moved)
+		_ = os.RemoveAll(stagingDir)
+		return backupDir, stagingDir, "", err
+	}
+
+	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName)
+	if err != nil {
+		u.logf("copy failed; rolling back replacement")
+		_ = removeCopiedEntries(u.task.RootDir, copied)
+		_ = moveEntriesBack(backupDir, u.task.RootDir, moved)
+		_ = os.RemoveAll(stagingDir)
+		return backupDir, stagingDir, "", err
+	}
+
+	launchPath := u.task.LaunchPath
+	if _, err := os.Stat(launchPath); err != nil {
+		u.logf("declared launch path unavailable after update: %v", err)
+		launchPath = findLaunchPath(u.task.RootDir)
+		if launchPath == "" {
+			return backupDir, stagingDir, "", errors.New("updated app launch path was not found")
+		}
+	}
+	_ = chmodExecutable(launchPath)
+
+	if err := startUpdatedApp(launchPath, u.task.RootDir); err != nil {
+		return backupDir, stagingDir, "", err
+	}
+
+	_ = os.RemoveAll(stagingDir)
+	cleanupOldBackups(filepath.Join(u.task.RootDir, backupDirName), backupDir, 7*24*time.Hour, u.logf)
+	return backupDir, stagingDir, launchPath, nil
+}
+
+func verifyZip(path string, expectedSize int64, expectedSha512 string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() != expectedSize {
+		return fmt.Errorf("zip size mismatch: expected %d, got %d", expectedSize, info.Size())
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	hash := sha512.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if !strings.EqualFold(actual, expectedSha512) {
+		return errors.New("zip sha512 mismatch")
+	}
+	return nil
+}
+
+func (u *updater) prepareStagingDir() (string, error) {
+	if u.task.StagingDir != "" {
+		if err := os.RemoveAll(u.task.StagingDir); err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(u.task.StagingDir, 0o755); err != nil {
+			return "", err
+		}
+		return u.task.StagingDir, nil
+	}
+	base := filepath.Dir(u.task.ZipPath)
+	return os.MkdirTemp(base, "uclaw-update-staging-")
+}
+
+func extractZip(zipPath string, destDir string) error {
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	destClean, err := filepath.Abs(destDir)
+	if err != nil {
+		return err
+	}
+	for _, file := range reader.File {
+		name := strings.ReplaceAll(file.Name, "\\", "/")
+		if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "../") || strings.HasPrefix(name, "../") {
+			return fmt.Errorf("unsafe zip entry path: %s", file.Name)
+		}
+		target := filepath.Join(destClean, filepath.FromSlash(name))
+		targetClean, err := filepath.Abs(target)
+		if err != nil {
+			return err
+		}
+		if targetClean != destClean && !strings.HasPrefix(targetClean, destClean+string(os.PathSeparator)) {
+			return fmt.Errorf("zip entry escapes staging directory: %s", file.Name)
+		}
+
+		mode := file.Mode()
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetClean, dirPerm(mode)); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetClean), 0o755); err != nil {
+			return err
+		}
+
+		if mode&os.ModeSymlink != 0 {
+			if err := extractSymlink(file, targetClean); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := extractRegularFile(file, targetClean, filePerm(mode)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func dirPerm(mode os.FileMode) os.FileMode {
+	perm := mode.Perm()
+	if perm == 0 {
+		return 0o755
+	}
+	return perm
+}
+
+func filePerm(mode os.FileMode) os.FileMode {
+	perm := mode.Perm()
+	if perm == 0 {
+		return 0o644
+	}
+	return perm
+}
+
+func extractRegularFile(file *zip.File, target string, perm os.FileMode) error {
+	src, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(dst, src)
+	closeErr := dst.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func extractSymlink(file *zip.File, target string) error {
+	src, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	raw, err := io.ReadAll(src)
+	if err != nil {
+		return err
+	}
+	linkTarget := string(raw)
+	normalized := strings.ReplaceAll(linkTarget, "\\", "/")
+	parts := strings.Split(normalized, "/")
+	for _, part := range parts {
+		if part == ".." {
+			return fmt.Errorf("unsafe symlink target in zip entry %s", file.Name)
+		}
+	}
+	if linkTarget == "" || filepath.IsAbs(linkTarget) {
+		return fmt.Errorf("unsafe symlink target in zip entry %s", file.Name)
+	}
+	_ = os.Remove(target)
+	return os.Symlink(linkTarget, target)
+}
+
+func (u *updater) validateStaging(stagingDir string) error {
+	if _, err := os.Stat(filepath.Join(stagingDir, "portable.flag")); err != nil {
+		return errors.New("update package is missing portable.flag")
+	}
+	relLaunch, err := filepath.Rel(u.task.RootDir, u.task.LaunchPath)
+	if err == nil && relLaunch != "." && !strings.HasPrefix(relLaunch, "..") && !filepath.IsAbs(relLaunch) {
+		if _, err := os.Stat(filepath.Join(stagingDir, relLaunch)); err == nil {
+			return nil
+		}
+	}
+	if fallback := findLaunchPath(stagingDir); fallback != "" {
+		return nil
+	}
+	return errors.New("update package is missing the UClaw executable")
+}
+
+func replacementEntrySet(stagingDir string, dataDirName string) (map[string]struct{}, error) {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return nil, err
+	}
+	replacements := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if shouldSkipRootEntry(name, dataDirName) {
+			continue
+		}
+		replacements[name] = struct{}{}
+	}
+	return replacements, nil
+}
+
+func (u *updater) moveCurrentFilesToBackup(backupDir string, replacementEntries map[string]struct{}) ([]string, error) {
+	entries, err := os.ReadDir(u.task.RootDir)
+	if err != nil {
+		return nil, err
+	}
+	moved := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if shouldSkipRootEntry(name, u.task.DataDirName) {
+			continue
+		}
+		if _, shouldReplace := replacementEntries[name]; !shouldReplace {
+			u.logf("leaving root entry unchanged because it is not in the update package: %s", name)
+			continue
+		}
+		src := filepath.Join(u.task.RootDir, name)
+		dst := filepath.Join(backupDir, name)
+		if err := retry(fmt.Sprintf("move %s", name), 18, 500*time.Millisecond, func() error {
+			return os.Rename(src, dst)
+		}); err != nil {
+			return moved, err
+		}
+		moved = append(moved, name)
+	}
+	return moved, nil
+}
+
+func shouldSkipRootEntry(name string, dataDirName string) bool {
+	return name == dataDirName || name == backupDirName
+}
+
+func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string) ([]string, error) {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return nil, err
+	}
+	copied := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if shouldSkipRootEntry(name, dataDirName) {
+			continue
+		}
+		src := filepath.Join(stagingDir, name)
+		dst := filepath.Join(rootDir, name)
+		if err := copyPath(src, dst); err != nil {
+			return copied, err
+		}
+		copied = append(copied, name)
+	}
+	return copied, nil
+}
+
+func copyPath(src string, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		_ = os.Remove(dst)
+		return os.Symlink(target, dst)
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := copyPath(filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return os.Chmod(dst, info.Mode().Perm())
+	}
+	return copyFile(src, dst, info.Mode().Perm())
+}
+
+func copyFile(src string, dst string, perm os.FileMode) error {
+	input, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	output, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(dst, perm)
+}
+
+func moveEntriesBack(backupDir string, rootDir string, entries []string) error {
+	var firstErr error
+	for i := len(entries) - 1; i >= 0; i-- {
+		name := entries[i]
+		src := filepath.Join(backupDir, name)
+		dst := filepath.Join(rootDir, name)
+		_ = os.RemoveAll(dst)
+		if err := os.Rename(src, dst); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func removeCopiedEntries(rootDir string, entries []string) error {
+	var firstErr error
+	for i := len(entries) - 1; i >= 0; i-- {
+		if err := os.RemoveAll(filepath.Join(rootDir, entries[i])); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func retry(label string, attempts int, delay time.Duration, fn func() error) error {
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(delay * time.Duration(attempt))
+	}
+	return fmt.Errorf("%s failed after %d attempts: %w", label, attempts, err)
+}
+
+func findLaunchPath(rootDir string) string {
+	if runtime.GOOS == "windows" {
+		candidates := []string{
+			filepath.Join(rootDir, "UClaw.exe"),
+			filepath.Join(rootDir, "ClawX.exe"),
+		}
+		for _, candidate := range candidates {
+			if existsFile(candidate) {
+				return candidate
+			}
+		}
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(rootDir, "*.app", "Contents", "MacOS", "*"))
+	for _, match := range matches {
+		if existsFile(match) {
+			return match
+		}
+	}
+	return ""
+}
+
+func existsFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func chmodExecutable(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(path, info.Mode().Perm()|0o755)
+}
+
+func defaultStartUpdatedApp(launchPath string, rootDir string) error {
+	if runtime.GOOS == "darwin" {
+		if appBundle := findAppBundleFromLaunchPath(launchPath); appBundle != "" {
+			cmd := exec.Command("/usr/bin/open", "-n", appBundle)
+			cmd.Dir = rootDir
+			return cmd.Start()
+		}
+	}
+	cmd := exec.Command(launchPath)
+	cmd.Dir = rootDir
+	return cmd.Start()
+}
+
+func findAppBundleFromLaunchPath(launchPath string) string {
+	parts := strings.Split(filepath.Clean(launchPath), string(os.PathSeparator))
+	for index := len(parts) - 1; index >= 0; index-- {
+		if strings.HasSuffix(parts[index], ".app") {
+			return string(os.PathSeparator) + filepath.Join(parts[:index+1]...)
+		}
+	}
+	return ""
+}
+
+func cleanupOldBackups(backupsRoot string, keep string, maxAge time.Duration, logf func(string, ...any)) {
+	entries, err := os.ReadDir(backupsRoot)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(backupsRoot, entry.Name())
+		if path == keep {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			logf("failed to remove old backup %s: %v", path, err)
+		}
+	}
+}

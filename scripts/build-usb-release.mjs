@@ -71,7 +71,12 @@ function addDirectoryToZip(zip, sourceDir, prefix = '') {
     const sourcePath = path.join(sourceDir, entry.name);
     const zipPath = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (shouldSkipEntry(zipPath)) continue;
-    if (entry.isDirectory()) {
+    if (entry.isSymbolicLink()) {
+      zip.file(zipPath, fs.readlinkSync(sourcePath), {
+        date: new Date('2026-01-01T00:00:00Z'),
+        unixPermissions: 0o120777,
+      });
+    } else if (entry.isDirectory()) {
       addDirectoryToZip(zip, sourcePath, zipPath);
     } else if (entry.isFile()) {
       zip.file(zipPath, fs.readFileSync(sourcePath), {

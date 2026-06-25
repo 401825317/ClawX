@@ -46,7 +46,7 @@ interface UpdateState {
   init: () => Promise<void>;
   checkForUpdates: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
-  installUpdate: () => void;
+  installUpdate: () => Promise<void>;
   cancelAutoInstall: () => Promise<void>;
   setChannel: (channel: 'stable' | 'beta' | 'dev') => Promise<void>;
   setAutoDownload: (enable: boolean) => Promise<void>;
@@ -233,8 +233,45 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     }
   },
 
-  installUpdate: () => {
-    void invokeIpc('update:install');
+  installUpdate: async () => {
+    try {
+      const result = await invokeIpc<{
+        success: boolean;
+        error?: string;
+        status?: {
+          status: UpdateStatus;
+          mode?: 'installed' | 'portable';
+          info?: UpdateInfo;
+          progress?: ProgressInfo;
+          error?: string;
+          downloadPath?: string;
+        };
+      }>('update:install');
+
+      if (!result.success) {
+        set({
+          status: result.status?.status || 'error',
+          mode: result.status?.mode || get().mode,
+          updateInfo: result.status?.info || get().updateInfo,
+          progress: result.status?.progress || get().progress,
+          error: result.status?.error || result.error || 'Failed to install update',
+          downloadPath: result.status?.downloadPath || get().downloadPath,
+        });
+        return;
+      }
+      if (result.status) {
+        set({
+          status: result.status.status,
+          mode: result.status.mode || get().mode,
+          updateInfo: result.status.info || get().updateInfo,
+          progress: result.status.progress || get().progress,
+          error: result.status.error || null,
+          downloadPath: result.status.downloadPath || get().downloadPath,
+        });
+      }
+    } catch (error) {
+      set({ status: 'error', error: String(error) });
+    }
   },
 
   cancelAutoInstall: async () => {

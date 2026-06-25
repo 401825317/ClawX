@@ -255,6 +255,7 @@
       "download": "Download Update",
       "downloadPortable": "Download Portable Package",
       "install": "Install & Restart",
+      "installPortable": "Update & Restart",
       "openDownloadLocation": "Open Download Location",
       "cancelAutoInstall": "Cancel",
       "later": "Later",
@@ -267,14 +268,14 @@
     "toast": {
       "availableTitle": "UClaw update available",
       "availableDescription": "Version v{{version}} is available. Download it when you're ready.",
-      "portableAvailableDescription": "Version v{{version}} portable package is available. Download it, quit UClaw, then replace the current USB folder.",
+      "portableAvailableDescription": "Version v{{version}} portable package is available. Download it and UClaw can update itself after confirmation.",
       "downloadedTitle": "UClaw update ready",
       "downloadedDescription": "Version v{{version}} has been downloaded. Restart to install it.",
-      "portableDownloadedDescription": "Version v{{version}} portable package has been downloaded. Quit UClaw, then replace the current USB folder.",
+      "portableDownloadedDescription": "Version v{{version}} portable package has been downloaded. UClaw will update the portable folder and restart automatically.",
       "unknownVersion": "new"
     },
     "help": "UClaw checks for updates automatically and prompts you before downloading or installing.",
-    "portableHelp": "UClaw checks for updates automatically. Portable builds download the new package to the local runtime update cache; quit the app and replace the current USB folder to update."
+    "portableHelp": "UClaw checks for updates automatically. Portable builds download the new package to the local runtime update cache, preserve UClawData, then update and restart after confirmation."
   },
   "advanced": {
     "title": "Advanced",

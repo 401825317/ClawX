@@ -24,6 +24,7 @@ import {
   filenameFromPortableUpdateInfo,
   verifyPortableUpdatePackage,
 } from './portable-update-security';
+import { launchPortableUpdateInstaller } from './portable-update-installer';
 
 /** Base update feed URL (without trailing channel path). */
 function getUpdateFeedBaseUrl(): string {
@@ -475,13 +476,51 @@ export class AppUpdater extends EventEmitter {
    */
   quitAndInstall(): void {
     if (isPortableMode()) {
-      void this.openDownloadedUpdate();
+      void this.installPortableUpdate().catch(() => {});
       return;
     }
 
     logger.info('[Updater] quitAndInstall called');
     setQuitting();
     autoUpdater.quitAndInstall();
+  }
+
+  async installDownloadedUpdate(): Promise<void> {
+    if (isPortableMode()) {
+      await this.installPortableUpdate();
+      return;
+    }
+    this.quitAndInstall();
+  }
+
+  private async installPortableUpdate(): Promise<void> {
+    try {
+      const info = this.status.info;
+      if (!isPortableUpdateInfo(info)) {
+        throw new Error('Portable update metadata is not available');
+      }
+      if (!this.status.downloadPath) {
+        throw new Error('Portable update package has not been downloaded');
+      }
+
+      logger.info(`[Updater] Installing portable update v${info.version} from ${this.status.downloadPath}`);
+      await launchPortableUpdateInstaller(this.status.downloadPath, {
+        version: info.version,
+        sha512: info.sha512,
+        size: info.size,
+      });
+    } catch (error) {
+      logger.error('[Updater] Portable update install failed:', error);
+      this.updateStatus({
+        status: 'error',
+        mode: 'portable',
+        error: (error as Error).message || String(error),
+      });
+      await this.openDownloadedUpdate().catch((openError) => {
+        logger.warn('[Updater] Failed to open downloaded portable update after install error:', openError);
+      });
+      throw error;
+    }
   }
 
   async openDownloadedUpdate(): Promise<void> {
@@ -596,12 +635,12 @@ export function registerUpdateHandlers(
 
   // Install update and restart
   ipcMain.handle('update:install', async () => {
-    if (isPortableMode()) {
-      await updater.openDownloadedUpdate();
+    try {
+      await updater.installDownloadedUpdate();
       return { success: true, status: updater.getStatus() };
+    } catch (error) {
+      return { success: false, error: String(error), status: updater.getStatus() };
     }
-    updater.quitAndInstall();
-    return { success: true, status: updater.getStatus() };
   });
 
   // Set update channel

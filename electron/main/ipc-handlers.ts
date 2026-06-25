@@ -482,8 +482,12 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
             break;
           }
           if (request.action === 'install') {
-            appUpdater.quitAndInstall();
-            data = { success: true };
+            try {
+              await appUpdater.installDownloadedUpdate();
+              data = { success: true, status: appUpdater.getStatus() };
+            } catch (error) {
+              data = { success: false, error: String(error), status: appUpdater.getStatus() };
+            }
             break;
           }
           if (request.action === 'setChannel') {

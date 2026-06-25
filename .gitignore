@@ -58,6 +58,7 @@ tests/fixtures/transcripts/
 *.rpm
 
 resources/bin
+resources/updater/
 
 # Secrets
 *.p12

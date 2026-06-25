@@ -83,12 +83,12 @@ export function UpdateNotifier() {
             description={mode === 'portable'
               ? t('updates.toast.portableDownloadedDescription', { version })
               : t('updates.toast.downloadedDescription', { version })}
-            primaryActionLabel={mode === 'portable' ? t('updates.action.openDownloadLocation') : t('updates.action.install')}
+            primaryActionLabel={mode === 'portable' ? t('updates.action.installPortable') : t('updates.action.install')}
             dismissLabel={dismissLabel}
             onPrimaryAction={() => {
               toast.dismiss(toastId);
               lastDownloadedVersionRef.current = null;
-              installUpdate();
+              void installUpdate();
             }}
             onDismiss={() => {
               toast.dismiss(toastId);

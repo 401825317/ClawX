@@ -121,9 +121,9 @@ export function UpdateSettings() {
           );
         }
         return (
-          <Button onClick={installUpdate} size="sm" variant="default">
+          <Button onClick={() => void installUpdate()} size="sm" variant="default">
             <Rocket className="h-4 w-4 mr-2" />
-            {mode === 'portable' ? t('updates.action.openDownloadLocation') : t('updates.action.install')}
+            {mode === 'portable' ? t('updates.action.installPortable') : t('updates.action.install')}
           </Button>
         );
       case 'error':
