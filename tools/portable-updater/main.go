@@ -19,7 +19,7 @@ import (
 
 const (
 	defaultDataDirName = "UClawData"
-	backupDirName     = ".uclaw-update-backups"
+	backupDirName      = ".uclaw-update-backups"
 	resultSuffix       = ".result.json"
 )
 
@@ -52,6 +52,7 @@ type updater struct {
 	task     updateTask
 	taskPath string
 	logFile  *os.File
+	progress *progressReporter
 }
 
 func main() {
@@ -69,7 +70,10 @@ func main() {
 
 func run(taskPath string) int {
 	task, err := readTask(taskPath)
-	u := &updater{task: task, taskPath: taskPath}
+	progress := newProgressReporter()
+	defer progress.Close()
+
+	u := &updater{task: task, taskPath: taskPath, progress: progress}
 	if task.LogPath != "" {
 		if logFile, openErr := openLog(task.LogPath); openErr == nil {
 			u.logFile = logFile
@@ -79,18 +83,30 @@ func run(taskPath string) int {
 
 	if err != nil {
 		u.logf("failed to read task: %v", err)
+		progress.Fail("更新失败", err.Error())
 		u.writeResult(updateResult{Success: false, Error: err.Error()})
 		return 1
 	}
 	if err := validateTask(&task); err != nil {
 		u.logf("invalid task: %v", err)
+		progress.Fail("更新失败", err.Error())
 		u.writeResult(updateResult{Success: false, Error: err.Error(), TargetVersion: task.TargetVersion})
 		return 1
 	}
 	u.task = task
 
 	u.logf("portable update started: version=%s root=%s zip=%s", task.TargetVersion, task.RootDir, task.ZipPath)
+	progress.Update(progressState{
+		Title:   "正在准备更新",
+		Detail:  "请不要关闭此窗口，更新完成后会自动重启 UClaw。",
+		Percent: 2,
+	})
 	if task.ParentPID > 0 {
+		progress.Update(progressState{
+			Title:   "正在关闭旧版本",
+			Detail:  "等待 UClaw 完全退出，随后开始替换文件。",
+			Percent: 5,
+		})
 		waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
 			u.logf(format, args...)
 		})
@@ -107,13 +123,20 @@ func run(taskPath string) int {
 		result.Success = false
 		result.Error = err.Error()
 		u.logf("portable update failed: %v", err)
+		progress.Fail("更新失败", err.Error())
 		u.writeResult(result)
 		return 1
 	}
 
 	result.Success = true
 	u.logf("portable update completed; launched %s", launchedPath)
+	progress.Update(progressState{
+		Title:   "更新完成",
+		Detail:  "新版 UClaw 已启动。",
+		Percent: 100,
+	})
 	u.writeResult(result)
+	time.Sleep(900 * time.Millisecond)
 	return 0
 }
 
@@ -199,19 +222,40 @@ func (u *updater) writeResult(result updateResult) {
 }
 
 func (u *updater) apply() (backupDir string, stagingDir string, launchedPath string, err error) {
+	u.progress.Update(progressState{
+		Title:   "正在校验更新包",
+		Detail:  "正在检查文件完整性。",
+		Percent: 8,
+	})
 	if err := verifyZip(u.task.ZipPath, u.task.Size, u.task.Sha512); err != nil {
 		return "", "", "", err
 	}
 
+	u.progress.Update(progressState{
+		Title:   "正在准备更新文件",
+		Detail:  "正在创建临时目录。",
+		Percent: 18,
+	})
 	stagingDir, err = u.prepareStagingDir()
 	if err != nil {
 		return "", "", "", err
 	}
 	u.logf("extracting update zip to %s", stagingDir)
-	if err := extractZip(u.task.ZipPath, stagingDir); err != nil {
+	if err := extractZip(u.task.ZipPath, stagingDir, func(percent int, detail string) {
+		u.progress.Update(progressState{
+			Title:   "正在解压更新包",
+			Detail:  detail,
+			Percent: clampProgressPercent(percent, 20, 58),
+		})
+	}); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return "", stagingDir, "", err
 	}
+	u.progress.Update(progressState{
+		Title:   "正在检查新版文件",
+		Detail:  "正在确认更新包内容。",
+		Percent: 60,
+	})
 	if err := u.validateStaging(stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return "", stagingDir, "", err
@@ -219,6 +263,11 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 
 	backupDir = filepath.Join(u.task.RootDir, backupDirName, time.Now().UTC().Format("20060102-150405"))
 	u.logf("backing up current app files to %s", backupDir)
+	u.progress.Update(progressState{
+		Title:   "正在备份旧版本",
+		Detail:  "正在保存可回滚的旧文件。",
+		Percent: 64,
+	})
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return backupDir, stagingDir, "", err
@@ -238,7 +287,13 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		return backupDir, stagingDir, "", err
 	}
 
-	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName)
+	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName, func(percent int, detail string) {
+		u.progress.Update(progressState{
+			Title:   "正在安装新版文件",
+			Detail:  detail,
+			Percent: clampProgressPercent(percent, 70, 92),
+		})
+	})
 	if err != nil {
 		u.logf("copy failed; rolling back replacement")
 		_ = removeCopiedEntries(u.task.RootDir, copied)
@@ -257,6 +312,11 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	}
 	_ = chmodExecutable(launchPath)
 
+	u.progress.Update(progressState{
+		Title:   "正在启动新版 UClaw",
+		Detail:  "更新即将完成。",
+		Percent: 96,
+	})
 	if err := startUpdatedApp(launchPath, u.task.RootDir); err != nil {
 		return backupDir, stagingDir, "", err
 	}
@@ -264,6 +324,19 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	_ = os.RemoveAll(stagingDir)
 	cleanupOldBackups(filepath.Join(u.task.RootDir, backupDirName), backupDir, 7*24*time.Hour, u.logf)
 	return backupDir, stagingDir, launchPath, nil
+}
+
+func clampProgressPercent(value int, min int, max int) int {
+	if max <= min {
+		return min
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	return min + ((max - min) * value / 100)
 }
 
 func verifyZip(path string, expectedSize int64, expectedSha512 string) error {
@@ -306,7 +379,7 @@ func (u *updater) prepareStagingDir() (string, error) {
 	return os.MkdirTemp(base, "uclaw-update-staging-")
 }
 
-func extractZip(zipPath string, destDir string) error {
+func extractZip(zipPath string, destDir string, onProgress func(percent int, detail string)) error {
 	reader, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
@@ -317,7 +390,15 @@ func extractZip(zipPath string, destDir string) error {
 	if err != nil {
 		return err
 	}
-	for _, file := range reader.File {
+	totalEntries := len(reader.File)
+	if totalEntries == 0 && onProgress != nil {
+		onProgress(100, "更新包为空。")
+	}
+	for index, file := range reader.File {
+		if onProgress != nil {
+			current := index + 1
+			onProgress(current*100/totalEntries, fmt.Sprintf("正在解压 %d/%d", current, totalEntries))
+		}
 		name := strings.ReplaceAll(file.Name, "\\", "/")
 		if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "../") || strings.HasPrefix(name, "../") {
 			return fmt.Errorf("unsafe zip entry path: %s", file.Name)
@@ -353,6 +434,9 @@ func extractZip(zipPath string, destDir string) error {
 		if err := extractRegularFile(file, targetClean, filePerm(mode)); err != nil {
 			return err
 		}
+	}
+	if onProgress != nil {
+		onProgress(100, "解压完成。")
 	}
 	return nil
 }
@@ -480,23 +564,38 @@ func shouldSkipRootEntry(name string, dataDirName string) bool {
 	return name == dataDirName || name == backupDirName
 }
 
-func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string) ([]string, error) {
+func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string, onProgress func(percent int, detail string)) ([]string, error) {
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
 		return nil, err
 	}
 	copied := make([]string, 0, len(entries))
+	replacementEntries := make([]os.DirEntry, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
 		if shouldSkipRootEntry(name, dataDirName) {
 			continue
 		}
+		replacementEntries = append(replacementEntries, entry)
+	}
+	total := len(replacementEntries)
+	if total == 0 && onProgress != nil {
+		onProgress(100, "没有需要替换的文件。")
+	}
+	for index, entry := range replacementEntries {
+		name := entry.Name()
 		src := filepath.Join(stagingDir, name)
 		dst := filepath.Join(rootDir, name)
+		if onProgress != nil {
+			onProgress(index*100/total, fmt.Sprintf("正在替换 %d/%d: %s", index+1, total, name))
+		}
 		if err := copyPath(src, dst); err != nil {
 			return copied, err
 		}
 		copied = append(copied, name)
+	}
+	if onProgress != nil {
+		onProgress(100, "新版文件已安装。")
 	}
 	return copied, nil
 }
