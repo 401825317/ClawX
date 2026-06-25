@@ -15,6 +15,7 @@ import {
   isManagedAuthReady,
   type ManagedAuthStatus,
 } from '@/lib/managed-auth';
+import { isManagedUsernameValid } from '@/lib/managed-username';
 import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useManagedAuthStore } from '@/stores/managed-auth';
@@ -177,6 +178,10 @@ export function ManagedAccountAuthPanel({
     const normalizedAccount = account.trim();
     if (!normalizedAccount || !password) {
       toast.error(t('auth.toast.enterAccountPassword'));
+      return;
+    }
+    if (mode === 'register' && !isManagedUsernameValid(normalizedAccount)) {
+      toast.error(t('auth.errors.invalid_username'));
       return;
     }
     if (showActivationCode && !activationTicket && !activationCode.trim()) {
