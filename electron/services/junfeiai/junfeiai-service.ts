@@ -218,6 +218,12 @@ const JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR = [
   'glm-latest',
 ] as const;
 
+const LEGACY_JUNFEIAI_PROVIDER_NAMES = new Set([
+  '\u7075\u667a\u65e0\u9650',
+  '\u7075\u667a\u65e0\u7ebf',
+  '\u940f\u57ab\u6ae4\u93c3\u7281\u6a94',
+]);
+
 type JunFeiAIStandardApiKeyPayload = Record<string, unknown> & {
   key?: unknown;
 };
@@ -714,6 +720,11 @@ function normalizeBaseUrl(raw?: string): string {
   return normalized.endsWith('/v1') ? normalized : `${normalized}/v1`;
 }
 
+function normalizeJunFeiAIProviderDisplayName(raw?: string): string {
+  const name = typeof raw === 'string' ? raw.trim() : '';
+  return LEGACY_JUNFEIAI_PROVIDER_NAMES.has(name) ? JUNFEIAI_PROVIDER_NAME : name;
+}
+
 function getLocalProviderBaseUrlOverride(): string {
   if (!isJunFeiAIDevOverrideEnabled()) {
     return '';
@@ -727,15 +738,20 @@ function getLocalProviderBaseUrlOverride(): string {
 
 function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunFeiAIBootstrapPayload {
   const providerBaseUrl = getLocalProviderBaseUrlOverride();
-  if (!providerBaseUrl) {
-    return bootstrap;
-  }
-
+  const serviceDisplayName = normalizeJunFeiAIProviderDisplayName(bootstrap.service?.displayName);
+  const serviceName = normalizeJunFeiAIProviderDisplayName(bootstrap.service?.name);
+  const runtimeProviderName = normalizeJunFeiAIProviderDisplayName(bootstrap.runtime?.providerName);
   return {
     ...bootstrap,
+    service: {
+      ...(bootstrap.service ?? {}),
+      ...(serviceName ? { name: serviceName } : {}),
+      ...(serviceDisplayName ? { displayName: serviceDisplayName } : {}),
+    },
     runtime: {
       ...(bootstrap.runtime ?? {}),
-      baseUrl: normalizeBaseUrl(providerBaseUrl),
+      ...(runtimeProviderName ? { providerName: runtimeProviderName } : {}),
+      ...(providerBaseUrl ? { baseUrl: normalizeBaseUrl(providerBaseUrl) } : {}),
     },
   };
 }
@@ -762,7 +778,10 @@ function normalizeFallbackModels(models?: string[]): string[] {
 function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAccount | null): ProviderAccount {
   const runtime = bootstrap.runtime ?? {};
   const now = new Date().toISOString();
-  const providerName = runtime.providerName || bootstrap.service?.displayName || JUNFEIAI_PROVIDER_NAME;
+  const providerName = normalizeJunFeiAIProviderDisplayName(runtime.providerName)
+    || normalizeJunFeiAIProviderDisplayName(bootstrap.service?.displayName)
+    || normalizeJunFeiAIProviderDisplayName(existing?.label)
+    || JUNFEIAI_PROVIDER_NAME;
   return {
     id: JUNFEIAI_PROVIDER_ID,
     vendorId: JUNFEIAI_PROVIDER_ID,

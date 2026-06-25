@@ -49,9 +49,9 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   },
   {
     id: 'lingzhiwuxian',
-    name: '灵智无限',
+    name: '零至无限',
     icon: '灵',
-    placeholder: '由灵智无限登录自动管理',
+    placeholder: '由零至无限登录自动管理',
     model: '国内主流模型',
     requiresApiKey: false,
     category: 'compatible',

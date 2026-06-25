@@ -814,7 +814,7 @@ describe('JunFeiAI managed provider service', () => {
 
   it('does not sync runtime during a no-change background status check', async () => {
     const existing = makeAccount({
-      label: '灵智无限',
+      label: '零至无限',
       metadata: { resourceUrl: 'https://zz-cn.lingzhiwuxian.com' },
       fallbackModels: [],
     });

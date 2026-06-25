@@ -84,7 +84,7 @@ describe('provider metadata', () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: 'lingzhiwuxian',
-          name: '灵智无限',
+          name: '零至无限',
           requiresApiKey: false,
           defaultBaseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
           defaultModelId: 'smart-latest',

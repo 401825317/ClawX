@@ -57,6 +57,14 @@ export type ManagedAuthStateKey =
   | 'unmanaged'
   | 'error';
 
+const MANAGED_AUTH_SERVICE_NAME_ALIASES = new Set([
+  '\u7075\u667a\u65e0\u9650',
+  '\u7075\u667a\u65e0\u7ebf',
+  '\u940f\u57ab\u6ae4\u93c3\u7281\u6a94',
+]);
+
+const MANAGED_AUTH_SERVICE_NAME = '零至无限';
+
 function stringValue(value: unknown): string {
   if (typeof value === 'string') {
     return value.trim();
@@ -125,9 +133,12 @@ export function getManagedAuthUserEmail(status: ManagedAuthStatus | null | undef
 }
 
 export function getManagedAuthServiceName(status: ManagedAuthStatus | null | undefined): string {
-  return status?.bootstrap?.service?.displayName
+  const serviceName = status?.bootstrap?.service?.displayName
     || status?.bootstrap?.service?.name
     || '';
+  return MANAGED_AUTH_SERVICE_NAME_ALIASES.has(serviceName.trim())
+    ? MANAGED_AUTH_SERVICE_NAME
+    : serviceName;
 }
 
 export function getManagedAuthStateKey(

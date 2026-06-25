@@ -81,11 +81,11 @@ describe('model option helpers', () => {
         account({
           id: 'lingzhiwuxian',
           vendorId: 'lingzhiwuxian',
-          label: '灵智无限',
+          label: '零至无限',
           model: 'smart-latest',
         }),
       ],
-      [{ ...status('lingzhiwuxian'), type: 'lingzhiwuxian', name: '灵智无限' }],
+      [{ ...status('lingzhiwuxian'), type: 'lingzhiwuxian', name: '零至无限' }],
       'lingzhiwuxian',
     );
 

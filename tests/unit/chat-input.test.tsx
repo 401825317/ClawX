@@ -447,7 +447,7 @@ describe('ChatInput agent targeting', () => {
       {
         id: 'lingzhiwuxian',
         vendorId: 'lingzhiwuxian',
-        label: '灵智无限',
+        label: '零至无限',
         authMode: 'api_key',
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         model: 'smart-latest',
@@ -470,7 +470,7 @@ describe('ChatInput agent targeting', () => {
       },
     ];
     providersState.statuses = [
-      { id: 'lingzhiwuxian', name: '灵智无限', type: 'lingzhiwuxian', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
+      { id: 'lingzhiwuxian', name: '零至无限', type: 'lingzhiwuxian', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
       { id: 'beta5678', name: 'Beta', type: 'custom', hasKey: true, keyMasked: 'sk-***', enabled: true, createdAt: now, updatedAt: now },
     ];
     providersState.defaultAccountId = 'lingzhiwuxian';

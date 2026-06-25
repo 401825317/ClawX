@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-ClawX 是基于 Electron + React + Vite + TypeScript 的 OpenClaw 桌面客户端。本工作区中的这个分支用于适配 new-api/JunFeiAI/灵智无限托管供应商能力，让桌面端可以完成账号登录、设备激活、relay token 获取、模型供应商写入和充值相关流程。
+ClawX 是基于 Electron + React + Vite + TypeScript 的 OpenClaw 桌面客户端。本工作区中的这个分支用于适配 new-api/JunFeiAI/零至无限托管供应商能力，让桌面端可以完成账号登录、设备激活、relay token 获取、模型供应商写入和充值相关流程。
 
 仓库信息：
 

@@ -1,5 +1,5 @@
 export const JUNFEIAI_PROVIDER_ID = 'lingzhiwuxian';
-export const JUNFEIAI_PROVIDER_NAME = '灵智无限';
+export const JUNFEIAI_PROVIDER_NAME = '零至无限';
 export const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
 export const JUNFEIAI_DEFAULT_MODEL = 'smart-latest';
 export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-completions';
