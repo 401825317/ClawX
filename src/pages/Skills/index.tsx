@@ -26,6 +26,7 @@ import { useSkillsStore } from '@/stores/skills';
 import { useGatewayStore } from '@/stores/gateway';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { cn } from '@/lib/utils';
+import { scheduleAfterNavigationFrame } from '@/lib/deferred-work';
 import { invokeIpc } from '@/lib/api-client';
 import { hostApiFetch } from '@/lib/host-api';
 import { toast } from 'sonner';
@@ -721,6 +722,7 @@ export function Skills() {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setInterval> | null = null;
     let gatewayMergeTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelInitialFetch: (() => void) | null = null;
 
     const attemptFetch = async (includeGateway = false) => {
       const ok = await fetchSkills({ includeGateway });
@@ -733,12 +735,14 @@ export function Skills() {
     };
 
     setSkillsFeatureReady(false);
-    void attemptFetch();
-    if (gatewayRunning && gatewayReportedReady) {
-      gatewayMergeTimer = setTimeout(() => {
-        void attemptFetch(true);
-      }, SKILLS_GATEWAY_MERGE_DELAY_MS);
-    }
+    cancelInitialFetch = scheduleAfterNavigationFrame(() => {
+      void attemptFetch();
+      if (gatewayRunning && gatewayReportedReady) {
+        gatewayMergeTimer = setTimeout(() => {
+          void attemptFetch(true);
+        }, SKILLS_GATEWAY_MERGE_DELAY_MS);
+      }
+    });
 
     if (gatewayRunning && !gatewayReportedReady) {
       retryTimer = setInterval(() => {
@@ -748,6 +752,7 @@ export function Skills() {
 
     return () => {
       cancelled = true;
+      cancelInitialFetch?.();
       if (retryTimer) {
         clearInterval(retryTimer);
       }
@@ -759,26 +764,29 @@ export function Skills() {
 
   useEffect(() => {
     let cancelled = false;
-    void hostApiFetch<{ success: boolean; capability?: { canSearch?: boolean; canInstall?: boolean } }>('/api/skills/marketplace/capability')
-      .then((result) => {
-        if (cancelled) return;
-        setMarketplaceCapability({
-          canSearch: Boolean(result.success && result.capability?.canSearch),
-          canInstall: Boolean(result.success && result.capability?.canInstall),
-        });
-        setMarketplaceCapabilityChecked(true);
-      })
-      .catch(() => {
-        if (!cancelled) {
+    const cancelCapabilityFetch = scheduleAfterNavigationFrame(() => {
+      void hostApiFetch<{ success: boolean; capability?: { canSearch?: boolean; canInstall?: boolean } }>('/api/skills/marketplace/capability')
+        .then((result) => {
+          if (cancelled) return;
           setMarketplaceCapability({
-            canSearch: false,
-            canInstall: false,
+            canSearch: Boolean(result.success && result.capability?.canSearch),
+            canInstall: Boolean(result.success && result.capability?.canInstall),
           });
           setMarketplaceCapabilityChecked(true);
-        }
-      });
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setMarketplaceCapability({
+              canSearch: false,
+              canInstall: false,
+            });
+            setMarketplaceCapabilityChecked(true);
+          }
+        });
+    });
     return () => {
       cancelled = true;
+      cancelCapabilityFetch();
     };
   }, []);
 
@@ -923,9 +931,20 @@ export function Skills() {
   const [skillsDirPath, setSkillsDirPath] = useState('~/.openclaw/skills');
 
   useEffect(() => {
-    invokeIpc<string>('openclaw:getSkillsDir')
-      .then((dir) => setSkillsDirPath(dir as string))
-      .catch(console.error);
+    let cancelled = false;
+    const cancelGetSkillsDir = scheduleAfterNavigationFrame(() => {
+      invokeIpc<string>('openclaw:getSkillsDir')
+        .then((dir) => {
+          if (!cancelled) {
+            setSkillsDirPath(dir as string);
+          }
+        })
+        .catch(console.error);
+    });
+    return () => {
+      cancelled = true;
+      cancelGetSkillsDir();
+    };
   }, []);
 
   useEffect(() => {
@@ -942,7 +961,7 @@ export function Skills() {
     const query = installQuery.trim();
     if (query.length === 0) {
       searchSkills(marketplaceCategorySearchQuery);
-      return;
+      return undefined;
     }
 
     const timer = setTimeout(() => {

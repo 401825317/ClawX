@@ -14,6 +14,7 @@ import { useChatStore } from '@/stores/chat';
 import type { ChatRuntimeRunState, ChatSession } from '@/stores/chat/types';
 import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
+import { scheduleAfterNavigationFrame } from '@/lib/deferred-work';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { fetchChannelsAccounts } from '@/pages/Channels/channel-accounts-cache';
 import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
@@ -216,11 +217,11 @@ export function Agents() {
   }, [fetchChannelAccounts]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
+    const cancelRefresh = scheduleAfterNavigationFrame(() => {
       void Promise.all([fetchAgents({ quiet: agents.length > 0 }), fetchChannelAccounts({ deferIfBusy: true })]);
       void refreshProviderSnapshot({ quiet: true });
-    }, 0);
-    return () => window.clearTimeout(timer);
+    });
+    return cancelRefresh;
   }, [agents.length, fetchAgents, fetchChannelAccounts, refreshProviderSnapshot]);
 
   useEffect(() => {
@@ -256,10 +257,10 @@ export function Agents() {
     lastGatewayStateRef.current = gatewayStatus.state;
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
-      const timer = window.setTimeout(() => {
+      const cancelRefresh = scheduleAfterNavigationFrame(() => {
         void fetchChannelAccounts({ deferIfBusy: true });
-      }, 0);
-      return () => window.clearTimeout(timer);
+      });
+      return cancelRefresh;
     }
     return undefined;
   }, [fetchChannelAccounts, gatewayStatus.state]);
@@ -268,10 +269,10 @@ export function Agents() {
     if (hasActiveRun) return;
     if (deferredChannelRefreshRef.current == null) return;
     clearDeferredChannelRefresh();
-    const timer = window.setTimeout(() => {
+    const cancelRefresh = scheduleAfterNavigationFrame(() => {
       void fetchChannelAccounts();
-    }, 0);
-    return () => window.clearTimeout(timer);
+    });
+    return cancelRefresh;
   }, [clearDeferredChannelRefresh, fetchChannelAccounts, hasActiveRun]);
 
   useEffect(() => clearDeferredChannelRefresh, [clearDeferredChannelRefresh]);

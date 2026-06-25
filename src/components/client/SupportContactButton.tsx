@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Headphones, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -23,7 +23,7 @@ interface SupportContactButtonProps {
   sidebarOffset?: number;
 }
 
-export function SupportContactButton(props: SupportContactButtonProps) {
+function SupportContactButtonComponent(props: SupportContactButtonProps) {
   const { t } = useTranslation(['common']);
   const [open, setOpen] = useState(false);
   const support = useClientConfigStore((state) => state.support);
@@ -138,3 +138,5 @@ export function SupportContactButton(props: SupportContactButtonProps) {
     </>
   );
 }
+
+export const SupportContactButton = memo(SupportContactButtonComponent);

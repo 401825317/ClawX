@@ -30,6 +30,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { scheduleAfterNavigationFrame } from '@/lib/deferred-work';
 import { hostApiFetch } from '@/lib/host-api';
 import { fetchChannelsAccounts } from '@/pages/Channels/channel-accounts-cache';
 import { useCronStore } from '@/stores/cron';
@@ -891,12 +892,19 @@ export function Cron() {
   // Fetch jobs on mount
   useEffect(() => {
     if (isGatewayRunning) {
-      fetchJobs();
+      const cancelFetchJobs = scheduleAfterNavigationFrame(() => {
+        void fetchJobs();
+      });
+      return cancelFetchJobs;
     }
+    return undefined;
   }, [fetchJobs, isGatewayRunning]);
 
   useEffect(() => {
-    void fetchConfiguredChannels();
+    const cancelFetchChannels = scheduleAfterNavigationFrame(() => {
+      void fetchConfiguredChannels();
+    });
+    return cancelFetchChannels;
   }, [fetchConfiguredChannels]);
 
   // Statistics

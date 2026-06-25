@@ -3,6 +3,7 @@ import { AlertCircle, Loader2, ShieldCheck } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ManagedAccountAuthPanel } from '@/components/auth/ManagedAccountAuthPanel';
+import { scheduleAfterNavigationFrame, scheduleIdleWork } from '@/lib/deferred-work';
 import {
   getManagedAuthServiceName,
   getManagedAuthStateKey,
@@ -13,6 +14,8 @@ import { useManagedAuthStore } from '@/stores/managed-auth';
 interface ManagedAuthGateProps {
   enabled: boolean;
 }
+
+const MANAGED_AUTH_REMOTE_VERIFY_IDLE_TIMEOUT_MS = 1_500;
 
 export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
   const { t } = useTranslation('setup');
@@ -34,6 +37,8 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
     }
 
     let cancelled = false;
+    let cancelInitialCheck: (() => void) | null = null;
+    let cancelRemoteVerify: (() => void) | null = null;
     const runRemoteVerify = async () => {
       try {
         await refreshStatus();
@@ -44,6 +49,16 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
       }
     };
 
+    const scheduleRemoteVerify = () => {
+      cancelRemoteVerify?.();
+      cancelRemoteVerify = scheduleIdleWork(() => {
+        cancelRemoteVerify = null;
+        if (!cancelled && document.visibilityState !== 'hidden') {
+          void runRemoteVerify();
+        }
+      }, MANAGED_AUTH_REMOTE_VERIFY_IDLE_TIMEOUT_MS);
+    };
+
     const runInitialCheck = async () => {
       try {
         await loadLocalStatus();
@@ -51,17 +66,23 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
         // Fall through to remote verification. The store keeps the local error.
       }
       if (!cancelled) {
-        void runRemoteVerify();
+        scheduleRemoteVerify();
       }
     };
 
-    void runInitialCheck();
+    cancelInitialCheck = scheduleAfterNavigationFrame(() => {
+      void runInitialCheck();
+    });
     const timer = window.setInterval(() => {
-      void runRemoteVerify();
+      if (document.visibilityState !== 'hidden') {
+        scheduleRemoteVerify();
+      }
     }, 5 * 60 * 1000);
 
     return () => {
       cancelled = true;
+      cancelInitialCheck?.();
+      cancelRemoteVerify?.();
       window.clearInterval(timer);
     };
   }, [loadLocalStatus, refreshStatus, shouldCheck]);

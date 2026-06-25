@@ -7,6 +7,7 @@ import { useGatewayStore } from '@/stores/gateway';
 import { hasActiveChatWork, useChatStore } from '@/stores/chat';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { hostApiFetch } from '@/lib/host-api';
+import { scheduleAfterNavigationFrame } from '@/lib/deferred-work';
 import { subscribeHostEvent } from '@/lib/host-events';
 import { ChannelConfigModal } from '@/components/channels/ChannelConfigModal';
 import { cn } from '@/lib/utils';
@@ -369,12 +370,15 @@ export function Channels() {
 
   useEffect(() => {
     isMountedRef.current = true;
-    void fetchPageData({ configOnly: true });
-    const timer = window.setTimeout(() => {
+    const cancelConfigRefresh = scheduleAfterNavigationFrame(() => {
+      void fetchPageData({ configOnly: true });
+    });
+    const cancelRuntimeRefresh = scheduleAfterNavigationFrame(() => {
       void fetchPageData({ deferIfBusy: true });
     }, CHANNELS_RUNTIME_FETCH_DELAY_MS);
     return () => {
-      window.clearTimeout(timer);
+      cancelConfigRefresh();
+      cancelRuntimeRefresh();
     };
   }, [fetchPageData]);
 
@@ -423,16 +427,23 @@ export function Channels() {
     lastGatewayStateRef.current = gatewayStatus.state;
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
-      void fetchPageData({ deferIfBusy: true });
+      const cancelRefresh = scheduleAfterNavigationFrame(() => {
+        void fetchPageData({ deferIfBusy: true });
+      });
       scheduleConvergenceRefresh();
+      return cancelRefresh;
     }
+    return undefined;
   }, [fetchPageData, gatewayStatus.state, scheduleConvergenceRefresh]);
 
   useEffect(() => {
     if (hasActiveRun) return;
     if (deferredRuntimeRefreshRef.current == null) return;
     clearDeferredRuntimeRefresh();
-    void fetchPageData();
+    const cancelRefresh = scheduleAfterNavigationFrame(() => {
+      void fetchPageData();
+    });
+    return cancelRefresh;
   }, [clearDeferredRuntimeRefresh, fetchPageData, hasActiveRun]);
 
   const configuredTypes = useMemo(

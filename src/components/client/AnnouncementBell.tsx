@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { Bell, ExternalLink } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
@@ -33,7 +33,7 @@ function levelBadgeVariant(level: ClientAnnouncement['level']) {
   return 'secondary' as const;
 }
 
-export function AnnouncementBell(props: AnnouncementBellProps) {
+function AnnouncementBellComponent(props: AnnouncementBellProps) {
   const { t } = useTranslation(['common']);
   const [open, setOpen] = useState(false);
   const announcements = useClientConfigStore((state) => state.announcements);
@@ -149,3 +149,5 @@ export function AnnouncementBell(props: AnnouncementBellProps) {
     </>
   );
 }
+
+export const AnnouncementBell = memo(AnnouncementBellComponent);
