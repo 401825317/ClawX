@@ -92,14 +92,14 @@ async function handleRun(message: MediaGenerationWorkerRequest): Promise<void> {
         size: message.payload.size,
         quality: message.payload.quality,
         inputImages: message.payload.inputImages,
-      })
+      }, { skipManagedRelayPreparation: true })
       : await generateVideoForChatSession({
         sessionKey: message.payload.sessionKey,
         prompt: message.payload.prompt,
         size: message.payload.size,
         durationSeconds: message.payload.durationSeconds,
         inputImages: message.payload.inputImages,
-      });
+      }, { skipManagedRelayPreparation: true });
 
     parentPort.postMessage({
       type: 'result',

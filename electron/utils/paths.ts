@@ -21,7 +21,10 @@ export {
 
 function getElectronApp() {
   if (process.versions?.electron) {
-    return (require('electron') as typeof import('electron')).app;
+    const electronModule = require('electron') as Partial<typeof import('electron')> & { app?: typeof import('electron').app };
+    if (electronModule.app) {
+      return electronModule.app;
+    }
   }
 
   const fallbackUserData = process.env.CLAWX_USER_DATA_DIR?.trim() || join(homedir(), '.clawx');

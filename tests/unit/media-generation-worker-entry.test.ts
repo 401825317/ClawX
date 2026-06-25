@@ -81,7 +81,7 @@ describe('media generation worker entry', () => {
       size: '1024x1024',
       quality: 'medium',
       inputImages: undefined,
-    });
+    }, { skipManagedRelayPreparation: true });
     expect(parentPort.postMessage).toHaveBeenCalledWith({
       type: 'result',
       jobId: 'job-1',

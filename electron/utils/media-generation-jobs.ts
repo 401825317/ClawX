@@ -11,6 +11,8 @@ import type {
   MediaGenerationWorkerRequest,
   MediaGenerationWorkerResponse,
 } from './media-generation-types';
+import { ensureManagedOpenAiImageRelay } from './openclaw-image-generation';
+import { ensureManagedOpenAiVideoRelay } from './openclaw-video-generation';
 
 type InternalMediaGenerationJob = MediaGenerationJobSnapshot & {
   payload: MediaGenerationJobPayload;
@@ -336,4 +338,12 @@ export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): M
 export function getMediaGenerationJob(jobId: string): MediaGenerationJobSnapshot | null {
   const job = jobs.get(jobId);
   return job ? cloneSnapshot(job) : null;
+}
+
+export async function prepareMediaGenerationJob(payload: MediaGenerationJobPayload): Promise<void> {
+  if (payload.kind === 'image') {
+    await ensureManagedOpenAiImageRelay();
+    return;
+  }
+  await ensureManagedOpenAiVideoRelay();
 }

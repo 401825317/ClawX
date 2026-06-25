@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
+const prepareMediaGenerationJobMock = vi.fn();
 const enqueueMediaGenerationJobMock = vi.fn();
 
 vi.mock('@electron/api/route-utils', () => ({
@@ -28,6 +29,7 @@ vi.mock('@electron/utils/openclaw-video-generation', () => ({
 
 vi.mock('@electron/utils/media-generation-jobs', () => ({
   enqueueMediaGenerationJob: (...args: unknown[]) => enqueueMediaGenerationJobMock(...args),
+  prepareMediaGenerationJob: (...args: unknown[]) => prepareMediaGenerationJobMock(...args),
   getMediaGenerationJob: vi.fn(),
 }));
 
@@ -53,6 +55,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
       createdAt: 1,
       updatedAt: 1,
     });
+    prepareMediaGenerationJobMock.mockResolvedValue(undefined);
   });
 
   it('enqueues a video generation job and returns immediately', async () => {
@@ -72,6 +75,14 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
+    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith({
+      kind: 'video',
+      sessionKey: 'agent:main:main',
+      prompt: 'make a short product video',
+      size: '1280x720',
+      durationSeconds: 4,
+      inputImages: undefined,
+    });
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
       kind: 'video',
       sessionKey: 'agent:main:main',
@@ -110,6 +121,18 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
+    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'video',
+      sessionKey: 'agent:main:main',
+      prompt: 'animate this frame',
+      inputImages: [
+        {
+          fileName: 'frame.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/frame.png',
+        },
+      ],
+    }));
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'video',
       sessionKey: 'agent:main:main',

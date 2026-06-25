@@ -544,8 +544,10 @@ export async function generateVideoForChatSession(params: {
   size?: string;
   durationSeconds?: number;
   inputImages?: VideoGenerationInputImageRef[];
-}): Promise<Awaited<ReturnType<typeof generateVideoInProcess>>> {
-  await ensureManagedOpenAiVideoRelay();
+}, options?: { skipManagedRelayPreparation?: boolean }): Promise<Awaited<ReturnType<typeof generateVideoInProcess>>> {
+  if (!options?.skipManagedRelayPreparation) {
+    await ensureManagedOpenAiVideoRelay();
+  }
 
   const snapshot = await listAgentsSnapshot();
   const agentId = params.sessionKey.split(':')[1] || snapshot.defaultAgentId;

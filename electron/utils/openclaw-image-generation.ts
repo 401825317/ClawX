@@ -567,8 +567,10 @@ export async function generateImageForChatSession(params: {
   size?: string;
   quality?: 'low' | 'medium' | 'high';
   inputImages?: ImageGenerationInputImageRef[];
-}): Promise<Awaited<ReturnType<typeof generateImageInProcess>>> {
-  await ensureManagedOpenAiImageRelay();
+}, options?: { skipManagedRelayPreparation?: boolean }): Promise<Awaited<ReturnType<typeof generateImageInProcess>>> {
+  if (!options?.skipManagedRelayPreparation) {
+    await ensureManagedOpenAiImageRelay();
+  }
 
   const snapshot = await listAgentsSnapshot();
   const agentId = params.sessionKey.split(':')[1] || snapshot.defaultAgentId;

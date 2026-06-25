@@ -29,6 +29,7 @@ import {
 import {
   enqueueMediaGenerationJob,
   getMediaGenerationJob,
+  prepareMediaGenerationJob,
 } from '../../utils/media-generation-jobs';
 
 export async function handleMediaRoutes(
@@ -171,15 +172,17 @@ export async function handleMediaRoutes(
           }))
         : undefined;
 
-      const job = enqueueMediaGenerationJob({
-        kind: 'image',
+      const payload = {
+        kind: 'image' as const,
         sessionKey,
         prompt,
         model: body.model?.trim(),
         size: body.size?.trim(),
         quality: body.quality,
         inputImages,
-      });
+      };
+      await prepareMediaGenerationJob(payload);
+      const job = enqueueMediaGenerationJob(payload);
       sendJson(res, 202, { success: true, jobId: job.id, job });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -311,8 +314,8 @@ export async function handleMediaRoutes(
           }))
         : undefined;
 
-      const job = enqueueMediaGenerationJob({
-        kind: 'video',
+      const payload = {
+        kind: 'video' as const,
         sessionKey,
         prompt,
         size: body.size?.trim(),
@@ -320,7 +323,9 @@ export async function handleMediaRoutes(
           ? Math.max(1, Math.floor(body.durationSeconds))
           : undefined,
         inputImages,
-      });
+      };
+      await prepareMediaGenerationJob(payload);
+      const job = enqueueMediaGenerationJob(payload);
 
       sendJson(res, 202, { success: true, jobId: job.id, job });
     } catch (error) {

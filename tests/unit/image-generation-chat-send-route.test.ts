@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 
 const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
+const prepareMediaGenerationJobMock = vi.fn();
 const enqueueMediaGenerationJobMock = vi.fn();
 const getMediaGenerationJobMock = vi.fn();
 
@@ -30,6 +31,7 @@ vi.mock('@electron/utils/openclaw-video-generation', () => ({
 vi.mock('@electron/utils/media-generation-jobs', () => ({
   enqueueMediaGenerationJob: (...args: unknown[]) => enqueueMediaGenerationJobMock(...args),
   getMediaGenerationJob: (...args: unknown[]) => getMediaGenerationJobMock(...args),
+  prepareMediaGenerationJob: (...args: unknown[]) => prepareMediaGenerationJobMock(...args),
 }));
 
 function makeReq(method = 'POST'): IncomingMessage {
@@ -54,6 +56,7 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
       createdAt: 1,
       updatedAt: 1,
     });
+    prepareMediaGenerationJobMock.mockResolvedValue(undefined);
   });
 
   it('enqueues an image generation job and returns immediately', async () => {
@@ -73,6 +76,15 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
+    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith({
+      kind: 'image',
+      sessionKey: 'agent:main:main',
+      prompt: 'draw a night city poster',
+      model: undefined,
+      size: '2048x2048',
+      quality: 'high',
+      inputImages: undefined,
+    });
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
       kind: 'image',
       sessionKey: 'agent:main:main',
@@ -111,6 +123,18 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
+    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'image',
+      sessionKey: 'agent:main:main',
+      prompt: 'make the dot red',
+      inputImages: [
+        {
+          fileName: 'dot.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/generated/dot.png',
+        },
+      ],
+    }));
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'image',
       sessionKey: 'agent:main:main',
