@@ -380,7 +380,7 @@ async function initialize(): Promise<void> {
 
   // Create system tray
   if (!isE2EMode) {
-    createTray(window);
+    await createTray(window);
   }
 
   // Override security headers ONLY for the OpenClaw Gateway Control UI.
