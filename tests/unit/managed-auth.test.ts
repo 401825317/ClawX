@@ -66,6 +66,21 @@ describe('managed auth helpers', () => {
     expect(getManagedAuthStateKey(localReady, { error: 'fetch failed' })).toBe('ready');
   });
 
+  it('treats a local refresh token as a recoverable managed-auth session', () => {
+    const localRefreshable: ManagedAuthStatus = {
+      managed: true,
+      localOnly: true,
+      hasAuthToken: false,
+      hasRefreshToken: true,
+      hasRelayToken: true,
+      authValid: false,
+    };
+
+    expect(isManagedAuthReady(localRefreshable)).toBe(false);
+    expect(isManagedAuthLocallyReady(localRefreshable)).toBe(true);
+    expect(getManagedAuthStateKey(localRefreshable)).toBe('ready');
+  });
+
   it('uses stable account display-name priority', () => {
     expect(getManagedAuthDisplayName({
       auth: {

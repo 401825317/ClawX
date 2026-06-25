@@ -13,6 +13,7 @@ export type ManagedAuthStatus = {
   managed?: boolean;
   hasRelayToken?: boolean;
   hasAuthToken?: boolean;
+  hasRefreshToken?: boolean;
   authValid?: boolean;
   authRejected?: boolean;
   authError?: string;
@@ -110,7 +111,7 @@ export function isManagedAuthLocallyReady(status: ManagedAuthStatus | null | und
     return true;
   }
   return Boolean(status?.localOnly)
-    && Boolean(status?.hasAuthToken)
+    && Boolean(status?.hasAuthToken || status?.hasRefreshToken)
     && Boolean(status?.hasRelayToken)
     && !isManagedActivationRequired(status);
 }

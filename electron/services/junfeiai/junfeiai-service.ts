@@ -234,6 +234,8 @@ type JunFeiAIVerificationCache = {
   payload: Record<string, unknown>;
 };
 
+let junfeiaiAuthRefreshInFlight: Promise<JunFeiAIRefreshPayload | null> | null = null;
+
 export interface JunFeiAISeedResult {
   managed: boolean;
   account: ProviderAccount | null;
@@ -262,6 +264,7 @@ export interface JunFeiAILocalStatusResult {
   activationRequired?: boolean;
   relayOwnerUserId?: string;
   hasAuthToken?: boolean;
+  hasRefreshToken?: boolean;
   authValid?: boolean;
   authRejected?: boolean;
   authError?: string;
@@ -899,7 +902,7 @@ export async function getStoredJunFeiAIAuthToken(): Promise<string | null> {
     return null;
   }
   if (secret.expiresAt > 0 && secret.expiresAt < Date.now()) {
-    const refreshed = await refreshStoredJunFeiAIAuthSession(secret);
+    const refreshed = await refreshStoredJunFeiAIAuthSessionOnce(secret);
     return refreshed?.accessToken ?? null;
   }
   return secret.accessToken;
@@ -930,11 +933,14 @@ export async function getJunFeiAILocalStatus(): Promise<JunFeiAILocalStatusResul
     : undefined;
   const activation = await applyLocalDeviceActivationState(bootstrap, authUser ?? null);
   const verificationCache = getCachedVerificationWindow(await readVerificationCache());
-  const hasAuthToken = Boolean(
-    authSecret?.type === 'oauth'
-    && authSecret.accessToken
+  const hasStoredAuthSession = authSecret?.type === 'oauth';
+  const hasFreshAccessToken = Boolean(
+    hasStoredAuthSession
+    && authSecret.accessToken?.trim()
     && (authSecret.expiresAt <= 0 || authSecret.expiresAt > Date.now()),
   );
+  const hasRefreshToken = Boolean(hasStoredAuthSession && authSecret.refreshToken?.trim());
+  const hasAuthToken = hasFreshAccessToken || hasRefreshToken;
   const hasRelayToken = isRelaySecretUsableForUser(relaySecret, authUser);
   const relayOwnerUserId = relaySecret?.type === 'api_key' ? relaySecret.ownerUserId : undefined;
   const user = verificationCache.user ?? authUser;
@@ -949,6 +955,7 @@ export async function getJunFeiAILocalStatus(): Promise<JunFeiAILocalStatusResul
     activationRequired: activation.activationRequired,
     relayOwnerUserId,
     hasAuthToken,
+    hasRefreshToken,
     authValid: hasAuthToken && verificationCache.valid,
     authRejected: false,
     authError: hasAuthToken && !verificationCache.valid ? 'Account verification is pending' : undefined,
@@ -1005,6 +1012,16 @@ async function refreshStoredJunFeiAIAuthSession(secret: Extract<Awaited<ReturnTy
   });
 
   return refreshed;
+}
+
+async function refreshStoredJunFeiAIAuthSessionOnce(secret: Extract<Awaited<ReturnType<typeof getProviderSecret>>, { type: 'oauth' }>): Promise<JunFeiAIRefreshPayload | null> {
+  if (!junfeiaiAuthRefreshInFlight) {
+    junfeiaiAuthRefreshInFlight = refreshStoredJunFeiAIAuthSession(secret)
+      .finally(() => {
+        junfeiaiAuthRefreshInFlight = null;
+      });
+  }
+  return junfeiaiAuthRefreshInFlight;
 }
 
 export async function storeJunFeiAIRelayToken(

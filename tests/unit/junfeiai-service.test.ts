@@ -924,6 +924,62 @@ describe('JunFeiAI managed provider service', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('treats an expired access token with a refresh token as a local auth session', async () => {
+    const existing = makeAccount();
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.readJunFeiAIDeviceActivationState.mockResolvedValue({
+      activated: true,
+      onboardingCompleted: true,
+      activatedAt: '2026-06-07T00:00:00.000Z',
+      userId: '7',
+    });
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'expired-access',
+          refreshToken: 'refresh-token',
+          expiresAt: Date.now() - 60_000,
+          subject: '7',
+          email: 'alice@example.com',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return {
+          type: 'api_key',
+          accountId: 'lingzhiwuxian',
+          apiKey: 'relay',
+          ownerUserId: '7',
+        };
+      }
+      return null;
+    });
+    memoryStore.set('junfeiaiVerificationCache', {
+      verifiedAt: Date.now(),
+      graceSeconds: 3600,
+      payload: {
+        valid: true,
+        user: { id: 7, email: 'alice@example.com' },
+      },
+    });
+
+    const result = await getJunFeiAILocalStatus();
+
+    expect(result).toMatchObject({
+      managed: true,
+      localOnly: true,
+      source: 'local',
+      hasAuthToken: true,
+      hasRefreshToken: true,
+      hasRelayToken: true,
+      authValid: true,
+      deviceActivated: true,
+      activationRequired: false,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('does nothing when managed provider mode is disabled', async () => {
     vi.stubEnv('CLAWX_MANAGED_PROVIDER', '0');
 
@@ -1162,6 +1218,58 @@ describe('JunFeiAI managed provider service', () => {
         headers: expect.objectContaining({ Authorization: 'Bearer fresh-access' }),
       }),
     );
+  });
+
+  it('coalesces concurrent expired-token refresh attempts', async () => {
+    mocks.getProviderSecret.mockResolvedValue({
+      type: 'oauth',
+      accountId: 'lingzhiwuxian-auth',
+      accessToken: 'expired-access',
+      refreshToken: 'refresh-token',
+      expiresAt: Date.now() - 60_000,
+      email: 'user@example.com',
+      subject: '7',
+    });
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          access_token: 'fresh-access',
+          refresh_token: 'fresh-refresh',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        },
+      }), { status: 200 }))
+      .mockResolvedValue(new Response(JSON.stringify({
+        data: {
+          methods: { alipay: { payment_type: 'alipay', currency: 'CNY' } },
+          topupInfo: { payg_credit_usd_per_cny: 2 },
+          quotaPerUnit: 1,
+        },
+      }), { status: 200 }));
+
+    await Promise.all([
+      getJunFeiAITopupOverview(),
+      getJunFeiAITopupOverview(),
+    ]);
+
+    const refreshCalls = fetchMock.mock.calls.filter(([url]) => (
+      url === 'https://zz-cn.lingzhiwuxian.com/api/clawx/auth/refresh'
+    ));
+    expect(refreshCalls).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://zz-cn.lingzhiwuxian.com/api/clawx/billing/checkout-info',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({ Authorization: 'Bearer fresh-access' }),
+      }),
+    );
+    expect(mocks.setProviderSecret).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'oauth',
+      accountId: 'lingzhiwuxian-auth',
+      accessToken: 'fresh-access',
+      refreshToken: 'fresh-refresh',
+    }));
   });
 
   it('falls back to standard Sub2API auth and key routes when ClawX compat routes are missing', async () => {
