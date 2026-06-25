@@ -77,6 +77,41 @@ async function generateIdentity(): Promise<DeviceIdentity> {
   };
 }
 
+export async function readDeviceIdentity(filePath: string): Promise<DeviceIdentity | null> {
+  try {
+    if (!(await fileExists(filePath))) {
+      return null;
+    }
+    const raw = await readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (
+      parsed?.version === 1 &&
+      typeof parsed.deviceId === 'string' &&
+      typeof parsed.publicKeyPem === 'string' &&
+      typeof parsed.privateKeyPem === 'string'
+    ) {
+      const derivedId = fingerprintPublicKey(parsed.publicKeyPem);
+      return {
+        deviceId: derivedId || parsed.deviceId,
+        publicKeyPem: parsed.publicKeyPem,
+        privateKeyPem: parsed.privateKeyPem,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+export async function writeDeviceIdentity(filePath: string, identity: DeviceIdentity): Promise<void> {
+  const dir = path.dirname(filePath);
+  if (!(await fileExists(dir))) await mkdir(dir, { recursive: true });
+  const stored = { version: 1, ...identity, createdAtMs: Date.now() };
+  await writeFile(filePath, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+  try { await chmod(filePath, 0o600); } catch { /* ignore */ }
+}
+
 /**
  * Load device identity from disk, or create and persist a new one.
  * The identity file is stored at `filePath` with mode 0o600.
@@ -84,35 +119,22 @@ async function generateIdentity(): Promise<DeviceIdentity> {
  * Fully async — no synchronous file I/O or crypto.
  */
 export async function loadOrCreateDeviceIdentity(filePath: string): Promise<DeviceIdentity> {
-  try {
-    if (await fileExists(filePath)) {
+  const existing = await readDeviceIdentity(filePath);
+  if (existing) {
+    try {
       const raw = await readFile(filePath, 'utf8');
       const parsed = JSON.parse(raw);
-      if (
-        parsed?.version === 1 &&
-        typeof parsed.deviceId === 'string' &&
-        typeof parsed.publicKeyPem === 'string' &&
-        typeof parsed.privateKeyPem === 'string'
-      ) {
-        const derivedId = fingerprintPublicKey(parsed.publicKeyPem);
-        if (derivedId && derivedId !== parsed.deviceId) {
-          const updated = { ...parsed, deviceId: derivedId };
-          await writeFile(filePath, `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
-          return { deviceId: derivedId, publicKeyPem: parsed.publicKeyPem, privateKeyPem: parsed.privateKeyPem };
-        }
-        return { deviceId: parsed.deviceId, publicKeyPem: parsed.publicKeyPem, privateKeyPem: parsed.privateKeyPem };
+      if (parsed?.deviceId !== existing.deviceId) {
+        await writeDeviceIdentity(filePath, existing);
       }
+    } catch {
+      // The readable identity is already valid; keep using it.
     }
-  } catch {
-    // fall through to create a new identity
+    return existing;
   }
 
   const identity = await generateIdentity();
-  const dir = path.dirname(filePath);
-  if (!(await fileExists(dir))) await mkdir(dir, { recursive: true });
-  const stored = { version: 1, ...identity, createdAtMs: Date.now() };
-  await writeFile(filePath, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
-  try { await chmod(filePath, 0o600); } catch { /* ignore */ }
+  await writeDeviceIdentity(filePath, identity);
   return identity;
 }
 

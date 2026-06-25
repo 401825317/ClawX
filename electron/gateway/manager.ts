@@ -2,8 +2,6 @@
  * Gateway Process Manager
  * Manages the OpenClaw Gateway process lifecycle
  */
-import { app } from 'electron';
-import path from 'path';
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { PORTS } from '../utils/config';
@@ -11,9 +9,9 @@ import { JsonRpcNotification, isNotification, isResponse } from './protocol';
 import { logger } from '../utils/logger';
 import { captureTelemetryEvent, trackMetric } from '../utils/telemetry';
 import {
-  loadOrCreateDeviceIdentity,
   type DeviceIdentity,
 } from '../utils/device-identity';
+import { loadOrCreateJunFeiAIDeviceIdentity } from '../utils/junfeiai-device';
 import {
   DEFAULT_RECONNECT_CONFIG,
   type ReconnectConfig,
@@ -241,8 +239,7 @@ export class GatewayManager extends EventEmitter {
   private async initDeviceIdentity(): Promise<void> {
     if (this.deviceIdentity) return; // already loaded
     try {
-      const identityPath = path.join(app.getPath('userData'), 'clawx-device-identity.json');
-      this.deviceIdentity = await loadOrCreateDeviceIdentity(identityPath);
+      this.deviceIdentity = await loadOrCreateJunFeiAIDeviceIdentity();
       logger.debug(`Device identity loaded (deviceId=${this.deviceIdentity.deviceId})`);
     } catch (err) {
       logger.warn('Failed to load device identity, scopes will be limited:', err);
