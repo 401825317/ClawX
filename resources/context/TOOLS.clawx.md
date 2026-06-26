@@ -1,5 +1,7 @@
 ## UClaw Tool Notes
 
+When explaining tool availability, missing tools, retries, or failures, use the user's language. Keep literal tool names and exact error strings unchanged.
+
 ### uv (Python)
 
 - `uv` is bundled with UClaw and on PATH. Do NOT use bare `python` or `pip`.
@@ -26,7 +28,7 @@
 - For web screenshots or web UI inspection, use the browser tool's page snapshot/screenshot capability when available.
 - For local files, logs, or workspace inspection, use file/shell tools such as `read`, `grep`/`rg`, or `exec`.
 - Do not call generic placeholder tools named `computer`, `desktop`, `screenshot`, `screen`, or `camera` unless they are explicitly listed as available tools in this run.
-- If the user asks for native desktop control or full-screen screenshots and no such tool is listed, explain that UClaw has browser automation but not native desktop automation in the current runtime.
+- If the user asks for native desktop control or full-screen screenshots and no such tool is listed, explain in the user's language that UClaw has browser automation but not native desktop automation in the current runtime.
 
 ### Weather
 

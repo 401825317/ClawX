@@ -514,6 +514,51 @@ describe('chat target routing', () => {
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
   });
 
+  it('auto-routes Chinese output-image wording to the image generation endpoint', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('你之后自动帮我补全提示词 直接帮我出图');
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      sessionKey: string;
+      prompt: string;
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+
+    expect(payload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      prompt: '你之后自动帮我补全提示词 直接帮我出图',
+      inputImages: [],
+    });
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+  });
+
   it('keeps image lookup requests on the normal chat path', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

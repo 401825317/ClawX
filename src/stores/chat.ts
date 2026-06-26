@@ -80,7 +80,7 @@ let _lastChatEventAt = 0;
 let _managedAuthBackgroundVerifyInFlight: Promise<void> | null = null;
 let _lastManagedAuthBackgroundVerifyAt = 0;
 const MANAGED_AUTH_BACKGROUND_VERIFY_MIN_INTERVAL_MS = 60_000;
-const IMAGE_GENERATION_INTENT_PATTERN = /(?:生成|绘制|画|制作|做|设计|create|generate|draw|make|design|render)[\s\S]{0,24}(?:图片|图像|插画|海报|封面|头像|壁纸|图标|logo|icon|banner|poster|image|picture|illustration|photo|artwork)/i;
+const IMAGE_GENERATION_INTENT_PATTERN = /(?:(?:生成|绘制|画|制作|做|设计|create|generate|draw|make|design|render)[\s\S]{0,24}(?:图片|图像|插画|海报|封面|头像|壁纸|图标|logo|icon|banner|poster|image|picture|illustration|photo|artwork)|(?:出图|生图|画图|作图|做图|配图|生成图|生成海报|生成封面|生成头像)|(?:补全提示词|优化提示词)[\s\S]{0,32}(?:出图|生图|画图|作图|做图|图片|图像|image|picture))/i;
 const IMAGE_LOOKUP_INTENT_PATTERN = /(?:搜索|搜|查找|找|检索|浏览器|网页|素材|参考图|参考图片|search|find|look up|browse|reference)/i;
 const IMAGE_NEGATION_INTENT_PATTERN = /(?:不要|不用|别|不需要|do not|don't|dont|no need)[\s\S]{0,12}(?:生成|绘制|画|制作|图片|图像|image|picture)/i;
 

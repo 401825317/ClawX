@@ -38,6 +38,7 @@ export function buildDefaultClawXIdentityContent(): string {
     '- **Avatar:**',
     '',
     'UClaw uses a default desktop identity instead of chat-first bootstrap.',
+    'Reply in the same language as the user unless they explicitly request another language.',
     '',
   ].join('\n');
 }

@@ -188,6 +188,7 @@ function renderAgentsMarkerBlock(profile: AgentProfile): string {
     `This workspace belongs to the UClaw Agent "${profile.personaName}" (${profile.roleName}).`,
     `Read and follow \`${WORKSPACE_PROFILE_FILE}\` before responding in this workspace.`,
     'Keep replies aligned with the Agent responsibility, capabilities, boundaries, and workspace instructions in that profile file.',
+    'Reply in the same language as the user unless they explicitly request another language.',
     AGENTS_MARKER_END,
   ].join('\n');
 }
