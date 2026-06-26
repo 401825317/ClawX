@@ -1,4 +1,5 @@
 import { homedir, tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,9 +10,40 @@ async function importPaths() {
 
 describe('OpenClaw path helpers', () => {
   const root = join(tmpdir(), `uclaw-paths-${Math.random().toString(36).slice(2)}`);
+  const originalResourcesPath = process.resourcesPath;
 
   beforeEach(() => {
     vi.unstubAllEnvs();
+    Object.defineProperty(process, 'resourcesPath', {
+      value: originalResourcesPath,
+      configurable: true,
+    });
+  });
+
+  it('prefers an explicit OpenClaw runtime directory for utility processes', async () => {
+    const explicitDir = join(root, 'packaged', 'resources', 'openclaw');
+    vi.stubEnv('CLAWX_OPENCLAW_DIR', explicitDir);
+
+    const { getOpenClawDir, getOpenClawEntryPath } = await importPaths();
+
+    expect(getOpenClawDir()).toBe(explicitDir);
+    expect(getOpenClawEntryPath()).toBe(join(explicitDir, 'openclaw.mjs'));
+  });
+
+  it('detects packaged OpenClaw resources without electron.app in utility processes', async () => {
+    const resourcesDir = join(root, 'packaged-resources');
+    const openclawDir = join(resourcesDir, 'openclaw');
+    rmSync(resourcesDir, { recursive: true, force: true });
+    mkdirSync(openclawDir, { recursive: true });
+    writeFileSync(join(openclawDir, 'package.json'), '{"name":"openclaw"}\n', 'utf8');
+    Object.defineProperty(process, 'resourcesPath', {
+      value: resourcesDir,
+      configurable: true,
+    });
+
+    const { getOpenClawDir } = await importPaths();
+
+    expect(getOpenClawDir()).toBe(openclawDir);
   });
 
   it('prefers OPENCLAW_STATE_DIR for portable OpenClaw data', async () => {

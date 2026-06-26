@@ -7,6 +7,7 @@ import type { MediaGenerationWorkerRequest } from '@electron/utils/media-generat
 
 const forkMock = vi.fn();
 const testOpenClawConfigDir = join(tmpdir(), 'clawx-tests', 'media-generation-jobs-openclaw');
+const testOpenClawRuntimeDir = join(tmpdir(), 'clawx-tests', 'media-generation-jobs-openclaw-runtime');
 
 class MockUtilityProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -49,6 +50,7 @@ vi.mock('electron', () => ({
 
 vi.mock('@electron/utils/paths', () => ({
   getOpenClawConfigDir: () => testOpenClawConfigDir,
+  getOpenClawDir: () => testOpenClawRuntimeDir,
 }));
 
 vi.mock('fs', async () => {
@@ -101,6 +103,7 @@ describe('media generation jobs', () => {
     expect(forkMock.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
       env: expect.objectContaining({
         CLAWX_ELECTRON_STORE_CWD: '/tmp/uclaw-test-user-data',
+        CLAWX_OPENCLAW_DIR: testOpenClawRuntimeDir,
       }),
     }));
 
@@ -145,5 +148,40 @@ describe('media generation jobs', () => {
     expect(failed.error).toContain('Worker stdout:');
     expect(failed.error).toContain('provider selected: openai/grok-image-video');
     expect(failed.error?.length).toBeLessThanOrEqual(12_050);
+  });
+
+  it('shows a concise user-facing message for upstream provider failures', async () => {
+    let child: MockUtilityProcess | null = null;
+    forkMock.mockImplementationOnce(() => {
+      child = new MockUtilityProcess();
+      child.postMessage = vi.fn((message: MediaGenerationWorkerRequest) => {
+        queueMicrotask(() => {
+          child?.emit('message', {
+            type: 'result',
+            jobId: message.jobId,
+            success: false,
+            error: [
+              'ProviderHttpError: UClaw OpenAI image generation failed (HTTP 429):',
+              'Upstream rate limit exceeded, please retry later [type=rate_limit_error]',
+              'at createProviderHttpError (...stack...)',
+            ].join(' '),
+          });
+        });
+      });
+      queueMicrotask(() => child?.emit('spawn'));
+      return child;
+    });
+
+    const { enqueueMediaGenerationJob } = await import('@electron/utils/media-generation-jobs');
+    const queued = enqueueMediaGenerationJob({
+      kind: 'image',
+      sessionKey: 'agent:main:main',
+      prompt: 'draw a sunny beach',
+    });
+
+    const failed = await waitForJobStatus(queued.id, 'failed') as { error?: string };
+    expect(failed.error).toBe('上游渠道报错，生成失败了，请稍后重试。');
+    expect(failed.error).not.toContain('ProviderHttpError');
+    expect(failed.error).not.toContain('stack');
   });
 });

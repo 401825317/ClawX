@@ -40,6 +40,26 @@ function getElectronApp() {
   return fallbackApp;
 }
 
+function resolveExplicitOpenClawDir(): string | null {
+  const explicitDir = process.env.CLAWX_OPENCLAW_DIR?.trim();
+  if (!explicitDir) {
+    return null;
+  }
+  return resolve(explicitDir);
+}
+
+function resolvePackagedOpenClawDirFromProcess(): string | null {
+  const resourcesPath = process.resourcesPath?.trim();
+  if (!resourcesPath) {
+    return null;
+  }
+  const candidate = join(resourcesPath, 'openclaw');
+  if (existsSync(join(candidate, 'package.json'))) {
+    return candidate;
+  }
+  return null;
+}
+
 /**
  * Resolve OpenClaw's effective home directory. This mirrors OpenClaw's own
  * tilde semantics: OPENCLAW_HOME becomes the home for ~/.openclaw paths.
@@ -191,9 +211,24 @@ export function getPreloadPath(): string {
  * - Development: from node_modules/openclaw
  */
 export function getOpenClawDir(): string {
+  const explicitDir = resolveExplicitOpenClawDir();
+  if (explicitDir) {
+    return explicitDir;
+  }
+
   if (getElectronApp().isPackaged) {
     return join(process.resourcesPath, 'openclaw');
   }
+
+  // Electron utility processes do not expose electron.app, so the fallback app
+  // above looks like development mode even when launched from app.asar.
+  // Detect the packaged resources directory directly before falling back to
+  // node_modules/openclaw.
+  const packagedDir = resolvePackagedOpenClawDirFromProcess();
+  if (packagedDir) {
+    return packagedDir;
+  }
+
   // Development: use node_modules/openclaw
   return join(__dirname, '../../node_modules/openclaw');
 }

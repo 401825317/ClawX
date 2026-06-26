@@ -13,6 +13,7 @@ import type {
 } from './media-generation-types';
 import { ensureManagedOpenAiImageRelay } from './openclaw-image-generation';
 import { ensureManagedOpenAiVideoRelay } from './openclaw-video-generation';
+import { getOpenClawDir } from './paths';
 
 type InternalMediaGenerationJob = MediaGenerationJobSnapshot & {
   payload: MediaGenerationJobPayload;
@@ -24,6 +25,7 @@ const MAX_JOB_HISTORY = 50;
 const MAX_WORKER_OUTPUT_CHARS = 4096;
 const MAX_WORKER_LOG_CHARS = 1024;
 const MAX_JOB_ERROR_CHARS = 12_000;
+const USER_FACING_UPSTREAM_MEDIA_ERROR = '上游渠道报错，生成失败了，请稍后重试。';
 
 let activeJobId: string | null = null;
 
@@ -68,10 +70,11 @@ function compactJobHistory(): void {
 
 function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
   const now = Date.now();
+  logger.warn(`[media-generation] ${job.kind} job ${job.id} failed: ${truncateText(error, MAX_JOB_ERROR_CHARS)}`);
   job.status = 'failed';
   job.updatedAt = now;
   job.completedAt = now;
-  job.error = truncateText(error, MAX_JOB_ERROR_CHARS);
+  job.error = normalizeUserFacingMediaGenerationError(error);
 }
 
 function chunkToText(data: unknown): string {
@@ -83,6 +86,23 @@ function chunkToText(data: unknown): string {
 function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}\n[truncated ${text.length - maxChars} chars]`;
+}
+
+function isUpstreamMediaGenerationError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return normalized.includes('providerhttperror')
+    || normalized.includes('upstream')
+    || normalized.includes('rate_limit')
+    || normalized.includes('rate limit')
+    || normalized.includes('http 429')
+    || normalized.includes('http 5');
+}
+
+function normalizeUserFacingMediaGenerationError(error: string): string {
+  if (isUpstreamMediaGenerationError(error)) {
+    return USER_FACING_UPSTREAM_MEDIA_ERROR;
+  }
+  return truncateText(error, MAX_JOB_ERROR_CHARS);
 }
 
 function normalizeCapturedText(text: string): string {
@@ -211,6 +231,7 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
       env: {
         ...process.env,
         CLAWX_MEDIA_GENERATION_WORKER_ENTRY: entryPath,
+        CLAWX_OPENCLAW_DIR: getOpenClawDir(),
         [getElectronStoreUserDataEnvKey()]: app.getPath('userData'),
       } as NodeJS.ProcessEnv,
       serviceName: 'UClaw Media Generation',
