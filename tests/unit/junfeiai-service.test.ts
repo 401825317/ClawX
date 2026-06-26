@@ -73,6 +73,7 @@ import {
   getJunFeiAITopupOverview,
   loginJunFeiAI,
   logoutJunFeiAI,
+  registerJunFeiAI,
   storeJunFeiAIRelayToken,
   verifyJunFeiAIAuth,
 } from '@electron/services/junfeiai/junfeiai-service';
@@ -537,6 +538,229 @@ describe('JunFeiAI managed provider service', () => {
     expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
   });
 
+  it('restarts the running Gateway after registration switches the managed relay token owner', async () => {
+    const existing = makeAccount();
+    let authSecret: unknown = {
+      type: 'oauth',
+      accountId: 'lingzhiwuxian-auth',
+      accessToken: 'old-access',
+      refreshToken: '',
+      expiresAt: Date.now() + 60_000,
+      subject: '7',
+    };
+    let relaySecret: unknown = {
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'ovo-relay',
+      ownerUserId: '7',
+      ownerUsername: 'ovo',
+    };
+    const gateway = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      restart: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return authSecret;
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return relaySecret;
+      }
+      return null;
+    });
+    mocks.setProviderSecret.mockImplementation(async (secret: unknown) => {
+      if (!secret || typeof secret !== 'object' || !('accountId' in secret)) {
+        return;
+      }
+      if (secret.accountId === 'lingzhiwuxian-auth') {
+        authSecret = secret;
+      }
+      if (secret.accountId === 'lingzhiwuxian') {
+        relaySecret = secret;
+      }
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          accessToken: 'new-access',
+          refreshToken: 'new-refresh',
+          expiresIn: 3600,
+          user: { id: 8, username: 'liziqaq' },
+          device: { id: 'device-1', status: 'active' },
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { token: 'liziqaq-relay', expiresIn: null },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { user: { id: 8, username: 'liziqaq' } },
+      }), { status: 200 }));
+
+    await expect(registerJunFeiAI({
+      account: 'liziqaq',
+      username: 'liziqaq',
+      password: 'password123',
+      activationTicket: 'ticket',
+    }, gateway as never)).resolves.toMatchObject({
+      managed: true,
+      hasRelayToken: true,
+      relayOwnerUserId: '8',
+      auth: {
+        user: { id: 8, username: 'liziqaq' },
+      },
+    });
+
+    expect(mocks.setProviderSecret).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'liziqaq-relay',
+      ownerUserId: '8',
+      ownerUsername: 'liziqaq',
+    }));
+    expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('lingzhiwuxian');
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      '',
+      undefined,
+    );
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      'liziqaq-relay',
+      undefined,
+    );
+    expect(gateway.restart).toHaveBeenCalledTimes(1);
+    const syncOrder = mocks.syncSavedProviderToRuntime.mock.invocationCallOrder.at(-1) ?? 0;
+    const restartOrder = gateway.restart.mock.invocationCallOrder.at(-1) ?? 0;
+    expect(syncOrder).toBeGreaterThan(0);
+    expect(restartOrder).toBeGreaterThan(syncOrder);
+  });
+
+  it('stops the running Gateway when account-switch restart fails', async () => {
+    const existing = makeAccount();
+    const gateway = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      restart: vi.fn().mockRejectedValue(new Error('restart failed')),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'new-access',
+          refreshToken: 'new-refresh',
+          expiresAt: Date.now() + 60_000,
+          subject: '8',
+        };
+      }
+      return null;
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          accessToken: 'new-access',
+          refreshToken: 'new-refresh',
+          expiresIn: 3600,
+          user: { id: 8, username: 'liziqaq' },
+          device: { id: 'device-1', status: 'active' },
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { token: 'liziqaq-relay', expiresIn: null },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { user: { id: 8, username: 'liziqaq' } },
+      }), { status: 200 }));
+
+    await expect(registerJunFeiAI({
+      account: 'liziqaq',
+      username: 'liziqaq',
+      password: 'password123',
+      activationTicket: 'ticket',
+    }, gateway as never)).resolves.toMatchObject({
+      managed: true,
+      hasRelayToken: true,
+      relayOwnerUserId: '8',
+    });
+
+    expect(gateway.restart).toHaveBeenCalledTimes(1);
+    expect(gateway.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the stale relay key and stops Gateway when registration cannot fetch a new relay token', async () => {
+    const existing = makeAccount();
+    const gateway = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      restart: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'new-access',
+          refreshToken: 'new-refresh',
+          expiresAt: Date.now() + 60_000,
+          subject: '8',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return {
+          type: 'api_key',
+          accountId: 'lingzhiwuxian',
+          apiKey: 'ovo-relay',
+          ownerUserId: '7',
+        };
+      }
+      return null;
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          accessToken: 'new-access',
+          refreshToken: 'new-refresh',
+          expiresIn: 3600,
+          user: { id: 8, username: 'liziqaq' },
+          device: { id: 'device-1', status: 'active' },
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        success: false,
+        message: 'relay unavailable',
+      }), { status: 500 }));
+
+    await expect(registerJunFeiAI({
+      account: 'liziqaq',
+      username: 'liziqaq',
+      password: 'password123',
+      activationTicket: 'ticket',
+    }, gateway as never)).rejects.toThrow('relay unavailable');
+
+    expect(mocks.deleteProviderSecret).toHaveBeenCalledWith('lingzhiwuxian');
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      '',
+      undefined,
+    );
+    expect(gateway.stop).toHaveBeenCalledTimes(1);
+    expect(gateway.restart).not.toHaveBeenCalled();
+    expect(mocks.syncSavedProviderToRuntime).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      'ovo-relay',
+      expect.anything(),
+    );
+  });
+
   it('syncs runtime during status checks when a fresh relay key is issued', async () => {
     const existing = makeAccount();
     let relaySecret: unknown = null;
@@ -592,6 +816,73 @@ describe('JunFeiAI managed provider service', () => {
       undefined,
     );
     expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
+  });
+
+  it('restarts Gateway when a status check refreshes a stale relay key', async () => {
+    const existing = makeAccount();
+    let relaySecret: unknown = {
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'old-user-relay',
+      ownerUserId: '7',
+    };
+    const gateway = {
+      getStatus: vi.fn(() => ({ state: 'running' })),
+      restart: vi.fn().mockResolvedValue(undefined),
+    };
+
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'access-bob',
+          refreshToken: '',
+          expiresAt: Date.now() + 60_000,
+          subject: '8',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return relaySecret;
+      }
+      return null;
+    });
+    mocks.setProviderSecret.mockImplementation(async (secret: unknown) => {
+      if (
+        secret
+        && typeof secret === 'object'
+        && 'accountId' in secret
+        && secret.accountId === 'lingzhiwuxian'
+      ) {
+        relaySecret = secret;
+      }
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { id: 8, username: 'bob', email: 'bob@example.com' },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { token: 'bob-relay', expiresIn: 3600 },
+      }), { status: 200 }));
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: { activationRequired: false },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+      gatewayManager: gateway as never,
+      syncRuntimeOnAuthChange: true,
+    });
+
+    expect(result.hasRelayToken).toBe(true);
+    expect(mocks.syncSavedProviderToRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      'bob-relay',
+      undefined,
+    );
+    expect(gateway.restart).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes an expired relay key for the same logged-in user', async () => {

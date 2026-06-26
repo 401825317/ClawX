@@ -1187,6 +1187,58 @@ async function saveJunFeiAIRelaySecret(
   return token;
 }
 
+async function applyJunFeiAIAuthSwitchToGateway(gatewayManager?: GatewayManager): Promise<void> {
+  if (!gatewayManager) {
+    return;
+  }
+  const status = gatewayManager.getStatus();
+  if (status.state === 'stopped') {
+    return;
+  }
+  logger.info('[junfeiai] Restarting Gateway after managed account switch to apply the new relay token.');
+  try {
+    await gatewayManager.restart();
+  } catch (error) {
+    logger.warn('[junfeiai] Gateway restart after managed account switch failed; stopping Gateway to avoid using a stale relay token:', error);
+    try {
+      await gatewayManager.stop();
+    } catch (stopError) {
+      logger.warn('[junfeiai] Failed to stop Gateway after account switch restart failure:', stopError);
+    }
+  }
+}
+
+async function clearJunFeiAIStaleRelayKeyForAuthSwitch(): Promise<void> {
+  await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
+  const account = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
+  try {
+    if (account) {
+      await syncSavedProviderToRuntime(providerAccountToConfig(account), '', undefined);
+      return;
+    }
+    await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+  } catch (error) {
+    logger.warn('[junfeiai] Failed to clear stale managed relay key from OpenClaw during account switch:', error);
+    try {
+      await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+    } catch (fallbackError) {
+      logger.warn('[junfeiai] Failed to clear stale managed relay auth profile during account switch:', fallbackError);
+    }
+  }
+}
+
+async function stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager?: GatewayManager): Promise<void> {
+  if (!gatewayManager || gatewayManager.getStatus().state === 'stopped') {
+    return;
+  }
+  logger.warn('[junfeiai] Stopping Gateway after managed account switch failed before a new relay token was applied.');
+  try {
+    await gatewayManager.stop();
+  } catch (error) {
+    logger.warn('[junfeiai] Failed to stop Gateway after managed account switch failure:', error);
+  }
+}
+
 async function getJunFeiAIAuthStatusWithOptions(options: {
   markDeviceActivatedFromStoredAuth?: boolean;
 }): Promise<{
@@ -1379,6 +1431,11 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       options.syncRuntimeOnAuthChange === true
       && runtimeChanged
     );
+  const shouldApplyRuntimeAuthImmediately = Boolean(
+    options.gatewayManager
+    && (relaySecretChanged || shouldClearRuntimeKey),
+  );
+  const runtimeSyncGatewayManager = shouldApplyRuntimeAuthImmediately ? undefined : options.gatewayManager;
 
   if (shouldSyncRuntime) {
     const apiKey = runtimeApiKey ?? (shouldClearRuntimeKey ? '' : undefined);
@@ -1387,11 +1444,14 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       || relaySecretChanged
       || shouldClearRuntimeKey;
     if (shouldSyncProviderConfig) {
-      await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, options.gatewayManager);
+      await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, runtimeSyncGatewayManager);
     }
     if ((defaultProviderChanged || options.syncRuntime === true) && !shouldClearRuntimeKey) {
-      await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, options.gatewayManager);
+      await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, runtimeSyncGatewayManager);
     }
+  }
+  if (shouldApplyRuntimeAuthImmediately) {
+    await applyJunFeiAIAuthSwitchToGateway(options.gatewayManager);
   }
 
   return {
@@ -1430,7 +1490,14 @@ export async function loginJunFeiAI(
   }
   auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
-  const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
+  await clearJunFeiAIStaleRelayKeyForAuthSwitch();
+  let relay: JunFeiAIRelayTokenPayload = {};
+  try {
+    relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
+  } catch (error) {
+    await stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager);
+    throw error;
+  }
   const authUser = getAuthUser(auth);
   if (authPayloadIndicatesDeviceActivated(auth) || relay.token?.trim()) {
     await markJunFeiAIDeviceActivated('login', getActivationUser(authUser));
@@ -1439,11 +1506,11 @@ export async function loginJunFeiAI(
     bootstrap: auth,
     relayToken: relay.token,
     relayTokenExpiresAt: relayTokenExpiresAt(relay),
-    gatewayManager,
     markDeviceActivatedFromStoredAuth: false,
   });
   const { accessToken: _accessToken, refreshToken: _refreshToken, ...safeAuth } = auth;
   await saveVerificationCache(safeAuth);
+  await applyJunFeiAIAuthSwitchToGateway(gatewayManager);
   return { ...seed, auth: safeAuth };
 }
 
@@ -1472,16 +1539,23 @@ export async function registerJunFeiAI(
   await storeJunFeiAIAuthSession(auth);
   const authUser = getAuthUser(auth);
   await markJunFeiAIDeviceActivated('register', getActivationUser(authUser));
-  const relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
+  await clearJunFeiAIStaleRelayKeyForAuthSwitch();
+  let relay: JunFeiAIRelayTokenPayload = {};
+  try {
+    relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
+  } catch (error) {
+    await stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager);
+    throw error;
+  }
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,
     relayTokenExpiresAt: relayTokenExpiresAt(relay),
-    gatewayManager,
     markDeviceActivatedFromStoredAuth: false,
   });
   const { accessToken: _accessToken, refreshToken: _refreshToken, ...safeAuth } = auth;
   await saveVerificationCache(safeAuth);
+  await applyJunFeiAIAuthSwitchToGateway(gatewayManager);
   return { ...seed, auth: safeAuth };
 }
 
