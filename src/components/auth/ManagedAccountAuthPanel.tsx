@@ -8,7 +8,6 @@ import { Label } from '@/components/ui/label';
 import { hostApiFetch } from '@/lib/host-api';
 import {
   getManagedAuthErrorMessage,
-  isManagedDeviceAuthorizationRequired,
 } from '@/lib/managed-auth-errors';
 import {
   isManagedActivationRequired,
@@ -53,7 +52,6 @@ export function ManagedAccountAuthPanel({
   const [verifyCode, setVerifyCode] = useState('');
   const [activationTicket, setActivationTicket] = useState('');
   const [activationValid, setActivationValid] = useState<boolean | null>(null);
-  const [loginDeviceAuthorizationRequired, setLoginDeviceAuthorizationRequired] = useState(false);
   const [checkingActivation, setCheckingActivation] = useState(false);
   const [sendingVerifyCode, setSendingVerifyCode] = useState(false);
   const [verifyCodeCountdown, setVerifyCodeCountdown] = useState(0);
@@ -68,11 +66,7 @@ export function ManagedAccountAuthPanel({
   const canRegister = allowRegister && auth.registrationEnabled !== false;
   const canLogin = auth.loginEnabled !== false;
   const activationRequiredForRegister = mode === 'register' && (requiresActivation || auth.activationRequired === true);
-  const activationRequiredForLogin = mode === 'login' && (
-    loginDeviceAuthorizationRequired
-    || (hasAuthToken && requiresActivation)
-  );
-  const showActivationCode = activationRequiredForRegister || activationRequiredForLogin;
+  const showActivationCode = activationRequiredForRegister;
 
   const refreshAndReportStatus = useCallback(async () => {
     try {
@@ -98,7 +92,7 @@ export function ManagedAccountAuthPanel({
   }, [authReady, onAuthenticated, onReadyChange, status]);
 
   useEffect(() => {
-    if (status?.deviceActivated || !canRegister) {
+    if (defaultMode === 'login' || status?.deviceActivated || !canRegister) {
       setMode('login');
     } else if (requiresActivation || defaultMode === 'register') {
       setMode('register');
@@ -197,14 +191,13 @@ export function ManagedAccountAuthPanel({
           account: normalizedAccount,
           username: normalizedAccount,
           password,
-          activationCode: activationCode.trim() || undefined,
-          activationTicket: activationTicket || activationCode.trim() || undefined,
+          activationCode: mode === 'register' ? (activationCode.trim() || undefined) : undefined,
+          activationTicket: mode === 'register' ? (activationTicket || activationCode.trim() || undefined) : undefined,
           verifyCode: emailVerifyEnabled ? (verifyCode.trim() || undefined) : undefined,
         }),
       });
       toast.success(mode === 'register' ? t('auth.toast.activated') : t('auth.toast.loggedIn'));
       setPassword('');
-      setLoginDeviceAuthorizationRequired(false);
       const next = await refreshAndReportStatus();
       await refreshProviderSnapshot();
       if (next && isManagedAuthReady(next)) {
@@ -214,14 +207,7 @@ export function ManagedAccountAuthPanel({
         onAuthenticated?.(next);
       }
     } catch (error) {
-      if (mode === 'login' && isManagedDeviceAuthorizationRequired(error)) {
-        setLoginDeviceAuthorizationRequired(true);
-        setActivationTicket('');
-        setActivationValid(null);
-        toast.error(t('auth.errors.device_authorization_required'));
-      } else {
-        toast.error(t(`auth.toast.${mode}Failed`, { message: getManagedAuthErrorMessage(t, error) }));
-      }
+      toast.error(t(`auth.toast.${mode}Failed`, { message: getManagedAuthErrorMessage(t, error) }));
     } finally {
       setSubmitting(false);
     }
@@ -238,7 +224,6 @@ export function ManagedAccountAuthPanel({
       setVerifyCode('');
       setActivationTicket('');
       setActivationValid(null);
-      setLoginDeviceAuthorizationRequired(false);
     } catch (error) {
       toast.error(t('auth.toast.logoutFailed', { message: getManagedAuthErrorMessage(t, error) }));
     } finally {
@@ -266,7 +251,6 @@ export function ManagedAccountAuthPanel({
               type="button"
               onClick={() => {
                 setMode('login');
-                setLoginDeviceAuthorizationRequired(false);
               }}
               disabled={!canLogin}
               className={cn(
@@ -281,7 +265,6 @@ export function ManagedAccountAuthPanel({
                 type="button"
                 onClick={() => {
                   setMode('register');
-                  setLoginDeviceAuthorizationRequired(false);
                 }}
                 disabled={!canRegister}
                 className={cn(
@@ -408,9 +391,7 @@ export function ManagedAccountAuthPanel({
                 )}
                 {mode === 'register'
                   ? t('auth.actions.registerAndActivate')
-                  : loginDeviceAuthorizationRequired
-                    ? t('auth.actions.loginAndAuthorize')
-                    : t('auth.actions.login')}
+                  : t('auth.actions.login')}
               </Button>
             </div>
           </div>

@@ -128,7 +128,7 @@ export function ManagedAuthGate({ enabled }: ManagedAuthGateProps) {
         {stateKey === 'checking' ? null : (
           <ManagedAccountAuthPanel
             defaultMode="login"
-            allowRegister={false}
+            allowRegister
             successVisible={false}
           />
         )}
