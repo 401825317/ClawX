@@ -6,7 +6,7 @@
  * surfaced via ExecutionGraphCard, not inside message bubbles.
  */
 import { useState, useCallback, useEffect, memo } from 'react';
-import { Sparkles, Copy, Check, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Copy, Check, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -16,6 +16,7 @@ import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { invokeIpc, statFile } from '@/lib/api-client';
+import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractImages, extractToolUse, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
 import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
@@ -366,7 +367,7 @@ export const ChatMessage = memo(function ChatMessage({
             {assistantAvatarSrc ? (
               <img src={assistantAvatarSrc} alt="" data-testid="assistant-agent-avatar" className="h-full w-full object-cover" />
             ) : (
-              <Sparkles className="h-4 w-4" />
+              <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" data-testid="assistant-agent-avatar" className="h-full w-full object-cover" />
             )}
           </div>
         </div>

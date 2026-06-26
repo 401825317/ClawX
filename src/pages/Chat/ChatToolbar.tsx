@@ -4,14 +4,14 @@
  * entry point.  Rendered in the Header when on the Chat page.
  */
 import { useMemo, useRef, useState } from 'react';
-import { RefreshCw, Bot, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
+import { RefreshCw, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useAgentsStore } from '@/stores/agents';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { cn } from '@/lib/utils';
-import { getAgentAvatar } from '@/lib/agent-avatars';
+import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 import { useTranslation } from 'react-i18next';
 import { WORKSPACE_BROWSER_ENABLED } from '@/components/file-preview/workspace-browser-config';
 
@@ -75,9 +75,9 @@ export function ChatToolbar({
           aria-expanded={agentPickerOpen}
         >
           {currentAgent?.profile?.avatarId ? (
-            <img src={currentAvatar.src} alt="" className="mr-1.5 h-5 w-5 rounded-full" />
+            <img src={currentAvatar.src} alt="" className="mr-1.5 h-5 w-5 rounded-full object-cover" />
           ) : (
-            <Bot className="mr-1.5 h-3.5 w-3.5 text-primary" />
+            <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="mr-1.5 h-5 w-5 rounded-full object-cover" />
           )}
           <span className="max-w-[150px] truncate">{currentAgentName}</span>
           <ChevronDown className="ml-1 h-3.5 w-3.5 text-muted-foreground" />
@@ -112,9 +112,7 @@ export function ChatToolbar({
                       {agent.profile?.avatarId ? (
                         <img src={avatar.src} alt="" className="h-full w-full object-cover" />
                       ) : (
-                        <div className="flex h-full w-full items-center justify-center text-primary bg-primary/10">
-                          <Bot className="h-4 w-4" />
-                        </div>
+                        <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="h-full w-full object-cover" />
                       )}
                       {isRunning && (
                         <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border border-white bg-emerald-500 dark:border-background" />

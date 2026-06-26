@@ -8,6 +8,7 @@ import ecommerceAvatar from '@/assets/agent-avatars/ecommerce.webp';
 import supportAvatar from '@/assets/agent-avatars/support.webp';
 import analystAvatar from '@/assets/agent-avatars/analyst.webp';
 import operatorAvatar from '@/assets/agent-avatars/operator.webp';
+import openclawDefaultAgentAvatar from '@/assets/openclaw-default-agent.png';
 
 export interface AgentAvatarOption {
   id: string;
@@ -27,6 +28,8 @@ export const AGENT_AVATARS: AgentAvatarOption[] = [
   { id: 'analyst', src: analystAvatar, accentClass: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' },
   { id: 'operator', src: operatorAvatar, accentClass: 'bg-teal-500/10 text-teal-700 dark:text-teal-300' },
 ];
+
+export const DEFAULT_AGENT_AVATAR_SRC = openclawDefaultAgentAvatar;
 
 export function getAgentAvatar(id: string | undefined | null): AgentAvatarOption {
   return AGENT_AVATARS.find((avatar) => avatar.id === id) ?? AGENT_AVATARS[0];

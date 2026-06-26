@@ -5,7 +5,7 @@
  * are in the toolbar; messages render with markdown + streaming.
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, Loader2, Sparkles } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, Loader2 } from 'lucide-react';
 import { useChatStore, type ChatRuntimeRunState, type RawMessage } from '@/stores/chat';
 import { isInternalMessage } from '@/stores/chat/helpers';
 import { buildBaselineRunKey, getBaseline } from '@/stores/baseline-cache';
@@ -42,7 +42,7 @@ import { GeneratedFilesPanel } from '@/components/file-preview/GeneratedFilesPan
 import type { FilePreviewTarget } from '@/components/file-preview/types';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import type { AttachedFileMeta } from '@/stores/chat/types';
-import { getAgentAvatar } from '@/lib/agent-avatars';
+import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 import { toast } from 'sonner';
 
 const ArtifactPanelLazy = lazy(() =>
@@ -221,7 +221,7 @@ export function Chat() {
   );
   const currentAgentAvatarSrc = currentAgent?.profile?.avatarId
     ? getAgentAvatar(currentAgent.profile.avatarId).src
-    : null;
+    : DEFAULT_AGENT_AVATAR_SRC;
   const panelOpen = useArtifactPanel((s) => s.open);
   const panelWidthPct = useArtifactPanel((s) => s.widthPct);
   const openChanges = useArtifactPanel((s) => s.openChanges);
@@ -1359,7 +1359,7 @@ function TypingIndicator() {
   return (
     <div className="flex gap-3" data-testid="chat-typing-indicator">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
-        <Sparkles className="h-4 w-4" />
+        <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="h-full w-full rounded-full object-cover" />
       </div>
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex gap-1">
@@ -1379,7 +1379,7 @@ function ActivityIndicator({ phase }: { phase: 'tool_processing' }) {
   return (
     <div className="flex gap-3" data-testid="chat-activity-indicator">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
-        <Sparkles className="h-4 w-4" />
+        <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="h-full w-full rounded-full object-cover" />
       </div>
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1396,7 +1396,7 @@ function ImageGeneratingIndicator() {
   return (
     <div className="flex gap-3" data-testid="chat-image-generating-indicator">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
-        <Sparkles className="h-4 w-4" />
+        <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="h-full w-full rounded-full object-cover" />
       </div>
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1413,7 +1413,7 @@ function VideoGeneratingIndicator() {
   return (
     <div className="flex gap-3" data-testid="chat-video-generating-indicator">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
-        <Sparkles className="h-4 w-4" />
+        <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="h-full w-full rounded-full object-cover" />
       </div>
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
