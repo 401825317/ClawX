@@ -348,12 +348,19 @@ const LLM_IDLE_HINT_MS = 120_000;
 /** Wait past one LLM idle window before declaring a hard no-response failure. */
 const NO_RESPONSE_SAFETY_TIMEOUT_MS = 130_000;
 const SESSION_RENAME_DEDUPE_TTL_MS = 60_000;
+const INTERNAL_TEMPORARY_SESSION_PATTERNS = [
+  /^agent:main:uclaw-profile-[A-Za-z0-9_-]+/,
+];
 
 type PendingOptimisticUserMessage = {
   message: RawMessage;
   timestampMs: number;
   createdAtMs: number;
 };
+
+function isInternalTemporarySessionKey(sessionKey: string): boolean {
+  return INTERNAL_TEMPORARY_SESSION_PATTERNS.some((pattern) => pattern.test(sessionKey));
+}
 
 const _pendingOptimisticUserMessages = new Map<string, PendingOptimisticUserMessage[]>();
 const _sessionRenameInFlight = new Map<string, Promise<void>>();
@@ -3077,7 +3084,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
             };
             return mergeSessionRowWithLocalState(nextSession, localSessionByKey.get(nextSession.key));
-          }).filter((s: ChatSession) => s.key);
+          }).filter((s: ChatSession) => s.key && !isInternalTemporarySessionKey(s.key));
 
           const canonicalBySuffix = new Map<string, string>();
           for (const session of sessions) {

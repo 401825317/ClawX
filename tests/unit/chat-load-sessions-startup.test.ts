@@ -153,4 +153,43 @@ describe('chat store loadSessions startup selection', () => {
     expect(useChatStore.getState().currentSessionKey).toBe('agent:main:main');
     expect(useChatStore.getState().sessions.some((session) => session.key === 'agent:main:main')).toBe(true);
   });
+
+  it('hides internal agent profile generation sessions from the sidebar state', async () => {
+    gatewayRpcMock.mockImplementation(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [
+            {
+              key: 'agent:main:uclaw-profile-20260626-temp123',
+              displayName: '0723e8d3 (2026-06-26)',
+              updatedAt: 9_000,
+            },
+            {
+              key: 'agent:uclaw3d:main',
+              displayName: 'UClaw 3D 建模助手',
+              updatedAt: 8_000,
+            },
+          ],
+        };
+      }
+      if (method === 'chat.history') {
+        return { messages: [] };
+      }
+      throw new Error(`Unexpected gateway RPC: ${method}`);
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:uclaw3d:main',
+      currentAgentId: 'uclaw3d',
+      sessions: [],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+    });
+
+    await useChatStore.getState().loadSessions();
+
+    expect(useChatStore.getState().sessions.map((session) => session.key)).toEqual(['agent:uclaw3d:main']);
+  });
 });
