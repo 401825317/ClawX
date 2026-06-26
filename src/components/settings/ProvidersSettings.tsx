@@ -578,7 +578,7 @@ function ProviderCard({
               <span className="capitalize">{vendor?.name || account.vendorId}</span>
               <span className="w-1 h-1 rounded-full bg-black/20 dark:bg-white/20" />
               <span>{getAuthModeLabel(account.authMode, t)}</span>
-              {account.model && (
+              {showModelIdField && account.model && (
                 <>
                   <span className="w-1 h-1 rounded-full bg-black/20 dark:bg-white/20" />
                   <span className="truncate max-w-[200px]">{account.model}</span>

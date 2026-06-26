@@ -169,7 +169,7 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
   {
     id: 'lingzhiwuxian',
     name: '零至无限',
-    icon: '灵',
+    icon: '零',
     placeholder: '由零至无限登录自动管理',
     model: '国内主流模型',
     requiresApiKey: false,
