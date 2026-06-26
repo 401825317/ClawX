@@ -96,6 +96,7 @@ describe('OpenClaw path helpers', () => {
 
     const {
       expandPath,
+      expandFilePreviewPath,
       expandOpenClawPath,
       getOpenClawConfigDir,
       getOpenClawConfigPath,
@@ -108,7 +109,17 @@ describe('OpenClaw path helpers', () => {
     expect(getOpenClawConfigDir()).toBe(join(openclawHome, '.openclaw'));
     expect(getOpenClawConfigPath()).toBe(join(openclawHome, '.openclaw', 'openclaw.json'));
     expect(expandOpenClawPath('~/.openclaw/workspace')).toBe(join(openclawHome, '.openclaw', 'workspace'));
+    expect(expandFilePreviewPath('~/.openclaw/workspace-agent-2')).toBe(join(openclawHome, '.openclaw', 'workspace-agent-2'));
     expect(expandPath('~/.openclaw/workspace')).not.toBe(join(openclawHome, '.openclaw', 'workspace'));
+  });
+
+  it('keeps normal user paths on the OS home for file preview', async () => {
+    const openclawHome = join(root, 'preview-openclaw-home');
+    vi.stubEnv('OPENCLAW_HOME', openclawHome);
+
+    const { expandFilePreviewPath } = await importPaths();
+
+    expect(expandFilePreviewPath('~/Downloads/report.pdf')).toBe(join(homedir(), 'Downloads', 'report.pdf'));
   });
 
   it('resolves OPENCLAW_HOME values that are relative to the OS home', async () => {

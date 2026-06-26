@@ -23,7 +23,7 @@ import {
   getOpenClawSkillsDir,
   getOpenClawMediaDir,
   ensureDir,
-  expandPath,
+  expandFilePreviewPath,
 } from '../utils/paths';
 import { getOpenClawCliCommand } from '../utils/openclaw-cli';
 import { getAllSettings, getSetting, resetSettings, setSetting, type AppSettings } from '../utils/store';
@@ -3121,7 +3121,7 @@ async function resolveSandboxedPath(
   // OpenClaw stores agent.workspace / agentDir paths as `~/.openclaw/...`
   // literals; expand the tilde before realpath so sandbox resolution
   // matches what the user actually sees on disk.
-  const expanded = expandPath(input);
+  const expanded = expandFilePreviewPath(input);
   const fsP = await import('fs/promises');
   let real: string;
   try {

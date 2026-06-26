@@ -104,6 +104,18 @@ export function expandOpenClawPath(path: string): string {
 }
 
 /**
+ * Expand paths surfaced to file preview. OpenClaw-owned paths must follow
+ * OpenClaw's effective home, while ordinary user paths keep OS-home tilde
+ * semantics.
+ */
+export function expandFilePreviewPath(path: string): string {
+  if (path === '~/.openclaw' || path === '~\\.openclaw' || path.startsWith('~/.openclaw/') || path.startsWith('~\\.openclaw\\')) {
+    return expandOpenClawPath(path);
+  }
+  return expandPath(path);
+}
+
+/**
  * Get OpenClaw config directory
  */
 export function getOpenClawConfigDir(): string {
