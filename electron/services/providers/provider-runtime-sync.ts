@@ -43,6 +43,8 @@ type RuntimeProviderSyncContext = {
   api: string;
 };
 
+type RuntimeApiKeyOverrides = Map<string, string | undefined>;
+
 function normalizeProviderBaseUrl(
   config: ProviderConfig,
   baseUrl?: string,
@@ -476,6 +478,7 @@ async function buildRuntimeProviderConfigMap(): Promise<Map<string, ProviderConf
 async function buildAgentModelProviderEntry(
   config: ProviderConfig,
   modelId: string,
+  apiKeyOverrides?: RuntimeApiKeyOverrides,
 ): Promise<{
   baseUrl?: string;
   api?: string;
@@ -492,7 +495,10 @@ async function buildAgentModelProviderEntry(
 
   let apiKey: string | undefined;
   let authHeader: boolean | undefined;
-  const accountApiKey = normalizeRuntimeApiKey(config, await getApiKey(config.id), meta?.apiKeyEnv) || undefined;
+  const rawApiKey = apiKeyOverrides?.has(config.id)
+    ? apiKeyOverrides.get(config.id)
+    : await getApiKey(config.id);
+  const accountApiKey = normalizeRuntimeApiKey(config, rawApiKey, meta?.apiKeyEnv) || undefined;
 
   if (isUnregisteredProviderType(config.type)) {
     apiKey = accountApiKey;
@@ -516,7 +522,10 @@ async function buildAgentModelProviderEntry(
   };
 }
 
-async function syncAgentModelsToRuntime(agentIds?: Set<string>): Promise<void> {
+async function syncAgentModelsToRuntime(
+  agentIds?: Set<string>,
+  apiKeyOverrides?: RuntimeApiKeyOverrides,
+): Promise<void> {
   const snapshot = await listAgentsSnapshot();
   const runtimeProviderConfigs = await buildRuntimeProviderConfigMap();
 
@@ -540,7 +549,7 @@ async function syncAgentModelsToRuntime(agentIds?: Set<string>): Promise<void> {
       continue;
     }
 
-    const entry = await buildAgentModelProviderEntry(providerConfig, parsed.modelId);
+    const entry = await buildAgentModelProviderEntry(providerConfig, parsed.modelId, apiKeyOverrides);
     if (!entry) {
       continue;
     }
@@ -564,7 +573,7 @@ export async function syncSavedProviderToRuntime(
   }
 
   try {
-    await syncAgentModelsToRuntime();
+    await syncAgentModelsToRuntime(undefined, new Map([[config.id, apiKey]]));
   } catch (err) {
     logger.warn('[provider-runtime] Failed to sync per-agent model registries after provider save:', err);
   }

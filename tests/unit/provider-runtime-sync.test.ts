@@ -168,6 +168,65 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(options.apiKeyEnv).toBeUndefined();
   });
 
+  it('writes a freshly issued managed relay key into per-agent models.json', async () => {
+    mocks.getApiKey.mockResolvedValue('stale-relay-key');
+    mocks.getAllProviders.mockResolvedValue([
+      createProvider({
+        id: 'lingzhiwuxian',
+        type: 'lingzhiwuxian',
+        model: 'qwen-latest',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      }),
+    ]);
+    mocks.listAgentsSnapshot.mockResolvedValue({
+      agents: [
+        { id: 'main', modelRef: 'lingzhiwuxian/qwen-latest' },
+        { id: 'agent', modelRef: 'lingzhiwuxian/qwen-latest' },
+      ],
+    });
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    await syncSavedProviderToRuntime(createProvider({
+      id: 'lingzhiwuxian',
+      type: 'lingzhiwuxian',
+      model: 'qwen-latest',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    }), 'fresh-relay-key');
+
+    expect(mocks.syncProviderConfigToOpenClaw).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      'qwen-latest',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+    );
+    expect(mocks.updateSingleAgentModelProvider).toHaveBeenCalledWith(
+      'main',
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+    );
+    expect(mocks.updateSingleAgentModelProvider).toHaveBeenCalledWith(
+      'agent',
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+    );
+    expect(mocks.updateSingleAgentModelProvider).not.toHaveBeenCalledWith(
+      expect.any(String),
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: 'stale-relay-key',
+      }),
+    );
+  });
+
   it('clears managed provider inline key without writing the env placeholder when relay key is missing', async () => {
     mocks.getApiKey.mockResolvedValue(null);
     mocks.getProviderConfig.mockReturnValue({
@@ -192,6 +251,43 @@ describe('provider-runtime-sync refresh strategy', () => {
     );
     const options = mocks.syncProviderConfigToOpenClaw.mock.calls.at(-1)?.[2] as Record<string, unknown>;
     expect(options.apiKeyEnv).toBeUndefined();
+  });
+
+  it('clears stale per-agent managed relay keys when the runtime key is cleared', async () => {
+    mocks.getApiKey.mockResolvedValue('stale-relay-key');
+    mocks.getAllProviders.mockResolvedValue([
+      createProvider({
+        id: 'lingzhiwuxian',
+        type: 'lingzhiwuxian',
+        model: 'qwen-latest',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      }),
+    ]);
+    mocks.listAgentsSnapshot.mockResolvedValue({
+      agents: [
+        { id: 'main', modelRef: 'lingzhiwuxian/qwen-latest' },
+      ],
+    });
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    await syncSavedProviderToRuntime(createProvider({
+      id: 'lingzhiwuxian',
+      type: 'lingzhiwuxian',
+      model: 'qwen-latest',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    }), '');
+
+    expect(mocks.updateSingleAgentModelProvider).toHaveBeenCalledWith(
+      'main',
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: null,
+      }),
+    );
   });
 
   it('uses debouncedRestart after deleting provider config', async () => {
