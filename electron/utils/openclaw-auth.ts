@@ -2691,6 +2691,44 @@ type AgentModelProviderEntry = {
   authHeader?: boolean;
 };
 
+async function updatePluginModelCatalogProviderEntry(
+  agentId: string,
+  providerType: string,
+  entry: AgentModelProviderEntry,
+): Promise<void> {
+  const catalogPath = join(getOpenClawAgentDir(agentId), 'plugins', providerType, 'catalog.json');
+  const data = await readJsonFile<Record<string, unknown>>(catalogPath);
+  if (!data) {
+    return;
+  }
+
+  const providers = (
+    data.providers && typeof data.providers === 'object' ? data.providers : {}
+  ) as Record<string, Record<string, unknown>>;
+  const existing = providers[providerType];
+  if (!existing || typeof existing !== 'object') {
+    return;
+  }
+
+  const next = { ...existing };
+  if (entry.baseUrl !== undefined) next.baseUrl = entry.baseUrl;
+  if (entry.api !== undefined) next.api = entry.api;
+  if (entry.models !== undefined) next.models = entry.models;
+  if (entry.apiKey !== undefined) {
+    if (entry.apiKey) {
+      next.apiKey = entry.apiKey;
+    } else {
+      delete next.apiKey;
+    }
+  }
+  if (entry.authHeader !== undefined) next.authHeader = entry.authHeader;
+
+  providers[providerType] = next;
+  data.providers = providers;
+  await writeJsonFile(catalogPath, data);
+  console.log(`Updated plugin catalog for agent "${agentId}" provider "${providerType}"`);
+}
+
 async function updateModelsJsonProviderEntriesForAgents(
   agentIds: string[],
   providerType: string,
@@ -2752,6 +2790,12 @@ async function updateModelsJsonProviderEntriesForAgents(
       console.log(`Updated models.json for agent "${agentId}" provider "${providerType}"`);
     } catch (err) {
       console.warn(`Failed to update models.json for agent "${agentId}":`, err);
+    }
+
+    try {
+      await updatePluginModelCatalogProviderEntry(agentId, providerType, entry);
+    } catch (err) {
+      console.warn(`Failed to update plugin catalog for agent "${agentId}" provider "${providerType}":`, err);
     }
   }
 }

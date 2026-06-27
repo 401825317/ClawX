@@ -246,6 +246,18 @@ describe('provider-runtime-sync refresh strategy', () => {
       }),
       { createIfMissing: false },
     );
+    expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      'fresh-relay-key',
+    );
+    expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith(
+      'clawx-openai-image',
+      'fresh-relay-key',
+    );
+    expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith(
+      'openai',
+      'fresh-relay-key',
+    );
   });
 
   it('still syncs discovered agent models when the agent snapshot cannot be read', async () => {
@@ -375,6 +387,9 @@ describe('provider-runtime-sync refresh strategy', () => {
       }),
       { createIfMissing: false },
     );
+    expect(mocks.removeProviderKeyFromOpenClaw).toHaveBeenCalledWith('lingzhiwuxian');
+    expect(mocks.removeProviderKeyFromOpenClaw).toHaveBeenCalledWith('clawx-openai-image');
+    expect(mocks.removeProviderKeyFromOpenClaw).toHaveBeenCalledWith('openai');
   });
 
   it('uses debouncedRestart after deleting provider config', async () => {

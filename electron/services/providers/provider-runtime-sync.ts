@@ -619,6 +619,27 @@ async function syncManagedRelayAgentModelsAcrossDiscoveredAgents(
   }, { createIfMissing: false });
 }
 
+async function syncManagedRelayAuthProfiles(apiKey: string | undefined): Promise<void> {
+  if (apiKey === undefined) {
+    return;
+  }
+
+  const managedApiKey = apiKey.trim();
+  const providers = [
+    JUNFEIAI_PROVIDER_ID,
+    CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
+    CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
+  ];
+
+  for (const provider of providers) {
+    if (managedApiKey) {
+      await saveProviderKeyToOpenClaw(provider, managedApiKey);
+    } else {
+      await removeProviderKeyFromOpenClaw(provider);
+    }
+  }
+}
+
 export async function syncAgentModelOverrideToRuntime(agentId: string): Promise<void> {
   await syncAgentModelsToRuntime(new Set([agentId]));
 }
@@ -643,6 +664,7 @@ export async function syncSavedProviderToRuntime(
   try {
     await syncProviderAgentModelsAcrossDiscoveredAgents(config, context.runtimeProviderKey, apiKeyOverrides);
     if (config.type === JUNFEIAI_PROVIDER_ID) {
+      await syncManagedRelayAuthProfiles(apiKey);
       await syncManagedRelayAgentModelsAcrossDiscoveredAgents(config, apiKey);
     }
   } catch (err) {

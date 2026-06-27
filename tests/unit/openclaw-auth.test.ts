@@ -1673,6 +1673,48 @@ describe('anthropic-messages maxTokens', () => {
     expect(providers.openai).toBeUndefined();
   });
 
+  it('refreshes stale plugin model catalog api keys with agent models.json updates', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const agentDir = join(testHome, '.openclaw', 'agents', 'main', 'agent');
+    const catalogDir = join(agentDir, 'plugins', 'openai');
+    await mkdir(catalogDir, { recursive: true });
+    await writeFile(join(agentDir, 'models.json'), JSON.stringify({
+      providers: {
+        openai: {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          api: 'openai-responses',
+          apiKey: 'old-relay-key',
+          models: [{ id: 'grok-image-video', name: 'grok-image-video' }],
+        },
+      },
+    }, null, 2), 'utf8');
+    await writeFile(join(catalogDir, 'catalog.json'), JSON.stringify({
+      generatedBy: 'openclaw-plugin-model-catalog-v1',
+      providers: {
+        openai: {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          api: 'openai-responses',
+          apiKey: 'old-relay-key',
+          models: [{ id: 'grok-image-video', name: 'grok-image-video' }],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const { updateAgentModelProvider } = await import('@electron/utils/openclaw-auth');
+
+    await updateAgentModelProvider('openai', {
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      api: 'openai-responses',
+      apiKey: 'fresh-relay-key',
+      models: [{ id: 'grok-image-video', name: 'grok-image-video', cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    });
+
+    const catalog = JSON.parse(await readFile(join(catalogDir, 'catalog.json'), 'utf8')) as Record<string, unknown>;
+    const entry = ((catalog.providers as Record<string, unknown>).openai) as Record<string, unknown>;
+
+    expect(entry.apiKey).toBe('fresh-relay-key');
+  });
+
   it('updates existing models.json providers for runtime agents missing from openclaw.json', async () => {
     await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
     const agentDir = join(testHome, '.openclaw', 'agents', 'stale-runtime', 'agent');
