@@ -246,12 +246,16 @@ export interface JunFeiAISeedResult {
   activationRequired?: boolean;
   relayOwnerUserId?: string;
   hasAuthToken?: boolean;
+  hasRefreshToken?: boolean;
   authValid?: boolean;
   authRejected?: boolean;
   authError?: string;
   auth?: {
     user?: Record<string, unknown>;
   };
+  localOnly?: boolean;
+  lastVerifiedAt?: number;
+  offlineGraceExpiresAt?: number;
 }
 
 export interface JunFeiAILocalStatusResult {
@@ -1243,17 +1247,22 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
   markDeviceActivatedFromStoredAuth?: boolean;
 }): Promise<{
   hasAuthToken: boolean;
+  hasRefreshToken?: boolean;
   authValid: boolean;
   authRejected?: boolean;
   authError?: string;
   auth?: { user?: Record<string, unknown> };
 }> {
+  const secret = await getProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
+  const hasStoredAuthSession = secret?.type === 'oauth';
+  const hasRefreshToken = Boolean(hasStoredAuthSession && secret.refreshToken?.trim());
   let accessToken: string | null;
   try {
     accessToken = await getStoredJunFeiAIAuthToken();
   } catch (error) {
     return {
       hasAuthToken: true,
+      hasRefreshToken,
       authValid: false,
       authRejected: isJunFeiAIAuthRejection(error),
       authError: error instanceof Error ? error.message : String(error),
@@ -1262,6 +1271,7 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
   if (!accessToken) {
     return {
       hasAuthToken: false,
+      hasRefreshToken,
       authValid: false,
       authError: 'JunFeiAI is not logged in',
     };
@@ -1291,12 +1301,14 @@ async function getJunFeiAIAuthStatusWithOptions(options: {
     }
     return {
       hasAuthToken: true,
+      hasRefreshToken,
       authValid: true,
       auth: { user },
     };
   } catch (error) {
     return {
       hasAuthToken: true,
+      hasRefreshToken,
       authValid: false,
       authRejected: isJunFeiAIAuthRejection(error),
       authError: error instanceof Error ? error.message : String(error),
@@ -1340,7 +1352,32 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   const authStatus = await getJunFeiAIAuthStatusWithOptions({
     markDeviceActivatedFromStoredAuth: options.markDeviceActivatedFromStoredAuth,
   });
-  const authUser = authStatus.auth?.user ?? null;
+  const verificationCache = getCachedVerificationWindow(await readVerificationCache());
+  const cachedAuthUser = verificationCache.user ?? null;
+  const canKeepLocalAuthDuringSync = Boolean(
+    authStatus.authRejected
+    && verificationCache.valid
+    && authStatus.hasRefreshToken
+    && cachedAuthUser,
+  );
+  const effectiveAuthStatus = canKeepLocalAuthDuringSync
+    ? {
+      ...authStatus,
+      authValid: true,
+      authRejected: false,
+      authError: authStatus.authError
+        ? `Using cached JunFeiAI login while auth refresh is synchronizing: ${authStatus.authError}`
+        : 'Using cached JunFeiAI login while auth refresh is synchronizing',
+      auth: { user: cachedAuthUser },
+      localOnly: true,
+      lastVerifiedAt: verificationCache.lastVerifiedAt,
+      offlineGraceExpiresAt: verificationCache.offlineGraceExpiresAt,
+    }
+    : authStatus;
+  if (canKeepLocalAuthDuringSync) {
+    logger.warn('[junfeiai] Keeping cached managed auth during a transient auth refresh rejection.');
+  }
+  const authUser = effectiveAuthStatus.auth?.user ?? null;
   const authUserId = getUserId(authUser);
   const activation = await applyLocalDeviceActivationState(bootstrap, authUser);
   bootstrap = activation.bootstrap;
@@ -1362,7 +1399,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   let relaySecret: StoredProviderSecret = null;
   let relayOwnerUserId: string | undefined;
   let relaySecretChanged = false;
-  const authCanReceiveRelay = authStatus.authValid && !activation.activationRequired;
+  const authCanReceiveRelay = effectiveAuthStatus.authValid && !activation.activationRequired;
 
   if (runtimeApiKey) {
     await setProviderSecret({
@@ -1403,8 +1440,8 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     && !relaySecretMatchesUser(relaySecret, authUser),
   );
   const relayExpired = isRelaySecretExpired(relaySecret);
-  const shouldClearRuntimeKey = !authStatus.hasAuthToken
-    || authStatus.authRejected
+  const shouldClearRuntimeKey = !effectiveAuthStatus.hasAuthToken
+    || effectiveAuthStatus.authRejected
     || activation.activationRequired
     || relayOwnerMismatch
     || relayExpired;
@@ -1463,7 +1500,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     deviceActivated: activation.deviceActivated,
     activationRequired: activation.activationRequired,
     relayOwnerUserId,
-    ...authStatus,
+    ...effectiveAuthStatus,
   };
 }
 

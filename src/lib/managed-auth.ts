@@ -116,6 +116,19 @@ export function isManagedAuthLocallyReady(status: ManagedAuthStatus | null | und
     && !isManagedActivationRequired(status);
 }
 
+export function isManagedAuthRecoverableLocalSession(status: ManagedAuthStatus | null | undefined): boolean {
+  if (status?.managed === false) {
+    return true;
+  }
+  const graceExpiresAt = typeof status?.offlineGraceExpiresAt === 'number'
+    ? status.offlineGraceExpiresAt
+    : 0;
+  return Boolean(status?.hasRefreshToken)
+    && Boolean(status?.hasRelayToken)
+    && graceExpiresAt > Date.now()
+    && !isManagedActivationRequired(status);
+}
+
 export function getManagedAuthUser(status: ManagedAuthStatus | null | undefined): ManagedAuthUser | null {
   return status?.auth?.user ?? null;
 }
@@ -153,6 +166,9 @@ export function getManagedAuthStateKey(
     return 'unmanaged';
   }
   if (isManagedAuthLocallyReady(status)) {
+    return 'ready';
+  }
+  if (isManagedAuthRecoverableLocalSession(status)) {
     return 'ready';
   }
   if (options.error) {

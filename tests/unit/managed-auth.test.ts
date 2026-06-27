@@ -3,6 +3,7 @@ import {
   getManagedAuthDisplayName,
   getManagedAuthStateKey,
   isManagedAuthLocallyReady,
+  isManagedAuthRecoverableLocalSession,
   isManagedAuthReady,
   type ManagedAuthStatus,
 } from '@/lib/managed-auth';
@@ -79,6 +80,22 @@ describe('managed auth helpers', () => {
     expect(isManagedAuthReady(localRefreshable)).toBe(false);
     expect(isManagedAuthLocallyReady(localRefreshable)).toBe(true);
     expect(getManagedAuthStateKey(localRefreshable)).toBe('ready');
+  });
+
+  it('keeps a relay-backed session ready during auth refresh synchronization', () => {
+    const syncingSession: ManagedAuthStatus = {
+      managed: true,
+      hasAuthToken: true,
+      hasRefreshToken: true,
+      hasRelayToken: true,
+      authValid: false,
+      authRejected: true,
+      offlineGraceExpiresAt: Date.now() + 60_000,
+    };
+
+    expect(isManagedAuthLocallyReady(syncingSession)).toBe(false);
+    expect(isManagedAuthRecoverableLocalSession(syncingSession)).toBe(true);
+    expect(getManagedAuthStateKey(syncingSession)).toBe('ready');
   });
 
   it('uses stable account display-name priority', () => {

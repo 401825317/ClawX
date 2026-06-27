@@ -1,6 +1,10 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
-import { isManagedAuthLocallyReady, type ManagedAuthStatus } from '@/lib/managed-auth';
+import {
+  isManagedAuthLocallyReady,
+  isManagedAuthRecoverableLocalSession,
+  type ManagedAuthStatus,
+} from '@/lib/managed-auth';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -50,6 +54,14 @@ export const useManagedAuthStore = create<ManagedAuthStore>((set, get) => ({
     });
     try {
       const status = await hostApiFetch<ManagedAuthStatus>('/api/junfeiai/status');
+      const previousStatus = get().status;
+      if (
+        isManagedAuthRecoverableLocalSession(status)
+        && (isManagedAuthLocallyReady(previousStatus) || isManagedAuthRecoverableLocalSession(previousStatus))
+      ) {
+        set({ status: previousStatus, loading: false, verifying: false, initialized: true, error: null });
+        return previousStatus as ManagedAuthStatus;
+      }
       set({ status, loading: false, verifying: false, initialized: true, error: null });
       return status;
     } catch (error) {

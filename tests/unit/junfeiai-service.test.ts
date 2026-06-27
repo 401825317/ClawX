@@ -1004,7 +1004,7 @@ describe('JunFeiAI managed provider service', () => {
     expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
   });
 
-  it('clears auth and relay secrets when stored login is rejected', async () => {
+  it('keeps cached auth and relay secrets when refresh is temporarily rejected inside offline grace', async () => {
     const existing = makeAccount();
     mocks.getProviderAccount.mockResolvedValue(existing);
     mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
@@ -1033,8 +1033,62 @@ describe('JunFeiAI managed provider service', () => {
     memoryStore.set('junfeiaiVerificationCache', {
       verifiedAt: Date.now(),
       graceSeconds: 3600,
-      payload: { valid: true },
+      payload: {
+        valid: true,
+        user: { id: 7, username: 'alice' },
+      },
     });
+
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        auth: { activationRequired: false },
+        runtime: { defaultModel: 'gpt-5.5' },
+      },
+    });
+
+    expect(result.authValid).toBe(true);
+    expect(result.authRejected).toBe(false);
+    expect(result.hasRelayToken).toBe(true);
+    expect(result.localOnly).toBe(true);
+    expect(result.auth?.user).toMatchObject({ id: 7, username: 'alice' });
+    expect(mocks.deleteProviderSecret).not.toHaveBeenCalledWith('lingzhiwuxian');
+    expect(mocks.deleteProviderSecret).not.toHaveBeenCalledWith('lingzhiwuxian-auth');
+    expect(mocks.syncSavedProviderToRuntime).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'lingzhiwuxian', type: 'lingzhiwuxian' }),
+      '',
+      undefined,
+    );
+    expect(memoryStore.get('junfeiaiVerificationCache')).toEqual(expect.objectContaining({
+      payload: expect.objectContaining({ valid: true }),
+    }));
+  });
+
+  it('clears auth and relay secrets when stored login is rejected without offline grace', async () => {
+    const existing = makeAccount();
+    mocks.getProviderAccount.mockResolvedValue(existing);
+    mocks.getDefaultProvider.mockResolvedValue('lingzhiwuxian');
+    mocks.getProviderSecret.mockImplementation(async (accountId: string) => {
+      if (accountId === 'lingzhiwuxian-auth') {
+        return {
+          type: 'oauth',
+          accountId: 'lingzhiwuxian-auth',
+          accessToken: 'rejected-access',
+          refreshToken: 'refresh-token',
+          expiresAt: Date.now() + 60_000,
+          subject: '7',
+        };
+      }
+      if (accountId === 'lingzhiwuxian') {
+        return {
+          type: 'api_key',
+          accountId: 'lingzhiwuxian',
+          apiKey: 'stale-relay',
+          ownerUserId: '7',
+        };
+      }
+      return null;
+    });
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ message: 'invalid token' }), { status: 401 }));
 
     const result = await ensureJunFeiAIProviderSeeded({
       bootstrap: {
@@ -1054,7 +1108,6 @@ describe('JunFeiAI managed provider service', () => {
       undefined,
     );
     expect(mocks.syncDefaultProviderToRuntime).not.toHaveBeenCalled();
-    expect(memoryStore.get('junfeiaiVerificationCache')).toBeNull();
   });
 
   it('syncs runtime during status checks when a stored login is rejected', async () => {
