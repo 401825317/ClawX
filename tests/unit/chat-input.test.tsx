@@ -163,6 +163,8 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return `gateway ${String(vars?.state ?? '')} | port: ${String(vars?.port ?? '')} ${String(vars?.pid ?? '')}`.trim();
     case 'composer.retryFailedAttachments':
       return 'Retry failed attachments';
+    case 'composer.busyHint':
+      return 'Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish.';
     case 'composer.skillPreviewTooltip':
       return 'Preview SKILL.md';
     case 'composer.skillPreviewNotFound':
@@ -556,6 +558,18 @@ describe('ChatInput agent targeting', () => {
     renderChatInput();
 
     expect(screen.getByText(/gateway starting \| port: 18789/i)).toBeInTheDocument();
+  });
+
+  it('shows that accepted messages wait while the current run is active', () => {
+    render(
+      <TooltipProvider>
+        <ChatInput onSend={vi.fn()} sending />
+      </TooltipProvider>,
+    );
+
+    expect(screen.getByTestId('chat-composer-busy-hint')).toHaveTextContent(
+      'Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish.',
+    );
   });
 
   it('renders the skill trigger after the @ agent picker', () => {

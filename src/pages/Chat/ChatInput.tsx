@@ -1410,7 +1410,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
           </div>
         </div>
         <div className="mt-2.5 flex items-center justify-between gap-2 text-tiny text-muted-foreground/60 px-4">
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             <div className={cn(
               "w-1.5 h-1.5 rounded-full",
               isGatewayUsable ? "bg-green-500/80" : "bg-red-500/80",
@@ -1429,6 +1429,14 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
             {chatComposerStatusComponents.map((Component, index) => (
               <Component key={`${index}`} gatewayStatus={gatewayStatus} />
             ))}
+            {sending && (
+              <span className="ml-2 truncate text-muted-foreground/75" data-testid="chat-composer-busy-hint">
+                {t(
+                  'composer.busyHint',
+                  'Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish.',
+                )}
+              </span>
+            )}
           </div>
           {hasFailedAttachments && (
             <Button

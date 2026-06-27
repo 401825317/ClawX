@@ -4,6 +4,7 @@ import {
   isInternalAssistantReplyText,
   isOpenClawRuntimeEventPrompt,
 } from '@/pages/Chat/message-utils';
+import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 import type { AttachedFileMeta, ChatSession, ContentBlock, RawMessage, ToolStatus } from './types';
 
 // Module-level timestamp tracking the last chat event received.
@@ -1447,6 +1448,8 @@ function extractTextFromContent(content: unknown): string {
 function summarizeToolOutput(text: string): string | undefined {
   const trimmed = text.trim();
   if (!trimmed) return undefined;
+  const normalizedError = normalizeToolErrorMessage(trimmed, 'zh');
+  if (normalizedError) return normalizedError;
   const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (lines.length === 0) return undefined;
   const summaryLines = lines.slice(0, 2);

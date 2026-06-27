@@ -10,6 +10,7 @@ import {
 import { isInternalMessage } from '@/stores/chat/helpers';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import type { ChatRuntimeRunState } from '@/stores/chat/types';
+import { appendToolErrorHint, normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 
 export type TaskStepStatus = 'running' | 'completed' | 'error';
 
@@ -367,6 +368,18 @@ function runtimeDetail(value: unknown): string | undefined {
   }
 }
 
+function getToolErrorDetail(value: unknown): string | undefined {
+  const rendered = runtimeDetail(value);
+  return appendToolErrorHint(rendered, 'zh');
+}
+
+function getToolSummaryDetail(tool: ToolStatus): string | undefined {
+  if (tool.status === 'error') {
+    return normalizeToolErrorMessage(tool.summary, 'zh') ?? normalizeText(tool.summary);
+  }
+  return normalizeText(tool.summary);
+}
+
 export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | undefined): TaskStep[] {
   if (!runState) return [];
 
@@ -430,7 +443,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           label: event.name,
           status: event.isError ? 'error' : 'completed',
           kind: 'tool',
-          detail: runtimeDetail(event.result),
+          detail: event.isError ? getToolErrorDetail(event.result) : runtimeDetail(event.result),
           depth: 1,
         });
         break;
@@ -592,7 +605,7 @@ export function deriveTaskSteps({
       label: tool.name,
       status: tool.status,
       kind: 'tool',
-      detail: normalizeText(tool.summary),
+      detail: getToolSummaryDetail(tool),
       depth: 1,
     });
   });

@@ -203,7 +203,8 @@
         "folderDropUnsupported": "Couldn't attach this folder. Drag it again, or paste the folder path into your message.",
         "folderAttachment": "Folder",
         "skillPreviewTooltip": "Preview SKILL.md",
-        "skillPreviewNotFound": "Could not find this skill. Open the skill picker to refresh the list."
+        "skillPreviewNotFound": "Could not find this skill. Open the skill picker to refresh the list.",
+        "busyHint": "Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish."
     },
     "historyBuckets": {
         "today": "Today",

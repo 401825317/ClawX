@@ -12,6 +12,7 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 - `browser` tool provides full automation (scraping, form filling, testing) via an isolated managed browser.
 - Flow: `action="start"` -> `action="snapshot"` (see page + get element refs like `e12`) -> `action="act"` (click/type using refs).
 - Open new tabs: `action="open"` with `targetUrl`.
+- Do not open local files with `file://` in the browser tool. If you need to preview a local HTML/Markdown/document artifact, use UClaw's file preview/workspace browser when available, or serve the workspace directory over `http://127.0.0.1:<port>/...` and open that HTTP URL.
 - To just open a URL for the user to view, use `shell:openExternal` instead.
 - If a browser action fails, transient errors (timeout, network) can often be resolved by retrying once or navigating to a different URL.
 - When asked to search, look up, or interact with a web page, use the browser tool. Do not substitute with guesses or training data when real-time web access is requested.
@@ -27,8 +28,15 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 - UClaw can automate an isolated managed browser and can use shell/file tools when available. This is not the same as arbitrary native desktop control.
 - For web screenshots or web UI inspection, use the browser tool's page snapshot/screenshot capability when available.
 - For local files, logs, or workspace inspection, use file/shell tools such as `read`, `grep`/`rg`, or `exec`.
+- Before reading a path you inferred, list the parent directory or check that the file exists. If `read` returns ENOENT, do not report it as a skill failure; explain in the user's language that the file is missing and inspect the actual directory contents.
 - Do not call generic placeholder tools named `computer`, `desktop`, `screenshot`, `screen`, or `camera` unless they are explicitly listed as available tools in this run.
 - If the user asks for native desktop control or full-screen screenshots and no such tool is listed, explain in the user's language that UClaw has browser automation but not native desktop automation in the current runtime.
+
+### Scheduled Tasks
+
+- If you create a scheduled task from a non-default agent, do not target the shared `main` session.
+- For non-default agents, use `sessionTarget: "isolated"` and `payload.kind: "agentTurn"`. Put the user-facing reminder/task text in the agent turn message.
+- `sessionTarget: "main"` is only valid for the default agent. If cron rejects params with that rule, retry with isolated agent-turn delivery instead of telling the user the skill failed.
 
 ### Weather
 
