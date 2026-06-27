@@ -25,6 +25,15 @@ import {
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
 import { JUNFEIAI_PROVIDER_ID } from '../../utils/junfeiai-distribution';
+import {
+  CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
+  CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
+} from '../../utils/openclaw-image-relay-constants';
+import {
+  CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
+  CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
+  CLAWX_OPENAI_VIDEO_MODEL_IDS,
+} from '../../utils/openclaw-video-relay-constants';
 
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai-codex';
 const OPENAI_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_OAUTH_RUNTIME_PROVIDER}/gpt-5.5`;
@@ -558,6 +567,58 @@ async function syncAgentModelsToRuntime(
   }
 }
 
+async function syncProviderAgentModelsAcrossDiscoveredAgents(
+  config: ProviderConfig,
+  runtimeProviderKey: string,
+  apiKeyOverrides?: RuntimeApiKeyOverrides,
+): Promise<void> {
+  const modelId = config.model || getProviderDefaultModel(config.type);
+  if (!modelId) {
+    return;
+  }
+
+  const entry = await buildAgentModelProviderEntry(config, modelId, apiKeyOverrides);
+  if (!entry) {
+    return;
+  }
+
+  await updateAgentModelProvider(runtimeProviderKey, entry);
+}
+
+async function syncManagedRelayAgentModelsAcrossDiscoveredAgents(
+  config: ProviderConfig,
+  apiKey: string | undefined,
+): Promise<void> {
+  if (apiKey === undefined) {
+    return;
+  }
+
+  const managedApiKey = apiKey.trim() || null;
+  const meta = getProviderConfig(config.type);
+  const baseUrl = normalizeProviderBaseUrl(
+    config,
+    config.baseUrl || meta?.baseUrl,
+    meta?.api,
+  );
+  if (!baseUrl) {
+    return;
+  }
+
+  await updateAgentModelProvider(CLAWX_OPENAI_IMAGE_PROVIDER_KEY, {
+    baseUrl,
+    api: 'openai-completions',
+    models: [piAiModelsJsonModelEntry(CLAWX_OPENAI_IMAGE_DEFAULT_MODEL)],
+    apiKey: managedApiKey,
+  }, { createIfMissing: false });
+
+  await updateAgentModelProvider(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, {
+    baseUrl,
+    api: 'openai-responses',
+    models: CLAWX_OPENAI_VIDEO_MODEL_IDS.map((modelId) => piAiModelsJsonModelEntry(modelId)),
+    apiKey: managedApiKey,
+  }, { createIfMissing: false });
+}
+
 export async function syncAgentModelOverrideToRuntime(agentId: string): Promise<void> {
   await syncAgentModelsToRuntime(new Set([agentId]));
 }
@@ -572,10 +633,20 @@ export async function syncSavedProviderToRuntime(
     return;
   }
 
+  const apiKeyOverrides = new Map([[config.id, apiKey]]);
   try {
-    await syncAgentModelsToRuntime(undefined, new Map([[config.id, apiKey]]));
+    await syncAgentModelsToRuntime(undefined, apiKeyOverrides);
   } catch (err) {
     logger.warn('[provider-runtime] Failed to sync per-agent model registries after provider save:', err);
+  }
+
+  try {
+    await syncProviderAgentModelsAcrossDiscoveredAgents(config, context.runtimeProviderKey, apiKeyOverrides);
+    if (config.type === JUNFEIAI_PROVIDER_ID) {
+      await syncManagedRelayAgentModelsAcrossDiscoveredAgents(config, apiKey);
+    }
+  } catch (err) {
+    logger.warn('[provider-runtime] Failed to sync discovered per-agent model registries after provider save:', err);
   }
 
   scheduleGatewayRefresh(

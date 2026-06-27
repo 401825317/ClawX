@@ -225,6 +225,73 @@ describe('provider-runtime-sync refresh strategy', () => {
         apiKey: 'stale-relay-key',
       }),
     );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'clawx-openai-image',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+      { createIfMissing: false },
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({
+        api: 'openai-responses',
+        apiKey: 'fresh-relay-key',
+      }),
+      { createIfMissing: false },
+    );
+  });
+
+  it('still syncs discovered agent models when the agent snapshot cannot be read', async () => {
+    mocks.getApiKey.mockResolvedValue('stale-relay-key');
+    mocks.getAllProviders.mockResolvedValue([
+      createProvider({
+        id: 'lingzhiwuxian',
+        type: 'lingzhiwuxian',
+        model: 'qwen-latest',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      }),
+    ]);
+    mocks.listAgentsSnapshot.mockRejectedValue(new Error('invalid openclaw.json'));
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    await syncSavedProviderToRuntime(createProvider({
+      id: 'lingzhiwuxian',
+      type: 'lingzhiwuxian',
+      model: 'qwen-latest',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    }), 'fresh-relay-key');
+
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'clawx-openai-image',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+      { createIfMissing: false },
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({
+        apiKey: 'fresh-relay-key',
+      }),
+      { createIfMissing: false },
+    );
   });
 
   it('clears managed provider inline key without writing the env placeholder when relay key is missing', async () => {
@@ -287,6 +354,26 @@ describe('provider-runtime-sync refresh strategy', () => {
       expect.objectContaining({
         apiKey: null,
       }),
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'lingzhiwuxian',
+      expect.objectContaining({
+        apiKey: null,
+      }),
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'clawx-openai-image',
+      expect.objectContaining({
+        apiKey: null,
+      }),
+      { createIfMissing: false },
+    );
+    expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({
+        apiKey: null,
+      }),
+      { createIfMissing: false },
     );
   });
 

@@ -675,6 +675,30 @@ async function discoverAgentIds(): Promise<string[]> {
   }
 }
 
+async function discoverAgentIdsForModelsJsonUpdate(): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const id of await discoverAgentIds()) {
+    if (id.trim()) ids.add(id.trim());
+  }
+
+  const agentsDir = getOpenClawAgentsDir();
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const agentId = entry.name.trim();
+      if (!agentId) continue;
+      if (await fileExists(join(getOpenClawAgentDir(agentId), 'models.json'))) {
+        ids.add(agentId);
+      }
+    }
+  } catch {
+    // Keep configured-agent discovery as the source of truth when disk scan fails.
+  }
+
+  return ids.size > 0 ? [...ids] : ['main'];
+}
+
 // ── OpenClaw Config Helpers ──────────────────────────────────────
 
 const FEISHU_PLUGIN_ID_CANDIDATES = ['openclaw-lark', 'feishu-openclaw-plugin'] as const;
@@ -2671,6 +2695,7 @@ async function updateModelsJsonProviderEntriesForAgents(
   agentIds: string[],
   providerType: string,
   entry: AgentModelProviderEntry,
+  options: { createIfMissing?: boolean } = {},
 ): Promise<void> {
   for (const agentId of agentIds) {
     const modelsPath = join(getOpenClawAgentDir(agentId), 'models.json');
@@ -2689,6 +2714,9 @@ async function updateModelsJsonProviderEntriesForAgents(
       providers[providerType] && typeof providers[providerType] === 'object'
         ? { ...providers[providerType] }
         : {};
+    if (!providers[providerType] && options.createIfMissing === false) {
+      continue;
+    }
 
     const existingModels = Array.isArray(existing.models)
       ? (existing.models as Array<Record<string, unknown>>)
@@ -2731,9 +2759,10 @@ async function updateModelsJsonProviderEntriesForAgents(
 export async function updateAgentModelProvider(
   providerType: string,
   entry: AgentModelProviderEntry,
+  options?: { createIfMissing?: boolean },
 ): Promise<void> {
-  const agentIds = await discoverAgentIds();
-  await updateModelsJsonProviderEntriesForAgents(agentIds, providerType, entry);
+  const agentIds = await discoverAgentIdsForModelsJsonUpdate();
+  await updateModelsJsonProviderEntriesForAgents(agentIds, providerType, entry, options);
 }
 
 export async function updateSingleAgentModelProvider(
