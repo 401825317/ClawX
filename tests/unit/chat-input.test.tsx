@@ -194,7 +194,7 @@ describe('ChatInput agent targeting', () => {
     agentsState.defaultModelRef = null;
     chatState.currentAgentId = 'main';
     chatState.currentSessionKey = 'agent:main:main';
-    chatState.sessions = [{ key: 'agent:main:main', model: 'custom-alpha123/model-alpha' }];
+    chatState.sessions = [{ key: 'agent:main:main', model: 'lingzhiwuxian/smart-latest' }];
     chatState.updateSessionModel.mockReset();
     gatewayState.status = { state: 'running', port: 18789 };
     providersState.accounts = [];
@@ -297,9 +297,9 @@ describe('ChatInput agent targeting', () => {
         id: 'main',
         name: 'Main',
         isDefault: true,
-        modelDisplay: 'model-alpha',
-        modelRef: 'custom-alpha123/model-alpha',
-        overrideModelRef: 'custom-alpha123/model-alpha',
+        modelDisplay: '智能路由',
+        modelRef: 'lingzhiwuxian/smart-latest',
+        overrideModelRef: 'lingzhiwuxian/smart-latest',
         inheritedModel: false,
         workspace: '~/.openclaw/workspace',
         agentDir: '~/.openclaw/agents/main/agent',
@@ -307,10 +307,10 @@ describe('ChatInput agent targeting', () => {
         channelTypes: [],
       },
     ];
-    agentsState.defaultModelRef = 'custom-alpha123/model-alpha';
+    agentsState.defaultModelRef = 'lingzhiwuxian/smart-latest';
     chatState.sessions = [
-      { key: 'agent:main:main', model: 'custom-alpha123/model-alpha' },
-      { key: 'agent:main:session-b', model: 'custom-alpha123/model-alpha' },
+      { key: 'agent:main:main', model: 'lingzhiwuxian/smart-latest' },
+      { key: 'agent:main:session-b', model: 'lingzhiwuxian/smart-latest' },
     ];
     providersState.accounts = [
       {
@@ -348,10 +348,10 @@ describe('ChatInput agent targeting', () => {
     renderChatInput();
 
     fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(await screen.findByRole('button', { name: 'model-beta' }));
+    fireEvent.click(await screen.findByRole('button', { name: '通义千问' }));
 
     await waitFor(() => {
-      expect(chatState.updateSessionModel).toHaveBeenCalledWith('agent:main:main', 'custom-beta5678/model-beta');
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith('agent:main:main', 'lingzhiwuxian/qwen-latest');
     });
   });
 
@@ -364,9 +364,9 @@ describe('ChatInput agent targeting', () => {
         id: 'main',
         name: 'Main',
         isDefault: true,
-        modelDisplay: 'model-alpha',
-        modelRef: 'custom-alpha123/model-alpha',
-        overrideModelRef: 'custom-alpha123/model-alpha',
+        modelDisplay: '智能路由',
+        modelRef: 'lingzhiwuxian/smart-latest',
+        overrideModelRef: 'lingzhiwuxian/smart-latest',
         inheritedModel: false,
         workspace: '~/.openclaw/workspace',
         agentDir: '~/.openclaw/agents/main/agent',
@@ -374,8 +374,8 @@ describe('ChatInput agent targeting', () => {
         channelTypes: [],
       },
     ];
-    agentsState.defaultModelRef = 'custom-alpha123/model-alpha';
-    chatState.sessions = [{ key: 'agent:main:main', model: 'custom-alpha123/model-alpha' }];
+    agentsState.defaultModelRef = 'lingzhiwuxian/smart-latest';
+    chatState.sessions = [{ key: 'agent:main:main', model: 'lingzhiwuxian/smart-latest' }];
     providersState.accounts = [
       {
         id: 'alpha1234',
@@ -414,9 +414,9 @@ describe('ChatInput agent targeting', () => {
     renderChatInput(onSend);
 
     fireEvent.click(screen.getByTestId('chat-model-picker-button'));
-    fireEvent.click(await screen.findByRole('button', { name: 'model-beta' }));
+    fireEvent.click(await screen.findByRole('button', { name: '通义千问' }));
 
-    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('model-beta');
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('通义千问');
     expect(screen.getByTestId('chat-model-picker-button')).not.toBeDisabled();
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'send after model click' } });
@@ -758,8 +758,8 @@ describe('ChatInput agent targeting', () => {
       },
     ];
     chatState.sessions = [
-      { key: 'agent:main:main', model: 'custom-alpha123/model-alpha' },
-      { key: 'agent:main:session-b', model: 'custom-alpha123/model-alpha' },
+      { key: 'agent:main:main', model: 'lingzhiwuxian/smart-latest' },
+      { key: 'agent:main:session-b', model: 'lingzhiwuxian/smart-latest' },
     ];
 
     const view = renderChatInput(onSend);

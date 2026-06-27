@@ -126,11 +126,6 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
         description: '自动选择合适的文本模型。',
         enabled: true,
       },
-      { id: 'qwen-latest', label: '通义千问', enabled: true },
-      { id: 'deepseek-latest', label: 'DeepSeek', enabled: true },
-      { id: 'doubao-latest', label: '豆包', enabled: true },
-      { id: 'kimi-latest', label: 'Kimi', enabled: true },
-      { id: 'glm-latest', label: '智谱 GLM', enabled: true },
     ],
   },
   image: {

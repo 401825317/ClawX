@@ -20,9 +20,8 @@ import { useChatStore } from '@/stores/chat';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import { useProviderStore } from '@/stores/providers';
-import { useClientConfigStore } from '@/stores/client-config';
+import { DEFAULT_CLIENT_MODEL_OPTIONS, useClientConfigStore } from '@/stores/client-config';
 import {
-  buildConfiguredModelOptions,
   formatModelDisplayLabel,
   formatProviderModelIdLabel,
   toModelOptionTestId,
@@ -73,6 +72,12 @@ interface RemoteModelOption {
 // ── Helpers ──────────────────────────────────────────────────────
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
+const DEFAULT_TEXT_MODEL_OPTION: RemoteModelOption = {
+  modelRef: `lingzhiwuxian/${DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel}`,
+  label: formatProviderModelIdLabel('lingzhiwuxian', DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel),
+  runtimeProviderKey: 'lingzhiwuxian',
+  accountId: 'lingzhiwuxian',
+};
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -280,8 +285,6 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   const agents = useAgentsStore((s) => s.agents);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
   const providerAccounts = useProviderStore((s) => s.accounts);
-  const providerStatuses = useProviderStore((s) => s.statuses);
-  const providerDefaultAccountId = useProviderStore((s) => s.defaultAccountId);
   const refreshProviderSnapshot = useProviderStore((s) => s.refreshProviderSnapshot);
   const clientModelOptions = useClientConfigStore((s) => s.modelOptions);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
@@ -352,41 +355,38 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
   );
-  const baseModelOptions = useMemo(
-    () => buildConfiguredModelOptions(providerAccounts, providerStatuses, providerDefaultAccountId),
-    [providerAccounts, providerDefaultAccountId, providerStatuses],
-  );
   const configuredTextModelOptions = useMemo<RemoteModelOption[]>(() => {
-    const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'lingzhiwuxian' && account.enabled);
-    if (!junfeiaiAccount) {
-      return [];
-    }
-    return clientModelOptions.text.models.map((model) => ({
+    const textModels = clientModelOptions.text.models.length > 0
+      ? clientModelOptions.text.models
+      : [{
+        id: DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel,
+        label: DEFAULT_TEXT_MODEL_OPTION.label,
+        enabled: true,
+      }];
+    return textModels.map((model) => ({
       modelRef: `lingzhiwuxian/${model.id}`,
       label: model.label || formatProviderModelIdLabel('lingzhiwuxian', model.id),
       runtimeProviderKey: 'lingzhiwuxian',
       accountId: 'lingzhiwuxian',
     }));
-  }, [clientModelOptions.text.models, providerAccounts]);
+  }, [clientModelOptions.text.models]);
   const modelOptions = useMemo(() => {
     const preferredRemoteOptions = configuredTextModelOptions.length > 0
       ? configuredTextModelOptions
       : remoteModelOptions;
-    if (preferredRemoteOptions.length === 0) {
-      return baseModelOptions;
-    }
-    const deduped = new Map<string, RemoteModelOption | typeof baseModelOptions[number]>();
+    const deduped = new Map<string, RemoteModelOption>();
     for (const option of preferredRemoteOptions) {
       deduped.set(option.modelRef, option);
     }
-    for (const option of baseModelOptions) {
-      if (!deduped.has(option.modelRef)) {
-        deduped.set(option.modelRef, option);
-      }
+    if (deduped.size === 0) {
+      deduped.set(DEFAULT_TEXT_MODEL_OPTION.modelRef, DEFAULT_TEXT_MODEL_OPTION);
     }
     return [...deduped.values()];
-  }, [baseModelOptions, configuredTextModelOptions, remoteModelOptions]);
-  const effectiveModelRef = optimisticModelRef || currentSession?.model || currentAgent?.modelRef || defaultModelRef || modelOptions[0]?.modelRef || null;
+  }, [configuredTextModelOptions, remoteModelOptions]);
+  const requestedModelRef = optimisticModelRef || currentSession?.model || currentAgent?.modelRef || defaultModelRef || null;
+  const effectiveModelRef = requestedModelRef && modelOptions.some((option) => option.modelRef === requestedModelRef)
+    ? requestedModelRef
+    : modelOptions[0]?.modelRef || null;
   const currentModelLabel = modelOptions.find((option) => option.modelRef === effectiveModelRef)?.label
     ?? formatModelDisplayLabel(effectiveModelRef);
   const mentionableAgents = useMemo(
@@ -407,7 +407,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     );
   }, [quickSkills, skillQuery]);
   const showAgentPicker = mentionableAgents.length > 0;
-  const showModelPicker = modelOptions.length > 1;
+  const showModelPicker = true;
   const chatComposerStatusComponents = rendererExtensionRegistry.getChatComposerStatusComponents();
   const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
   const inputDisabled = disabled || !isGatewayUsable;
@@ -627,7 +627,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   }, [skillPickerOpen, loadQuickSkills]);
 
   const handleSelectModel = useCallback(async (modelRef: string) => {
-    if (modelRef === effectiveModelRef) {
+    if (modelRef === effectiveModelRef && requestedModelRef === effectiveModelRef) {
       setModelPickerOpen(false);
       textareaRef.current?.focus();
       return;
@@ -652,7 +652,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         console.error('Failed to switch session model:', error);
       }
     })();
-  }, [currentSessionKey, defaultModelRef, effectiveModelRef, t, updateSessionModel]);
+  }, [currentSessionKey, defaultModelRef, effectiveModelRef, requestedModelRef, t, updateSessionModel]);
 
   // ── File staging via native dialog / Electron drag-drop paths ──
 
@@ -814,6 +814,21 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       }
     }
 
+    if (effectiveModelRef && requestedModelRef !== effectiveModelRef) {
+      try {
+        console.info('[ChatInput] Persisting effective model before send', {
+          sessionKey: currentSessionKey,
+          requestedModelRef,
+          effectiveModelRef,
+        });
+        await updateSessionModel(currentSessionKey, effectiveModelRef);
+      } catch (error) {
+        toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
+        console.error('Failed to persist effective session model before send:', error);
+        return;
+      }
+    }
+
     // Capture values before clearing — clear input immediately for snappy UX,
     // but keep attachments available for the async send
     console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
@@ -841,7 +856,21 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     setTargetAgentId(null);
     setPickerOpen(false);
     setSkillPickerOpen(false);
-  }, [attachments, canSend, imageOptions, input, onSend, sendMode, targetAgentId, videoOptions]);
+  }, [
+    attachments,
+    canSend,
+    currentSessionKey,
+    effectiveModelRef,
+    imageOptions,
+    input,
+    onSend,
+    requestedModelRef,
+    sendMode,
+    t,
+    targetAgentId,
+    updateSessionModel,
+    videoOptions,
+  ]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
