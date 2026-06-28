@@ -13,11 +13,56 @@ const execFileAsync = promisify(execFile);
 const POWERSHELL_TIMEOUT_MS = 8_000;
 const MAX_TYPE_TEXT_LENGTH = 20_000;
 const SYSTEM_WINDOW_ACTIONS = new Set(['focus', 'restore', 'minimize', 'maximize', 'close']);
+const COMPUTER_ACTIONS_REQUIRING_CONFIRMATION = new Set([
+  'browserClick',
+  'browserType',
+  'mouseClick',
+  'mouseDrag',
+  'keyPress',
+  'typeText',
+  'fileDialogSetPath',
+  'windowClose',
+]);
 const SWP_NOMOVE = 0x0002;
 const SWP_NOSIZE = 0x0001;
 const SWP_SHOWWINDOW = 0x0040;
 const MAX_UIA_DEPTH = 6;
 const MAX_UIA_NODES = 500;
+const MAX_DOM_NODES = 800;
+const MAX_AGENT_STEPS = 12;
+
+type BrowserDomNode = {
+  index: number;
+  tagName: string;
+  text: string;
+  id: string;
+  className: string;
+  role: string | null;
+  ariaLabel: string | null;
+  name: string | null;
+  href: string | null;
+  type: string | null;
+  placeholder: string | null;
+  value: string | null;
+  disabled: boolean;
+  visible: boolean;
+  selector: string;
+  bounds: { x: number; y: number; width: number; height: number };
+};
+
+type BrowserDomSnapshot = {
+  url: string;
+  title: string;
+  nodeCount: number;
+  truncated: boolean;
+  nodes: BrowserDomNode[];
+};
+
+type ComputerActionRisk = {
+  risk: 'low' | 'medium' | 'high';
+  requiresConfirmation: boolean;
+  reason: string;
+};
 
 function getDesktopScreenshotsDir(): string {
   return join(getOpenClawMediaDir(), 'desktop-screenshots');
@@ -969,11 +1014,261 @@ async function findUiaElements(input: {
   return await runWindowsPowerShellJson(buildUiaTreeScript(input));
 }
 
+function getTargetBrowserWindow(ctx: HostApiContext, windowId?: unknown): BrowserWindow {
+  const id = windowId === undefined || windowId === null ? null : toInteger(windowId, 'windowId');
+  const win = id === null
+    ? (ctx.mainWindow && !ctx.mainWindow.isDestroyed() ? ctx.mainWindow : null)
+    : BrowserWindow.fromId(id);
+  if (!win || win.isDestroyed()) {
+    throw new Error('Target browser window is unavailable');
+  }
+  return win;
+}
+
+function buildDomSnapshotScript(maxNodes: number, textIncludes: string, selectorFilter: string): string {
+  return `
+(() => {
+  const maxNodes = ${JSON.stringify(maxNodes)};
+  const textIncludes = ${JSON.stringify(textIncludes.toLowerCase())};
+  const selectorFilter = ${JSON.stringify(selectorFilter)};
+  const nodes = [];
+  const selectorFor = (el) => {
+    if (el.id) return '#' + CSS.escape(el.id);
+    const parts = [];
+    let current = el;
+    while (current && current.nodeType === Node.ELEMENT_NODE && current !== document.documentElement && parts.length < 5) {
+      let part = current.localName;
+      const parent = current.parentElement;
+      if (parent) {
+        const sameTag = Array.from(parent.children).filter((child) => child.localName === current.localName);
+        if (sameTag.length > 1) part += ':nth-of-type(' + (sameTag.indexOf(current) + 1) + ')';
+      }
+      parts.unshift(part);
+      current = parent;
+    }
+    return parts.length ? parts.join(' > ') : el.localName;
+  };
+  const isInteresting = (el) => {
+    const tag = el.localName;
+    return ['a', 'button', 'input', 'textarea', 'select', 'option', 'summary'].includes(tag)
+      || el.hasAttribute('role')
+      || el.hasAttribute('aria-label')
+      || el.hasAttribute('contenteditable')
+      || typeof el.onclick === 'function'
+      || el.tabIndex >= 0;
+  };
+  const candidates = selectorFilter
+    ? Array.from(document.querySelectorAll(selectorFilter))
+    : Array.from(document.querySelectorAll('a,button,input,textarea,select,option,summary,[role],[aria-label],[contenteditable],[tabindex]'));
+  for (const el of candidates) {
+    if (nodes.length >= maxNodes) break;
+    if (!isInteresting(el)) continue;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    const text = ((el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || '') + '').replace(/\\s+/g, ' ').trim();
+    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || '1') > 0;
+    const haystack = [text, el.id, el.className, el.getAttribute('role'), el.getAttribute('aria-label'), el.getAttribute('name'), el.getAttribute('placeholder'), el.getAttribute('href')].filter(Boolean).join(' ').toLowerCase();
+    if (textIncludes && !haystack.includes(textIncludes)) continue;
+    nodes.push({
+      index: nodes.length,
+      tagName: el.tagName.toLowerCase(),
+      text,
+      id: el.id || '',
+      className: typeof el.className === 'string' ? el.className : '',
+      role: el.getAttribute('role'),
+      ariaLabel: el.getAttribute('aria-label'),
+      name: el.getAttribute('name'),
+      href: el.getAttribute('href'),
+      type: el.getAttribute('type'),
+      placeholder: el.getAttribute('placeholder'),
+      value: 'value' in el ? String(el.value || '').slice(0, 200) : null,
+      disabled: Boolean(el.disabled) || el.getAttribute('aria-disabled') === 'true',
+      visible,
+      selector: selectorFor(el),
+      bounds: {
+        x: Math.round(rect.x + window.scrollX),
+        y: Math.round(rect.y + window.scrollY),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+    });
+  }
+  return {
+    url: location.href,
+    title: document.title,
+    nodeCount: nodes.length,
+    truncated: nodes.length >= maxNodes,
+    nodes,
+  };
+})()
+`;
+}
+
+async function executeJavaScript<T>(win: BrowserWindow, script: string): Promise<T> {
+  return await win.webContents.executeJavaScript(script, true) as T;
+}
+
+async function getBrowserDomSnapshot(ctx: HostApiContext, input: {
+  windowId?: unknown;
+  maxNodes?: unknown;
+  textIncludes?: unknown;
+  selector?: unknown;
+}): Promise<BrowserDomSnapshot> {
+  const win = getTargetBrowserWindow(ctx, input.windowId);
+  const maxNodes = Math.max(1, Math.min(MAX_DOM_NODES, input.maxNodes === undefined ? 200 : toInteger(input.maxNodes, 'maxNodes')));
+  const textIncludes = typeof input.textIncludes === 'string' ? input.textIncludes.trim() : '';
+  const selector = typeof input.selector === 'string' ? input.selector.trim() : '';
+  return await executeJavaScript<BrowserDomSnapshot>(win, buildDomSnapshotScript(maxNodes, textIncludes, selector));
+}
+
+async function queryBrowserElement(ctx: HostApiContext, input: {
+  windowId?: unknown;
+  selector?: unknown;
+  textIncludes?: unknown;
+  maxNodes?: unknown;
+}): Promise<{ matches: BrowserDomNode[]; snapshot: BrowserDomSnapshot }> {
+  const snapshot = await getBrowserDomSnapshot(ctx, input);
+  return { matches: snapshot.nodes, snapshot };
+}
+
+function elementSelectorFromInput(input: { selector?: unknown; index?: unknown }, snapshot?: BrowserDomSnapshot): string {
+  const selector = typeof input.selector === 'string' ? input.selector.trim() : '';
+  if (selector) return selector;
+  if (input.index !== undefined && input.index !== null && snapshot) {
+    const index = toInteger(input.index, 'index');
+    const node = snapshot.nodes[index];
+    if (!node) throw new Error(`No DOM node found at index ${index}`);
+    return node.selector;
+  }
+  throw new Error('selector or index is required');
+}
+
+async function browserElementAction(ctx: HostApiContext, input: {
+  windowId?: unknown;
+  selector?: unknown;
+  index?: unknown;
+  textIncludes?: unknown;
+  action?: unknown;
+  text?: unknown;
+  confirmed?: unknown;
+}): Promise<unknown> {
+  const action = typeof input.action === 'string' ? input.action.trim().toLowerCase() : 'click';
+  if (action !== 'click' && action !== 'type' && action !== 'focus') {
+    throw new Error('action must be one of: click, type, focus');
+  }
+  const risk = evaluateComputerActionRisk({ action: action === 'click' ? 'browserClick' : action === 'type' ? 'browserType' : 'browserFocus', target: input.selector ?? input.textIncludes });
+  if (risk.requiresConfirmation && input.confirmed !== true) {
+    return { ...risk, blocked: true };
+  }
+  const snapshot = input.selector ? undefined : await getBrowserDomSnapshot(ctx, {
+    windowId: input.windowId,
+    textIncludes: input.textIncludes,
+    maxNodes: input.index === undefined ? 20 : Math.max(20, toInteger(input.index, 'index') + 1),
+  });
+  const selector = elementSelectorFromInput(input, snapshot);
+  const text = typeof input.text === 'string' ? input.text : '';
+  if (text.length > MAX_TYPE_TEXT_LENGTH) {
+    throw new Error(`text is too long; max ${MAX_TYPE_TEXT_LENGTH} characters`);
+  }
+  const win = getTargetBrowserWindow(ctx, input.windowId);
+  const script = `
+(() => {
+  const selector = ${JSON.stringify(selector)};
+  const action = ${JSON.stringify(action)};
+  const text = ${JSON.stringify(text)};
+  const el = document.querySelector(selector);
+  if (!el) throw new Error('No DOM element matches selector: ' + selector);
+  el.scrollIntoView({ block: 'center', inline: 'center' });
+  el.focus?.();
+  if (action === 'click') {
+    el.click();
+  } else if (action === 'type') {
+    if (!('value' in el) && !el.isContentEditable) throw new Error('Selected element is not text-editable');
+    if (el.isContentEditable) {
+      el.textContent = text;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+    } else {
+      el.value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+  const rect = el.getBoundingClientRect();
+  return {
+    selector,
+    action,
+    tagName: el.tagName.toLowerCase(),
+    text: ((el.innerText || el.textContent || el.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim().slice(0, 500),
+    bounds: { x: Math.round(rect.x + window.scrollX), y: Math.round(rect.y + window.scrollY), width: Math.round(rect.width), height: Math.round(rect.height) },
+    url: location.href,
+    title: document.title,
+  };
+})()
+`;
+  return await executeJavaScript(win, script);
+}
+
+function evaluateComputerActionRisk(input: { action?: unknown; target?: unknown }): ComputerActionRisk {
+  const action = typeof input.action === 'string' ? input.action.trim() : '';
+  const target = typeof input.target === 'string' ? input.target.trim() : '';
+  const lowerTarget = target.toLowerCase();
+  const destructiveWords = ['delete', 'remove', 'close', 'submit', 'pay', 'purchase', 'order', 'logout', 'sign out', '删除', '移除', '关闭', '提交', '支付', '购买', '下单', '退出'];
+  const destructiveTarget = destructiveWords.some((word) => lowerTarget.includes(word));
+  const requiresConfirmation = COMPUTER_ACTIONS_REQUIRING_CONFIRMATION.has(action) || destructiveTarget;
+  if (requiresConfirmation) {
+    return {
+      risk: destructiveTarget || action === 'windowClose' || action === 'fileDialogSetPath' ? 'high' : 'medium',
+      requiresConfirmation: true,
+      reason: destructiveTarget
+        ? 'The target text looks potentially destructive or transactional.'
+        : 'This action changes the local computer state.',
+    };
+  }
+  return {
+    risk: 'low',
+    requiresConfirmation: false,
+    reason: 'Read-only or focus-only action.',
+  };
+}
+
+async function runComputerAgentStep(ctx: HostApiContext, input: {
+  goal?: unknown;
+  steps?: unknown;
+  confirmed?: unknown;
+}): Promise<{ goal: string; steps: unknown[]; completed: boolean; note: string }> {
+  const goal = typeof input.goal === 'string' ? input.goal.trim() : '';
+  if (!goal) throw new Error('goal is required');
+  const steps = Array.isArray(input.steps) ? input.steps.slice(0, MAX_AGENT_STEPS) : [];
+  const results: unknown[] = [];
+  for (const rawStep of steps) {
+    const step = rawStep && typeof rawStep === 'object' ? rawStep as Record<string, unknown> : {};
+    const action = typeof step.action === 'string' ? step.action : '';
+    if (action === 'observeDom') {
+      results.push({ action, result: await getBrowserDomSnapshot(ctx, step) });
+    } else if (action === 'findDom') {
+      results.push({ action, result: await queryBrowserElement(ctx, step) });
+    } else if (action === 'clickDom' || action === 'typeDom' || action === 'focusDom') {
+      const mappedAction = action === 'clickDom' ? 'click' : action === 'typeDom' ? 'type' : 'focus';
+      results.push({ action, result: await browserElementAction(ctx, { ...step, action: mappedAction, confirmed: step.confirmed ?? input.confirmed }) });
+    } else if (action === 'screenshot') {
+      results.push({ action, result: await inspectScreen(step) });
+    } else {
+      results.push({ action, error: `Unsupported agent step action: ${action}` });
+    }
+  }
+  return {
+    goal,
+    steps: results,
+    completed: false,
+    note: 'Executed the provided deterministic steps. Ask the model to inspect results and provide the next steps or final answer.',
+  };
+}
+
 export async function handleComputerRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  _ctx: HostApiContext,
+  ctx: HostApiContext,
 ): Promise<boolean> {
   if (
     (url.pathname === '/api/computer/desktop-screenshot' || url.pathname === '/api/computer/screenshot')
@@ -1147,6 +1442,69 @@ export async function handleComputerRoutes(
     sendJson(res, 200, {
       success: true,
       result: await findUiaElements(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/browser/dom' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      windowId?: unknown;
+      maxNodes?: unknown;
+      textIncludes?: unknown;
+      selector?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await getBrowserDomSnapshot(ctx, body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/browser/find' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      windowId?: unknown;
+      selector?: unknown;
+      textIncludes?: unknown;
+      maxNodes?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await queryBrowserElement(ctx, body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/browser/action' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      windowId?: unknown;
+      selector?: unknown;
+      index?: unknown;
+      textIncludes?: unknown;
+      action?: unknown;
+      text?: unknown;
+      confirmed?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await browserElementAction(ctx, body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/safety/evaluate' && req.method === 'POST') {
+    const body = await parseJsonBody<{ action?: unknown; target?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: evaluateComputerActionRisk(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/agent/run' && req.method === 'POST') {
+    const body = await parseJsonBody<{ goal?: unknown; steps?: unknown; confirmed?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await runComputerAgentStep(ctx, body),
     });
     return true;
   }

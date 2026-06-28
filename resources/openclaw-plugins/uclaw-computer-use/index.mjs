@@ -39,6 +39,12 @@ const WINDOW_TARGET_PROPERTIES = {
     description: 'Fallback case-insensitive title substring to find a window.',
   },
 };
+const BROWSER_TARGET_PROPERTIES = {
+  windowId: {
+    type: 'integer',
+    description: 'Optional Electron BrowserWindow id returned by computer_window_list. Defaults to the main UClaw window.',
+  },
+};
 
 function resolveHostApiOrigin() {
   return (process.env.CLAWX_HOST_API_ORIGIN || DEFAULT_HOST_API_ORIGIN).replace(/\/+$/u, '');
@@ -362,6 +368,164 @@ export const pluginEntry = defineToolPlugin({
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/uia/find', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_browser_dom_snapshot',
+      label: 'Inspect browser DOM',
+      description: 'Inspect the DOM of the UClaw browser window and return visible interactive elements with selectors, text, roles, and bounds.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...BROWSER_TARGET_PROPERTIES,
+          selector: {
+            type: 'string',
+            description: 'Optional CSS selector filter.',
+          },
+          textIncludes: {
+            type: 'string',
+            description: 'Optional case-insensitive text, label, id, role, placeholder, or href substring filter.',
+          },
+          maxNodes: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 800,
+            description: 'Maximum DOM nodes to return. Defaults to 200.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/browser/dom', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_browser_dom_find',
+      label: 'Find browser DOM elements',
+      description: 'Find DOM elements in the UClaw browser window by CSS selector or text/label substring. Use returned selector or index for DOM actions.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...BROWSER_TARGET_PROPERTIES,
+          selector: {
+            type: 'string',
+            description: 'Optional CSS selector.',
+          },
+          textIncludes: {
+            type: 'string',
+            description: 'Optional case-insensitive text, label, id, role, placeholder, or href substring.',
+          },
+          maxNodes: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 800,
+            description: 'Maximum DOM nodes to scan. Defaults to 200.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/browser/find', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_browser_dom_action',
+      label: 'Act on browser DOM',
+      description: 'Focus, click, or type into a DOM element in the UClaw browser window. Mutating actions may return requiresConfirmation unless confirmed is true.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...BROWSER_TARGET_PROPERTIES,
+          selector: {
+            type: 'string',
+            description: 'CSS selector for the target element.',
+          },
+          index: {
+            type: 'integer',
+            minimum: 0,
+            description: 'Index from computer_browser_dom_find when selector is not provided.',
+          },
+          textIncludes: {
+            type: 'string',
+            description: 'Text filter used with index lookup when selector is not provided.',
+          },
+          action: {
+            type: 'string',
+            enum: ['focus', 'click', 'type'],
+            description: 'DOM action to perform.',
+          },
+          text: {
+            type: 'string',
+            description: 'Text to set when action is type.',
+          },
+          confirmed: {
+            type: 'boolean',
+            description: 'Set true after user confirmation for mutating or risky actions.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/browser/action', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_safety_evaluate',
+      label: 'Evaluate computer action risk',
+      description: 'Evaluate whether a computer-use action is read-only, mutating, or potentially destructive/transactional before executing it.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: {
+            type: 'string',
+            description: 'Action identifier such as browserClick, browserType, mouseClick, typeText, windowClose, observe.',
+          },
+          target: {
+            type: 'string',
+            description: 'Human-readable target text or selector for risk scanning.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/safety/evaluate', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_agent_run_steps',
+      label: 'Run computer-use steps',
+      description: 'Run a short deterministic observe/act loop for computer-use tasks. Supported step actions: observeDom, findDom, focusDom, clickDom, typeDom, screenshot.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['goal'],
+        properties: {
+          goal: {
+            type: 'string',
+            description: 'User goal for the computer-use loop.',
+          },
+          steps: {
+            type: 'array',
+            maxItems: 12,
+            items: {
+              type: 'object',
+              additionalProperties: true,
+            },
+            description: 'Deterministic steps to run. The model should inspect results and continue or finish.',
+          },
+          confirmed: {
+            type: 'boolean',
+            description: 'Set true only after user confirmation for mutating or risky steps.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/agent/run', {
         method: 'POST',
         body: JSON.stringify(params || {}),
       })),
