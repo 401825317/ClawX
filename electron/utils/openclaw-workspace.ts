@@ -14,6 +14,7 @@ const CLAWX_BEGIN = '<!-- clawx:begin -->';
 const CLAWX_END = '<!-- clawx:end -->';
 const DEFAULT_BOOTSTRAP_FILENAME = 'BOOTSTRAP.md';
 const DEFAULT_IDENTITY_FILENAME = 'IDENTITY.md';
+const DEFAULT_CONTEXT_TARGETS = new Set(['AGENTS.md', 'TOOLS.md']);
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -361,11 +362,16 @@ async function mergeClawXContextOnce(options: EnsureClawXContextOptions = {}): P
       const targetPath = join(workspaceDir, targetName);
 
       if (!(await fileExists(targetPath))) {
-        missing++;
-        if (shouldWaitForSeed) {
-          retryableMissing++;
+        if (shouldWaitForSeed && DEFAULT_CONTEXT_TARGETS.has(targetName)) {
+          await writeFile(targetPath, `# ${targetName}\n`, 'utf-8');
+          logger.info(`Seeded ${targetName} for ClawX context merge (${workspaceDir})`);
+        } else {
+          missing++;
+          if (shouldWaitForSeed) {
+            retryableMissing++;
+          }
+          continue;
         }
-        continue;
       }
 
       const section = await readFile(join(contextDir, file), 'utf-8');

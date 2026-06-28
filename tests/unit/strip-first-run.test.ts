@@ -234,6 +234,26 @@ describe('ensureClawXDefaultIdentity', () => {
 });
 
 describe('ensureClawXContext', () => {
+  it('seeds missing default workspace context files before merging ClawX instructions', async () => {
+    const openclawDir = join(testHome, '.openclaw');
+    const defaultWorkspace = join(openclawDir, 'workspace');
+    await mkdir(defaultWorkspace, { recursive: true });
+    await writeFile(
+      join(openclawDir, 'openclaw.json'),
+      JSON.stringify({
+        agents: {
+          defaults: { workspace: defaultWorkspace },
+        },
+      }),
+      'utf-8',
+    );
+
+    await ensureClawXContext();
+
+    await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw Environment');
+    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('UClaw has native computer-use tools');
+  });
+
   it('does not wait for missing files in non-default agent workspaces', async () => {
     const openclawDir = join(testHome, '.openclaw');
     const defaultWorkspace = join(openclawDir, 'workspace-main');
