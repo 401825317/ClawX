@@ -17,6 +17,7 @@ const COMPUTER_ACTIONS_REQUIRING_CONFIRMATION = new Set([
   'browserClick',
   'browserType',
   'mouseClick',
+  'mouseButton',
   'mouseDrag',
   'keyPress',
   'typeText',
@@ -63,6 +64,7 @@ type ComputerActionRisk = {
   requiresConfirmation: boolean;
   reason: string;
 };
+type ConfirmableResult<T> = T | (ComputerActionRisk & { blocked: true });
 
 function getDesktopScreenshotsDir(): string {
   return join(getOpenClawMediaDir(), 'desktop-screenshots');
@@ -389,12 +391,21 @@ public static class UClawMouse {
 `);
 }
 
+function blockUnlessConfirmed(input: { confirmed?: unknown }, action: string, target?: unknown): ComputerActionRisk & { blocked: true } | null {
+  const risk = evaluateComputerActionRisk({ action, target });
+  if (risk.requiresConfirmation && input.confirmed !== true) {
+    return { ...risk, blocked: true };
+  }
+  return null;
+}
+
 async function clickMouse(input: {
   x?: unknown;
   y?: unknown;
   button?: unknown;
   clicks?: unknown;
-}): Promise<{ x?: number; y?: number; button: string; clicks: number }> {
+  confirmed?: unknown;
+}): Promise<ConfirmableResult<{ x?: number; y?: number; button: string; clicks: number }>> {
   const hasX = input.x !== undefined && input.x !== null;
   const hasY = input.y !== undefined && input.y !== null;
   if (hasX !== hasY) {
@@ -405,6 +416,8 @@ async function clickMouse(input: {
   const button = normalizeMouseButton(input.button);
   const clicks = Math.max(1, Math.min(3, input.clicks === undefined ? 1 : toInteger(input.clicks, 'clicks')));
   const flags = mouseButtonFlags(button);
+  const blocked = blockUnlessConfirmed(input, 'mouseClick', `button=${button}; clicks=${clicks}; x=${x ?? ''}; y=${y ?? ''}`);
+  if (blocked) return blocked;
 
   return await runWindowsPowerShellJson<{ x?: number; y?: number; button: string; clicks: number }>(`
 Add-Type @"
@@ -431,7 +444,8 @@ for ($i = 0; $i -lt ${clicks}; $i++) {
 async function mouseButton(input: {
   button?: unknown;
   action?: unknown;
-}): Promise<{ button: string; action: string }> {
+  confirmed?: unknown;
+}): Promise<ConfirmableResult<{ button: string; action: string }>> {
   const button = normalizeMouseButton(input.button);
   const action = typeof input.action === 'string' ? input.action.trim().toLowerCase() : '';
   if (action !== 'down' && action !== 'up') {
@@ -439,6 +453,8 @@ async function mouseButton(input: {
   }
   const flags = mouseButtonFlags(button);
   const selectedFlag = action === 'down' ? flags.down : flags.up;
+  const blocked = blockUnlessConfirmed(input, 'mouseButton', `button=${button}; action=${action}`);
+  if (blocked) return blocked;
 
   return await runWindowsPowerShellJson<{ button: string; action: string }>(`
 Add-Type @"
@@ -492,7 +508,8 @@ async function dragMouse(input: {
   toY?: unknown;
   button?: unknown;
   durationMs?: unknown;
-}): Promise<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }> {
+  confirmed?: unknown;
+}): Promise<ConfirmableResult<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }>> {
   const fromX = toInteger(input.fromX, 'fromX');
   const fromY = toInteger(input.fromY, 'fromY');
   const toX = toInteger(input.toX, 'toX');
@@ -502,6 +519,8 @@ async function dragMouse(input: {
   const flags = mouseButtonFlags(button);
   const steps = Math.max(1, Math.min(60, Math.ceil(durationMs / 25)));
   const sleepMs = Math.max(1, Math.floor(durationMs / steps));
+  const blocked = blockUnlessConfirmed(input, 'mouseDrag', `from=${fromX},${fromY}; to=${toX},${toY}; button=${button}`);
+  if (blocked) return blocked;
 
   return await runWindowsPowerShellJson<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }>(`
 Add-Type @"
@@ -528,12 +547,15 @@ for ($i = 1; $i -le ${steps}; $i++) {
 `);
 }
 
-async function pressKey(input: { key?: unknown; modifiers?: unknown }): Promise<{
+async function pressKey(input: { key?: unknown; modifiers?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{
   key: string;
   modifiers: string[];
-}> {
+}>> {
   const key = normalizeKey(input.key);
   const modifiers = normalizeModifiers(input.modifiers);
+  const target = [...modifiers.map((item) => item.label), key.label].join('+');
+  const blocked = blockUnlessConfirmed(input, 'keyPress', target);
+  if (blocked) return blocked;
   const downSequence = [...modifiers, key];
   const upSequence = [...downSequence].reverse();
   const downScript = downSequence.map((item) => `[UClawKeyboard]::keybd_event(${item.vk}, 0, 0, [UIntPtr]::Zero)`).join('\n');
@@ -555,13 +577,15 @@ ${upScript}
 `);
 }
 
-async function typeText(input: { text?: unknown }): Promise<{ length: number; method: 'clipboard-paste' }> {
+async function typeText(input: { text?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{ length: number; method: 'clipboard-paste' }>> {
   const text = typeof input.text === 'string' ? input.text : '';
   if (text.length > MAX_TYPE_TEXT_LENGTH) {
     throw new Error(`text is too long; max ${MAX_TYPE_TEXT_LENGTH} characters`);
   }
+  const blocked = blockUnlessConfirmed(input, 'typeText', text.slice(0, 200));
+  if (blocked) return blocked;
   clipboard.writeText(text);
-  await pressKey({ key: 'v', modifiers: ['ctrl'] });
+  await pressKey({ key: 'v', modifiers: ['ctrl'], confirmed: true });
   return { length: text.length, method: 'clipboard-paste' };
 }
 
@@ -694,12 +718,13 @@ async function controlSystemWindow(input: {
   hwnd?: unknown;
   titleIncludes?: unknown;
   action?: unknown;
-}): Promise<{
+  confirmed?: unknown;
+}): Promise<ConfirmableResult<{
   hwnd: number;
   title: string;
   action: string;
   success: boolean;
-}> {
+}>> {
   const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
   const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
   const action = typeof input.action === 'string' ? input.action.trim().toLowerCase() : 'focus';
@@ -709,6 +734,10 @@ async function controlSystemWindow(input: {
   if (!hwnd && !titleIncludes) {
     throw new Error('hwnd or titleIncludes is required');
   }
+  const blocked = action === 'close'
+    ? blockUnlessConfirmed(input, 'windowClose', titleIncludes || String(hwnd))
+    : null;
+  if (blocked) return blocked;
 
   return await runWindowsPowerShellJson<{
     hwnd: number;
@@ -831,11 +860,11 @@ $ok = [UClawWindows]::SetWindowPos($handle, [IntPtr]::new([int64]$InputJson.inse
 `);
 }
 
-async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown }): Promise<{
+async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{
   length: number;
   submitted: boolean;
   method: 'clipboard-paste';
-}> {
+}>> {
   const filePath = typeof input.filePath === 'string' ? input.filePath : '';
   if (!filePath.trim()) {
     throw new Error('filePath is required');
@@ -843,11 +872,13 @@ async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown }
   if (filePath.length > 32_000) {
     throw new Error('filePath is too long');
   }
+  const blocked = blockUnlessConfirmed(input, 'fileDialogSetPath', filePath);
+  if (blocked) return blocked;
   clipboard.writeText(filePath);
-  await pressKey({ key: 'v', modifiers: ['ctrl'] });
+  await pressKey({ key: 'v', modifiers: ['ctrl'], confirmed: true });
   const submit = input.submit !== false;
   if (submit) {
-    await pressKey({ key: 'enter' });
+    await pressKey({ key: 'enter', confirmed: true });
   }
   return { length: filePath.length, submitted: submit, method: 'clipboard-paste' };
 }

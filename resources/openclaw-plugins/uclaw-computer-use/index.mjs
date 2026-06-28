@@ -29,6 +29,10 @@ const WINDOW_ACTION_SCHEMA = {
   enum: ['focus', 'restore', 'minimize', 'maximize', 'close'],
   description: 'Window action to perform.',
 };
+const CONFIRMED_SCHEMA = {
+  type: 'boolean',
+  description: 'Set true only after user confirmation for mutating or risky actions. If omitted, the host returns requiresConfirmation without executing.',
+};
 const WINDOW_TARGET_PROPERTIES = {
   hwnd: {
     type: 'number',
@@ -254,6 +258,7 @@ export const pluginEntry = defineToolPlugin({
         properties: {
           ...WINDOW_TARGET_PROPERTIES,
           action: WINDOW_ACTION_SCHEMA,
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/system-window/control', {
@@ -609,6 +614,7 @@ export const pluginEntry = defineToolPlugin({
             maximum: 3,
             description: 'Number of clicks, default 1.',
           },
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/click', {
@@ -631,6 +637,7 @@ export const pluginEntry = defineToolPlugin({
             enum: ['down', 'up'],
             description: 'Whether to press or release the button.',
           },
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/button', {
@@ -677,6 +684,7 @@ export const pluginEntry = defineToolPlugin({
             type: 'number',
             description: 'Drag duration in milliseconds. Defaults to 350.',
           },
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/drag', {
@@ -695,6 +703,7 @@ export const pluginEntry = defineToolPlugin({
         properties: {
           key: KEY_SCHEMA,
           modifiers: MODIFIERS_SCHEMA,
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/keyboard/press', {
@@ -715,6 +724,7 @@ export const pluginEntry = defineToolPlugin({
             type: 'string',
             description: 'Plain text to paste into the currently focused app.',
           },
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/keyboard/type', {
@@ -739,6 +749,7 @@ export const pluginEntry = defineToolPlugin({
             type: 'boolean',
             description: 'Whether to press Enter after pasting. Defaults to true.',
           },
+          confirmed: CONFIRMED_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/file-dialog/set-path', {
