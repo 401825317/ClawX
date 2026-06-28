@@ -129,12 +129,12 @@ function resultOrPayload(payload) {
 export const pluginEntry = defineToolPlugin({
   id: PLUGIN_ID,
   name: 'UClaw Computer Use',
-  description: 'Local desktop screenshot, clipboard, window inspection, and basic mouse/keyboard tools provided by UClaw.',
+  description: 'Native UClaw computer-use tools for desktop observation and action: screenshots, OCR-ready inspection, Windows UI Automation, system window control, clipboard, mouse, keyboard, file dialogs, and UClaw window DOM inspection. Use these for desktop/Chrome/window/screenshot/click/type tasks when computer_* tools are available.',
   tools: (tool) => [
     tool({
       name: 'computer_screenshot',
       label: 'Capture desktop screenshot',
-      description: 'Capture the current desktop screen and return the saved PNG file path. Use this when the user asks to see, inspect, or screenshot their current screen.',
+      description: 'Capture the current full desktop screen and return the saved PNG file path. Use this when the user asks to see, inspect, or screenshot their current screen.',
       parameters: EMPTY_OBJECT_SCHEMA,
       execute: async () => summarizeScreenshot(await hostApiFetch('/api/computer/screenshot', {
         method: 'POST',
@@ -144,7 +144,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_inspect_screen',
       label: 'Inspect screen',
-      description: 'Capture the desktop or a window and return a screenshot artifact plus OCR status. If OCR is unsupported, use the returned screenshot file path with a vision-capable model.',
+      description: 'Capture the desktop or a window and return a screenshot artifact plus OCR status. Use this as the first observation step for visual desktop tasks. If OCR is unsupported, use the returned screenshot file path with a vision-capable model.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -218,7 +218,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_system_window_list',
       label: 'List system windows',
-      description: 'List normal Windows desktop application windows by title/process, including hwnd, title, process, visible/minimized state, and bounds.',
+      description: 'List normal Windows desktop application windows by title/process, including hwnd, title, process, visible/minimized state, and bounds. Use this before controlling an already-open Chrome/Edge/native desktop app window.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -251,7 +251,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_system_window_control',
       label: 'Control system window',
-      description: 'Focus, restore, minimize, maximize, or close a Windows desktop application window. Prefer hwnd from computer_system_window_list; titleIncludes is a fallback.',
+      description: 'Focus, restore, minimize, maximize, or close a Windows desktop application window. Prefer hwnd from computer_system_window_list; titleIncludes is a fallback. Use focus/restore before UIA, mouse, or keyboard actions against Chrome/desktop apps.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -316,7 +316,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_uia_tree',
       label: 'Get UI Automation tree',
-      description: 'Read the Windows UI Automation control tree for the foreground or selected window, including control type, name, automation id, enabled/offscreen state, bounds, and children.',
+      description: 'Read the Windows UI Automation control tree for the foreground or selected window, including control type, name, automation id, enabled/offscreen state, bounds, and children. Prefer this over blind coordinate clicks for native apps and external browser windows.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -344,7 +344,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_uia_find',
       label: 'Find UI Automation elements',
-      description: 'Find controls in a Windows UI Automation tree by visible text/name, automation id, and/or control type. Returned bounds can be used with mouse tools.',
+      description: 'Find controls in a Windows UI Automation tree by visible text/name, automation id, and/or control type. Returned bounds can be used with mouse tools for native apps and external browser windows.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -380,7 +380,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_browser_dom_snapshot',
       label: 'Inspect browser DOM',
-      description: 'Inspect the DOM of the UClaw browser window and return visible interactive elements with selectors, text, roles, and bounds.',
+      description: 'Inspect the DOM of the UClaw/Electron browser window and return visible interactive elements with selectors, text, roles, and bounds. This is for UClaw app windows, not arbitrary external Chrome tabs.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -410,7 +410,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_browser_dom_find',
       label: 'Find browser DOM elements',
-      description: 'Find DOM elements in the UClaw browser window by CSS selector or text/label substring. Use returned selector or index for DOM actions.',
+      description: 'Find DOM elements in the UClaw/Electron browser window by CSS selector or text/label substring. Use returned selector or index for DOM actions. For external Chrome/Edge windows, use system window plus UIA/mouse/keyboard tools instead.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -440,7 +440,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_browser_dom_action',
       label: 'Act on browser DOM',
-      description: 'Focus, click, or type into a DOM element in the UClaw browser window. Mutating actions may return requiresConfirmation unless confirmed is true.',
+      description: 'Focus, click, or type into a DOM element in the UClaw/Electron browser window. Mutating actions may return requiresConfirmation unless confirmed is true. For external Chrome/Edge windows, use UIA/mouse/keyboard tools instead.',
       parameters: {
         type: 'object',
         additionalProperties: false,
