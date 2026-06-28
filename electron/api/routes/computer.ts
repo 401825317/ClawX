@@ -12,6 +12,7 @@ import { getOpenClawMediaDir } from '../../utils/paths';
 const execFileAsync = promisify(execFile);
 const POWERSHELL_TIMEOUT_MS = 8_000;
 const MAX_TYPE_TEXT_LENGTH = 20_000;
+const SYSTEM_WINDOW_ACTIONS = new Set(['focus', 'restore', 'minimize', 'maximize', 'close']);
 
 function getDesktopScreenshotsDir(): string {
   return join(getOpenClawMediaDir(), 'desktop-screenshots');
@@ -210,6 +211,15 @@ async function runWindowsPowerShellJson<T>(script: string): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
+function powerShellJsonInput(value: unknown): string {
+  return Buffer.from(JSON.stringify(value ?? {}), 'utf8').toString('base64');
+}
+
+function powerShellJsonInputScript(value: unknown): string {
+  const encoded = powerShellJsonInput(value);
+  return `$InputJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("${encoded}")) | ConvertFrom-Json`;
+}
+
 function toFiniteNumber(value: unknown, field: string): number {
   const numberValue = Number(value);
   if (!Number.isFinite(numberValue)) {
@@ -393,6 +403,184 @@ async function typeText(input: { text?: unknown }): Promise<{ length: number; me
   return { length: text.length, method: 'clipboard-paste' };
 }
 
+const WINDOWS_ENUM_SCRIPT = `
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class UClawWindows {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+}
+"@
+function Get-UClawWindowText([IntPtr]$Handle) {
+  $sb = New-Object System.Text.StringBuilder 1024
+  [void][UClawWindows]::GetWindowText($Handle, $sb, $sb.Capacity)
+  $sb.ToString()
+}
+function Get-UClawClassName([IntPtr]$Handle) {
+  $sb = New-Object System.Text.StringBuilder 256
+  [void][UClawWindows]::GetClassName($Handle, $sb, $sb.Capacity)
+  $sb.ToString()
+}
+function Get-UClawSystemWindows {
+  $items = New-Object System.Collections.Generic.List[object]
+  $callback = [UClawWindows+EnumWindowsProc]{
+    param([IntPtr]$hWnd, [IntPtr]$lParam)
+    $title = Get-UClawWindowText $hWnd
+    if ([string]::IsNullOrWhiteSpace($title)) { return $true }
+    $rect = New-Object UClawWindows+RECT
+    [void][UClawWindows]::GetWindowRect($hWnd, [ref]$rect)
+    $processIdValue = 0
+    [void][UClawWindows]::GetWindowThreadProcessId($hWnd, [ref]$processIdValue)
+    $processName = $null
+    try { $processName = (Get-Process -Id $processIdValue -ErrorAction Stop).ProcessName } catch {}
+    $items.Add([pscustomobject]@{
+      hwnd = $hWnd.ToInt64()
+      title = $title
+      className = Get-UClawClassName $hWnd
+      visible = [UClawWindows]::IsWindowVisible($hWnd)
+      enabled = [UClawWindows]::IsWindowEnabled($hWnd)
+      minimized = [UClawWindows]::IsIconic($hWnd)
+      processId = [int]$processIdValue
+      processName = $processName
+      bounds = [pscustomobject]@{
+        x = $rect.Left
+        y = $rect.Top
+        width = $rect.Right - $rect.Left
+        height = $rect.Bottom - $rect.Top
+      }
+    })
+    return $true
+  }
+  [void][UClawWindows]::EnumWindows($callback, [IntPtr]::Zero)
+  $items
+}
+`;
+
+async function listSystemWindows(input: {
+  titleIncludes?: unknown;
+  processName?: unknown;
+  visibleOnly?: unknown;
+  limit?: unknown;
+}): Promise<{ windows: unknown[] }> {
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
+  const processName = typeof input.processName === 'string' ? input.processName.trim() : '';
+  const visibleOnly = input.visibleOnly !== false;
+  const limit = Math.max(1, Math.min(200, input.limit === undefined ? 80 : toInteger(input.limit, 'limit')));
+  return await runWindowsPowerShellJson<{ windows: unknown[] }>(`
+${powerShellJsonInputScript({ titleIncludes, processName, visibleOnly, limit })}
+${WINDOWS_ENUM_SCRIPT}
+$windows = Get-UClawSystemWindows
+if ($InputJson.visibleOnly) {
+  $windows = $windows | Where-Object { $_.visible -eq $true }
+}
+if ($InputJson.titleIncludes) {
+  $needle = [string]$InputJson.titleIncludes
+  $windows = $windows | Where-Object { $_.title.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }
+}
+if ($InputJson.processName) {
+  $proc = [string]$InputJson.processName
+  $windows = $windows | Where-Object { $_.processName -and $_.processName.Equals($proc, [System.StringComparison]::OrdinalIgnoreCase) }
+}
+$selected = @($windows | Select-Object -First ([int]$InputJson.limit))
+[pscustomobject]@{ windows = $selected } | ConvertTo-Json -Compress -Depth 6
+`);
+}
+
+async function controlSystemWindow(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  action?: unknown;
+}): Promise<{
+  hwnd: number;
+  title: string;
+  action: string;
+  success: boolean;
+}> {
+  const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
+  const action = typeof input.action === 'string' ? input.action.trim().toLowerCase() : 'focus';
+  if (!SYSTEM_WINDOW_ACTIONS.has(action)) {
+    throw new Error(`action must be one of: ${Array.from(SYSTEM_WINDOW_ACTIONS).join(', ')}`);
+  }
+  if (!hwnd && !titleIncludes) {
+    throw new Error('hwnd or titleIncludes is required');
+  }
+
+  return await runWindowsPowerShellJson<{
+    hwnd: number;
+    title: string;
+    action: string;
+    success: boolean;
+  }>(`
+${powerShellJsonInputScript({ hwnd, titleIncludes, action })}
+${WINDOWS_ENUM_SCRIPT}
+$target = $null
+if ($InputJson.hwnd) {
+  $target = Get-UClawSystemWindows | Where-Object { $_.hwnd -eq [int64]$InputJson.hwnd } | Select-Object -First 1
+} elseif ($InputJson.titleIncludes) {
+  $needle = [string]$InputJson.titleIncludes
+  $target = Get-UClawSystemWindows | Where-Object { $_.title.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | Select-Object -First 1
+}
+if (-not $target) { throw "No matching system window found" }
+$handle = [IntPtr]::new([int64]$target.hwnd)
+$ok = $false
+switch ([string]$InputJson.action) {
+  "focus" {
+    [void][UClawWindows]::ShowWindow($handle, 9)
+    $ok = [UClawWindows]::SetForegroundWindow($handle)
+  }
+  "restore" { $ok = [UClawWindows]::ShowWindow($handle, 9) }
+  "minimize" { $ok = [UClawWindows]::ShowWindow($handle, 6) }
+  "maximize" { $ok = [UClawWindows]::ShowWindow($handle, 3) }
+  "close" { $ok = [UClawWindows]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+}
+[pscustomobject]@{ hwnd = $target.hwnd; title = $target.title; action = [string]$InputJson.action; success = [bool]$ok } | ConvertTo-Json -Compress
+`);
+}
+
+async function inspectScreen(input: {
+  target?: unknown;
+  sourceId?: unknown;
+  titleIncludes?: unknown;
+}): Promise<{
+  screenshot: Awaited<ReturnType<typeof captureDesktopScreenshot>> | Awaited<ReturnType<typeof captureWindowScreenshot>>;
+  ocr: {
+    supported: false;
+    text: '';
+    blocks: [];
+    reason: string;
+  };
+}> {
+  const target = typeof input.target === 'string' ? input.target.trim().toLowerCase() : 'desktop';
+  const screenshot = target === 'window'
+    ? await captureWindowScreenshot(input)
+    : await captureDesktopScreenshot();
+
+  return {
+    screenshot,
+    ocr: {
+      supported: false,
+      text: '',
+      blocks: [],
+      reason: 'Local OCR runtime is not bundled yet. Use the screenshot artifact with a vision-capable model, or enable a future OCR provider.',
+    },
+  };
+}
+
 export async function handleComputerRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -447,6 +635,33 @@ export async function handleComputerRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/computer/system-windows' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      titleIncludes?: unknown;
+      processName?: unknown;
+      visibleOnly?: unknown;
+      limit?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await listSystemWindows(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/system-window/control' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      hwnd?: unknown;
+      titleIncludes?: unknown;
+      action?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await controlSystemWindow(body),
+    });
+    return true;
+  }
+
   if (url.pathname === '/api/computer/window-sources' && req.method === 'GET') {
     sendJson(res, 200, {
       success: true,
@@ -464,6 +679,19 @@ export async function handleComputerRoutes(
       success: true,
       screenshot,
       result: screenshot,
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/inspect' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      target?: unknown;
+      sourceId?: unknown;
+      titleIncludes?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await inspectScreen(body),
     });
     return true;
   }

@@ -8,9 +8,12 @@
   "contracts": {
     "tools": [
       "computer_screenshot",
+      "computer_inspect_screen",
       "computer_clipboard_read",
       "computer_clipboard_write",
       "computer_window_list",
+      "computer_system_window_list",
+      "computer_system_window_control",
       "computer_window_sources",
       "computer_window_screenshot",
       "computer_display_list",

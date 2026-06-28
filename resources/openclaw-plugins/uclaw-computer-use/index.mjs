@@ -24,6 +24,11 @@ const MODIFIERS_SCHEMA = {
   },
   description: 'Modifier keys held while pressing the key.',
 };
+const WINDOW_ACTION_SCHEMA = {
+  type: 'string',
+  enum: ['focus', 'restore', 'minimize', 'maximize', 'close'],
+  description: 'Window action to perform.',
+};
 
 function resolveHostApiOrigin() {
   return (process.env.CLAWX_HOST_API_ORIGIN || DEFAULT_HOST_API_ORIGIN).replace(/\/+$/u, '');
@@ -75,6 +80,28 @@ function summarizeScreenshot(payload) {
   };
 }
 
+function summarizeInspection(payload) {
+  const result = payload?.result || payload;
+  const screenshot = result?.screenshot;
+  return {
+    screenshot: screenshot
+      ? {
+        filePath: screenshot.filePath,
+        mimeType: screenshot.mimeType || 'image/png',
+        fileSize: screenshot.fileSize,
+        sourceName: screenshot.sourceName,
+      }
+      : null,
+    ocr: result?.ocr || {
+      supported: false,
+      text: '',
+      blocks: [],
+      reason: 'No OCR result returned.',
+    },
+    note: 'Use the screenshot filePath with a vision-capable model if OCR.supported is false or OCR text is insufficient.',
+  };
+}
+
 function resultOrPayload(payload) {
   return payload?.result || payload;
 }
@@ -92,6 +119,34 @@ export const pluginEntry = defineToolPlugin({
       execute: async () => summarizeScreenshot(await hostApiFetch('/api/computer/screenshot', {
         method: 'POST',
         body: '{}',
+      })),
+    }),
+    tool({
+      name: 'computer_inspect_screen',
+      label: 'Inspect screen',
+      description: 'Capture the desktop or a window and return a screenshot artifact plus OCR status. If OCR is unsupported, use the returned screenshot file path with a vision-capable model.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          target: {
+            type: 'string',
+            enum: ['desktop', 'window'],
+            description: 'Whether to inspect the full desktop or a specific application window. Defaults to desktop.',
+          },
+          sourceId: {
+            type: 'string',
+            description: 'Window source id returned by computer_window_sources when target is window.',
+          },
+          titleIncludes: {
+            type: 'string',
+            description: 'Fallback case-insensitive title substring for window inspection.',
+          },
+        },
+      },
+      execute: async (params) => summarizeInspection(await hostApiFetch('/api/computer/inspect', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
       })),
     }),
     tool({
@@ -139,6 +194,63 @@ export const pluginEntry = defineToolPlugin({
         const payload = await hostApiFetch('/api/computer/windows', { method: 'GET' });
         return payload.result || payload;
       },
+    }),
+    tool({
+      name: 'computer_system_window_list',
+      label: 'List system windows',
+      description: 'List normal Windows desktop application windows by title/process, including hwnd, title, process, visible/minimized state, and bounds.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          titleIncludes: {
+            type: 'string',
+            description: 'Optional case-insensitive title substring filter.',
+          },
+          processName: {
+            type: 'string',
+            description: 'Optional process name filter, for example chrome or notepad.',
+          },
+          visibleOnly: {
+            type: 'boolean',
+            description: 'Whether to include only visible windows. Defaults to true.',
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 200,
+            description: 'Maximum number of windows to return. Defaults to 80.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/system-windows', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_system_window_control',
+      label: 'Control system window',
+      description: 'Focus, restore, minimize, maximize, or close a Windows desktop application window. Prefer hwnd from computer_system_window_list; titleIncludes is a fallback.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          hwnd: {
+            type: 'number',
+            description: 'Window handle returned by computer_system_window_list.',
+          },
+          titleIncludes: {
+            type: 'string',
+            description: 'Fallback case-insensitive title substring to find a window.',
+          },
+          action: WINDOW_ACTION_SCHEMA,
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/system-window/control', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
     }),
     tool({
       name: 'computer_window_sources',
