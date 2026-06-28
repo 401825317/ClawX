@@ -303,6 +303,70 @@ export const pluginEntry = defineToolPlugin({
       })),
     }),
     tool({
+      name: 'computer_uia_tree',
+      label: 'Get UI Automation tree',
+      description: 'Read the Windows UI Automation control tree for the foreground or selected window, including control type, name, automation id, enabled/offscreen state, bounds, and children.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...WINDOW_TARGET_PROPERTIES,
+          maxDepth: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 6,
+            description: 'Maximum UIA tree depth. Defaults to 4.',
+          },
+          maxNodes: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 500,
+            description: 'Maximum nodes to return. Defaults to 200.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/uia/tree', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_uia_find',
+      label: 'Find UI Automation elements',
+      description: 'Find controls in a Windows UI Automation tree by visible text/name, automation id, and/or control type. Returned bounds can be used with mouse tools.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...WINDOW_TARGET_PROPERTIES,
+          textIncludes: {
+            type: 'string',
+            description: 'Case-insensitive text/name/automation id substring to match.',
+          },
+          controlType: {
+            type: 'string',
+            description: 'Control type substring such as button, edit, list, menuitem, document.',
+          },
+          maxDepth: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 6,
+            description: 'Maximum UIA tree depth. Defaults to 4.',
+          },
+          maxNodes: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 500,
+            description: 'Maximum nodes to scan. Defaults to 200.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/uia/find', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
       name: 'computer_window_sources',
       label: 'List capturable windows',
       description: 'List desktop windows that can be captured by UClaw, including source ids for window screenshots.',

@@ -17,6 +17,8 @@
       "computer_system_window_foreground",
       "computer_system_window_set_bounds",
       "computer_system_window_set_topmost",
+      "computer_uia_tree",
+      "computer_uia_find",
       "computer_window_sources",
       "computer_window_screenshot",
       "computer_display_list",

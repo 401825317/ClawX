@@ -16,6 +16,8 @@ const SYSTEM_WINDOW_ACTIONS = new Set(['focus', 'restore', 'minimize', 'maximize
 const SWP_NOMOVE = 0x0002;
 const SWP_NOSIZE = 0x0001;
 const SWP_SHOWWINDOW = 0x0040;
+const MAX_UIA_DEPTH = 6;
+const MAX_UIA_NODES = 500;
 
 function getDesktopScreenshotsDir(): string {
   return join(getOpenClawMediaDir(), 'desktop-screenshots');
@@ -183,26 +185,36 @@ async function runWindowsPowerShellJson<T>(script: string): Promise<T> {
     unsupportedOnThisPlatform('Computer control');
   }
 
-  const { stdout, stderr } = await execFileAsync(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-EncodedCommand',
-      encodePowerShell([
-        '$ErrorActionPreference = "Stop"',
-        '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8',
-        script,
-      ].join('\n')),
-    ],
-    {
-      timeout: POWERSHELL_TIMEOUT_MS,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024,
-    },
-  );
+  let stdout = '';
+  let stderr = '';
+  try {
+    const result = await execFileAsync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        encodePowerShell([
+          '$ErrorActionPreference = "Stop"',
+          '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8',
+          script,
+        ].join('\n')),
+      ],
+      {
+        timeout: POWERSHELL_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      },
+    );
+    stdout = result.stdout;
+    stderr = result.stderr;
+  } catch (error) {
+    const execError = error as Error & { stderr?: string; stdout?: string };
+    const detail = (execError.stderr || execError.stdout || execError.message || '').trim();
+    throw new Error(detail || 'PowerShell command failed');
+  }
 
   const raw = stdout.trim();
   if (!raw) {
@@ -824,6 +836,139 @@ async function inspectScreen(input: {
   };
 }
 
+function normalizeControlType(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase().replace(/controltype$/i, '') : '';
+}
+
+function buildUiaTreeScript(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  maxDepth?: unknown;
+  maxNodes?: unknown;
+  textIncludes?: unknown;
+  controlType?: unknown;
+}): string {
+  const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
+  const maxDepth = Math.max(0, Math.min(MAX_UIA_DEPTH, input.maxDepth === undefined ? 4 : toInteger(input.maxDepth, 'maxDepth')));
+  const maxNodes = Math.max(1, Math.min(MAX_UIA_NODES, input.maxNodes === undefined ? 200 : toInteger(input.maxNodes, 'maxNodes')));
+  const textIncludes = typeof input.textIncludes === 'string' ? input.textIncludes.trim() : '';
+  const controlType = normalizeControlType(input.controlType);
+
+  return `
+${powerShellJsonInputScript({ hwnd, titleIncludes, maxDepth, maxNodes, textIncludes, controlType })}
+${WINDOWS_ENUM_SCRIPT}
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+function Convert-UClawAutomationElement($Element, [int]$Depth, [ref]$Count) {
+  if ($null -eq $Element -or $Count.Value -ge [int]$InputJson.maxNodes) { return $null }
+  $Count.Value++
+  $rect = $Element.Current.BoundingRectangle
+  $name = $Element.Current.Name
+  $automationId = $Element.Current.AutomationId
+  $className = $Element.Current.ClassName
+  $controlTypeName = $Element.Current.ControlType.ProgrammaticName
+  if ($controlTypeName) { $controlTypeName = $controlTypeName -replace '^ControlType\\.', '' }
+  $children = New-Object System.Collections.Generic.List[object]
+  $node = [pscustomobject]@{
+    name = $name
+    automationId = $automationId
+    className = $className
+    controlType = $controlTypeName
+    isEnabled = $Element.Current.IsEnabled
+    isOffscreen = $Element.Current.IsOffscreen
+    bounds = [pscustomobject]@{
+      x = [int]$rect.X
+      y = [int]$rect.Y
+      width = [int]$rect.Width
+      height = [int]$rect.Height
+    }
+    children = @()
+  }
+  if ($Depth -lt [int]$InputJson.maxDepth) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $child = $walker.GetFirstChild($Element)
+    while ($null -ne $child -and $Count.Value -lt [int]$InputJson.maxNodes) {
+      $converted = Convert-UClawAutomationElement $child ($Depth + 1) $Count
+      if ($null -ne $converted) { $children.Add($converted) }
+      $child = $walker.GetNextSibling($child)
+    }
+  }
+  $node.children = @($children.ToArray())
+  $node
+}
+function Find-UClawAutomationMatches($Node, $Matches) {
+  if ($null -eq $Node) { return }
+  $textNeedle = [string]$InputJson.textIncludes
+  $typeNeedle = [string]$InputJson.controlType
+  $textOk = [string]::IsNullOrWhiteSpace($textNeedle) -or (
+    ($Node.name -and $Node.name.IndexOf($textNeedle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+    ($Node.automationId -and $Node.automationId.IndexOf($textNeedle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+  )
+  $typeOk = [string]::IsNullOrWhiteSpace($typeNeedle) -or (
+    $Node.controlType -and $Node.controlType.ToLowerInvariant().Contains($typeNeedle)
+  )
+  if ($textOk -and $typeOk) { $Matches.Add($Node) }
+  foreach ($child in @($Node.children)) { Find-UClawAutomationMatches $child $Matches }
+}
+$target = $null
+if ($InputJson.hwnd) {
+  $target = Get-UClawSystemWindows | Where-Object { $_.hwnd -eq [int64]$InputJson.hwnd } | Select-Object -First 1
+} elseif ($InputJson.titleIncludes) {
+  $needle = [string]$InputJson.titleIncludes
+  $target = Get-UClawSystemWindows | Where-Object { $_.title.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | Select-Object -First 1
+} else {
+  $target = Convert-UClawWindow ([UClawWindows]::GetForegroundWindow())
+}
+if (-not $target) { throw "No matching system window found" }
+$rootElement = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new([int64]$target.hwnd))
+if ($null -eq $rootElement) { throw "UI Automation root element is unavailable" }
+$count = 0
+$tree = Convert-UClawAutomationElement $rootElement 0 ([ref]$count)
+$matches = New-Object System.Collections.Generic.List[object]
+if ($InputJson.textIncludes -or $InputJson.controlType) { Find-UClawAutomationMatches $tree $matches }
+[pscustomobject]@{
+  window = $target
+  tree = $tree
+  matches = @($matches.ToArray())
+  nodeCount = $count
+  truncated = $count -ge [int]$InputJson.maxNodes
+} | ConvertTo-Json -Compress -Depth 12
+`;
+}
+
+async function getUiaTree(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  maxDepth?: unknown;
+  maxNodes?: unknown;
+}): Promise<{
+  window: unknown;
+  tree: unknown;
+  matches: unknown[];
+  nodeCount: number;
+  truncated: boolean;
+}> {
+  return await runWindowsPowerShellJson(buildUiaTreeScript(input));
+}
+
+async function findUiaElements(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  maxDepth?: unknown;
+  maxNodes?: unknown;
+  textIncludes?: unknown;
+  controlType?: unknown;
+}): Promise<{
+  window: unknown;
+  tree: unknown;
+  matches: unknown[];
+  nodeCount: number;
+  truncated: boolean;
+}> {
+  return await runWindowsPowerShellJson(buildUiaTreeScript(input));
+}
+
 export async function handleComputerRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -972,6 +1117,36 @@ export async function handleComputerRoutes(
     sendJson(res, 200, {
       success: true,
       result: await inspectScreen(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/uia/tree' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      hwnd?: unknown;
+      titleIncludes?: unknown;
+      maxDepth?: unknown;
+      maxNodes?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await getUiaTree(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/uia/find' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      hwnd?: unknown;
+      titleIncludes?: unknown;
+      maxDepth?: unknown;
+      maxNodes?: unknown;
+      textIncludes?: unknown;
+      controlType?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await findUiaElements(body),
     });
     return true;
   }
