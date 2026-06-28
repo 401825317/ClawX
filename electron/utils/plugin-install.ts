@@ -293,12 +293,6 @@ export function findBestBundledPluginSource(candidateSources: string[], targetDi
   const availableSources = candidateSources.filter((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
   if (availableSources.length === 0) return null;
 
-  const targetFingerprint = targetDir ? readPluginContentFingerprint(targetDir) : null;
-  if (targetFingerprint) {
-    const matchingSource = availableSources.find((dir) => readPluginContentFingerprint(dir) === targetFingerprint);
-    if (matchingSource) return matchingSource;
-  }
-
   let bestSource: { dir: string; mtimeMs: number } | null = null;
   for (const dir of availableSources) {
     let mtimeMs = 0;

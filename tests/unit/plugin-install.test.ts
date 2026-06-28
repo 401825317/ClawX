@@ -37,6 +37,10 @@ const {
 
 const ORIGINAL_PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, 'platform');
 
+function normalizeTestPath(input: unknown): string {
+  return String(input).replace(/\\/g, '/');
+}
+
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   const mocked = {
@@ -100,6 +104,7 @@ describe('plugin installer diagnostics', () => {
     vi.clearAllMocks();
     mockApp.isPackaged = true;
     mockHomedir.mockReturnValue('/home/test');
+    process.env.OPENCLAW_HOME = '/home/test';
     setPlatform('linux');
 
     mockExistsSync.mockReturnValue(false);
@@ -113,6 +118,7 @@ describe('plugin installer diagnostics', () => {
   });
 
   afterEach(() => {
+    delete process.env.OPENCLAW_HOME;
     if (ORIGINAL_PLATFORM_DESCRIPTOR) {
       Object.defineProperty(process, 'platform', ORIGINAL_PLATFORM_DESCRIPTOR);
     }
@@ -130,6 +136,7 @@ describe('plugin installer diagnostics', () => {
   it('retries once on Windows and logs diagnostic details when bundled copy fails', async () => {
     setPlatform('win32');
     mockHomedir.mockReturnValue('C:\\Users\\test');
+    process.env.OPENCLAW_HOME = 'C:\\Users\\test';
 
     const sourceDir = 'C:\\Program Files\\ClawX\\resources\\openclaw-plugins\\wecom';
     const sourceManifestSuffix = 'Program Files\\ClawX\\resources\\openclaw-plugins\\wecom\\openclaw.plugin.json';
@@ -208,7 +215,7 @@ describe('plugin installer diagnostics', () => {
       '[plugin] Bundled mirror install failed for WeCom',
       expect.objectContaining({
         sourceDir,
-        targetDir: expect.stringContaining('.openclaw/extensions/wecom'),
+        targetDir: expect.stringContaining('.openclaw\\extensions\\wecom'),
         platform: 'win32',
         attempts: [
           expect.objectContaining({ attempt: 1, code: 'EPERM' }),
@@ -228,47 +235,92 @@ describe('plugin installer diagnostics', () => {
     const targetPackage = `${targetDir}/package.json`;
     const targetEntry = `${targetDir}/index.mjs`;
 
-    mockExistsSync.mockImplementation((input: string) => [
-      sourceManifest,
-      sourcePackage,
-      sourceEntry,
-      targetManifest,
-      targetPackage,
-      targetEntry,
-    ].includes(String(input)));
+    mockExistsSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      return [
+        sourceManifest,
+        sourcePackage,
+        sourceEntry,
+        targetManifest,
+        targetPackage,
+        targetEntry,
+      ].includes(filePath) || filePath.endsWith('/.openclaw/extensions/clawx-openai-image/openclaw.plugin.json');
+    });
 
     mockReadFileSync.mockImplementation((input: string) => {
-      switch (String(input)) {
-        case sourceManifest:
-        case targetManifest:
+      const filePath = normalizeTestPath(input);
+      const isSource = filePath.includes('/bundle/clawx-openai-image/');
+      const isTarget = filePath.includes('/.openclaw/extensions/clawx-openai-image/');
+      if (isSource || isTarget) {
+        if (filePath.endsWith('/openclaw.plugin.json')) {
           return JSON.stringify({ id: 'clawx-openai-image', entry: 'index.mjs' });
-        case sourcePackage:
-        case targetPackage:
+        }
+        if (filePath.endsWith('/package.json')) {
           return JSON.stringify({ name: 'clawx-openai-image-plugin', version: '0.1.4', main: 'index.mjs' });
-        case sourceEntry:
+        }
+        if (filePath.endsWith('/index.mjs') && isSource) {
           return 'export const value = "new";';
-        case targetEntry:
+        }
+        if (filePath.endsWith('/index.mjs') && isTarget) {
           return 'export const value = "old";';
-        default:
-          return '{}';
+        }
       }
+      return '{}';
     });
 
     const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
     const result = ensurePluginInstalled('clawx-openai-image', [sourceDir], 'UClaw OpenAI Image');
 
     expect(result).toEqual({ installed: true });
-    expect(mockRmSync).toHaveBeenCalledWith('/home/test/.openclaw/extensions/clawx-openai-image', {
+    expect(mockRmSync).toHaveBeenCalledWith(expect.stringContaining('.openclaw\\extensions\\clawx-openai-image'), {
       recursive: true,
       force: true,
     });
     expect(mockCpSync).toHaveBeenCalledWith(
       '/bundle/clawx-openai-image',
-      '/home/test/.openclaw/extensions/clawx-openai-image',
+      expect.stringContaining('.openclaw\\extensions\\clawx-openai-image'),
       { recursive: true, dereference: true },
     );
     expect(mockLoggerInfo).toHaveBeenCalledWith(
       '[plugin] Refreshing UClaw OpenAI Image plugin: bundled content changed without version bump',
     );
+  });
+
+  it('chooses the newest bundled source instead of a stale source that matches the installed copy', async () => {
+    const buildDir = '/app/build/openclaw-plugins/uclaw-computer-use';
+    const resourcesDir = '/app/resources/openclaw-plugins/uclaw-computer-use';
+    const targetDir = '/home/test/.openclaw/extensions/uclaw-computer-use';
+
+    mockExistsSync.mockImplementation((input: string) => normalizeTestPath(input).endsWith('/openclaw.plugin.json'));
+    mockReadFileSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (filePath.endsWith('/openclaw.plugin.json')) {
+        const hasNewTool = filePath.startsWith(resourcesDir);
+        return JSON.stringify({
+          id: 'uclaw-computer-use',
+          entry: 'index.mjs',
+          contracts: {
+            tools: hasNewTool ? ['computer_screenshot', 'computer_web_observe'] : ['computer_screenshot'],
+          },
+        });
+      }
+      if (filePath.endsWith('/package.json')) {
+        return JSON.stringify({ name: 'uclaw-computer-use-plugin', version: '0.1.0', main: 'index.mjs' });
+      }
+      if (filePath.endsWith('/index.mjs')) {
+        return filePath.startsWith(resourcesDir)
+          ? 'export const tool = "computer_web_observe";'
+          : 'export const tool = "computer_screenshot";';
+      }
+      return '{}';
+    });
+    mockStatSync.mockImplementation((input: string) => ({
+      isDirectory: () => false,
+      mtimeMs: normalizeTestPath(input).startsWith(resourcesDir) ? 200 : 100,
+    }) as never);
+
+    const { findBestBundledPluginSource } = await import('@electron/utils/plugin-install');
+
+    expect(findBestBundledPluginSource([buildDir, resourcesDir], targetDir)).toBe(resourcesDir);
   });
 });

@@ -430,6 +430,46 @@ export const pluginEntry = defineToolPlugin({
       })),
     }),
     tool({
+      name: 'computer_web_observe',
+      label: 'Observe external browser',
+      description: 'Observe an external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi through Windows UI Automation plus an optional window screenshot. Returns window/foreground info, inferred URL/title when UIA exposes it, visible text, clickable/editable candidates with bounds/centers, and screenshot coordinate metadata. Use this before visual guessing or repeated image calls on the user\'s normal browser.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...WINDOW_TARGET_PROPERTIES,
+          processName: {
+            type: 'string',
+            description: 'Optional browser process name, for example chrome, msedge, brave, chromium, firefox, opera, or vivaldi. Defaults to the first visible supported browser.',
+          },
+          focus: {
+            type: 'boolean',
+            description: 'Whether to restore and focus the browser window before observing. Defaults to true.',
+          },
+          includeScreenshot: {
+            type: 'boolean',
+            description: 'Whether to include a window screenshot artifact and coordinateMapping. Defaults to true.',
+          },
+          maxNodes: {
+            type: 'integer',
+            minimum: 50,
+            maximum: 500,
+            description: 'Maximum UIA nodes to scan. Defaults to 300.',
+          },
+          maxCandidates: {
+            type: 'integer',
+            minimum: 10,
+            maximum: 120,
+            description: 'Maximum clickable/editable candidates to return. Defaults to 60.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/web/observe', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
       name: 'computer_browser_dom_snapshot',
       label: 'Inspect browser DOM',
       description: 'Inspect the DOM of the UClaw/Electron browser window and return visible interactive elements with selectors, text, roles, and bounds. This is for UClaw app windows, not arbitrary external Chrome tabs.',

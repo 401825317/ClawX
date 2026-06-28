@@ -34,6 +34,7 @@ const MAX_DOM_NODES = 800;
 const MAX_AGENT_STEPS = 12;
 const MAX_BROWSER_OPEN_URL_LENGTH = 4096;
 const MAX_WINDOW_SOURCE_PREVIEW_COUNT = 6;
+const DEFAULT_BROWSER_PROCESS_NAMES = new Set(['chrome', 'msedge', 'brave', 'brave-browser', 'chromium', 'firefox', 'opera', 'opera_gx', 'vivaldi']);
 
 type BrowserDomNode = {
   index: number;
@@ -79,6 +80,32 @@ type SystemWindowInfo = {
   processId?: number;
   processName?: string | null;
   bounds?: unknown;
+};
+
+type UiaNodeInfo = {
+  name?: string;
+  automationId?: string;
+  className?: string;
+  controlType?: string;
+  value?: string | null;
+  isEnabled?: boolean;
+  isOffscreen?: boolean;
+  bounds?: unknown;
+  children?: UiaNodeInfo[];
+};
+
+type WebObserveCandidate = {
+  index: number;
+  kind: 'clickable' | 'editable' | 'text';
+  name: string;
+  value?: string | null;
+  controlType: string;
+  automationId?: string;
+  className?: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  center: { x: number; y: number };
+  enabled: boolean;
+  offscreen: boolean;
 };
 
 type ExpectedForegroundInput = {
@@ -316,6 +343,12 @@ function normalizeSystemWindowBounds(bounds: unknown): { x: number; y: number; w
     width: Math.round(width),
     height: Math.round(height),
   };
+}
+
+function isBrowserProcessName(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = normalizeProcessName(value);
+  return DEFAULT_BROWSER_PROCESS_NAMES.has(normalized);
 }
 
 async function findSystemWindowForSourceName(sourceName: string): Promise<SystemWindowInfo | null> {
@@ -952,7 +985,7 @@ async function listSystemWindows(input: {
   limit?: unknown;
 }): Promise<{ windows: unknown[] }> {
   const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
-  const processName = typeof input.processName === 'string' ? input.processName.trim() : '';
+  const processName = typeof input.processName === 'string' ? normalizeProcessName(input.processName) : '';
   const visibleOnly = input.visibleOnly !== false;
   const limit = Math.max(1, Math.min(200, input.limit === undefined ? 80 : toInteger(input.limit, 'limit')));
   return await runWindowsPowerShellJson<{ windows: unknown[] }>(`
@@ -1233,12 +1266,18 @@ function Convert-UClawAutomationElement($Element, [int]$Depth, [ref]$Count) {
   $className = $Element.Current.ClassName
   $controlTypeName = $Element.Current.ControlType.ProgrammaticName
   if ($controlTypeName) { $controlTypeName = $controlTypeName -replace '^ControlType\\.', '' }
+  $value = $null
+  try {
+    $valuePattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($null -ne $valuePattern) { $value = $valuePattern.Current.Value }
+  } catch {}
   $children = New-Object System.Collections.Generic.List[object]
   $node = [pscustomobject]@{
     name = $name
     automationId = $automationId
     className = $className
     controlType = $controlTypeName
+    value = $value
     isEnabled = $Element.Current.IsEnabled
     isOffscreen = $Element.Current.IsOffscreen
     bounds = [pscustomobject]@{
@@ -1331,6 +1370,181 @@ async function findUiaElements(input: {
   truncated: boolean;
 }> {
   return await runWindowsPowerShellJson(buildUiaTreeScript(input));
+}
+
+function flattenUiaTree(root: unknown): UiaNodeInfo[] {
+  const nodes: UiaNodeInfo[] = [];
+  const stack = root && typeof root === 'object' ? [root as UiaNodeInfo] : [];
+  while (stack.length > 0) {
+    const node = stack.shift();
+    if (!node) continue;
+    nodes.push(node);
+    const children = Array.isArray(node.children) ? node.children : [];
+    for (const child of children) {
+      if (child && typeof child === 'object') stack.push(child);
+    }
+  }
+  return nodes;
+}
+
+function normalizeUiaBounds(bounds: unknown): { x: number; y: number; width: number; height: number } | null {
+  const normalized = normalizeSystemWindowBounds(bounds);
+  if (!normalized || normalized.width <= 0 || normalized.height <= 0) return null;
+  return normalized;
+}
+
+function isLikelyClickableControl(controlType: string): boolean {
+  return ['button', 'hyperlink', 'menuitem', 'tabitem', 'listitem', 'treeitem', 'checkbox', 'radioButton', 'splitButton']
+    .some((item) => controlType.toLowerCase().includes(item.toLowerCase()));
+}
+
+function isLikelyEditableControl(controlType: string): boolean {
+  return ['edit', 'document', 'comboBox'].some((item) => controlType.toLowerCase().includes(item.toLowerCase()));
+}
+
+function summarizeUiaText(nodes: UiaNodeInfo[], maxItems: number): string[] {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const node of nodes) {
+    const text = [node.name, node.value].filter((item) => typeof item === 'string' && item.trim()).join(' | ').trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    lines.push(text.slice(0, 300));
+    if (lines.length >= maxItems) break;
+  }
+  return lines;
+}
+
+function extractWebObserveCandidates(nodes: UiaNodeInfo[], maxCandidates: number): WebObserveCandidate[] {
+  const candidates: WebObserveCandidate[] = [];
+  for (const node of nodes) {
+    const bounds = normalizeUiaBounds(node.bounds);
+    if (!bounds) continue;
+    const controlType = String(node.controlType || '');
+    const name = String(node.name || node.value || node.automationId || '').replace(/\s+/gu, ' ').trim();
+    const editable = isLikelyEditableControl(controlType);
+    const clickable = isLikelyClickableControl(controlType);
+    if (!name && !editable && !clickable) continue;
+    const offscreen = node.isOffscreen === true;
+    if (offscreen) continue;
+    const kind = editable ? 'editable' : clickable ? 'clickable' : 'text';
+    candidates.push({
+      index: candidates.length,
+      kind,
+      name: name.slice(0, 240),
+      value: typeof node.value === 'string' ? node.value.slice(0, 500) : null,
+      controlType,
+      automationId: node.automationId,
+      className: node.className,
+      bounds,
+      center: {
+        x: Math.round(bounds.x + bounds.width / 2),
+        y: Math.round(bounds.y + bounds.height / 2),
+      },
+      enabled: node.isEnabled !== false,
+      offscreen,
+    });
+    if (candidates.length >= maxCandidates) break;
+  }
+  return candidates;
+}
+
+function inferBrowserLocation(nodes: UiaNodeInfo[]): { url: string | null; title: string | null; source: string } {
+  const editableNodes = nodes.filter((node) => isLikelyEditableControl(String(node.controlType || '')));
+  for (const node of editableNodes) {
+    const value = typeof node.value === 'string' ? node.value.trim() : '';
+    if (/^https?:\/\//iu.test(value) || /^[\w.-]+\.[a-z]{2,}(\/|$)/iu.test(value)) {
+      return {
+        url: value,
+        title: typeof node.name === 'string' && node.name.trim() ? node.name.trim() : null,
+        source: 'uia-edit-value',
+      };
+    }
+  }
+  return { url: null, title: null, source: 'unresolved' };
+}
+
+async function findBrowserWindow(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  processName?: unknown;
+}): Promise<SystemWindowInfo> {
+  const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
+  const processName = typeof input.processName === 'string' ? input.processName.trim() : '';
+
+  if (hwnd) {
+    const windows = await listSystemWindows({ visibleOnly: false, limit: 200 });
+    const match = windows.windows.find((item) => Number((item as SystemWindowInfo).hwnd) === hwnd) as SystemWindowInfo | undefined;
+    if (match) return match;
+    throw new Error(`No system window found for hwnd ${hwnd}`);
+  }
+
+  if (titleIncludes || processName) {
+    const windows = await listSystemWindows({ titleIncludes, processName, visibleOnly: true, limit: 50 });
+    const match = windows.windows.find((item) => {
+      const win = item as SystemWindowInfo;
+      return processName ? true : isBrowserProcessName(win.processName);
+    }) as SystemWindowInfo | undefined;
+    if (match) return match;
+  }
+
+  const windows = await listSystemWindows({ visibleOnly: true, limit: 120 });
+  const match = windows.windows.find((item) => isBrowserProcessName((item as SystemWindowInfo).processName)) as SystemWindowInfo | undefined;
+  if (match) return match;
+  throw new Error('No visible Chrome, Edge, Brave, or Chromium browser window found');
+}
+
+async function observeExternalBrowser(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  processName?: unknown;
+  focus?: unknown;
+  includeScreenshot?: unknown;
+  maxNodes?: unknown;
+  maxCandidates?: unknown;
+}): Promise<{
+  window: SystemWindowInfo;
+  foreground: SystemWindowInfo | null;
+  browser: { url: string | null; title: string | null; source: string };
+  uia: {
+    nodeCount: number;
+    truncated: boolean;
+    visibleText: string[];
+    candidates: WebObserveCandidate[];
+  };
+  screenshot: Awaited<ReturnType<typeof captureWindowScreenshot>> | null;
+  note: string;
+}> {
+  const target = await findBrowserWindow(input);
+  const focus = input.focus !== false;
+  if (focus) {
+    await controlSystemWindow({ hwnd: target.hwnd, action: 'restore' });
+    await controlSystemWindow({ hwnd: target.hwnd, action: 'focus' });
+  }
+
+  const maxNodes = Math.max(50, Math.min(MAX_UIA_NODES, input.maxNodes === undefined ? 300 : toInteger(input.maxNodes, 'maxNodes')));
+  const uia = await getUiaTree({ hwnd: target.hwnd, maxDepth: 5, maxNodes });
+  const nodes = flattenUiaTree(uia.tree);
+  const maxCandidates = Math.max(10, Math.min(120, input.maxCandidates === undefined ? 60 : toInteger(input.maxCandidates, 'maxCandidates')));
+  const screenshot = input.includeScreenshot === false
+    ? null
+    : await captureWindowScreenshot({ titleIncludes: target.title || undefined }).catch(() => null);
+  const foreground = await getForegroundSystemWindow().then((result) => result.window).catch(() => null);
+
+  return {
+    window: (uia.window || target) as SystemWindowInfo,
+    foreground,
+    browser: inferBrowserLocation(nodes),
+    uia: {
+      nodeCount: uia.nodeCount,
+      truncated: uia.truncated,
+      visibleText: summarizeUiaText(nodes, 80),
+      candidates: extractWebObserveCandidates(nodes, maxCandidates),
+    },
+    screenshot,
+    note: 'External browser observed through Windows UI Automation plus optional window screenshot. Use candidate bounds/center with expectedForeground for mouse/keyboard actions. If DOM access is required and browser tool is healthy, prefer browser snapshots for managed OpenClaw tabs.',
+  };
 }
 
 function getTargetBrowserWindow(ctx: HostApiContext, windowId?: unknown): BrowserWindow {
@@ -1787,6 +2001,23 @@ export async function handleComputerRoutes(
     sendJson(res, 200, {
       success: true,
       result: await findUiaElements(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/web/observe' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      hwnd?: unknown;
+      titleIncludes?: unknown;
+      processName?: unknown;
+      focus?: unknown;
+      includeScreenshot?: unknown;
+      maxNodes?: unknown;
+      maxCandidates?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await observeExternalBrowser(body),
     });
     return true;
   }
