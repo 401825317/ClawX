@@ -33,6 +33,25 @@ const CONFIRMED_SCHEMA = {
   type: 'boolean',
   description: 'Set true only after user confirmation for mutating or risky actions. If omitted, the host returns requiresConfirmation without executing.',
 };
+const EXPECTED_FOREGROUND_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  description: 'Safety guard for global mouse/keyboard input. Pass the target foreground window from computer_system_window_list/computer_system_window_foreground; the host refuses input if another window is foreground.',
+  properties: {
+    hwnd: {
+      type: 'number',
+      description: 'Expected foreground window handle.',
+    },
+    titleIncludes: {
+      type: 'string',
+      description: 'Expected case-insensitive title substring when hwnd is unavailable.',
+    },
+    processName: {
+      type: 'string',
+      description: 'Expected process name, with or without .exe.',
+    },
+  },
+};
 const WINDOW_TARGET_PROPERTIES = {
   hwnd: {
     type: 'number',
@@ -96,7 +115,7 @@ function summarizeScreenshot(payload) {
     mimeType: screenshot.mimeType || 'image/png',
     fileSize: screenshot.fileSize,
     sourceName: screenshot.sourceName,
-    note: 'Desktop screenshot captured. Use filePath as the image artifact path when you need to inspect or attach it.',
+    note: 'Desktop screenshot captured. Treat filePath as visual context for the current chat model. Do not call the standalone image tool without an explicit current-session vision model.',
   };
 }
 
@@ -118,7 +137,7 @@ function summarizeInspection(payload) {
       blocks: [],
       reason: 'No OCR result returned.',
     },
-    note: 'Use the screenshot filePath with a vision-capable model if OCR.supported is false or OCR text is insufficient.',
+    note: 'If OCR text is insufficient, treat the screenshot filePath as visual context for the current chat model. Do not call the standalone image tool without an explicit current-session vision model.',
   };
 }
 
@@ -134,7 +153,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_screenshot',
       label: 'Capture desktop screenshot',
-      description: 'Capture the current full desktop screen and return the saved PNG file path. Use this when the user asks to see, inspect, or screenshot their current screen.',
+      description: 'Capture the current full desktop screen and return the saved PNG file path. Use this when the user asks to see, inspect, or screenshot their current screen. The screenshot is visual context for the current chat model; avoid standalone image-tool fallbacks unless you pass the current session vision model explicitly.',
       parameters: EMPTY_OBJECT_SCHEMA,
       execute: async () => summarizeScreenshot(await hostApiFetch('/api/computer/screenshot', {
         method: 'POST',
@@ -144,7 +163,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_inspect_screen',
       label: 'Inspect screen',
-      description: 'Capture the desktop or a window and return a screenshot artifact plus OCR status. Use this as the first observation step for visual desktop tasks. If OCR is unsupported, use the returned screenshot file path with a vision-capable model.',
+      description: 'Capture the desktop or a window and return a screenshot artifact plus OCR status. Use this as the first observation step for visual desktop tasks. If OCR is unsupported, use the returned screenshot file path as current-model visual context, not as a reason to call the standalone image tool without an explicit model.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -214,6 +233,27 @@ export const pluginEntry = defineToolPlugin({
         const payload = await hostApiFetch('/api/computer/windows', { method: 'GET' });
         return payload.result || payload;
       },
+    }),
+    tool({
+      name: 'computer_browser_open_url',
+      label: 'Open URL in browser',
+      description: 'Open an absolute http/https URL in the system default browser. Use this before window focusing when the task asks to open a website or no existing Chrome/Edge window is available. Requires confirmed=true because it changes the desktop state.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['url'],
+        properties: {
+          url: {
+            type: 'string',
+            description: 'Absolute http or https URL to open.',
+          },
+          confirmed: CONFIRMED_SCHEMA,
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/browser/open-url', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
     }),
     tool({
       name: 'computer_system_window_list',
@@ -538,14 +578,33 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_window_sources',
       label: 'List capturable windows',
-      description: 'List desktop windows that can be captured by UClaw, including source ids for window screenshots.',
-      parameters: EMPTY_OBJECT_SCHEMA,
-      execute: async () => resultOrPayload(await hostApiFetch('/api/computer/window-sources', { method: 'GET' })),
+      description: 'List desktop windows that can be captured by UClaw, including source ids for window screenshots. By default this returns only ids/names to keep model context small; request previews only when visual disambiguation is necessary.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          includePreviews: {
+            type: 'boolean',
+            description: 'Set true only when several windows have ambiguous names and thumbnail previews are needed.',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of windows to return. Preview requests are capped by the client.',
+          },
+        },
+      },
+      execute: async (params = {}) => {
+        const search = new URLSearchParams();
+        if (params.includePreviews === true) search.set('includePreviews', 'true');
+        if (Number.isFinite(params.limit)) search.set('limit', String(params.limit));
+        const suffix = search.toString() ? `?${search.toString()}` : '';
+        return resultOrPayload(await hostApiFetch(`/api/computer/window-sources${suffix}`, { method: 'GET' }));
+      },
     }),
     tool({
       name: 'computer_window_screenshot',
       label: 'Capture window screenshot',
-      description: 'Capture a screenshot of an application window. Provide sourceId from computer_window_sources or titleIncludes to choose a window.',
+      description: 'Capture a screenshot of an application window. Provide sourceId from computer_window_sources or titleIncludes to choose a window. The screenshot should be interpreted by the current chat model when it supports images; do not use the standalone image tool without an explicit current-session vision model.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -582,7 +641,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_mouse_move',
       label: 'Move mouse',
-      description: 'Move the global mouse cursor to absolute screen coordinates. Use display bounds from computer_display_list when planning coordinates.',
+      description: 'Move the global mouse cursor to absolute screen coordinates. Use display bounds from computer_display_list when planning coordinates. For app-specific work, pass expectedForeground so the host refuses movement if the wrong window is foreground.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -590,6 +649,7 @@ export const pluginEntry = defineToolPlugin({
         properties: {
           x: { type: 'number', description: 'Absolute screen X coordinate.' },
           y: { type: 'number', description: 'Absolute screen Y coordinate.' },
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/move', {
@@ -600,7 +660,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_mouse_click',
       label: 'Click mouse',
-      description: 'Click the global mouse cursor. Optionally move to absolute x/y before clicking.',
+      description: 'Click the global mouse cursor. Optionally move to absolute x/y before clicking. For app-specific work, first verify the foreground window and pass expectedForeground; if focus failed, do not click.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -615,6 +675,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Number of clicks, default 1.',
           },
           confirmed: CONFIRMED_SCHEMA,
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/click', {
@@ -625,7 +686,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_mouse_button',
       label: 'Mouse button down/up',
-      description: 'Press or release a mouse button without automatically releasing or pressing it. Useful for custom drag operations.',
+      description: 'Press or release a mouse button without automatically releasing or pressing it. Useful for custom drag operations. Pass expectedForeground for app-specific actions.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -638,6 +699,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Whether to press or release the button.',
           },
           confirmed: CONFIRMED_SCHEMA,
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/button', {
@@ -648,7 +710,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_mouse_scroll',
       label: 'Scroll mouse wheel',
-      description: 'Scroll the mouse wheel. Negative delta scrolls down; positive delta scrolls up. Optionally move to x/y first.',
+      description: 'Scroll the mouse wheel. Negative delta scrolls down; positive delta scrolls up. Optionally move to x/y first. Pass expectedForeground for app-specific scrolling.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -659,6 +721,7 @@ export const pluginEntry = defineToolPlugin({
           },
           x: { type: 'number', description: 'Optional absolute screen X coordinate.' },
           y: { type: 'number', description: 'Optional absolute screen Y coordinate.' },
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/scroll', {
@@ -669,7 +732,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_mouse_drag',
       label: 'Drag mouse',
-      description: 'Drag from one absolute screen coordinate to another using a mouse button.',
+      description: 'Drag from one absolute screen coordinate to another using a mouse button. Pass expectedForeground for app-specific dragging.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -685,6 +748,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Drag duration in milliseconds. Defaults to 350.',
           },
           confirmed: CONFIRMED_SCHEMA,
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/drag', {
@@ -695,7 +759,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_key_press',
       label: 'Press key',
-      description: 'Press a keyboard key, optionally with modifiers such as ctrl, shift, alt, or win.',
+      description: 'Press a keyboard key, optionally with modifiers such as ctrl, shift, alt, or win. For app-specific work, first verify the foreground window and pass expectedForeground; if focus failed, do not press keys.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -704,6 +768,7 @@ export const pluginEntry = defineToolPlugin({
           key: KEY_SCHEMA,
           modifiers: MODIFIERS_SCHEMA,
           confirmed: CONFIRMED_SCHEMA,
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/keyboard/press', {
@@ -714,7 +779,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_type_text',
       label: 'Type text',
-      description: 'Paste plain text into the currently focused app using the system clipboard followed by Ctrl+V.',
+      description: 'Paste plain text into the currently focused app using the system clipboard followed by Ctrl+V. For app-specific work, first verify the foreground window and pass expectedForeground; if focus failed, do not type.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -725,6 +790,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Plain text to paste into the currently focused app.',
           },
           confirmed: CONFIRMED_SCHEMA,
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/keyboard/type', {
@@ -735,7 +801,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_file_dialog_set_path',
       label: 'Set file dialog path',
-      description: 'Paste a file path into the currently focused system file picker and optionally press Enter. Use after opening a file upload/save dialog.',
+      description: 'Paste a file path into the currently focused system file picker and optionally press Enter. Use after opening a file upload/save dialog. Pass expectedForeground so the host refuses to paste into the wrong app.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -750,6 +816,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Whether to press Enter after pasting. Defaults to true.',
           },
           confirmed: CONFIRMED_SCHEMA,
+          expectedForeground: EXPECTED_FOREGROUND_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/file-dialog/set-path', {

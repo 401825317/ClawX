@@ -289,6 +289,57 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
 
 // ── pnpm-aware node_modules copy helpers ─────────────────────────────────────
 
+export function findBestBundledPluginSource(candidateSources: string[], targetDir?: string): string | null {
+  const availableSources = candidateSources.filter((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
+  if (availableSources.length === 0) return null;
+
+  const targetFingerprint = targetDir ? readPluginContentFingerprint(targetDir) : null;
+  if (targetFingerprint) {
+    const matchingSource = availableSources.find((dir) => readPluginContentFingerprint(dir) === targetFingerprint);
+    if (matchingSource) return matchingSource;
+  }
+
+  let bestSource: { dir: string; mtimeMs: number } | null = null;
+  for (const dir of availableSources) {
+    let mtimeMs = 0;
+    for (const fileName of ['openclaw.plugin.json', 'package.json']) {
+      try {
+        mtimeMs = Math.max(mtimeMs, statSync(fsPath(join(dir, fileName))).mtimeMs);
+      } catch {
+        // Ignore metadata read errors; install validation still checks the chosen source.
+      }
+    }
+
+    let entryFiles: unknown[] = [];
+    try {
+      const raw = readFileSync(fsPath(join(dir, 'package.json')), 'utf-8');
+      const pkg = JSON.parse(raw) as {
+        main?: string;
+        module?: string;
+        openclaw?: { extensions?: string[] };
+      };
+      entryFiles = [pkg.main, pkg.module, ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : [])];
+    } catch {
+      entryFiles = [];
+    }
+
+    for (const entryFile of entryFiles) {
+      if (typeof entryFile !== 'string' || !entryFile.trim()) continue;
+      try {
+        mtimeMs = Math.max(mtimeMs, statSync(fsPath(join(dir, entryFile))).mtimeMs);
+      } catch {
+        // Ignore absent entries here; the install step will surface broken sources.
+      }
+    }
+
+    if (!bestSource || mtimeMs > bestSource.mtimeMs) {
+      bestSource = { dir, mtimeMs };
+    }
+  }
+
+  return bestSource?.dir ?? availableSources[0] ?? null;
+}
+
 /** Walk up from a path until we find a parent named node_modules. */
 function findParentNodeModules(startPath: string): string | null {
   let dir = startPath;
@@ -407,7 +458,7 @@ export function ensurePluginInstalled(
   const targetManifest = join(targetDir, 'openclaw.plugin.json');
   const targetPkgJson = join(targetDir, 'package.json');
 
-  const sourceDir = candidateSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
+  const sourceDir = findBestBundledPluginSource(candidateSources, targetDir);
 
   // If already installed, check whether an upgrade is available
   if (existsSync(fsPath(targetManifest))) {

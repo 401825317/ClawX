@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { BrowserWindow, clipboard, desktopCapturer, screen } from 'electron';
+import { BrowserWindow, clipboard, desktopCapturer, screen, shell } from 'electron';
 import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -23,6 +23,7 @@ const COMPUTER_ACTIONS_REQUIRING_CONFIRMATION = new Set([
   'typeText',
   'fileDialogSetPath',
   'windowClose',
+  'openUrl',
 ]);
 const SWP_NOMOVE = 0x0002;
 const SWP_NOSIZE = 0x0001;
@@ -31,6 +32,8 @@ const MAX_UIA_DEPTH = 6;
 const MAX_UIA_NODES = 500;
 const MAX_DOM_NODES = 800;
 const MAX_AGENT_STEPS = 12;
+const MAX_BROWSER_OPEN_URL_LENGTH = 4096;
+const MAX_WINDOW_SOURCE_PREVIEW_COUNT = 6;
 
 type BrowserDomNode = {
   index: number;
@@ -65,6 +68,25 @@ type ComputerActionRisk = {
   reason: string;
 };
 type ConfirmableResult<T> = T | (ComputerActionRisk & { blocked: true });
+
+type SystemWindowInfo = {
+  hwnd?: number;
+  title?: string;
+  className?: string;
+  visible?: boolean;
+  enabled?: boolean;
+  minimized?: boolean;
+  processId?: number;
+  processName?: string | null;
+  bounds?: unknown;
+};
+
+type ExpectedForegroundInput = {
+  expectedForeground?: unknown;
+  expectedForegroundHwnd?: unknown;
+  expectedForegroundTitleIncludes?: unknown;
+  expectedForegroundProcessName?: unknown;
+};
 
 function getDesktopScreenshotsDir(): string {
   return join(getOpenClawMediaDir(), 'desktop-screenshots');
@@ -120,20 +142,39 @@ export async function captureDesktopScreenshot(): Promise<{
 async function listWindowSources(): Promise<Array<{
   id: string;
   name: string;
-  thumbnailPreview: string | null;
+  thumbnailPreview?: string | null;
 }>> {
+  return await getWindowSources({ includePreviews: false });
+}
+
+async function getWindowSources(input: {
+  includePreviews?: boolean;
+  limit?: number;
+} = {}): Promise<Array<{
+  id: string;
+  name: string;
+  thumbnailPreview?: string | null;
+}>> {
+  const includePreviews = input.includePreviews === true;
+  const limit = includePreviews
+    ? Math.max(1, Math.min(MAX_WINDOW_SOURCE_PREVIEW_COUNT, input.limit ?? MAX_WINDOW_SOURCE_PREVIEW_COUNT))
+    : Math.max(1, Math.min(200, input.limit ?? 100));
   const sources = await desktopCapturer.getSources({
     types: ['window'],
-    thumbnailSize: { width: 480, height: 270 },
+    thumbnailSize: includePreviews ? { width: 240, height: 135 } : { width: 1, height: 1 },
     fetchWindowIcons: false,
   });
 
-  return sources.map((source) => ({
+  return sources.slice(0, limit).map((source) => ({
     id: source.id,
     name: source.name,
-    thumbnailPreview: source.thumbnail.isEmpty()
-      ? null
-      : `data:image/png;base64,${source.thumbnail.toPNG().toString('base64')}`,
+    ...(includePreviews
+      ? {
+        thumbnailPreview: source.thumbnail.isEmpty()
+          ? null
+          : `data:image/png;base64,${source.thumbnail.toPNG().toString('base64')}`,
+      }
+      : {}),
   }));
 }
 
@@ -159,10 +200,16 @@ async function captureWindowScreenshot(input: {
 
   const source = sources.find((candidate) => sourceId && candidate.id === sourceId)
     ?? sources.find((candidate) => titleIncludes && candidate.name.toLowerCase().includes(titleIncludes))
-    ?? sources[0];
+    ?? (!sourceId && !titleIncludes ? sources[0] : undefined);
 
   if (!source || source.thumbnail.isEmpty()) {
-    throw new Error('No application window is available for screenshot capture');
+    const availableWindows = sources.map((candidate) => candidate.name).filter(Boolean).slice(0, 20);
+    const selector = sourceId
+      ? `sourceId "${sourceId}"`
+      : titleIncludes
+        ? `titleIncludes "${titleIncludes}"`
+        : 'the default window source';
+    throw new Error(`No application window screenshot source matched ${selector}. Restore/focus the target window first, or choose one of: ${availableWindows.join(', ')}`);
   }
 
   const png = source.thumbnail.toPNG();
@@ -295,6 +342,27 @@ function toInteger(value: unknown, field: string): number {
   return numberValue;
 }
 
+function normalizeBrowserOpenUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('url must be a non-empty string');
+  }
+  const rawUrl = value.trim();
+  if (rawUrl.length > MAX_BROWSER_OPEN_URL_LENGTH) {
+    throw new Error(`url is too long; max ${MAX_BROWSER_OPEN_URL_LENGTH} characters`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('url must be an absolute http or https URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('url protocol must be http or https');
+  }
+  parsed.hash = parsed.hash.slice(0, MAX_BROWSER_OPEN_URL_LENGTH);
+  return parsed.toString();
+}
+
 function normalizeMouseButton(value: unknown): 'left' | 'right' | 'middle' {
   const button = typeof value === 'string' ? value.toLowerCase().trim() : 'left';
   if (button === 'left' || button === 'right' || button === 'middle') {
@@ -366,6 +434,68 @@ function normalizeModifiers(value: unknown): Array<{ label: string; vk: number }
   return value.map(normalizeKey);
 }
 
+function normalizeProcessName(value: string): string {
+  return value.trim().toLowerCase().replace(/\.exe$/u, '');
+}
+
+function normalizeExpectedForeground(input: ExpectedForegroundInput): {
+  hwnd: number | null;
+  titleIncludes: string;
+  processName: string;
+} | null {
+  const expected = input.expectedForeground && typeof input.expectedForeground === 'object'
+    ? input.expectedForeground as Record<string, unknown>
+    : {};
+  const hwndValue = input.expectedForegroundHwnd ?? expected.hwnd;
+  const titleValue = input.expectedForegroundTitleIncludes ?? expected.titleIncludes;
+  const processValue = input.expectedForegroundProcessName ?? expected.processName;
+  const hwnd = hwndValue === undefined || hwndValue === null ? null : toInteger(hwndValue, 'expectedForeground.hwnd');
+  const titleIncludes = typeof titleValue === 'string' ? titleValue.trim() : '';
+  const processName = typeof processValue === 'string' ? processValue.trim() : '';
+  if (!hwnd && !titleIncludes && !processName) {
+    return null;
+  }
+  return { hwnd, titleIncludes, processName };
+}
+
+function describeWindowForError(window: SystemWindowInfo | null): string {
+  if (!window) return 'none';
+  const title = window.title ? `"${window.title}"` : '(untitled)';
+  const hwnd = window.hwnd ? `, hwnd=${window.hwnd}` : '';
+  const processName = window.processName ? `, process=${window.processName}` : '';
+  return `${title}${hwnd}${processName}`;
+}
+
+function foregroundMatches(expected: NonNullable<ReturnType<typeof normalizeExpectedForeground>>, current: SystemWindowInfo | null): boolean {
+  if (!current) return false;
+  if (expected.hwnd && current.hwnd !== expected.hwnd) {
+    return false;
+  }
+  if (expected.titleIncludes && !(current.title ?? '').toLowerCase().includes(expected.titleIncludes.toLowerCase())) {
+    return false;
+  }
+  if (expected.processName && normalizeProcessName(current.processName ?? '') !== normalizeProcessName(expected.processName)) {
+    return false;
+  }
+  return true;
+}
+
+async function assertExpectedForeground(input: ExpectedForegroundInput): Promise<SystemWindowInfo | null> {
+  const expected = normalizeExpectedForeground(input);
+  if (!expected) return null;
+  const { window } = await getForegroundSystemWindow();
+  const current = window && typeof window === 'object' ? window : null;
+  if (foregroundMatches(expected, current)) {
+    return current;
+  }
+  const expectedDescription = [
+    expected.hwnd ? `hwnd=${expected.hwnd}` : '',
+    expected.titleIncludes ? `titleIncludes="${expected.titleIncludes}"` : '',
+    expected.processName ? `processName=${expected.processName}` : '',
+  ].filter(Boolean).join(', ');
+  throw new Error(`Foreground window mismatch: expected ${expectedDescription}, current is ${describeWindowForError(current)}. Refusing global mouse/keyboard input.`);
+}
+
 async function getCursorPosition(): Promise<{ x: number; y: number }> {
   return await runWindowsPowerShellJson<{ x: number; y: number }>(`
 Add-Type -AssemblyName System.Windows.Forms
@@ -374,9 +504,10 @@ $p = [System.Windows.Forms.Cursor]::Position
 `);
 }
 
-async function moveMouse(input: { x?: unknown; y?: unknown }): Promise<{ x: number; y: number }> {
+async function moveMouse(input: { x?: unknown; y?: unknown } & ExpectedForegroundInput): Promise<{ x: number; y: number }> {
   const x = toInteger(input.x, 'x');
   const y = toInteger(input.y, 'y');
+  await assertExpectedForeground(input);
   return await runWindowsPowerShellJson<{ x: number; y: number }>(`
 Add-Type @"
 using System;
@@ -405,7 +536,7 @@ async function clickMouse(input: {
   button?: unknown;
   clicks?: unknown;
   confirmed?: unknown;
-}): Promise<ConfirmableResult<{ x?: number; y?: number; button: string; clicks: number }>> {
+} & ExpectedForegroundInput): Promise<ConfirmableResult<{ x?: number; y?: number; button: string; clicks: number }>> {
   const hasX = input.x !== undefined && input.x !== null;
   const hasY = input.y !== undefined && input.y !== null;
   if (hasX !== hasY) {
@@ -418,6 +549,7 @@ async function clickMouse(input: {
   const flags = mouseButtonFlags(button);
   const blocked = blockUnlessConfirmed(input, 'mouseClick', `button=${button}; clicks=${clicks}; x=${x ?? ''}; y=${y ?? ''}`);
   if (blocked) return blocked;
+  await assertExpectedForeground(input);
 
   return await runWindowsPowerShellJson<{ x?: number; y?: number; button: string; clicks: number }>(`
 Add-Type @"
@@ -445,7 +577,7 @@ async function mouseButton(input: {
   button?: unknown;
   action?: unknown;
   confirmed?: unknown;
-}): Promise<ConfirmableResult<{ button: string; action: string }>> {
+} & ExpectedForegroundInput): Promise<ConfirmableResult<{ button: string; action: string }>> {
   const button = normalizeMouseButton(input.button);
   const action = typeof input.action === 'string' ? input.action.trim().toLowerCase() : '';
   if (action !== 'down' && action !== 'up') {
@@ -455,6 +587,7 @@ async function mouseButton(input: {
   const selectedFlag = action === 'down' ? flags.down : flags.up;
   const blocked = blockUnlessConfirmed(input, 'mouseButton', `button=${button}; action=${action}`);
   if (blocked) return blocked;
+  await assertExpectedForeground(input);
 
   return await runWindowsPowerShellJson<{ button: string; action: string }>(`
 Add-Type @"
@@ -474,7 +607,7 @@ async function scrollMouse(input: {
   delta?: unknown;
   x?: unknown;
   y?: unknown;
-}): Promise<{ delta: number; x?: number; y?: number }> {
+} & ExpectedForegroundInput): Promise<{ delta: number; x?: number; y?: number }> {
   const delta = Math.max(-10_000, Math.min(10_000, toInteger(input.delta ?? -120, 'delta')));
   const hasX = input.x !== undefined && input.x !== null;
   const hasY = input.y !== undefined && input.y !== null;
@@ -483,6 +616,7 @@ async function scrollMouse(input: {
   }
   const x = hasX ? toInteger(input.x, 'x') : null;
   const y = hasY ? toInteger(input.y, 'y') : null;
+  await assertExpectedForeground(input);
 
   return await runWindowsPowerShellJson<{ delta: number; x?: number; y?: number }>(`
 Add-Type @"
@@ -509,7 +643,7 @@ async function dragMouse(input: {
   button?: unknown;
   durationMs?: unknown;
   confirmed?: unknown;
-}): Promise<ConfirmableResult<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }>> {
+} & ExpectedForegroundInput): Promise<ConfirmableResult<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }>> {
   const fromX = toInteger(input.fromX, 'fromX');
   const fromY = toInteger(input.fromY, 'fromY');
   const toX = toInteger(input.toX, 'toX');
@@ -521,6 +655,7 @@ async function dragMouse(input: {
   const sleepMs = Math.max(1, Math.floor(durationMs / steps));
   const blocked = blockUnlessConfirmed(input, 'mouseDrag', `from=${fromX},${fromY}; to=${toX},${toY}; button=${button}`);
   if (blocked) return blocked;
+  await assertExpectedForeground(input);
 
   return await runWindowsPowerShellJson<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }>(`
 Add-Type @"
@@ -547,7 +682,7 @@ for ($i = 1; $i -le ${steps}; $i++) {
 `);
 }
 
-async function pressKey(input: { key?: unknown; modifiers?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{
+async function pressKey(input: { key?: unknown; modifiers?: unknown; confirmed?: unknown } & ExpectedForegroundInput): Promise<ConfirmableResult<{
   key: string;
   modifiers: string[];
 }>> {
@@ -556,6 +691,7 @@ async function pressKey(input: { key?: unknown; modifiers?: unknown; confirmed?:
   const target = [...modifiers.map((item) => item.label), key.label].join('+');
   const blocked = blockUnlessConfirmed(input, 'keyPress', target);
   if (blocked) return blocked;
+  await assertExpectedForeground(input);
   const downSequence = [...modifiers, key];
   const upSequence = [...downSequence].reverse();
   const downScript = downSequence.map((item) => `[UClawKeyboard]::keybd_event(${item.vk}, 0, 0, [UIntPtr]::Zero)`).join('\n');
@@ -577,15 +713,24 @@ ${upScript}
 `);
 }
 
-async function typeText(input: { text?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{ length: number; method: 'clipboard-paste' }>> {
+async function typeText(input: { text?: unknown; confirmed?: unknown } & ExpectedForegroundInput): Promise<ConfirmableResult<{ length: number; method: 'clipboard-paste' }>> {
   const text = typeof input.text === 'string' ? input.text : '';
   if (text.length > MAX_TYPE_TEXT_LENGTH) {
     throw new Error(`text is too long; max ${MAX_TYPE_TEXT_LENGTH} characters`);
   }
   const blocked = blockUnlessConfirmed(input, 'typeText', text.slice(0, 200));
   if (blocked) return blocked;
+  await assertExpectedForeground(input);
   clipboard.writeText(text);
-  await pressKey({ key: 'v', modifiers: ['ctrl'], confirmed: true });
+  await pressKey({
+    key: 'v',
+    modifiers: ['ctrl'],
+    confirmed: true,
+    expectedForeground: input.expectedForeground,
+    expectedForegroundHwnd: input.expectedForegroundHwnd,
+    expectedForegroundTitleIncludes: input.expectedForegroundTitleIncludes,
+    expectedForegroundProcessName: input.expectedForegroundProcessName,
+  });
   return { length: text.length, method: 'clipboard-paste' };
 }
 
@@ -771,8 +916,8 @@ switch ([string]$InputJson.action) {
 `);
 }
 
-async function getForegroundSystemWindow(): Promise<{ window: unknown | null }> {
-  return await runWindowsPowerShellJson<{ window: unknown | null }>(`
+async function getForegroundSystemWindow(): Promise<{ window: SystemWindowInfo | null }> {
+  return await runWindowsPowerShellJson<{ window: SystemWindowInfo | null }>(`
 ${WINDOWS_ENUM_SCRIPT}
 $window = Convert-UClawWindow ([UClawWindows]::GetForegroundWindow())
 [pscustomobject]@{ window = $window } | ConvertTo-Json -Compress -Depth 6
@@ -860,7 +1005,7 @@ $ok = [UClawWindows]::SetWindowPos($handle, [IntPtr]::new([int64]$InputJson.inse
 `);
 }
 
-async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{
+async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown; confirmed?: unknown } & ExpectedForegroundInput): Promise<ConfirmableResult<{
   length: number;
   submitted: boolean;
   method: 'clipboard-paste';
@@ -874,11 +1019,27 @@ async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown; 
   }
   const blocked = blockUnlessConfirmed(input, 'fileDialogSetPath', filePath);
   if (blocked) return blocked;
+  await assertExpectedForeground(input);
   clipboard.writeText(filePath);
-  await pressKey({ key: 'v', modifiers: ['ctrl'], confirmed: true });
+  await pressKey({
+    key: 'v',
+    modifiers: ['ctrl'],
+    confirmed: true,
+    expectedForeground: input.expectedForeground,
+    expectedForegroundHwnd: input.expectedForegroundHwnd,
+    expectedForegroundTitleIncludes: input.expectedForegroundTitleIncludes,
+    expectedForegroundProcessName: input.expectedForegroundProcessName,
+  });
   const submit = input.submit !== false;
   if (submit) {
-    await pressKey({ key: 'enter', confirmed: true });
+    await pressKey({
+      key: 'enter',
+      confirmed: true,
+      expectedForeground: input.expectedForeground,
+      expectedForegroundHwnd: input.expectedForegroundHwnd,
+      expectedForegroundTitleIncludes: input.expectedForegroundTitleIncludes,
+      expectedForegroundProcessName: input.expectedForegroundProcessName,
+    });
   }
   return { length: filePath.length, submitted: submit, method: 'clipboard-paste' };
 }
@@ -936,6 +1097,17 @@ ${powerShellJsonInputScript({ hwnd, titleIncludes, maxDepth, maxNodes, textInclu
 ${WINDOWS_ENUM_SCRIPT}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+function Convert-UClawSafeInt($Value) {
+  if ($null -eq $Value) { return $null }
+  try {
+    $number = [double]$Value
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+    if ($number -lt [int]::MinValue -or $number -gt [int]::MaxValue) { return $null }
+    return [int][math]::Round($number)
+  } catch {
+    return $null
+  }
+}
 function Convert-UClawAutomationElement($Element, [int]$Depth, [ref]$Count) {
   if ($null -eq $Element -or $Count.Value -ge [int]$InputJson.maxNodes) { return $null }
   $Count.Value++
@@ -954,10 +1126,10 @@ function Convert-UClawAutomationElement($Element, [int]$Depth, [ref]$Count) {
     isEnabled = $Element.Current.IsEnabled
     isOffscreen = $Element.Current.IsOffscreen
     bounds = [pscustomobject]@{
-      x = [int]$rect.X
-      y = [int]$rect.Y
-      width = [int]$rect.Width
-      height = [int]$rect.Height
+      x = Convert-UClawSafeInt $rect.X
+      y = Convert-UClawSafeInt $rect.Y
+      width = Convert-UClawSafeInt $rect.Width
+      height = Convert-UClawSafeInt $rect.Height
     }
     children = @()
   }
@@ -1239,6 +1411,22 @@ async function browserElementAction(ctx: HostApiContext, input: {
   return await executeJavaScript(win, script);
 }
 
+async function openBrowserUrl(input: { url?: unknown; confirmed?: unknown }): Promise<ConfirmableResult<{
+  url: string;
+  opened: true;
+  method: 'default-browser';
+}>> {
+  const url = normalizeBrowserOpenUrl(input.url);
+  const blocked = blockUnlessConfirmed(input, 'openUrl', url);
+  if (blocked) return blocked;
+  await shell.openExternal(url);
+  return {
+    url,
+    opened: true,
+    method: 'default-browser',
+  };
+}
+
 function evaluateComputerActionRisk(input: { action?: unknown; target?: unknown }): ComputerActionRisk {
   const action = typeof input.action === 'string' ? input.action.trim() : '';
   const target = typeof input.target === 'string' ? input.target.trim() : '';
@@ -1414,10 +1602,13 @@ export async function handleComputerRoutes(
   }
 
   if (url.pathname === '/api/computer/window-sources' && req.method === 'GET') {
+    const includePreviews = url.searchParams.get('includePreviews') === 'true';
+    const limitRaw = url.searchParams.get('limit');
+    const limit = limitRaw ? toInteger(limitRaw, 'limit') : undefined;
     sendJson(res, 200, {
       success: true,
       result: {
-        windows: await listWindowSources(),
+        windows: await getWindowSources({ includePreviews, limit }),
       },
     });
     return true;
@@ -1518,6 +1709,18 @@ export async function handleComputerRoutes(
     sendJson(res, 200, {
       success: true,
       result: await browserElementAction(ctx, body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/browser/open-url' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      url?: unknown;
+      confirmed?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await openBrowserUrl(body),
     });
     return true;
   }

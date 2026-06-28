@@ -33,7 +33,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -167,7 +167,7 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
 
     // Try bundled sources first (packaged mode or if bundle-plugins was run)
     const bundledSources = buildCandidateSources(dirName);
-    const bundledDir = bundledSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
+    const bundledDir = findBestBundledPluginSource(bundledSources, targetDir);
 
     if (bundledDir) {
       const sourceVersion = readPluginVersion(join(bundledDir, 'package.json'));
@@ -277,7 +277,10 @@ function buildPluginSourceSignatures(configuredChannels: string[]): Record<strin
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) continue;
     const bundledSources = buildCandidateSources(pluginInfo.dirName);
-    const bundledDir = bundledSources.find((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
+    const bundledDir = findBestBundledPluginSource(
+      bundledSources,
+      join(getOpenClawExtensionsDir(), pluginInfo.dirName),
+    );
     const devPkgPath = join(process.cwd(), 'node_modules', ...pluginInfo.npmName.split('/'));
     const sourceDir = bundledDir || (!app.isPackaged ? devPkgPath : '');
     signatures[channelType] = sourceDir
