@@ -249,7 +249,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_browser_open_url',
       label: 'Open URL in browser',
-      description: 'Open an absolute http/https URL in the system default browser. Use this before window focusing when the task asks to open a website or no existing Chrome/Edge window is available. Requires confirmed=true because it changes the desktop state.',
+      description: 'Open an absolute http/https URL in the system default browser. Use this before window focusing when the task asks to open a website or no existing Chrome/Edge window is available. Prefer this over exec/explorer/start/chrome shell launches for desktop browser automation; exec remains appropriate for normal local commands, logs, tests, and scripts. Requires confirmed=true because it changes the desktop state.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -303,7 +303,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_system_window_control',
       label: 'Control system window',
-      description: 'Focus, restore, minimize, maximize, or close a Windows desktop application window. Prefer hwnd from computer_system_window_list; titleIncludes is a fallback. Use focus/restore before UIA, mouse, or keyboard actions against Chrome/desktop apps.',
+      description: 'Focus, restore, minimize, maximize, or close a Windows desktop application window. Prefer hwnd from computer_system_window_list; titleIncludes is a fallback. Focus/restore waits briefly and returns foregroundMatched/foreground when available; verify that match before mouse or keyboard actions against Chrome/desktop apps.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -432,7 +432,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_web_observe',
       label: 'Observe external browser',
-      description: 'Observe an external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi through Windows UI Automation plus an optional window screenshot. Returns window/foreground info, inferred URL/title when UIA exposes it, visible text, clickable/editable candidates with bounds/centers, and screenshot coordinate metadata. Use this before visual guessing or repeated image calls on the user\'s normal browser.',
+      description: 'Observe an external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi through Windows UI Automation plus an optional window screenshot. Returns window/foreground info, inferred URL/title when UIA exposes it, visible text, clickable/editable candidates with bounds/centers, and screenshot coordinate metadata. Use this before visual guessing, repeated full-screen screenshots, or image calls on the user\'s normal browser.',
       parameters: {
         type: 'object',
         additionalProperties: false,

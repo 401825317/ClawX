@@ -63,6 +63,7 @@ describe('UClaw tool routing context', () => {
     expect(toolsContext).toContain('asks for `computer_browser_open_url`');
     expect(toolsContext).toContain('do not read/use `browser-automation` and do not call `browser`');
     expect(toolsContext).toContain('Do not switch to `browser`, `browser-automation`, `exec`, PowerShell');
+    expect(toolsContext).toContain('not a ban on `exec` for normal local files, logs, scripts, tests, builds, or development commands');
   });
 
   it('treats account web automation as UClaw-orchestrated browser plus desktop fallback', () => {
@@ -134,11 +135,23 @@ describe('UClaw tool routing context', () => {
     expect(toolsContext).toContain('external browser windows such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi');
     expect(toolsContext).toContain('prefer `computer_web_observe` as the first observation step');
     expect(toolsContext).toContain('clickable/editable candidates with bounds/centers');
+    expect(toolsContext).toContain('`explorer`, `start`, or shell browser launches');
+    expect(toolsContext).toContain('Shell commands remain appropriate for non-browser local automation');
+    expect(toolsContext).toContain('Use its candidates before falling back to repeated full-screen screenshots');
     expect(computerRoutes).toContain('/api/computer/web/observe');
     expect(computerRoutes).toContain('observeExternalBrowser');
     expect(computerRoutes).toContain('inferBrowserLocation');
     expect(computerRoutes).toContain('extractWebObserveCandidates');
     expect(computerRoutes).toContain('ValuePattern');
+  });
+
+  it('waits for foreground after focus without weakening input safety', () => {
+    expect(toolsContext).toContain('After focus/restore, check the returned `foregroundMatched`/`foreground` fields');
+    expect(computerRoutes).toContain('FOCUS_WAIT_TIMEOUT_MS');
+    expect(computerRoutes).toContain('waitForExpectedForeground');
+    expect(computerRoutes).toContain('foregroundMatched');
+    expect(computerUsePlugin).toContain('returns foregroundMatched/foreground');
+    expect(computerUsePlugin).toContain('verify that match before mouse or keyboard actions');
   });
 
   it('keeps computer-use visual inspection on the current session model first', () => {

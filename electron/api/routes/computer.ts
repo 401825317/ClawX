@@ -34,6 +34,8 @@ const MAX_DOM_NODES = 800;
 const MAX_AGENT_STEPS = 12;
 const MAX_BROWSER_OPEN_URL_LENGTH = 4096;
 const MAX_WINDOW_SOURCE_PREVIEW_COUNT = 6;
+const FOCUS_WAIT_TIMEOUT_MS = 1_500;
+const FOCUS_WAIT_INTERVAL_MS = 120;
 const DEFAULT_BROWSER_PROCESS_NAMES = new Set(['chrome', 'msedge', 'brave', 'brave-browser', 'chromium', 'firefox', 'opera', 'opera_gx', 'vivaldi']);
 
 type BrowserDomNode = {
@@ -637,6 +639,27 @@ async function assertExpectedForeground(input: ExpectedForegroundInput): Promise
   throw new Error(`Foreground window mismatch: expected ${expectedDescription}, current is ${describeWindowForError(current)}. Refusing global mouse/keyboard input.`);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForExpectedForeground(
+  expected: NonNullable<ReturnType<typeof normalizeExpectedForeground>>,
+  timeoutMs = FOCUS_WAIT_TIMEOUT_MS,
+): Promise<{ matched: boolean; window: SystemWindowInfo | null }> {
+  const startedAt = Date.now();
+  let current: SystemWindowInfo | null = null;
+  do {
+    const foreground = await getForegroundSystemWindow();
+    current = foreground.window && typeof foreground.window === 'object' ? foreground.window : null;
+    if (foregroundMatches(expected, current)) {
+      return { matched: true, window: current };
+    }
+    await sleep(FOCUS_WAIT_INTERVAL_MS);
+  } while (Date.now() - startedAt < timeoutMs);
+  return { matched: false, window: current };
+}
+
 async function getCursorPosition(): Promise<{ x: number; y: number }> {
   return await runWindowsPowerShellJson<{ x: number; y: number }>(`
 Add-Type -AssemblyName System.Windows.Forms
@@ -1018,6 +1041,8 @@ async function controlSystemWindow(input: {
   title: string;
   action: string;
   success: boolean;
+  foregroundMatched?: boolean;
+  foreground?: SystemWindowInfo | null;
 }>> {
   const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
   const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
@@ -1033,7 +1058,7 @@ async function controlSystemWindow(input: {
     : null;
   if (blocked) return blocked;
 
-  return await runWindowsPowerShellJson<{
+  const result = await runWindowsPowerShellJson<{
     hwnd: number;
     title: string;
     action: string;
@@ -1063,6 +1088,19 @@ switch ([string]$InputJson.action) {
 }
 [pscustomobject]@{ hwnd = $target.hwnd; title = $target.title; action = [string]$InputJson.action; success = [bool]$ok } | ConvertTo-Json -Compress
 `);
+  if (action === 'focus' || action === 'restore') {
+    const foreground = await waitForExpectedForeground({
+      hwnd: result.hwnd,
+      titleIncludes: '',
+      processName: '',
+    });
+    return {
+      ...result,
+      foregroundMatched: foreground.matched,
+      foreground: foreground.window,
+    };
+  }
+  return result;
 }
 
 async function getForegroundSystemWindow(): Promise<{ window: SystemWindowInfo | null }> {
