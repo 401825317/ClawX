@@ -114,8 +114,14 @@ function summarizeScreenshot(payload) {
     filePath: screenshot.filePath,
     mimeType: screenshot.mimeType || 'image/png',
     fileSize: screenshot.fileSize,
+    width: screenshot.width,
+    height: screenshot.height,
     sourceName: screenshot.sourceName,
-    note: 'Desktop screenshot captured. Treat filePath as visual context for the current chat model. Do not call the standalone image tool without an explicit current-session vision model.',
+    sourceId: screenshot.sourceId,
+    display: screenshot.display,
+    windowBounds: screenshot.windowBounds,
+    coordinateMapping: screenshot.coordinateMapping,
+    note: 'Desktop screenshot captured with width/height and coordinateMapping metadata. Treat filePath as visual context for the current chat model. Do not run Python/PIL or shell scripts to read image dimensions; use width, height, and coordinateMapping. Do not call the standalone image tool without an explicit current-session vision model.',
   };
 }
 
@@ -128,7 +134,13 @@ function summarizeInspection(payload) {
         filePath: screenshot.filePath,
         mimeType: screenshot.mimeType || 'image/png',
         fileSize: screenshot.fileSize,
+        width: screenshot.width,
+        height: screenshot.height,
         sourceName: screenshot.sourceName,
+        sourceId: screenshot.sourceId,
+        display: screenshot.display,
+        windowBounds: screenshot.windowBounds,
+        coordinateMapping: screenshot.coordinateMapping,
       }
       : null,
     ocr: result?.ocr || {
@@ -137,7 +149,7 @@ function summarizeInspection(payload) {
       blocks: [],
       reason: 'No OCR result returned.',
     },
-    note: 'If OCR text is insufficient, treat the screenshot filePath as visual context for the current chat model. Do not call the standalone image tool without an explicit current-session vision model.',
+    note: 'If OCR text is insufficient, treat the screenshot filePath as visual context for the current chat model. Use screenshot width/height and coordinateMapping for coordinates; do not run Python/PIL or shell scripts to read image dimensions. Do not call the standalone image tool without an explicit current-session vision model.',
   };
 }
 
@@ -153,7 +165,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_screenshot',
       label: 'Capture desktop screenshot',
-      description: 'Capture the current full desktop screen and return the saved PNG file path. Use this when the user asks to see, inspect, or screenshot their current screen. The screenshot is visual context for the current chat model; avoid standalone image-tool fallbacks unless you pass the current session vision model explicitly.',
+      description: 'Capture the current full desktop screen and return the saved PNG file path, width, height, display bounds, scale factor, and coordinateMapping. Use this when the user asks to see, inspect, or screenshot their current screen. The screenshot is visual context for the current chat model; avoid standalone image-tool fallbacks unless you pass the current session vision model explicitly. Never run Python/PIL just to read image dimensions.',
       parameters: EMPTY_OBJECT_SCHEMA,
       execute: async () => summarizeScreenshot(await hostApiFetch('/api/computer/screenshot', {
         method: 'POST',
@@ -163,7 +175,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_inspect_screen',
       label: 'Inspect screen',
-      description: 'Capture the desktop or a window and return a screenshot artifact plus OCR status. Use this as the first observation step for visual desktop tasks. If OCR is unsupported, use the returned screenshot file path as current-model visual context, not as a reason to call the standalone image tool without an explicit model.',
+      description: 'Capture the desktop or a window and return a screenshot artifact plus width, height, coordinateMapping, and OCR status. Use this as the first observation step for visual desktop tasks. If OCR is unsupported, use the returned screenshot file path as current-model visual context, not as a reason to call the standalone image tool without an explicit model. Never run Python/PIL just to read image dimensions.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -604,7 +616,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_window_screenshot',
       label: 'Capture window screenshot',
-      description: 'Capture a screenshot of an application window. Provide sourceId from computer_window_sources or titleIncludes to choose a window. The screenshot should be interpreted by the current chat model when it supports images; do not use the standalone image tool without an explicit current-session vision model.',
+      description: 'Capture a screenshot of an application window and return width, height, optional windowBounds, and coordinateMapping. Provide sourceId from computer_window_sources or titleIncludes to choose a window. The screenshot should be interpreted by the current chat model when it supports images; do not use the standalone image tool without an explicit current-session vision model. Never run Python/PIL just to read image dimensions.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -779,7 +791,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_type_text',
       label: 'Type text',
-      description: 'Paste plain text into the currently focused app using the system clipboard followed by Ctrl+V. For app-specific work, first verify the foreground window and pass expectedForeground; if focus failed, do not type.',
+      description: 'Paste plain text into the currently focused app using the system clipboard followed by Ctrl+V. For app-specific work, first verify the foreground window and pass expectedForeground; if focus failed, do not type. Never paste javascript: URLs into a browser address bar to inspect page text; use browser/DOM/UIA observation tools instead.',
       parameters: {
         type: 'object',
         additionalProperties: false,

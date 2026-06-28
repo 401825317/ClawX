@@ -4504,8 +4504,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const hasProgress = hasAssistantProgressSinceSend(state.messages, state.lastUserMessageAt);
 
       if (sendAgeMs >= LLM_IDLE_HINT_MS && !state.runError && !hasProgress) {
-        set({
-          runError: 'The model did not respond within 120 seconds. Retrying...',
+        console.info('[sendMessage] Model call exceeded one idle window; keeping run active for gateway/runtime retry', {
+          sessionKey: currentSessionKey,
+          sendAgeMs,
+          activeRunId: state.activeRunId,
         });
       }
 

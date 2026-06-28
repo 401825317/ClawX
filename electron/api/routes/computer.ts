@@ -109,8 +109,26 @@ export async function captureDesktopScreenshot(): Promise<{
   filePath: string;
   mimeType: 'image/png';
   fileSize: number;
+  width: number;
+  height: number;
   preview: string;
   sourceName?: string;
+  display?: {
+    id: number;
+    label: string;
+    scaleFactor: number;
+    bounds: Electron.Rectangle;
+    workArea: Electron.Rectangle;
+  };
+  coordinateMapping?: {
+    screenshotOrigin: { x: 0; y: 0 };
+    screenOrigin: { x: number; y: number };
+    screenshotSize: { width: number; height: number };
+    screenBounds: Electron.Rectangle;
+    scaleX: number;
+    scaleY: number;
+    formula: string;
+  };
 }> {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
@@ -122,6 +140,11 @@ export async function captureDesktopScreenshot(): Promise<{
     throw new Error('No desktop screen is available for screenshot capture');
   }
 
+  const imageSize = source.thumbnail.getSize();
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const displayBounds = primaryDisplay.bounds;
+  const scaleX = displayBounds.width / Math.max(1, imageSize.width);
+  const scaleY = displayBounds.height / Math.max(1, imageSize.height);
   const png = source.thumbnail.toPNG();
   const outDir = getDesktopScreenshotsDir();
   await mkdir(outDir, { recursive: true });
@@ -134,8 +157,26 @@ export async function captureDesktopScreenshot(): Promise<{
     filePath,
     mimeType: 'image/png',
     fileSize: png.byteLength,
+    width: imageSize.width,
+    height: imageSize.height,
     preview: `data:image/png;base64,${png.toString('base64')}`,
     sourceName: source.name,
+    display: {
+      id: primaryDisplay.id,
+      label: primaryDisplay.label,
+      scaleFactor: primaryDisplay.scaleFactor,
+      bounds: displayBounds,
+      workArea: primaryDisplay.workArea,
+    },
+    coordinateMapping: {
+      screenshotOrigin: { x: 0, y: 0 },
+      screenOrigin: { x: displayBounds.x, y: displayBounds.y },
+      screenshotSize: imageSize,
+      screenBounds: displayBounds,
+      scaleX,
+      scaleY,
+      formula: `screenX = ${displayBounds.x} + screenshotX * ${scaleX}; screenY = ${displayBounds.y} + screenshotY * ${scaleY}`,
+    },
   };
 }
 
@@ -186,9 +227,21 @@ async function captureWindowScreenshot(input: {
   filePath: string;
   mimeType: 'image/png';
   fileSize: number;
+  width: number;
+  height: number;
   preview: string;
   sourceId: string;
   sourceName: string;
+  windowBounds?: unknown;
+  coordinateMapping?: {
+    screenshotOrigin: { x: 0; y: 0 };
+    screenOrigin: { x: number; y: number } | null;
+    screenshotSize: { width: number; height: number };
+    screenBounds: { x: number; y: number; width: number; height: number } | null;
+    scaleX: number | null;
+    scaleY: number | null;
+    formula: string;
+  };
 }> {
   const sourceId = typeof input.sourceId === 'string' ? input.sourceId.trim() : '';
   const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim().toLowerCase() : '';
@@ -212,6 +265,11 @@ async function captureWindowScreenshot(input: {
     throw new Error(`No application window screenshot source matched ${selector}. Restore/focus the target window first, or choose one of: ${availableWindows.join(', ')}`);
   }
 
+  const imageSize = source.thumbnail.getSize();
+  const matchedSystemWindow = await findSystemWindowForSourceName(source.name).catch(() => null);
+  const windowBounds = normalizeSystemWindowBounds(matchedSystemWindow?.bounds);
+  const scaleX = windowBounds ? windowBounds.width / Math.max(1, imageSize.width) : null;
+  const scaleY = windowBounds ? windowBounds.height / Math.max(1, imageSize.height) : null;
   const png = source.thumbnail.toPNG();
   const outDir = getDesktopScreenshotsDir();
   await mkdir(outDir, { recursive: true });
@@ -224,10 +282,54 @@ async function captureWindowScreenshot(input: {
     filePath,
     mimeType: 'image/png',
     fileSize: png.byteLength,
+    width: imageSize.width,
+    height: imageSize.height,
     preview: `data:image/png;base64,${png.toString('base64')}`,
     sourceId: source.id,
     sourceName: source.name,
+    windowBounds: windowBounds ?? undefined,
+    coordinateMapping: {
+      screenshotOrigin: { x: 0, y: 0 },
+      screenOrigin: windowBounds ? { x: windowBounds.x, y: windowBounds.y } : null,
+      screenshotSize: imageSize,
+      screenBounds: windowBounds,
+      scaleX,
+      scaleY,
+      formula: windowBounds && scaleX != null && scaleY != null
+        ? `screenX = ${windowBounds.x} + screenshotX * ${scaleX}; screenY = ${windowBounds.y} + screenshotY * ${scaleY}`
+        : 'Window screen bounds were not resolved; use screenshot pixel coordinates or call computer_system_window_list for bounds.',
+    },
   };
+}
+
+function normalizeSystemWindowBounds(bounds: unknown): { x: number; y: number; width: number; height: number } | null {
+  if (!bounds || typeof bounds !== 'object') return null;
+  const raw = bounds as Record<string, unknown>;
+  const x = typeof raw.x === 'number' ? raw.x : Number(raw.x);
+  const y = typeof raw.y === 'number' ? raw.y : Number(raw.y);
+  const width = typeof raw.width === 'number' ? raw.width : Number(raw.width);
+  const height = typeof raw.height === 'number' ? raw.height : Number(raw.height);
+  if (![x, y, width, height].every(Number.isFinite)) return null;
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
+async function findSystemWindowForSourceName(sourceName: string): Promise<SystemWindowInfo | null> {
+  if (process.platform !== 'win32') return null;
+  const normalizedSource = sourceName.trim().toLowerCase();
+  if (!normalizedSource) return null;
+  const windows = await listSystemWindows({ visibleOnly: true, limit: 200 });
+  const items = Array.isArray((windows as { windows?: unknown[] }).windows)
+    ? (windows as { windows: SystemWindowInfo[] }).windows
+    : [];
+  return items.find((item) => {
+    const title = String(item.title || '').trim().toLowerCase();
+    return title && (normalizedSource.includes(title) || title.includes(normalizedSource));
+  }) ?? null;
 }
 
 function getWindowList(): Array<{
@@ -361,6 +463,12 @@ function normalizeBrowserOpenUrl(value: unknown): string {
   }
   parsed.hash = parsed.hash.slice(0, MAX_BROWSER_OPEN_URL_LENGTH);
   return parsed.toString();
+}
+
+function looksLikeAddressBarScript(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const compact = value.trim().replace(/[\u0000-\u001f\s]+/gu, '').toLowerCase();
+  return compact.startsWith('javascript:');
 }
 
 function normalizeMouseButton(value: unknown): 'left' | 'right' | 'middle' {
@@ -717,6 +825,14 @@ async function typeText(input: { text?: unknown; confirmed?: unknown } & Expecte
   const text = typeof input.text === 'string' ? input.text : '';
   if (text.length > MAX_TYPE_TEXT_LENGTH) {
     throw new Error(`text is too long; max ${MAX_TYPE_TEXT_LENGTH} characters`);
+  }
+  if (looksLikeAddressBarScript(text)) {
+    return {
+      risk: 'high',
+      requiresConfirmation: true,
+      blocked: true,
+      reason: 'Typing javascript: URLs is blocked for computer-use safety. Use browser/DOM/UIA observation tools instead of address-bar script injection.',
+    };
   }
   const blocked = blockUnlessConfirmed(input, 'typeText', text.slice(0, 200));
   if (blocked) return blocked;
@@ -1431,6 +1547,13 @@ function evaluateComputerActionRisk(input: { action?: unknown; target?: unknown 
   const action = typeof input.action === 'string' ? input.action.trim() : '';
   const target = typeof input.target === 'string' ? input.target.trim() : '';
   const lowerTarget = target.toLowerCase();
+  if (looksLikeAddressBarScript(target)) {
+    return {
+      risk: 'high',
+      requiresConfirmation: true,
+      reason: 'Typing javascript: URLs into a browser address bar is unsafe and unreliable. Use browser/DOM/UIA observation tools instead.',
+    };
+  }
   const destructiveWords = ['delete', 'remove', 'close', 'submit', 'pay', 'purchase', 'order', 'logout', 'sign out', '删除', '移除', '关闭', '提交', '支付', '购买', '下单', '退出'];
   const destructiveTarget = destructiveWords.some((word) => lowerTarget.includes(word));
   const requiresConfirmation = COMPUTER_ACTIONS_REQUIRING_CONFIRMATION.has(action) || destructiveTarget;
