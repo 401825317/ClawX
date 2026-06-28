@@ -13,6 +13,9 @@ const execFileAsync = promisify(execFile);
 const POWERSHELL_TIMEOUT_MS = 8_000;
 const MAX_TYPE_TEXT_LENGTH = 20_000;
 const SYSTEM_WINDOW_ACTIONS = new Set(['focus', 'restore', 'minimize', 'maximize', 'close']);
+const SWP_NOMOVE = 0x0002;
+const SWP_NOSIZE = 0x0001;
+const SWP_SHOWWINDOW = 0x0040;
 
 function getDesktopScreenshotsDir(): string {
   return join(getOpenClawMediaDir(), 'desktop-screenshots');
@@ -241,6 +244,12 @@ function normalizeMouseButton(value: unknown): 'left' | 'right' | 'middle' {
   throw new Error('button must be one of: left, right, middle');
 }
 
+function mouseButtonFlags(button: 'left' | 'right' | 'middle'): { down: number; up: number } {
+  if (button === 'right') return { down: 0x0008, up: 0x0010 };
+  if (button === 'middle') return { down: 0x0020, up: 0x0040 };
+  return { down: 0x0002, up: 0x0004 };
+}
+
 const VK_CODES: Record<string, number> = {
   backspace: 0x08,
   tab: 0x09,
@@ -338,11 +347,7 @@ async function clickMouse(input: {
   const y = hasY ? toInteger(input.y, 'y') : null;
   const button = normalizeMouseButton(input.button);
   const clicks = Math.max(1, Math.min(3, input.clicks === undefined ? 1 : toInteger(input.clicks, 'clicks')));
-  const flags = button === 'right'
-    ? { down: 0x0008, up: 0x0010 }
-    : button === 'middle'
-      ? { down: 0x0020, up: 0x0040 }
-      : { down: 0x0002, up: 0x0004 };
+  const flags = mouseButtonFlags(button);
 
   return await runWindowsPowerShellJson<{ x?: number; y?: number; button: string; clicks: number }>(`
 Add-Type @"
@@ -363,6 +368,106 @@ for ($i = 0; $i -lt ${clicks}; $i++) {
   Start-Sleep -Milliseconds 35
 }
 [pscustomobject]@{ ${x !== null ? `x = ${x}; y = ${y};` : ''} button = "${button}"; clicks = ${clicks} } | ConvertTo-Json -Compress
+`);
+}
+
+async function mouseButton(input: {
+  button?: unknown;
+  action?: unknown;
+}): Promise<{ button: string; action: string }> {
+  const button = normalizeMouseButton(input.button);
+  const action = typeof input.action === 'string' ? input.action.trim().toLowerCase() : '';
+  if (action !== 'down' && action !== 'up') {
+    throw new Error('action must be one of: down, up');
+  }
+  const flags = mouseButtonFlags(button);
+  const selectedFlag = action === 'down' ? flags.down : flags.up;
+
+  return await runWindowsPowerShellJson<{ button: string; action: string }>(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UClawMouse {
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+[UClawMouse]::mouse_event(${selectedFlag}, 0, 0, 0, [UIntPtr]::Zero)
+[pscustomobject]@{ button = "${button}"; action = "${action}" } | ConvertTo-Json -Compress
+`);
+}
+
+async function scrollMouse(input: {
+  delta?: unknown;
+  x?: unknown;
+  y?: unknown;
+}): Promise<{ delta: number; x?: number; y?: number }> {
+  const delta = Math.max(-10_000, Math.min(10_000, toInteger(input.delta ?? -120, 'delta')));
+  const hasX = input.x !== undefined && input.x !== null;
+  const hasY = input.y !== undefined && input.y !== null;
+  if (hasX !== hasY) {
+    throw new Error('x and y must be provided together');
+  }
+  const x = hasX ? toInteger(input.x, 'x') : null;
+  const y = hasY ? toInteger(input.y, 'y') : null;
+
+  return await runWindowsPowerShellJson<{ delta: number; x?: number; y?: number }>(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UClawMouse {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extraInfo);
+}
+"@
+${x !== null && y !== null ? `[void][UClawMouse]::SetCursorPos(${x}, ${y})` : ''}
+[UClawMouse]::mouse_event(0x0800, 0, 0, ${delta}, [UIntPtr]::Zero)
+[pscustomobject]@{ delta = ${delta}; ${x !== null ? `x = ${x}; y = ${y};` : ''} } | ConvertTo-Json -Compress
+`);
+}
+
+async function dragMouse(input: {
+  fromX?: unknown;
+  fromY?: unknown;
+  toX?: unknown;
+  toY?: unknown;
+  button?: unknown;
+  durationMs?: unknown;
+}): Promise<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }> {
+  const fromX = toInteger(input.fromX, 'fromX');
+  const fromY = toInteger(input.fromY, 'fromY');
+  const toX = toInteger(input.toX, 'toX');
+  const toY = toInteger(input.toY, 'toY');
+  const button = normalizeMouseButton(input.button);
+  const durationMs = Math.max(0, Math.min(5_000, input.durationMs === undefined ? 350 : toInteger(input.durationMs, 'durationMs')));
+  const flags = mouseButtonFlags(button);
+  const steps = Math.max(1, Math.min(60, Math.ceil(durationMs / 25)));
+  const sleepMs = Math.max(1, Math.floor(durationMs / steps));
+
+  return await runWindowsPowerShellJson<{ fromX: number; fromY: number; toX: number; toY: number; button: string; durationMs: number }>(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UClawMouse {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+[void][UClawMouse]::SetCursorPos(${fromX}, ${fromY})
+Start-Sleep -Milliseconds 35
+[UClawMouse]::mouse_event(${flags.down}, 0, 0, 0, [UIntPtr]::Zero)
+for ($i = 1; $i -le ${steps}; $i++) {
+  $x = [int](${fromX} + ((${toX} - ${fromX}) * $i / ${steps}))
+  $y = [int](${fromY} + ((${toY} - ${fromY}) * $i / ${steps}))
+  [void][UClawMouse]::SetCursorPos($x, $y)
+  Start-Sleep -Milliseconds ${sleepMs}
+}
+[UClawMouse]::mouse_event(${flags.up}, 0, 0, 0, [UIntPtr]::Zero)
+[pscustomobject]@{ fromX = ${fromX}; fromY = ${fromY}; toX = ${toX}; toY = ${toY}; button = "${button}"; durationMs = ${durationMs} } | ConvertTo-Json -Compress
 `);
 }
 
@@ -421,8 +526,10 @@ public static class UClawWindows {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 }
 "@
 function Get-UClawWindowText([IntPtr]$Handle) {
@@ -467,6 +574,32 @@ function Get-UClawSystemWindows {
   }
   [void][UClawWindows]::EnumWindows($callback, [IntPtr]::Zero)
   $items
+}
+function Convert-UClawWindow([IntPtr]$hWnd) {
+  if ($hWnd -eq [IntPtr]::Zero) { return $null }
+  $title = Get-UClawWindowText $hWnd
+  $rect = New-Object UClawWindows+RECT
+  [void][UClawWindows]::GetWindowRect($hWnd, [ref]$rect)
+  $processIdValue = 0
+  [void][UClawWindows]::GetWindowThreadProcessId($hWnd, [ref]$processIdValue)
+  $processName = $null
+  try { $processName = (Get-Process -Id $processIdValue -ErrorAction Stop).ProcessName } catch {}
+  [pscustomobject]@{
+    hwnd = $hWnd.ToInt64()
+    title = $title
+    className = Get-UClawClassName $hWnd
+    visible = [UClawWindows]::IsWindowVisible($hWnd)
+    enabled = [UClawWindows]::IsWindowEnabled($hWnd)
+    minimized = [UClawWindows]::IsIconic($hWnd)
+    processId = [int]$processIdValue
+    processName = $processName
+    bounds = [pscustomobject]@{
+      x = $rect.Left
+      y = $rect.Top
+      width = $rect.Right - $rect.Left
+      height = $rect.Bottom - $rect.Top
+    }
+  }
 }
 `;
 
@@ -550,6 +683,116 @@ switch ([string]$InputJson.action) {
 }
 [pscustomobject]@{ hwnd = $target.hwnd; title = $target.title; action = [string]$InputJson.action; success = [bool]$ok } | ConvertTo-Json -Compress
 `);
+}
+
+async function getForegroundSystemWindow(): Promise<{ window: unknown | null }> {
+  return await runWindowsPowerShellJson<{ window: unknown | null }>(`
+${WINDOWS_ENUM_SCRIPT}
+$window = Convert-UClawWindow ([UClawWindows]::GetForegroundWindow())
+[pscustomobject]@{ window = $window } | ConvertTo-Json -Compress -Depth 6
+`);
+}
+
+async function setSystemWindowBounds(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  x?: unknown;
+  y?: unknown;
+  width?: unknown;
+  height?: unknown;
+}): Promise<{ hwnd: number; title: string; bounds: unknown; success: boolean }> {
+  const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
+  if (!hwnd && !titleIncludes) {
+    throw new Error('hwnd or titleIncludes is required');
+  }
+  const hasMove = input.x !== undefined || input.y !== undefined;
+  const hasSize = input.width !== undefined || input.height !== undefined;
+  if ((input.x === undefined) !== (input.y === undefined)) {
+    throw new Error('x and y must be provided together');
+  }
+  if ((input.width === undefined) !== (input.height === undefined)) {
+    throw new Error('width and height must be provided together');
+  }
+  if (!hasMove && !hasSize) {
+    throw new Error('At least one of x/y or width/height is required');
+  }
+  const x = hasMove ? toInteger(input.x, 'x') : 0;
+  const y = hasMove ? toInteger(input.y, 'y') : 0;
+  const width = hasSize ? Math.max(1, toInteger(input.width, 'width')) : 0;
+  const height = hasSize ? Math.max(1, toInteger(input.height, 'height')) : 0;
+  const flags = SWP_SHOWWINDOW
+    | (hasMove ? 0 : SWP_NOMOVE)
+    | (hasSize ? 0 : SWP_NOSIZE);
+
+  return await runWindowsPowerShellJson<{ hwnd: number; title: string; bounds: unknown; success: boolean }>(`
+${powerShellJsonInputScript({ hwnd, titleIncludes, x, y, width, height, flags })}
+${WINDOWS_ENUM_SCRIPT}
+$target = $null
+if ($InputJson.hwnd) {
+  $target = Get-UClawSystemWindows | Where-Object { $_.hwnd -eq [int64]$InputJson.hwnd } | Select-Object -First 1
+} elseif ($InputJson.titleIncludes) {
+  $needle = [string]$InputJson.titleIncludes
+  $target = Get-UClawSystemWindows | Where-Object { $_.title.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | Select-Object -First 1
+}
+if (-not $target) { throw "No matching system window found" }
+$handle = [IntPtr]::new([int64]$target.hwnd)
+$ok = [UClawWindows]::SetWindowPos($handle, [IntPtr]::Zero, [int]$InputJson.x, [int]$InputJson.y, [int]$InputJson.width, [int]$InputJson.height, [uint32]$InputJson.flags)
+$next = Convert-UClawWindow $handle
+[pscustomobject]@{ hwnd = $next.hwnd; title = $next.title; bounds = $next.bounds; success = [bool]$ok } | ConvertTo-Json -Compress -Depth 6
+`);
+}
+
+async function setSystemWindowTopmost(input: {
+  hwnd?: unknown;
+  titleIncludes?: unknown;
+  topmost?: unknown;
+}): Promise<{ hwnd: number; title: string; topmost: boolean; success: boolean }> {
+  const hwnd = input.hwnd === undefined || input.hwnd === null ? null : toInteger(input.hwnd, 'hwnd');
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim() : '';
+  const topmost = input.topmost !== false;
+  if (!hwnd && !titleIncludes) {
+    throw new Error('hwnd or titleIncludes is required');
+  }
+  const insertAfter = topmost ? -1 : -2;
+  const flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+
+  return await runWindowsPowerShellJson<{ hwnd: number; title: string; topmost: boolean; success: boolean }>(`
+${powerShellJsonInputScript({ hwnd, titleIncludes, topmost, insertAfter, flags })}
+${WINDOWS_ENUM_SCRIPT}
+$target = $null
+if ($InputJson.hwnd) {
+  $target = Get-UClawSystemWindows | Where-Object { $_.hwnd -eq [int64]$InputJson.hwnd } | Select-Object -First 1
+} elseif ($InputJson.titleIncludes) {
+  $needle = [string]$InputJson.titleIncludes
+  $target = Get-UClawSystemWindows | Where-Object { $_.title.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } | Select-Object -First 1
+}
+if (-not $target) { throw "No matching system window found" }
+$handle = [IntPtr]::new([int64]$target.hwnd)
+$ok = [UClawWindows]::SetWindowPos($handle, [IntPtr]::new([int64]$InputJson.insertAfter), 0, 0, 0, 0, [uint32]$InputJson.flags)
+[pscustomobject]@{ hwnd = $target.hwnd; title = $target.title; topmost = [bool]$InputJson.topmost; success = [bool]$ok } | ConvertTo-Json -Compress
+`);
+}
+
+async function setFileDialogPath(input: { filePath?: unknown; submit?: unknown }): Promise<{
+  length: number;
+  submitted: boolean;
+  method: 'clipboard-paste';
+}> {
+  const filePath = typeof input.filePath === 'string' ? input.filePath : '';
+  if (!filePath.trim()) {
+    throw new Error('filePath is required');
+  }
+  if (filePath.length > 32_000) {
+    throw new Error('filePath is too long');
+  }
+  clipboard.writeText(filePath);
+  await pressKey({ key: 'v', modifiers: ['ctrl'] });
+  const submit = input.submit !== false;
+  if (submit) {
+    await pressKey({ key: 'enter' });
+  }
+  return { length: filePath.length, submitted: submit, method: 'clipboard-paste' };
 }
 
 async function inspectScreen(input: {
@@ -662,6 +905,43 @@ export async function handleComputerRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/computer/system-window/foreground' && req.method === 'GET') {
+    sendJson(res, 200, {
+      success: true,
+      result: await getForegroundSystemWindow(),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/system-window/bounds' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      hwnd?: unknown;
+      titleIncludes?: unknown;
+      x?: unknown;
+      y?: unknown;
+      width?: unknown;
+      height?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await setSystemWindowBounds(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/system-window/topmost' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      hwnd?: unknown;
+      titleIncludes?: unknown;
+      topmost?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await setSystemWindowTopmost(body),
+    });
+    return true;
+  }
+
   if (url.pathname === '/api/computer/window-sources' && req.method === 'GET') {
     sendJson(res, 200, {
       success: true,
@@ -732,6 +1012,40 @@ export async function handleComputerRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/computer/mouse/button' && req.method === 'POST') {
+    const body = await parseJsonBody<{ button?: unknown; action?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await mouseButton(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/mouse/scroll' && req.method === 'POST') {
+    const body = await parseJsonBody<{ delta?: unknown; x?: unknown; y?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await scrollMouse(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/mouse/drag' && req.method === 'POST') {
+    const body = await parseJsonBody<{
+      fromX?: unknown;
+      fromY?: unknown;
+      toX?: unknown;
+      toY?: unknown;
+      button?: unknown;
+      durationMs?: unknown;
+    }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await dragMouse(body),
+    });
+    return true;
+  }
+
   if (url.pathname === '/api/computer/keyboard/press' && req.method === 'POST') {
     const body = await parseJsonBody<{ key?: unknown; modifiers?: unknown }>(req);
     sendJson(res, 200, {
@@ -746,6 +1060,15 @@ export async function handleComputerRoutes(
     sendJson(res, 200, {
       success: true,
       result: await typeText(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/file-dialog/set-path' && req.method === 'POST') {
+    const body = await parseJsonBody<{ filePath?: unknown; submit?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await setFileDialogPath(body),
     });
     return true;
   }

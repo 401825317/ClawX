@@ -14,14 +14,21 @@
       "computer_window_list",
       "computer_system_window_list",
       "computer_system_window_control",
+      "computer_system_window_foreground",
+      "computer_system_window_set_bounds",
+      "computer_system_window_set_topmost",
       "computer_window_sources",
       "computer_window_screenshot",
       "computer_display_list",
       "computer_cursor_position",
       "computer_mouse_move",
       "computer_mouse_click",
+      "computer_mouse_button",
+      "computer_mouse_scroll",
+      "computer_mouse_drag",
       "computer_key_press",
-      "computer_type_text"
+      "computer_type_text",
+      "computer_file_dialog_set_path"
     ]
   },
   "configSchema": {

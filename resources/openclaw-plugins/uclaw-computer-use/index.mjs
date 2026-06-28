@@ -29,6 +29,16 @@ const WINDOW_ACTION_SCHEMA = {
   enum: ['focus', 'restore', 'minimize', 'maximize', 'close'],
   description: 'Window action to perform.',
 };
+const WINDOW_TARGET_PROPERTIES = {
+  hwnd: {
+    type: 'number',
+    description: 'Window handle returned by computer_system_window_list.',
+  },
+  titleIncludes: {
+    type: 'string',
+    description: 'Fallback case-insensitive title substring to find a window.',
+  },
+};
 
 function resolveHostApiOrigin() {
   return (process.env.CLAWX_HOST_API_ORIGIN || DEFAULT_HOST_API_ORIGIN).replace(/\/+$/u, '');
@@ -236,18 +246,58 @@ export const pluginEntry = defineToolPlugin({
         type: 'object',
         additionalProperties: false,
         properties: {
-          hwnd: {
-            type: 'number',
-            description: 'Window handle returned by computer_system_window_list.',
-          },
-          titleIncludes: {
-            type: 'string',
-            description: 'Fallback case-insensitive title substring to find a window.',
-          },
+          ...WINDOW_TARGET_PROPERTIES,
           action: WINDOW_ACTION_SCHEMA,
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/system-window/control', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_system_window_foreground',
+      label: 'Get foreground window',
+      description: 'Return the current foreground Windows desktop application window.',
+      parameters: EMPTY_OBJECT_SCHEMA,
+      execute: async () => resultOrPayload(await hostApiFetch('/api/computer/system-window/foreground', { method: 'GET' })),
+    }),
+    tool({
+      name: 'computer_system_window_set_bounds',
+      label: 'Set system window bounds',
+      description: 'Move and/or resize a Windows desktop application window. Provide hwnd from computer_system_window_list when possible.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...WINDOW_TARGET_PROPERTIES,
+          x: { type: 'number', description: 'New left coordinate. Must be provided with y.' },
+          y: { type: 'number', description: 'New top coordinate. Must be provided with x.' },
+          width: { type: 'number', description: 'New window width. Must be provided with height.' },
+          height: { type: 'number', description: 'New window height. Must be provided with width.' },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/system-window/bounds', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_system_window_set_topmost',
+      label: 'Set system window topmost',
+      description: 'Set or clear always-on-top for a Windows desktop application window.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ...WINDOW_TARGET_PROPERTIES,
+          topmost: {
+            type: 'boolean',
+            description: 'true to keep window on top, false to clear topmost. Defaults to true.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/system-window/topmost', {
         method: 'POST',
         body: JSON.stringify(params || {}),
       })),
@@ -339,6 +389,74 @@ export const pluginEntry = defineToolPlugin({
       })),
     }),
     tool({
+      name: 'computer_mouse_button',
+      label: 'Mouse button down/up',
+      description: 'Press or release a mouse button without automatically releasing or pressing it. Useful for custom drag operations.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['action'],
+        properties: {
+          button: MOUSE_BUTTON_SCHEMA,
+          action: {
+            type: 'string',
+            enum: ['down', 'up'],
+            description: 'Whether to press or release the button.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/button', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_mouse_scroll',
+      label: 'Scroll mouse wheel',
+      description: 'Scroll the mouse wheel. Negative delta scrolls down; positive delta scrolls up. Optionally move to x/y first.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          delta: {
+            type: 'number',
+            description: 'Wheel delta. Typical one-notch values are -120 or 120. Defaults to -120.',
+          },
+          x: { type: 'number', description: 'Optional absolute screen X coordinate.' },
+          y: { type: 'number', description: 'Optional absolute screen Y coordinate.' },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/scroll', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_mouse_drag',
+      label: 'Drag mouse',
+      description: 'Drag from one absolute screen coordinate to another using a mouse button.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['fromX', 'fromY', 'toX', 'toY'],
+        properties: {
+          fromX: { type: 'number', description: 'Start X coordinate.' },
+          fromY: { type: 'number', description: 'Start Y coordinate.' },
+          toX: { type: 'number', description: 'End X coordinate.' },
+          toY: { type: 'number', description: 'End Y coordinate.' },
+          button: MOUSE_BUTTON_SCHEMA,
+          durationMs: {
+            type: 'number',
+            description: 'Drag duration in milliseconds. Defaults to 350.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/mouse/drag', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
       name: 'computer_key_press',
       label: 'Press key',
       description: 'Press a keyboard key, optionally with modifiers such as ctrl, shift, alt, or win.',
@@ -372,6 +490,30 @@ export const pluginEntry = defineToolPlugin({
         },
       },
       execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/keyboard/type', {
+        method: 'POST',
+        body: JSON.stringify(params || {}),
+      })),
+    }),
+    tool({
+      name: 'computer_file_dialog_set_path',
+      label: 'Set file dialog path',
+      description: 'Paste a file path into the currently focused system file picker and optionally press Enter. Use after opening a file upload/save dialog.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['filePath'],
+        properties: {
+          filePath: {
+            type: 'string',
+            description: 'Absolute file path to paste into the focused file dialog.',
+          },
+          submit: {
+            type: 'boolean',
+            description: 'Whether to press Enter after pasting. Defaults to true.',
+          },
+        },
+      },
+      execute: async (params) => resultOrPayload(await hostApiFetch('/api/computer/file-dialog/set-path', {
         method: 'POST',
         body: JSON.stringify(params || {}),
       })),
