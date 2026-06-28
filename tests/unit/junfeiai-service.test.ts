@@ -177,6 +177,43 @@ describe('JunFeiAI managed provider service', () => {
     expect(mocks.syncSavedProviderToRuntime).not.toHaveBeenCalled();
   });
 
+  it('prefers client-exposed smart routing when runtime bootstrap still reports a stale model', async () => {
+    const result = await ensureJunFeiAIProviderSeeded({
+      bootstrap: {
+        service: { displayName: 'JunFeiAI Managed', apiOrigin: 'https://zz-cn.lingzhiwuxian.com' },
+        runtime: {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+          apiProtocol: 'openai-completions',
+          defaultModel: 'qwen-latest',
+          fallbackModels: ['deepseek-latest'],
+          modelFamilies: [
+            { id: 'smart-latest', name: '智能路由' },
+            { id: 'qwen-latest', name: '通义千问最新版' },
+          ],
+        },
+        client: {
+          modelOptions: {
+            text: {
+              defaultModel: 'smart-latest',
+              models: [{ id: 'smart-latest', label: '智能路由', enabled: true }],
+            },
+          },
+        },
+      },
+      syncRuntime: false,
+    });
+
+    expect(result.account?.model).toBe('smart-latest');
+    expect(result.account?.fallbackModels).toEqual(['deepseek-latest']);
+    expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'smart-latest',
+        fallbackModels: ['deepseek-latest'],
+      }),
+    );
+    expect(mocks.loggerWarn).toHaveBeenCalledWith(expect.stringContaining('Runtime default model "qwen-latest"'));
+  });
+
   it('does not use local device activation to bypass auth when no user is logged in', async () => {
     mocks.readJunFeiAIDeviceActivationState.mockResolvedValue({
       activated: true,

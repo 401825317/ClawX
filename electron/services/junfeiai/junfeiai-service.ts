@@ -211,11 +211,6 @@ interface JunFeiAIRelayTokenPayload {
 
 const JUNFEIAI_FALLBACK_MODELS_ON_FETCH_ERROR = [
   'smart-latest',
-  'qwen-latest',
-  'deepseek-latest',
-  'doubao-latest',
-  'kimi-latest',
-  'glm-latest',
 ] as const;
 
 const LEGACY_JUNFEIAI_PROVIDER_NAMES = new Set([
@@ -782,6 +777,39 @@ function normalizeFallbackModels(models?: string[]): string[] {
   return Array.from(new Set((models ?? []).map((model) => model.trim()).filter(Boolean)));
 }
 
+function normalizeClientTextModelId(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function getClientAllowedTextModels(bootstrap: JunFeiAIBootstrapPayload): string[] {
+  const rawModels = bootstrap.client?.modelOptions?.text?.models;
+  if (!Array.isArray(rawModels)) {
+    return [];
+  }
+  return Array.from(new Set(
+    rawModels
+      .filter((model) => model?.enabled !== false)
+      .map((model) => normalizeClientTextModelId(model?.id))
+      .filter(Boolean),
+  ));
+}
+
+function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string {
+  const runtimeDefault = normalizeClientTextModelId(bootstrap.runtime?.defaultModel);
+  const clientDefault = normalizeClientTextModelId(bootstrap.client?.modelOptions?.text?.defaultModel);
+  const allowedClientModels = getClientAllowedTextModels(bootstrap);
+  if (clientDefault && allowedClientModels.includes(clientDefault)) {
+    if (runtimeDefault && runtimeDefault !== clientDefault && !allowedClientModels.includes(runtimeDefault)) {
+      logger.warn(`[junfeiai] Runtime default model "${runtimeDefault}" is not exposed by client model options; using "${clientDefault}".`);
+    }
+    return clientDefault;
+  }
+  if (runtimeDefault) {
+    return runtimeDefault;
+  }
+  return JUNFEIAI_DEFAULT_MODEL;
+}
+
 function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAccount | null): ProviderAccount {
   const runtime = bootstrap.runtime ?? {};
   const now = new Date().toISOString();
@@ -796,7 +824,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     authMode: 'api_key',
     baseUrl: normalizeBaseUrl(runtime.baseUrl),
     apiProtocol: normalizeProviderProtocol(runtime.apiProtocol),
-    model: runtime.defaultModel || JUNFEIAI_DEFAULT_MODEL,
+    model: resolveRuntimeDefaultModel(bootstrap),
     fallbackModels: normalizeFallbackModels(runtime.fallbackModels),
     enabled: true,
     isDefault: true,
@@ -1072,6 +1100,10 @@ async function createStandardSub2APIKey(accessToken: string, device?: Record<str
 }
 
 function normalizeJunFeiAIModelFamilies(bootstrap: JunFeiAIBootstrapPayload): string[] {
+  const clientModels = getClientAllowedTextModels(bootstrap);
+  if (clientModels.length > 0) {
+    return clientModels;
+  }
   const raw = Array.isArray(bootstrap.runtime?.modelFamilies) ? bootstrap.runtime.modelFamilies : [];
   return Array.from(new Set(
     raw
