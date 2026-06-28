@@ -45,7 +45,7 @@ describe('bundled OpenClaw skill trimming', () => {
     const scriptAllowlist = await import(pathToFileURL(join(process.cwd(), 'scripts/openclaw-bundled-skill-allowlist.mjs')).href);
 
     expect(scriptAllowlist.UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS);
-    expect(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(expect.arrayContaining(['diagram-maker', 'summarize', 'weather']));
+    expect(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(expect.arrayContaining(['browser-automation', 'diagram-maker', 'summarize', 'weather']));
   });
 
 

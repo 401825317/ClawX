@@ -24,6 +24,7 @@ import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.
 const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
+const OPENCLAW_SKILL_SHIMS = path.join(ROOT, 'resources', 'openclaw-skill-shims');
 
 function isJunFeiAIManagedDistribution() {
   return process.env.CLAWX_MANAGED_PROVIDER !== '0';
@@ -82,6 +83,27 @@ function trimBundledOpenClawSkills(skillsRoot) {
   return { removed, kept: [...UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET] };
 }
 
+function installMissingOpenClawSkillShims(skillsRoot) {
+  if (!fs.existsSync(OPENCLAW_SKILL_SHIMS)) return [];
+  fs.mkdirSync(skillsRoot, { recursive: true });
+
+  const installed = [];
+  for (const entry of fs.readdirSync(OPENCLAW_SKILL_SHIMS, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const sourceDir = path.join(OPENCLAW_SKILL_SHIMS, entry.name);
+    const sourceManifest = path.join(sourceDir, 'SKILL.md');
+    if (!fs.existsSync(sourceManifest)) continue;
+
+    const targetDir = path.join(skillsRoot, entry.name);
+    const targetManifest = path.join(targetDir, 'SKILL.md');
+    if (fs.existsSync(targetManifest)) continue;
+
+    fs.cpSync(sourceDir, targetDir, { recursive: true, dereference: true });
+    installed.push(entry.name);
+  }
+  return installed;
+}
+
 function removeDirRobust(targetDir) {
   if (!fs.existsSync(targetDir)) return;
 
@@ -121,6 +143,11 @@ fs.cpSync(openclawReal, OUTPUT, {
   dereference: true,
   filter: shouldCopyOpenClawPackageEntry,
 });
+
+const installedSkillShims = installMissingOpenClawSkillShims(path.join(OUTPUT, 'skills'));
+if (installedSkillShims.length > 0) {
+  echo`   Installed OpenClaw skill compatibility shims: ${installedSkillShims.join(', ')}`;
+}
 
 const bundledSkillsTrim = trimBundledOpenClawSkills(path.join(OUTPUT, 'skills'));
 if (bundledSkillsTrim.removed > 0) {

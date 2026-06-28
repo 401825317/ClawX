@@ -12,6 +12,7 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 
 - `browser` tool provides automation (scraping, form filling, testing) via an isolated managed browser when that tool is available and healthy.
 - Treat `browser` as UClaw's high-efficiency web engine, not as the whole computer-use product. For account/workflow tasks, UClaw should choose the best engine and switch when needed.
+- This context already includes UClaw's browser automation loop. Do not read `browser-automation/SKILL.md` from `node_modules/openclaw/skills`; some OpenClaw builds reference that legacy skill name in docs even when the file is not bundled.
 - For logged-in business web tasks such as Douyin/TikTok private messages, comment replies, WeChat Official Account publishing, ecommerce product listing/unlisting, CRM, ERP, ad platforms, or "my account/my browser/my backend" tasks, use this routing order:
   1. If the task can run in a healthy managed browser that is already logged in for the target site, use `browser` for DOM/ref-based observation and actions.
   2. If managed browser is not logged in, user-account state matters, or `profile="user"` attach fails with errors like `DevToolsActivePort`/`Could not connect to Chrome`, stop retrying `browser` and switch to UClaw desktop computer-use tools.
@@ -20,6 +21,7 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 - Do not expose recoverable intermediate browser errors to the user as final failure when later steps can continue. Summarize only the final state or the real blocker.
 - `browser` is not native desktop computer use. If the user explicitly asks for UClaw `computer use`, asks for `computer_browser_open_url`, asks to use the user's normal desktop browser, or asks to operate an existing Chrome/Edge window, do not read/use `browser-automation` and do not call `browser`; use the concrete `computer_*` tools instead.
 - If you have already used any `computer_*` tool in the current task to operate the user's normal desktop, stay on the `computer_*` path for that task. Do not switch to `browser` for tab inspection or page control; normal Chrome usually has no DevToolsActivePort and `browser` may fail with `Could not connect to Chrome`.
+- If `browser` returns `action targetId must match request targetId` or a stale target/ref error, do not repeat the same action with the old targetId. Call `browser` status/tabs/snapshot on the same profile, use the newest returned `targetId` or tab label, then retry the intended action once.
 - Flow: `action="start"` -> `action="snapshot"` (see page + get element refs like `e12`) -> `action="act"` (click/type using refs).
 - Open new tabs: `action="open"` with `targetUrl`.
 - Do not open local files with `file://` in the browser tool. If you need to preview a local HTML/Markdown/document artifact, use UClaw's file preview/workspace browser when available, or serve the workspace directory over `http://127.0.0.1:<port>/...` and open that HTTP URL.

@@ -4,6 +4,7 @@
  * Keep this list in sync with electron/shared/skills/bundled-allowlist.ts.
  */
 export const UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS = [
+  'browser-automation',
   'diagram-maker',
   'healthcheck',
   'meme-maker',

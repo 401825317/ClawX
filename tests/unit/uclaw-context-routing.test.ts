@@ -52,6 +52,7 @@ describe('UClaw tool routing context', () => {
 
   it('treats account web automation as UClaw-orchestrated browser plus desktop fallback', () => {
     expect(toolsContext).toContain('Treat `browser` as UClaw\'s high-efficiency web engine');
+    expect(toolsContext).toContain('Do not read `browser-automation/SKILL.md` from `node_modules/openclaw/skills`');
     expect(toolsContext).toContain('For logged-in business web tasks such as Douyin/TikTok private messages');
     expect(toolsContext).toContain('WeChat Official Account publishing');
     expect(toolsContext).toContain('ecommerce product listing/unlisting');
@@ -70,6 +71,8 @@ describe('UClaw tool routing context', () => {
     expect(toolsContext).toContain('Do not keep acting from stale refs or old screenshots');
     expect(toolsContext).toContain('For long automation tasks, treat provider idle retries');
     expect(toolsContext).toContain('targetId mismatch');
+    expect(toolsContext).toContain('action targetId must match request targetId');
+    expect(toolsContext).toContain('use the newest returned `targetId` or tab label');
     expect(toolsContext).toContain('missing input refs as recoverable signals');
     expect(toolsContext).toContain('Do not tell the user the task failed while the runtime is still making progress');
   });

@@ -6,6 +6,7 @@
  * the Skills page.
  */
 export const UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS = [
+  'browser-automation',
   'diagram-maker',
   'healthcheck',
   'meme-maker',
