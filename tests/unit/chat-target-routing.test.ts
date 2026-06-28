@@ -107,6 +107,19 @@ describe('chat target routing', () => {
       if (url === '/api/media/video-generation/chat-send') {
         return { success: true, jobId: 'job-video', job: { id: 'job-video', status: 'queued' } };
       }
+      if (url === '/api/computer/desktop-screenshot') {
+        return {
+          success: true,
+          screenshot: {
+            fileName: 'desktop-screenshot.png',
+            filePath: 'C:\\Users\\Administrator\\.openclaw\\media\\desktop-screenshots\\desktop-screenshot.png',
+            mimeType: 'image/png',
+            fileSize: 1024,
+            preview: 'data:image/png;base64,abc',
+            sourceName: 'Screen 1',
+          },
+        };
+      }
       if (url === '/api/media/generation-jobs/job-image' || url === '/api/media/generation-jobs/job-video') {
         return { success: true, job: { id: url.endsWith('job-image') ? 'job-image' : 'job-video', status: 'succeeded' } };
       }
@@ -598,6 +611,93 @@ describe('chat target routing', () => {
       message: '帮我搜索几张参考图片',
     });
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+  });
+
+  it('keeps automation planning requests with illustration wording on the normal chat path', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    const prompt = '我想让你帮我实现每天早上定时给我推送早报，然后根据优质内容改写之后自己配图发到我的微信公众号里，不使用公众号API实现';
+    await useChatStore.getState().sendMessage(prompt);
+
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    expect(sendCall).toBeTruthy();
+    const payload = JSON.parse((sendCall?.[1] as { body: string }).body) as {
+      sessionKey: string;
+      message: string;
+    };
+
+    expect(payload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      message: prompt,
+    });
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+  });
+
+  it('captures local desktop screenshots without routing through OpenClaw nodes', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('你截图一下当前桌面');
+
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/computer/desktop-screenshot')).toBe(true);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+    expect(gatewayRpcMock.mock.calls.some(([method]) => method === 'chat.send')).toBe(false);
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '已截取当前桌面。',
+      _attachedFiles: [
+        {
+          fileName: 'desktop-screenshot.png',
+          mimeType: 'image/png',
+          fileSize: 1024,
+          preview: 'data:image/png;base64,abc',
+          source: 'tool-result',
+        },
+      ],
+    });
   });
 
   it('forwards explicitly pasted image references for image-mode sends', async () => {

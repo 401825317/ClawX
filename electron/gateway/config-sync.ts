@@ -33,8 +33,10 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
+import { getHostApiToken } from '../api/host-api-token';
+import { getPort } from '../utils/config';
 import { stripSystemdSupervisorEnv } from './config-sync-env';
 import { cleanupAgentsSymlinkedSkills, cleanupStalePluginRuntimeDeps } from './skills-symlink-cleanup';
 import {
@@ -77,6 +79,14 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
   'openclaw-weixin': { dirName: 'openclaw-weixin', npmName: '@tencent-weixin/openclaw-weixin' },
   [CLAWX_OPENAI_IMAGE_PROVIDER_KEY]: { dirName: CLAWX_OPENAI_IMAGE_PROVIDER_KEY, npmName: 'clawx-openai-image-plugin' },
 };
+
+function ensureCoreUClawPluginsInstalled(): boolean {
+  const result = ensureUClawComputerUsePluginInstalled();
+  if (result.warning) {
+    logger.warn(`[plugin] UClaw Computer Use: ${result.warning}`);
+  }
+  return result.installed;
+}
 
 /**
  * OpenClaw 3.22+ ships Discord, Telegram, and other channels as built-in
@@ -497,6 +507,12 @@ export async function syncGatewayConfigBeforeLaunch(
     logger.warn('Failed to auto-upgrade plugins:', err);
   }
 
+  try {
+    measureSync(timingsMs, 'uclawCorePluginMaintenanceMs', ensureCoreUClawPluginsInstalled);
+  } catch (err) {
+    logger.warn('Failed to install UClaw core plugins:', err);
+  }
+
   // Batch gateway token, browser config, and session idle into one read+write cycle.
   try {
     await measureAsync(timingsMs, 'configFieldSyncMs', async () => {
@@ -635,6 +651,8 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     ...uvEnv,
     ...proxyEnv,
     OPENCLAW_GATEWAY_TOKEN: appSettings.gatewayToken,
+    CLAWX_HOST_API_ORIGIN: `http://127.0.0.1:${getPort('CLAWX_HOST_API')}`,
+    CLAWX_HOST_API_TOKEN: getHostApiToken(),
     OPENCLAW_SKIP_CHANNELS: skipChannels ? '1' : '',
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',

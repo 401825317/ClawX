@@ -1,5 +1,5 @@
-import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { getHostApiToken, rotateHostApiToken } from './host-api-token';
 import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import { extensionRegistry } from '../extensions/registry';
@@ -19,6 +19,7 @@ import { handleSessionRoutes } from './routes/sessions';
 import { handleCronRoutes } from './routes/cron';
 import { handleDiagnosticsRoutes } from './routes/diagnostics';
 import { handleMediaRoutes } from './routes/media';
+import { handleComputerRoutes } from './routes/computer';
 import { sendJson, setCorsHeaders, requireJsonContentType } from './route-utils';
 
 type RouteHandler = (
@@ -44,6 +45,7 @@ const coreRouteHandlers: RouteHandler[] = [
   handleLogRoutes,
   handleUsageRoutes,
   handleMediaRoutes,
+  handleComputerRoutes,
 ];
 
 function buildRouteHandlers(): RouteHandler[] {
@@ -58,16 +60,9 @@ function buildRouteHandlers(): RouteHandler[] {
  * if they can reach 127.0.0.1:13210 (the CORS wildcard alone is not
  * sufficient because browsers attach the Origin header but not a secret).
  */
-let hostApiToken: string = '';
-
-/** Retrieve the current Host API auth token (for use by IPC proxy). */
-export function getHostApiToken(): string {
-  return hostApiToken;
-}
-
 export function startHostApiServer(ctx: HostApiContext, port = getPort('CLAWX_HOST_API')): Server {
   // Generate a cryptographically random token for this session.
-  hostApiToken = randomBytes(32).toString('hex');
+  const hostApiToken = rotateHostApiToken();
 
   const server = createServer(async (req, res) => {
     try {

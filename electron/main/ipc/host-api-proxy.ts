@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
-import { getHostApiToken } from '../../api/server';
+import { getHostApiToken } from '../../api/host-api-token';
 
 type HostApiFetchRequest = {
   path: string;

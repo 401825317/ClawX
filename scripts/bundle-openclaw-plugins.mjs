@@ -45,6 +45,11 @@ const PLUGINS = [
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
 ];
 
+const LOCAL_PLUGINS = [
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'), pluginId: 'clawx-openai-image' },
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-computer-use'), pluginId: 'uclaw-computer-use' },
+];
+
 function getVirtualStoreNodeModules(realPkgPath) {
   let dir = realPkgPath;
   while (dir !== path.dirname(dir)) {
@@ -183,6 +188,26 @@ function bundleOnePlugin({ npmName, pluginId }) {
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
+function bundleLocalPlugin({ sourceDir, pluginId }) {
+  if (!fs.existsSync(sourceDir)) {
+    throw new Error(`Missing local plugin source: ${sourceDir}`);
+  }
+
+  const outputDir = path.join(OUTPUT_ROOT, pluginId);
+  echo`Bundling local plugin ${pluginId} -> ${outputDir}`;
+
+  if (fs.existsSync(outputDir)) {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+  fs.mkdirSync(outputDir, { recursive: true });
+  fs.cpSync(normWin(sourceDir), normWin(outputDir), { recursive: true, dereference: true });
+
+  const manifestPath = path.join(outputDir, 'openclaw.plugin.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`Missing openclaw.plugin.json in local plugin output: ${pluginId}`);
+  }
+}
+
 /**
  * Patch plugin entry JS files so the exported `id` matches openclaw.plugin.json.
  * Some plugins (e.g. wecom) ship with a hardcoded ID in their compiled output
@@ -245,6 +270,10 @@ fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
 for (const plugin of PLUGINS) {
   bundleOnePlugin(plugin);
+}
+
+for (const plugin of LOCAL_PLUGINS) {
+  bundleLocalPlugin(plugin);
 }
 
 echo`✅ Plugin mirrors ready: ${OUTPUT_ROOT}`;

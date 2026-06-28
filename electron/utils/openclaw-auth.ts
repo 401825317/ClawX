@@ -287,6 +287,35 @@ function ensureOAuthPluginEnabled(config: Record<string, unknown>, provider: str
   config.plugins = plugins;
 }
 
+function ensurePluginEntryEnabled(config: Record<string, unknown>, pluginId: string): boolean {
+  const plugins = isPlainRecord(config.plugins) ? config.plugins as Record<string, unknown> : {};
+  const allow = Array.isArray(plugins.allow)
+    ? (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  const entries = isPlainRecord(plugins.entries) ? plugins.entries as Record<string, Record<string, unknown>> : {};
+  let modified = false;
+
+  if (!allow.includes(pluginId)) {
+    plugins.allow = [...allow, pluginId];
+    modified = true;
+  }
+
+  const existingEntry = isPlainRecord(entries[pluginId]) ? entries[pluginId] : {};
+  if (existingEntry.enabled !== true) {
+    entries[pluginId] = {
+      ...existingEntry,
+      enabled: true,
+    };
+    modified = true;
+  }
+
+  plugins.entries = entries;
+  if (modified || config.plugins !== plugins) {
+    config.plugins = plugins;
+  }
+  return modified;
+}
+
 function removePluginRegistrations(
   config: Record<string, unknown>,
   pluginIds: string[],
@@ -732,6 +761,7 @@ const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
   'acpx',
   'memory-core',
+  'uclaw-computer-use',
 ]);
 const AUTH_PROFILE_PROVIDER_KEY_MAP: Record<string, string> = {
   'openai-codex': 'openai',
@@ -2641,6 +2671,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 
     // ── web_fetch SSRF policy (fake-IP / transparent-proxy environments) ──
     if (ensureWebFetchSsrfPolicyInConfig(config)) {
+      modified = true;
+    }
+
+    if (ensurePluginEntryEnabled(config, 'uclaw-computer-use')) {
       modified = true;
     }
 

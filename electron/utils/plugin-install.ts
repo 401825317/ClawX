@@ -581,6 +581,14 @@ export function ensureClawXOpenAiImagePluginInstalled(): { installed: boolean; w
   );
 }
 
+export function ensureUClawComputerUsePluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-computer-use',
+    buildCandidateSources('uclaw-computer-use'),
+    'UClaw Computer Use',
+  );
+}
+
 // ── Bulk startup installer ───────────────────────────────────────────────────
 
 /**
@@ -594,6 +602,7 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureWeChatPluginInstalled, label: 'WeChat' },
   { fn: ensureQQBotPluginInstalled, label: 'QQBot' },
   { fn: ensureClawXOpenAiImagePluginInstalled, label: 'UClaw OpenAI Image' },
+  { fn: ensureUClawComputerUsePluginInstalled, label: 'UClaw Computer Use' },
 ] as const;
 
 /**

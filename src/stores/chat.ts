@@ -80,9 +80,11 @@ let _lastChatEventAt = 0;
 let _managedAuthBackgroundVerifyInFlight: Promise<void> | null = null;
 let _lastManagedAuthBackgroundVerifyAt = 0;
 const MANAGED_AUTH_BACKGROUND_VERIFY_MIN_INTERVAL_MS = 60_000;
-const IMAGE_GENERATION_INTENT_PATTERN = /(?:(?:生成|绘制|画|制作|做|设计|create|generate|draw|make|design|render)[\s\S]{0,24}(?:图片|图像|插画|海报|封面|头像|壁纸|图标|logo|icon|banner|poster|image|picture|illustration|photo|artwork)|(?:出图|生图|画图|作图|做图|配图|生成图|生成海报|生成封面|生成头像)|(?:补全提示词|优化提示词)[\s\S]{0,32}(?:出图|生图|画图|作图|做图|图片|图像|image|picture))/i;
+const IMAGE_GENERATION_INTENT_PATTERN = /(?:(?:生成|绘制|画|制作|做|设计|create|generate|draw|make|design|render)[\s\S]{0,24}(?:图片|图像|插画|海报|封面|头像|壁纸|图标|logo|icon|banner|poster|image|picture|illustration|photo|artwork)|(?:出图|生图|画图|作图|做图|生成图|生成海报|生成封面|生成头像)|(?:补全提示词|优化提示词)[\s\S]{0,32}(?:出图|生图|画图|作图|做图|图片|图像|image|picture))/i;
 const IMAGE_LOOKUP_INTENT_PATTERN = /(?:搜索|搜|查找|找|检索|浏览器|网页|素材|参考图|参考图片|search|find|look up|browse|reference)/i;
 const IMAGE_NEGATION_INTENT_PATTERN = /(?:不要|不用|别|不需要|do not|don't|dont|no need)[\s\S]{0,12}(?:生成|绘制|画|制作|图片|图像|image|picture)/i;
+const IMAGE_AUTOMATION_PLANNING_INTENT_PATTERN = /(?:每天|每日|定时|自动化|流程|方案|实现|开发|搭建|配置|推送|公众号|工作流|daily|schedule|automate|workflow)/i;
+const DESKTOP_SCREENSHOT_INTENT_PATTERN = /(?:截图|截屏|截个屏|截一下|屏幕截图|桌面截图|当前桌面|当前屏幕|screenshot|screen\s*(?:shot|capture)|capture\s+(?:the\s+)?screen|desktop\s+screenshot)/i;
 
 function managedAuthSendErrorMessage(stateKey: string, detail?: string | null): string {
   if (stateKey === 'loggedOut') {
@@ -167,8 +169,30 @@ function shouldAutoUseImageGenerationMode(
   if (attachments?.some((file) => !file.mimeType.startsWith('image/'))) return false;
   if (IMAGE_NEGATION_INTENT_PATTERN.test(trimmed)) return false;
   if (IMAGE_LOOKUP_INTENT_PATTERN.test(trimmed)) return false;
+  if (IMAGE_AUTOMATION_PLANNING_INTENT_PATTERN.test(trimmed)) return false;
   return IMAGE_GENERATION_INTENT_PATTERN.test(trimmed);
 }
+
+function shouldUseLocalDesktopScreenshot(text: string, mode: ChatSendMode, attachments?: ChatSendAttachment[]): boolean {
+  if (mode !== 'chat') return false;
+  if (attachments && attachments.length > 0) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return DESKTOP_SCREENSHOT_INTENT_PATTERN.test(trimmed);
+}
+
+type DesktopScreenshotResponse = {
+  success?: boolean;
+  screenshot?: {
+    fileName: string;
+    filePath: string;
+    mimeType: string;
+    fileSize: number;
+    preview: string | null;
+    sourceName?: string;
+  };
+  error?: string;
+};
 
 type PendingImageInput = {
   fileName: string;
@@ -4267,6 +4291,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Mark this session as most recently active
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
+
+    if (shouldUseLocalDesktopScreenshot(trimmed, mode, attachments)) {
+      try {
+        const result = await hostApiFetch<DesktopScreenshotResponse>(
+          '/api/computer/desktop-screenshot',
+          {
+            method: 'POST',
+            body: JSON.stringify({}),
+          },
+        );
+        if (result.success === false || !result.screenshot) {
+          throw new Error(result.error || 'Failed to capture desktop screenshot');
+        }
+        const screenshot = result.screenshot;
+        const assistantMsg: RawMessage = {
+          role: 'assistant',
+          content: '已截取当前桌面。',
+          timestamp: Date.now() / 1000,
+          id: crypto.randomUUID(),
+          _attachedFiles: [{
+            fileName: screenshot.fileName,
+            mimeType: screenshot.mimeType,
+            fileSize: screenshot.fileSize,
+            preview: screenshot.preview,
+            filePath: screenshot.filePath,
+            source: 'tool-result',
+          }],
+        };
+        set((s) => ({
+          messages: [...s.messages, assistantMsg],
+          sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        }));
+        markSessionRunIdle(currentSessionKey);
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+          sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        });
+        markSessionRunIdle(currentSessionKey);
+      }
+      return;
+    }
 
     if (effectiveMode === 'image') {
       try {

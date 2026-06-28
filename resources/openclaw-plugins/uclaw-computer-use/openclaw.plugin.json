@@ -1,0 +1,29 @@
+{
+  "id": "uclaw-computer-use",
+  "name": "UClaw Computer Use",
+  "description": "Local desktop computer-use tools provided by the UClaw Electron host.",
+  "version": "0.1.0",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "contracts": {
+    "tools": [
+      "computer_screenshot",
+      "computer_clipboard_read",
+      "computer_clipboard_write",
+      "computer_window_list",
+      "computer_window_sources",
+      "computer_window_screenshot",
+      "computer_display_list",
+      "computer_cursor_position",
+      "computer_mouse_move",
+      "computer_mouse_click",
+      "computer_key_press",
+      "computer_type_text"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

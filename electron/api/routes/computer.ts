@@ -1,0 +1,526 @@
+import type { IncomingMessage, ServerResponse } from 'http';
+import { BrowserWindow, clipboard, desktopCapturer, screen } from 'electron';
+import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { promisify } from 'node:util';
+import type { HostApiContext } from '../context';
+import { parseJsonBody, sendJson } from '../route-utils';
+import { getOpenClawMediaDir } from '../../utils/paths';
+
+const execFileAsync = promisify(execFile);
+const POWERSHELL_TIMEOUT_MS = 8_000;
+const MAX_TYPE_TEXT_LENGTH = 20_000;
+
+function getDesktopScreenshotsDir(): string {
+  return join(getOpenClawMediaDir(), 'desktop-screenshots');
+}
+
+function buildScreenshotFileName(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const suffix = crypto.randomUUID().slice(0, 8);
+  return `desktop-screenshot-${stamp}-${suffix}.png`;
+}
+
+function buildWindowScreenshotFileName(): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const suffix = crypto.randomUUID().slice(0, 8);
+  return `window-screenshot-${stamp}-${suffix}.png`;
+}
+
+export async function captureDesktopScreenshot(): Promise<{
+  fileName: string;
+  filePath: string;
+  mimeType: 'image/png';
+  fileSize: number;
+  preview: string;
+  sourceName?: string;
+}> {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: 1920, height: 1080 },
+    fetchWindowIcons: false,
+  });
+  const source = sources[0];
+  if (!source || source.thumbnail.isEmpty()) {
+    throw new Error('No desktop screen is available for screenshot capture');
+  }
+
+  const png = source.thumbnail.toPNG();
+  const outDir = getDesktopScreenshotsDir();
+  await mkdir(outDir, { recursive: true });
+  const fileName = buildScreenshotFileName();
+  const filePath = join(outDir, fileName);
+  await writeFile(filePath, png);
+
+  return {
+    fileName: basename(filePath),
+    filePath,
+    mimeType: 'image/png',
+    fileSize: png.byteLength,
+    preview: `data:image/png;base64,${png.toString('base64')}`,
+    sourceName: source.name,
+  };
+}
+
+async function listWindowSources(): Promise<Array<{
+  id: string;
+  name: string;
+  thumbnailPreview: string | null;
+}>> {
+  const sources = await desktopCapturer.getSources({
+    types: ['window'],
+    thumbnailSize: { width: 480, height: 270 },
+    fetchWindowIcons: false,
+  });
+
+  return sources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    thumbnailPreview: source.thumbnail.isEmpty()
+      ? null
+      : `data:image/png;base64,${source.thumbnail.toPNG().toString('base64')}`,
+  }));
+}
+
+async function captureWindowScreenshot(input: {
+  sourceId?: unknown;
+  titleIncludes?: unknown;
+}): Promise<{
+  fileName: string;
+  filePath: string;
+  mimeType: 'image/png';
+  fileSize: number;
+  preview: string;
+  sourceId: string;
+  sourceName: string;
+}> {
+  const sourceId = typeof input.sourceId === 'string' ? input.sourceId.trim() : '';
+  const titleIncludes = typeof input.titleIncludes === 'string' ? input.titleIncludes.trim().toLowerCase() : '';
+  const sources = await desktopCapturer.getSources({
+    types: ['window'],
+    thumbnailSize: { width: 1920, height: 1080 },
+    fetchWindowIcons: false,
+  });
+
+  const source = sources.find((candidate) => sourceId && candidate.id === sourceId)
+    ?? sources.find((candidate) => titleIncludes && candidate.name.toLowerCase().includes(titleIncludes))
+    ?? sources[0];
+
+  if (!source || source.thumbnail.isEmpty()) {
+    throw new Error('No application window is available for screenshot capture');
+  }
+
+  const png = source.thumbnail.toPNG();
+  const outDir = getDesktopScreenshotsDir();
+  await mkdir(outDir, { recursive: true });
+  const fileName = buildWindowScreenshotFileName();
+  const filePath = join(outDir, fileName);
+  await writeFile(filePath, png);
+
+  return {
+    fileName: basename(filePath),
+    filePath,
+    mimeType: 'image/png',
+    fileSize: png.byteLength,
+    preview: `data:image/png;base64,${png.toString('base64')}`,
+    sourceId: source.id,
+    sourceName: source.name,
+  };
+}
+
+function getWindowList(): Array<{
+  id: number;
+  title: string;
+  focused: boolean;
+  visible: boolean;
+  minimized: boolean;
+  bounds: Electron.Rectangle;
+}> {
+  return BrowserWindow.getAllWindows()
+    .filter((window) => !window.isDestroyed())
+    .map((window) => ({
+      id: window.id,
+      title: window.getTitle(),
+      focused: window.isFocused(),
+      visible: window.isVisible(),
+      minimized: window.isMinimized(),
+      bounds: window.getBounds(),
+    }));
+}
+
+function getDisplayList(): Array<{
+  id: number;
+  label: string;
+  scaleFactor: number;
+  bounds: Electron.Rectangle;
+  workArea: Electron.Rectangle;
+}> {
+  return screen.getAllDisplays().map((display) => ({
+    id: display.id,
+    label: display.label,
+    scaleFactor: display.scaleFactor,
+    bounds: display.bounds,
+    workArea: display.workArea,
+  }));
+}
+
+function unsupportedOnThisPlatform(action: string): never {
+  throw new Error(`${action} is currently supported on Windows only`);
+}
+
+function encodePowerShell(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64');
+}
+
+async function runWindowsPowerShellJson<T>(script: string): Promise<T> {
+  if (process.platform !== 'win32') {
+    unsupportedOnThisPlatform('Computer control');
+  }
+
+  const { stdout, stderr } = await execFileAsync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      encodePowerShell([
+        '$ErrorActionPreference = "Stop"',
+        '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::UTF8',
+        script,
+      ].join('\n')),
+    ],
+    {
+      timeout: POWERSHELL_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    },
+  );
+
+  const raw = stdout.trim();
+  if (!raw) {
+    if (stderr.trim()) {
+      throw new Error(stderr.trim());
+    }
+    return {} as T;
+  }
+  return JSON.parse(raw) as T;
+}
+
+function toFiniteNumber(value: unknown, field: string): number {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) {
+    throw new Error(`${field} must be a finite number`);
+  }
+  return numberValue;
+}
+
+function toInteger(value: unknown, field: string): number {
+  const numberValue = Math.trunc(toFiniteNumber(value, field));
+  return numberValue;
+}
+
+function normalizeMouseButton(value: unknown): 'left' | 'right' | 'middle' {
+  const button = typeof value === 'string' ? value.toLowerCase().trim() : 'left';
+  if (button === 'left' || button === 'right' || button === 'middle') {
+    return button;
+  }
+  throw new Error('button must be one of: left, right, middle');
+}
+
+const VK_CODES: Record<string, number> = {
+  backspace: 0x08,
+  tab: 0x09,
+  enter: 0x0d,
+  shift: 0x10,
+  ctrl: 0x11,
+  control: 0x11,
+  alt: 0x12,
+  pause: 0x13,
+  capslock: 0x14,
+  esc: 0x1b,
+  escape: 0x1b,
+  space: 0x20,
+  pageup: 0x21,
+  pagedown: 0x22,
+  end: 0x23,
+  home: 0x24,
+  left: 0x25,
+  up: 0x26,
+  right: 0x27,
+  down: 0x28,
+  insert: 0x2d,
+  delete: 0x2e,
+  win: 0x5b,
+  meta: 0x5b,
+  command: 0x5b,
+  numlock: 0x90,
+  scrolllock: 0x91,
+};
+
+for (let code = 0x30; code <= 0x39; code += 1) {
+  VK_CODES[String.fromCharCode(code).toLowerCase()] = code;
+}
+for (let code = 0x41; code <= 0x5a; code += 1) {
+  VK_CODES[String.fromCharCode(code).toLowerCase()] = code;
+}
+for (let index = 1; index <= 24; index += 1) {
+  VK_CODES[`f${index}`] = 0x6f + index;
+}
+
+function normalizeKey(value: unknown): { label: string; vk: number } {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('key must be a non-empty string');
+  }
+  const label = value.trim().toLowerCase();
+  const vk = VK_CODES[label];
+  if (!vk) {
+    throw new Error(`Unsupported key: ${value}`);
+  }
+  return { label, vk };
+}
+
+function normalizeModifiers(value: unknown): Array<{ label: string; vk: number }> {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeKey);
+}
+
+async function getCursorPosition(): Promise<{ x: number; y: number }> {
+  return await runWindowsPowerShellJson<{ x: number; y: number }>(`
+Add-Type -AssemblyName System.Windows.Forms
+$p = [System.Windows.Forms.Cursor]::Position
+[pscustomobject]@{ x = $p.X; y = $p.Y } | ConvertTo-Json -Compress
+`);
+}
+
+async function moveMouse(input: { x?: unknown; y?: unknown }): Promise<{ x: number; y: number }> {
+  const x = toInteger(input.x, 'x');
+  const y = toInteger(input.y, 'y');
+  return await runWindowsPowerShellJson<{ x: number; y: number }>(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UClawMouse {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int X, int Y);
+}
+"@
+[void][UClawMouse]::SetCursorPos(${x}, ${y})
+[pscustomobject]@{ x = ${x}; y = ${y} } | ConvertTo-Json -Compress
+`);
+}
+
+async function clickMouse(input: {
+  x?: unknown;
+  y?: unknown;
+  button?: unknown;
+  clicks?: unknown;
+}): Promise<{ x?: number; y?: number; button: string; clicks: number }> {
+  const hasX = input.x !== undefined && input.x !== null;
+  const hasY = input.y !== undefined && input.y !== null;
+  if (hasX !== hasY) {
+    throw new Error('x and y must be provided together');
+  }
+  const x = hasX ? toInteger(input.x, 'x') : null;
+  const y = hasY ? toInteger(input.y, 'y') : null;
+  const button = normalizeMouseButton(input.button);
+  const clicks = Math.max(1, Math.min(3, input.clicks === undefined ? 1 : toInteger(input.clicks, 'clicks')));
+  const flags = button === 'right'
+    ? { down: 0x0008, up: 0x0010 }
+    : button === 'middle'
+      ? { down: 0x0020, up: 0x0040 }
+      : { down: 0x0002, up: 0x0004 };
+
+  return await runWindowsPowerShellJson<{ x?: number; y?: number; button: string; clicks: number }>(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UClawMouse {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+}
+"@
+${x !== null && y !== null ? `[void][UClawMouse]::SetCursorPos(${x}, ${y})` : ''}
+for ($i = 0; $i -lt ${clicks}; $i++) {
+  [UClawMouse]::mouse_event(${flags.down}, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 35
+  [UClawMouse]::mouse_event(${flags.up}, 0, 0, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 35
+}
+[pscustomobject]@{ ${x !== null ? `x = ${x}; y = ${y};` : ''} button = "${button}"; clicks = ${clicks} } | ConvertTo-Json -Compress
+`);
+}
+
+async function pressKey(input: { key?: unknown; modifiers?: unknown }): Promise<{
+  key: string;
+  modifiers: string[];
+}> {
+  const key = normalizeKey(input.key);
+  const modifiers = normalizeModifiers(input.modifiers);
+  const downSequence = [...modifiers, key];
+  const upSequence = [...downSequence].reverse();
+  const downScript = downSequence.map((item) => `[UClawKeyboard]::keybd_event(${item.vk}, 0, 0, [UIntPtr]::Zero)`).join('\n');
+  const upScript = upSequence.map((item) => `[UClawKeyboard]::keybd_event(${item.vk}, 0, 2, [UIntPtr]::Zero)`).join('\n');
+
+  return await runWindowsPowerShellJson<{ key: string; modifiers: string[] }>(`
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class UClawKeyboard {
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+${downScript}
+Start-Sleep -Milliseconds 35
+${upScript}
+[pscustomobject]@{ key = "${key.label}"; modifiers = @(${modifiers.map((item) => `"${item.label}"`).join(', ')}) } | ConvertTo-Json -Compress
+`);
+}
+
+async function typeText(input: { text?: unknown }): Promise<{ length: number; method: 'clipboard-paste' }> {
+  const text = typeof input.text === 'string' ? input.text : '';
+  if (text.length > MAX_TYPE_TEXT_LENGTH) {
+    throw new Error(`text is too long; max ${MAX_TYPE_TEXT_LENGTH} characters`);
+  }
+  clipboard.writeText(text);
+  await pressKey({ key: 'v', modifiers: ['ctrl'] });
+  return { length: text.length, method: 'clipboard-paste' };
+}
+
+export async function handleComputerRoutes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  _ctx: HostApiContext,
+): Promise<boolean> {
+  if (
+    (url.pathname === '/api/computer/desktop-screenshot' || url.pathname === '/api/computer/screenshot')
+    && req.method === 'POST'
+  ) {
+    const screenshot = await captureDesktopScreenshot();
+    sendJson(res, 200, {
+      success: true,
+      screenshot,
+      result: screenshot,
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/clipboard/read' && req.method === 'POST') {
+    const text = clipboard.readText();
+    sendJson(res, 200, {
+      success: true,
+      result: {
+        text,
+        length: text.length,
+      },
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/clipboard/write' && req.method === 'POST') {
+    const body = await parseJsonBody<{ text?: unknown }>(req);
+    const text = typeof body.text === 'string' ? body.text : '';
+    clipboard.writeText(text);
+    sendJson(res, 200, {
+      success: true,
+      result: {
+        length: text.length,
+      },
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/windows' && req.method === 'GET') {
+    sendJson(res, 200, {
+      success: true,
+      result: {
+        windows: getWindowList(),
+      },
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/window-sources' && req.method === 'GET') {
+    sendJson(res, 200, {
+      success: true,
+      result: {
+        windows: await listWindowSources(),
+      },
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/window-screenshot' && req.method === 'POST') {
+    const body = await parseJsonBody<{ sourceId?: unknown; titleIncludes?: unknown }>(req);
+    const screenshot = await captureWindowScreenshot(body);
+    sendJson(res, 200, {
+      success: true,
+      screenshot,
+      result: screenshot,
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/displays' && req.method === 'GET') {
+    sendJson(res, 200, {
+      success: true,
+      result: {
+        displays: getDisplayList(),
+      },
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/cursor' && req.method === 'GET') {
+    sendJson(res, 200, {
+      success: true,
+      result: await getCursorPosition(),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/mouse/move' && req.method === 'POST') {
+    const body = await parseJsonBody<{ x?: unknown; y?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await moveMouse(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/mouse/click' && req.method === 'POST') {
+    const body = await parseJsonBody<{ x?: unknown; y?: unknown; button?: unknown; clicks?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await clickMouse(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/keyboard/press' && req.method === 'POST') {
+    const body = await parseJsonBody<{ key?: unknown; modifiers?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await pressKey(body),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/computer/keyboard/type' && req.method === 'POST') {
+    const body = await parseJsonBody<{ text?: unknown }>(req);
+    sendJson(res, 200, {
+      success: true,
+      result: await typeText(body),
+    });
+    return true;
+  }
+
+  return false;
+}
