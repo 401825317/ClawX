@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Patch electron-builder's NSIS extractUsing7za macro to extract directly into
  * $INSTDIR instead of temp + CopyFiles.

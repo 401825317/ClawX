@@ -66,7 +66,7 @@ describe('getOpenClawCliCommand (Windows packaged)', () => {
     mockExistsSync.mockImplementation((p: string) => /[\\/]cli[\\/]openclaw\.cmd$/i.test(p) || /[\\/]bin[\\/]node\.exe$/i.test(p));
     const { getOpenClawCliCommand } = await import('@electron/utils/openclaw-cli');
     expect(getOpenClawCliCommand()).toBe(
-      "& 'C:\\Program Files\\ClawX\\resources/cli/openclaw.cmd'",
+      "& 'C:\\Program Files\\ClawX\\resources\\cli\\openclaw.cmd'",
     );
   });
 
@@ -74,7 +74,7 @@ describe('getOpenClawCliCommand (Windows packaged)', () => {
     mockExistsSync.mockImplementation((p: string) => /[\\/]bin[\\/]node\.exe$/i.test(p));
     const { getOpenClawCliCommand } = await import('@electron/utils/openclaw-cli');
     expect(getOpenClawCliCommand()).toBe(
-      "& 'C:\\Program Files\\ClawX\\resources/bin/node.exe' 'C:\\Program Files\\ClawX\\resources\\openclaw\\openclaw.mjs'",
+      "& 'C:\\Program Files\\ClawX\\resources\\bin\\node.exe' 'C:\\Program Files\\ClawX\\resources\\openclaw\\openclaw.mjs'",
     );
   });
 

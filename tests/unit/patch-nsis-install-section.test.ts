@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,16 +7,18 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { patchNsisInstallSectionTemplate } from '../../scripts/patch-nsis-install-section.mjs';
 
-const SAMPLE_INSTALL_SECTION = `!ifdef ONE_CLICK
-  !insertmacro CHECK_APP_RUNNING
-!else
-  \${ifNot} \${UAC_IsInnerInstance}
-    !insertmacro CHECK_APP_RUNNING
-  \${endif}
-!endif
-
-!insertmacro installApplicationFiles
-`;
+const SAMPLE_INSTALL_SECTION = [
+  '!ifdef ONE_CLICK',
+  '  !insertmacro CHECK_APP_RUNNING',
+  '!else',
+  '  ${ifNot} ${UAC_IsInnerInstance}',
+  '    !insertmacro CHECK_APP_RUNNING',
+  '  ${endif}',
+  '!endif',
+  '',
+  '!insertmacro installApplicationFiles',
+  '',
+].join('\n');
 
 describe('patchNsisInstallSectionTemplate', () => {
   let tempDir: string | undefined;

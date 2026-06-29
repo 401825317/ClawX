@@ -24,6 +24,8 @@ export interface ElectronProxyConfig {
   proxyBypassRules?: string;
 }
 
+const LOCAL_PROXY_BYPASS_RULES = ['<local>', 'localhost', '127.0.0.1', '::1'];
+
 function trimValue(value: string | undefined | null): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -54,6 +56,19 @@ export function resolveProxySettings(settings: ProxySettings): ResolvedProxySett
   };
 }
 
+export function mergeLocalProxyBypassRules(value: string): string {
+  const rules = new Map<string, string>();
+  const add = (rule: string) => {
+    const trimmed = rule.trim();
+    if (!trimmed) return;
+    rules.set(trimmed.toLowerCase(), trimmed);
+  };
+
+  value.split(/[,\n;]/).forEach(add);
+  LOCAL_PROXY_BYPASS_RULES.forEach(add);
+  return [...rules.values()].join(';');
+}
+
 export function buildElectronProxyConfig(settings: ProxySettings): ElectronProxyConfig {
   if (!settings.proxyEnabled) {
     return { mode: 'direct' };
@@ -82,7 +97,7 @@ export function buildElectronProxyConfig(settings: ProxySettings): ElectronProxy
   return {
     mode: 'fixed_servers',
     proxyRules: rules.join(';'),
-    ...(resolved.bypassRules ? { proxyBypassRules: resolved.bypassRules } : {}),
+    proxyBypassRules: mergeLocalProxyBypassRules(resolved.bypassRules),
   };
 }
 
@@ -103,7 +118,7 @@ export function buildProxyEnv(settings: ProxySettings): Record<string, string> {
   }
 
   const resolved = resolveProxySettings(settings);
-  const noProxy = resolved.bypassRules
+  const noProxy = mergeLocalProxyBypassRules(resolved.bypassRules)
     .split(/[,\n;]/)
     .map((rule) => rule.trim())
     .filter(Boolean)

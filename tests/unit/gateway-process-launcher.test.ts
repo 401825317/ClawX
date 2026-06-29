@@ -264,7 +264,7 @@ describe('Gateway process launcher', () => {
       await launchPromise;
 
       const [modulePath, , options] = vi.mocked(utilityProcess.fork).mock.calls[0] ?? [];
-      expect(modulePath).toBe('/Applications/UClaw.app/Contents/Resources/app.asar/dist-electron/main/gateway-entry-wrapper.cjs');
+      expect(String(modulePath).replace(/\\/g, '/')).toBe('/Applications/UClaw.app/Contents/Resources/app.asar/dist-electron/main/gateway-entry-wrapper.cjs');
       expect(options).toMatchObject({
         env: {
           CLAWX_OPENCLAW_ENTRY: '/tmp/openclaw/openclaw.mjs',

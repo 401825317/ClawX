@@ -206,6 +206,25 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
   if (!fs.existsSync(manifestPath)) {
     throw new Error(`Missing openclaw.plugin.json in local plugin output: ${pluginId}`);
   }
+
+  const pkgJsonPath = path.join(outputDir, 'package.json');
+  if (!fs.existsSync(pkgJsonPath)) return;
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  const dependencies = Object.keys(pkg.dependencies || {});
+  if (dependencies.length === 0) return;
+
+  const outputNodeModules = path.join(outputDir, 'node_modules');
+  fs.mkdirSync(outputNodeModules, { recursive: true });
+  for (const depName of dependencies) {
+    const depPath = path.join(NODE_MODULES, ...depName.split('/'));
+    if (!fs.existsSync(depPath)) {
+      throw new Error(`Missing dependency "${depName}" for local plugin "${pluginId}". Run pnpm install first.`);
+    }
+    const realDepPath = fs.realpathSync(depPath);
+    const depOutputPath = path.join(outputNodeModules, depName);
+    fs.mkdirSync(normWin(path.dirname(depOutputPath)), { recursive: true });
+    fs.cpSync(normWin(realDepPath), normWin(depOutputPath), { recursive: true, dereference: true });
+  }
 }
 
 /**

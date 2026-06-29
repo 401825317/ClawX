@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Patch electron-builder's uninstallOldVersion to skip the legacy uninstaller on
  * upgrades. customCheckAppRunning already kills processes and moves $INSTDIR

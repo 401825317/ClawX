@@ -31,6 +31,9 @@ const SWP_SHOWWINDOW = 0x0040;
 const MAX_UIA_DEPTH = 6;
 const MAX_UIA_NODES = 500;
 const MAX_DOM_NODES = 800;
+const DEFAULT_WEB_OBSERVE_MAX_NODES = 120;
+const DEFAULT_WEB_OBSERVE_MAX_CANDIDATES = 25;
+const DEFAULT_WEB_OBSERVE_VISIBLE_TEXT_ITEMS = 35;
 const MAX_AGENT_STEPS = 12;
 const MAX_BROWSER_OPEN_URL_LENGTH = 4096;
 const MAX_WINDOW_SOURCE_PREVIEW_COUNT = 6;
@@ -207,14 +210,6 @@ export async function captureDesktopScreenshot(): Promise<{
       formula: `screenX = ${displayBounds.x} + screenshotX * ${scaleX}; screenY = ${displayBounds.y} + screenshotY * ${scaleY}`,
     },
   };
-}
-
-async function listWindowSources(): Promise<Array<{
-  id: string;
-  name: string;
-  thumbnailPreview?: string | null;
-}>> {
-  return await getWindowSources({ includePreviews: false });
 }
 
 async function getWindowSources(input: {
@@ -416,10 +411,9 @@ async function runWindowsPowerShellJson<T>(script: string): Promise<T> {
     unsupportedOnThisPlatform('Computer control');
   }
 
-  let stdout = '';
-  let stderr = '';
+  let result: { stdout: string; stderr: string };
   try {
-    const result = await execFileAsync(
+    result = await execFileAsync(
       'powershell.exe',
       [
         '-NoProfile',
@@ -439,18 +433,16 @@ async function runWindowsPowerShellJson<T>(script: string): Promise<T> {
         maxBuffer: 1024 * 1024,
       },
     );
-    stdout = result.stdout;
-    stderr = result.stderr;
   } catch (error) {
     const execError = error as Error & { stderr?: string; stdout?: string };
     const detail = (execError.stderr || execError.stdout || execError.message || '').trim();
-    throw new Error(detail || 'PowerShell command failed');
+    throw new Error(detail || 'PowerShell command failed', { cause: error });
   }
 
-  const raw = stdout.trim();
+  const raw = result.stdout.trim();
   if (!raw) {
-    if (stderr.trim()) {
-      throw new Error(stderr.trim());
+    if (result.stderr.trim()) {
+      throw new Error(result.stderr.trim());
     }
     return {} as T;
   }
@@ -502,6 +494,7 @@ function normalizeBrowserOpenUrl(value: unknown): string {
 
 function looksLikeAddressBarScript(value: unknown): boolean {
   if (typeof value !== 'string') return false;
+  // eslint-disable-next-line no-control-regex -- strip ASCII control characters from pasted address-bar text before checking for javascript: URLs.
   const compact = value.trim().replace(/[\u0000-\u001f\s]+/gu, '').toLowerCase();
   return compact.startsWith('javascript:');
 }
@@ -648,16 +641,17 @@ async function waitForExpectedForeground(
   timeoutMs = FOCUS_WAIT_TIMEOUT_MS,
 ): Promise<{ matched: boolean; window: SystemWindowInfo | null }> {
   const startedAt = Date.now();
-  let current: SystemWindowInfo | null = null;
-  do {
+  while (true) {
     const foreground = await getForegroundSystemWindow();
-    current = foreground.window && typeof foreground.window === 'object' ? foreground.window : null;
-    if (foregroundMatches(expected, current)) {
-      return { matched: true, window: current };
+    const currentWindow = foreground.window && typeof foreground.window === 'object' ? foreground.window as SystemWindowInfo : null;
+    if (foregroundMatches(expected, currentWindow)) {
+      return { matched: true, window: currentWindow };
+    }
+    if (Date.now() - startedAt >= timeoutMs) {
+      return { matched: false, window: currentWindow };
     }
     await sleep(FOCUS_WAIT_INTERVAL_MS);
-  } while (Date.now() - startedAt < timeoutMs);
-  return { matched: false, window: current };
+  }
 }
 
 async function getCursorPosition(): Promise<{ x: number; y: number }> {
@@ -1561,13 +1555,14 @@ async function observeExternalBrowser(input: {
     await controlSystemWindow({ hwnd: target.hwnd, action: 'focus' });
   }
 
-  const maxNodes = Math.max(50, Math.min(MAX_UIA_NODES, input.maxNodes === undefined ? 300 : toInteger(input.maxNodes, 'maxNodes')));
+  const maxNodes = Math.max(50, Math.min(MAX_UIA_NODES, input.maxNodes === undefined ? DEFAULT_WEB_OBSERVE_MAX_NODES : toInteger(input.maxNodes, 'maxNodes')));
   const uia = await getUiaTree({ hwnd: target.hwnd, maxDepth: 5, maxNodes });
   const nodes = flattenUiaTree(uia.tree);
-  const maxCandidates = Math.max(10, Math.min(120, input.maxCandidates === undefined ? 60 : toInteger(input.maxCandidates, 'maxCandidates')));
-  const screenshot = input.includeScreenshot === false
-    ? null
-    : await captureWindowScreenshot({ titleIncludes: target.title || undefined }).catch(() => null);
+  const maxCandidates = Math.max(5, Math.min(120, input.maxCandidates === undefined ? DEFAULT_WEB_OBSERVE_MAX_CANDIDATES : toInteger(input.maxCandidates, 'maxCandidates')));
+  const includeScreenshot = input.includeScreenshot === true;
+  const screenshot = includeScreenshot
+    ? await captureWindowScreenshot({ titleIncludes: target.title || undefined }).catch(() => null)
+    : null;
   const foreground = await getForegroundSystemWindow().then((result) => result.window).catch(() => null);
 
   return {
@@ -1577,11 +1572,11 @@ async function observeExternalBrowser(input: {
     uia: {
       nodeCount: uia.nodeCount,
       truncated: uia.truncated,
-      visibleText: summarizeUiaText(nodes, 80),
+      visibleText: summarizeUiaText(nodes, DEFAULT_WEB_OBSERVE_VISIBLE_TEXT_ITEMS),
       candidates: extractWebObserveCandidates(nodes, maxCandidates),
     },
     screenshot,
-    note: 'External browser observed through Windows UI Automation plus optional window screenshot. Use candidate bounds/center with expectedForeground for mouse/keyboard actions. If DOM access is required and browser tool is healthy, prefer browser snapshots for managed OpenClaw tabs.',
+    note: 'External browser observed through a bounded Windows UI Automation summary. Screenshot is omitted by default to keep model context small; call again with includeScreenshot=true only when text/candidates are insufficient. Use candidate bounds/center with expectedForeground for mouse/keyboard actions. If DOM access is required and browser tool is healthy, prefer browser snapshots for managed OpenClaw tabs.',
   };
 }
 

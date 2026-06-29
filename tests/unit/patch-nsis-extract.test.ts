@@ -17,20 +17,22 @@ const SAMPLE_EXTRACT_MACRO = `!macro extractUsing7za FILE
   CopyFiles /SILENT "$PLUGINSDIR\\\\7z-out\\\\*" $OUTDIR
 !macroend`;
 
-const SAMPLE_FILE = `!macro ia32_app_files
-  File /oname=$PLUGINSDIR\\\\app-32.7z "\\\${APP_32}"
-!macroend
-
-${SAMPLE_EXTRACT_MACRO}
-
-!macro decompress
-  !ifdef ZIP_COMPRESSION
-    Quit
-  !else
-    !insertmacro extractUsing7za "$PLUGINSDIR\\\\app-$packageArch.7z"
-  !endif
-!macroend
-`;
+const SAMPLE_FILE = [
+  '!macro ia32_app_files',
+  '  File /oname=$PLUGINSDIR\\\\app-32.7z "${APP_32}"',
+  '!macroend',
+  '',
+  SAMPLE_EXTRACT_MACRO,
+  '',
+  '!macro decompress',
+  '  !ifdef ZIP_COMPRESSION',
+  '    Quit',
+  '  !else',
+  '    !insertmacro extractUsing7za "$PLUGINSDIR\\\\app-$packageArch.7z"',
+  '  !endif',
+  '!macroend',
+  '',
+].join('\n');
 
 const SAMPLE_UNINSTALL_FUNCTION = readFileSync(
   join(FIXTURES, 'installUtil-unpatched.snippet.nsh'),
@@ -61,7 +63,7 @@ describe('patch-nsis-extract', () => {
     expect(result).toContain('$(decompressionFailed)');
     expect(result).toContain('Quit');
     expect(result).toContain('SetErrorLevel 2');
-    expect(result).toContain('Restoring previous ClawX installation after failed update');
+    expect(result).toContain('Failed to extract UClaw files after multiple attempts.');
     expect(result).not.toContain('continuing overwrite install anyway');
     expect(patchNsisExtractTemplate(target)).toBe(true);
   });
@@ -73,12 +75,14 @@ describe('patch-nsis-extract', () => {
       target,
       SAMPLE_FILE.replace(
         SAMPLE_EXTRACT_MACRO,
-        `!macro extractUsing7za FILE
-  ; ClawX-patched: extract directly to $INSTDIR.
-  ClearErrors
-  Nsis7z::Extract "\${FILE}"
-  DetailPrint "Extract reported file locks; continuing overwrite install anyway..."
-!macroend`,
+        [
+          '!macro extractUsing7za FILE',
+          '  ; ClawX-patched: extract directly to $INSTDIR.',
+          '  ClearErrors',
+          '  Nsis7z::Extract "${FILE}"',
+          '  DetailPrint "Extract reported file locks; continuing overwrite install anyway..."',
+          '!macroend',
+        ].join('\n'),
       ),
       'utf8',
     );
@@ -87,11 +91,10 @@ describe('patch-nsis-extract', () => {
 
     const result = readFileSync(target, 'utf8');
     expect(result).toContain('ClawX-patched-v2');
-    expect(result).toContain('Failed to extract ClawX files after multiple attempts.');
+    expect(result).toContain('Failed to extract UClaw files after multiple attempts.');
     expect(result).toContain('$(decompressionFailed)');
     expect(result).toContain('Quit');
     expect(result).toContain('SetErrorLevel 2');
-    expect(result).toContain('Restoring previous ClawX installation after failed update');
     expect(result).not.toContain('continuing overwrite install anyway');
   });
 

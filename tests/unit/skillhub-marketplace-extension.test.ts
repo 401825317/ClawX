@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import * as fsp from 'node:fs/promises';
 import JSZip from 'jszip';
 
 async function loadExtensionForHome(homeDir: string) {
@@ -10,6 +11,13 @@ async function loadExtensionForHome(homeDir: string) {
   vi.spyOn(paths, 'getOpenClawConfigDir').mockReturnValue(join(homeDir, '.openclaw'));
   const mod = await import('@electron/extensions/builtin/skillhub-marketplace');
   return mod.createSkillHubMarketplaceExtension();
+}
+
+async function loadSkillHubModuleForHome(homeDir: string) {
+  vi.resetModules();
+  const paths = await import('@electron/utils/paths');
+  vi.spyOn(paths, 'getOpenClawConfigDir').mockReturnValue(join(homeDir, '.openclaw'));
+  return await import('@electron/extensions/builtin/skillhub-marketplace');
 }
 
 function jsonResponse(value: unknown): Response {
@@ -138,5 +146,57 @@ describe('SkillHub marketplace extension', () => {
       displayName: 'SkillHub Demo',
       displayDescription: 'SkillHub demo desc',
     });
+  });
+
+  it('falls back to copy when Windows blocks the final rename', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'clawx-skillhub-home-'));
+    const originalRename = fsp.rename;
+    const renameMock = vi.fn(async (oldPath: Parameters<typeof fsp.rename>[0], newPath: Parameters<typeof fsp.rename>[1]) => {
+      if (String(oldPath).includes('.demo-skill-skillhub-') && String(newPath).endsWith(join('skills', 'demo-skill'))) {
+        const error = new Error('EPERM: operation not permitted, rename');
+        (error as NodeJS.ErrnoException).code = 'EPERM';
+        throw error;
+      }
+      return await originalRename(oldPath, newPath);
+    });
+    const skillHub = await loadSkillHubModuleForHome(homeDir);
+    skillHub.__setSkillHubFsForTests({ ...fsp, rename: renameMock });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/v1/skills/demo-skill')) {
+        return jsonResponse({
+          latestVersion: { version: '1.0.0' },
+          skill: {
+            slug: 'demo-skill',
+            displayName: 'SkillHub Demo',
+            summary_zh: 'SkillHub demo desc',
+            source: 'community',
+          },
+        });
+      }
+      if (url.includes('/api/v1/download?slug=demo-skill')) {
+        return await skillZipResponse();
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const extension = skillHub.createSkillHubMarketplaceExtension();
+      await extension.install({ slug: 'demo-skill', version: '1.0.0', provider: 'skillhub' });
+
+      const skillDir = join(homeDir, '.openclaw', 'skills', 'demo-skill');
+      expect(renameMock).toHaveBeenCalled();
+      expect(existsSync(join(skillDir, 'SKILL.md'))).toBe(true);
+      expect(existsSync(join(skillDir, 'references', 'readme.md'))).toBe(true);
+      const origin = JSON.parse(readFileSync(join(skillDir, '.clawhub', 'origin.json'), 'utf-8'));
+      expect(origin).toMatchObject({
+        provider: 'skillhub',
+        slug: 'demo-skill',
+        installedVersion: '1.0.0',
+      });
+    } finally {
+      skillHub.__setSkillHubFsForTests(null);
+    }
   });
 });

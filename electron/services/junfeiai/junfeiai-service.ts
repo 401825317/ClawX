@@ -1579,13 +1579,12 @@ export async function loginJunFeiAI(
   auth = normalizeJunFeiAIAuthPayload(auth);
   await storeJunFeiAIAuthSession(auth);
   await clearJunFeiAIStaleRelayKeyForAuthSwitch();
-  let relay: JunFeiAIRelayTokenPayload = {};
-  try {
-    relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
-  } catch (error) {
-    await stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager);
-    throw error;
-  }
+  const relay: JunFeiAIRelayTokenPayload = auth.accessToken
+    ? await requestRuntimeToken(auth.accessToken, auth.device ?? device).catch(async (error) => {
+      await stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager);
+      throw error;
+    })
+    : {};
   const authUser = getAuthUser(auth);
   if (authPayloadIndicatesDeviceActivated(auth) || relay.token?.trim()) {
     await markJunFeiAIDeviceActivated('login', getActivationUser(authUser));
@@ -1628,13 +1627,12 @@ export async function registerJunFeiAI(
   const authUser = getAuthUser(auth);
   await markJunFeiAIDeviceActivated('register', getActivationUser(authUser));
   await clearJunFeiAIStaleRelayKeyForAuthSwitch();
-  let relay: JunFeiAIRelayTokenPayload = {};
-  try {
-    relay = auth.accessToken ? await requestRuntimeToken(auth.accessToken, auth.device ?? device) : {};
-  } catch (error) {
-    await stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager);
-    throw error;
-  }
+  const relay: JunFeiAIRelayTokenPayload = auth.accessToken
+    ? await requestRuntimeToken(auth.accessToken, auth.device ?? device).catch(async (error) => {
+      await stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager);
+      throw error;
+    })
+    : {};
   const seed = await ensureJunFeiAIProviderSeeded({
     bootstrap: auth,
     relayToken: relay.token,

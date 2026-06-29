@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   hasApiKey: vi.fn(),
   loggerWarn: vi.fn(),
   loggerInfo: vi.fn(),
+  isJunFeiAIManagedDistribution: vi.fn(),
 }));
 
 vi.mock('@electron/services/providers/provider-migration', () => ({
@@ -72,6 +73,11 @@ vi.mock('@electron/utils/logger', () => ({
   },
 }));
 
+vi.mock('@electron/utils/junfeiai-distribution', () => ({
+  isJunFeiAIManagedDistribution: mocks.isJunFeiAIManagedDistribution,
+  JUNFEIAI_PROVIDER_ID: 'lingzhiwuxian',
+}));
+
 vi.mock('@electron/shared/providers/registry', () => ({
   PROVIDER_DEFINITIONS: [],
   getProviderDefinition: mocks.getProviderDefinition,
@@ -118,6 +124,7 @@ describe('ProviderService.listAccounts (openclaw.json as sole source of truth)',
     mocks.getApiKey.mockResolvedValue(null);
     mocks.hasApiKey.mockResolvedValue(false);
     mocks.listProviderAccounts.mockResolvedValue([]);
+    mocks.isJunFeiAIManagedDistribution.mockReturnValue(false);
     service = new ProviderService();
   });
 
@@ -461,6 +468,52 @@ describe('ProviderService.listAccounts (openclaw.json as sole source of truth)',
       }),
     ]));
   });
+
+  it('hides internal relay providers in JunFeiAI managed builds', async () => {
+    mocks.isJunFeiAIManagedDistribution.mockReturnValue(true);
+    mocks.listProviderAccounts.mockResolvedValue([]);
+    mocks.getActiveOpenClawProviders.mockResolvedValue(new Set(['lingzhiwuxian', 'openai', 'clawx-openai-image']));
+    mocks.getOpenClawProvidersConfig.mockResolvedValue({
+      providers: {
+        lingzhiwuxian: { baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1' },
+        openai: { baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1', api: 'openai-responses' },
+        'clawx-openai-image': { baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1', api: 'openai-completions' },
+      },
+      defaultModel: 'lingzhiwuxian/smart-latest',
+    });
+    mocks.getProviderDefinition.mockImplementation((key: string) => {
+      if (key === 'lingzhiwuxian') {
+        return {
+          id: 'lingzhiwuxian',
+          name: '零至无限',
+          defaultAuthMode: 'api_key',
+          defaultModelId: 'smart-latest',
+          providerConfig: {
+            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            api: 'openai-completions',
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const result = await service.listAccounts();
+
+    expect(mocks.saveProviderAccount).toHaveBeenCalledTimes(1);
+    expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'lingzhiwuxian',
+        vendorId: 'lingzhiwuxian',
+        label: '零至无限',
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual(expect.objectContaining({
+      id: 'lingzhiwuxian',
+      vendorId: 'lingzhiwuxian',
+      label: '零至无限',
+    }));
+  });
 });
 
 describe('ProviderService.listAccountsKeyInfo', () => {
@@ -476,6 +529,7 @@ describe('ProviderService.listAccountsKeyInfo', () => {
     mocks.getProviderApiKeyFromOpenClaw.mockResolvedValue(null);
     mocks.getApiKey.mockResolvedValue(null);
     mocks.hasApiKey.mockResolvedValue(false);
+    mocks.isJunFeiAIManagedDistribution.mockReturnValue(false);
     service = new ProviderService();
   });
 

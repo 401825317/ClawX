@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildElectronProxyConfig,
   buildProxyEnv,
+  mergeLocalProxyBypassRules,
   normalizeProxyServer,
   resolveProxySettings,
 } from '@electron/utils/proxy';
@@ -85,8 +86,29 @@ describe('proxy helpers', () => {
     })).toEqual({
       mode: 'fixed_servers',
       proxyRules: 'http=http://127.0.0.1:7890;https=http://127.0.0.1:7892;socks5://127.0.0.1:7891',
-      proxyBypassRules: '<local>;localhost',
+      proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
     });
+  });
+
+  it('always bypasses local Gateway addresses when proxy is enabled', () => {
+    expect(buildElectronProxyConfig({
+      proxyEnabled: true,
+      proxyServer: 'http://127.0.0.1:7890',
+      proxyHttpServer: '',
+      proxyHttpsServer: '',
+      proxyAllServer: '',
+      proxyBypassRules: '',
+    })).toEqual({
+      mode: 'fixed_servers',
+      proxyRules: 'http=http://127.0.0.1:7890;https=http://127.0.0.1:7890;http://127.0.0.1:7890',
+      proxyBypassRules: '<local>;localhost;127.0.0.1;::1',
+    });
+  });
+
+  it('deduplicates user and built-in local bypass rules', () => {
+    expect(mergeLocalProxyBypassRules('localhost;example.com,127.0.0.1')).toBe(
+      'localhost;example.com;127.0.0.1;<local>;::1',
+    );
   });
 
   it('builds upper and lower-case proxy env vars for the Gateway', () => {
@@ -104,8 +126,8 @@ describe('proxy helpers', () => {
       http_proxy: 'http://127.0.0.1:7890',
       https_proxy: 'http://127.0.0.1:7890',
       all_proxy: 'socks5://127.0.0.1:7891',
-      NO_PROXY: '<local>,localhost,127.0.0.1',
-      no_proxy: '<local>,localhost,127.0.0.1',
+      NO_PROXY: '<local>,localhost,127.0.0.1,::1',
+      no_proxy: '<local>,localhost,127.0.0.1,::1',
     });
   });
 });

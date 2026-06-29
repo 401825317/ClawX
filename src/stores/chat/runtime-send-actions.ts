@@ -47,6 +47,10 @@ function ensureSessionEntry(sessions: ChatSession[], sessionKey: string): ChatSe
 
 let sendGeneration = 0;
 
+function buildNoResponseSafetyMessage(): string {
+  return 'The task has not produced new visible progress for a while. UClaw stopped waiting to keep the app responsive. Refresh the conversation or retry if the task did not finish.';
+}
+
 export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<RuntimeActions, 'sendMessage' | 'abortRun'> {
   return {
     sendMessage: async (
@@ -178,7 +182,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
         }
         clearHistoryPoll();
         set({
-          error: 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.',
+          error: buildNoResponseSafetyMessage(),
           sending: false,
           activeRunId: null,
           lastUserMessageAt: null,

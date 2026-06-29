@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { getHostApiToken, rotateHostApiToken } from './host-api-token';
+import { rotateHostApiToken } from './host-api-token';
 import { getPort } from '../utils/config';
 import { logger } from '../utils/logger';
 import { extensionRegistry } from '../extensions/registry';

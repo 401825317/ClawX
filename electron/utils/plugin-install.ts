@@ -289,7 +289,7 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
 
 // ── pnpm-aware node_modules copy helpers ─────────────────────────────────────
 
-export function findBestBundledPluginSource(candidateSources: string[], targetDir?: string): string | null {
+export function findBestBundledPluginSource(candidateSources: string[], _targetDir?: string): string | null {
   const availableSources = candidateSources.filter((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
   if (availableSources.length === 0) return null;
 
@@ -304,18 +304,19 @@ export function findBestBundledPluginSource(candidateSources: string[], targetDi
       }
     }
 
-    let entryFiles: unknown[] = [];
-    try {
+    const entryFiles: unknown[] = (() => {
+      try {
       const raw = readFileSync(fsPath(join(dir, 'package.json')), 'utf-8');
       const pkg = JSON.parse(raw) as {
         main?: string;
         module?: string;
         openclaw?: { extensions?: string[] };
       };
-      entryFiles = [pkg.main, pkg.module, ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : [])];
-    } catch {
-      entryFiles = [];
-    }
+        return [pkg.main, pkg.module, ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : [])];
+      } catch {
+        return [];
+      }
+    })();
 
     for (const entryFile of entryFiles) {
       if (typeof entryFile !== 'string' || !entryFile.trim()) continue;

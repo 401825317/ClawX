@@ -1592,17 +1592,64 @@ describe('useChatStore startup history retry', () => {
 
     await vi.advanceTimersByTimeAsync(121_000);
 
-    expect(useChatStore.getState().runError).toContain('120 seconds');
+    expect(useChatStore.getState().runError).toBeNull();
     expect(useChatStore.getState().sending).toBe(true);
     expect(useChatStore.getState().streamingMessage).toBeNull();
 
     await vi.advanceTimersByTimeAsync(20_000);
 
     expect(useChatStore.getState().sending).toBe(false);
-    expect(useChatStore.getState().error).toContain('No response received');
+    expect(useChatStore.getState().error).toContain('not produced new visible progress');
+    expect(useChatStore.getState().error).not.toContain('API key');
 
     resolveSend?.({ runId: 'run-idle-test' });
     await sendPromise;
+  });
+
+  it('classifies context overflow as a context problem instead of an API key/provider failure', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-context-overflow',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:session-context-overflow' }],
+      messages: [
+        { id: 'user-context', role: 'user', content: 'long computer task', timestamp: 1000 },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: true,
+      activeRunId: 'run-context-overflow',
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: true,
+      lastUserMessageAt: 1000,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    gatewayRpcMock.mockResolvedValueOnce({
+      messages: [
+        { id: 'user-context', role: 'user', content: 'long computer task', timestamp: 1000 },
+        {
+          id: 'assistant-context-overflow',
+          role: 'assistant',
+          content: '',
+          stopReason: 'error',
+          errorMessage: 'Context overflow: estimated context size exceeds safe threshold during tool loop.',
+          timestamp: 1500,
+        },
+      ],
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    expect(useChatStore.getState().runError).toContain('context became too large');
+    expect(useChatStore.getState().runError).not.toContain('API key');
+    expect(useChatStore.getState().sending).toBe(false);
   });
 
   it('does not treat prior-turn assistant history as progress for a new send', async () => {
@@ -1649,7 +1696,7 @@ describe('useChatStore startup history retry', () => {
     const sendPromise = useChatStore.getState().sendMessage('new question');
     await vi.advanceTimersByTimeAsync(121_000);
 
-    expect(useChatStore.getState().runError).toContain('120 seconds');
+    expect(useChatStore.getState().runError).toBeNull();
     expect(useChatStore.getState().error).toBeNull();
     expect(useChatStore.getState().sending).toBe(true);
 

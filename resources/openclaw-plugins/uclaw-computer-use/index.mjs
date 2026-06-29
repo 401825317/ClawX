@@ -432,7 +432,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_web_observe',
       label: 'Observe external browser',
-      description: 'Observe an external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi through Windows UI Automation plus an optional window screenshot. Returns window/foreground info, inferred URL/title when UIA exposes it, visible text, clickable/editable candidates with bounds/centers, and screenshot coordinate metadata. Use this before visual guessing, repeated full-screen screenshots, or image calls on the user\'s normal browser.',
+      description: 'Observe an already-open external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi through a bounded Windows UI Automation summary plus an optional window screenshot. Returns window/foreground info, inferred URL/title when UIA exposes it, visible text, and clickable/editable candidates with bounds/centers. Screenshots are omitted by default to keep context small; request one only when text/candidates are insufficient. Use this before visual guessing, repeated full-screen screenshots, or image calls on the user\'s normal browser.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -448,19 +448,19 @@ export const pluginEntry = defineToolPlugin({
           },
           includeScreenshot: {
             type: 'boolean',
-            description: 'Whether to include a window screenshot artifact and coordinateMapping. Defaults to true.',
+            description: 'Whether to include a window screenshot artifact and coordinateMapping. Defaults to false to keep context small; set true only when UIA text/candidates are insufficient.',
           },
           maxNodes: {
             type: 'integer',
             minimum: 50,
             maximum: 500,
-            description: 'Maximum UIA nodes to scan. Defaults to 300.',
+            description: 'Maximum UIA nodes to scan. Defaults to 120 for a light observation; increase only for targeted follow-up.',
           },
           maxCandidates: {
             type: 'integer',
-            minimum: 10,
+            minimum: 5,
             maximum: 120,
-            description: 'Maximum clickable/editable candidates to return. Defaults to 60.',
+            description: 'Maximum clickable/editable candidates to return. Defaults to 25 for a light observation; increase only for targeted follow-up.',
           },
         },
       },

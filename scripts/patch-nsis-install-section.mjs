@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Patch electron-builder's assisted install section so the app-running guard is
  * executed in the elevated UAC inner instance as well.

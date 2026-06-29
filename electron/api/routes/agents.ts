@@ -154,25 +154,15 @@ function parseModelRef(modelRef: string | null | undefined): { providerKey: stri
 }
 
 async function resolveProfileGenerationModelRef(): Promise<string | undefined> {
-  let snapshot: Awaited<ReturnType<typeof listAgentsSnapshot>> | null = null;
-  let defaultProviderId: string | undefined;
-  try {
-    snapshot = await listAgentsSnapshot();
-  } catch {
-    snapshot = null;
-  }
-  try {
-    defaultProviderId = await getDefaultProvider();
-  } catch {
-    defaultProviderId = undefined;
-  }
+  const snapshot = await Promise.resolve(listAgentsSnapshot()).catch(() => null);
+  const defaultProviderId = await Promise.resolve(getDefaultProvider()).catch(() => undefined);
   const preferredModelRef = snapshot?.defaultModelRef ?? null;
   const preferred = parseModelRef(preferredModelRef);
   const providers = new Map<string, Awaited<ReturnType<typeof getProvider>>>();
 
   if (defaultProviderId) {
     try {
-      providers.set(defaultProviderId, await getProvider(defaultProviderId));
+      providers.set(defaultProviderId, await Promise.resolve(getProvider(defaultProviderId)));
     } catch {
       providers.set(defaultProviderId, null);
     }
@@ -180,7 +170,7 @@ async function resolveProfileGenerationModelRef(): Promise<string | undefined> {
 
   if (preferred?.providerKey) {
     try {
-      providers.set(preferred.providerKey, await getProvider(preferred.providerKey));
+      providers.set(preferred.providerKey, await Promise.resolve(getProvider(preferred.providerKey)));
     } catch {
       providers.set(preferred.providerKey, null);
     }
@@ -195,12 +185,7 @@ async function resolveProfileGenerationModelRef(): Promise<string | undefined> {
     return normalizeProviderModelRef(provider, runtimeProviderKey, preferredModelRef);
   }
 
-  let fallbackProviders: Awaited<ReturnType<typeof getAllProviders>> = [];
-  try {
-    fallbackProviders = await getAllProviders();
-  } catch {
-    fallbackProviders = [];
-  }
+  const fallbackProviders = await Promise.resolve(getAllProviders()).catch(() => []);
   for (const provider of fallbackProviders) {
     const runtimeProviderKey = await getOpenClawProviderKey(provider.type, provider.id);
     if (preferred && runtimeProviderKey !== preferred.providerKey) {
@@ -357,10 +342,10 @@ async function generateAgentProfileViaGateway(
 
     throw lastParseError ?? new Error('Timed out while generating the Agent profile. Please retry.');
   } finally {
-    await ctx.gatewayManager.rpc('chat.abort', { sessionKey }, 15_000).catch(() => {
+    await Promise.resolve(ctx.gatewayManager.rpc('chat.abort', { sessionKey }, 15_000)).catch(() => {
       // The run may already be complete, or the gateway may be shutting down.
     });
-    await deleteLocalChatSession(sessionKey).catch((error) => {
+    await Promise.resolve(deleteLocalChatSession(sessionKey)).catch((error) => {
       console.warn('[agents] Failed to clean temporary profile generation session:', error);
     });
   }

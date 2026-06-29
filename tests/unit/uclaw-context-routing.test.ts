@@ -120,7 +120,7 @@ describe('UClaw tool routing context', () => {
     expect(computerUsePlugin).toContain('computer_browser_open_url');
     expect(computerUsePlugin).toContain('computer_web_observe');
     expect(computerUseManifest).toContain('computer_web_observe');
-    expect(computerUsePlugin).toContain('Observe an external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi');
+    expect(computerUsePlugin).toContain('Observe an already-open external browser window such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi');
     expect(computerUsePlugin).toContain('EXPECTED_FOREGROUND_SCHEMA');
     expect(computerUsePlugin).toContain('the host refuses input if another window is foreground');
     expect(computerUsePlugin).toContain('Open an absolute http/https URL in the system default browser');
@@ -131,10 +131,19 @@ describe('UClaw tool routing context', () => {
     expect(computerUsePlugin).toContain('This is for UClaw app windows, not arbitrary external Chrome tabs');
   });
 
+  it('keeps external browser observation light by default', () => {
+    expect(computerUsePlugin).toContain('Screenshots are omitted by default to keep context small');
+    expect(computerUsePlugin).toContain('Defaults to false to keep context small');
+    expect(computerUsePlugin).toContain('Defaults to 120 for a light observation');
+    expect(computerUsePlugin).toContain('Defaults to 25 for a light observation');
+    expect(computerRoutes).toContain('DEFAULT_WEB_OBSERVE_VISIBLE_TEXT_ITEMS = 35');
+  });
+
   it('uses aggregated external-browser observation before visual guessing', () => {
     expect(toolsContext).toContain('external browser windows such as Chrome, Edge, Brave, Chromium, Firefox, Opera, or Vivaldi');
-    expect(toolsContext).toContain('prefer `computer_web_observe` as the first observation step');
+    expect(toolsContext).toContain('use `computer_web_observe` when you need the user\'s normal browser/session/window state');
     expect(toolsContext).toContain('clickable/editable candidates with bounds/centers');
+    expect(toolsContext).toContain('default observation is intentionally light and omits screenshots');
     expect(toolsContext).toContain('`explorer`, `start`, or shell browser launches');
     expect(toolsContext).toContain('Shell commands remain appropriate for non-browser local automation');
     expect(toolsContext).toContain('Use its candidates before falling back to repeated full-screen screenshots');
@@ -142,6 +151,9 @@ describe('UClaw tool routing context', () => {
     expect(computerRoutes).toContain('observeExternalBrowser');
     expect(computerRoutes).toContain('inferBrowserLocation');
     expect(computerRoutes).toContain('extractWebObserveCandidates');
+    expect(computerRoutes).toContain('DEFAULT_WEB_OBSERVE_MAX_NODES = 120');
+    expect(computerRoutes).toContain('DEFAULT_WEB_OBSERVE_MAX_CANDIDATES = 25');
+    expect(computerRoutes).toContain('input.includeScreenshot === true');
     expect(computerRoutes).toContain('ValuePattern');
   });
 

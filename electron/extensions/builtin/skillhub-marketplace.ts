@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import * as fsp from 'node:fs/promises';
 import { basename, dirname, join, normalize, relative, resolve } from 'node:path';
 import type {
   Extension,
@@ -16,6 +16,8 @@ import type {
 import { logger } from '../../utils/logger';
 import { getOpenClawConfigDir } from '../../utils/paths';
 import { resolveSupportedLanguage, type LanguageCode } from '../../../shared/language';
+
+type SkillHubFs = Pick<typeof fsp, 'cp' | 'mkdir' | 'mkdtemp' | 'rename' | 'rm' | 'writeFile'>;
 
 type RawSkillHubSkill = {
   slug?: unknown;
@@ -84,6 +86,7 @@ const SKILLHUB_CACHE_TTL_MS = 5 * 60 * 1000;
 const SKILLHUB_DEFAULT_LIMIT = 100;
 const SKILLHUB_MAX_LIMIT = 100;
 const VALID_SKILLHUB_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+let skillHubFs: SkillHubFs = fsp;
 
 let skillHubCountCache: { total: number; timestamp: number } | null = null;
 const skillHubSearchCache = new Map<string, { timestamp: number; catalog: MarketplaceSearchResult }>();
@@ -369,8 +372,8 @@ async function fetchSkillHubDetail(slug: string, language: LanguageCode): Promis
 async function extractSkillZip(zipBuffer: Buffer, targetDir: string): Promise<void> {
   const zip = await JSZip.loadAsync(zipBuffer);
   const targetParent = dirname(targetDir);
-  await mkdir(targetParent, { recursive: true });
-  const tempDir = await mkdtemp(join(targetParent, `.${basename(targetDir)}-skillhub-`));
+  await skillHubFs.mkdir(targetParent, { recursive: true });
+  const tempDir = await skillHubFs.mkdtemp(join(targetParent, `.${basename(targetDir)}-skillhub-`));
 
   const targetRoot = resolve(tempDir);
   let hasSkillManifest = false;
@@ -391,19 +394,80 @@ async function extractSkillZip(zipBuffer: Buffer, targetDir: string): Promise<vo
       }
 
       const content = await entry.async('nodebuffer');
-      await mkdir(dirname(destinationPath), { recursive: true });
-      await writeFile(destinationPath, content);
+      await skillHubFs.mkdir(dirname(destinationPath), { recursive: true });
+      await skillHubFs.writeFile(destinationPath, content);
     }
 
     if (!hasSkillManifest) {
       throw new Error('SkillHub archive does not contain SKILL.md');
     }
 
-    await rm(targetDir, { recursive: true, force: true });
-    await rename(tempDir, targetDir);
+    await commitExtractedSkillDir(tempDir, targetDir);
   } catch (error) {
-    await rm(tempDir, { recursive: true, force: true });
+    await skillHubFs.rm(tempDir, { recursive: true, force: true });
     throw error;
+  }
+}
+
+function isWindowsRenamePermissionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as { code?: unknown }).code;
+  return code === 'EPERM' || code === 'EACCES' || code === 'ENOTEMPTY';
+}
+
+async function removeDirectoryBestEffort(dir: string): Promise<void> {
+  try {
+    await skillHubFs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (error) {
+    logger.warn(`[skillhub] Failed to remove stale skill directory "${dir}":`, error);
+  }
+}
+
+async function moveExistingTargetAside(targetDir: string): Promise<string | null> {
+  const oldDir = join(dirname(targetDir), `.${basename(targetDir)}-delete-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  try {
+    await skillHubFs.rename(targetDir, oldDir);
+    return oldDir;
+  } catch (error) {
+    const code = (error as { code?: unknown } | undefined)?.code;
+    if (code === 'ENOENT') {
+      return null;
+    }
+    if (!isWindowsRenamePermissionError(error)) {
+      throw error;
+    }
+    await removeDirectoryBestEffort(targetDir);
+    return null;
+  }
+}
+
+async function commitExtractedSkillDir(tempDir: string, targetDir: string): Promise<void> {
+  const oldDir = await moveExistingTargetAside(targetDir);
+  try {
+    try {
+      await skillHubFs.rename(tempDir, targetDir);
+    } catch (error) {
+      if (!isWindowsRenamePermissionError(error)) {
+        throw error;
+      }
+      logger.warn(`[skillhub] Rename install failed for "${targetDir}", falling back to copy:`, error);
+      await skillHubFs.cp(tempDir, targetDir, { recursive: true, force: true, errorOnExist: false });
+      await skillHubFs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  } catch (error) {
+    if (oldDir) {
+      await removeDirectoryBestEffort(targetDir);
+      try {
+        await skillHubFs.rename(oldDir, targetDir);
+      } catch (restoreError) {
+        logger.warn(`[skillhub] Failed to restore previous skill directory "${targetDir}":`, restoreError);
+      }
+    }
+    throw error;
+  } finally {
+    if (oldDir) {
+      await removeDirectoryBestEffort(oldDir);
+    }
   }
 }
 
@@ -414,8 +478,8 @@ async function persistOriginMetadata(params: {
   detail?: MarketplaceSkillResult | null;
 }): Promise<void> {
   const originDir = join(params.targetDir, '.clawhub');
-  await mkdir(originDir, { recursive: true });
-  await writeFile(join(originDir, 'origin.json'), `${JSON.stringify({
+  await skillHubFs.mkdir(originDir, { recursive: true });
+  await skillHubFs.writeFile(join(originDir, 'origin.json'), `${JSON.stringify({
     provider: SKILLHUB_PROVIDER_ID,
     slug: params.slug,
     installedVersion: params.version || params.detail?.version,
@@ -482,4 +546,8 @@ class SkillHubMarketplaceExtension implements MarketplaceProviderExtension {
 
 export function createSkillHubMarketplaceExtension(): Extension {
   return new SkillHubMarketplaceExtension();
+}
+
+export function __setSkillHubFsForTests(nextFs: SkillHubFs | null): void {
+  skillHubFs = nextFs ?? fsp;
 }

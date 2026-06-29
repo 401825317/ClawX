@@ -626,6 +626,31 @@ function isRecoverableRuntimeError(errorMessage: string): boolean {
     || normalized.includes('connection reset');
 }
 
+function normalizeChatRunErrorMessage(errorMessage: string): string {
+  const normalized = errorMessage.trim();
+  const lower = normalized.toLowerCase();
+  if (!normalized) return 'The task ended without a model response. Please retry.';
+  if (
+    lower.includes('context overflow')
+    || lower.includes('prompt too large')
+    || lower.includes('context size exceeds')
+    || lower.includes('context length')
+  ) {
+    return 'The task context became too large for the model. Start a new conversation or ask UClaw to summarize and continue.';
+  }
+  if (
+    lower.includes('non_deliverable_terminal_turn')
+    || lower.includes('non-deliverable terminal')
+  ) {
+    return 'The task reached a terminal state but the final reply was not delivered. Refreshing the conversation history may show the result.';
+  }
+  return normalized;
+}
+
+function buildNoResponseSafetyMessage(): string {
+  return 'The task has not produced new visible progress for a while. UClaw stopped waiting to keep the app responsive. Refresh the conversation or retry if the task did not finish.';
+}
+
 function scheduleRecoverableRuntimeError(commit: () => void): void {
   clearErrorRecoveryTimer();
   _errorRecoveryTimer = setTimeout(() => {
@@ -3697,12 +3722,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         && isSendingNow
         && isRecoverableRuntimeError(latestTerminalAssistantErrorMessage),
       );
+      const normalizedTerminalAssistantErrorMessage = latestTerminalAssistantErrorMessage
+        ? normalizeChatRunErrorMessage(latestTerminalAssistantErrorMessage)
+        : null;
 
       set({
         messages: finalMessages,
         thinkingLevel,
         loading: false,
-        runError: historyErrorIsTransient ? null : latestTerminalAssistantErrorMessage,
+        runError: historyErrorIsTransient ? null : normalizedTerminalAssistantErrorMessage,
       });
       cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
 
@@ -4535,7 +4563,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       clearHistoryPoll();
       set({
-        error: 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.',
+        error: buildNoResponseSafetyMessage(),
         sending: false,
         pendingImageGenerationLocal: false,
         pendingVideoGenerationLocal: false,
@@ -5056,6 +5084,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           || getMessageErrorMessage(event.message)
           || 'An error occurred',
         );
+        const normalizedErrorMsg = normalizeChatRunErrorMessage(errorMsg);
         const terminalAssistantError = isTerminalAssistantErrorMessage(event.message);
         const wasSending = get().sending;
         const sessionKeyAtError = get().currentSessionKey;
@@ -5075,8 +5104,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           set({
-            error: terminalAssistantError ? null : errorMsg,
-            runError: terminalAssistantError ? errorMsg : null,
+            error: terminalAssistantError ? null : normalizedErrorMsg,
+            runError: terminalAssistantError ? normalizedErrorMsg : null,
             sending: false,
             pendingImageGenerationLocal: false,
             pendingVideoGenerationLocal: false,
@@ -5239,7 +5268,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         nextPatch.streamingTools = [];
         if (event.status === 'error' && event.error) {
           nextPatch.error = null;
-          nextPatch.runError = event.error;
+          nextPatch.runError = normalizeChatRunErrorMessage(event.error);
         }
         if (event.status === 'aborted') {
           nextPatch.streamingMessage = null;

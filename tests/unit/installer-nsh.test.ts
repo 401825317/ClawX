@@ -20,7 +20,7 @@ describe('installer.nsh running-app guard', () => {
     expect(guard).toContain('wmic process where "name=\'${APP_EXECUTABLE_FILENAME}\'" call terminate');
     expect(guard).toContain('SetErrorLevel 2');
     expect(guard).toContain('Quit');
-    expect(guard).toContain('ClawX is still running and cannot be replaced safely');
+    expect(guard).toContain('UClaw is still running and cannot be replaced safely');
     expect(guard).not.toContain('${nsProcess::FindProcess}');
   });
 });

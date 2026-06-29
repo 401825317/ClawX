@@ -30,7 +30,6 @@ import {
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from '../../utils/openclaw-image-relay-constants';
 import {
-  CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   CLAWX_OPENAI_VIDEO_MODEL_IDS,
 } from '../../utils/openclaw-video-relay-constants';

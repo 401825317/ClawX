@@ -97,8 +97,11 @@ export class ProviderService {
 
     const { providers: openClawProviders, defaultModel } = await getOpenClawProvidersConfig();
     const activeProviders = await getActiveOpenClawProviders();
+    const visibleActiveProviders = isJunFeiAIManagedDistribution()
+      ? new Set([...activeProviders].filter((provider) => provider === JUNFEIAI_PROVIDER_ID))
+      : activeProviders;
 
-    if (activeProviders.size === 0) {
+    if (visibleActiveProviders.size === 0) {
       return [];
     }
 
@@ -118,7 +121,7 @@ export class ProviderService {
     const processedKeys = new Set<string>();
 
     let hasConfiguredOpenAiApiKey = false;
-    if (activeProviders.has('openai')) {
+    if (visibleActiveProviders.has('openai')) {
       for (const account of storeByKey.get('openai') ?? []) {
         if (account.authMode === 'oauth_browser') {
           continue;
@@ -132,7 +135,7 @@ export class ProviderService {
       }
     }
 
-    const activeKeysForUi = filterActiveProviderKeysForUi(activeProviders, {
+    const activeKeysForUi = filterActiveProviderKeysForUi(visibleActiveProviders, {
       hasConfiguredOpenAiApiKey,
     });
 
@@ -181,7 +184,7 @@ export class ProviderService {
       }
     }
 
-    if (activeProviders.has(OPENAI_CODEX_RUNTIME_PROVIDER_KEY)) {
+    if (visibleActiveProviders.has(OPENAI_CODEX_RUNTIME_PROVIDER_KEY)) {
       const openaiStoreAccounts = storeByKey.get('openai') ?? [];
       for (const account of openaiStoreAccounts) {
         if (account.authMode !== 'api_key' && account.authMode !== undefined) {
