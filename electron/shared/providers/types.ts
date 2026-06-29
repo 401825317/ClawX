@@ -184,6 +184,8 @@ export interface ProviderAccount {
     email?: string;
     resourceUrl?: string;
     customModels?: string[];
+    managedDefaultModel?: string;
+    managedAllowedModels?: string[];
   };
   createdAt: string;
   updatedAt: string;

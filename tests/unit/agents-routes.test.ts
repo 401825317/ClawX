@@ -30,8 +30,20 @@ vi.mock('@electron/utils/channel-config', () => ({
 }));
 
 vi.mock('@electron/services/providers/provider-runtime-sync', () => ({
-  syncAllProviderAuthToRuntime: vi.fn(),
+  getOpenClawProviderKey: vi.fn((type: string, id: string) => type === 'custom' ? id : type),
+  normalizeProviderModelRef: vi.fn((_provider: { model?: string }, runtimeProviderKey: string, modelRef?: string) => (
+    modelRef === 'lingzhiwuxian/qwen-latest'
+      ? 'lingzhiwuxian/smart-latest'
+      : modelRef || `${runtimeProviderKey}/smart-latest`
+  )),
+  syncAllProviderAuthToRuntime: vi.fn(() => Promise.resolve()),
   syncAgentModelOverrideToRuntime: vi.fn(),
+}));
+
+vi.mock('@electron/utils/secure-storage', () => ({
+  getAllProviders: vi.fn(() => Promise.resolve([])),
+  getDefaultProvider: vi.fn(() => Promise.resolve(undefined)),
+  getProvider: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock('@electron/utils/openclaw-workspace', () => ({
@@ -236,9 +248,11 @@ describe('handleAgentRoutes agent creation', () => {
 });
 
 describe('handleAgentRoutes profile generation', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetAllMocks();
     vi.resetModules();
+    const runtimeSync = await import('@electron/services/providers/provider-runtime-sync');
+    vi.mocked(runtimeSync.syncAllProviderAuthToRuntime).mockResolvedValue(undefined);
   });
 
   it('uses a local fallback profile when chat.history times out', async () => {
@@ -360,5 +374,117 @@ describe('handleAgentRoutes profile generation', () => {
         error: '503 No available channel for model qwen-latest under group default',
       },
     );
+  });
+
+  it('sets a normalized temporary session model before generating a profile', async () => {
+    vi.useFakeTimers();
+    try {
+      const routeUtils = await import('@electron/api/route-utils');
+      const agentConfig = await import('@electron/utils/agent-config');
+      const secureStorage = await import('@electron/utils/secure-storage');
+      const runtimeSync = await import('@electron/services/providers/provider-runtime-sync');
+      const { handleAgentRoutes } = await import('@electron/api/routes/agents');
+
+      vi.mocked(routeUtils.parseJsonBody).mockResolvedValue({
+        roleName: 'Research',
+        responsibility: 'Research work',
+        avatarId: 'strategist',
+        locale: 'en-US',
+      });
+      vi.mocked(agentConfig.listAgentsSnapshot).mockResolvedValue({
+        agents: [],
+        defaultAgentId: 'main',
+        defaultModelRef: 'lingzhiwuxian/qwen-latest',
+        configuredChannelTypes: [],
+        channelOwners: {},
+        channelAccountOwners: {},
+      });
+      vi.mocked(secureStorage.getDefaultProvider).mockResolvedValue('lingzhiwuxian');
+      vi.mocked(secureStorage.getProvider).mockResolvedValue({
+        id: 'lingzhiwuxian',
+        name: '零至无限',
+        type: 'lingzhiwuxian',
+        model: 'qwen-latest',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        metadata: {
+          managedDefaultModel: 'smart-latest',
+          managedAllowedModels: ['smart-latest'],
+        },
+        enabled: true,
+        createdAt: '2026-06-29T00:00:00.000Z',
+        updatedAt: '2026-06-29T00:00:00.000Z',
+      } as never);
+      vi.mocked(runtimeSync.syncAllProviderAuthToRuntime).mockResolvedValue(undefined);
+      vi.mocked(runtimeSync.normalizeProviderModelRef).mockReturnValue('lingzhiwuxian/smart-latest');
+
+      const gatewayManager = {
+        rpc: vi.fn(async (method: string) => {
+          if (method === 'sessions.create') return {};
+          if (method === 'chat.send') return { runId: 'run-1' };
+          if (method === 'chat.history') {
+            return {
+              messages: [
+                {
+                  role: 'assistant',
+                  content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                      roleName: 'Research',
+                      personaName: 'Research',
+                      responsibility: 'Research work',
+                      capabilities: ['Plan research', 'Summarize findings', 'Review sources'],
+                      boundaries: ['Ask when scope is unclear'],
+                      welcomeMessage: 'Ready.',
+                      workspaceInstructions: 'You are Research.',
+                    }),
+                  }],
+                },
+              ],
+            };
+          }
+          if (method === 'sessions.list') {
+            return { sessions: [{ key: expect.any(String), status: 'idle', hasActiveRun: false }] };
+          }
+          if (method === 'chat.abort') return {};
+          throw new Error(`Unexpected rpc method ${method}`);
+        }),
+      };
+
+      const handledPromise = handleAgentRoutes(
+        { method: 'POST' } as never,
+        {} as never,
+        new URL('http://127.0.0.1/api/agents/generate-profile'),
+        { gatewayManager } as never,
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const handled = await handledPromise;
+
+      expect(handled).toBe(true);
+      expect(runtimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledTimes(1);
+      expect(gatewayManager.rpc).toHaveBeenCalledWith(
+        'sessions.create',
+        expect.objectContaining({
+          key: expect.stringMatching(/^agent:main:uclaw-profile-/),
+          agentId: 'main',
+          model: 'lingzhiwuxian/smart-latest',
+        }),
+        15_000,
+      );
+      expect(gatewayManager.rpc).toHaveBeenCalledWith(
+        'chat.send',
+        expect.objectContaining({
+          sessionKey: expect.stringMatching(/^agent:main:uclaw-profile-/),
+        }),
+        expect.any(Number),
+      );
+      expect(routeUtils.sendJson).toHaveBeenCalledWith(
+        {},
+        200,
+        expect.objectContaining({ success: true }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

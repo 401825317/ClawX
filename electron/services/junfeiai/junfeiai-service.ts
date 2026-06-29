@@ -794,6 +794,23 @@ function getClientAllowedTextModels(bootstrap: JunFeiAIBootstrapPayload): string
   ));
 }
 
+function getManagedTextModelMetadata(bootstrap: JunFeiAIBootstrapPayload): {
+  managedDefaultModel?: string;
+  managedAllowedModels?: string[];
+} {
+  if (!Array.isArray(bootstrap.client?.modelOptions?.text?.models)) {
+    return {};
+  }
+  const allowed = getClientAllowedTextModels(bootstrap);
+  const resolvedDefault = resolveRuntimeDefaultModel(bootstrap);
+  return {
+    managedDefaultModel: resolvedDefault,
+    managedAllowedModels: allowed.includes(resolvedDefault)
+      ? allowed
+      : Array.from(new Set([resolvedDefault, ...allowed].filter(Boolean))),
+  };
+}
+
 function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string {
   const runtimeDefault = normalizeClientTextModelId(bootstrap.runtime?.defaultModel);
   const clientDefault = normalizeClientTextModelId(bootstrap.client?.modelOptions?.text?.defaultModel);
@@ -817,6 +834,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     || normalizeJunFeiAIProviderDisplayName(bootstrap.service?.displayName)
     || normalizeJunFeiAIProviderDisplayName(existing?.label)
     || JUNFEIAI_PROVIDER_NAME;
+  const modelMetadata = getManagedTextModelMetadata(bootstrap);
   return {
     id: JUNFEIAI_PROVIDER_ID,
     vendorId: JUNFEIAI_PROVIDER_ID,
@@ -830,6 +848,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     isDefault: true,
     metadata: {
       resourceUrl: bootstrap.service?.apiOrigin || getJunFeiAIOrigin(),
+      ...modelMetadata,
     },
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,

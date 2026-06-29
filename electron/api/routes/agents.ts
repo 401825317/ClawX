@@ -13,7 +13,13 @@ import {
   updateAgentName,
 } from '../../utils/agent-config';
 import { deleteChannelAccountConfig } from '../../utils/channel-config';
-import { syncAgentModelOverrideToRuntime, syncAllProviderAuthToRuntime } from '../../services/providers/provider-runtime-sync';
+import {
+  getOpenClawProviderKey,
+  normalizeProviderModelRef,
+  syncAgentModelOverrideToRuntime,
+  syncAllProviderAuthToRuntime,
+} from '../../services/providers/provider-runtime-sync';
+import { getAllProviders, getDefaultProvider, getProvider } from '../../utils/secure-storage';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 import { ensureClawXContext } from '../../utils/openclaw-workspace';
@@ -135,6 +141,77 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function parseModelRef(modelRef: string | null | undefined): { providerKey: string; modelId: string } | null {
+  const trimmed = typeof modelRef === 'string' ? modelRef.trim() : '';
+  const separatorIndex = trimmed.indexOf('/');
+  if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) {
+    return null;
+  }
+  return {
+    providerKey: trimmed.slice(0, separatorIndex),
+    modelId: trimmed.slice(separatorIndex + 1),
+  };
+}
+
+async function resolveProfileGenerationModelRef(): Promise<string | undefined> {
+  let snapshot: Awaited<ReturnType<typeof listAgentsSnapshot>> | null = null;
+  let defaultProviderId: string | undefined;
+  try {
+    snapshot = await listAgentsSnapshot();
+  } catch {
+    snapshot = null;
+  }
+  try {
+    defaultProviderId = await getDefaultProvider();
+  } catch {
+    defaultProviderId = undefined;
+  }
+  const preferredModelRef = snapshot?.defaultModelRef ?? null;
+  const preferred = parseModelRef(preferredModelRef);
+  const providers = new Map<string, Awaited<ReturnType<typeof getProvider>>>();
+
+  if (defaultProviderId) {
+    try {
+      providers.set(defaultProviderId, await getProvider(defaultProviderId));
+    } catch {
+      providers.set(defaultProviderId, null);
+    }
+  }
+
+  if (preferred?.providerKey) {
+    try {
+      providers.set(preferred.providerKey, await getProvider(preferred.providerKey));
+    } catch {
+      providers.set(preferred.providerKey, null);
+    }
+  }
+
+  for (const provider of providers.values()) {
+    if (!provider) continue;
+    const runtimeProviderKey = await getOpenClawProviderKey(provider.type, provider.id);
+    if (preferred && runtimeProviderKey !== preferred.providerKey) {
+      continue;
+    }
+    return normalizeProviderModelRef(provider, runtimeProviderKey, preferredModelRef);
+  }
+
+  let fallbackProviders: Awaited<ReturnType<typeof getAllProviders>> = [];
+  try {
+    fallbackProviders = await getAllProviders();
+  } catch {
+    fallbackProviders = [];
+  }
+  for (const provider of fallbackProviders) {
+    const runtimeProviderKey = await getOpenClawProviderKey(provider.type, provider.id);
+    if (preferred && runtimeProviderKey !== preferred.providerKey) {
+      continue;
+    }
+    return normalizeProviderModelRef(provider, runtimeProviderKey, preferredModelRef);
+  }
+
+  return preferredModelRef?.trim() || undefined;
+}
+
 function isChatHistoryTimeout(error: unknown): boolean {
   const message = getErrorMessage(error).toLowerCase();
   return message.includes('rpc timeout: chat.history')
@@ -187,6 +264,32 @@ async function generateAgentProfileViaGateway(
   let consecutiveHistoryTimeouts = 0;
 
   try {
+    try {
+      await syncAllProviderAuthToRuntime();
+    } catch (error) {
+      console.warn('[agents] Failed to sync provider auth before Agent profile generation:', error);
+    }
+    const modelRef = await resolveProfileGenerationModelRef();
+    if (modelRef) {
+      try {
+        await ctx.gatewayManager.rpc(
+          'sessions.create',
+          {
+            key: sessionKey,
+            agentId: 'main',
+            model: modelRef,
+          },
+          15_000,
+        );
+      } catch (error) {
+        console.warn('[agents] Failed to set temporary profile generation model:', {
+          sessionKey,
+          modelRef,
+          error: getErrorMessage(error),
+        });
+      }
+    }
+
     await ctx.gatewayManager.rpc<{ runId?: string }>(
       'chat.send',
       {

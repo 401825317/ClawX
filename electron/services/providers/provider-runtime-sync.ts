@@ -93,6 +93,56 @@ function getRuntimeApiKeyEnv(config: ProviderConfig, apiKeyEnv?: string): string
   return config.type === JUNFEIAI_PROVIDER_ID ? undefined : apiKeyEnv;
 }
 
+function getManagedAllowedModelIds(config: ProviderConfig): string[] {
+  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+    return [];
+  }
+  const models = config.metadata?.managedAllowedModels;
+  if (!Array.isArray(models)) {
+    return [];
+  }
+  return Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)));
+}
+
+function getManagedDefaultModelId(config: ProviderConfig): string | undefined {
+  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+    return undefined;
+  }
+  const fromMetadata = config.metadata?.managedDefaultModel?.trim();
+  if (fromMetadata) {
+    return fromMetadata;
+  }
+  const allowed = getManagedAllowedModelIds(config);
+  return allowed[0] || getProviderDefaultModel(config.type);
+}
+
+function normalizeRuntimeModelId(config: ProviderConfig, modelId?: string): string | undefined {
+  const normalized = modelId?.trim();
+  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+    return normalized || undefined;
+  }
+
+  const allowed = getManagedAllowedModelIds(config);
+  if (normalized && (allowed.length === 0 || allowed.includes(normalized))) {
+    return normalized;
+  }
+
+  return getManagedDefaultModelId(config);
+}
+
+export function normalizeProviderModelRef(
+  config: ProviderConfig,
+  runtimeProviderKey: string,
+  modelRef?: string,
+): string | undefined {
+  const raw = modelRef?.trim();
+  const modelId = raw?.startsWith(`${runtimeProviderKey}/`)
+    ? raw.slice(runtimeProviderKey.length + 1)
+    : raw;
+  const normalizedModelId = normalizeRuntimeModelId(config, modelId);
+  return normalizedModelId ? `${runtimeProviderKey}/${normalizedModelId}` : undefined;
+}
+
 function normalizeRuntimeApiKey(
   config: ProviderConfig,
   apiKey: string | null | undefined,
@@ -390,7 +440,7 @@ async function syncRuntimeProviderConfig(
       context.meta?.apiKeyEnv,
     )
     : null;
-  await syncProviderConfigToOpenClaw(context.runtimeProviderKey, config.model, {
+  await syncProviderConfigToOpenClaw(context.runtimeProviderKey, normalizeRuntimeModelId(config, config.model), {
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
     api: context.api,
     apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
@@ -417,7 +467,7 @@ async function syncCustomProviderAgentModel(
     return;
   }
 
-  const modelId = config.model;
+  const modelId = normalizeRuntimeModelId(config, config.model);
   await updateAgentModelProvider(runtimeProviderKey, {
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl, config.apiProtocol || 'openai-completions'),
     api: config.apiProtocol || 'openai-completions',
@@ -496,6 +546,7 @@ async function buildAgentModelProviderEntry(
   authHeader?: boolean;
 } | null> {
   const meta = getProviderConfig(config.type);
+  const runtimeModelId = normalizeRuntimeModelId(config, modelId);
   const api = config.apiProtocol || (isUnregisteredProviderType(config.type) ? 'openai-completions' : meta?.api);
   const baseUrl = normalizeProviderBaseUrl(config, config.baseUrl || meta?.baseUrl, api);
   if (!api || !baseUrl) {
@@ -525,7 +576,7 @@ async function buildAgentModelProviderEntry(
   return {
     baseUrl,
     api,
-    models: [piAiModelsJsonModelEntry(modelId)],
+    models: runtimeModelId ? [piAiModelsJsonModelEntry(runtimeModelId)] : [],
     apiKey: apiKey ?? (config.type === JUNFEIAI_PROVIDER_ID ? null : undefined),
     authHeader,
   };
@@ -572,7 +623,7 @@ async function syncProviderAgentModelsAcrossDiscoveredAgents(
   runtimeProviderKey: string,
   apiKeyOverrides?: RuntimeApiKeyOverrides,
 ): Promise<void> {
-  const modelId = config.model || getProviderDefaultModel(config.type);
+  const modelId = normalizeRuntimeModelId(config, config.model || getProviderDefaultModel(config.type));
   if (!modelId) {
     return;
   }
@@ -694,7 +745,7 @@ export async function syncUpdatedProviderToRuntime(
   const defaultProviderId = await getDefaultProvider();
   const isDefaultProvider = defaultProviderId === config.id;
   if (isDefaultProvider) {
-    const modelOverride = config.model ? `${ock}/${config.model}` : undefined;
+    const modelOverride = normalizeProviderModelRef(config, ock, config.model);
     if (!isUnregisteredProviderType(config.type)) {
       if (shouldUseExplicitDefaultOverride(config, ock)) {
         const runtimeApiKey = normalizeRuntimeApiKey(
@@ -827,9 +878,7 @@ export async function syncDefaultProviderToRuntime(
   const isOAuthProvider = (oauthTypes.includes(provider.type) && !providerKey) || Boolean(browserOAuthRuntimeProvider);
 
   if (!isOAuthProvider) {
-    const modelOverride = provider.model
-      ? (provider.model.startsWith(`${ock}/`) ? provider.model : `${ock}/${provider.model}`)
-      : undefined;
+    const modelOverride = normalizeProviderModelRef(provider, ock, provider.model);
 
     if (isUnregisteredProviderType(provider.type)) {
       await setOpenClawDefaultModelWithOverride(ock, modelOverride, {
@@ -930,7 +979,7 @@ export async function syncDefaultProviderToRuntime(
     providerKey &&
     provider.baseUrl
   ) {
-    const modelId = provider.model;
+    const modelId = normalizeRuntimeModelId(provider, provider.model);
     await updateAgentModelProvider(ock, {
       baseUrl: normalizeProviderBaseUrl(provider, provider.baseUrl, provider.apiProtocol || 'openai-completions'),
       api: provider.apiProtocol || 'openai-completions',
