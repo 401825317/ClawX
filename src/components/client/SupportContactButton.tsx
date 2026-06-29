@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import { Headphones, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
@@ -27,6 +27,14 @@ function SupportContactButtonComponent(props: SupportContactButtonProps) {
   const { t } = useTranslation(['common']);
   const [open, setOpen] = useState(false);
   const support = useClientConfigStore((state) => state.support);
+  const fetchConfig = useClientConfigStore((state) => state.fetchConfig);
+
+  const handleOpenChange = useCallback((nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (nextOpen) {
+      void fetchConfig();
+    }
+  }, [fetchConfig]);
 
   if (!support) {
     return null;
@@ -55,7 +63,7 @@ function SupportContactButtonComponent(props: SupportContactButtonProps) {
               'hover:bg-black/5 dark:hover:bg-white/5 text-foreground/80',
               props.collapsed ? 'justify-center px-0' : 'justify-start',
             )}
-            onClick={() => setOpen(true)}
+            onClick={() => handleOpenChange(true)}
           >
             <div className="flex shrink-0 items-center justify-center text-current [&_svg]:size-4">
               <Headphones className="h-4 w-4" strokeWidth={2} />
@@ -72,7 +80,7 @@ function SupportContactButtonComponent(props: SupportContactButtonProps) {
         )}
       </Tooltip>
 
-      <Sheet open={open} onOpenChange={setOpen}>
+      <Sheet open={open} onOpenChange={handleOpenChange}>
         <SheetContent
           side="left"
           className="w-[360px] max-w-[calc(100vw-88px)] border-r p-0"
