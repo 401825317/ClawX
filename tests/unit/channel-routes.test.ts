@@ -16,6 +16,10 @@ const setChannelDefaultAccountMock = vi.fn();
 const assignChannelAccountToAgentMock = vi.fn();
 const clearChannelBindingMock = vi.fn();
 const parseJsonBodyMock = vi.fn();
+const ensureWeChatPluginInstalledMock = vi.fn();
+const saveWeChatAccountStateMock = vi.fn();
+const startWeChatLoginSessionMock = vi.fn();
+const waitForWeChatLoginSessionMock = vi.fn();
 const testOpenClawConfigDir = join(tmpdir(), 'clawx-tests', 'channel-routes-openclaw');
 
 vi.mock('@electron/utils/channel-config', () => ({
@@ -47,15 +51,15 @@ vi.mock('@electron/utils/plugin-install', () => ({
   ensureDingTalkPluginInstalled: vi.fn(),
   ensureFeishuPluginInstalled: vi.fn(),
   ensureQQBotPluginInstalled: vi.fn(),
-  ensureWeChatPluginInstalled: vi.fn(),
+  ensureWeChatPluginInstalled: (...args: unknown[]) => ensureWeChatPluginInstalledMock(...args),
   ensureWeComPluginInstalled: vi.fn(),
 }));
 
 vi.mock('@electron/utils/wechat-login', () => ({
   cancelWeChatLoginSession: vi.fn(),
-  saveWeChatAccountState: vi.fn(),
-  startWeChatLoginSession: vi.fn(),
-  waitForWeChatLoginSession: vi.fn(),
+  saveWeChatAccountState: (...args: unknown[]) => saveWeChatAccountStateMock(...args),
+  startWeChatLoginSession: (...args: unknown[]) => startWeChatLoginSessionMock(...args),
+  waitForWeChatLoginSession: (...args: unknown[]) => waitForWeChatLoginSessionMock(...args),
 }));
 
 vi.mock('@electron/utils/whatsapp-login', () => ({
@@ -110,6 +114,20 @@ describe('handleChannelRoutes', () => {
     });
     readOpenClawConfigMock.mockResolvedValue({
       channels: {},
+    });
+    ensureWeChatPluginInstalledMock.mockReturnValue({ installed: true });
+    saveWeChatAccountStateMock.mockResolvedValue('wechat-bot');
+    startWeChatLoginSessionMock.mockResolvedValue({
+      sessionKey: 'wechat-session',
+      qrcodeUrl: 'data:image/png;base64,qr',
+    });
+    waitForWeChatLoginSessionMock.mockResolvedValue({
+      connected: true,
+      accountId: 'bot@im.bot',
+      botToken: 'wechat-token',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+      userId: 'user-123',
+      message: 'WeChat connected successfully.',
     });
   });
 
@@ -1391,6 +1409,58 @@ describe('handleChannelRoutes', () => {
         ],
       }),
     );
+  });
+
+  it('binds a successful WeChat QR account to the main agent by default', async () => {
+    parseJsonBodyMock.mockResolvedValue({});
+    listAgentsSnapshotMock.mockResolvedValue({
+      agents: [{ id: 'main', name: 'Main Agent' }],
+      channelOwners: {},
+      channelAccountOwners: {},
+    });
+    readOpenClawConfigMock.mockResolvedValue({
+      bindings: [],
+    });
+
+    const gatewayManager = {
+      rpc: vi.fn(),
+      getStatus: () => ({ state: 'running' }),
+      debouncedReload: vi.fn(),
+      debouncedRestart: vi.fn(),
+    };
+
+    const { handleChannelRoutes } = await import('@electron/api/routes/channels');
+    const handled = await handleChannelRoutes(
+      { method: 'POST' } as IncomingMessage,
+      {} as ServerResponse,
+      new URL('http://127.0.0.1:13210/api/channels/wechat/start'),
+      {
+        gatewayManager,
+        eventBus: { emit: vi.fn() },
+        mainWindow: null,
+      } as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      200,
+      { success: true },
+    );
+
+    await vi.waitFor(() => {
+      expect(assignChannelAccountToAgentMock).toHaveBeenCalledWith(
+        'main',
+        'openclaw-weixin',
+        'wechat-bot',
+      );
+    });
+    expect(saveChannelConfigMock).toHaveBeenCalledWith(
+      'wechat',
+      { enabled: true },
+      'wechat-bot',
+    );
+    expect(gatewayManager.debouncedRestart).toHaveBeenCalledWith(150);
   });
 
   it('restarts gateway after a no-change channel config save', async () => {

@@ -215,7 +215,7 @@ async function awaitWeChatQrLogin(
       userId: result.userId,
     });
     await saveChannelConfig(UI_WECHAT_CHANNEL_TYPE, { enabled: true }, normalizedAccountId);
-    await ensureScopedChannelBinding(UI_WECHAT_CHANNEL_TYPE, normalizedAccountId);
+    await ensureWeChatQrAccountBinding(normalizedAccountId);
     scheduleGatewayChannelSaveRefresh(ctx, OPENCLAW_WECHAT_CHANNEL_TYPE, `wechat:loginSuccess:${normalizedAccountId}`);
 
     if (!isActiveQrLogin(loginKey, sessionKey)) {
@@ -237,6 +237,21 @@ async function awaitWeChatQrLogin(
       activeQrLogins.delete(loginKey);
     }
     await cancelWeChatLoginSession(sessionKey);
+  }
+}
+
+async function ensureWeChatQrAccountBinding(accountId: string): Promise<void> {
+  await ensureScopedChannelBinding(UI_WECHAT_CHANNEL_TYPE, accountId);
+
+  const storedChannelType = resolveStoredChannelType(UI_WECHAT_CHANNEL_TYPE);
+  const existingOwner = await readChannelBindingOwner(storedChannelType, accountId);
+  if (existingOwner) {
+    return;
+  }
+
+  const agents = await listAgentsSnapshot();
+  if (agents.agents.some((entry) => entry.id === 'main')) {
+    await assignChannelAccountToAgent('main', storedChannelType, accountId);
   }
 }
 

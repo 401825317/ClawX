@@ -6,7 +6,7 @@ import type { OpenClawConfig } from './channel-config';
 import { withConfigLock } from './config-mutex';
 import { expandOpenClawPath, getOpenClawConfigDir } from './paths';
 import * as logger from './logger';
-import { toUiChannelType } from './channel-alias';
+import { OPENCLAW_WECHAT_CHANNEL_TYPE, toUiChannelType } from './channel-alias';
 import { ensureClawXIdentityFile } from './openclaw-workspace';
 import {
   deleteAgentProfile,
@@ -788,6 +788,41 @@ export async function assignChannelToAgent(agentId: string, channelType: string)
     await writeOpenClawConfig(config);
     logger.info('Assigned channel to agent', { agentId, channelType, accountId });
     return buildSnapshotFromConfig(config);
+  });
+}
+
+export async function repairMissingWeChatMainBindings(): Promise<{ repaired: number }> {
+  return withConfigLock(async () => {
+    const config = await readOpenClawConfig() as AgentConfigDocument;
+    const { entries } = normalizeAgentsConfig(config);
+    if (!entries.some((entry) => entry.id === MAIN_AGENT_ID)) {
+      return { repaired: 0 };
+    }
+
+    const accountIds = listConfiguredAccountIdsForChannel(config, OPENCLAW_WECHAT_CHANNEL_TYPE);
+    if (accountIds.length === 0) {
+      return { repaired: 0 };
+    }
+
+    const { accountToAgent } = getChannelBindingMap(config.bindings);
+    let repaired = 0;
+    let bindings = config.bindings;
+    for (const accountId of accountIds) {
+      if (accountToAgent.has(`${OPENCLAW_WECHAT_CHANNEL_TYPE}:${accountId}`)) {
+        continue;
+      }
+      bindings = upsertBindingsForChannel(bindings, OPENCLAW_WECHAT_CHANNEL_TYPE, MAIN_AGENT_ID, accountId);
+      repaired += 1;
+    }
+
+    if (repaired === 0) {
+      return { repaired: 0 };
+    }
+
+    config.bindings = bindings;
+    await writeOpenClawConfig(config);
+    logger.info('Repaired missing WeChat account bindings', { repaired });
+    return { repaired };
   });
 }
 

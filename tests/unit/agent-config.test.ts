@@ -434,6 +434,62 @@ describe('agent config lifecycle', () => {
     expect(snapshot.channelAccountOwners['feishu:alt']).toBe('main');
   });
 
+  it('repairs historical WeChat accounts missing an agent binding', async () => {
+    await writeOpenClawJson({
+      agents: {
+        list: [
+          { id: 'main', name: 'Main', default: true },
+        ],
+      },
+      channels: {
+        'openclaw-weixin': {
+          enabled: true,
+          defaultAccount: 'bot-im-bot',
+          accounts: {
+            'bot-im-bot': { enabled: true },
+          },
+        },
+      },
+    });
+
+    const { listAgentsSnapshot, repairMissingWeChatMainBindings } = await import('@electron/utils/agent-config');
+
+    await expect(repairMissingWeChatMainBindings()).resolves.toEqual({ repaired: 1 });
+
+    const snapshot = await listAgentsSnapshot();
+    expect(snapshot.channelAccountOwners['openclaw-weixin:bot-im-bot']).toBe('main');
+  });
+
+  it('does not overwrite an existing WeChat account binding during repair', async () => {
+    await writeOpenClawJson({
+      agents: {
+        list: [
+          { id: 'main', name: 'Main', default: true },
+          { id: 'support', name: 'Support' },
+        ],
+      },
+      bindings: [
+        { agentId: 'support', match: { channel: 'openclaw-weixin', accountId: 'bot-im-bot' } },
+      ],
+      channels: {
+        'openclaw-weixin': {
+          enabled: true,
+          defaultAccount: 'bot-im-bot',
+          accounts: {
+            'bot-im-bot': { enabled: true },
+          },
+        },
+      },
+    });
+
+    const { listAgentsSnapshot, repairMissingWeChatMainBindings } = await import('@electron/utils/agent-config');
+
+    await expect(repairMissingWeChatMainBindings()).resolves.toEqual({ repaired: 0 });
+
+    const snapshot = await listAgentsSnapshot();
+    expect(snapshot.channelAccountOwners['openclaw-weixin:bot-im-bot']).toBe('support');
+  });
+
   it('preserves original agentId casing when persisting bindings', async () => {
     await writeOpenClawJson({
       agents: {

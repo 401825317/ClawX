@@ -28,6 +28,7 @@ import {
 } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
 import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
+import { repairMissingWeChatMainBindings } from '../utils/agent-config';
 import { sanitizeOpenClawConfig, batchSyncConfigFields } from '../utils/openclaw-auth';
 import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
@@ -442,6 +443,12 @@ export async function syncGatewayConfigBeforeLaunch(
     await measureAsync(timingsMs, 'wechatStateCleanupMs', cleanupDanglingWeChatPluginState);
   } catch (err) {
     logger.warn('Failed to clean dangling WeChat plugin state before launch:', err);
+  }
+
+  try {
+    await measureAsync(timingsMs, 'wechatBindingRepairMs', repairMissingWeChatMainBindings);
+  } catch (err) {
+    logger.warn('Failed to repair WeChat account bindings before launch:', err);
   }
 
   // Remove stale copies of built-in extensions (Discord, Telegram) that
