@@ -48,6 +48,7 @@ import {
   type PrelaunchMaintenanceRunResult,
   type PrelaunchMaintenanceTaskName,
 } from './prelaunch-maintenance-cache';
+import { repairOpenClawDeviceJsonFiles } from './device-json-repair';
 
 
 export interface GatewayLaunchContext {
@@ -437,6 +438,12 @@ export async function syncGatewayConfigBeforeLaunch(
     await measureAsync(timingsMs, 'sanitizeMs', sanitizeOpenClawConfig);
   } catch (err) {
     logger.warn('Failed to sanitize openclaw.json:', err);
+  }
+
+  try {
+    measureSync(timingsMs, 'deviceJsonRepairMs', repairOpenClawDeviceJsonFiles);
+  } catch (err) {
+    logger.warn('Failed to repair OpenClaw device JSON files before launch:', err);
   }
 
   try {

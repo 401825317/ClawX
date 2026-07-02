@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -30,9 +31,28 @@ vi.mock('@electron/utils/logger', () => ({
   },
 }));
 
+const spawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', () => {
+  const mocked = {
+    spawn: spawnMock,
+  };
+  return {
+    ...mocked,
+    default: mocked,
+  };
+});
+
 async function importInstaller() {
   vi.resetModules();
   return await import('@electron/main/portable-update-installer');
+}
+
+function makeSpawnedChild(event: 'spawn' | 'error', error?: NodeJS.ErrnoException) {
+  const child = new EventEmitter() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
+  child.unref = vi.fn();
+  setImmediate(() => child.emit(event, error));
+  return child;
 }
 
 describe('portable update installer', () => {
@@ -57,6 +77,8 @@ describe('portable update installer', () => {
       'helper',
       'utf-8',
     );
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(() => makeSpawnedChild('spawn'));
     vi.spyOn(process, 'cwd').mockReturnValue(root);
     Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
     Object.defineProperty(process, 'arch', { value: 'x64', configurable: true });
@@ -116,5 +138,25 @@ describe('portable update installer', () => {
     expect(task.parentPid).toBe(process.pid);
     expect(task.logPath).toContain(join('Runtime', 'logs'));
     expect(task.stagingDir).toContain(join('Runtime', 'updates', 'staging'));
+  });
+
+  it('does not quit when Windows blocks the updater helper from launching', async () => {
+    const zipPath = join(root, 'Runtime', 'updates', 'UClaw-0.5.0-win-x64-usb.zip');
+    const zipContent = Buffer.from('504b0506000000000000000000000000000000000000', 'hex');
+    await mkdir(join(root, 'Runtime', 'updates'), { recursive: true });
+    await writeFile(zipPath, zipContent);
+    const sha512 = createHash('sha512').update(zipContent).digest('hex');
+    const error = new Error('spawn helper EACCES') as NodeJS.ErrnoException;
+    error.code = 'EACCES';
+    spawnMock.mockImplementation(() => makeSpawnedChild('error', error));
+    const { launchPortableUpdateInstaller, PortableUpdaterLaunchError } = await importInstaller();
+
+    await expect(launchPortableUpdateInstaller(zipPath, {
+      version: '0.5.0',
+      sha512,
+      size: zipContent.length,
+    })).rejects.toBeInstanceOf(PortableUpdaterLaunchError);
+
+    expect(electronState.quit).not.toHaveBeenCalled();
   });
 });

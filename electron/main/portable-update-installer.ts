@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -34,6 +34,25 @@ export type PortableUpdateInstallerLaunch = {
   taskPath: string;
   logPath: string;
 };
+
+export class PortableUpdaterLaunchError extends Error {
+  readonly code?: string;
+  readonly helperPath: string;
+
+  constructor(helperPath: string, cause: unknown) {
+    const code = typeof cause === 'object' && cause && 'code' in cause
+      ? String((cause as { code?: unknown }).code)
+      : undefined;
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const message = code === 'EACCES' || code === 'EPERM'
+      ? `Portable updater helper was blocked by Windows or security software: ${helperPath}`
+      : `Portable updater helper failed to start: ${helperPath}${detail ? ` (${detail})` : ''}`;
+    super(message);
+    this.name = 'PortableUpdaterLaunchError';
+    this.code = code;
+    this.helperPath = helperPath;
+  }
+}
 
 function portableUpdaterFileName(platform = process.platform): string {
   return platform === 'win32' ? 'uclaw-portable-updater.exe' : 'uclaw-portable-updater';
@@ -126,6 +145,29 @@ export async function preparePortableUpdateInstaller(
   return { helperPath, taskPath, logPath };
 }
 
+function waitForHelperLaunch(child: ChildProcess, helperPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+    const timer = setTimeout(() => {
+      settle(resolve);
+    }, 1000);
+
+    child.once('spawn', () => {
+      clearTimeout(timer);
+      settle(resolve);
+    });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      settle(() => reject(new PortableUpdaterLaunchError(helperPath, error)));
+    });
+  });
+}
+
 export async function launchPortableUpdateInstaller(
   zipPath: string,
   info: PortableInstallerUpdateInfo,
@@ -140,6 +182,8 @@ export async function launchPortableUpdateInstaller(
     stdio: 'ignore',
     windowsHide: true,
   });
+
+  await waitForHelperLaunch(child, launch.helperPath);
   child.unref();
 
   setQuitting();
