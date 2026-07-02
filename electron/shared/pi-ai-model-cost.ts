@@ -20,7 +20,6 @@ export type PiAiModelCostRates = {
 
 export const PI_AI_PROMPT_CACHE_KEY_COMPAT = {
   supportsPromptCacheKey: true,
-  supportsLongCacheRetention: false,
 } as const;
 
 export type PiAiPromptCacheKeyCompat = typeof PI_AI_PROMPT_CACHE_KEY_COMPAT;

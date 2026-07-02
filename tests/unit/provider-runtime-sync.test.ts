@@ -81,7 +81,6 @@ import {
 
 const PROMPT_CACHE_KEY_COMPAT = {
   supportsPromptCacheKey: true,
-  supportsLongCacheRetention: false,
 };
 
 function createProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
@@ -248,6 +247,7 @@ describe('provider-runtime-sync refresh strategy', () => {
         compat: PROMPT_CACHE_KEY_COMPAT,
       }),
     ]);
+    expect(mainAgentEntry.models?.[0]?.compat).not.toHaveProperty('supportsLongCacheRetention');
     expect(mocks.updateSingleAgentModelProvider).toHaveBeenCalledWith(
       'agent',
       'lingzhiwuxian',
@@ -277,6 +277,7 @@ describe('provider-runtime-sync refresh strategy', () => {
         compat: PROMPT_CACHE_KEY_COMPAT,
       }),
     ]);
+    expect(managedEntry.models?.[0]?.compat).not.toHaveProperty('supportsLongCacheRetention');
     expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
       'clawx-openai-image',
       expect.objectContaining({

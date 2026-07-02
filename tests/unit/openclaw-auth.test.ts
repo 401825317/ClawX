@@ -69,7 +69,6 @@ async function writeAgentAuthProfiles(agentId: string, store: Record<string, unk
 
 const PROMPT_CACHE_KEY_COMPAT = {
   supportsPromptCacheKey: true,
-  supportsLongCacheRetention: false,
 };
 
 describe('saveProviderKeyToOpenClaw', () => {
@@ -1080,6 +1079,7 @@ describe('syncProviderConfigToOpenClaw', () => {
         compat: PROMPT_CACHE_KEY_COMPAT,
       }),
     ]);
+    expect(((entry.models as Array<Record<string, unknown>>)[0]?.compat as Record<string, unknown>)?.supportsLongCacheRetention).toBeUndefined();
   });
 
   it('clears the managed provider env placeholder during default model override sync', async () => {
@@ -2130,6 +2130,53 @@ describe('ensureOpenClawProviderAgentRuntimePins', () => {
     const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
     expect((providers.openai as Record<string, unknown>).agentRuntime).toEqual({ id: 'pi' });
     expect((providers['openai-codex'] as Record<string, unknown>).agentRuntime).toEqual({ id: 'pi' });
+  });
+
+  it('removes unsupported model compat keys during sanitizeOpenClawConfig before Gateway launch', async () => {
+    await writeOpenClawJson({
+      models: {
+        providers: {
+          lingzhiwuxian: {
+            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            api: 'openai-completions',
+            models: [
+              {
+                id: 'smart-latest',
+                name: '智能路由',
+                compat: {
+                  supportsPromptCacheKey: true,
+                  supportsLongCacheRetention: false,
+                },
+              },
+            ],
+          },
+          openai: {
+            baseUrl: 'https://api.openai.com/v1',
+            api: 'openai-responses',
+            models: [
+              {
+                id: 'gpt-5.5',
+                name: 'gpt-5.5',
+                compat: { experimental: true },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const { sanitizeOpenClawConfig } = await import('@electron/utils/openclaw-auth');
+    await sanitizeOpenClawConfig();
+
+    const result = await readOpenClawJson();
+    const providers = (result.models as Record<string, unknown>).providers as Record<string, Record<string, unknown>>;
+    const lingzhiModels = providers.lingzhiwuxian.models as Array<Record<string, unknown>>;
+    const openaiModels = providers.openai.models as Array<Record<string, unknown>>;
+
+    expect(lingzhiModels[0]?.compat).toEqual({ supportsPromptCacheKey: true });
+    expect(openaiModels[0]?.compat).toBeUndefined();
+    expect(lingzhiModels[0]?.id).toBe('smart-latest');
+    expect(openaiModels[0]?.id).toBe('gpt-5.5');
   });
 
   it('leaves entries untouched when the openai entry already has any agentRuntime.id', async () => {

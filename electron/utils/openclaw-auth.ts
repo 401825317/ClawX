@@ -1565,26 +1565,6 @@ function mergeProviderModels(
   return merged;
 }
 
-function applyProviderModelCompat(
-  provider: string,
-  models: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  if (provider !== JUNFEIAI_PROVIDER_ID) {
-    return models;
-  }
-
-  return models.map((model) => {
-    const existingCompat = isPlainRecord(model.compat) ? model.compat : {};
-    return {
-      ...model,
-      compat: {
-        ...existingCompat,
-        ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
-      },
-    };
-  });
-}
-
 /**
  * OpenClaw 2026.5+ requires a positive `maxTokens` on each model (and can
  * fall back to provider-level `maxTokens`) when `api` is `anthropic-messages`.
@@ -1823,6 +1803,103 @@ function applyOpenClawProviderAgentRuntimePinsToConfig(config: Record<string, un
   return pinned;
 }
 
+const OPENCLAW_CONFIG_MODEL_COMPAT_KEYS = new Set([
+  'supportsStore',
+  'supportsPromptCacheKey',
+  'supportsDeveloperRole',
+  'supportsReasoningEffort',
+  'supportsUsageInStreaming',
+  'supportsTools',
+  'supportsStrictMode',
+  'requiresStringContent',
+  'strictMessageKeys',
+  'visibleReasoningDetailTypes',
+  'supportedReasoningEfforts',
+  'reasoningEffortMap',
+  'maxTokensField',
+  'thinkingFormat',
+  'requiresToolResultName',
+  'requiresAssistantAfterToolResult',
+  'requiresThinkingAsText',
+  'requiresReasoningContentOnAssistantMessages',
+  'toolSchemaProfile',
+  'unsupportedToolSchemaKeywords',
+  'nativeWebSearchTool',
+  'toolCallArgumentsEncoding',
+  'requiresMistralToolIds',
+  'requiresOpenAiAnthropicToolPayload',
+]);
+
+function sanitizeModelCompatRecord(compat: unknown): { compat?: Record<string, unknown>; modified: boolean } {
+  if (!isPlainRecord(compat)) {
+    return compat === undefined
+      ? { compat: undefined, modified: false }
+      : { compat: undefined, modified: true };
+  }
+
+  let modified = false;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(compat)) {
+    if (OPENCLAW_CONFIG_MODEL_COMPAT_KEYS.has(key)) {
+      sanitized[key] = value;
+    } else {
+      modified = true;
+    }
+  }
+
+  if (Object.keys(sanitized).length === 0) {
+    return { compat: undefined, modified: true };
+  }
+
+  return { compat: sanitized, modified };
+}
+
+function stripUnsupportedModelCompatFieldsFromConfig(config: Record<string, unknown>): string[] {
+  const models = (config.models || {}) as Record<string, unknown>;
+  const providers = (models.providers || {}) as Record<string, unknown>;
+  const touchedProviders: string[] = [];
+
+  for (const [providerKey, providerEntry] of Object.entries(providers)) {
+    if (!isPlainRecord(providerEntry) || !Array.isArray(providerEntry.models)) {
+      continue;
+    }
+
+    const { models: sanitizedModels, modified } = stripUnsupportedModelCompatFields(
+      providerEntry.models as Array<Record<string, unknown>>,
+    );
+    if (modified) {
+      providerEntry.models = sanitizedModels;
+      providers[providerKey] = providerEntry;
+      touchedProviders.push(providerKey);
+    }
+  }
+
+  if (touchedProviders.length > 0) {
+    models.providers = providers;
+    config.models = models;
+  }
+
+  return touchedProviders;
+}
+
+function normalizeProviderModelEntries(
+  provider: string,
+  models: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const { models: sanitizedModels } = stripUnsupportedModelCompatFields(models);
+  if (provider !== JUNFEIAI_PROVIDER_ID) {
+    return sanitizedModels;
+  }
+
+  return sanitizedModels.map((model) => ({
+    ...model,
+    compat: {
+      ...(isPlainRecord(model.compat) ? model.compat : {}),
+      ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
+    },
+  }));
+}
+
 function upsertOpenClawProviderEntry(
   config: Record<string, unknown>,
   provider: string,
@@ -1849,7 +1926,7 @@ function upsertOpenClawProviderEntry(
   if (options.api === 'anthropic-messages') {
     mergedModels = mergedModels.map((model) => ensureAnthropicMessagesModelEntry(model, provider, existingProvider));
   }
-  mergedModels = applyProviderModelCompat(provider, mergedModels);
+  mergedModels = normalizeProviderModelEntries(provider, mergedModels);
 
   const nextProvider: Record<string, unknown> = {
     ...existingProvider,
@@ -2750,6 +2827,30 @@ type AgentModelProviderEntry = {
   authHeader?: boolean;
 };
 
+function stripUnsupportedModelCompatFields(
+  models: Array<Record<string, unknown>>,
+): { models: Array<Record<string, unknown>>; modified: boolean } {
+  let modified = false;
+  const sanitized = models.map((model) => {
+    if (!model || typeof model !== 'object' || !('compat' in model)) {
+      return model;
+    }
+    const { compat, modified: compatModified } = sanitizeModelCompatRecord(model.compat);
+    if (!compatModified) {
+      return model;
+    }
+    modified = true;
+    const next = { ...model };
+    if (compat) {
+      next.compat = compat;
+    } else {
+      delete next.compat;
+    }
+    return next;
+  });
+  return { models: sanitized, modified };
+}
+
 function normalizeAgentModelProviderEntry(
   providerType: string,
   entry: AgentModelProviderEntry,
@@ -2758,12 +2859,14 @@ function normalizeAgentModelProviderEntry(
     return entry;
   }
 
+  const models = normalizeProviderModelEntries(
+    providerType,
+    entry.models as Array<Record<string, unknown>>,
+  );
+
   return {
     ...entry,
-    models: applyProviderModelCompat(
-      providerType,
-      entry.models as Array<Record<string, unknown>>,
-    ) as AgentModelProviderEntry['models'],
+    models: models as AgentModelProviderEntry['models'],
   };
 }
 
@@ -3593,6 +3696,12 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     if (pinnedProviderRuntimes.length > 0) {
       modified = true;
       console.log(`[sanitize] Pinned embedded agent runtime for models.providers entries: ${pinnedProviderRuntimes.join(', ')}`);
+    }
+
+    const strippedCompatProviders = stripUnsupportedModelCompatFieldsFromConfig(config);
+    if (strippedCompatProviders.length > 0) {
+      modified = true;
+      console.log(`[sanitize] Removed unsupported model compat metadata from providers: ${strippedCompatProviders.join(', ')}`);
     }
 
     if (healAnthropicMessagesMaxTokensInConfig(config)) {
