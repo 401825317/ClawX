@@ -79,6 +79,11 @@ import {
   syncUpdatedProviderToRuntime,
 } from '@electron/services/providers/provider-runtime-sync';
 
+const PROMPT_CACHE_KEY_COMPAT = {
+  supportsPromptCacheKey: true,
+  supportsLongCacheRetention: false,
+};
+
 function createProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
     id: 'moonshot',
@@ -234,6 +239,15 @@ describe('provider-runtime-sync refresh strategy', () => {
         apiKey: 'fresh-relay-key',
       }),
     );
+    const mainAgentEntry = mocks.updateSingleAgentModelProvider.mock.calls.find(
+      ([agentId, providerKey]) => agentId === 'main' && providerKey === 'lingzhiwuxian',
+    )?.[2] as { models?: Array<Record<string, unknown>> };
+    expect(mainAgentEntry.models).toEqual([
+      expect.objectContaining({
+        id: 'smart-latest',
+        compat: PROMPT_CACHE_KEY_COMPAT,
+      }),
+    ]);
     expect(mocks.updateSingleAgentModelProvider).toHaveBeenCalledWith(
       'agent',
       'lingzhiwuxian',
@@ -254,6 +268,15 @@ describe('provider-runtime-sync refresh strategy', () => {
         apiKey: 'fresh-relay-key',
       }),
     );
+    const managedEntry = mocks.updateAgentModelProvider.mock.calls.find(
+      ([providerKey]) => providerKey === 'lingzhiwuxian',
+    )?.[1] as { models?: Array<Record<string, unknown>> };
+    expect(managedEntry.models).toEqual([
+      expect.objectContaining({
+        id: 'smart-latest',
+        compat: PROMPT_CACHE_KEY_COMPAT,
+      }),
+    ]);
     expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
       'clawx-openai-image',
       expect.objectContaining({
@@ -261,6 +284,10 @@ describe('provider-runtime-sync refresh strategy', () => {
       }),
       { createIfMissing: false },
     );
+    const imageEntry = mocks.updateAgentModelProvider.mock.calls.find(
+      ([providerKey]) => providerKey === 'clawx-openai-image',
+    )?.[1] as { models?: Array<Record<string, unknown>> };
+    expect(imageEntry.models?.[0]?.compat).toBeUndefined();
     expect(mocks.updateAgentModelProvider).toHaveBeenCalledWith(
       'openai',
       expect.objectContaining({
@@ -269,6 +296,10 @@ describe('provider-runtime-sync refresh strategy', () => {
       }),
       { createIfMissing: false },
     );
+    const videoEntry = mocks.updateAgentModelProvider.mock.calls.find(
+      ([providerKey]) => providerKey === 'openai',
+    )?.[1] as { models?: Array<Record<string, unknown>> };
+    expect(videoEntry.models?.[0]?.compat).toBeUndefined();
     expect(mocks.saveProviderKeyToOpenClaw).toHaveBeenCalledWith(
       'lingzhiwuxian',
       'fresh-relay-key',

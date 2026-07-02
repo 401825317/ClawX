@@ -67,6 +67,11 @@ async function writeAgentAuthProfiles(agentId: string, store: Record<string, unk
   await writeFile(join(agentDir, 'auth-profiles.json'), JSON.stringify(store, null, 2), 'utf8');
 }
 
+const PROMPT_CACHE_KEY_COMPAT = {
+  supportsPromptCacheKey: true,
+  supportsLongCacheRetention: false,
+};
+
 describe('saveProviderKeyToOpenClaw', () => {
   beforeEach(async () => {
     vi.resetModules();
@@ -1069,6 +1074,12 @@ describe('syncProviderConfigToOpenClaw', () => {
     const entry = providers.lingzhiwuxian as Record<string, unknown>;
 
     expect(entry.apiKey).toBe('relay-valid-key');
+    expect(entry.models).toEqual([
+      expect.objectContaining({
+        id: 'qwen-latest',
+        compat: PROMPT_CACHE_KEY_COMPAT,
+      }),
+    ]);
   });
 
   it('clears the managed provider env placeholder during default model override sync', async () => {
@@ -1637,8 +1648,10 @@ describe('anthropic-messages maxTokens', () => {
     const content = await readFile(join(agentDir, 'models.json'), 'utf8');
     const result = JSON.parse(content) as Record<string, unknown>;
     const entry = ((result.providers as Record<string, unknown>).lingzhiwuxian) as Record<string, unknown>;
+    const models = entry.models as Array<Record<string, unknown>>;
 
     expect(entry.apiKey).toBeUndefined();
+    expect(models[0]?.compat).toEqual(PROMPT_CACHE_KEY_COMPAT);
   });
 
   it('does not create missing agent models.json providers when requested', async () => {
@@ -1742,8 +1755,10 @@ describe('anthropic-messages maxTokens', () => {
     const content = await readFile(join(agentDir, 'models.json'), 'utf8');
     const result = JSON.parse(content) as Record<string, unknown>;
     const entry = ((result.providers as Record<string, unknown>).lingzhiwuxian) as Record<string, unknown>;
+    const models = entry.models as Array<Record<string, unknown>>;
 
     expect(entry.apiKey).toBe('fresh-relay-key');
+    expect(models[0]?.compat).toEqual(PROMPT_CACHE_KEY_COMPAT);
   });
 
   it('repairs legacy agent models.json anthropic-messages entries during update', async () => {

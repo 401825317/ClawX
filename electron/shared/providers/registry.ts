@@ -4,6 +4,7 @@ import type {
   ProviderType,
   ProviderTypeInfo,
 } from './types';
+import { PI_AI_PROMPT_CACHE_KEY_COMPAT } from '../pi-ai-model-cost';
 
 const LINGZHIWUXIAN_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
 
@@ -74,6 +75,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           reasoning: true,
           input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
         {
           id: 'qwen-latest',
@@ -81,6 +83,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           reasoning: true,
           input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
         {
           id: 'deepseek-latest',
@@ -88,6 +91,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           reasoning: true,
           input: ['text'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
         {
           id: 'doubao-latest',
@@ -95,6 +99,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           reasoning: false,
           input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
         {
           id: 'kimi-latest',
@@ -102,6 +107,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           reasoning: true,
           input: ['text'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
         {
           id: 'glm-latest',
@@ -109,6 +115,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           reasoning: true,
           input: ['text', 'image'],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
       ],
     },

@@ -33,7 +33,11 @@ import {
   isOAuthProviderType,
   isOpenClawOAuthPluginProviderKey,
 } from './provider-keys';
-import { normalizePiAiModelCost, type PiAiModelCostRates } from '../shared/pi-ai-model-cost';
+import {
+  PI_AI_PROMPT_CACHE_KEY_COMPAT,
+  normalizePiAiModelCost,
+  type PiAiModelCostRates,
+} from '../shared/pi-ai-model-cost';
 import { withConfigLock } from './config-mutex';
 import { PORTS } from './config';
 import { getSetting } from './store';
@@ -1561,6 +1565,26 @@ function mergeProviderModels(
   return merged;
 }
 
+function applyProviderModelCompat(
+  provider: string,
+  models: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  if (provider !== JUNFEIAI_PROVIDER_ID) {
+    return models;
+  }
+
+  return models.map((model) => {
+    const existingCompat = isPlainRecord(model.compat) ? model.compat : {};
+    return {
+      ...model,
+      compat: {
+        ...existingCompat,
+        ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
+      },
+    };
+  });
+}
+
 /**
  * OpenClaw 2026.5+ requires a positive `maxTokens` on each model (and can
  * fall back to provider-level `maxTokens`) when `api` is `anthropic-messages`.
@@ -1825,6 +1849,7 @@ function upsertOpenClawProviderEntry(
   if (options.api === 'anthropic-messages') {
     mergedModels = mergedModels.map((model) => ensureAnthropicMessagesModelEntry(model, provider, existingProvider));
   }
+  mergedModels = applyProviderModelCompat(provider, mergedModels);
 
   const nextProvider: Record<string, unknown> = {
     ...existingProvider,
@@ -2725,6 +2750,23 @@ type AgentModelProviderEntry = {
   authHeader?: boolean;
 };
 
+function normalizeAgentModelProviderEntry(
+  providerType: string,
+  entry: AgentModelProviderEntry,
+): AgentModelProviderEntry {
+  if (!entry.models) {
+    return entry;
+  }
+
+  return {
+    ...entry,
+    models: applyProviderModelCompat(
+      providerType,
+      entry.models as Array<Record<string, unknown>>,
+    ) as AgentModelProviderEntry['models'],
+  };
+}
+
 async function updatePluginModelCatalogProviderEntry(
   agentId: string,
   providerType: string,
@@ -2769,6 +2811,8 @@ async function updateModelsJsonProviderEntriesForAgents(
   entry: AgentModelProviderEntry,
   options: { createIfMissing?: boolean } = {},
 ): Promise<void> {
+  const normalizedEntry = normalizeAgentModelProviderEntry(providerType, entry);
+
   for (const agentId of agentIds) {
     const modelsPath = join(getOpenClawAgentDir(agentId), 'models.json');
     let data: Record<string, unknown> = {};
@@ -2794,26 +2838,26 @@ async function updateModelsJsonProviderEntriesForAgents(
       ? (existing.models as Array<Record<string, unknown>>)
       : [];
 
-    const mergedModels = (entry.models ?? []).map((m) => {
+    const mergedModels = (normalizedEntry.models ?? []).map((m) => {
       const prev = existingModels.find((e) => e.id === m.id);
-      const base = prev ? { ...prev, id: m.id, name: m.name } : { ...m };
+      const base = prev ? { ...prev, ...m, id: m.id, name: m.name } : { ...m };
       return {
         ...base,
         cost: normalizePiAiModelCost((base as { cost?: unknown }).cost),
       };
     });
 
-    if (entry.baseUrl !== undefined) existing.baseUrl = entry.baseUrl;
-    if (entry.api !== undefined) existing.api = entry.api;
+    if (normalizedEntry.baseUrl !== undefined) existing.baseUrl = normalizedEntry.baseUrl;
+    if (normalizedEntry.api !== undefined) existing.api = normalizedEntry.api;
     if (mergedModels.length > 0) existing.models = mergedModels;
-    if (entry.apiKey !== undefined) {
-      if (entry.apiKey) {
-        existing.apiKey = entry.apiKey;
+    if (normalizedEntry.apiKey !== undefined) {
+      if (normalizedEntry.apiKey) {
+        existing.apiKey = normalizedEntry.apiKey;
       } else {
         delete existing.apiKey;
       }
     }
-    if (entry.authHeader !== undefined) existing.authHeader = entry.authHeader;
+    if (normalizedEntry.authHeader !== undefined) existing.authHeader = normalizedEntry.authHeader;
     ensureAnthropicMessagesProviderDefaults(existing, providerType);
 
     providers[providerType] = existing;
@@ -2827,7 +2871,7 @@ async function updateModelsJsonProviderEntriesForAgents(
     }
 
     try {
-      await updatePluginModelCatalogProviderEntry(agentId, providerType, entry);
+      await updatePluginModelCatalogProviderEntry(agentId, providerType, normalizedEntry);
     } catch (err) {
       console.warn(`Failed to update plugin catalog for agent "${agentId}" provider "${providerType}":`, err);
     }

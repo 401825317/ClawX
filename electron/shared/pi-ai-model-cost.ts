@@ -18,6 +18,20 @@ export type PiAiModelCostRates = {
   cacheWrite: number;
 };
 
+export const PI_AI_PROMPT_CACHE_KEY_COMPAT = {
+  supportsPromptCacheKey: true,
+  supportsLongCacheRetention: false,
+} as const;
+
+export type PiAiPromptCacheKeyCompat = typeof PI_AI_PROMPT_CACHE_KEY_COMPAT;
+
+export type PiAiModelsJsonModelEntry = {
+  id: string;
+  name: string;
+  cost: PiAiModelCostRates;
+  compat?: PiAiPromptCacheKeyCompat;
+};
+
 export function normalizePiAiModelCost(existing: unknown): PiAiModelCostRates {
   if (!existing || typeof existing !== 'object') {
     return { ...PI_AI_MODEL_ZERO_COST };
@@ -38,6 +52,16 @@ export function normalizePiAiModelCost(existing: unknown): PiAiModelCostRates {
 export function piAiModelsJsonModelEntry(
   id: string,
   name: string = id,
-): { id: string; name: string; cost: PiAiModelCostRates } {
+): PiAiModelsJsonModelEntry {
   return { id, name, cost: normalizePiAiModelCost(undefined) };
+}
+
+export function piAiPromptCacheModelEntry(
+  id: string,
+  name: string = id,
+): PiAiModelsJsonModelEntry {
+  return {
+    ...piAiModelsJsonModelEntry(id, name),
+    compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
+  };
 }

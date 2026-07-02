@@ -3,8 +3,10 @@ import { getOpenClawProviderKeyForType, isOAuthProviderType } from '../utils/pro
 import type { ProviderConfig } from '../utils/secure-storage';
 import {
   piAiModelsJsonModelEntry,
-  type PiAiModelCostRates,
+  piAiPromptCacheModelEntry,
+  type PiAiModelsJsonModelEntry,
 } from '../shared/pi-ai-model-cost';
+import { JUNFEIAI_PROVIDER_ID } from '../utils/junfeiai-distribution';
 
 export interface AgentProviderUpdatePayload {
   providerKey: string;
@@ -12,7 +14,7 @@ export interface AgentProviderUpdatePayload {
     baseUrl: string;
     api: string;
     apiKey: string | undefined;
-    models: Array<{ id: string; name: string; cost: PiAiModelCostRates }>;
+    models: PiAiModelsJsonModelEntry[];
   };
 }
 
@@ -22,6 +24,12 @@ export function getModelIdFromRef(modelRef: string | undefined, providerKey: str
     return modelRef.slice(providerKey.length + 1);
   }
   return modelRef;
+}
+
+function modelEntryForProvider(provider: ProviderConfig, modelId: string): PiAiModelsJsonModelEntry {
+  return provider.type === JUNFEIAI_PROVIDER_ID
+    ? piAiPromptCacheModelEntry(modelId)
+    : piAiModelsJsonModelEntry(modelId);
 }
 
 export function buildNonOAuthAgentProviderUpdate(
@@ -46,7 +54,7 @@ export function buildNonOAuthAgentProviderUpdate(
       baseUrl,
       api,
       apiKey: meta?.apiKeyEnv,
-      models: modelId ? [piAiModelsJsonModelEntry(modelId)] : [],
+      models: modelId ? [modelEntryForProvider(provider, modelId)] : [],
     },
   };
 }

@@ -20,7 +20,8 @@ import {
 } from '../../utils/openclaw-auth';
 import {
   piAiModelsJsonModelEntry,
-  type PiAiModelCostRates,
+  piAiPromptCacheModelEntry,
+  type PiAiModelsJsonModelEntry,
 } from '../../shared/pi-ai-model-cost';
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
@@ -127,6 +128,15 @@ function normalizeRuntimeModelId(config: ProviderConfig, modelId?: string): stri
   }
 
   return getManagedDefaultModelId(config);
+}
+
+function runtimeModelEntryForProvider(
+  config: ProviderConfig,
+  modelId: string,
+): PiAiModelsJsonModelEntry {
+  return config.type === JUNFEIAI_PROVIDER_ID
+    ? piAiPromptCacheModelEntry(modelId)
+    : piAiModelsJsonModelEntry(modelId);
 }
 
 export function normalizeProviderModelRef(
@@ -540,7 +550,7 @@ async function buildAgentModelProviderEntry(
 ): Promise<{
   baseUrl?: string;
   api?: string;
-  models?: Array<{ id: string; name: string; cost: PiAiModelCostRates }>;
+  models?: PiAiModelsJsonModelEntry[];
   apiKey?: string;
   authHeader?: boolean;
 } | null> {
@@ -575,7 +585,7 @@ async function buildAgentModelProviderEntry(
   return {
     baseUrl,
     api,
-    models: runtimeModelId ? [piAiModelsJsonModelEntry(runtimeModelId)] : [],
+    models: runtimeModelId ? [runtimeModelEntryForProvider(config, runtimeModelId)] : [],
     apiKey: apiKey ?? (config.type === JUNFEIAI_PROVIDER_ID ? null : undefined),
     authHeader,
   };
