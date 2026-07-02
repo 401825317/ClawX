@@ -1977,6 +1977,7 @@ describe('syncOpenAiCompatibleImageRelay', () => {
     expect(openai.api).toBe('openai-responses');
     expect(imageRelay.baseUrl).toBe('https://relay.example.com/v1');
     expect(imageRelay.api).toBe('openai-completions');
+    expect(imageRelay.apiKey).toBe('sk-relay-test');
     expect(imageRelay.request).toEqual({ allowPrivateNetwork: true });
     expect(imageRelay.models).toEqual([{ id: 'gpt-image-2', name: 'gpt-image-2' }]);
 
