@@ -20,6 +20,7 @@ import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1046,6 +1047,17 @@ function patchBundledRuntime(outputDir) {
   });
   if (browserPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${browserPatch.patchedFiles} browser runtime file(s)`;
+  }
+
+  // --- Prompt cache key patch ---
+  // OpenClaw's operator UI cache key includes the per-session run scope, which
+  // prevents ClawX-managed providers from reusing the same provider/model/agent
+  // prompt prefix across fresh conversations.
+  const promptCacheKeyPatch = patchOpenClawPromptCacheKeyRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (promptCacheKeyPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
   }
 
 }

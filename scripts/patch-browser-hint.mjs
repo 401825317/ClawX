@@ -7,9 +7,11 @@
  */
 
 import { patchInstalledOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 
 try {
   patchInstalledOpenClawBrowserRuntime();
+  patchInstalledOpenClawPromptCacheKeyRuntime();
 } catch {
   // openclaw not installed yet or dist not found - skip silently
 }
