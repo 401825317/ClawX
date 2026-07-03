@@ -233,6 +233,9 @@ describe('Gateway process launcher', () => {
       env: {
         CLAWX_OPENCLAW_ENTRY: '/tmp/openclaw/openclaw.mjs',
         OPENCLAW_DISABLE_BONJOUR: '1',
+        OPENCLAW_DISABLE_UPDATE_CHECK: '1',
+        OPENCLAW_SKIP_UPDATE_CHECK: '1',
+        NO_UPDATE_NOTIFIER: '1',
         PATH: '/usr/bin',
       },
     });
@@ -270,6 +273,9 @@ describe('Gateway process launcher', () => {
           CLAWX_OPENCLAW_ENTRY: '/tmp/openclaw/openclaw.mjs',
           NODE_OPTIONS: '--trace-warnings',
           OPENCLAW_DISABLE_BONJOUR: '1',
+          OPENCLAW_DISABLE_UPDATE_CHECK: '1',
+          OPENCLAW_SKIP_UPDATE_CHECK: '1',
+          NO_UPDATE_NOTIFIER: '1',
           PATH: '/usr/bin',
         },
       });

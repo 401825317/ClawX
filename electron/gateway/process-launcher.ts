@@ -74,6 +74,9 @@ export async function launchGatewayProcess(options: {
   // `isDisabledByEnv()`).  Set after the `forkEnv` spread so any
   // pre-existing value inherited from the user shell cannot re-enable it.
   runtimeEnv.OPENCLAW_DISABLE_BONJOUR = '1';
+  runtimeEnv.OPENCLAW_DISABLE_UPDATE_CHECK = '1';
+  runtimeEnv.OPENCLAW_SKIP_UPDATE_CHECK = '1';
+  runtimeEnv.NO_UPDATE_NOTIFIER = '1';
   runtimeEnv.CLAWX_OPENCLAW_ENTRY = entryScript;
 
   const gatewayEntryScript = getGatewayEntryWrapperPath();

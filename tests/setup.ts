@@ -14,6 +14,7 @@ vi.mock('electron', () => ({
     getPath: vi.fn().mockReturnValue('/tmp/clawx-test'),
     getVersion: vi.fn().mockReturnValue('0.0.0-test'),
     getName: vi.fn().mockReturnValue('clawx-test'),
+    getAppPath: vi.fn().mockReturnValue('/tmp/clawx-app'),
     isPackaged: false,
     isReady: vi.fn().mockResolvedValue(true),
     on: vi.fn(),

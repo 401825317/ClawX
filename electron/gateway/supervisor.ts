@@ -8,17 +8,44 @@ import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
 import { probeGatewayReady } from './ws-client';
 
+const PYTHON_STARTUP_READINESS_DELAY_MS = 45_000;
+const PYTHON_STARTUP_READINESS_MIN_INTERVAL_MS = 6 * 60 * 60_000;
+
+let pythonReadinessWarmupTimer: NodeJS.Timeout | null = null;
+let lastPythonReadinessWarmupAt = 0;
+
 export function warmupManagedPythonReadiness(): void {
-  void isPythonReady().then((pythonReady) => {
-    if (!pythonReady) {
-      logger.info('Python environment missing or incomplete, attempting background repair...');
-      void setupManagedPython().catch((err) => {
-        logger.error('Background Python repair failed:', err);
-      });
-    }
-  }).catch((err) => {
-    logger.error('Failed to check Python environment:', err);
-  });
+  if (process.env.CLAWX_DISABLE_PYTHON_STARTUP_WARMUP === '1') return;
+
+  const now = Date.now();
+  if (pythonReadinessWarmupTimer || now - lastPythonReadinessWarmupAt < PYTHON_STARTUP_READINESS_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  pythonReadinessWarmupTimer = setTimeout(() => {
+    pythonReadinessWarmupTimer = null;
+    lastPythonReadinessWarmupAt = Date.now();
+
+    void isPythonReady().then((pythonReady) => {
+      if (!pythonReady) {
+        if (process.env.CLAWX_ENABLE_STARTUP_PYTHON_REPAIR === '1') {
+          logger.info('Python environment missing or incomplete, attempting delayed background repair...');
+          void setupManagedPython().catch((err) => {
+            logger.error('Background Python repair failed:', err);
+          });
+          return;
+        }
+
+        logger.info(
+          'Python environment missing or incomplete; startup repair skipped. ' +
+          'Python-dependent features will repair the runtime when explicitly requested.',
+        );
+      }
+    }).catch((err) => {
+      logger.error('Failed to check Python environment:', err);
+    });
+  }, PYTHON_STARTUP_READINESS_DELAY_MS);
+  pythonReadinessWarmupTimer.unref?.();
 }
 
 export async function terminateOwnedGatewayProcess(child: Electron.UtilityProcess): Promise<void> {

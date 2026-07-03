@@ -7,6 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 
 const CACHE_SCHEMA_VERSION = 1;
@@ -84,6 +85,15 @@ export function pathSignature(path: string): string {
   try {
     const stat = statSync(path);
     return `${stat.isDirectory() ? 'dir' : 'file'}:${Math.round(stat.mtimeMs)}:${stat.size}`;
+  } catch {
+    return 'missing';
+  }
+}
+
+export function fileContentHash(path: string): string {
+  try {
+    const content = readFileSync(path);
+    return createHash('sha256').update(content).digest('hex');
   } catch {
     return 'missing';
   }

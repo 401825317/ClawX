@@ -43,7 +43,7 @@ import { cleanupAgentsSymlinkedSkills, cleanupStalePluginRuntimeDeps } from './s
 import {
   buildPrelaunchMaintenanceCacheKey,
   directoryChildrenSignature,
-  pathSignature,
+  fileContentHash,
   runCachedPrelaunchMaintenanceTask,
   type PrelaunchMaintenanceRunResult,
   type PrelaunchMaintenanceTaskName,
@@ -138,14 +138,6 @@ async function measureAsync<T>(timings: Record<string, number>, key: string, fn:
     return await fn();
   } finally {
     timings[key] = Date.now() - startedAt;
-  }
-}
-
-function appVersionForCache(): string {
-  try {
-    return app.getVersion();
-  } catch {
-    return 'unknown';
   }
 }
 
@@ -287,48 +279,40 @@ function buildPluginSourceSignatures(configuredChannels: string[]): Record<strin
     const sourceDir = bundledDir || (!app.isPackaged ? devPkgPath : '');
     signatures[channelType] = sourceDir
       ? {
-        sourceDir,
-        manifest: pathSignature(join(sourceDir, 'openclaw.plugin.json')),
-        packageJson: pathSignature(join(sourceDir, 'package.json')),
+        dirName: pluginInfo.dirName,
+        npmName: pluginInfo.npmName,
+        version: readPluginVersion(join(sourceDir, 'package.json')),
+        manifestHash: fileContentHash(join(sourceDir, 'openclaw.plugin.json')),
+        packageJsonHash: fileContentHash(join(sourceDir, 'package.json')),
       }
       : 'missing';
   }
   return signatures;
 }
 
-function buildPluginMaintenanceCacheKey(openclawDir: string, configuredChannels: string[]): string {
+export function buildPluginMaintenanceCacheKey(configuredChannels: string[]): string {
   return buildPrelaunchMaintenanceCacheKey({
     task: 'plugin-maintenance',
-    appVersion: appVersionForCache(),
-    openclawDir,
-    cwd: process.cwd(),
     configuredChannels: [...configuredChannels].sort(),
     extensionsDir: directoryChildrenSignature(getOpenClawExtensionsDir()),
     sourceSignatures: buildPluginSourceSignatures(configuredChannels),
   });
 }
 
-function buildSkillsSymlinkCleanupCacheKey(openclawDir: string): string {
+export function buildSkillsSymlinkCleanupCacheKey(): string {
   const workspaceSkillsDir = join(getOpenClawConfigDir(), 'workspace', 'skills');
   return buildPrelaunchMaintenanceCacheKey({
     task: 'skills-symlink-cleanup',
-    appVersion: appVersionForCache(),
-    openclawDir,
-    skillsDir: getOpenClawSkillsDir(),
     skillsDirSignature: directoryChildrenSignature(getOpenClawSkillsDir()),
-    workspaceSkillsDir,
     workspaceSkillsDirSignature: directoryChildrenSignature(workspaceSkillsDir),
   });
 }
 
-function buildRuntimeDepsCleanupCacheKey(openclawDir: string): string {
+export function buildRuntimeDepsCleanupCacheKey(): string {
   const runtimeDepsDir = join(getOpenClawConfigDir(), 'plugin-runtime-deps');
   return buildPrelaunchMaintenanceCacheKey({
     task: 'runtime-deps-cleanup',
-    appVersion: appVersionForCache(),
-    openclawDir,
-    currentOpenClawDir: getOpenClawResolvedDir(),
-    runtimeDepsDir,
+    openclawPackageJsonHash: fileContentHash(join(getOpenClawResolvedDir(), 'package.json')),
     runtimeDepsDirSignature: directoryChildrenSignature(runtimeDepsDir),
   });
 }
@@ -419,7 +403,7 @@ function ensureExtensionDepsResolvable(openclawDir: string): void {
 
 export async function syncGatewayConfigBeforeLaunch(
   appSettings: Awaited<ReturnType<typeof getAllSettings>>,
-  openclawDir: string,
+  _openclawDir: string,
 ): Promise<GatewayPrelaunchSyncSummary> {
   const timingsMs: Record<string, number> = {};
   const maintenance: GatewayPrelaunchSyncSummary['maintenance'] = {};
@@ -474,7 +458,7 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     const result = measureSync(timingsMs, 'skillsCleanupMs', () => runCachedPrelaunchMaintenanceTask(
       'skills-symlink-cleanup',
-      () => buildSkillsSymlinkCleanupCacheKey(openclawDir),
+      buildSkillsSymlinkCleanupCacheKey,
       () => (cleanupAgentsSymlinkedSkills().failed ?? 0) === 0,
     ));
     maintenance['skills-symlink-cleanup'] = result;
@@ -489,7 +473,7 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     const result = measureSync(timingsMs, 'runtimeDepsCleanupMs', () => runCachedPrelaunchMaintenanceTask(
       'runtime-deps-cleanup',
-      () => buildRuntimeDepsCleanupCacheKey(openclawDir),
+      buildRuntimeDepsCleanupCacheKey,
       () => (cleanupStalePluginRuntimeDeps().failed ?? 0) === 0,
     ));
     maintenance['runtime-deps-cleanup'] = result;
@@ -512,7 +496,7 @@ export async function syncGatewayConfigBeforeLaunch(
 
     const result = measureSync(timingsMs, 'pluginMaintenanceMs', () => runCachedPrelaunchMaintenanceTask(
       'plugin-maintenance',
-      () => buildPluginMaintenanceCacheKey(openclawDir, configuredChannels),
+      () => buildPluginMaintenanceCacheKey(configuredChannels),
       () => {
         const upgradeOk = ensureConfiguredPluginsUpgraded(configuredChannels);
         const cleanupOk = cleanupUnconfiguredChannelPlugins(configuredChannels);
