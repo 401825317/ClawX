@@ -2000,7 +2000,7 @@ describe('syncOpenAiCompatibleImageRelay', () => {
       },
       agents: {
         defaults: {
-          imageGenerationModel: { primary: 'clawx-openai-image/gpt-image-2', timeoutMs: 180000 },
+          imageGenerationModel: { primary: 'clawx-openai-image/gpt-image-2', timeoutMs: 900000 },
         },
       },
       plugins: {

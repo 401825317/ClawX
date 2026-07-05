@@ -94,10 +94,10 @@ describe('openclaw-image-generation helpers', () => {
       toManagedOpenAiImageModelRef,
     } = await import('@electron/utils/openclaw-image-generation');
 
-    expect(IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS).toBe(240_000);
-    expect(resolveChatImageTimeoutMs(null)).toBe(240_000);
-    expect(resolveChatImageTimeoutMs(120_000)).toBe(240_000);
-    expect(resolveChatImageTimeoutMs(300_000)).toBe(300_000);
+    expect(IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS).toBe(900_000);
+    expect(resolveChatImageTimeoutMs(null)).toBe(900_000);
+    expect(resolveChatImageTimeoutMs(120_000)).toBe(900_000);
+    expect(resolveChatImageTimeoutMs(300_000)).toBe(900_000);
     expect(toManagedOpenAiImageModelRef('gpt-image-2')).toBe('clawx-openai-image/gpt-image-2');
     expect(toManagedOpenAiImageModelRef('openai/gpt-image-2')).toBe('clawx-openai-image/gpt-image-2');
     expect(toManagedOpenAiImageModelRef('litellm/gpt-image-2')).toBe('clawx-openai-image/gpt-image-2');

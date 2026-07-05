@@ -6,7 +6,7 @@ const PROVIDER_ID = 'clawx-openai-image';
 const DEFAULT_MODEL = 'gpt-image-2';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_SIZE = '1024x1024';
-const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = 900_000;
 const DEFAULT_MIME_TYPE = 'image/png';
 const MAX_INPUT_IMAGES = 5;
 

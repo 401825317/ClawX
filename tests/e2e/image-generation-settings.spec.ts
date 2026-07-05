@@ -67,7 +67,7 @@ test.describe('Image generation settings page', () => {
               config: {
                 primary: 'clawx-openai-image/gpt-image-2',
                 fallbacks: [],
-                timeoutMs: 180000,
+                timeoutMs: 900000,
               },
               autoProviderFallback: false,
               defaultAgentId: 'default',
@@ -111,7 +111,7 @@ test.describe('Image generation settings page', () => {
       config: {
         primary: 'clawx-openai-image/gpt-image-2',
         fallbacks: [],
-        timeoutMs: 180000,
+        timeoutMs: 900000,
       },
       autoProviderFallback: false,
       defaultAgentId: 'default',
@@ -137,7 +137,7 @@ test.describe('Image generation settings page', () => {
       config: {
         primary: null,
         fallbacks: [],
-        timeoutMs: 180000,
+        timeoutMs: 900000,
       },
       openAiRelay: {
         enabled: false,

@@ -42,7 +42,7 @@ export function ImageGenerationSettings() {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<ImageGenerationSettingsSnapshot | null>(null);
 
-  const [timeoutMs, setTimeoutMs] = useState('180000');
+  const [timeoutMs, setTimeoutMs] = useState('900000');
   const [relayBaseUrl, setRelayBaseUrl] = useState('');
   const [relayModel, setRelayModel] = useState('gpt-image-2');
   const [testAgentId, setTestAgentId] = useState('');
@@ -52,7 +52,7 @@ export function ImageGenerationSettings() {
     try {
       const settings = await fetchImageGenerationSettings();
       setSnapshot(settings);
-      setTimeoutMs(settings.config.timeoutMs ? String(settings.config.timeoutMs) : '180000');
+      setTimeoutMs(settings.config.timeoutMs ? String(settings.config.timeoutMs) : '900000');
       setRelayBaseUrl(settings.openAiRelay?.baseUrl ?? '');
       setRelayModel(settings.openAiRelay?.model || 'gpt-image-2');
       setTestAgentId(settings.defaultAgentId);
