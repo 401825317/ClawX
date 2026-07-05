@@ -1544,6 +1544,73 @@ describe('useChatStore startup history retry', () => {
     await sendPromise;
   });
 
+  it('does not emit a false no-response error when runtime graph shows recent activity', async () => {
+    let resolveSend: ((value: { runId: string }) => void) | undefined;
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'chat.send') {
+        return new Promise((resolve) => {
+          resolveSend = resolve;
+        });
+      }
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            { id: 'user-runtime-active', role: 'user', content: 'long task', timestamp: 1000 },
+          ],
+        };
+      }
+      return { messages: [] };
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-runtime-active',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:session-runtime-active' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    const sendPromise = useChatStore.getState().sendMessage('long task');
+    useChatStore.setState({
+      activeRunId: 'run-runtime-active',
+      runtimeRuns: {
+        'run-runtime-active': {
+          runId: 'run-runtime-active',
+          sessionKey: 'agent:main:session-runtime-active',
+          status: 'running',
+          startedAt: Date.now(),
+          lastEventAt: Date.now(),
+          assistantText: '',
+          thinkingText: '',
+          events: [],
+        },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(121_000);
+
+    expect(useChatStore.getState().error).toBeNull();
+    expect(useChatStore.getState().sending).toBe(true);
+
+    resolveSend?.({ runId: 'run-runtime-active' });
+    await sendPromise;
+  });
+
   it('surfaces an idle-timeout hint when a role-only stream placeholder stalls the run', async () => {
     let resolveSend: ((value: { runId: string }) => void) | undefined;
     gatewayRpcMock.mockImplementation((method: string) => {
