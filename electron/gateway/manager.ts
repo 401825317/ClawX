@@ -100,6 +100,42 @@ export interface GatewayDiagnosticsSnapshot {
   lastSocketCloseAt?: number;
   lastSocketCloseCode?: number;
   consecutiveRpcFailures: number;
+  lastLifecycleEventAt?: number;
+  lastLifecycleEvent?: string;
+  lastStartRequestedAt?: number;
+  lastStartReason?: string;
+  lastStartSource?: string;
+  lastStopRequestedAt?: number;
+  lastStopReason?: string;
+  lastStopSource?: string;
+  lastRestartRequestedAt?: number;
+  lastRestartReason?: string;
+  lastRestartSource?: string;
+  lastRestartCompletedAt?: number;
+  lastReconnectScheduledAt?: number;
+  lastReconnectReason?: string;
+  lastReconnectSource?: string;
+  lastProcessExitAt?: number;
+  lastProcessExitCode?: number | null;
+  lastProcessExitExpected?: boolean;
+  recentLifecycleEvents?: GatewayLifecycleEvent[];
+}
+
+export interface GatewayLifecycleEvent {
+  at: number;
+  event: string;
+  state: GatewayLifecycleState;
+  port: number;
+  pid?: number;
+  reason?: string;
+  source?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface GatewayLifecycleContext {
+  reason?: string;
+  source?: string;
+  details?: Record<string, unknown>;
 }
 
 function isCoreRpcMethod(method: string): boolean {
@@ -173,6 +209,7 @@ export class GatewayManager extends EventEmitter {
   private reconnectAttemptsTotal = 0;
   private reconnectSuccessTotal = 0;
   private static readonly RELOAD_POLICY_REFRESH_MS = 15_000;
+  private static readonly LIFECYCLE_EVENT_BUFFER_SIZE = 100;
   private static readonly HEARTBEAT_INTERVAL_MS = 60_000;
   private static readonly HEARTBEAT_TIMEOUT_MS = 30_000;
   private static readonly HEARTBEAT_MAX_MISSES = 4;
@@ -185,6 +222,7 @@ export class GatewayManager extends EventEmitter {
   private gatewayReadyFallbackTimer: NodeJS.Timeout | null = null;
   private gatewayReadyFallbackAttempt = 0;
   private readonly capabilityMonitor = new GatewayCapabilityMonitor();
+  private readonly lifecycleEvents: GatewayLifecycleEvent[] = [];
   private diagnostics: GatewayDiagnosticsSnapshot = {
     consecutiveHeartbeatMisses: 0,
     consecutiveRpcFailures: 0,
@@ -209,7 +247,10 @@ export class GatewayManager extends EventEmitter {
             shouldReconnect: this.shouldReconnect,
           },
           () => {
-            void this.restart().catch((error) => {
+            void this.restart({
+              reason: 'deferred-restart-flush',
+              source: `status:${previousState}->${nextState}`,
+            }).catch((error) => {
               logger.warn('Deferred Gateway restart failed:', error);
             });
           },
@@ -255,6 +296,68 @@ export class GatewayManager extends EventEmitter {
     return sanitized;
   }
 
+  private safeStringifyLifecycleEvent(event: GatewayLifecycleEvent): string {
+    try {
+      return JSON.stringify(event);
+    } catch {
+      return JSON.stringify({
+        ...event,
+        details: '[unserializable]',
+      });
+    }
+  }
+
+  private recordLifecycleEvent(event: string, context?: GatewayLifecycleContext): GatewayLifecycleEvent {
+    const pid = this.process?.pid ?? this.status.pid;
+    const entry: GatewayLifecycleEvent = {
+      at: Date.now(),
+      event,
+      state: this.status.state,
+      port: this.status.port,
+      ...(pid ? { pid } : {}),
+      ...(context?.reason ? { reason: context.reason } : {}),
+      ...(context?.source ? { source: context.source } : {}),
+      ...(context?.details ? { details: context.details } : {}),
+    };
+
+    this.lifecycleEvents.push(entry);
+    if (this.lifecycleEvents.length > GatewayManager.LIFECYCLE_EVENT_BUFFER_SIZE) {
+      this.lifecycleEvents.shift();
+    }
+
+    this.diagnostics.lastLifecycleEventAt = entry.at;
+    this.diagnostics.lastLifecycleEvent = event;
+
+    if (event === 'start_requested') {
+      this.diagnostics.lastStartRequestedAt = entry.at;
+      this.diagnostics.lastStartReason = entry.reason;
+      this.diagnostics.lastStartSource = entry.source;
+    } else if (event === 'stop_requested') {
+      this.diagnostics.lastStopRequestedAt = entry.at;
+      this.diagnostics.lastStopReason = entry.reason;
+      this.diagnostics.lastStopSource = entry.source;
+    } else if (event === 'restart_requested') {
+      this.diagnostics.lastRestartRequestedAt = entry.at;
+      this.diagnostics.lastRestartReason = entry.reason;
+      this.diagnostics.lastRestartSource = entry.source;
+    } else if (event === 'restart_completed') {
+      this.diagnostics.lastRestartCompletedAt = entry.at;
+    } else if (event === 'reconnect_scheduled') {
+      this.diagnostics.lastReconnectScheduledAt = entry.at;
+      this.diagnostics.lastReconnectReason = entry.reason;
+      this.diagnostics.lastReconnectSource = entry.source;
+    } else if (event === 'process_exit') {
+      this.diagnostics.lastProcessExitAt = entry.at;
+      const code = entry.details?.code;
+      const expected = entry.details?.expected;
+      this.diagnostics.lastProcessExitCode = typeof code === 'number' ? code : null;
+      this.diagnostics.lastProcessExitExpected = typeof expected === 'boolean' ? expected : undefined;
+    }
+
+    logger.info(`[gateway-lifecycle] ${this.safeStringifyLifecycleEvent(entry)}`);
+    return entry;
+  }
+
   private isUnsupportedShutdownError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
     return /unknown method:\s*shutdown/i.test(message);
@@ -267,7 +370,10 @@ export class GatewayManager extends EventEmitter {
   }
 
   getDiagnostics(): GatewayDiagnosticsSnapshot {
-    return { ...this.diagnostics };
+    return {
+      ...this.diagnostics,
+      recentLifecycleEvents: [...this.lifecycleEvents],
+    };
   }
 
   getCapabilitySnapshot(summary?: GatewayHealthSummary): GatewayCapabilitySnapshot {
@@ -293,19 +399,34 @@ export class GatewayManager extends EventEmitter {
   /**
    * Start Gateway process
    */
-  async start(): Promise<void> {
+  async start(context?: GatewayLifecycleContext): Promise<void> {
     if (this.startLock) {
+      this.recordLifecycleEvent('start_ignored', {
+        reason: context?.reason ?? 'start-already-in-progress',
+        source: context?.source ?? 'gateway-manager',
+      });
       logger.debug('Gateway start ignored because a start flow is already in progress');
       return;
     }
 
     if (this.status.state === 'running') {
+      this.recordLifecycleEvent('start_ignored', {
+        reason: context?.reason ?? 'already-running',
+        source: context?.source ?? 'gateway-manager',
+      });
       logger.debug('Gateway already running, skipping start');
       return;
     }
 
     this.startLock = true;
     const startEpoch = this.lifecycleController.bump('start');
+    this.recordLifecycleEvent('start_requested', {
+      reason: context?.reason ?? (this.isAutoReconnectStart ? 'auto-reconnect' : 'manual-start'),
+      source: context?.source ?? 'gateway-manager',
+      details: {
+        reconnectAttempts: this.reconnectAttempts,
+      },
+    });
     logger.info(`Gateway start requested (port=${this.status.port})`);
     this.lastSpawnSummary = null;
     this.shouldReconnect = true;
@@ -429,7 +550,13 @@ export class GatewayManager extends EventEmitter {
       this.setStatus({ state: 'error', error: String(error) });
       if (this.shouldReconnect) {
         logger.warn('Gateway start failed; scheduling auto-reconnect recovery');
-        this.scheduleReconnect();
+        this.scheduleReconnect({
+          reason: 'start-failed',
+          source: context?.source ?? 'gateway-start',
+          details: {
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
       }
       throw error;
     } finally {
@@ -442,7 +569,10 @@ export class GatewayManager extends EventEmitter {
           shouldReconnect: this.shouldReconnect,
         },
         () => {
-          void this.restart().catch((error) => {
+          void this.restart({
+            reason: 'deferred-restart-flush',
+            source: 'start:finally',
+          }).catch((error) => {
             logger.warn('Deferred Gateway restart failed:', error);
           });
         },
@@ -453,7 +583,11 @@ export class GatewayManager extends EventEmitter {
   /**
    * Stop Gateway process
    */
-  async stop(): Promise<void> {
+  async stop(context?: GatewayLifecycleContext): Promise<void> {
+    this.recordLifecycleEvent('stop_requested', {
+      reason: context?.reason ?? 'manual-stop',
+      source: context?.source ?? 'gateway-manager',
+    });
     logger.info('Gateway stop requested');
     this.lifecycleController.bump('stop');
     // Disable auto-reconnect
@@ -530,12 +664,20 @@ export class GatewayManager extends EventEmitter {
   /**
    * Restart Gateway process
    */
-  async restart(): Promise<void> {
+  async restart(context?: GatewayLifecycleContext): Promise<void> {
     if (this.restartController.isRestartDeferred({
       state: this.status.state,
       startLock: this.startLock,
     })) {
-      this.restartController.markDeferredRestart('restart', {
+      this.recordLifecycleEvent('restart_deferred', {
+        reason: context?.reason ?? 'restart-deferred',
+        source: context?.source ?? 'gateway-manager',
+        details: {
+          state: this.status.state,
+          startLock: this.startLock,
+        },
+      });
+      this.restartController.markDeferredRestart(context?.reason ?? 'restart', {
         state: this.status.state,
         startLock: this.startLock,
       });
@@ -543,6 +685,10 @@ export class GatewayManager extends EventEmitter {
     }
 
     if (this.restartInFlight) {
+      this.recordLifecycleEvent('restart_joined_in_flight', {
+        reason: context?.reason ?? 'restart-in-flight',
+        source: context?.source ?? 'gateway-manager',
+      });
       logger.debug('Gateway restart already in progress, joining existing request');
       await this.restartInFlight;
       return;
@@ -551,6 +697,16 @@ export class GatewayManager extends EventEmitter {
     const decision = this.restartGovernor.decide();
     if (!decision.allow) {
       const observability = this.restartGovernor.getObservability();
+      this.recordLifecycleEvent('restart_suppressed', {
+        reason: decision.reason,
+        source: context?.source ?? 'gateway-restart-governor',
+        details: {
+          retryAfterMs: decision.retryAfterMs,
+          requestedReason: context?.reason,
+          suppressedTotal: observability.suppressed_total,
+          executedTotal: observability.executed_total,
+        },
+      });
       logger.warn(
         `[gateway-restart-governor] restart suppressed reason=${decision.reason} retryAfterMs=${decision.retryAfterMs} ` +
         `suppressed=${observability.suppressed_total} executed=${observability.executed_total} circuitOpenUntil=${observability.circuit_open_until}`,
@@ -568,17 +724,37 @@ export class GatewayManager extends EventEmitter {
     }
 
     const pidBefore = this.status.pid;
+    this.recordLifecycleEvent('restart_requested', {
+      reason: context?.reason ?? 'manual-restart',
+      source: context?.source ?? 'gateway-manager',
+      details: {
+        pidBefore,
+      },
+    });
     logger.info(`[gateway-refresh] mode=restart requested pidBefore=${pidBefore ?? 'n/a'}`);
     this.restartInFlight = (async () => {
-      await this.stop();
+      await this.stop({
+        reason: `restart:${context?.reason ?? 'manual-restart'}`,
+        source: context?.source ?? 'gateway-manager',
+      });
       try {
-        await this.start();
+        await this.start({
+          reason: `restart:${context?.reason ?? 'manual-restart'}`,
+          source: context?.source ?? 'gateway-manager',
+        });
       } catch (err) {
         // stop() set shouldReconnect=false. Restore it so the gateway
         // can self-heal via scheduleReconnect() instead of dying permanently.
         logger.warn('Gateway restart: start() failed after stop(), enabling auto-reconnect recovery', err);
         this.shouldReconnect = true;
-        this.scheduleReconnect();
+        this.scheduleReconnect({
+          reason: 'restart-start-failed',
+          source: context?.source ?? 'gateway-restart',
+          details: {
+            requestedReason: context?.reason,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        });
         throw err;
       }
     })();
@@ -599,6 +775,16 @@ export class GatewayManager extends EventEmitter {
         `[gateway-refresh] mode=restart result=applied pidBefore=${pidBefore ?? 'n/a'} pidAfter=${this.status.pid ?? 'n/a'} ` +
         `suppressed=${observability.suppressed_total} executed=${observability.executed_total} circuitOpenUntil=${observability.circuit_open_until}`,
       );
+      this.recordLifecycleEvent('restart_completed', {
+        reason: context?.reason ?? 'manual-restart',
+        source: context?.source ?? 'gateway-manager',
+        details: {
+          pidBefore,
+          pidAfter: this.status.pid,
+          suppressedTotal: observability.suppressed_total,
+          executedTotal: observability.executed_total,
+        },
+      });
     } finally {
       this.restartInFlight = null;
       this.restartController.flushDeferredRestart(
@@ -609,7 +795,10 @@ export class GatewayManager extends EventEmitter {
           shouldReconnect: this.shouldReconnect,
         },
         () => {
-          void this.restart().catch((error) => {
+          void this.restart({
+            reason: 'deferred-restart-flush',
+            source: 'restart:finally',
+          }).catch((error) => {
             logger.warn('Deferred Gateway restart failed:', error);
           });
         },
@@ -624,9 +813,19 @@ export class GatewayManager extends EventEmitter {
    * provider:setDefault and channel:saveConfig all fire within seconds
    * of each other during setup.
    */
-  debouncedRestart(delayMs = 2000): void {
+  debouncedRestart(delayMs = 2000, context?: GatewayLifecycleContext): void {
+    this.recordLifecycleEvent('restart_debounced', {
+      reason: context?.reason ?? 'debounced-restart',
+      source: context?.source ?? 'gateway-manager',
+      details: {
+        delayMs,
+      },
+    });
     this.restartController.debouncedRestart(delayMs, () => {
-      void this.restart().catch((err) => {
+      void this.restart({
+        reason: context?.reason ?? 'debounced-restart',
+        source: context?.source ?? 'gateway-manager',
+      }).catch((err) => {
         logger.warn('Debounced Gateway restart failed:', err);
       });
     });
@@ -636,14 +835,17 @@ export class GatewayManager extends EventEmitter {
    * Ask the Gateway process to reload config in-place when possible.
    * Falls back to restart on unsupported platforms or signaling failures.
    */
-  async reload(): Promise<void> {
+  async reload(context?: GatewayLifecycleContext): Promise<void> {
     await this.refreshReloadPolicy();
 
     if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
       logger.info(
         `[gateway-refresh] mode=reload result=policy_forced_restart policy=${this.reloadPolicy.mode}`,
       );
-      await this.restart();
+      await this.restart({
+        reason: context?.reason ?? `reload-policy-${this.reloadPolicy.mode}`,
+        source: context?.source ?? 'gateway-reload',
+      });
       return;
     }
 
@@ -651,7 +853,15 @@ export class GatewayManager extends EventEmitter {
       state: this.status.state,
       startLock: this.startLock,
     })) {
-      this.restartController.markDeferredRestart('reload', {
+      this.recordLifecycleEvent('reload_deferred', {
+        reason: context?.reason ?? 'reload-deferred',
+        source: context?.source ?? 'gateway-reload',
+        details: {
+          state: this.status.state,
+          startLock: this.startLock,
+        },
+      });
+      this.restartController.markDeferredRestart(context?.reason ?? 'reload', {
         state: this.status.state,
         startLock: this.startLock,
       });
@@ -664,7 +874,10 @@ export class GatewayManager extends EventEmitter {
     if (!this.process?.pid || this.status.state !== 'running') {
       logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=not_running');
       logger.warn('Gateway reload requested while not running; falling back to restart');
-      await this.restart();
+      await this.restart({
+        reason: 'reload-fallback-not-running',
+        source: context?.source ?? 'gateway-reload',
+      });
       return;
     }
 
@@ -686,7 +899,10 @@ export class GatewayManager extends EventEmitter {
       // Fall back to a full restart.  The connectedForMs < 8000 guard above
       // already skips unnecessary restarts for recently-started processes.
       logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=windows');
-      await this.restart();
+      await this.restart({
+        reason: 'reload-fallback-windows',
+        source: context?.source ?? 'gateway-reload',
+      });
       return;
     }
 
@@ -699,7 +915,10 @@ export class GatewayManager extends EventEmitter {
       if (this.status.state !== 'running' || !this.process?.pid) {
         logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=post_signal_unhealthy');
         logger.warn('Gateway did not stay running after reload signal, falling back to restart');
-        await this.restart();
+        await this.restart({
+          reason: 'reload-fallback-post-signal-unhealthy',
+          source: context?.source ?? 'gateway-reload',
+        });
       } else {
         const pidAfter = this.process.pid;
         logger.info(
@@ -709,7 +928,13 @@ export class GatewayManager extends EventEmitter {
     } catch (error) {
       logger.warn('[gateway-refresh] mode=reload result=fallback_restart cause=signal_error');
       logger.warn('Gateway reload signal failed, falling back to restart:', error);
-      await this.restart();
+      await this.restart({
+        reason: 'reload-fallback-signal-error',
+        source: context?.source ?? 'gateway-reload',
+        details: {
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
     }
   }
 
@@ -717,24 +942,38 @@ export class GatewayManager extends EventEmitter {
    * Debounced reload — coalesces multiple rapid config-change events into one
    * in-process reload when possible.
    */
-  debouncedReload(delayMs?: number): void {
+  debouncedReload(delayMs?: number, context?: GatewayLifecycleContext): void {
     void this.refreshReloadPolicy();
     const effectiveDelay = delayMs ?? this.reloadPolicy.debounceMs;
     if (this.reloadPolicy.mode === 'off' || this.reloadPolicy.mode === 'restart') {
       logger.debug(
         `Gateway reload policy=${this.reloadPolicy.mode}; routing debouncedReload to debouncedRestart (${effectiveDelay}ms)`,
       );
-      this.debouncedRestart(effectiveDelay);
+      this.debouncedRestart(effectiveDelay, {
+        reason: context?.reason ?? `debounced-reload-policy-${this.reloadPolicy.mode}`,
+        source: context?.source ?? 'gateway-reload',
+      });
       return;
     }
 
     if (this.reloadDebounceTimer) {
       clearTimeout(this.reloadDebounceTimer);
     }
+    this.recordLifecycleEvent('reload_debounced', {
+      reason: context?.reason ?? 'debounced-reload',
+      source: context?.source ?? 'gateway-manager',
+      details: {
+        delayMs: effectiveDelay,
+        policy: this.reloadPolicy.mode,
+      },
+    });
     logger.debug(`Gateway reload debounced (will fire in ${effectiveDelay}ms)`);
     this.reloadDebounceTimer = setTimeout(() => {
       this.reloadDebounceTimer = null;
-      void this.reload().catch((err) => {
+      void this.reload({
+        reason: context?.reason ?? 'debounced-reload',
+        source: context?.source ?? 'gateway-manager',
+      }).catch((err) => {
         logger.warn('Debounced Gateway reload failed:', err);
       });
     }, effectiveDelay);
@@ -1046,6 +1285,16 @@ export class GatewayManager extends EventEmitter {
         this.setStatus({ pid });
       },
       onExit: (exitedChild, code) => {
+        const expectedExit = !this.shouldReconnect;
+        this.recordLifecycleEvent('process_exit', {
+          reason: expectedExit ? 'expected-process-exit' : 'unexpected-process-exit',
+          source: 'utility-process',
+          details: {
+            code,
+            expected: expectedExit,
+            childPid: exitedChild.pid,
+          },
+        });
         this.processExitCode = code;
         this.ownsProcess = false;
         this.connectionMonitor.clear();
@@ -1068,7 +1317,15 @@ export class GatewayManager extends EventEmitter {
         // fires *before* process exit and sets state='stopped', which
         // previously caused this handler to also skip reconnect — leaving
         // the gateway permanently dead with no recovery path.
-        this.scheduleReconnect();
+        this.scheduleReconnect({
+          reason: 'process-exit',
+          source: 'utility-process',
+          details: {
+            code,
+            expected: expectedExit,
+            childPid: exitedChild.pid,
+          },
+        });
       },
       onError: () => {
         this.ownsProcess = false;
@@ -1115,6 +1372,13 @@ export class GatewayManager extends EventEmitter {
       onCloseAfterHandshake: (closeCode) => {
         this.connectionMonitor.clear();
         this.recordSocketClose(closeCode);
+        this.recordLifecycleEvent('websocket_close', {
+          reason: closeCode === 1012 ? 'gateway-in-process-restart' : 'websocket-close',
+          source: 'gateway-websocket',
+          details: {
+            closeCode,
+          },
+        });
         this.diagnostics.consecutiveHeartbeatMisses = 0;
         if (this.status.state === 'running') {
           this.setStatus({ state: 'stopped' });
@@ -1128,7 +1392,13 @@ export class GatewayManager extends EventEmitter {
           // restart (e.g. config reload).  The UtilityProcess stays alive, so
           // `onExit` will never fire — we MUST reconnect from the WS close path.
           if (process.platform !== 'win32' || closeCode === 1012) {
-            this.scheduleReconnect();
+            this.scheduleReconnect({
+              reason: closeCode === 1012 ? 'gateway-in-process-restart' : 'websocket-close',
+              source: 'gateway-websocket',
+              details: {
+                closeCode,
+              },
+            });
           }
         }
       },
@@ -1225,7 +1495,15 @@ export class GatewayManager extends EventEmitter {
           return;
         }
         logger.warn('Gateway heartbeat recovery: restarting unresponsive gateway process');
-        void this.restart().catch((error) => {
+        void this.restart({
+          reason: 'heartbeat-timeout',
+          source: 'gateway-heartbeat',
+          details: {
+            consecutiveMisses,
+            timeoutMs,
+            pid,
+          },
+        }).catch((error) => {
           logger.warn('Gateway heartbeat recovery failed:', error);
         });
       },
@@ -1250,7 +1528,10 @@ export class GatewayManager extends EventEmitter {
         return;
       }
       logger.warn('Gateway heartbeat recovery: initial gateway.ready grace expired, restarting unresponsive gateway process');
-      void this.restart().catch((error) => {
+      void this.restart({
+        reason: 'initial-gateway-ready-heartbeat-timeout',
+        source: 'gateway-heartbeat',
+      }).catch((error) => {
         logger.warn('Gateway heartbeat recovery failed:', error);
       });
     }, delayMs);
@@ -1265,7 +1546,7 @@ export class GatewayManager extends EventEmitter {
   /**
    * Schedule reconnection attempt with exponential backoff
    */
-  private scheduleReconnect(): void {
+  private scheduleReconnect(context?: GatewayLifecycleContext): void {
     const decision = getReconnectScheduleDecision({
       shouldReconnect: this.shouldReconnect,
       hasReconnectTimer: this.reconnectTimer !== null,
@@ -1276,15 +1557,35 @@ export class GatewayManager extends EventEmitter {
     });
 
     if (decision.action === 'skip') {
+      this.recordLifecycleEvent('reconnect_skipped', {
+        reason: decision.reason,
+        source: context?.source ?? 'gateway-reconnect',
+        details: {
+          requestedReason: context?.reason,
+        },
+      });
       logger.debug(`Gateway reconnect skipped (${decision.reason})`);
       return;
     }
 
     if (decision.action === 'already-scheduled') {
+      this.recordLifecycleEvent('reconnect_already_scheduled', {
+        reason: context?.reason ?? 'already-scheduled',
+        source: context?.source ?? 'gateway-reconnect',
+      });
       return;
     }
 
     if (decision.action === 'fail') {
+      this.recordLifecycleEvent('reconnect_failed', {
+        reason: 'max-attempts-reached',
+        source: context?.source ?? 'gateway-reconnect',
+        details: {
+          attempts: decision.attempts,
+          maxAttempts: decision.maxAttempts,
+          requestedReason: context?.reason,
+        },
+      });
       logger.error(`Gateway reconnect failed: max attempts reached (${decision.maxAttempts})`);
       this.setStatus({
         state: 'error',
@@ -1298,6 +1599,17 @@ export class GatewayManager extends EventEmitter {
     const { delay, nextAttempt, maxAttempts } = decision;
     const effectiveDelay = Math.max(delay, cooldownRemaining);
     this.reconnectAttempts = nextAttempt;
+    this.recordLifecycleEvent('reconnect_scheduled', {
+      reason: context?.reason ?? 'auto-reconnect',
+      source: context?.source ?? 'gateway-reconnect',
+      details: {
+        delayMs: effectiveDelay,
+        attempt: nextAttempt,
+        maxAttempts,
+        cooldownRemaining,
+        ...(context?.details ?? {}),
+      },
+    });
     logger.warn(`Scheduling Gateway reconnect attempt ${nextAttempt}/${maxAttempts} in ${effectiveDelay}ms`);
 
     this.setStatus({
@@ -1323,7 +1635,10 @@ export class GatewayManager extends EventEmitter {
         // Use the guarded start() flow so reconnect attempts cannot bypass
         // lifecycle locking and accidentally start duplicate Gateway processes.
         this.isAutoReconnectStart = true;
-        await this.start();
+        await this.start({
+          reason: context?.reason ?? 'auto-reconnect',
+          source: context?.source ?? 'gateway-reconnect',
+        });
         this.reconnectSuccessTotal += 1;
         this.emitReconnectMetric('success', {
           attemptNo,
@@ -1339,7 +1654,14 @@ export class GatewayManager extends EventEmitter {
           delayMs: effectiveDelay,
           error: error instanceof Error ? error.message : String(error),
         });
-        this.scheduleReconnect();
+        this.scheduleReconnect({
+          reason: 'reconnect-attempt-failed',
+          source: context?.source ?? 'gateway-reconnect',
+          details: {
+            previousReason: context?.reason,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
       }
     }, effectiveDelay);
   }

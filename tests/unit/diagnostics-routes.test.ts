@@ -86,6 +86,17 @@ describe('handleDiagnosticsRoutes', () => {
             lastRpcSuccessAt: 70,
             consecutiveHeartbeatMisses: 1,
             consecutiveRpcFailures: 0,
+            lastRestartReason: 'heartbeat-timeout',
+            recentLifecycleEvents: [
+              {
+                at: 80,
+                event: 'restart_requested',
+                state: 'running',
+                port: 18789,
+                reason: 'heartbeat-timeout',
+                source: 'gateway-heartbeat',
+              },
+            ],
           }),
         },
       } as never,
@@ -98,7 +109,14 @@ describe('handleDiagnosticsRoutes', () => {
       clawxLogTail?: string;
       gatewayLogTail?: string;
       gatewayErrLogTail?: string;
-      gateway?: { state?: string; reasons?: string[] };
+      gateway?: {
+        state?: string;
+        reasons?: string[];
+        diagnostics?: {
+          lastRestartReason?: string;
+          recentLifecycleEvents?: Array<{ event: string; reason?: string; source?: string }>;
+        };
+      };
     };
     expect(payload.platform).toBe(process.platform);
     expect(payload.channels).toEqual([
@@ -112,6 +130,14 @@ describe('handleDiagnosticsRoutes', () => {
     expect(payload.gatewayErrLogTail).toBe('');
     expect(payload.gateway?.state).toBe('degraded');
     expect(payload.gateway?.reasons).toEqual(expect.arrayContaining(['gateway_degraded']));
+    expect(payload.gateway?.diagnostics?.lastRestartReason).toBe('heartbeat-timeout');
+    expect(payload.gateway?.diagnostics?.recentLifecycleEvents).toEqual([
+      expect.objectContaining({
+        event: 'restart_requested',
+        reason: 'heartbeat-timeout',
+        source: 'gateway-heartbeat',
+      }),
+    ]);
   });
 
   it('returns empty gateway log tails when log files are missing', async () => {

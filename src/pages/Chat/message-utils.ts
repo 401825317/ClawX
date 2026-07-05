@@ -437,14 +437,14 @@ export function extractMediaRefs(message: RawMessage | unknown): Array<{ filePat
  */
 export function extractImages(
   message: RawMessage | unknown,
-): Array<{ mimeType: string; data?: string; url?: string }> {
+): Array<{ mimeType: string; data?: string; url?: string; width?: number; height?: number }> {
   if (!message || typeof message !== 'object') return [];
   const msg = message as Record<string, unknown>;
   const content = msg.content;
 
   if (!Array.isArray(content)) return [];
 
-  const images: Array<{ mimeType: string; data?: string; url?: string }> = [];
+  const images: Array<{ mimeType: string; data?: string; url?: string; width?: number; height?: number }> = [];
   for (const block of content as ContentBlock[]) {
     if (block.type !== 'image') continue;
 
@@ -452,16 +452,16 @@ export function extractImages(
     if (block.source) {
       const src = block.source;
       if (src.type === 'base64' && src.media_type && src.data) {
-        images.push({ mimeType: src.media_type, data: src.data });
+        images.push({ mimeType: src.media_type, data: src.data, width: block.width, height: block.height });
       } else if (src.type === 'url' && src.url && !isUnresolvableImageUrl(src.url)) {
-        images.push({ mimeType: src.media_type || 'image/jpeg', url: src.url });
+        images.push({ mimeType: src.media_type || 'image/jpeg', url: src.url, width: block.width, height: block.height });
       }
       continue;
     }
 
     // Path 2: Flat format from Gateway tool results {data, mimeType}
     if (block.data) {
-      images.push({ mimeType: block.mimeType || 'image/jpeg', data: block.data });
+      images.push({ mimeType: block.mimeType || 'image/jpeg', data: block.data, width: block.width, height: block.height });
     }
     // Flat `block.url` is intentionally NOT handled here; see comment above.
   }

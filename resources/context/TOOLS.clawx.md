@@ -38,6 +38,11 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 - If `web_search` returns `web_search is disabled or no provider is available`, treat `web_search` as unavailable for the rest of the current task/run. Do not retry `web_search` with the same or similar query. Fall back to `web_fetch` on known/search-engine URLs, `browser` for interactive web pages, or `computer_*` tools for private/logged-in desktop state. Mention the disabled search provider only if it affects the final outcome.
 - Avoid shell/Python HTTP scraping for ordinary searches. Use `exec`, `uv`, `curl`, or ad-hoc Python network scripts only when the web tools are unavailable or insufficient, and keep errors out of the final answer unless they are necessary to explain a blocker.
 
+### Local Actions
+
+- For tasks that require local side effects, such as downloading files, installing apps, moving files into `/Applications`, editing files, starting servers, or changing settings, do not end with a future-tense promise like "I'll do it now" or "我现在继续". Continue calling the appropriate tools until the action is completed, fails with a concrete blocker, or requires explicit user confirmation. Only send the final reply after that state is verified.
+- Before claiming a local app, file, server, or setting was changed, verify the resulting state with an available inspection tool (`exec`, `read`, `process`, `computer_*`, `browser`, or another listed tool that fits the task).
+
 ### Computer And Screen
 
 - UClaw has native computer-use tools when `computer_*` tools are listed. These include full-screen and window screenshots, clipboard read/write, Windows window listing/focus/move/resize/topmost, UI Automation tree/find, DOM inspection for UClaw windows, mouse movement/click/scroll/drag, keyboard shortcuts/text entry, display/cursor inspection, and file-dialog path entry.

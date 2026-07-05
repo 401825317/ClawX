@@ -60,6 +60,8 @@ interface ChatInputProps {
   onStop?: () => void;
   disabled?: boolean;
   sending?: boolean;
+  imageEditReference?: ImageEditReference | null;
+  onClearImageEditReference?: () => void;
 }
 
 interface RemoteModelOption {
@@ -67,6 +69,14 @@ interface RemoteModelOption {
   label: string;
   runtimeProviderKey: string;
   accountId: string;
+}
+
+export interface ImageEditReference {
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  filePath: string;
+  preview: string | null;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -257,7 +267,14 @@ function readFileAsBase64(file: globalThis.File): Promise<string> {
 
 // ── Component ────────────────────────────────────────────────────
 
-export function ChatInput({ onSend, onStop, disabled = false, sending = false }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  onStop,
+  disabled = false,
+  sending = false,
+  imageEditReference = null,
+  onClearImageEditReference,
+}: ChatInputProps) {
   const { t } = useTranslation('chat');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -300,6 +317,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     [currentSessionKey, sessions],
   );
   const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
+  const hasImageEditReference = !!imageEditReference?.filePath;
   const imageModelOptions = clientModelOptions.image.models;
   const selectedImageModel = useMemo(() => {
     return imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel)
@@ -326,6 +344,15 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       quality,
     };
   }, [currentSessionKey, defaultImageOptions, selectedImageModel, sessionImageOptions]);
+
+  useEffect(() => {
+    if (!hasImageEditReference) return;
+    setSessionSendModes((current) => {
+      if (current[currentSessionKey] === 'image') return current;
+      return { ...current, [currentSessionKey]: 'image' };
+    });
+    textareaRef.current?.focus();
+  }, [currentSessionKey, hasImageEditReference]);
   const videoModelOptions = clientModelOptions.video.models;
   const selectedVideoModel = useMemo(() => {
     return videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel)
@@ -798,7 +825,24 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     if (!canSend) return;
     const readyAttachments = attachments.filter(a => a.status === 'ready');
     const textToSend = input.trim();
-    const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
+    const imageReferenceAttachment = sendMode === 'image' && imageEditReference?.filePath
+      ? {
+        id: `image-edit-reference:${imageEditReference.filePath}`,
+        fileName: imageEditReference.fileName || imageEditReference.filePath.split(/[\\/]/).pop() || 'image',
+        mimeType: imageEditReference.mimeType || 'image/png',
+        fileSize: imageEditReference.fileSize || 0,
+        stagedPath: imageEditReference.filePath,
+        preview: imageEditReference.preview,
+        status: 'ready' as const,
+      }
+      : null;
+    const dedupedReadyAttachments = imageReferenceAttachment
+      ? [
+        imageReferenceAttachment,
+        ...readyAttachments.filter((attachment) => attachment.stagedPath !== imageReferenceAttachment.stagedPath),
+      ]
+      : readyAttachments;
+    const attachmentsToSend = dedupedReadyAttachments.length > 0 ? dedupedReadyAttachments : undefined;
 
     if (rendererExtensionRegistry.hasChatBeforeSendHooks()) {
       const guard = await rendererExtensionRegistry.runChatBeforeSend({
@@ -853,6 +897,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
       sendMode === 'image' ? imageOptions : undefined,
       sendMode === 'video' ? videoOptions : undefined,
     );
+    if (imageReferenceAttachment) {
+      onClearImageEditReference?.();
+    }
     setTargetAgentId(null);
     setPickerOpen(false);
     setSkillPickerOpen(false);
@@ -863,7 +910,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
     effectiveModelRef,
     imageOptions,
     input,
+    imageEditReference,
     onSend,
+    onClearImageEditReference,
     requestedModelRef,
     sendMode,
     t,
@@ -1027,6 +1076,45 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
 
         {/* Input Container */}
         <div className={`relative bg-surface-modal rounded-2xl shadow-sm border px-3 pt-2.5 pb-1.5 transition-all ${dragOver ? 'border-primary ring-1 ring-primary' : 'border-black/10 dark:border-white/10'}`}>
+          {hasImageEditReference && imageEditReference && (
+            <div
+              className="mb-2 flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 p-2"
+              data-testid="chat-image-edit-reference"
+            >
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-black/10 bg-background dark:border-white/10">
+                {imageEditReference.preview ? (
+                  <img
+                    src={imageEditReference.preview}
+                    alt={imageEditReference.fileName}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <ImageIcon className="h-4 w-4 text-muted-foreground" />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium text-foreground">
+                  {t('composer.imageEditReferenceLabel', '修改图片')}
+                </div>
+                <div className="truncate text-tiny text-muted-foreground">
+                  {imageEditReference.fileName}
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 shrink-0 rounded-lg text-muted-foreground hover:text-foreground"
+                onClick={onClearImageEditReference}
+                disabled={sending}
+                title={t('composer.clearImageEditReference', '取消参考图')}
+                aria-label={t('composer.clearImageEditReference', '取消参考图')}
+                data-testid="chat-image-edit-reference-clear"
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          )}
+
           {selectedTarget && (
             <div className="flex flex-wrap gap-2 pb-1.5">
               <button
@@ -1282,6 +1370,9 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                     : 'hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground',
                 )}
                 onClick={() => {
+                  if (sendMode === 'image') {
+                    onClearImageEditReference?.();
+                  }
                   setSessionSendModes((current) => ({
                     ...current,
                     [currentSessionKey]: current[currentSessionKey] === 'image' ? 'chat' : 'image',
@@ -1303,6 +1394,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
                     : 'hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground',
                 )}
                 onClick={() => {
+                  onClearImageEditReference?.();
                   setSessionSendModes((current) => ({
                     ...current,
                     [currentSessionKey]: current[currentSessionKey] === 'video' ? 'chat' : 'video',

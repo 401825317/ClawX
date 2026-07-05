@@ -396,7 +396,7 @@ describe('loadMissingPreviews', () => {
 
       vi.mocked(invokeIpc)
         .mockResolvedValueOnce({ [gatewayUrl]: { preview: null, fileSize: 0 } })
-        .mockResolvedValueOnce({ [gatewayUrl]: { preview: 'data:image/png;base64,ok', fileSize: 42 } });
+        .mockResolvedValueOnce({ [gatewayUrl]: { preview: 'data:image/png;base64,ok', fileSize: 42, width: 1536, height: 864 } });
 
       const result = loadMissingPreviews(messages);
       expect(invokeIpc).toHaveBeenCalledTimes(1);
@@ -408,6 +408,8 @@ describe('loadMissingPreviews', () => {
       expect(messages[0]?._attachedFiles?.[0]).toMatchObject({
         preview: 'data:image/png;base64,ok',
         fileSize: 42,
+        width: 1536,
+        height: 864,
       });
       expect(messages[0]?._attachedFiles?.[0]?.previewStatus).toBeUndefined();
     } finally {

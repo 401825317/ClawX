@@ -86,6 +86,7 @@ const SKILLHUB_CACHE_TTL_MS = 5 * 60 * 1000;
 const SKILLHUB_DEFAULT_LIMIT = 100;
 const SKILLHUB_MAX_LIMIT = 100;
 const VALID_SKILLHUB_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+const SKILLHUB_COPY_RETRY_DELAYS_MS = [200, 750, 1500];
 let skillHubFs: SkillHubFs = fsp;
 
 let skillHubCountCache: { total: number; timestamp: number } | null = null;
@@ -409,10 +410,14 @@ async function extractSkillZip(zipBuffer: Buffer, targetDir: string): Promise<vo
   }
 }
 
-function isWindowsRenamePermissionError(error: unknown): boolean {
+function isRetriableWindowsFsError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const code = (error as { code?: unknown }).code;
-  return code === 'EPERM' || code === 'EACCES' || code === 'ENOTEMPTY';
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY' || code === 'ENOTEMPTY';
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
 async function removeDirectoryBestEffort(dir: string): Promise<void> {
@@ -423,35 +428,54 @@ async function removeDirectoryBestEffort(dir: string): Promise<void> {
   }
 }
 
-async function moveExistingTargetAside(targetDir: string): Promise<string | null> {
+async function moveExistingTargetAside(targetDir: string): Promise<{ oldDir: string | null; targetExisted: boolean }> {
   const oldDir = join(dirname(targetDir), `.${basename(targetDir)}-delete-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   try {
     await skillHubFs.rename(targetDir, oldDir);
-    return oldDir;
+    return { oldDir, targetExisted: true };
   } catch (error) {
     const code = (error as { code?: unknown } | undefined)?.code;
     if (code === 'ENOENT') {
-      return null;
+      return { oldDir: null, targetExisted: false };
     }
-    if (!isWindowsRenamePermissionError(error)) {
+    if (!isRetriableWindowsFsError(error)) {
       throw error;
     }
     await removeDirectoryBestEffort(targetDir);
-    return null;
+    return { oldDir: null, targetExisted: true };
+  }
+}
+
+async function copyExtractedSkillDirWithRetries(tempDir: string, targetDir: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await skillHubFs.cp(tempDir, targetDir, { recursive: true, force: true, errorOnExist: false });
+      return;
+    } catch (error) {
+      if (!isRetriableWindowsFsError(error) || attempt >= SKILLHUB_COPY_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      const waitMs = SKILLHUB_COPY_RETRY_DELAYS_MS[attempt];
+      logger.warn(
+        `[skillhub] Copy install failed for "${targetDir}", retrying in ${waitMs}ms:`,
+        error,
+      );
+      await delay(waitMs);
+    }
   }
 }
 
 async function commitExtractedSkillDir(tempDir: string, targetDir: string): Promise<void> {
-  const oldDir = await moveExistingTargetAside(targetDir);
+  const { oldDir, targetExisted } = await moveExistingTargetAside(targetDir);
   try {
     try {
       await skillHubFs.rename(tempDir, targetDir);
     } catch (error) {
-      if (!isWindowsRenamePermissionError(error)) {
+      if (!isRetriableWindowsFsError(error)) {
         throw error;
       }
       logger.warn(`[skillhub] Rename install failed for "${targetDir}", falling back to copy:`, error);
-      await skillHubFs.cp(tempDir, targetDir, { recursive: true, force: true, errorOnExist: false });
+      await copyExtractedSkillDirWithRetries(tempDir, targetDir);
       await skillHubFs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     }
   } catch (error) {
@@ -462,6 +486,8 @@ async function commitExtractedSkillDir(tempDir: string, targetDir: string): Prom
       } catch (restoreError) {
         logger.warn(`[skillhub] Failed to restore previous skill directory "${targetDir}":`, restoreError);
       }
+    } else if (!targetExisted) {
+      await removeDirectoryBestEffort(targetDir);
     }
     throw error;
   } finally {

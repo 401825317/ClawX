@@ -618,7 +618,10 @@ async function initialize(): Promise<void> {
     try {
       await syncAllProviderAuthToRuntime();
       logger.debug('Auto-starting Gateway...');
-      await gatewayManager.start();
+      await gatewayManager.start({
+        reason: 'app-auto-start',
+        source: 'main-startup',
+      });
       logger.info('Gateway auto-start succeeded');
     } catch (error) {
       logger.error('Gateway auto-start failed:', error);
@@ -652,7 +655,10 @@ async function initialize(): Promise<void> {
         try {
           await syncAllProviderAuthToRuntime();
           logger.debug('Auto-starting Gateway after JunFeiAI background verification...');
-          await gatewayManager.start();
+          await gatewayManager.start({
+            reason: 'junfeiai-background-verification',
+            source: 'main-startup',
+          });
           logger.info('Gateway auto-start after JunFeiAI verification succeeded');
         } catch (error) {
           logger.error('Gateway auto-start after JunFeiAI verification failed:', error);
@@ -779,7 +785,10 @@ if (gotTheLock) {
     hostApiServer?.close();
     void extensionRegistry.teardownAll();
 
-    const stopPromise = gatewayManager.stop().catch((err) => {
+    const stopPromise = gatewayManager.stop({
+      reason: 'app-quit',
+      source: 'main-before-quit',
+    }).catch((err) => {
       logger.warn('gatewayManager.stop() error during quit:', err);
     });
     const timeoutPromise = new Promise<'timeout'>((resolve) => {

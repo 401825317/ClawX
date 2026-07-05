@@ -4,9 +4,14 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 describe('UClaw tool routing context', () => {
+  const agentsContext = readFileSync(join(process.cwd(), 'resources', 'context', 'AGENTS.clawx.md'), 'utf8');
   const toolsContext = readFileSync(join(process.cwd(), 'resources', 'context', 'TOOLS.clawx.md'), 'utf8');
   const computerUsePlugin = readFileSync(
     join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs'),
+    'utf8',
+  );
+  const finalizePatchScript = readFileSync(
+    join(process.cwd(), 'scripts', 'openclaw-finalize-local-action-patch.mjs'),
     'utf8',
   );
   const computerUseManifest = readFileSync(
@@ -49,6 +54,194 @@ describe('UClaw tool routing context', () => {
     expect(toolsContext).toContain('If `web_search` returns `web_search is disabled or no provider is available`');
     expect(toolsContext).toContain('treat `web_search` as unavailable for the rest of the current task/run');
     expect(toolsContext).toContain('Do not retry `web_search` with the same or similar query');
+  });
+
+  it('prevents local action tasks from ending with unexecuted promises', () => {
+    expect(agentsContext).toContain('**Local Action Completion Rule**');
+    expect(agentsContext).toContain('If the next step is clear, call the appropriate tool instead of sending a final answer');
+    expect(toolsContext).toContain('### Local Actions');
+    expect(toolsContext).toContain('do not end with a future-tense promise');
+    expect(toolsContext).toContain('Only send the final reply after that state is verified');
+    expect(toolsContext).toContain('Before claiming a local app, file, server, or setting was changed');
+    expect(computerUsePlugin).toContain('before_agent_finalize');
+    expect(computerUsePlugin).toContain('before_prompt_build');
+    expect(computerUsePlugin).toContain('appendSystemContext: LOCAL_ACTION_CONTEXT');
+    expect(computerUsePlugin).toContain('UClaw local action final reply looked like an unexecuted plan');
+    expect(computerUsePlugin).toContain('DELIVERABLE_CONTRACTS');
+    expect(computerUsePlugin).toContain('concrete artifact');
+    expect(computerUsePlugin).toContain('PPT/presentation deliverable');
+    expect(computerUsePlugin).toContain('registerLocalActionCompletionGuard(api)');
+    expect(computerUsePlugin).toContain('需要(?:你|用户).{0,20}确认');
+    expect(finalizePatchScript).toContain('allowUclawLocalActionRevisionAfterSideEffect');
+    expect(finalizePatchScript).toContain('UClaw local action final reply looked like an unexecuted plan');
+  });
+
+  it('revises the observed Douyin install promise instead of finalizing it', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    expect(finalizeHook).toBeTruthy();
+    const result = finalizeHook?.({
+      lastAssistantMessage: '我先从抖音官网确认下载入口，然后安装到本机；如果官网只提供移动端/Windows 版，我会停下来说明。',
+      messages: [{ role: 'assistant', content: [{ type: 'toolCall', name: 'web_fetch' }] }],
+    }) as { action?: string; retry?: { instruction?: string } } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.retry?.instruction).toContain('Do not send another plan or promise');
+  });
+
+  it('revises local-action promises when the hook exposes messagesSnapshot', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    const result = finalizeHook?.({
+      messagesSnapshot: [
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'browser' }] },
+        { role: 'toolResult', toolName: 'browser', content: [{ type: 'text', text: 'ok' }] },
+        {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: '找到官网首页里的“客户端”下载链接了，是 `douyin.com` 域名下的 macOS 通用版 DMG。我现在下载并安装。' }],
+        },
+      ],
+    }) as { action?: string; retry?: { instruction?: string } } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.retry?.instruction).toContain('Continue by calling the appropriate tools now');
+  });
+
+  it('detects OpenAI-style top-level tool calls before revising local-action promises', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    const result = finalizeHook?.({
+      lastAssistantMessage: '找到官网首页里的“客户端”下载链接了，是 `douyin.com` 域名下的 macOS 通用版 DMG。我现在下载并安装。',
+      messages: [
+        { role: 'assistant', tool_calls: [{ id: 'call_1', function: { name: 'browser' } }] },
+        { role: 'tool', tool_call_id: 'call_1', content: 'ok' },
+      ],
+    }) as { action?: string; reason?: string } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.reason).toContain('unexecuted plan');
+  });
+
+  it('revises PPT deliverable progress when no artifact evidence exists', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    const result = finalizeHook?.({
+      lastAssistantMessage: '正在抓公开行情/资金流数据；百度拦了验证码，我换东方财富/同花顺数据源和接口，先把可验证的数据落到本地再做 PPT。',
+      messages: [
+        { role: 'user', content: '帮我看一下最新科技股大跌的原因，然后分析一下上周五主力资金的流入流出迹象。然后做一个分析的ppt' },
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'web_fetch' }] },
+        { role: 'tool', tool_call_id: 'call_1', content: 'search ok' },
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'exec' }] },
+        { role: 'tool', tool_call_id: 'call_2', content: 'RemoteDisconnected without artifact' },
+      ],
+    }) as { action?: string; retry?: { instruction?: string; maxAttempts?: number }; reason?: string } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.reason).toContain('unexecuted plan');
+    expect(result?.retry?.instruction).toContain('PPT/presentation deliverable');
+    expect(result?.retry?.maxAttempts).toBe(2);
+  });
+
+  it('allows PPT deliverable finalization when artifact evidence exists', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    const result = finalizeHook?.({
+      lastAssistantMessage: '已完成分析 PPT：/Users/test/tech-fund-flow-analysis.pptx',
+      messages: [
+        { role: 'user', content: '帮我看一下最新科技股大跌的原因，然后分析一下上周五主力资金的流入流出迹象。然后做一个分析的ppt' },
+        { role: 'tool', tool_call_id: 'call_1', content: 'created /Users/test/tech-fund-flow-analysis.pptx' },
+      ],
+    }) as { action?: string } | undefined;
+
+    expect(result).toBeUndefined();
+  });
+
+  it('does not treat recoverable data-source failures as completed deliverables', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    const result = finalizeHook?.({
+      lastAssistantMessage: '东方财富接口失败，我换同花顺数据源继续补数据，再做 PPT。',
+      messages: [
+        { role: 'user', content: '分析科技股大跌和主力资金流向，做成一个PPT' },
+        { role: 'tool', tool_call_id: 'call_1', content: 'RemoteDisconnected' },
+      ],
+    }) as { action?: string; retry?: { instruction?: string } } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.retry?.instruction).toContain('PPT/presentation deliverable');
   });
 
   it('keeps weather useful when explicit user location is missing', () => {

@@ -84,6 +84,38 @@ describe('GatewayManager diagnostics', () => {
     expect(manager.getDiagnostics().lastSocketCloseCode).toBe(1006);
   });
 
+  it('records lifecycle reason and source for restart diagnostics', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    vi.spyOn(manager, 'stop').mockResolvedValue();
+    vi.spyOn(manager, 'start').mockResolvedValue();
+
+    await manager.restart({
+      reason: 'channel-config-save',
+      source: '/api/channels',
+    });
+
+    const diagnostics = manager.getDiagnostics();
+    expect(diagnostics.lastRestartReason).toBe('channel-config-save');
+    expect(diagnostics.lastRestartSource).toBe('/api/channels');
+    expect(diagnostics.lastRestartCompletedAt).toBe(Date.now());
+    expect(diagnostics.recentLifecycleEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: 'restart_requested',
+          reason: 'channel-config-save',
+          source: '/api/channels',
+        }),
+        expect.objectContaining({
+          event: 'restart_completed',
+          reason: 'channel-config-save',
+          source: '/api/channels',
+        }),
+      ]),
+    );
+  });
+
   it('does not count gateway-declared rpc errors as transport failures', async () => {
     const { GatewayManager } = await import('@electron/gateway/manager');
     const { buildGatewayHealthSummary } = await import('@electron/utils/gateway-health');

@@ -7,6 +7,8 @@ export interface AttachedFileMeta {
   fileSize: number;
   preview: string | null;
   previewStatus?: 'unavailable';
+  width?: number;
+  height?: number;
   filePath?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
   /**

@@ -11,7 +11,10 @@ async function handleProxySettingsChange(ctx: HostApiContext): Promise<void> {
   await syncProxyConfigToOpenClaw(settings, { preserveExistingWhenDisabled: false });
   await applyProxySettings(settings);
   if (ctx.gatewayManager.getStatus().state === 'running') {
-    await ctx.gatewayManager.restart();
+    await ctx.gatewayManager.restart({
+      reason: 'proxy-settings-change',
+      source: '/api/settings',
+    });
   }
 }
 

@@ -199,4 +199,62 @@ describe('SkillHub marketplace extension', () => {
       skillHub.__setSkillHubFsForTests(null);
     }
   });
+
+  it('retries copy fallback when Windows temporarily blocks scanning extracted references', async () => {
+    const homeDir = mkdtempSync(join(tmpdir(), 'clawx-skillhub-home-'));
+    const originalRename = fsp.rename;
+    const originalCp = fsp.cp;
+    const renameMock = vi.fn(async (oldPath: Parameters<typeof fsp.rename>[0], newPath: Parameters<typeof fsp.rename>[1]) => {
+      if (String(oldPath).includes('.demo-skill-skillhub-') && String(newPath).endsWith(join('skills', 'demo-skill'))) {
+        const error = new Error('EPERM: operation not permitted, rename');
+        (error as NodeJS.ErrnoException).code = 'EPERM';
+        throw error;
+      }
+      return await originalRename(oldPath, newPath);
+    });
+    const cpMock = vi.fn(async (source: Parameters<typeof fsp.cp>[0], destination: Parameters<typeof fsp.cp>[1], options?: Parameters<typeof fsp.cp>[2]) => {
+      if (cpMock.mock.calls.length === 1) {
+        const error = new Error(`EPERM: operation not permitted, scandir '${join(String(source), 'references')}'`);
+        (error as NodeJS.ErrnoException).code = 'EPERM';
+        (error as NodeJS.ErrnoException).syscall = 'scandir';
+        (error as NodeJS.ErrnoException).path = join(String(source), 'references');
+        throw error;
+      }
+      return await originalCp(source, destination, options);
+    });
+    const skillHub = await loadSkillHubModuleForHome(homeDir);
+    skillHub.__setSkillHubFsForTests({ ...fsp, rename: renameMock, cp: cpMock });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/v1/skills/demo-skill')) {
+        return jsonResponse({
+          latestVersion: { version: '1.0.0' },
+          skill: {
+            slug: 'demo-skill',
+            displayName: 'SkillHub Demo',
+            summary_zh: 'SkillHub demo desc',
+            source: 'community',
+          },
+        });
+      }
+      if (url.includes('/api/v1/download?slug=demo-skill')) {
+        return await skillZipResponse();
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const extension = skillHub.createSkillHubMarketplaceExtension();
+      await extension.install({ slug: 'demo-skill', version: '1.0.0', provider: 'skillhub' });
+
+      const skillDir = join(homeDir, '.openclaw', 'skills', 'demo-skill');
+      expect(renameMock).toHaveBeenCalled();
+      expect(cpMock).toHaveBeenCalledTimes(2);
+      expect(existsSync(join(skillDir, 'SKILL.md'))).toBe(true);
+      expect(existsSync(join(skillDir, 'references', 'readme.md'))).toBe(true);
+    } finally {
+      skillHub.__setSkillHubFsForTests(null);
+    }
+  });
 });

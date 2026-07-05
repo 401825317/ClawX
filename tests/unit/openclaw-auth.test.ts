@@ -2281,4 +2281,31 @@ describe('batchSyncConfigFields', () => {
     expect(ssrfPolicy.allowRfc2544BenchmarkRange).toBe(false);
     expect(ssrfPolicy.allowIpv6UniqueLocalRange).toBe(false);
   });
+
+  it('enables hook access for the UClaw computer-use local-action guards', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      plugins: {
+        allow: ['uclaw-computer-use'],
+        entries: {
+          'uclaw-computer-use': {
+            enabled: true,
+            config: { preserved: true },
+          },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(entries['uclaw-computer-use']).toEqual({
+      enabled: true,
+      config: { preserved: true },
+      hooks: { allowConversationAccess: true, allowPromptInjection: true },
+    });
+  });
 });

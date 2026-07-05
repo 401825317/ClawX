@@ -27,7 +27,7 @@ export function buildGatewayHealthSummary(
     && now - options.lastChannelsStatusFailureAt <= CHANNEL_STATUS_FAILURE_WINDOW_MS
     && (
       typeof options.lastChannelsStatusOkAt !== 'number'
-      || options.lastChannelsStatusFailureAt > options.lastChannelsStatusOkAt
+      || options.lastChannelsStatusFailureAt >= options.lastChannelsStatusOkAt
     );
 
   if (options.status.state !== 'running') {

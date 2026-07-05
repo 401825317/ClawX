@@ -1460,7 +1460,14 @@ describe('handleChannelRoutes', () => {
       { enabled: true },
       'wechat-bot',
     );
-    expect(gatewayManager.debouncedRestart).toHaveBeenCalledWith(150);
+    expect(gatewayManager.debouncedRestart).toHaveBeenCalledWith(
+      150,
+      expect.objectContaining({
+        reason: 'wechat:loginSuccess:wechat-bot',
+        source: '/api/channels',
+        details: { channelType: 'openclaw-weixin' },
+      }),
+    );
   });
 
   it('restarts gateway after a no-change channel config save', async () => {
@@ -1495,7 +1502,14 @@ describe('handleChannelRoutes', () => {
 
     expect(handled).toBe(true);
     expect(saveChannelConfigMock).not.toHaveBeenCalled();
-    expect(debouncedRestart).toHaveBeenCalledWith(150);
+    expect(debouncedRestart).toHaveBeenCalledWith(
+      150,
+      expect.objectContaining({
+        reason: 'channel:saveConfigNoChange:telegram',
+        source: '/api/channels',
+        details: { channelType: 'telegram' },
+      }),
+    );
     expect(sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
       200,

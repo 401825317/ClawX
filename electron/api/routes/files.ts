@@ -85,6 +85,14 @@ async function generateImagePreview(filePath: string, mimeType: string): Promise
   }
 }
 
+function getImageDimensions(filePath: string, mimeType: string): { width?: number; height?: number } {
+  if (!mimeType.startsWith('image/') || mimeType === 'image/svg+xml') return {};
+  const img = nativeImage.createFromPath(filePath);
+  if (img.isEmpty()) return {};
+  const size = img.getSize();
+  return size.width > 0 && size.height > 0 ? { width: size.width, height: size.height } : {};
+}
+
 /**
  * Resolve a Gateway-emitted outgoing-media URL to the original file on disk.
  * Mirror of `electron/main/ipc-handlers.ts::resolveOutgoingMediaUrl` — kept
@@ -198,7 +206,7 @@ export async function handleFileRoutes(
         paths: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }>;
       }>(req);
       const fsP = await import('node:fs/promises');
-      const results: Record<string, { preview: string | null; fileSize: number }> = {};
+      const results: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }> = {};
       for (const entry of body.paths) {
         if (entry.filePath) {
           try {
@@ -206,7 +214,7 @@ export async function handleFileRoutes(
             const preview = entry.mimeType.startsWith('image/')
               ? await generateImagePreview(entry.filePath, entry.mimeType)
               : null;
-            results[entry.filePath] = { preview, fileSize: s.size };
+            results[entry.filePath] = { preview, fileSize: s.size, ...getImageDimensions(entry.filePath, entry.mimeType) };
           } catch {
             results[entry.filePath] = { preview: null, fileSize: 0 };
           }
@@ -223,7 +231,12 @@ export async function handleFileRoutes(
             const preview = resolved.mimeType.startsWith('image/')
               ? await generateImagePreview(resolved.path, resolved.mimeType)
               : null;
-            results[entry.gatewayUrl] = { preview, fileSize: s.size };
+            results[entry.gatewayUrl] = {
+              preview,
+              fileSize: s.size,
+              filePath: resolved.path,
+              ...getImageDimensions(resolved.path, resolved.mimeType),
+            };
           } catch {
             results[entry.gatewayUrl] = { preview: null, fileSize: 0 };
           }

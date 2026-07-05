@@ -320,6 +320,29 @@ function ensurePluginEntryEnabled(config: Record<string, unknown>, pluginId: str
   return modified;
 }
 
+function ensurePluginHookAccess(config: Record<string, unknown>, pluginId: string): boolean {
+  const plugins = isPlainRecord(config.plugins) ? config.plugins as Record<string, unknown> : {};
+  const entries = isPlainRecord(plugins.entries) ? plugins.entries as Record<string, Record<string, unknown>> : {};
+  const existingEntry = isPlainRecord(entries[pluginId]) ? entries[pluginId] : {};
+  const hooks = isPlainRecord(existingEntry.hooks) ? existingEntry.hooks as Record<string, unknown> : {};
+
+  if (hooks.allowConversationAccess === true && hooks.allowPromptInjection === true) {
+    return false;
+  }
+
+  entries[pluginId] = {
+    ...existingEntry,
+    hooks: {
+      ...hooks,
+      allowConversationAccess: true,
+      allowPromptInjection: true,
+    },
+  };
+  plugins.entries = entries;
+  config.plugins = plugins;
+  return true;
+}
+
 function removePluginRegistrations(
   config: Record<string, unknown>,
   pluginIds: string[],
@@ -2779,6 +2802,9 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     }
 
     if (ensurePluginEntryEnabled(config, 'uclaw-computer-use')) {
+      modified = true;
+    }
+    if (ensurePluginHookAccess(config, 'uclaw-computer-use')) {
       modified = true;
     }
 
