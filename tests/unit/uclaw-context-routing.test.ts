@@ -106,6 +106,12 @@ describe('UClaw tool routing context', () => {
     expect(computerUsePlugin).toContain('width, height, display bounds, scale factor, and coordinateMapping');
   });
 
+  it('asks generated local artifacts to avoid fixed overwrite-prone names', () => {
+    expect(toolsContext).toContain('non-overwriting filename with a timestamp');
+    expect(toolsContext).toContain('Do not reuse fixed names like `image.png`');
+    expect(computerUsePlugin).toContain('non-overwriting path with a timestamp');
+  });
+
   it('blocks address-bar javascript injection as a desktop observation strategy', () => {
     expect(toolsContext).toContain('Do not paste `javascript:` URLs into a browser address bar');
     expect(toolsContext).toContain('Use available browser/DOM/UIA/observe tools');

@@ -16,6 +16,8 @@ describe('ClawX OpenAI image plugin request shape', () => {
     const bundleScript = await readFile(join(repoRoot, 'scripts/bundle-openclaw.mjs'), 'utf8');
 
     expect(pluginSource).not.toContain('response_format');
+    expect(pluginSource).not.toContain('Content-Length');
+    expect(pluginSource).not.toContain('contentLength');
     expect(packageJson).not.toContain('patch-openclaw-image-b64-json');
     expect(bundleScript).not.toContain('response_format: "b64_json"');
   });
@@ -77,6 +79,8 @@ describe('ClawX OpenAI image plugin request shape', () => {
       });
 
       expect(result?.images).toHaveLength(1);
+      const image = result?.images[0] as { fileName?: string };
+      expect(image.fileName).toMatch(/^clawx-image-1-\d{8}-\d{6}-[0-9a-f]{8}\.png$/u);
       expect(JSON.parse(requestBody)).toEqual({
         model: 'gpt-image-2',
         prompt: 'paint a fox',
@@ -88,6 +92,62 @@ describe('ClawX OpenAI image plugin request shape', () => {
       server.close();
     }
   }, 15_000);
+
+  it('does not set a manual Content-Length header for multipart edits', async () => {
+    const originalFetch = globalThis.fetch;
+    let requestHeaders: HeadersInit | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestHeaders = init?.headers;
+      return new Response(JSON.stringify({
+        data: [{ b64_json: Buffer.from('fake-image').toString('base64') }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const plugin = await import('../../resources/openclaw-plugins/clawx-openai-image/index.mjs');
+      let provider: { generateImage: (req: Record<string, unknown>) => Promise<{ images: unknown[] }> } | undefined;
+      plugin.default.register({
+        registerImageGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const result = await provider?.generateImage({
+        provider: 'clawx-openai-image',
+        model: 'gpt-image-2',
+        prompt: 'edit the reference',
+        cfg: {
+          models: {
+            providers: {
+              'clawx-openai-image': {
+                apiKey: 'test-key',
+                baseUrl: 'http://127.0.0.1:12345/v1',
+              },
+            },
+          },
+        },
+        inputImages: [
+          {
+            buffer: Buffer.from('fake image bytes'),
+            mimeType: 'image/png',
+            fileName: 'reference.png',
+          },
+        ],
+        agentDir: '/tmp/clawx-openai-image-test-agent',
+        ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+      });
+
+      expect(result?.images).toHaveLength(1);
+      const headers = requestHeaders as Record<string, string>;
+      expect(headers['Content-Type']).toContain('multipart/form-data');
+      expect(Object.keys(headers).map((key) => key.toLowerCase())).not.toContain('content-length');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 
   it('sends reference-image edits as multipart image uploads', async () => {
     let requestContentType = '';

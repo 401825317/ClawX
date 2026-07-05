@@ -78,12 +78,64 @@ const DEFAULT_TEXT_MODEL_OPTION: RemoteModelOption = {
   runtimeProviderKey: 'lingzhiwuxian',
   accountId: 'lingzhiwuxian',
 };
+const IMAGE_EDIT_SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const IMAGE_EDIT_SUPPORTED_EXTENSIONS = /\.(jpe?g|jfif|png|webp)$/i;
+const KNOWN_IMAGE_EXTENSIONS = /\.(avif|bmp|gif|heic|heif|jfif|jpe?g|png|svg|tiff?|webp)$/i;
+
+type ImageEditReferenceCandidate = {
+  fileName?: string;
+  name?: string;
+  mimeType?: string;
+  type?: string;
+};
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function normalizeMimeType(mimeType: string | undefined): string {
+  return String(mimeType || '').split(';')[0].trim().toLowerCase();
+}
+
+function fileNameOf(candidate: ImageEditReferenceCandidate): string {
+  return candidate.fileName || candidate.name || 'image';
+}
+
+function isGenericMimeType(mimeType: string): boolean {
+  return !mimeType || mimeType === 'application/octet-stream' || mimeType === 'binary/octet-stream';
+}
+
+function isUnsupportedImageEditReference(candidate: ImageEditReferenceCandidate): boolean {
+  const mimeType = normalizeMimeType(candidate.mimeType || candidate.type);
+  const fileName = fileNameOf(candidate);
+  if (IMAGE_EDIT_SUPPORTED_MIME_TYPES.has(mimeType) || IMAGE_EDIT_SUPPORTED_EXTENSIONS.test(fileName)) {
+    return false;
+  }
+  if (mimeType.startsWith('image/')) return true;
+  return isGenericMimeType(mimeType) && KNOWN_IMAGE_EXTENSIONS.test(fileName);
+}
+
+function showUnsupportedImageEditReferenceToast(
+  candidates: ImageEditReferenceCandidate[],
+  t: ReturnType<typeof useTranslation>['t'],
+): void {
+  const unsupported = candidates.filter(isUnsupportedImageEditReference);
+  if (unsupported.length === 0) return;
+
+  const names = unsupported.slice(0, 3).map((candidate) => {
+    const mimeType = normalizeMimeType(candidate.mimeType || candidate.type);
+    return `${fileNameOf(candidate)}${mimeType ? ` (${mimeType})` : ''}`;
+  });
+  const files = unsupported.length > 3
+    ? `${names.join(', ')} +${unsupported.length - 3}`
+    : names.join(', ');
+  toast.warning(t('composer.unsupportedImageEditReferenceFormat', {
+    files,
+    defaultValue: `这些图片可以作为普通附件上传，但不能作为 OpenAI 图片编辑参考图：${files}。请先转成 PNG、JPEG 或 WebP 后再图生图。`,
+  }), { duration: 8000 });
 }
 
 function getSkillPrefix(skillName: string): string {
@@ -689,6 +741,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         body: JSON.stringify({ filePaths }),
       });
       console.log('[stagePathFiles] Stage result:', staged?.map(s => ({ id: s?.id, fileName: s?.fileName, mimeType: s?.mimeType, fileSize: s?.fileSize, stagedPath: s?.stagedPath, hasPreview: !!s?.preview })));
+      showUnsupportedImageEditReferenceToast(staged, t);
 
       setAttachments(prev => {
         let updated = [...prev];
@@ -720,7 +773,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
           : a,
       ));
     }
-  }, []);
+  }, [t]);
 
   const pickFiles = useCallback(async () => {
     try {
@@ -737,6 +790,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
   // ── Stage browser File objects (paste / drag-drop) ─────────────
 
   const stageBufferFiles = useCallback(async (files: globalThis.File[]) => {
+    showUnsupportedImageEditReferenceToast(files, t);
     for (const file of files) {
       const tempId = crypto.randomUUID();
       setAttachments(prev => [...prev, {
@@ -781,7 +835,7 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false }:
         ));
       }
     }
-  }, []);
+  }, [t]);
 
   // ── Attachment management ──────────────────────────────────────
 

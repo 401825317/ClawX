@@ -9,6 +9,11 @@ const DEFAULT_SIZE = '1024x1024';
 const DEFAULT_TIMEOUT_MS = 900_000;
 const DEFAULT_MIME_TYPE = 'image/png';
 const MAX_INPUT_IMAGES = 5;
+const SUPPORTED_EDIT_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
 
 function trimTrailingSlash(value) {
   return String(value || '').trim().replace(/\/+$/u, '');
@@ -55,6 +60,97 @@ function imageFileExtensionForMimeType(mimeType) {
   return 'png';
 }
 
+function compactTimestamp(date = new Date()) {
+  return date.toISOString()
+    .replace(/\.\d{3}Z$/u, 'Z')
+    .replace(/[-:]/gu, '')
+    .replace(/[TZ]/gu, '-')
+    .replace(/-$/u, '');
+}
+
+function uniqueImageFileName(index, mimeType) {
+  return `clawx-image-${index + 1}-${compactTimestamp()}-${randomUUID().slice(0, 8)}.${imageFileExtensionForMimeType(mimeType)}`;
+}
+
+function normalizeMimeType(mimeType) {
+  return String(mimeType || '').split(';')[0].trim().toLowerCase();
+}
+
+function imageBytes(image) {
+  if (image?.buffer instanceof Uint8Array) {
+    return Buffer.from(image.buffer.buffer, image.buffer.byteOffset, image.buffer.byteLength);
+  }
+  return Buffer.from(image?.buffer || []);
+}
+
+function sniffSupportedImageMimeType(bytes) {
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (
+    bytes.length >= 8
+    && bytes[0] === 0x89
+    && bytes[1] === 0x50
+    && bytes[2] === 0x4e
+    && bytes[3] === 0x47
+  ) {
+    return 'image/png';
+  }
+  if (
+    bytes.length >= 12
+    && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+    && bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return '';
+}
+
+function supportedMimeTypeFromFileName(fileName) {
+  const normalized = String(fileName || '').toLowerCase();
+  if (/\.(jpe?g|jfif)$/u.test(normalized)) return 'image/jpeg';
+  if (normalized.endsWith('.png')) return 'image/png';
+  if (normalized.endsWith('.webp')) return 'image/webp';
+  return '';
+}
+
+function isGenericMimeType(mimeType) {
+  return !mimeType || mimeType === 'application/octet-stream' || mimeType === 'binary/octet-stream';
+}
+
+function resolveEditInputImages(inputImages) {
+  const unsupported = [];
+  const resolvedImages = inputImages.map((image, index) => {
+    const fileName = imageSourceUploadFileName({ image, index });
+    const declaredMimeType = normalizeMimeType(image?.mimeType);
+    const bytes = imageBytes(image);
+    let mimeType = SUPPORTED_EDIT_IMAGE_MIME_TYPES.has(declaredMimeType) ? declaredMimeType : '';
+    if (!mimeType && isGenericMimeType(declaredMimeType)) {
+      mimeType = sniffSupportedImageMimeType(bytes) || supportedMimeTypeFromFileName(fileName);
+    }
+    if (!mimeType) {
+      unsupported.push({
+        fileName,
+        mimeType: declaredMimeType || 'unknown',
+      });
+    }
+    return {
+      bytes,
+      fileName,
+      mimeType,
+    };
+  });
+
+  if (unsupported.length > 0) {
+    const details = unsupported
+      .map(({ fileName, mimeType }) => `${fileName} (${mimeType})`)
+      .join(', ');
+    throw new Error(`UClaw OpenAI 图片编辑只支持 PNG、JPEG 或 WebP 参考图。当前文件不支持：${details}。请先转成 PNG 或 JPEG 后重试。`);
+  }
+
+  return resolvedImages;
+}
+
 function parseImagesResponse(payload) {
   const data = Array.isArray(payload?.data) ? payload.data : [];
   return data.map((entry, index) => {
@@ -66,7 +162,7 @@ function parseImagesResponse(payload) {
     const image = {
       buffer: Buffer.from(base64, 'base64'),
       mimeType,
-      fileName: `clawx-image-${index + 1}.${imageFileExtensionForMimeType(mimeType)}`,
+      fileName: uniqueImageFileName(index, mimeType),
     };
     if (typeof entry?.revised_prompt === 'string' && entry.revised_prompt.trim()) {
       image.revisedPrompt = entry.revised_prompt.trim();
@@ -125,7 +221,7 @@ function multipartFilePart(boundary, name, fileName, mimeType, bytes) {
   ]);
 }
 
-function buildEditMultipart(req, inputImages, model, count) {
+function buildEditMultipart(req, editImages, model, count) {
   const boundary = `uclaw-openai-image-${randomUUID()}`;
   const parts = [
     multipartTextPart(boundary, 'model', model),
@@ -136,17 +232,14 @@ function buildEditMultipart(req, inputImages, model, count) {
   if (req.quality) {
     parts.push(multipartTextPart(boundary, 'quality', req.quality));
   }
-  inputImages.forEach((image, index) => {
-    const fieldName = inputImages.length > 1 ? 'image[]' : 'image';
-    const bytes = image.buffer instanceof Uint8Array
-      ? Buffer.from(image.buffer.buffer, image.buffer.byteOffset, image.buffer.byteLength)
-      : Buffer.from(image.buffer);
+  editImages.forEach((image, index) => {
+    const fieldName = editImages.length > 1 ? 'image[]' : 'image';
     parts.push(multipartFilePart(
       boundary,
       fieldName,
-      imageSourceUploadFileName({ image, index }),
+      image.fileName,
       image.mimeType,
-      bytes,
+      image.bytes,
     ));
   });
   parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
@@ -154,7 +247,6 @@ function buildEditMultipart(req, inputImages, model, count) {
   return {
     body,
     contentType: `multipart/form-data; boundary=${boundary}`,
-    contentLength: String(body.byteLength),
   };
 }
 
@@ -204,12 +296,13 @@ function buildProvider() {
         throw new Error(`UClaw OpenAI image editing supports up to ${MAX_INPUT_IMAGES} reference images.`);
       }
       const mode = inputImages.length > 0 ? 'edit' : 'generate';
+      const editImages = mode === 'edit' ? resolveEditInputImages(inputImages) : [];
       const providerConfig = resolveProviderConfig(req);
       const apiKey = resolveApiKey(req, providerConfig);
       const model = String(req.model || DEFAULT_MODEL).split('/').pop() || DEFAULT_MODEL;
       const count = resolveCount(req);
       const baseUrl = normalizeRelayBaseUrl(providerConfig.baseUrl, DEFAULT_BASE_URL);
-      const editMultipart = mode === 'edit' ? buildEditMultipart(req, inputImages, model, count) : null;
+      const editMultipart = mode === 'edit' ? buildEditMultipart(req, editImages, model, count) : null;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), resolveTimeoutMs(req));
       try {
@@ -219,7 +312,6 @@ function buildProvider() {
             ? {
               Authorization: `Bearer ${apiKey}`,
               'Content-Type': editMultipart.contentType,
-              'Content-Length': editMultipart.contentLength,
             }
             : {
               Authorization: `Bearer ${apiKey}`,

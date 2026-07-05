@@ -853,7 +853,7 @@ export const pluginEntry = defineToolPlugin({
     tool({
       name: 'computer_file_dialog_set_path',
       label: 'Set file dialog path',
-      description: 'Paste a file path into the currently focused system file picker and optionally press Enter. Use after opening a file upload/save dialog. Pass expectedForeground so the host refuses to paste into the wrong app.',
+      description: 'Paste a file path into the currently focused system file picker and optionally press Enter. Use after opening a file upload/save dialog. When saving a new local artifact, choose a non-overwriting path with a timestamp and short random suffix or UUID before the extension unless the user explicitly asks to overwrite. Pass expectedForeground so the host refuses to paste into the wrong app.',
       parameters: {
         type: 'object',
         additionalProperties: false,

@@ -60,6 +60,7 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 - For web UI inside the UClaw/Electron window, prefer `computer_browser_dom_snapshot`, `computer_browser_dom_find`, and `computer_browser_dom_action`.
 - For risky or mutating actions, call `computer_safety_evaluate` when useful and respect `requiresConfirmation` responses. Do not claim an action was completed when the host returned `requiresConfirmation`.
 - For local files, logs, or workspace inspection, use file/shell tools such as `read`, `grep`/`rg`, or `exec`.
+- When creating or saving user-facing local artifacts, choose a non-overwriting filename with a timestamp and short random suffix or UUID before the extension. Do not reuse fixed names like `image.png`, `poster.png`, or `output.pdf` unless the user explicitly asks to overwrite that exact file.
 - Before reading a path you inferred, list the parent directory or check that the file exists. If `read` returns ENOENT, do not report it as a skill failure; explain in the user's language that the file is missing and inspect the actual directory contents.
 - Do not call generic placeholder tools named `computer`, `desktop`, `screenshot`, `screen`, or `camera` unless they are explicitly listed as available tools in this run. Use the concrete `computer_*` tool names when available.
 - If no `computer_*` tool is listed, explain in the user's language that native desktop computer-use tools are not available in the current runtime.
