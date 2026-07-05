@@ -176,7 +176,7 @@ describe('ensureClawXIdentityFile', () => {
 
     const identity = await readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8');
     expect(identity).toContain('UClaw');
-    expect(identity).toContain('Reply in the same language as the user');
+    expect(identity).toContain('默认所有面向用户的自然语言回复都必须使用简体中文');
   });
 
   it('replaces the untouched OpenClaw identity template but preserves custom identities', async () => {
@@ -205,7 +205,7 @@ describe('ensureClawXIdentityFile', () => {
     await ensureClawXIdentityFile(workspaceDir);
     const identity = await readFile(join(workspaceDir, 'IDENTITY.md'), 'utf-8');
     expect(identity).toContain('UClaw');
-    expect(identity).toContain('Reply in the same language as the user');
+    expect(identity).toContain('默认所有面向用户的自然语言回复都必须使用简体中文');
     expect(identity).not.toContain('pick something you like');
 
     await writeFile(join(workspaceDir, 'IDENTITY.md'), '# IDENTITY.md\n\n- **Name:** Paisley\n', 'utf-8');
@@ -250,7 +250,7 @@ describe('ensureClawXContext', () => {
 
     await ensureClawXContext();
 
-    await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw Environment');
+    await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw 环境');
     await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('UClaw has native computer-use tools');
   });
 
@@ -280,9 +280,9 @@ describe('ensureClawXContext', () => {
 
     expect(result).toBe('done');
     const agentsContent = await readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8');
-    expect(agentsContent).toContain('## UClaw Environment');
-    expect(agentsContent).toContain('Reply in the same language as the user');
-    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('## UClaw Tool Notes');
+    expect(agentsContent).toContain('## UClaw 环境');
+    expect(agentsContent).toContain('默认所有面向用户的自然语言回复都必须使用简体中文');
+    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('## UClaw 工具说明');
     await expect(access(join(agentWorkspace, 'AGENTS.md'))).rejects.toThrow();
     await expect(access(join(agentWorkspace, 'TOOLS.md'))).rejects.toThrow();
   });

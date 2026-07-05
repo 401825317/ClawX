@@ -343,6 +343,22 @@ function ensurePluginHookAccess(config: Record<string, unknown>, pluginId: strin
   return true;
 }
 
+function isParallelWebSearchConfigured(config: Record<string, unknown>): boolean {
+  const tools = isPlainRecord(config.tools) ? config.tools : null;
+  const web = tools && isPlainRecord(tools.web) ? tools.web : null;
+  const search = web && isPlainRecord(web.search) ? web.search : null;
+  if (!search) return false;
+
+  const provider = typeof search.provider === 'string' ? search.provider.trim() : '';
+  if (!PARALLEL_WEB_SEARCH_PROVIDER_IDS.has(provider)) return false;
+  return search.enabled !== false;
+}
+
+function ensureParallelWebSearchPluginRegistration(config: Record<string, unknown>): boolean {
+  if (!isParallelWebSearchConfigured(config)) return false;
+  return ensurePluginEntryEnabled(config, PARALLEL_SEARCH_PLUGIN_ID);
+}
+
 function removePluginRegistrations(
   config: Record<string, unknown>,
   pluginIds: string[],
@@ -790,6 +806,8 @@ const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'memory-core',
   'uclaw-computer-use',
 ]);
+const PARALLEL_SEARCH_PLUGIN_ID = 'parallel';
+const PARALLEL_WEB_SEARCH_PROVIDER_IDS = new Set(['parallel', 'parallel-free']);
 const AUTH_PROFILE_PROVIDER_KEY_MAP: Record<string, string> = {
   'openai-codex': 'openai',
   'google-gemini-cli': 'google',
@@ -2807,6 +2825,9 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (ensurePluginHookAccess(config, 'uclaw-computer-use')) {
       modified = true;
     }
+    if (ensureParallelWebSearchPluginRegistration(config)) {
+      modified = true;
+    }
 
     const pinnedProviderRuntimes = applyOpenClawProviderAgentRuntimePinsToConfig(config);
     if (pinnedProviderRuntimes.length > 0) {
@@ -3541,6 +3562,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       const installedExtensionIds = await discoverInstalledExtensionPluginIds();
       const loadedPluginIds = await discoverLoadedPluginIdsFromConfig(config);
       const activeProviderIds = await collectActiveProviderIdsFromConfig(config);
+      const parallelWebSearchConfigured = isParallelWebSearchConfigured(config);
 
       const explicitlyEnabledBundledPluginIds = Object.keys(pEntries)
         .filter((pluginId) => {
@@ -3575,7 +3597,8 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       const externalPluginIds: string[] = [];
       for (const pluginId of allowArr2) {
         if (BUILTIN_CHANNEL_IDS.has(pluginId) || bundled.all.has(pluginId)) continue;
-        const isConfiguredExternal = Boolean(pEntries[pluginId]);
+        const isConfiguredExternal = Boolean(pEntries[pluginId])
+          || (pluginId === PARALLEL_SEARCH_PLUGIN_ID && parallelWebSearchConfigured);
         const isInstalledExternal = installedExtensionIds.has(pluginId);
         const isLoadedExternal = loadedPluginIds.has(pluginId);
         if (!isConfiguredExternal && !isInstalledExternal && !isLoadedExternal) {

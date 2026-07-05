@@ -111,6 +111,7 @@
     "@larksuite/openclaw-lark": "2026.6.10",
     "@larksuiteoapi/node-sdk": "^1.67.0",
     "@monaco-editor/react": "^4.7.0",
+    "@openclaw/parallel-plugin": "2026.6.11",
     "@openclaw/qqbot": "2026.6.9",
     "@playwright/test": "^1.56.1",
     "@radix-ui/react-dialog": "^1.1.15",

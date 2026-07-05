@@ -235,6 +235,7 @@ const PLUGIN_NPM_NAMES: Record<string, string> = {
   qqbot: '@openclaw/qqbot',
 
   'openclaw-weixin': '@tencent-weixin/openclaw-weixin',
+  parallel: '@openclaw/parallel-plugin',
 };
 
 // ── Version helper ───────────────────────────────────────────────────────────
@@ -635,6 +636,14 @@ export function ensureUClawComputerUsePluginInstalled(): { installed: boolean; w
   );
 }
 
+export function ensureParallelPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'parallel',
+    buildCandidateSources('parallel'),
+    'Parallel Search',
+  );
+}
+
 // ── Bulk startup installer ───────────────────────────────────────────────────
 
 /**
@@ -647,6 +656,7 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureFeishuPluginInstalled, label: 'Feishu' },
   { fn: ensureWeChatPluginInstalled, label: 'WeChat' },
   { fn: ensureQQBotPluginInstalled, label: 'QQBot' },
+  { fn: ensureParallelPluginInstalled, label: 'Parallel Search' },
   { fn: ensureClawXOpenAiImagePluginInstalled, label: 'UClaw OpenAI Image' },
   { fn: ensureUClawComputerUsePluginInstalled, label: 'UClaw Computer Use' },
 ] as const;

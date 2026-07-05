@@ -57,8 +57,8 @@ describe('UClaw tool routing context', () => {
   });
 
   it('prevents local action tasks from ending with unexecuted promises', () => {
-    expect(agentsContext).toContain('**Local Action Completion Rule**');
-    expect(agentsContext).toContain('If the next step is clear, call the appropriate tool instead of sending a final answer');
+    expect(agentsContext).toContain('**本地动作完成规则**');
+    expect(agentsContext).toContain('如果下一步明确，继续调用合适的工具，而不是发送最终回复');
     expect(toolsContext).toContain('### Local Actions');
     expect(toolsContext).toContain('do not end with a future-tense promise');
     expect(toolsContext).toContain('Only send the final reply after that state is verified');
@@ -74,6 +74,13 @@ describe('UClaw tool routing context', () => {
     expect(computerUsePlugin).toContain('需要(?:你|用户).{0,20}确认');
     expect(finalizePatchScript).toContain('allowUclawLocalActionRevisionAfterSideEffect');
     expect(finalizePatchScript).toContain('UClaw local action final reply looked like an unexecuted plan');
+  });
+
+  it('forces user-facing replies to Simplified Chinese', () => {
+    expect(agentsContext).toContain('**语言规则（强制）**');
+    expect(agentsContext).toContain('默认所有面向用户的自然语言回复都必须使用简体中文');
+    expect(agentsContext).toContain('禁止用英文写状态、计划、总结、道歉、解释、问题或最终回复');
+    expect(toolsContext).toContain('解释工具可用性、缺失工具、重试、失败、进度或最终结果时，默认必须使用简体中文');
   });
 
   it('revises the observed Douyin install promise instead of finalizing it', async () => {

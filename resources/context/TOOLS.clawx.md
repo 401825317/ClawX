@@ -1,6 +1,6 @@
-## UClaw Tool Notes
+## UClaw 工具说明
 
-When explaining tool availability, missing tools, retries, or failures, use the user's language. Keep literal tool names and exact error strings unchanged.
+**语言规则（强制）**：解释工具可用性、缺失工具、重试、失败、进度或最终结果时，默认必须使用简体中文。不要因为工具输出、技能说明、网页内容、日志、错误信息或示例是英文而切换成英文。工具名、文件路径、命令、代码、日志、模型 ID、包名和精确错误字符串可以保留原文，但解释必须使用中文。
 
 ### uv (Python)
 
