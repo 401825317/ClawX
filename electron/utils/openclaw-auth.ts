@@ -1558,6 +1558,7 @@ interface RuntimeProviderConfigOverride {
   apiKey?: string | null;
   headers?: Record<string, string>;
   authHeader?: boolean;
+  timeoutSeconds?: number;
 }
 
 type ProviderEntryBuildOptions = {
@@ -1567,6 +1568,7 @@ type ProviderEntryBuildOptions = {
   apiKey?: string | null;
   headers?: Record<string, string>;
   authHeader?: boolean;
+  timeoutSeconds?: number;
   request?: Record<string, unknown>;
   modelIds?: string[];
   includeRegistryModels?: boolean;
@@ -2001,6 +2003,9 @@ function upsertOpenClawProviderEntry(
   } else {
     delete nextProvider.authHeader;
   }
+  if (options.timeoutSeconds !== undefined) {
+    nextProvider.timeoutSeconds = options.timeoutSeconds;
+  }
   if (options.request !== undefined) {
     if (Object.keys(options.request).length > 0) {
       nextProvider.request = options.request;
@@ -2141,6 +2146,7 @@ export async function syncProviderConfigToOpenClaw(
         apiKeyEnv: override.apiKeyEnv,
         apiKey: override.apiKey,
         headers: override.headers,
+        timeoutSeconds: override.timeoutSeconds,
         modelIds: modelId ? [modelId] : [],
       });
     }
@@ -2425,6 +2431,7 @@ export async function setOpenClawDefaultModelWithOverride(
         apiKey: override.apiKey,
         headers: override.headers,
         authHeader: override.authHeader,
+        timeoutSeconds: override.timeoutSeconds,
         modelIds: [modelId, ...fallbackModelIds],
       });
     }
@@ -2874,6 +2881,7 @@ type AgentModelProviderEntry = {
   apiKey?: string;
   /** When true, pi-ai sends Authorization: Bearer instead of x-api-key */
   authHeader?: boolean;
+  timeoutSeconds?: number;
 };
 
 function stripUnsupportedModelCompatFields(
@@ -2950,6 +2958,7 @@ async function updatePluginModelCatalogProviderEntry(
     }
   }
   if (entry.authHeader !== undefined) next.authHeader = entry.authHeader;
+  if (entry.timeoutSeconds !== undefined) next.timeoutSeconds = entry.timeoutSeconds;
 
   providers[providerType] = next;
   data.providers = providers;
@@ -3010,6 +3019,7 @@ async function updateModelsJsonProviderEntriesForAgents(
       }
     }
     if (normalizedEntry.authHeader !== undefined) existing.authHeader = normalizedEntry.authHeader;
+    if (normalizedEntry.timeoutSeconds !== undefined) existing.timeoutSeconds = normalizedEntry.timeoutSeconds;
     ensureAnthropicMessagesProviderDefaults(existing, providerType);
 
     providers[providerType] = existing;

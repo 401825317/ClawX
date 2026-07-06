@@ -3,6 +3,7 @@ export const JUNFEIAI_PROVIDER_NAME = '零至无限';
 export const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
 export const JUNFEIAI_DEFAULT_MODEL = 'smart-latest';
 export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-completions';
+export const JUNFEIAI_PROVIDER_TIMEOUT_SECONDS = 300;
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'lingzhiwuxian-auth';
 
 function normalizeOrigin(value: string): string {

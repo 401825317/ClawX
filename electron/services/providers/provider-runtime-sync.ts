@@ -25,7 +25,10 @@ import {
 } from '../../shared/pi-ai-model-cost';
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
-import { JUNFEIAI_PROVIDER_ID } from '../../utils/junfeiai-distribution';
+import {
+  JUNFEIAI_PROVIDER_ID,
+  JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
+} from '../../utils/junfeiai-distribution';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
@@ -461,6 +464,7 @@ async function syncRuntimeProviderConfig(
     apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
     apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (accountApiKey || null) : undefined,
     headers: config.headers ?? context.meta?.headers,
+    timeoutSeconds: config.type === JUNFEIAI_PROVIDER_ID ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
   });
 }
 
@@ -559,6 +563,7 @@ async function buildAgentModelProviderEntry(
   models?: PiAiModelsJsonModelEntry[];
   apiKey?: string;
   authHeader?: boolean;
+  timeoutSeconds?: number;
 } | null> {
   const meta = getProviderConfig(config.type);
   const runtimeModelId = normalizeRuntimeModelId(config, modelId);
@@ -594,6 +599,7 @@ async function buildAgentModelProviderEntry(
     models: runtimeModelId ? [runtimeModelEntryForProvider(config, runtimeModelId)] : [],
     apiKey: apiKey ?? (config.type === JUNFEIAI_PROVIDER_ID ? null : undefined),
     authHeader,
+    timeoutSeconds: config.type === JUNFEIAI_PROVIDER_ID ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
   };
 }
 
