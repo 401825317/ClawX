@@ -1054,7 +1054,8 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     let rawRefs: Array<{ filePath: string; mimeType: string }> = [];
     if (msg.role === 'assistant' && !isToolOnlyMessage(msg)) {
       // Own text
-      rawRefs = extractRawFilePaths(text).filter(r => !mediaRefPaths.has(r.filePath));
+      const ownRawRefs = extractRawFilePaths(text).filter(r => !mediaRefPaths.has(r.filePath));
+      rawRefs = ownRawRefs;
       const rawPathSet = new Set(rawRefs.map((ref) => ref.filePath));
       for (const ref of extractMarkdownImageRefs(text)) {
         if ('filePath' in ref && !mediaRefPaths.has(ref.filePath) && !rawPathSet.has(ref.filePath)) {
@@ -1064,19 +1065,21 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
       }
 
       // Nearest preceding user message text (look back up to 5 messages)
-      const seenPaths = new Set(rawRefs.map(r => r.filePath));
-      for (let i = idx - 1; i >= Math.max(0, idx - 5); i--) {
-        const prev = messages[i];
-        if (!prev) break;
-        if (prev.role === 'user') {
-          const prevText = getMessageText(prev.content);
-          for (const ref of extractRawFilePaths(prevText)) {
-            if (!mediaRefPaths.has(ref.filePath) && !seenPaths.has(ref.filePath)) {
-              seenPaths.add(ref.filePath);
-              rawRefs.push(ref);
+      if (!ownRawRefs.some((ref) => ref.mimeType.startsWith('image/'))) {
+        const seenPaths = new Set(rawRefs.map(r => r.filePath));
+        for (let i = idx - 1; i >= Math.max(0, idx - 5); i--) {
+          const prev = messages[i];
+          if (!prev) break;
+          if (prev.role === 'user') {
+            const prevText = getMessageText(prev.content);
+            for (const ref of extractRawFilePaths(prevText)) {
+              if (!mediaRefPaths.has(ref.filePath) && !seenPaths.has(ref.filePath)) {
+                seenPaths.add(ref.filePath);
+                rawRefs.push(ref);
+              }
             }
+            break; // only use the nearest user message
           }
-          break; // only use the nearest user message
         }
       }
     }

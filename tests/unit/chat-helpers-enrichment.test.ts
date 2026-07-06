@@ -175,6 +175,29 @@ describe('enrichWithToolResultFiles', () => {
 });
 
 describe('enrichWithCachedImages — Gateway media bubble dedup', () => {
+  it('does not attach the previous user reference image to an image generation reply', () => {
+    const messages: RawMessage[] = [
+      {
+        role: 'user',
+        id: 'user-reference',
+        content: [{
+          type: 'text',
+          text: '把底册换成黑色\n\n[media attached: /tmp/reference.png (image/png) | /tmp/reference.png]',
+        }],
+      },
+      {
+        role: 'assistant',
+        id: 'image-result',
+        content: [{ type: 'text', text: '图片已修改。\n\nMEDIA:/tmp/generated.png' }],
+      },
+    ];
+
+    const enriched = enrichWithCachedImages(messages);
+    const reply = enriched.find((m) => m.id === 'image-result')!;
+    const replyPaths = (reply._attachedFiles ?? []).map((f) => f.filePath);
+    expect(replyPaths).toEqual(['/tmp/generated.png']);
+  });
+
   it('drops image-typed MEDIA: refs on the reply when the next message is a Gateway assistant-media bubble', () => {
     // When the agent emits `MEDIA:/tmp/x.png` the Gateway answers with a
     // dedicated `assistant-media` bubble. Surfacing the same image again
