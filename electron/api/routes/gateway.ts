@@ -12,6 +12,157 @@ async function runGatewayRpc<T>(ctx: HostApiContext, method: string, params?: un
   return await ctx.gatewayManager.rpc<T>(method, params, timeoutMs);
 }
 
+type ChatSendRpcParams = {
+  sessionKey: string;
+  message: string;
+  deliver: boolean;
+  idempotencyKey: string;
+  attachments?: Array<{ content: string; mimeType: string; fileName: string }>;
+};
+
+type ChatSendSessionTail = {
+  abortVersion: number;
+  promise: Promise<void>;
+};
+
+const CHAT_ABORT_SETTLE_MS = 750;
+const CHAT_SEND_CONFLICT_RETRY_TIMEOUT_MS = 30_000;
+const CHAT_SEND_CONFLICT_RETRY_DELAY_MS = 1_000;
+const chatSendSessionTails = new Map<string, ChatSendSessionTail>();
+const chatAbortSessionTails = new Map<string, Promise<void>>();
+const chatAbortSettleUntil = new Map<string, number>();
+const chatAbortSessionVersions = new Map<string, number>();
+const inFlightChatSendByIdempotencyKey = new Map<string, Promise<{ runId?: string }>>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isChatSessionInitializationConflict(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return (
+    message.includes('session initialization')
+    || message.includes('reply session')
+    || message.includes('repy session')
+  ) && (
+    message.includes('conflict')
+    || message.includes('conflicted')
+    || message.includes('conffict')
+    || message.includes('confficted')
+  );
+}
+
+async function waitForChatAbortSettle(sessionKey: string): Promise<void> {
+  const settleUntil = chatAbortSettleUntil.get(sessionKey) ?? 0;
+  const remainingMs = settleUntil - Date.now();
+  if (remainingMs <= 0) {
+    chatAbortSettleUntil.delete(sessionKey);
+    return;
+  }
+  await sleep(remainingMs);
+  if ((chatAbortSettleUntil.get(sessionKey) ?? 0) <= Date.now()) {
+    chatAbortSettleUntil.delete(sessionKey);
+  }
+}
+
+async function runChatSendRpcWithConflictRetry(
+  ctx: HostApiContext,
+  sessionKey: string,
+  params: ChatSendRpcParams,
+): Promise<{ runId?: string }> {
+  const startedAt = Date.now();
+  let attempt = 0;
+  while (true) {
+    try {
+      return await runGatewayRpc<{ runId?: string }>(ctx, 'chat.send', params, CHAT_SEND_RPC_TIMEOUT_MS);
+    } catch (error) {
+      if (!isChatSessionInitializationConflict(error)) {
+        throw error;
+      }
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= CHAT_SEND_CONFLICT_RETRY_TIMEOUT_MS) {
+        throw error;
+      }
+      attempt += 1;
+      logger.warn('[chat.send] Session initialization conflict; retrying after abort settle', {
+        sessionKey,
+        attempt,
+        elapsedMs,
+      });
+      chatAbortSettleUntil.set(sessionKey, Date.now() + CHAT_SEND_CONFLICT_RETRY_DELAY_MS);
+      await waitForChatAbortSettle(sessionKey);
+    }
+  }
+}
+
+async function runSerializedChatSendRpc(
+  ctx: HostApiContext,
+  params: ChatSendRpcParams,
+): Promise<{ runId?: string }> {
+  const sessionKey = params.sessionKey.trim() || 'unknown';
+  const idempotencyKey = params.idempotencyKey.trim();
+  const inFlightKey = idempotencyKey ? `${sessionKey}:${idempotencyKey}` : '';
+  const existing = inFlightKey ? inFlightChatSendByIdempotencyKey.get(inFlightKey) : undefined;
+  if (existing) {
+    logger.info('[chat.send] Reusing in-flight idempotent request', { sessionKey });
+    return existing;
+  }
+
+  const abortVersion = chatAbortSessionVersions.get(sessionKey) ?? 0;
+  const previousSendTail = chatSendSessionTails.get(sessionKey);
+  const previousSendPromise = previousSendTail?.abortVersion === abortVersion
+    ? previousSendTail.promise
+    : Promise.resolve();
+  const previousAbortTail = chatAbortSessionTails.get(sessionKey) ?? Promise.resolve();
+  const previousTail = Promise.all([
+    previousSendPromise.catch(() => undefined),
+    previousAbortTail.catch(() => undefined),
+  ]).then(() => waitForChatAbortSettle(sessionKey));
+  const promise = previousTail
+    .catch(() => undefined)
+    .then(() => runChatSendRpcWithConflictRetry(ctx, sessionKey, params))
+    .finally(() => {
+      if (inFlightKey && inFlightChatSendByIdempotencyKey.get(inFlightKey) === promise) {
+        inFlightChatSendByIdempotencyKey.delete(inFlightKey);
+      }
+    });
+  const currentTail = promise.then(() => undefined, () => undefined);
+  chatSendSessionTails.set(sessionKey, { abortVersion, promise: currentTail });
+  currentTail.finally(() => {
+    if (chatSendSessionTails.get(sessionKey)?.promise === currentTail) {
+      chatSendSessionTails.delete(sessionKey);
+    }
+  });
+
+  if (inFlightKey) {
+    inFlightChatSendByIdempotencyKey.set(inFlightKey, promise);
+  }
+  return promise;
+}
+
+async function runSerializedChatAbortRpc(
+  ctx: HostApiContext,
+  sessionKeyRaw: string,
+): Promise<Record<string, unknown>> {
+  const sessionKey = sessionKeyRaw.trim() || 'unknown';
+  chatAbortSessionVersions.set(sessionKey, (chatAbortSessionVersions.get(sessionKey) ?? 0) + 1);
+  const previousAbortTail = chatAbortSessionTails.get(sessionKey) ?? Promise.resolve();
+  const promise = previousAbortTail
+    .catch(() => undefined)
+    .then(() => runGatewayRpc<Record<string, unknown>>(ctx, 'chat.abort', { sessionKey: sessionKeyRaw }))
+    .finally(() => {
+      chatAbortSettleUntil.set(sessionKey, Date.now() + CHAT_ABORT_SETTLE_MS);
+    });
+  const currentTail = promise.then(() => undefined, () => undefined);
+  chatAbortSessionTails.set(sessionKey, currentTail);
+  currentTail.finally(() => {
+    if (chatAbortSessionTails.get(sessionKey) === currentTail) {
+      chatAbortSessionTails.delete(sessionKey);
+    }
+  });
+  return promise;
+}
+
 export async function handleGatewayRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -147,17 +298,12 @@ export async function handleGatewayRoutes(
         idempotencyKey: string;
       }>(req);
       sessionKeyForLog = body.sessionKey;
-      const result = await runGatewayRpc<{ runId?: string }>(
-        ctx,
-        'chat.send',
-        {
-          sessionKey: body.sessionKey,
-          message: body.message,
-          deliver: body.deliver ?? false,
-          idempotencyKey: body.idempotencyKey,
-        },
-        CHAT_SEND_RPC_TIMEOUT_MS,
-      );
+      const result = await runSerializedChatSendRpc(ctx, {
+        sessionKey: body.sessionKey,
+        message: body.message,
+        deliver: body.deliver ?? false,
+        idempotencyKey: body.idempotencyKey,
+      });
       logger.info('[metric] chat.send.rpc', {
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,
@@ -180,7 +326,7 @@ export async function handleGatewayRoutes(
   if (url.pathname === '/api/chat/abort' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ sessionKey: string }>(req);
-      const result = await runGatewayRpc<Record<string, unknown>>(ctx, 'chat.abort', { sessionKey: body.sessionKey });
+      const result = await runSerializedChatAbortRpc(ctx, body.sessionKey);
       sendJson(res, 200, { success: true, result });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -232,7 +378,7 @@ export async function handleGatewayRoutes(
       if (imageAttachments.length > 0) {
         rpcParams.attachments = imageAttachments;
       }
-      const result = await runGatewayRpc<{ runId?: string }>(ctx, 'chat.send', rpcParams, CHAT_SEND_RPC_TIMEOUT_MS);
+      const result = await runSerializedChatSendRpc(ctx, rpcParams as ChatSendRpcParams);
       logger.info('[metric] chat.send.rpc', {
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,

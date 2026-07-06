@@ -1410,7 +1410,12 @@ function registerGatewayHandlers(
 
       logger.info(`[chat:sendWithMedia] Sending: message="${message.substring(0, 100)}", attachments=${imageAttachments.length}, fileRefs=${fileReferences.length}`);
 
-      const result = await gatewayManager.rpc('chat.send', rpcParams, CHAT_SEND_RPC_TIMEOUT_MS);
+      const result = await gatewayRpcBackpressure.run(
+        'chat.send',
+        rpcParams,
+        CHAT_SEND_RPC_TIMEOUT_MS,
+        (rpcMethod, rpcParams2, rpcTimeoutMs) => gatewayManager.rpc(rpcMethod, rpcParams2, rpcTimeoutMs),
+      );
       logger.info(`[chat:sendWithMedia] RPC result: ${JSON.stringify(result)}`);
       return { success: true, result };
     } catch (error) {
