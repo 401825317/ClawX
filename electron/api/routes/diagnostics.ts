@@ -69,6 +69,7 @@ export async function handleDiagnosticsRoutes(
       const gateway = {
         ...gatewayStatus,
         ...gatewaySummary,
+        diagnostics,
         capabilities: typeof ctx.gatewayManager.getCapabilitySnapshot === 'function'
           ? ctx.gatewayManager.getCapabilitySnapshot(gatewaySummary)
           : undefined,

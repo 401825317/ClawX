@@ -259,8 +259,10 @@ function scheduleGatewayChannelRestart(ctx: HostApiContext, reason: string): voi
   if (ctx.gatewayManager.getStatus().state === 'stopped') {
     return;
   }
-  ctx.gatewayManager.debouncedRestart();
-  void reason;
+  ctx.gatewayManager.debouncedRestart(undefined, {
+    reason,
+    source: '/api/channels',
+  });
 }
 
 // Plugin-based channels require a full Gateway process restart to properly
@@ -284,12 +286,18 @@ function scheduleGatewayChannelSaveRefresh(
     return;
   }
   if (FORCE_RESTART_CHANNELS.has(storedChannelType)) {
-    ctx.gatewayManager.debouncedRestart(150);
-    void reason;
+    ctx.gatewayManager.debouncedRestart(150, {
+      reason,
+      source: '/api/channels',
+      details: { channelType: storedChannelType },
+    });
     return;
   }
-  ctx.gatewayManager.debouncedReload(150);
-  void reason;
+  ctx.gatewayManager.debouncedReload(150, {
+    reason,
+    source: '/api/channels',
+    details: { channelType: storedChannelType },
+  });
 }
 
 function toComparableConfig(input: Record<string, unknown>): Record<string, string> {

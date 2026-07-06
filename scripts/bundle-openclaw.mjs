@@ -20,6 +20,7 @@ import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
@@ -1047,6 +1048,18 @@ function patchBundledRuntime(outputDir) {
   });
   if (browserPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${browserPatch.patchedFiles} browser runtime file(s)`;
+  }
+
+  // --- Local action finalization patch ---
+  // OpenClaw normally refuses before_agent_finalize revisions after
+  // deterministic side effects. UClaw needs one narrow exception for the
+  // computer-use hook that catches final replies like "I will install it now"
+  // after browser/exec activity.
+  const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (localActionFinalizePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} local-action finalize runtime file(s)`;
   }
 
   // --- Prompt cache key patch ---

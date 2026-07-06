@@ -771,6 +771,8 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
             mimeType,
             fileSize: 0,
             preview: `data:${mimeType};base64,${src.data}`,
+            width: block.width,
+            height: block.height,
           });
         } else if (src.type === 'url' && src.url) {
           files.push({
@@ -778,6 +780,8 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
             mimeType,
             fileSize: 0,
             preview: src.url,
+            width: block.width,
+            height: block.height,
           });
         }
       }
@@ -789,6 +793,8 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           mimeType,
           fileSize: 0,
           preview: `data:${mimeType};base64,${block.data}`,
+          width: block.width,
+          height: block.height,
         });
       }
       // Path 3: Flat URL form from Gateway-injected assistant-media messages.
@@ -807,6 +813,8 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           mimeType,
           fileSize: 0,
           preview: null,
+          width: block.width,
+          height: block.height,
           gatewayUrl: block.url,
           source: 'gateway-media',
         });
@@ -1187,7 +1195,7 @@ function collectMissingPreviewRefs(messages: RawMessage[]): PreviewRef[] {
 
 function applyPreviewResults(
   messages: RawMessage[],
-  thumbnails: Record<string, { preview: string | null; fileSize: number }>,
+  thumbnails: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }>,
 ): boolean {
   let updated = false;
 
@@ -1202,6 +1210,9 @@ function applyPreviewResults(
       if (thumb && (thumb.preview || thumb.fileSize)) {
         if (thumb.preview) file.preview = thumb.preview;
         if (thumb.fileSize) file.fileSize = thumb.fileSize;
+        if (thumb.filePath) file.filePath = thumb.filePath;
+        if (thumb.width) file.width = thumb.width;
+        if (thumb.height) file.height = thumb.height;
         delete file.previewStatus;
         // Only persist local-path entries to the localStorage cache.
         // Gateway outgoing URLs are tied to a specific session/attachment
@@ -1225,6 +1236,9 @@ function applyPreviewResults(
         if (thumb && (thumb.preview || thumb.fileSize)) {
           if (thumb.preview) file.preview = thumb.preview;
           if (thumb.fileSize) file.fileSize = thumb.fileSize;
+          if (thumb.filePath) file.filePath = thumb.filePath;
+          if (thumb.width) file.width = thumb.width;
+          if (thumb.height) file.height = thumb.height;
           delete file.previewStatus;
           _imageCache.set(ref.filePath, { ...file });
           updated = true;
@@ -1273,7 +1287,7 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
       const thumbnails = await invokeIpc(
         'media:getThumbnails',
         needPreview,
-      ) as Record<string, { preview: string | null; fileSize: number }>;
+      ) as Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }>;
       if (applyPreviewResults(messages, thumbnails)) {
         updatedAny = true;
       }

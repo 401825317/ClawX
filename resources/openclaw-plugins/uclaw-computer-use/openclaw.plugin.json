@@ -20,6 +20,7 @@
       "computer_uia_tree",
       "computer_uia_find",
       "computer_web_observe",
+      "computer_browser_open_url",
       "computer_browser_dom_snapshot",
       "computer_browser_dom_find",
       "computer_browser_dom_action",

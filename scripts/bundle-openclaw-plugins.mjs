@@ -10,6 +10,7 @@
  *   - @larksuite/openclaw-lark -> build/openclaw-plugins/feishu-openclaw-plugin
  *   - @openclaw/qqbot -> build/openclaw-plugins/qqbot
  *   - @tencent-weixin/openclaw-weixin -> build/openclaw-plugins/openclaw-weixin
+ *   - @openclaw/parallel-plugin -> build/openclaw-plugins/parallel
  *
  * The output plugin directory contains:
  *   - plugin source files (index.ts, openclaw.plugin.json, package.json, ...)
@@ -43,6 +44,7 @@ const PLUGINS = [
   { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
   { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
   { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
+  { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel' },
 ];
 
 const LOCAL_PLUGINS = [

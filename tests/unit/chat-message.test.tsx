@@ -77,6 +77,99 @@ describe('ChatMessage attachment dedupe', () => {
     expect(screen.getByAltText('desktop_screenshot.png')).toBeInTheDocument();
   });
 
+  it('keeps assistant image cards aligned to their natural height in mixed-aspect rows', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'Images generated.',
+      _attachedFiles: [
+        {
+          fileName: 'portrait.png',
+          mimeType: 'image/png',
+          fileSize: 1234,
+          preview: 'data:image/png;base64,portrait',
+          filePath: '/tmp/portrait.png',
+          source: 'tool-result',
+        },
+        {
+          fileName: 'wide.png',
+          mimeType: 'image/png',
+          fileSize: 1234,
+          preview: 'data:image/png;base64,wide',
+          filePath: '/tmp/wide.png',
+          width: 1536,
+          height: 864,
+          source: 'tool-result',
+        },
+      ],
+    };
+
+    render(<ChatMessage message={message} />);
+
+    const cards = screen.getAllByTestId('chat-image-preview-card');
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toHaveClass('self-start');
+    expect(cards[1]).toHaveClass('self-start');
+    expect(cards[0]?.parentElement).toHaveClass('items-start');
+    expect(screen.getByAltText('wide.png')).toHaveAttribute('width', '1536');
+    expect(screen.getByAltText('wide.png')).toHaveAttribute('height', '864');
+  });
+
+  it('lets a file-backed image be selected as an edit reference', () => {
+    const file = {
+      fileName: 'generated.png',
+      mimeType: 'image/png',
+      fileSize: 1234,
+      preview: 'data:image/png;base64,abc',
+      filePath: '/tmp/generated.png',
+      source: 'tool-result' as const,
+    };
+    const onUseImageAsReference = vi.fn();
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'Image generated.',
+      _attachedFiles: [file],
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        onUseImageAsReference={onUseImageAsReference}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('image-edit-reference-button'));
+
+    expect(onUseImageAsReference).toHaveBeenCalledWith(file);
+  });
+
+  it('keeps the edit reference button when an image content block hides the duplicate attachment card', () => {
+    const file = {
+      fileName: 'generated.png',
+      mimeType: 'image/png',
+      fileSize: 1234,
+      preview: 'data:image/png;base64,abc',
+      filePath: '/tmp/generated.png',
+      source: 'gateway-media' as const,
+    };
+    const onUseImageAsReference = vi.fn();
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [{ type: 'image', data: 'abc', mimeType: 'image/png' }],
+      _attachedFiles: [file],
+    };
+
+    render(
+      <ChatMessage
+        message={message}
+        onUseImageAsReference={onUseImageAsReference}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('image-edit-reference-button'));
+
+    expect(onUseImageAsReference).toHaveBeenCalledWith(file);
+  });
+
   it('shows an explicit loading state for image artifacts before preview hydration finishes', () => {
     const message: RawMessage = {
       role: 'assistant',

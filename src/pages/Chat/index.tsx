@@ -16,7 +16,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
-import { ChatInput } from './ChatInput';
+import { ChatInput, type ImageEditReference } from './ChatInput';
 import { ExecutionGraphCard } from './ExecutionGraphCard';
 import { ChatToolbar } from './ChatToolbar';
 import { extractImages, extractText, extractThinking, extractToolUse, isInternalAssistantReplyText, isInternalProcessNarration, normalizeMessageRole, stripProcessMessagePrefix } from './message-utils';
@@ -222,6 +222,7 @@ export function Chat() {
   const currentAgentAvatarSrc = currentAgent?.profile?.avatarId
     ? getAgentAvatar(currentAgent.profile.avatarId).src
     : DEFAULT_AGENT_AVATAR_SRC;
+  const [imageEditReference, setImageEditReference] = useState<ImageEditReference | null>(null);
   const panelOpen = useArtifactPanel((s) => s.open);
   const panelWidthPct = useArtifactPanel((s) => s.widthPct);
   const openChanges = useArtifactPanel((s) => s.openChanges);
@@ -233,6 +234,9 @@ export function Chat() {
   useEffect(() => {
     closeArtifactPanel();
   }, [currentSessionKey, closeArtifactPanel]);
+  useEffect(() => {
+    setImageEditReference(null);
+  }, [currentSessionKey]);
   const [childTranscriptsBySession, setChildTranscriptsBySession] = useState<Record<string, Record<string, RawMessage[]>>>({});
   const [questionDirectoryOpenSessionKey, setQuestionDirectoryOpenSessionKey] = useState<string | null>(null);
   const childTranscripts = childTranscriptsBySession[currentSessionKey] ?? EMPTY_CHILD_TRANSCRIPTS;
@@ -260,6 +264,17 @@ export function Chat() {
     const target = buildPreviewTarget(file.filePath, file.fileName, file.fileSize);
     openPreview(target);
   }, [openPreview, t]);
+
+  const handleUseImageAsReference = useCallback((file: AttachedFileMeta) => {
+    if (!file.filePath || !file.mimeType.startsWith('image/')) return;
+    setImageEditReference({
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      fileSize: file.fileSize,
+      filePath: file.filePath,
+      preview: file.preview,
+    });
+  }, []);
   // Persistent per-run override for the Execution Graph's expanded/collapsed
   // state. Keyed by a stable run id (trigger message id, or a fallback of
   // `${sessionKey}:${triggerIdx}`) so user toggles survive the `loadHistory`
@@ -1036,6 +1051,7 @@ export function Chat() {
                         suppressToolCards={suppressToolCards}
                         suppressProcessAttachments={suppressToolCards}
                         onOpenFile={handleOpenAttachedFile}
+                        onUseImageAsReference={handleUseImageAsReference}
                       />
                       {(userRunCardsByTriggerIndex.get(idx) ?? []).map((card) => {
                           const triggerMsg = messages[card.triggerIndex];
@@ -1127,6 +1143,7 @@ export function Chat() {
                       isStreaming
                       streamingTools={streamingReplyText != null || hasActiveExecutionGraph ? [] : streamingTools}
                       onOpenFile={handleOpenAttachedFile}
+                      onUseImageAsReference={handleUseImageAsReference}
                     />
                   )}
 
@@ -1211,6 +1228,8 @@ export function Chat() {
         onStop={abortRun}
         disabled={!isGatewayRunning}
         sending={inputRunActive}
+        imageEditReference={imageEditReference}
+        onClearImageEditReference={() => setImageEditReference(null)}
       />
       </div>
 

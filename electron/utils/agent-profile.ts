@@ -185,10 +185,10 @@ function renderAgentsMarkerBlock(profile: AgentProfile): string {
     AGENTS_MARKER_START,
     '## UClaw Agent Persona',
     '',
-    `This workspace belongs to the UClaw Agent "${profile.personaName}" (${profile.roleName}).`,
-    `Read and follow \`${WORKSPACE_PROFILE_FILE}\` before responding in this workspace.`,
-    'Keep replies aligned with the Agent responsibility, capabilities, boundaries, and workspace instructions in that profile file.',
-    'Reply in the same language as the user unless they explicitly request another language.',
+    `此 workspace 属于 UClaw Agent "${profile.personaName}"（${profile.roleName}）。`,
+    `在此 workspace 回复前，必须先阅读并遵守 \`${WORKSPACE_PROFILE_FILE}\`。`,
+    '回复必须符合该 profile 文件中的 Agent 责任、能力、边界和 workspace 指令。',
+    '默认所有面向用户的自然语言回复都必须使用简体中文；只有用户明确要求其他语言时才切换。',
     AGENTS_MARKER_END,
   ].join('\n');
 }

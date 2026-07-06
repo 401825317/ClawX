@@ -175,7 +175,10 @@ function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {
     await syncProxyConfigToOpenClaw(settings, { preserveExistingWhenDisabled: false });
     await applyProxySettings(settings);
     if (gatewayManager.getStatus().state === 'running') {
-      await gatewayManager.restart();
+      await gatewayManager.restart({
+        reason: 'proxy-settings-change',
+        source: 'app:request/settings',
+      });
     }
   };
 
@@ -1210,7 +1213,10 @@ function registerGatewayHandlers(
   // Start Gateway
   ipcMain.handle('gateway:start', async () => {
     try {
-      await gatewayManager.start();
+      await gatewayManager.start({
+        reason: 'ipc-gateway-start',
+        source: 'gateway:start',
+      });
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -1220,7 +1226,10 @@ function registerGatewayHandlers(
   // Stop Gateway
   ipcMain.handle('gateway:stop', async () => {
     try {
-      await gatewayManager.stop();
+      await gatewayManager.stop({
+        reason: 'ipc-gateway-stop',
+        source: 'gateway:stop',
+      });
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -1230,7 +1239,10 @@ function registerGatewayHandlers(
   // Restart Gateway
   ipcMain.handle('gateway:restart', async () => {
     try {
-      await gatewayManager.restart();
+      await gatewayManager.restart({
+        reason: 'ipc-gateway-restart',
+        source: 'gateway:restart',
+      });
       return { success: true };
     } catch (error) {
       return { success: false, error: String(error) };
@@ -1506,7 +1518,10 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
   const scheduleGatewayChannelRestart = (reason: string): void => {
     if (gatewayManager.getStatus().state !== 'stopped') {
       logger.info(`Scheduling Gateway restart after ${reason}`);
-      gatewayManager.debouncedRestart(150);
+      gatewayManager.debouncedRestart(150, {
+        reason,
+        source: 'openclaw-channel-ipc',
+      });
     } else {
       logger.info(`Gateway is stopped; skip immediate restart after ${reason}`);
     }
@@ -1519,11 +1534,17 @@ function registerOpenClawHandlers(gatewayManager: GatewayManager): void {
     }
     if (forceRestartChannels.has(channelType)) {
       logger.info(`Scheduling Gateway restart after ${reason}`);
-      gatewayManager.debouncedRestart(150);
+      gatewayManager.debouncedRestart(150, {
+        reason,
+        source: 'openclaw-channel-ipc',
+      });
       return;
     }
     logger.info(`Scheduling Gateway reload after ${reason}`);
-    gatewayManager.debouncedReload(150);
+    gatewayManager.debouncedReload(150, {
+      reason,
+      source: 'openclaw-channel-ipc',
+    });
   };
 
   // Get OpenClaw package status
@@ -1832,11 +1853,19 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // can settle before applying the process-level refresh.
   deviceOAuthManager.on('oauth:success', ({ provider, accountId }) => {
     logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
-    gatewayManager.debouncedRestart(8000);
+    gatewayManager.debouncedRestart(8000, {
+      reason: `${provider}-oauth-success`,
+      source: 'device-oauth',
+      details: { accountId },
+    });
   });
   browserOAuthManager.on('oauth:success', ({ provider, accountId }) => {
     logger.info(`[IPC] Scheduling Gateway restart after ${provider} OAuth success for ${accountId}...`);
-    gatewayManager.debouncedRestart(8000);
+    gatewayManager.debouncedRestart(8000, {
+      reason: `${provider}-oauth-success`,
+      source: 'browser-oauth',
+      details: { accountId },
+    });
   });
 
   // Get all providers with key info
@@ -2460,7 +2489,10 @@ function registerSettingsHandlers(gatewayManager: GatewayManager): void {
     await syncProxyConfigToOpenClaw(settings, { preserveExistingWhenDisabled: false });
     await applyProxySettings(settings);
     if (gatewayManager.getStatus().state === 'running') {
-      await gatewayManager.restart();
+      await gatewayManager.restart({
+        reason: 'proxy-settings-change',
+        source: 'settings-ipc',
+      });
     }
   };
 
@@ -2658,6 +2690,14 @@ async function generateImagePreview(filePath: string, mimeType: string): Promise
   }
 }
 
+function getImageDimensions(filePath: string, mimeType: string): { width?: number; height?: number } {
+  if (!mimeType.startsWith('image/') || mimeType === 'image/svg+xml') return {};
+  const img = nativeImage.createFromPath(filePath);
+  if (img.isEmpty()) return {};
+  const size = img.getSize();
+  return size.width > 0 && size.height > 0 ? { width: size.width, height: size.height } : {};
+}
+
 /**
  * File staging IPC handlers
  * Stage files to ~/.openclaw/media/outbound/ for gateway access
@@ -2776,7 +2816,7 @@ function registerFileHandlers(): void {
     paths: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }>,
   ) => {
     const fsP = await import('fs/promises');
-    const results: Record<string, { preview: string | null; fileSize: number }> = {};
+    const results: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }> = {};
     for (const entry of paths) {
       // Local on-disk file (the original code path).
       if (entry.filePath) {
@@ -2786,7 +2826,7 @@ function registerFileHandlers(): void {
           if (entry.mimeType.startsWith('image/')) {
             preview = await generateImagePreview(entry.filePath, entry.mimeType);
           }
-          results[entry.filePath] = { preview, fileSize: s.size };
+          results[entry.filePath] = { preview, fileSize: s.size, ...getImageDimensions(entry.filePath, entry.mimeType) };
         } catch {
           results[entry.filePath] = { preview: null, fileSize: 0 };
         }
@@ -2809,7 +2849,12 @@ function registerFileHandlers(): void {
           if (resolved.mimeType.startsWith('image/')) {
             preview = await generateImagePreview(resolved.path, resolved.mimeType);
           }
-          results[entry.gatewayUrl] = { preview, fileSize: s.size };
+          results[entry.gatewayUrl] = {
+            preview,
+            fileSize: s.size,
+            filePath: resolved.path,
+            ...getImageDimensions(resolved.path, resolved.mimeType),
+          };
         } catch {
           results[entry.gatewayUrl] = { preview: null, fileSize: 0 };
         }

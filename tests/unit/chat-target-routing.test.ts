@@ -419,7 +419,7 @@ describe('chat target routing', () => {
     expect(payload.media[0]?.filePath).toBe('/tmp/design.png');
   });
 
-  it('does not reuse the latest assistant image for image-mode sends without explicit attachments', async () => {
+  it('reuses the latest assistant image for edit-like image-mode sends without explicit attachments', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
     useChatStore.setState({
@@ -478,8 +478,76 @@ describe('chat target routing', () => {
 
     expect(payload.sessionKey).toBe('agent:main:main');
     expect(payload.prompt).toBe('把 logo 去掉');
-    expect(payload.inputImages).toEqual([]);
+    expect(payload.inputImages).toEqual([
+      {
+        fileName: 'bike.png',
+        mimeType: 'image/png',
+        filePath: '/tmp/bike.png',
+      },
+    ]);
     expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
+  });
+
+  it('does not reuse the latest assistant image for a new image-generation prompt', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '图片已生成。',
+          _attachedFiles: [
+            {
+              fileName: 'bike.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/bike.png',
+              source: 'message-ref',
+            },
+          ],
+        },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      '帮我生成一张全新的产品海报',
+      undefined,
+      undefined,
+      'image',
+      { size: '1024x1024', quality: 'medium' },
+    );
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      sessionKey: string;
+      prompt: string;
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+
+    expect(payload.sessionKey).toBe('agent:main:main');
+    expect(payload.prompt).toBe('帮我生成一张全新的产品海报');
+    expect(payload.inputImages).toEqual([]);
   });
 
   it('auto-routes explicit image generation text to the image generation endpoint', async () => {

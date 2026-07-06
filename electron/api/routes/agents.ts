@@ -36,10 +36,11 @@ import { deleteLocalChatSession } from '../../utils/chat-session-cleanup';
 
 function scheduleGatewayReload(ctx: HostApiContext, reason: string): void {
   if (ctx.gatewayManager.getStatus().state !== 'stopped') {
-    ctx.gatewayManager.debouncedReload();
-    return;
+    ctx.gatewayManager.debouncedReload(undefined, {
+      reason,
+      source: '/api/agents',
+    });
   }
-  void reason;
 }
 
 const postCreateTaskTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -422,7 +423,10 @@ export async function restartGatewayForAgentDeletion(ctx: HostApiContext): Promi
       }
     }
 
-    await ctx.gatewayManager.restart();
+    await ctx.gatewayManager.restart({
+      reason: 'delete-agent',
+      source: '/api/agents',
+    });
     console.log('[agents] Gateway restart completed after agent deletion');
   } catch (err) {
     console.warn('[agents] Gateway restart after agent deletion failed:', err);

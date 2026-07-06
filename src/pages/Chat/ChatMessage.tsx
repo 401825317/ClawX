@@ -6,7 +6,7 @@
  * surfaced via ExecutionGraphCard, not inside message bubbles.
  */
 import { useState, useCallback, useEffect, memo } from 'react';
-import { Copy, Check, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Copy, Check, Wrench, FileText, Film, Music, FileArchive, File, X, FolderOpen, ZoomIn, Loader2, CheckCircle2, AlertCircle, ImagePlus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -50,9 +50,10 @@ interface ChatMessageProps {
    * the system default editor.
    */
   onOpenFile?: (file: AttachedFileMeta) => void;
+  onUseImageAsReference?: (file: AttachedFileMeta) => void;
 }
 
-interface ExtractedImage { url?: string; data?: string; mimeType: string; }
+interface ExtractedImage { url?: string; data?: string; mimeType: string; width?: number; height?: number; }
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
 
@@ -249,6 +250,7 @@ export const ChatMessage = memo(function ChatMessage({
   isStreaming = false,
   streamingTools = [],
   onOpenFile,
+  onUseImageAsReference,
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
   const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
@@ -387,7 +389,7 @@ export const ChatMessage = memo(function ChatMessage({
         {/* Images — rendered ABOVE text bubble for user messages */}
         {/* Images from content blocks (Gateway session data / channel push photos) */}
         {isUser && resolvableContentImages.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {resolvableContentImages.map((img, i) => {
               const src = imageSrc(img);
               if (!src) return null;
@@ -398,6 +400,8 @@ export const ChatMessage = memo(function ChatMessage({
                   fileName="image"
                   base64={img.data}
                   mimeType={img.mimeType}
+                  width={img.width}
+                  height={img.height}
                   onPreview={() => setLightboxImg({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
                 />
               );
@@ -407,7 +411,7 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* File attachments — images above text for user, file cards below */}
         {isUser && attachedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
               const isVideo = file.mimeType.startsWith('video/');
@@ -421,7 +425,10 @@ export const ChatMessage = memo(function ChatMessage({
                     fileName={file.fileName}
                     filePath={file.filePath}
                     mimeType={file.mimeType}
+                    width={file.width}
+                    height={file.height}
                     onPreview={() => setLightboxImg({ src: file.preview!, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
+                    onUseAsReference={file.filePath ? () => onUseImageAsReference?.(file) : undefined}
                   />
                 ) : (
                   <ImagePreviewPlaceholder key={`local-${i}`} file={file} />
@@ -447,10 +454,15 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* Images from content blocks — assistant messages (below text) */}
         {!isUser && resolvableContentImages.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {resolvableContentImages.map((img, i) => {
               const src = imageSrc(img);
               if (!src) return null;
+              const referenceFile = attachedFiles.find((file) => (
+                file.mimeType.startsWith('image/')
+                && !!file.filePath
+                && (file.gatewayUrl === img.url || file.preview === src)
+              ));
               return (
                 <ImagePreviewCard
                   key={`content-${i}`}
@@ -458,7 +470,10 @@ export const ChatMessage = memo(function ChatMessage({
                   fileName="image"
                   base64={img.data}
                   mimeType={img.mimeType}
+                  width={referenceFile?.width ?? img.width}
+                  height={referenceFile?.height ?? img.height}
                   onPreview={() => setLightboxImg({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
+                  onUseAsReference={referenceFile ? () => onUseImageAsReference?.(referenceFile) : undefined}
                 />
               );
             })}
@@ -467,7 +482,7 @@ export const ChatMessage = memo(function ChatMessage({
 
         {/* File attachments — assistant messages (below text) */}
         {!isUser && attachedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-start gap-2">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
               const isVideo = file.mimeType.startsWith('video/');
@@ -480,7 +495,10 @@ export const ChatMessage = memo(function ChatMessage({
                     fileName={file.fileName}
                     filePath={file.filePath}
                     mimeType={file.mimeType}
+                    width={file.width}
+                    height={file.height}
                     onPreview={() => setLightboxImg({ src: file.preview!, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
+                    onUseAsReference={file.filePath ? () => onUseImageAsReference?.(file) : undefined}
                   />
                 );
               }
@@ -861,25 +879,35 @@ function ImageThumbnail({
   filePath,
   base64,
   mimeType,
+  width,
+  height,
   onPreview,
+  onUseAsReference,
 }: {
   src: string;
   fileName: string;
   filePath?: string;
   base64?: string;
   mimeType?: string;
+  width?: number;
+  height?: number;
   onPreview: () => void;
+  onUseAsReference?: () => void;
 }) {
   void filePath; void base64; void mimeType;
   return (
     <div
-      className="relative w-36 h-36 rounded-xl border overflow-hidden border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 group/img cursor-zoom-in"
+      className="relative h-36 w-36 self-start rounded-xl border border-black/10 bg-black/5 overflow-hidden group/img cursor-zoom-in dark:border-white/10 dark:bg-white/5"
       onClick={onPreview}
+      data-testid="chat-image-thumbnail"
     >
-      <img src={src} alt={fileName} className="w-full h-full object-cover" />
+      <img src={src} alt={fileName} width={width} height={height} className="h-full w-full object-cover" />
       <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/25 transition-colors flex items-center justify-center">
         <ZoomIn className="h-6 w-6 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow" />
       </div>
+      {onUseAsReference && (
+        <ImageReferenceButton onUseAsReference={onUseAsReference} />
+      )}
     </div>
   );
 }
@@ -892,26 +920,59 @@ function ImagePreviewCard({
   filePath,
   base64,
   mimeType,
+  width,
+  height,
   onPreview,
+  onUseAsReference,
 }: {
   src: string;
   fileName: string;
   filePath?: string;
   base64?: string;
   mimeType?: string;
+  width?: number;
+  height?: number;
   onPreview: () => void;
+  onUseAsReference?: () => void;
 }) {
   void filePath; void base64; void mimeType;
   return (
     <div
-      className="relative max-w-xs rounded-xl border overflow-hidden border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 group/img cursor-zoom-in"
+      className="relative max-w-xs self-start rounded-xl border border-black/10 bg-black/5 overflow-hidden group/img cursor-zoom-in dark:border-white/10 dark:bg-white/5"
       onClick={onPreview}
+      data-testid="chat-image-preview-card"
     >
-      <img src={src} alt={fileName} className="block w-full" />
+      <img src={src} alt={fileName} width={width} height={height} className="block h-auto w-full" />
       <div className="absolute inset-0 bg-black/0 group-hover/img:bg-black/20 transition-colors flex items-center justify-center">
         <ZoomIn className="h-6 w-6 text-white opacity-0 group-hover/img:opacity-100 transition-opacity drop-shadow" />
       </div>
+      {onUseAsReference && (
+        <ImageReferenceButton onUseAsReference={onUseAsReference} />
+      )}
     </div>
+  );
+}
+
+function ImageReferenceButton({
+  onUseAsReference,
+}: {
+  onUseAsReference: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="absolute bottom-2 right-2 inline-flex h-7 items-center gap-1 rounded-lg bg-white/95 px-2 text-xs font-medium text-foreground opacity-0 shadow-sm transition-opacity hover:bg-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover/img:opacity-100 dark:bg-black/80 dark:hover:bg-black"
+      onClick={(event) => {
+        event.stopPropagation();
+        onUseAsReference();
+      }}
+      title="修改图片"
+      aria-label="修改图片"
+      data-testid="image-edit-reference-button"
+    >
+      <ImagePlus className="h-3.5 w-3.5" />
+      <span>修改图片</span>
+    </button>
   );
 }
 

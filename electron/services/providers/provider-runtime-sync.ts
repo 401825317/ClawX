@@ -284,10 +284,16 @@ function scheduleGatewayRefresh(
 
   logger.info(message);
   if (options?.mode === 'restart') {
-    gatewayManager.debouncedRestart(options?.delayMs);
+    gatewayManager.debouncedRestart(options?.delayMs, {
+      reason: message,
+      source: 'provider-runtime-sync',
+    });
     return;
   }
-  gatewayManager.debouncedReload(options?.delayMs);
+  gatewayManager.debouncedReload(options?.delayMs, {
+    reason: message,
+    source: 'provider-runtime-sync',
+  });
 }
 
 export async function syncProviderApiKeyToRuntime(

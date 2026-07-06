@@ -110,7 +110,7 @@ export function createHistoryActions(
           for (const file of message._attachedFiles) {
             const key = getAttachmentMergeKey(file);
             if (!key) continue;
-            if (!file.preview && !file.fileSize && !file.previewStatus) continue;
+            if (!file.preview && !file.fileSize && !file.previewStatus && !file.width && !file.height) continue;
             filesByKey.set(key, file);
           }
           if (filesByKey.size > 0) {
@@ -138,6 +138,14 @@ export function createHistoryActions(
             }
             if (!nextFile.fileSize && currentFile.fileSize) {
               nextFile = { ...nextFile, fileSize: currentFile.fileSize };
+              changed = true;
+            }
+            if (!nextFile.width && currentFile.width) {
+              nextFile = { ...nextFile, width: currentFile.width };
+              changed = true;
+            }
+            if (!nextFile.height && currentFile.height) {
+              nextFile = { ...nextFile, height: currentFile.height };
               changed = true;
             }
             if (!nextFile.previewStatus && currentFile.previewStatus) {

@@ -212,10 +212,14 @@ function multipartTextPart(boundary, name, value) {
 
 function multipartFilePart(boundary, name, fileName, mimeType, bytes) {
   const safeName = String(fileName || 'image.png').replace(/[\r\n"]/gu, '_');
-  const normalizedMimeType = String(mimeType || DEFAULT_MIME_TYPE).trim() || DEFAULT_MIME_TYPE;
+  const normalizedMimeType = String(mimeType || DEFAULT_MIME_TYPE).replace(/[\r\n]/gu, '').trim() || DEFAULT_MIME_TYPE;
   return Buffer.concat([
-    multipartHeader(boundary, name, `; filename="${safeName}"`),
-    Buffer.from(`Content-Type: ${normalizedMimeType}\r\n\r\n`, 'utf8'),
+    Buffer.from(
+      `--${boundary}\r\n`
+      + `Content-Disposition: form-data; name="${name}"; filename="${safeName}"\r\n`
+      + `Content-Type: ${normalizedMimeType}\r\n\r\n`,
+      'utf8',
+    ),
     Buffer.from(bytes),
     Buffer.from('\r\n', 'utf8'),
   ]);

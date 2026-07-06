@@ -34,7 +34,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -82,10 +82,34 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
   [CLAWX_OPENAI_IMAGE_PROVIDER_KEY]: { dirName: CLAWX_OPENAI_IMAGE_PROVIDER_KEY, npmName: 'clawx-openai-image-plugin' },
 };
 
+const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
+
 function ensureCoreUClawPluginsInstalled(): boolean {
   const result = ensureUClawComputerUsePluginInstalled();
   if (result.warning) {
     logger.warn(`[plugin] UClaw Computer Use: ${result.warning}`);
+  }
+  return result.installed;
+}
+
+function isParallelWebSearchConfigured(config: unknown): boolean {
+  if (!config || typeof config !== 'object') return false;
+  const tools = (config as { tools?: unknown }).tools;
+  if (!tools || typeof tools !== 'object') return false;
+  const web = (tools as { web?: unknown }).web;
+  if (!web || typeof web !== 'object') return false;
+  const search = (web as { search?: unknown }).search;
+  if (!search || typeof search !== 'object') return false;
+  const provider = (search as { provider?: unknown }).provider;
+  if (typeof provider !== 'string') return false;
+  if (!PARALLEL_WEB_SEARCH_PROVIDERS.has(provider.trim())) return false;
+  return (search as { enabled?: unknown }).enabled !== false;
+}
+
+function ensureParallelSearchPluginInstalled(): boolean {
+  const result = ensureParallelPluginInstalled();
+  if (result.warning) {
+    logger.warn(`[plugin] Parallel Search: ${result.warning}`);
   }
   return result.installed;
 }
@@ -408,6 +432,7 @@ export async function syncGatewayConfigBeforeLaunch(
   const timingsMs: Record<string, number> = {};
   const maintenance: GatewayPrelaunchSyncSummary['maintenance'] = {};
   let configuredChannels: string[] = [];
+  let shouldInstallParallelSearchPlugin = false;
 
   // Reset the extension-deps cache so that newly installed extensions
   // (e.g. user added a channel while the app was running) get their
@@ -488,6 +513,7 @@ export async function syncGatewayConfigBeforeLaunch(
   try {
     configuredChannels = await measureAsync(timingsMs, 'configuredChannelsMs', async () => {
       const rawCfg = await readOpenClawConfig();
+      shouldInstallParallelSearchPlugin = isParallelWebSearchConfigured(rawCfg);
       return withConfiguredImageGenerationPlugins(
         await listConfiguredChannelsFromConfig(rawCfg),
         rawCfg,
@@ -506,6 +532,14 @@ export async function syncGatewayConfigBeforeLaunch(
     maintenance['plugin-maintenance'] = result;
   } catch (err) {
     logger.warn('Failed to auto-upgrade plugins:', err);
+  }
+
+  if (shouldInstallParallelSearchPlugin) {
+    try {
+      measureSync(timingsMs, 'parallelPluginMaintenanceMs', ensureParallelSearchPluginInstalled);
+    } catch (err) {
+      logger.warn('Failed to install Parallel Search plugin:', err);
+    }
   }
 
   try {

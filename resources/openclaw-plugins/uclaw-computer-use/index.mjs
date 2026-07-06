@@ -2,6 +2,50 @@ import { defineToolPlugin } from 'openclaw/plugin-sdk/tool-plugin';
 
 const PLUGIN_ID = 'uclaw-computer-use';
 const DEFAULT_HOST_API_ORIGIN = 'http://127.0.0.1:13210';
+const LOCAL_ACTION_REVISION_ID = `${PLUGIN_ID}:unfinished-local-action`;
+const LOCAL_ACTION_REVISION_REASON = 'UClaw local action final reply looked like an unexecuted plan.';
+const LOCAL_ACTION_CONTEXT = [
+  'UClaw local action completion rule:',
+  '- If the user asks you to change local state, do not finish with a promise or plan.',
+  '- Future-tense final replies such as "我现在下载并安装", "我先提取链接，再下载安装", or "I will do it now" are incomplete.',
+  '- If the user asks for a concrete artifact such as a PPT, spreadsheet, document, PDF, or image file, only finalize after the artifact path is created/verified or a concrete blocker is reported.',
+  '- Keep using available tools until the requested local action is completed and verified, fails with a concrete blocker, or requires explicit user confirmation.',
+  '- Your final reply must report the verified result or the concrete blocker, not the next step you intend to do.',
+].join('\n');
+const LOCAL_ACTION_PROMISE_RE = /(?:我(?:先|现在|会|将|要|再|继续)|(?:然后|接着|马上))(?:[^。！？\n]{0,80})(?:下载|安装|执行|继续|确认|检查|打开|复制|移动|写入|修改|启动|停止|重启|运行|处理|说明|完成)/u;
+const LOCAL_ACTION_TASK_RE = /(?:下载|安装|\/Applications|本机|本地|文件|启动|停止|重启|运行|打开|复制|移动|写入|修改|设置|配置)/u;
+const TERMINAL_STATE_RE = /(?:已(?:经)?(?:完成|安装|下载|启动|停止|重启|复制|移动|写入|修改|配置)|无法|失败|报错|需要(?:你|用户).{0,20}确认|请(?:你|用户).{0,20}确认|阻塞|权限|找不到|不存在|未找到)/u;
+const CONTINUATION_STATE_RE = /(?:正在|我(?:会|将|要|再|继续|换|改用|准备|打算)|(?:先|再|然后|接着|下一步|马上).{0,40}(?:做|生成|创建|补|拉取|抓|写|导出|制作|运行|调用|下载|安装|验证|分析|处理))/u;
+const DELIVERABLE_CONTRACTS = [
+  {
+    id: 'presentation',
+    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:pptx?|PPT|演示文稿|幻灯片)|(?:pptx?|PPT|演示文稿|幻灯片).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:pptx?|presentation|slide deck|slides?))/iu,
+    evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.pptx?\b|[^\s`"'<>)\]}。！？；;，,]+\.pptx\b/iu,
+    instruction: 'The user asked for a PPT/presentation deliverable. Continue until a .ppt/.pptx artifact is created and verified, or report the concrete blocker.',
+    maxAttempts: 2,
+  },
+  {
+    id: 'spreadsheet',
+    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:xlsx?|Excel|表格|电子表格)|(?:xlsx?|Excel|表格|电子表格).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:xlsx?|spreadsheet|excel))/iu,
+    evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:xlsx?|csv|tsv)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:xlsx?|csv|tsv)\b/iu,
+    instruction: 'The user asked for a spreadsheet deliverable. Continue until a spreadsheet artifact is created and verified, or report the concrete blocker.',
+    maxAttempts: 2,
+  },
+  {
+    id: 'document',
+    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:docx?|Word|文档|报告|PDF|pdf)|(?:docx?|Word|文档|报告|PDF|pdf).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:docx?|document|report|pdf))/iu,
+    evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:docx?|pdf|md)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:docx?|pdf|md)\b/iu,
+    instruction: 'The user asked for a document/report deliverable. Continue until the document artifact is created and verified, or report the concrete blocker.',
+    maxAttempts: 2,
+  },
+  {
+    id: 'image',
+    requestRe: /(?:(?:画|绘制|制作|生成|创建|输出|导出|做成).{0,24}(?:图片|图像|海报|封面|插画|png|jpg|jpeg|webp)|(?:图片|图像|海报|封面|插画|png|jpg|jpeg|webp).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|draw|produce|export).{0,40}(?:image|picture|poster|cover|png|jpe?g|webp))/iu,
+    evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:png|jpe?g|webp|gif|svg)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:png|jpe?g|webp|gif|svg)\b/iu,
+    instruction: 'The user asked for an image deliverable. Continue until the image artifact is created and verified, or report the concrete blocker.',
+    maxAttempts: 2,
+  },
+];
 const EMPTY_OBJECT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -79,6 +123,224 @@ function resolveHostApiToken() {
     throw new Error('UClaw Host API token is not available for computer-use tools');
   }
   return token;
+}
+
+function messageContainsToolActivity(message) {
+  if (!message || typeof message !== 'object') return false;
+  if (typeof message.toolName === 'string' && message.toolName.trim()) return true;
+  if (typeof message.tool_call_id === 'string' && message.tool_call_id.trim()) return true;
+  if (typeof message.toolCallId === 'string' && message.toolCallId.trim()) return true;
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) return true;
+  if (Array.isArray(message.toolCalls) && message.toolCalls.length > 0) return true;
+  if (message.role === 'tool' || message.role === 'toolResult' || message.role === 'tool_result' || message.role === 'toolresult') return true;
+  const content = message.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => part && typeof part === 'object' && (
+    part.type === 'toolCall'
+    || part.type === 'toolResult'
+    || part.type === 'tool_use'
+    || part.type === 'tool_result'
+    || typeof part.toolCallId === 'string'
+    || typeof part.tool_call_id === 'string'
+    || typeof part.name === 'string'
+  ));
+}
+
+function hasToolActivity(messages) {
+  return Array.isArray(messages) && messages.some(messageContainsToolActivity);
+}
+
+function extractTextFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map((part) => {
+    if (typeof part === 'string') return part;
+    if (!part || typeof part !== 'object') return '';
+    return typeof part.text === 'string' ? part.text : '';
+  }).join('\n').trim();
+}
+
+function extractFinalAssistantText(event) {
+  const directCandidates = [
+    event?.lastAssistantMessage,
+    event?.assistantText,
+    event?.assistantMessage,
+    event?.finalAssistantMessage,
+    event?.finalText,
+    event?.reply,
+    event?.message,
+    event?.response,
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (candidate && typeof candidate === 'object') {
+      const text = extractTextFromContent(candidate.content);
+      if (text) return text;
+    }
+  }
+
+  const messageLists = [
+    event?.messages,
+    event?.messagesSnapshot,
+    event?.finalMessages,
+    event?.transcript,
+    event?.conversation,
+  ];
+  for (const messages of messageLists) {
+    if (!Array.isArray(messages)) continue;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message || typeof message !== 'object' || message.role !== 'assistant') continue;
+      const text = extractTextFromContent(message.content);
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+function extractUserRequestText(event) {
+  const directCandidates = [
+    event?.userMessage,
+    event?.userPrompt,
+    event?.prompt,
+    event?.request,
+    event?.input,
+    event?.finalPromptText,
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    if (candidate && typeof candidate === 'object') {
+      const text = extractTextFromContent(candidate.content);
+      if (text) return text;
+    }
+  }
+
+  for (const messages of extractMessageLists(event)) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message || typeof message !== 'object' || message.role !== 'user') continue;
+      const text = extractTextFromContent(message.content);
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+function extractMessageLists(event) {
+  return [
+    event?.messages,
+    event?.messagesSnapshot,
+    event?.finalMessages,
+    event?.transcript,
+    event?.conversation,
+  ].filter(Array.isArray);
+}
+
+function isConcreteTerminalState(text) {
+  return TERMINAL_STATE_RE.test(text) && !CONTINUATION_STATE_RE.test(text);
+}
+
+function isToolResultMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  const role = typeof message.role === 'string' ? message.role : '';
+  return role === 'tool'
+    || role === 'toolResult'
+    || role === 'tool_result'
+    || role === 'toolresult'
+    || typeof message.tool_call_id === 'string'
+    || typeof message.toolCallId === 'string';
+}
+
+function extractSearchableMessageText(message) {
+  if (!message || typeof message !== 'object') return '';
+  const parts = [extractTextFromContent(message.content)];
+  if (typeof message.text === 'string') parts.push(message.text);
+  if (typeof message.output === 'string') parts.push(message.output);
+  if (typeof message.result === 'string') parts.push(message.result);
+  if (message.details && typeof message.details === 'object') {
+    try {
+      parts.push(JSON.stringify(message.details));
+    } catch {
+      // Ignore non-serializable tool details.
+    }
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
+function hasDeliverableEvidence(contract, event, finalText) {
+  if (contract.evidenceRe.test(finalText)) return true;
+  return extractMessageLists(event).some((messages) => messages.some((message) => {
+    if (!isToolResultMessage(message)) return false;
+    return contract.evidenceRe.test(extractSearchableMessageText(message));
+  }));
+}
+
+function resolveUnfinishedDeliverable(event, finalText) {
+  const userText = extractUserRequestText(event);
+  if (!userText || isConcreteTerminalState(finalText)) return null;
+  for (const contract of DELIVERABLE_CONTRACTS) {
+    if (!contract.requestRe.test(userText)) continue;
+    if (hasDeliverableEvidence(contract, event, finalText)) continue;
+    return contract;
+  }
+  return null;
+}
+
+function resolveUnfinishedLocalActionRevision(event) {
+  const text = extractFinalAssistantText(event);
+  if (!text) return null;
+
+  const unfinishedDeliverable = resolveUnfinishedDeliverable(event, text);
+  if (unfinishedDeliverable) {
+    return {
+      instruction: unfinishedDeliverable.instruction,
+      maxAttempts: unfinishedDeliverable.maxAttempts,
+    };
+  }
+
+  if (isConcreteTerminalState(text)) return null;
+  if (!extractMessageLists(event).some(hasToolActivity)) return null;
+  if (!LOCAL_ACTION_TASK_RE.test(text) || !LOCAL_ACTION_PROMISE_RE.test(text)) return null;
+  return {
+    instruction: 'Your previous answer described future local work instead of completing the user request. Continue by calling the appropriate tools now, or state the concrete blocker if a tool cannot proceed.',
+    maxAttempts: 1,
+  };
+}
+
+function buildLocalActionRevision(revision) {
+  return {
+    action: 'revise',
+    reason: [LOCAL_ACTION_REVISION_REASON, revision.instruction].join('\n'),
+    retry: {
+      idempotencyKey: LOCAL_ACTION_REVISION_ID,
+      maxAttempts: revision.maxAttempts,
+      instruction: [
+        'Your previous answer described future local work instead of completing the user request.',
+        'Do not send another plan or promise.',
+        revision.instruction,
+        'Only finalize after the local action is completed, verified, failed with a concrete error, or requires explicit user confirmation.',
+      ].join('\n'),
+    },
+  };
+}
+
+function registerLocalActionCompletionGuard(api) {
+  if (typeof api.registerHook !== 'function') return;
+  api.registerHook('before_prompt_build', () => ({
+    appendSystemContext: LOCAL_ACTION_CONTEXT,
+  }), {
+    name: `${PLUGIN_ID}:local-action-context`,
+    description: 'Adds UClaw local-action completion guidance near every agent turn.',
+  });
+
+  api.registerHook('before_agent_finalize', (event) => {
+    const revision = resolveUnfinishedLocalActionRevision(event);
+    if (!revision) return;
+    return buildLocalActionRevision(revision);
+  }, {
+    name: LOCAL_ACTION_REVISION_ID,
+    description: 'Prevents UClaw from finalizing local-action tasks with unexecuted future-tense promises.',
+  });
 }
 
 async function hostApiFetch(path, options = {}) {
@@ -878,5 +1140,11 @@ export const pluginEntry = defineToolPlugin({
     }),
   ],
 });
+
+const registerTools = pluginEntry.register.bind(pluginEntry);
+pluginEntry.register = (api) => {
+  registerTools(api);
+  registerLocalActionCompletionGuard(api);
+};
 
 export default pluginEntry;

@@ -39,6 +39,17 @@ export interface GatewayCapabilityProbe {
   payload?: unknown;
 }
 
+export interface GatewayLifecycleEvent {
+  at: number;
+  event: string;
+  state: GatewayStatus['state'];
+  port: number;
+  pid?: number;
+  reason?: string;
+  source?: string;
+  details?: Record<string, unknown>;
+}
+
 export interface GatewayCapabilitySnapshot {
   core: {
     process: GatewayStatus['state'];
@@ -66,6 +77,25 @@ export interface GatewayCapabilitySnapshot {
     lastSocketCloseAt?: number;
     lastSocketCloseCode?: number;
     consecutiveRpcFailures: number;
+    lastLifecycleEventAt?: number;
+    lastLifecycleEvent?: string;
+    lastStartRequestedAt?: number;
+    lastStartReason?: string;
+    lastStartSource?: string;
+    lastStopRequestedAt?: number;
+    lastStopReason?: string;
+    lastStopSource?: string;
+    lastRestartRequestedAt?: number;
+    lastRestartReason?: string;
+    lastRestartSource?: string;
+    lastRestartCompletedAt?: number;
+    lastReconnectScheduledAt?: number;
+    lastReconnectReason?: string;
+    lastReconnectSource?: string;
+    lastProcessExitAt?: number;
+    lastProcessExitCode?: number | null;
+    lastProcessExitExpected?: boolean;
+    recentLifecycleEvents?: GatewayLifecycleEvent[];
   };
 }
 

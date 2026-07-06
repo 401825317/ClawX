@@ -700,6 +700,7 @@ exports.default = async function afterPack(context) {
     { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
     { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
     { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
+    { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel' },
   ];
 
   mkdirSync(pluginsDestRoot, { recursive: true });

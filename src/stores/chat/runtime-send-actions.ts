@@ -12,10 +12,13 @@ import {
   setLastAbortedRunId,
   rememberPendingOptimisticUserMessage,
   takeBlockedRunEvents,
+  toMs,
   upsertImageCacheEntry,
 } from './helpers';
-import type { ChatSession, RawMessage } from './types';
+import type { ChatSession, ChatState, RawMessage } from './types';
 import type { ChatGet, ChatSet, RuntimeActions } from './store-api';
+
+const SAFETY_TIMEOUT_MS = 90_000;
 
 function normalizeAgentId(value: string | undefined | null): string {
   return (value ?? '').trim().toLowerCase() || 'main';
@@ -49,6 +52,28 @@ let sendGeneration = 0;
 
 function buildNoResponseSafetyMessage(): string {
   return 'The task has not produced new visible progress for a while. UClaw stopped waiting to keep the app responsive. Refresh the conversation or retry if the task did not finish.';
+}
+
+function hasRecentRuntimeActivityForSend(
+  state: ChatState,
+  sessionKey: string,
+  now = Date.now(),
+): boolean {
+  return Object.values(state.runtimeRuns).some((run) => {
+    if (run.status !== 'running') return false;
+    const matchesSend = (state.activeRunId != null && run.runId === state.activeRunId)
+      || run.sessionKey === sessionKey;
+    if (!matchesSend) return false;
+
+    const lastEventAt = typeof run.lastEventAt === 'number' && Number.isFinite(run.lastEventAt)
+      ? toMs(run.lastEventAt)
+      : null;
+    const startedAt = typeof run.startedAt === 'number' && Number.isFinite(run.startedAt)
+      ? toMs(run.startedAt)
+      : null;
+    const activityAt = lastEventAt ?? startedAt;
+    return activityAt == null || now - activityAt < SAFETY_TIMEOUT_MS;
+  });
 }
 
 export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<RuntimeActions, 'sendMessage' | 'abortRun'> {
@@ -159,7 +184,6 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
       };
       setHistoryPollTimer(setTimeout(pollHistory, POLL_START_DELAY));
 
-      const SAFETY_TIMEOUT_MS = 90_000;
       const checkStuck = () => {
         const state = get();
         if (!state.sending) return;
@@ -169,6 +193,14 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
           return;
         }
         if (hasAssistantProgressSinceSend(state.messages, state.lastUserMessageAt)) {
+          setLastChatEventAt(Date.now());
+          if (state.error) {
+            set({ error: null });
+          }
+          setTimeout(checkStuck, 10_000);
+          return;
+        }
+        if (hasRecentRuntimeActivityForSend(state, currentSessionKey)) {
           setLastChatEventAt(Date.now());
           if (state.error) {
             set({ error: null });

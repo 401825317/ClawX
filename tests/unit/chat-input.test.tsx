@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { hostApiFetch } from '@/lib/host-api';
@@ -135,6 +136,10 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Image generation';
     case 'composer.imageModeActive':
       return 'Image mode on';
+    case 'composer.imageEditReferenceLabel':
+      return 'Modify image';
+    case 'composer.clearImageEditReference':
+      return 'Clear reference image';
     case 'composer.imageSizeLabel':
       return 'Size';
     case 'composer.imageQualityLabel':
@@ -180,10 +185,13 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-function renderChatInput(onSend = vi.fn()) {
+function renderChatInput(
+  onSend = vi.fn(),
+  props: Omit<Partial<ComponentProps<typeof ChatInput>>, 'onSend'> = {},
+) {
   return render(
     <TooltipProvider>
-      <ChatInput onSend={onSend} />
+      <ChatInput onSend={onSend} {...props} />
     </TooltipProvider>,
   );
 }
@@ -704,6 +712,60 @@ describe('ChatInput agent targeting', () => {
     fireEvent.click(screen.getByTitle('Send'));
 
     expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat', undefined, undefined);
+  });
+
+  it('sends the selected image edit reference as an image attachment', () => {
+    const onSend = vi.fn();
+    const onClearImageEditReference = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderChatInput(onSend, {
+      imageEditReference: {
+        fileName: 'generated.png',
+        mimeType: 'image/png',
+        fileSize: 2048,
+        filePath: '/tmp/generated.png',
+        preview: 'data:image/png;base64,abc',
+      },
+      onClearImageEditReference,
+    });
+
+    expect(screen.getByTestId('chat-image-edit-reference')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '把背景改成白色' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith(
+      '把背景改成白色',
+      [
+        expect.objectContaining({
+          fileName: 'generated.png',
+          mimeType: 'image/png',
+          fileSize: 2048,
+          stagedPath: '/tmp/generated.png',
+          preview: 'data:image/png;base64,abc',
+          status: 'ready',
+        }),
+      ],
+      null,
+      'image',
+      { model: 'gpt-image-2', size: '1024x1024', quality: 'medium' },
+      undefined,
+    );
+    expect(onClearImageEditReference).toHaveBeenCalled();
   });
 
   it('keeps video parameters selectable while using the configured default model', () => {

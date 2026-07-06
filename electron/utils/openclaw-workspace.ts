@@ -38,8 +38,8 @@ export function buildDefaultClawXIdentityContent(): string {
     '- **Emoji:** 🐾',
     '- **Avatar:**',
     '',
-    'UClaw uses a default desktop identity instead of chat-first bootstrap.',
-    'Reply in the same language as the user unless they explicitly request another language.',
+    'UClaw 使用默认桌面身份，而不是聊天优先的初始化身份。',
+    '默认所有面向用户的自然语言回复都必须使用简体中文；只有用户明确要求其他语言时才切换。',
     '',
   ].join('\n');
 }

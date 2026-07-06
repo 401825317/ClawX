@@ -45,7 +45,10 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/start' && req.method === 'POST') {
     try {
-      await ctx.gatewayManager.start();
+      await ctx.gatewayManager.start({
+        reason: 'api-gateway-start',
+        source: '/api/gateway/start',
+      });
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -55,7 +58,10 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/stop' && req.method === 'POST') {
     try {
-      await ctx.gatewayManager.stop();
+      await ctx.gatewayManager.stop({
+        reason: 'api-gateway-stop',
+        source: '/api/gateway/stop',
+      });
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -65,7 +71,10 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/restart' && req.method === 'POST') {
     try {
-      await ctx.gatewayManager.restart();
+      await ctx.gatewayManager.restart({
+        reason: 'api-gateway-restart',
+        source: '/api/gateway/restart',
+      });
       sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

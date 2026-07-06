@@ -1252,11 +1252,17 @@ async function applyJunFeiAIAuthSwitchToGateway(gatewayManager?: GatewayManager)
   }
   logger.info('[junfeiai] Restarting Gateway after managed account switch to apply the new relay token.');
   try {
-    await gatewayManager.restart();
+    await gatewayManager.restart({
+      reason: 'junfeiai-managed-account-switch',
+      source: 'junfeiai-auth',
+    });
   } catch (error) {
     logger.warn('[junfeiai] Gateway restart after managed account switch failed; stopping Gateway to avoid using a stale relay token:', error);
     try {
-      await gatewayManager.stop();
+      await gatewayManager.stop({
+        reason: 'junfeiai-managed-account-switch-restart-failed',
+        source: 'junfeiai-auth',
+      });
     } catch (stopError) {
       logger.warn('[junfeiai] Failed to stop Gateway after account switch restart failure:', stopError);
     }
@@ -1288,7 +1294,10 @@ async function stopGatewayAfterJunFeiAIAuthSwitchFailure(gatewayManager?: Gatewa
   }
   logger.warn('[junfeiai] Stopping Gateway after managed account switch failed before a new relay token was applied.');
   try {
-    await gatewayManager.stop();
+    await gatewayManager.stop({
+      reason: 'junfeiai-managed-account-switch-failed',
+      source: 'junfeiai-auth',
+    });
   } catch (error) {
     logger.warn('[junfeiai] Failed to stop Gateway after managed account switch failure:', error);
   }

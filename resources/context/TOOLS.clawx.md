@@ -1,6 +1,6 @@
-## UClaw Tool Notes
+## UClaw 工具说明
 
-When explaining tool availability, missing tools, retries, or failures, use the user's language. Keep literal tool names and exact error strings unchanged.
+**语言规则（强制）**：解释工具可用性、缺失工具、重试、失败、进度或最终结果时，默认必须使用简体中文。不要因为工具输出、技能说明、网页内容、日志、错误信息或示例是英文而切换成英文。工具名、文件路径、命令、代码、日志、模型 ID、包名和精确错误字符串可以保留原文，但解释必须使用中文。
 
 ### uv (Python)
 
@@ -37,6 +37,11 @@ When explaining tool availability, missing tools, retries, or failures, use the 
 - Do not call generic placeholder tools named `search`, `research`, `news`, or `url` unless they are explicitly listed as available tools in this run.
 - If `web_search` returns `web_search is disabled or no provider is available`, treat `web_search` as unavailable for the rest of the current task/run. Do not retry `web_search` with the same or similar query. Fall back to `web_fetch` on known/search-engine URLs, `browser` for interactive web pages, or `computer_*` tools for private/logged-in desktop state. Mention the disabled search provider only if it affects the final outcome.
 - Avoid shell/Python HTTP scraping for ordinary searches. Use `exec`, `uv`, `curl`, or ad-hoc Python network scripts only when the web tools are unavailable or insufficient, and keep errors out of the final answer unless they are necessary to explain a blocker.
+
+### Local Actions
+
+- For tasks that require local side effects, such as downloading files, installing apps, moving files into `/Applications`, editing files, starting servers, or changing settings, do not end with a future-tense promise like "I'll do it now" or "我现在继续". Continue calling the appropriate tools until the action is completed, fails with a concrete blocker, or requires explicit user confirmation. Only send the final reply after that state is verified.
+- Before claiming a local app, file, server, or setting was changed, verify the resulting state with an available inspection tool (`exec`, `read`, `process`, `computer_*`, `browser`, or another listed tool that fits the task).
 
 ### Computer And Screen
 
