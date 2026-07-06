@@ -3,6 +3,7 @@
  */
 import { pathToFileURL } from 'node:url';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
+import { saveGeneratedMediaBuffer } from './generated-media-store';
 
 type ImageGenerationRuntimeModule = {
   generateImage: (params: {
@@ -36,16 +37,6 @@ type ImageGenerationRuntimeModule = {
   }>;
 };
 
-type MediaStoreModule = {
-  saveMediaBuffer: (
-    buffer: Buffer,
-    mimeType: string,
-    subdir: string,
-    maxBytes: number,
-    originalFilename?: string,
-  ) => Promise<{ path: string; contentType: string; size: number }>;
-};
-
 type ImageOpsModule = {
   getImageMetadata: (buffer: Buffer) => Promise<{ width?: number; height?: number } | undefined>;
 };
@@ -55,12 +46,10 @@ type ModelInputModule = {
 };
 
 const OPENCLAW_IMAGE_GENERATION_RUNTIME = 'openclaw/plugin-sdk/image-generation-runtime';
-const OPENCLAW_MEDIA_STORE = 'openclaw/plugin-sdk/media-store';
 const OPENCLAW_MEDIA_RUNTIME = 'openclaw/plugin-sdk/media-runtime';
 const OPENCLAW_IMAGE_GENERATION_CORE = 'openclaw/plugin-sdk/image-generation-core';
 
 let imageRuntimeModule: ImageGenerationRuntimeModule | null = null;
-let mediaStoreModule: MediaStoreModule | null = null;
 let imageOpsModule: ImageOpsModule | null = null;
 let modelInputModule: ModelInputModule | null = null;
 
@@ -81,16 +70,6 @@ async function getImageGenerationRuntime(): Promise<ImageGenerationRuntimeModule
     };
   }
   return imageRuntimeModule;
-}
-
-async function getMediaStore(): Promise<MediaStoreModule> {
-  if (!mediaStoreModule) {
-    const mod = await importOpenClawSdkModule<{ saveMediaBuffer: MediaStoreModule['saveMediaBuffer'] }>(
-      OPENCLAW_MEDIA_STORE,
-    );
-    mediaStoreModule = { saveMediaBuffer: mod.saveMediaBuffer };
-  }
-  return mediaStoreModule;
 }
 
 async function getImageOps(): Promise<ImageOpsModule> {
@@ -185,7 +164,6 @@ export async function generateImageInProcess(params: {
   ignoredOverrides: unknown[];
 }> {
   const { generateImage } = await getImageGenerationRuntime();
-  const { saveMediaBuffer } = await getMediaStore();
   const { getImageMetadata } = await getImageOps();
 
   const result = await generateImage({
@@ -201,11 +179,9 @@ export async function generateImageInProcess(params: {
   });
 
   const outputs = await Promise.all(result.images.map(async (image, index) => {
-    const saved = await saveMediaBuffer(
+    const saved = await saveGeneratedMediaBuffer(
       image.buffer,
       image.mimeType,
-      'generated',
-      Number.MAX_SAFE_INTEGER,
       image.fileName,
     );
     const metadata = await getImageMetadata(image.buffer).catch(() => undefined);
