@@ -179,6 +179,12 @@ describe('provider-runtime-sync refresh strategy', () => {
     );
     const options = mocks.syncProviderConfigToOpenClaw.mock.calls.at(-1)?.[2] as Record<string, unknown>;
     expect(options.apiKeyEnv).toBeUndefined();
+    expect(options.headers).toEqual(expect.objectContaining({
+      'X-UClaw-Client': 'UClaw',
+      'X-UClaw-Version': '0.0.0-test',
+      'X-UClaw-Provider': 'lingzhiwuxian',
+      'X-UClaw-Session-Id': expect.any(String),
+    }));
   });
 
   it('keeps a managed model when the server model list still allows it', async () => {
@@ -203,6 +209,30 @@ describe('provider-runtime-sync refresh strategy', () => {
         apiKey: 'relay-valid-key',
       }),
     );
+  });
+
+  it('preserves configured provider headers when adding UClaw diagnostics', async () => {
+    mocks.getApiKey.mockResolvedValue('relay-valid-key');
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+    });
+
+    await syncSavedProviderToRuntime(createManagedProvider({
+      headers: {
+        'X-Custom-Route': 'cn-relay',
+      },
+    }), undefined);
+
+    const options = mocks.syncProviderConfigToOpenClaw.mock.calls.at(-1)?.[2] as {
+      headers?: Record<string, string>;
+    };
+    expect(options.headers).toEqual(expect.objectContaining({
+      'X-Custom-Route': 'cn-relay',
+      'X-UClaw-Client': 'UClaw',
+      'X-UClaw-Provider': 'lingzhiwuxian',
+    }));
   });
 
   it('writes a freshly issued managed relay key into per-agent models.json', async () => {

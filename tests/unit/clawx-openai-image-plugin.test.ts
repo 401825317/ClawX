@@ -30,8 +30,10 @@ describe('ClawX OpenAI image plugin request shape', () => {
 
   it('omits response_format from generated OpenAI-compatible requests', async () => {
     let requestBody = '';
+    let requestHeaders: http.IncomingHttpHeaders = {};
     const server = http.createServer((req, res) => {
       const chunks: Buffer[] = [];
+      requestHeaders = req.headers;
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         requestBody = Buffer.concat(chunks).toString('utf8');
@@ -76,6 +78,10 @@ describe('ClawX OpenAI image plugin request shape', () => {
               'clawx-openai-image': {
                 apiKey: 'test-key',
                 baseUrl: `http://127.0.0.1:${address.port}/v1`,
+                headers: {
+                  'X-UClaw-Version': '0.7.2-test',
+                  'X-UClaw-Mode': 'portable',
+                },
               },
             },
           },
@@ -94,6 +100,10 @@ describe('ClawX OpenAI image plugin request shape', () => {
         size: '1024x1024',
         quality: 'high',
       });
+      expect(requestHeaders['x-uclaw-client']).toBe('UClaw');
+      expect(requestHeaders['x-uclaw-version']).toBe('0.7.2-test');
+      expect(requestHeaders['x-uclaw-mode']).toBe('portable');
+      expect(requestHeaders['x-uclaw-provider']).toBe('clawx-openai-image');
     } finally {
       server.close();
     }

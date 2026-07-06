@@ -9,6 +9,7 @@ const DEFAULT_SIZE = '1024x1024';
 const DEFAULT_TIMEOUT_MS = 900_000;
 const DEFAULT_MIME_TYPE = 'image/png';
 const MAX_INPUT_IMAGES = 5;
+const CLIENT_DIAGNOSTIC_SESSION_ID = randomUUID();
 const SUPPORTED_EDIT_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -41,6 +42,33 @@ function resolveApiKey(req, providerConfig) {
     throw new Error('UClaw OpenAI image API key missing');
   }
   return apiKey;
+}
+
+function cleanHeaderValue(value) {
+  if (value == null) return undefined;
+  const cleaned = String(value).replace(/[\r\n\0]/gu, ' ').trim();
+  return cleaned || undefined;
+}
+
+function copyConfiguredHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return {};
+  const copied = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const cleaned = cleanHeaderValue(value);
+    if (cleaned) copied[key] = cleaned;
+  }
+  return copied;
+}
+
+function buildClientDiagnosticHeaders(providerConfig) {
+  const configured = copyConfiguredHeaders(providerConfig.headers);
+  const headers = { ...configured };
+  headers['X-UClaw-Client'] = headers['X-UClaw-Client'] || 'UClaw';
+  headers['X-UClaw-Platform'] = headers['X-UClaw-Platform'] || cleanHeaderValue(globalThis.process?.platform) || 'unknown';
+  headers['X-UClaw-Arch'] = headers['X-UClaw-Arch'] || cleanHeaderValue(globalThis.process?.arch) || 'unknown';
+  headers['X-UClaw-Provider'] = PROVIDER_ID;
+  headers['X-UClaw-Session-Id'] = headers['X-UClaw-Session-Id'] || CLIENT_DIAGNOSTIC_SESSION_ID;
+  return headers;
 }
 
 function appendImagesPath(baseUrl, mode) {
@@ -314,10 +342,12 @@ function buildProvider() {
           method: 'POST',
           headers: mode === 'edit'
             ? {
+              ...buildClientDiagnosticHeaders(providerConfig),
               Authorization: `Bearer ${apiKey}`,
               'Content-Type': editMultipart.contentType,
             }
             : {
+              ...buildClientDiagnosticHeaders(providerConfig),
               Authorization: `Bearer ${apiKey}`,
               'Content-Type': 'application/json',
             },

@@ -58,6 +58,7 @@ import {
 } from './openclaw-video-relay-constants';
 import { JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
+import { withUClawClientDiagnosticHeaders } from './uclaw-client-diagnostics';
 
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -2267,6 +2268,7 @@ export async function syncOpenAiCompatibleImageRelay(params: {
       baseUrl,
       api: 'openai-completions',
       apiKey: trimmedApiKey || undefined,
+      headers: withUClawClientDiagnosticHeaders(undefined, CLAWX_OPENAI_IMAGE_PROVIDER_KEY),
       modelIds,
       mergeExistingModels: false,
       request: { allowPrivateNetwork: true },
@@ -2325,6 +2327,7 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
     upsertOpenClawProviderEntry(config, CLAWX_OPENAI_VIDEO_PROVIDER_KEY, {
       baseUrl,
       api: 'openai-responses',
+      headers: withUClawClientDiagnosticHeaders(undefined, CLAWX_OPENAI_VIDEO_PROVIDER_KEY),
       modelIds,
       mergeExistingModels: true,
       request: { allowPrivateNetwork: true },

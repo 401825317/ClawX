@@ -37,6 +37,7 @@ import {
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   CLAWX_OPENAI_VIDEO_MODEL_IDS,
 } from '../../utils/openclaw-video-relay-constants';
+import { withUClawClientDiagnosticHeaders } from '../../utils/uclaw-client-diagnostics';
 
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai-codex';
 const OPENAI_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_OAUTH_RUNTIME_PROVIDER}/gpt-5.5`;
@@ -86,6 +87,17 @@ function normalizeProviderBaseUrl(
   }
 
   return normalized;
+}
+
+function shouldAttachUClawDiagnostics(
+  config: ProviderConfig,
+  runtimeProviderKey: string,
+  baseUrl?: string,
+): boolean {
+  if (config.type === JUNFEIAI_PROVIDER_ID || runtimeProviderKey === JUNFEIAI_PROVIDER_ID) {
+    return true;
+  }
+  return baseUrl?.includes('zz-cn.lingzhiwuxian.com') === true;
 }
 
 function shouldUseExplicitDefaultOverride(config: ProviderConfig, runtimeProviderKey: string): boolean {
@@ -458,12 +470,16 @@ async function syncRuntimeProviderConfig(
       context.meta?.apiKeyEnv,
     )
     : null;
+  const baseUrl = normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api);
+  const existingHeaders = config.headers ?? context.meta?.headers;
   await syncProviderConfigToOpenClaw(context.runtimeProviderKey, normalizeRuntimeModelId(config, config.model), {
-    baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
+    baseUrl,
     api: context.api,
     apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
     apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (accountApiKey || null) : undefined,
-    headers: config.headers ?? context.meta?.headers,
+    headers: shouldAttachUClawDiagnostics(config, context.runtimeProviderKey, baseUrl)
+      ? withUClawClientDiagnosticHeaders(existingHeaders, context.runtimeProviderKey)
+      : existingHeaders,
     timeoutSeconds: config.type === JUNFEIAI_PROVIDER_ID ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
   });
 }
