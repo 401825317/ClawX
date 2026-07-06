@@ -3,14 +3,16 @@ import { defineToolPlugin } from 'openclaw/plugin-sdk/tool-plugin';
 const PLUGIN_ID = 'uclaw-computer-use';
 const DEFAULT_HOST_API_ORIGIN = 'http://127.0.0.1:13210';
 const LOCAL_ACTION_REVISION_ID = `${PLUGIN_ID}:unfinished-local-action`;
-const LOCAL_ACTION_REVISION_REASON = 'UClaw local action final reply looked like an unexecuted plan.';
+const LOCAL_ACTION_REVISION_REASON = 'UClaw 本地动作最终回复仍像未执行的计划。';
+const USER_FACING_CHINESE_RULE = '所有面向用户的进度、解释、问题和最终回复都必须使用简体中文；工具名、文件路径、命令和精确错误原文可以保留英文，但必须用中文解释。';
 const LOCAL_ACTION_CONTEXT = [
-  'UClaw local action completion rule:',
-  '- If the user asks you to change local state, do not finish with a promise or plan.',
-  '- Future-tense final replies such as "我现在下载并安装", "我先提取链接，再下载安装", or "I will do it now" are incomplete.',
-  '- If the user asks for a concrete artifact such as a PPT, spreadsheet, document, PDF, or image file, only finalize after the artifact path is created/verified or a concrete blocker is reported.',
-  '- Keep using available tools until the requested local action is completed and verified, fails with a concrete blocker, or requires explicit user confirmation.',
-  '- Your final reply must report the verified result or the concrete blocker, not the next step you intend to do.',
+  'UClaw 本地动作完成规则：',
+  `- ${USER_FACING_CHINESE_RULE}`,
+  '- 用户要求改变本地状态时，不要用承诺、计划或下一步打算结束回复。',
+  '- “我现在下载并安装”“我先提取链接，再下载安装”“接下来我会处理”这类未来时回复都不算完成。',
+  '- 用户要求 PPT、表格、文档、PDF、图片等具体产物时，只有在产物路径已经创建并验证，或遇到具体阻塞点时才能结束。',
+  '- 继续使用可用工具，直到请求的本地动作完成并验证、失败且有具体阻塞点，或需要用户明确确认。',
+  '- 最终回复必须报告已验证的结果或具体阻塞点，不要只报告准备做什么。',
 ].join('\n');
 const LOCAL_ACTION_PROMISE_RE = /(?:我(?:先|现在|会|将|要|再|继续)|(?:然后|接着|马上))(?:[^。！？\n]{0,80})(?:下载|安装|执行|继续|确认|检查|打开|复制|移动|写入|修改|启动|停止|重启|运行|处理|说明|完成)/u;
 const LOCAL_ACTION_TASK_RE = /(?:下载|安装|\/Applications|本机|本地|文件|启动|停止|重启|运行|打开|复制|移动|写入|修改|设置|配置)/u;
@@ -21,28 +23,28 @@ const DELIVERABLE_CONTRACTS = [
     id: 'presentation',
     requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:pptx?|PPT|演示文稿|幻灯片)|(?:pptx?|PPT|演示文稿|幻灯片).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:pptx?|presentation|slide deck|slides?))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.pptx?\b|[^\s`"'<>)\]}。！？；;，,]+\.pptx\b/iu,
-    instruction: 'The user asked for a PPT/presentation deliverable. Continue until a .ppt/.pptx artifact is created and verified, or report the concrete blocker.',
+    instruction: '用户要求交付 PPT/演示文稿。继续使用工具，直到已经创建并验证 .ppt/.pptx 文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
   {
     id: 'spreadsheet',
     requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:xlsx?|Excel|表格|电子表格)|(?:xlsx?|Excel|表格|电子表格).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:xlsx?|spreadsheet|excel))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:xlsx?|csv|tsv)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:xlsx?|csv|tsv)\b/iu,
-    instruction: 'The user asked for a spreadsheet deliverable. Continue until a spreadsheet artifact is created and verified, or report the concrete blocker.',
+    instruction: '用户要求交付表格/电子表格。继续使用工具，直到已经创建并验证表格文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
   {
     id: 'document',
     requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:docx?|Word|文档|报告|PDF|pdf)|(?:docx?|Word|文档|报告|PDF|pdf).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:docx?|document|report|pdf))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:docx?|pdf|md)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:docx?|pdf|md)\b/iu,
-    instruction: 'The user asked for a document/report deliverable. Continue until the document artifact is created and verified, or report the concrete blocker.',
+    instruction: '用户要求交付文档/报告。继续使用工具，直到已经创建并验证文档文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
   {
     id: 'image',
     requestRe: /(?:(?:画|绘制|制作|生成|创建|输出|导出|做成).{0,24}(?:图片|图像|海报|封面|插画|png|jpg|jpeg|webp)|(?:图片|图像|海报|封面|插画|png|jpg|jpeg|webp).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|draw|produce|export).{0,40}(?:image|picture|poster|cover|png|jpe?g|webp))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:png|jpe?g|webp|gif|svg)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:png|jpe?g|webp|gif|svg)\b/iu,
-    instruction: 'The user asked for an image deliverable. Continue until the image artifact is created and verified, or report the concrete blocker.',
+    instruction: '用户要求交付图片产物。继续使用工具，直到已经创建并验证图片文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
 ];
@@ -302,7 +304,7 @@ function resolveUnfinishedLocalActionRevision(event) {
   if (!extractMessageLists(event).some(hasToolActivity)) return null;
   if (!LOCAL_ACTION_TASK_RE.test(text) || !LOCAL_ACTION_PROMISE_RE.test(text)) return null;
   return {
-    instruction: 'Your previous answer described future local work instead of completing the user request. Continue by calling the appropriate tools now, or state the concrete blocker if a tool cannot proceed.',
+    instruction: '上一条回复只是描述未来要做的本地动作，还没有完成用户请求。现在继续调用合适的工具；如果工具无法继续，必须用简体中文说明具体阻塞点。',
     maxAttempts: 1,
   };
 }
@@ -315,10 +317,11 @@ function buildLocalActionRevision(revision) {
       idempotencyKey: LOCAL_ACTION_REVISION_ID,
       maxAttempts: revision.maxAttempts,
       instruction: [
-        'Your previous answer described future local work instead of completing the user request.',
-        'Do not send another plan or promise.',
+        '上一条回复只是描述未来要做的本地动作，还没有完成用户请求。',
+        '不要再发送计划、承诺或英文状态说明。',
         revision.instruction,
-        'Only finalize after the local action is completed, verified, failed with a concrete error, or requires explicit user confirmation.',
+        '只有在本地动作已完成并验证、失败且有具体错误、或需要用户明确确认时，才能结束。',
+        USER_FACING_CHINESE_RULE,
       ].join('\n'),
     },
   };
@@ -330,7 +333,7 @@ function registerLocalActionCompletionGuard(api) {
     appendSystemContext: LOCAL_ACTION_CONTEXT,
   }), {
     name: `${PLUGIN_ID}:local-action-context`,
-    description: 'Adds UClaw local-action completion guidance near every agent turn.',
+    description: '为每轮 agent 添加 UClaw 本地动作完成规则。',
   });
 
   api.registerHook('before_agent_finalize', (event) => {
@@ -339,7 +342,7 @@ function registerLocalActionCompletionGuard(api) {
     return buildLocalActionRevision(revision);
   }, {
     name: LOCAL_ACTION_REVISION_ID,
-    description: 'Prevents UClaw from finalizing local-action tasks with unexecuted future-tense promises.',
+    description: '避免 UClaw 用尚未执行的未来时承诺结束本地动作任务。',
   });
 }
 

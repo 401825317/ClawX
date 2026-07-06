@@ -66,14 +66,15 @@ describe('UClaw tool routing context', () => {
     expect(computerUsePlugin).toContain('before_agent_finalize');
     expect(computerUsePlugin).toContain('before_prompt_build');
     expect(computerUsePlugin).toContain('appendSystemContext: LOCAL_ACTION_CONTEXT');
-    expect(computerUsePlugin).toContain('UClaw local action final reply looked like an unexecuted plan');
+    expect(computerUsePlugin).toContain('UClaw 本地动作最终回复仍像未执行的计划');
     expect(computerUsePlugin).toContain('DELIVERABLE_CONTRACTS');
-    expect(computerUsePlugin).toContain('concrete artifact');
-    expect(computerUsePlugin).toContain('PPT/presentation deliverable');
+    expect(computerUsePlugin).toContain('具体产物');
+    expect(computerUsePlugin).toContain('用户要求交付 PPT/演示文稿');
+    expect(computerUsePlugin).toContain('必须使用简体中文');
     expect(computerUsePlugin).toContain('registerLocalActionCompletionGuard(api)');
     expect(computerUsePlugin).toContain('需要(?:你|用户).{0,20}确认');
     expect(finalizePatchScript).toContain('allowUclawLocalActionRevisionAfterSideEffect');
-    expect(finalizePatchScript).toContain('UClaw local action final reply looked like an unexecuted plan');
+    expect(finalizePatchScript).toContain('UClaw 本地动作最终回复仍像未执行的计划');
   });
 
   it('forces user-facing replies to Simplified Chinese', () => {
@@ -105,7 +106,8 @@ describe('UClaw tool routing context', () => {
     }) as { action?: string; retry?: { instruction?: string } } | undefined;
 
     expect(result?.action).toBe('revise');
-    expect(result?.retry?.instruction).toContain('Do not send another plan or promise');
+    expect(result?.retry?.instruction).toContain('不要再发送计划、承诺或英文状态说明');
+    expect(result?.retry?.instruction).toContain('必须使用简体中文');
   });
 
   it('revises local-action promises when the hook exposes messagesSnapshot', async () => {
@@ -136,7 +138,8 @@ describe('UClaw tool routing context', () => {
     }) as { action?: string; retry?: { instruction?: string } } | undefined;
 
     expect(result?.action).toBe('revise');
-    expect(result?.retry?.instruction).toContain('Continue by calling the appropriate tools now');
+    expect(result?.retry?.instruction).toContain('现在继续调用合适的工具');
+    expect(result?.retry?.instruction).toContain('必须使用简体中文');
   });
 
   it('detects OpenAI-style top-level tool calls before revising local-action promises', async () => {
@@ -163,7 +166,7 @@ describe('UClaw tool routing context', () => {
     }) as { action?: string; reason?: string } | undefined;
 
     expect(result?.action).toBe('revise');
-    expect(result?.reason).toContain('unexecuted plan');
+    expect(result?.reason).toContain('未执行的计划');
   });
 
   it('revises PPT deliverable progress when no artifact evidence exists', async () => {
@@ -193,8 +196,9 @@ describe('UClaw tool routing context', () => {
     }) as { action?: string; retry?: { instruction?: string; maxAttempts?: number }; reason?: string } | undefined;
 
     expect(result?.action).toBe('revise');
-    expect(result?.reason).toContain('unexecuted plan');
-    expect(result?.retry?.instruction).toContain('PPT/presentation deliverable');
+    expect(result?.reason).toContain('未执行的计划');
+    expect(result?.retry?.instruction).toContain('用户要求交付 PPT/演示文稿');
+    expect(result?.retry?.instruction).toContain('必须使用简体中文');
     expect(result?.retry?.maxAttempts).toBe(2);
   });
 
@@ -248,7 +252,8 @@ describe('UClaw tool routing context', () => {
     }) as { action?: string; retry?: { instruction?: string } } | undefined;
 
     expect(result?.action).toBe('revise');
-    expect(result?.retry?.instruction).toContain('PPT/presentation deliverable');
+    expect(result?.retry?.instruction).toContain('用户要求交付 PPT/演示文稿');
+    expect(result?.retry?.instruction).toContain('必须使用简体中文');
   });
 
   it('keeps weather useful when explicit user location is missing', () => {

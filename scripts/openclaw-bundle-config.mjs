@@ -1,5 +1,6 @@
 export const EXTRA_BUNDLED_PACKAGES = [
   '@whiskeysockets/baileys',
+  'jszip',
 
   // Built-in channel/runtime extension deps that are not always pulled in by the
   // OpenClaw package's own transitive dependency graph, but are required in

@@ -45,7 +45,7 @@ describe('bundled OpenClaw skill trimming', () => {
     const scriptAllowlist = await import(pathToFileURL(join(process.cwd(), 'scripts/openclaw-bundled-skill-allowlist.mjs')).href);
 
     expect(scriptAllowlist.UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS);
-    expect(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(expect.arrayContaining(['browser-automation', 'diagram-maker', 'summarize', 'weather']));
+    expect(UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS).toEqual(expect.arrayContaining(['browser-automation', 'diagram-maker', 'presentation-maker', 'summarize', 'weather']));
   });
 
 
@@ -54,11 +54,13 @@ describe('bundled OpenClaw skill trimming', () => {
     mkdirSync(join(root, 'skill-creator'), { recursive: true });
     mkdirSync(join(root, 'weather'), { recursive: true });
     mkdirSync(join(root, 'diagram-maker'), { recursive: true });
+    mkdirSync(join(root, 'presentation-maker'), { recursive: true });
     mkdirSync(join(root, 'summarize'), { recursive: true });
     mkdirSync(join(root, 'browser-use'), { recursive: true });
     writeFileSync(join(root, 'skill-creator', 'SKILL.md'), '---\nname: skill-creator\ndescription: keep\n---\n');
     writeFileSync(join(root, 'weather', 'SKILL.md'), '---\nname: weather\ndescription: keep\n---\n');
     writeFileSync(join(root, 'diagram-maker', 'SKILL.md'), '---\nname: diagram-maker\ndescription: keep\n---\n');
+    writeFileSync(join(root, 'presentation-maker', 'SKILL.md'), '---\nname: presentation-maker\ndescription: keep\n---\n');
     writeFileSync(join(root, 'summarize', 'SKILL.md'), '---\nname: summarize\ndescription: keep\n---\n');
     writeFileSync(join(root, 'browser-use', 'SKILL.md'), '---\nname: browser-use\ndescription: remove\n---\n');
 
@@ -67,10 +69,11 @@ describe('bundled OpenClaw skill trimming', () => {
 
     expect(result.removed).toBe(1);
     expect(result.removedSlugs).toEqual(['browser-use']);
-    expect(result.kept).toEqual(expect.arrayContaining(['diagram-maker', 'skill-creator', 'summarize', 'weather']));
+    expect(result.kept).toEqual(expect.arrayContaining(['diagram-maker', 'presentation-maker', 'skill-creator', 'summarize', 'weather']));
     expect(existsSync(join(root, 'skill-creator'))).toBe(true);
     expect(existsSync(join(root, 'weather'))).toBe(true);
     expect(existsSync(join(root, 'diagram-maker'))).toBe(true);
+    expect(existsSync(join(root, 'presentation-maker'))).toBe(true);
     expect(existsSync(join(root, 'summarize'))).toBe(true);
     expect(existsSync(join(root, 'browser-use'))).toBe(false);
   });

@@ -10,6 +10,7 @@ export const UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS = [
   'diagram-maker',
   'healthcheck',
   'meme-maker',
+  'presentation-maker',
   'session-logs',
   'skill-creator',
   'spike',

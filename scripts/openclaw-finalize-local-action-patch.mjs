@@ -1,6 +1,9 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
+const LOCAL_ACTION_REVISION_REASON_MARKER = 'UClaw 本地动作最终回复仍像未执行的计划。';
+const LEGACY_LOCAL_ACTION_REVISION_REASON_MARKER = 'UClaw local action final reply looked like an unexecuted plan.';
+
 const SIDEEFFECT_FINALIZE_ANCHOR = `\t\t\t\tif (outcome.action !== "revise") return;
 \t\t\t\tif (event.hadDeterministicSideEffect) {
 \t\t\t\t\tlog$2.warn(\`before_agent_finalize requested revision after potential side effects; finalizing runId=\${params.runId} sessionId=\${params.sessionId}\`);
@@ -10,7 +13,7 @@ const SIDEEFFECT_FINALIZE_ANCHOR = `\t\t\t\tif (outcome.action !== "revise") ret
 `;
 
 const SIDEEFFECT_FINALIZE_PATCH = `\t\t\t\tif (outcome.action !== "revise") return;
-\t\t\t\tconst allowUclawLocalActionRevisionAfterSideEffect = event.hadDeterministicSideEffect && typeof outcome.reason === "string" && outcome.reason.includes("UClaw local action final reply looked like an unexecuted plan.");
+\t\t\t\tconst allowUclawLocalActionRevisionAfterSideEffect = event.hadDeterministicSideEffect && typeof outcome.reason === "string" && outcome.reason.includes("${LOCAL_ACTION_REVISION_REASON_MARKER}");
 \t\t\t\tif (event.hadDeterministicSideEffect && !allowUclawLocalActionRevisionAfterSideEffect) {
 \t\t\t\t\tlog$2.warn(\`before_agent_finalize requested revision after potential side effects; finalizing runId=\${params.runId} sessionId=\${params.sessionId}\`);
 \t\t\t\t\treturn;
@@ -19,16 +22,21 @@ const SIDEEFFECT_FINALIZE_PATCH = `\t\t\t\tif (outcome.action !== "revise") retu
 `;
 
 function patchFinalizeLocalActionContent(content) {
+  const normalizedContent = content.replaceAll(
+    LEGACY_LOCAL_ACTION_REVISION_REASON_MARKER,
+    LOCAL_ACTION_REVISION_REASON_MARKER,
+  );
+
   if (content.includes('allowUclawLocalActionRevisionAfterSideEffect')) {
-    return { content, changed: false };
+    return { content: normalizedContent, changed: normalizedContent !== content };
   }
 
-  if (!content.includes(SIDEEFFECT_FINALIZE_ANCHOR)) {
-    return { content, changed: false };
+  if (!normalizedContent.includes(SIDEEFFECT_FINALIZE_ANCHOR)) {
+    return { content: normalizedContent, changed: normalizedContent !== content };
   }
 
   return {
-    content: content.replace(SIDEEFFECT_FINALIZE_ANCHOR, SIDEEFFECT_FINALIZE_PATCH),
+    content: normalizedContent.replace(SIDEEFFECT_FINALIZE_ANCHOR, SIDEEFFECT_FINALIZE_PATCH),
     changed: true,
   };
 }
