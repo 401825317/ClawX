@@ -85,3 +85,4 @@ playground/
 # ClawX-biz bridge workspace artifacts
 resources/enterprise-skills/
 resources/openclaw-plugins/skillshub/
+/.codegraph/
