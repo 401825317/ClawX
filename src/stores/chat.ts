@@ -8,6 +8,8 @@ import { hostApiFetch } from '@/lib/host-api';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { getManagedAuthStateKey, isManagedAuthLocallyReady, isManagedAuthReady } from '@/lib/managed-auth';
+import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
+import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
@@ -2170,10 +2172,21 @@ function buildSessionModelRef(
   const normalizedModel = typeof model === 'string' ? model.trim() : '';
   if (!normalizedModel) return undefined;
   const normalizedProvider = typeof modelProvider === 'string' ? modelProvider.trim() : '';
-  if (!normalizedProvider) return normalizedModel;
-  return normalizedModel.startsWith(`${normalizedProvider}/`)
+  const modelRef = !normalizedProvider ? normalizedModel : normalizedModel.startsWith(`${normalizedProvider}/`)
     ? normalizedModel
     : `${normalizedProvider}/${normalizedModel}`;
+  return normalizeChatManagedModelRef(modelRef) ?? undefined;
+}
+
+function normalizeChatManagedModelRef(
+  modelRef: string | null | undefined,
+  options?: { fallbackEmpty?: boolean },
+): string | null {
+  return normalizeManagedTextModelRef(
+    modelRef,
+    useClientConfigStore.getState().modelOptions,
+    options,
+  );
 }
 
 function resolveEffectiveAgentModelRefForSession(sessionKey: string): string | null {
@@ -2182,7 +2195,7 @@ function resolveEffectiveAgentModelRefForSession(sessionKey: string): string | n
   const agent = agents.find((entry) => entry.id === agentId);
   const agentModelRef = typeof agent?.modelRef === 'string' ? agent.modelRef.trim() : '';
   const fallbackModelRef = typeof defaultModelRef === 'string' ? defaultModelRef.trim() : '';
-  return agentModelRef || fallbackModelRef || null;
+  return normalizeChatManagedModelRef(agentModelRef || fallbackModelRef || null, { fallbackEmpty: true });
 }
 
 function buildEffectiveSessionModelRef(result: GatewaySessionMutationResult | null | undefined): string | null {
@@ -2196,7 +2209,7 @@ function buildEffectiveSessionModelRef(result: GatewaySessionMutationResult | nu
   const overrideModelRef = buildSessionModelRef(entry?.modelOverride, entry?.providerOverride);
   if (overrideModelRef) return overrideModelRef;
 
-  return null;
+  return normalizeChatManagedModelRef(null);
 }
 
 function upsertSessionWithModel(
@@ -2205,7 +2218,10 @@ function upsertSessionWithModel(
   modelRef: string | null,
   updatedAt: number,
 ): ChatSession[] {
-  const nextModelRef = modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey) ?? undefined;
+  const nextModelRef = normalizeChatManagedModelRef(
+    modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey) ?? null,
+    { fallbackEmpty: true },
+  ) ?? undefined;
   let found = false;
   const nextSessions = sessions.map((session) => {
     if (session.key !== sessionKey) return session;
@@ -2234,44 +2250,63 @@ async function persistSessionModelSelection(
   sessionKey: string,
   modelRef: string | null,
 ): Promise<string | null> {
+  const normalizedModelRef = normalizeChatManagedModelRef(modelRef);
   if (_pendingLocalSessionKeys.has(sessionKey)) {
     const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
       key: sessionKey,
       agentId: getAgentIdFromSessionKey(sessionKey),
-      ...(modelRef ? { model: modelRef } : {}),
+      ...(normalizedModelRef ? { model: normalizedModelRef } : {}),
     });
     _pendingLocalSessionKeys.delete(sessionKey);
-    return buildEffectiveSessionModelRef(created) ?? modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+    return buildEffectiveSessionModelRef(created) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
   }
 
   const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
     key: sessionKey,
-    model: modelRef,
+    model: normalizedModelRef,
   });
-  return buildEffectiveSessionModelRef(patched) ?? modelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+  return buildEffectiveSessionModelRef(patched) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
 }
 
 function mergeSessionRowWithLocalState(
   nextSession: ChatSession,
   localSession: ChatSession | undefined,
 ): ChatSession {
-  if (!localSession) return nextSession;
+  const normalizedNextSession = {
+    ...nextSession,
+    model: normalizeChatManagedModelRef(nextSession.model) ?? undefined,
+  };
+  if (!localSession) return normalizedNextSession;
 
   const localUpdatedAt = typeof localSession.updatedAt === 'number' ? localSession.updatedAt : undefined;
-  const nextUpdatedAt = typeof nextSession.updatedAt === 'number' ? nextSession.updatedAt : undefined;
+  const nextUpdatedAt = typeof normalizedNextSession.updatedAt === 'number' ? normalizedNextSession.updatedAt : undefined;
+  const normalizedLocalModel = normalizeChatManagedModelRef(localSession.model) ?? undefined;
   const shouldPreserveLocalModel = Boolean(
-    localSession.model
+    normalizedLocalModel
     && (
-      !nextSession.model
+      !normalizedNextSession.model
       || (localUpdatedAt != null && nextUpdatedAt != null && localUpdatedAt > nextUpdatedAt)
     ),
   );
 
   return {
-    ...nextSession,
-    model: shouldPreserveLocalModel ? localSession.model : nextSession.model,
+    ...normalizedNextSession,
+    model: shouldPreserveLocalModel ? normalizedLocalModel : normalizedNextSession.model,
     updatedAt: shouldPreserveLocalModel ? localUpdatedAt : nextUpdatedAt,
   };
+}
+
+async function ensureSessionManagedTextModelAllowed(
+  get: ChatGet,
+  sessionKey: string,
+): Promise<void> {
+  const currentSessionModel = get().sessions.find((session) => session.key === sessionKey)?.model ?? null;
+  const currentModelRef = currentSessionModel || resolveEffectiveAgentModelRefForSession(sessionKey);
+  const normalizedModelRef = normalizeChatManagedModelRef(currentModelRef, { fallbackEmpty: true });
+  if (!normalizedModelRef || normalizedModelRef === currentModelRef) {
+    return;
+  }
+  await get().updateSessionModel(sessionKey, normalizedModelRef);
 }
 
 async function fetchChatHistory(
@@ -3493,7 +3528,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   updateSessionModel: async (key: string, modelRef: string | null) => {
-    const normalizedModelRef = typeof modelRef === 'string' ? modelRef.trim() : '';
+    const normalizedModelRef = normalizeChatManagedModelRef(modelRef) ?? '';
     const updatedAt = Date.now();
     const previousSessions = get().sessions;
     const optimisticModelRef = normalizedModelRef || resolveEffectiveAgentModelRefForSession(key);
@@ -3511,6 +3546,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ sessions: previousSessions });
       throw error;
     }
+  },
+
+  healManagedTextModels: () => {
+    set((state) => ({
+      sessions: state.sessions.map((session) => ({
+        ...session,
+        model: normalizeChatManagedModelRef(session.model, { fallbackEmpty: true }) ?? undefined,
+      })),
+    }));
   },
 
   // ── Cleanup empty session on navigate away ──
@@ -4276,6 +4320,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const currentSessionKey = targetSessionKey;
+    if (effectiveMode === 'chat') {
+      try {
+        await ensureSessionManagedTextModelAllowed(get, currentSessionKey);
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+          sending: false,
+        });
+        return;
+      }
+    }
+
     const currentMessages = get().messages;
     const sendGeneration = ++_sendGenerationCounter;
     _activeSendGenerationBySession.set(currentSessionKey, sendGeneration);

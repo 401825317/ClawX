@@ -19,6 +19,7 @@ import {
   toJunFeiAIClientError,
   verifyJunFeiAIAuth,
 } from '../../services/junfeiai/junfeiai-service';
+import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
 
 async function sendJunFeiAIJson<T>(
   res: ServerResponse,
@@ -124,7 +125,13 @@ export async function handleJunFeIAIRoutes(
   }
 
   if (url.pathname === '/api/junfeiai/client-config' && req.method === 'GET') {
-    sendJson(res, 200, await getJunFeiAIClientConfig());
+    const payload = await getJunFeiAIClientConfig();
+    try {
+      await selfHealManagedTextModelsFromClientConfig(payload.modelOptions);
+    } catch (error) {
+      console.warn('[junfeiai] Failed to self-heal managed text models from client config:', error);
+    }
+    sendJson(res, 200, payload);
     return true;
   }
 

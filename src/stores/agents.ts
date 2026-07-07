@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import type { ChannelType } from '@/types/channel';
 import type {
   AgentProfileDraft,
@@ -7,6 +8,7 @@ import type {
   AgentSummary,
   AgentsSnapshot,
 } from '@/types/agent';
+import { useClientConfigStore } from './client-config';
 
 interface AgentsState {
   agents: AgentSummary[];
@@ -25,17 +27,34 @@ interface AgentsState {
   generateAgentProfile: (input: AgentProfileGenerationInput) => Promise<AgentProfileDraft>;
   updateAgent: (agentId: string, name: string) => Promise<void>;
   updateAgentModel: (agentId: string, modelRef: string | null) => Promise<void>;
+  healManagedTextModels: () => void;
   deleteAgent: (agentId: string) => Promise<void>;
   assignChannel: (agentId: string, channelType: ChannelType) => Promise<void>;
   removeChannel: (agentId: string, channelType: ChannelType) => Promise<void>;
   clearError: () => void;
 }
 
+function normalizeSnapshotModelRef(modelRef: string | null | undefined, fallbackEmpty = false): string | null {
+  return normalizeManagedTextModelRef(
+    modelRef,
+    useClientConfigStore.getState().modelOptions,
+    { fallbackEmpty },
+  );
+}
+
+function normalizeSnapshotAgent(agent: AgentSummary): AgentSummary {
+  return {
+    ...agent,
+    modelRef: normalizeSnapshotModelRef(agent.modelRef, true),
+    overrideModelRef: normalizeSnapshotModelRef(agent.overrideModelRef),
+  };
+}
+
 function applySnapshot(snapshot: AgentsSnapshot | undefined) {
   return snapshot ? {
-    agents: snapshot.agents ?? [],
+    agents: (snapshot.agents ?? []).map(normalizeSnapshotAgent),
     defaultAgentId: snapshot.defaultAgentId ?? 'main',
-    defaultModelRef: snapshot.defaultModelRef ?? null,
+    defaultModelRef: normalizeSnapshotModelRef(snapshot.defaultModelRef, true),
     configuredChannelTypes: snapshot.configuredChannelTypes ?? [],
     channelOwners: snapshot.channelOwners ?? {},
     channelAccountOwners: snapshot.channelAccountOwners ?? {},
@@ -149,13 +168,14 @@ export const useAgentsStore = create<AgentsState>((set) => ({
   },
 
   updateAgentModel: async (agentId: string, modelRef: string | null) => {
+    const normalizedModelRef = normalizeSnapshotModelRef(modelRef);
     set({ error: null });
     try {
       const snapshot = await hostApiFetch<AgentsSnapshot & { success?: boolean }>(
         `/api/agents/${encodeURIComponent(agentId)}/model`,
         {
           method: 'PUT',
-          body: JSON.stringify({ modelRef }),
+          body: JSON.stringify({ modelRef: normalizedModelRef }),
         }
       );
       set(applySnapshot(snapshot));
@@ -163,6 +183,13 @@ export const useAgentsStore = create<AgentsState>((set) => ({
       set({ error: String(error) });
       throw error;
     }
+  },
+
+  healManagedTextModels: () => {
+    set((state) => ({
+      agents: state.agents.map(normalizeSnapshotAgent),
+      defaultModelRef: normalizeSnapshotModelRef(state.defaultModelRef, true),
+    }));
   },
 
   deleteAgent: async (agentId: string) => {

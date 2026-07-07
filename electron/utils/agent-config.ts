@@ -18,6 +18,7 @@ import {
 } from './agent-profile';
 import { appendAgentWelcomeMessage } from './chat-session-welcome-message';
 import { getProviderBackendConfig } from '../shared/providers/registry';
+import { JUNFEIAI_DEFAULT_MODEL, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
 
 const MAIN_AGENT_ID = 'main';
 const MAIN_AGENT_NAME = 'Main Agent';
@@ -88,6 +89,18 @@ interface AgentConfigDocument extends Record<string, unknown> {
   };
 }
 
+interface ManagedTextModelOption {
+  id?: string;
+  enabled?: boolean;
+}
+
+interface ManagedTextModelOptionsConfig {
+  text?: {
+    defaultModel?: string;
+    models?: ManagedTextModelOption[];
+  };
+}
+
 export interface AgentSummary {
   id: string;
   name: string;
@@ -126,6 +139,66 @@ function resolveModelRef(model: unknown): string | null {
   }
 
   return null;
+}
+
+function getManagedTextModelPolicy(modelOptions?: ManagedTextModelOptionsConfig): {
+  defaultModelRef: string;
+  allowedModelIds: string[];
+} {
+  const allowedModelIds = Array.from(new Set(
+    (Array.isArray(modelOptions?.text?.models) ? modelOptions.text.models : [])
+      .filter((model) => model?.enabled !== false)
+      .map((model) => (typeof model?.id === 'string' ? model.id.trim() : ''))
+      .filter(Boolean),
+  ));
+  const configuredDefault = typeof modelOptions?.text?.defaultModel === 'string'
+    ? modelOptions.text.defaultModel.trim()
+    : '';
+  const resolvedAllowedModelIds = allowedModelIds.length > 0
+    ? allowedModelIds
+    : [configuredDefault || JUNFEIAI_DEFAULT_MODEL];
+  const defaultModelId = configuredDefault && resolvedAllowedModelIds.includes(configuredDefault)
+    ? configuredDefault
+    : (resolvedAllowedModelIds[0] || JUNFEIAI_DEFAULT_MODEL);
+
+  return {
+    defaultModelRef: `${JUNFEIAI_PROVIDER_ID}/${defaultModelId}`,
+    allowedModelIds: resolvedAllowedModelIds,
+  };
+}
+
+function normalizeManagedTextModelRefForConfig(
+  modelRef: string | null,
+  policy: { defaultModelRef: string; allowedModelIds: string[] },
+  fallbackEmpty = false,
+): string | null {
+  const normalized = modelRef?.trim() || '';
+  if (!normalized) {
+    return fallbackEmpty ? policy.defaultModelRef : null;
+  }
+  const separatorIndex = normalized.indexOf('/');
+  if (separatorIndex <= 0 || separatorIndex >= normalized.length - 1) {
+    return normalized;
+  }
+
+  const providerKey = normalized.slice(0, separatorIndex);
+  const modelId = normalized.slice(separatorIndex + 1);
+  if (providerKey !== JUNFEIAI_PROVIDER_ID) {
+    return normalized;
+  }
+  return policy.allowedModelIds.includes(modelId)
+    ? `${JUNFEIAI_PROVIDER_ID}/${modelId}`
+    : policy.defaultModelRef;
+}
+
+function withModelPrimary(model: unknown, modelRef: string): AgentModelConfig {
+  if (model && typeof model === 'object' && !Array.isArray(model)) {
+    return {
+      ...(model as AgentModelConfig),
+      primary: modelRef,
+    };
+  }
+  return { primary: modelRef };
 }
 
 function formatModelLabel(model: unknown): string | null {
@@ -568,6 +641,62 @@ async function buildSnapshotFromConfig(config: AgentConfigDocument, preloadedCha
 export async function listAgentsSnapshot(): Promise<AgentsSnapshot> {
   const config = await readOpenClawConfig() as AgentConfigDocument;
   return buildSnapshotFromConfig(config);
+}
+
+export async function selfHealManagedTextModelsFromClientConfig(
+  modelOptions?: ManagedTextModelOptionsConfig,
+): Promise<AgentsSnapshot> {
+  return withConfigLock(async () => {
+    const config = await readOpenClawConfig() as AgentConfigDocument;
+    const { agentsConfig, entries, syntheticMain } = normalizeAgentsConfig(config);
+    const policy = getManagedTextModelPolicy(modelOptions);
+    let changed = false;
+
+    const defaultModelConfig = agentsConfig.defaults?.model;
+    const currentDefaultModelRef = resolveModelRef(defaultModelConfig);
+    const healedDefaultModelRef = normalizeManagedTextModelRefForConfig(
+      currentDefaultModelRef,
+      policy,
+      true,
+    );
+    const nextDefaults: AgentDefaultsConfig = {
+      ...(agentsConfig.defaults ?? {}),
+    };
+    if (healedDefaultModelRef && healedDefaultModelRef !== currentDefaultModelRef) {
+      nextDefaults.model = withModelPrimary(defaultModelConfig, healedDefaultModelRef);
+      changed = true;
+    }
+
+    const nextEntries = entries.map((entry) => {
+      const currentModelRef = resolveModelRef(entry.model);
+      const healedModelRef = normalizeManagedTextModelRefForConfig(currentModelRef, policy);
+      if (!healedModelRef || healedModelRef === currentModelRef) {
+        return entry;
+      }
+      changed = true;
+      return {
+        ...entry,
+        model: withModelPrimary(entry.model, healedModelRef),
+      };
+    });
+
+    if (changed) {
+      config.agents = {
+        ...agentsConfig,
+        defaults: nextDefaults,
+        list: syntheticMain ? undefined : nextEntries,
+      };
+      if (syntheticMain) {
+        delete config.agents.list;
+      }
+      await writeOpenClawConfig(config);
+      logger.info('Self-healed managed JunFeiAI text model refs', {
+        defaultModelRef: healedDefaultModelRef,
+      });
+    }
+
+    return buildSnapshotFromConfig(config);
+  });
 }
 
 export async function listAgentsSnapshotFromConfig(config: OpenClawConfig, configuredChannels?: string[]): Promise<AgentsSnapshot> {

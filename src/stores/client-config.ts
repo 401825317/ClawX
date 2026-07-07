@@ -477,6 +477,23 @@ function uniqueAppend(current: string[], keys: string[]): string[] {
   return Array.from(new Set([...current, ...keys])).slice(-200);
 }
 
+function scheduleManagedTextModelSelfHeal(): void {
+  void Promise.all([
+    import('./agents').then(async ({ useAgentsStore }) => {
+      useAgentsStore.getState().healManagedTextModels();
+      await useAgentsStore.getState().fetchAgents({ force: true, quiet: true });
+      useAgentsStore.getState().healManagedTextModels();
+    }),
+    import('./chat').then(async ({ useChatStore }) => {
+      useChatStore.getState().healManagedTextModels();
+      await useChatStore.getState().loadSessions();
+      useChatStore.getState().healManagedTextModels();
+    }),
+  ]).catch((error) => {
+    console.warn('[client-config] Failed to self-heal managed text models:', error);
+  });
+}
+
 export const useClientConfigStore = create<ClientConfigState>()(
   persist(
     (set, get) => ({
@@ -543,6 +560,7 @@ export const useClientConfigStore = create<ClientConfigState>()(
               : current.toastKeys,
             urgentAnnouncement: unreadUrgent ?? retainedUrgent,
           });
+          scheduleManagedTextModelSelfHeal();
         } catch (error) {
           set({
             loading: false,

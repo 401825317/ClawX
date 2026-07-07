@@ -10,6 +10,7 @@ import {
   syncSavedProviderToRuntime,
 } from '../providers/provider-runtime-sync';
 import { removeProviderKeyFromOpenClaw } from '../../utils/openclaw-auth';
+import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
 import {
   getJunFeiAIBackendOrigin,
   getJunFeiAIOrigin,
@@ -1444,6 +1445,11 @@ export async function ensureJunFeiAIProviderSeeded(options: {
 
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
   const account = buildAccount(bootstrap, existing);
+  try {
+    await selfHealManagedTextModelsFromClientConfig(bootstrap.client?.modelOptions);
+  } catch (error) {
+    logger.warn('[junfeiai] Failed to self-heal managed text model refs:', error);
+  }
   const providerChanged = accountChanged(existing, account);
   if (accountChanged(existing, account)) {
     await saveProviderAccount(account);

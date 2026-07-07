@@ -356,4 +356,124 @@ describe('chat session model switching', () => {
     expect(useChatStore.getState().sessions.find((entry) => entry.key === 'agent:main:session-b')?.model)
       .toBe('custom-beta5678/provider/model-beta');
   });
+
+  it('self-heals stale managed session models to the client-config text default', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-a',
+      currentAgentId: 'main',
+      sessions: [
+        { key: 'agent:main:session-a', model: 'lingzhiwuxian/gpt-5.5' },
+        { key: 'agent:main:session-b', model: 'custom-alpha123/model-alpha' },
+      ],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    useChatStore.getState().healManagedTextModels();
+
+    expect(useChatStore.getState().sessions.find((entry) => entry.key === 'agent:main:session-a')?.model)
+      .toBe('lingzhiwuxian/smart-latest');
+    expect(useChatStore.getState().sessions.find((entry) => entry.key === 'agent:main:session-b')?.model)
+      .toBe('custom-alpha123/model-alpha');
+  });
+
+  it('repairs a stale managed model before sending a chat request', async () => {
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'gpt-5.5',
+        modelRef: 'lingzhiwuxian/gpt-5.5',
+        overrideModelRef: 'lingzhiwuxian/gpt-5.5',
+        inheritedModel: false,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+    agentsState.defaultModelRef = 'lingzhiwuxian/gpt-5.5';
+
+    gatewayRpcMock.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'sessions.patch') {
+        return {
+          ok: true,
+          key: 'agent:main:main',
+          entry: {},
+          resolved: {
+            modelProvider: 'lingzhiwuxian',
+            model: 'smart-latest',
+          },
+        };
+      }
+      if (method === 'chat.history') {
+        return { messages: [] };
+      }
+      if (method === 'sessions.list') {
+        return { sessions: [] };
+      }
+      throw new Error(`Unexpected gateway RPC: ${method} ${JSON.stringify(params)}`);
+    });
+
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/chat/send') {
+        return { success: true, result: { runId: 'run-1' } };
+      }
+      if (url === '/api/chat/sessions') {
+        return { success: true, result: { sessions: [] } };
+      }
+      throw new Error(`Unexpected host API call: ${url}`);
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main', model: 'lingzhiwuxian/gpt-5.5' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('hello');
+
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.patch', {
+      key: 'agent:main:main',
+      model: 'lingzhiwuxian/smart-latest',
+    });
+    expect(hostApiFetchMock).toHaveBeenCalledWith('/api/chat/send', expect.objectContaining({
+      method: 'POST',
+    }));
+    expect(useChatStore.getState().sessions.find((entry) => entry.key === 'agent:main:main')?.model)
+      .toBe('lingzhiwuxian/smart-latest');
+  });
 });

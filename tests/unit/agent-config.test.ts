@@ -163,6 +163,49 @@ describe('agent config lifecycle', () => {
     });
   });
 
+  it('self-heals managed JunFeiAI text model refs from client-config model options', async () => {
+    await writeOpenClawJson({
+      agents: {
+        defaults: {
+          model: {
+            primary: 'lingzhiwuxian/gpt-5.5',
+            fallbacks: ['custom-alpha/model-alpha'],
+          },
+        },
+        list: [
+          { id: 'main', name: 'Main', default: true },
+          { id: 'coder', name: 'Coder', model: { primary: 'lingzhiwuxian/gpt-5.5' } },
+          { id: 'custom', name: 'Custom', model: { primary: 'custom-alpha/model-alpha' } },
+        ],
+      },
+    });
+
+    const { selfHealManagedTextModelsFromClientConfig } = await import('@electron/utils/agent-config');
+
+    const snapshot = await selfHealManagedTextModelsFromClientConfig({
+      text: {
+        defaultModel: 'smart-latest',
+        models: [{ id: 'smart-latest', enabled: true }],
+      },
+    });
+    const config = await readOpenClawJson() as {
+      agents?: {
+        defaults?: { model?: { primary?: string; fallbacks?: string[] } };
+        list?: Array<{ id: string; model?: { primary?: string } }>;
+      };
+    };
+
+    expect(config.agents?.defaults?.model?.primary).toBe('lingzhiwuxian/smart-latest');
+    expect(config.agents?.defaults?.model?.fallbacks).toEqual(['custom-alpha/model-alpha']);
+    expect(config.agents?.list?.find((agent) => agent.id === 'coder')?.model?.primary)
+      .toBe('lingzhiwuxian/smart-latest');
+    expect(config.agents?.list?.find((agent) => agent.id === 'custom')?.model?.primary)
+      .toBe('custom-alpha/model-alpha');
+    expect(snapshot.defaultModelRef).toBe('lingzhiwuxian/smart-latest');
+    expect(snapshot.agents.find((agent) => agent.id === 'coder')?.modelRef)
+      .toBe('lingzhiwuxian/smart-latest');
+  });
+
   it('updates and clears per-agent model overrides', async () => {
     await writeOpenClawJson({
       agents: {
