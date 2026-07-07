@@ -6,8 +6,10 @@
 export const UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS = [
   'browser-automation',
   'diagram-maker',
+  'document-maker',
   'healthcheck',
   'meme-maker',
+  'office-toolkit',
   'presentation-maker',
   'session-logs',
   'skill-creator',
@@ -15,6 +17,7 @@ export const UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS = [
   'summarize',
   'taskflow',
   'taskflow-inbox-triage',
+  'spreadsheet-maker',
   'video-frames',
   'weather',
 ];

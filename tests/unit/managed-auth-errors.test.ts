@@ -12,6 +12,7 @@ const t = (key: string, options?: Record<string, unknown>) => {
     'auth.errors.invalid_credentials': '用户名或密码错误，请重新输入。',
     'auth.errors.device_authorization_required': '当前设备需要激活码授权。',
     'auth.errors.user_exists': '该用户名已存在，请更换新的用户名。',
+    'auth.errors.password_policy': '密码长度需为 8-20 位。',
     'auth.errors.UNKNOWN': '服务暂时不可用，请稍后重试。',
   };
   return defaults[key] || String(options?.defaultValue ?? key);
@@ -52,5 +53,12 @@ describe('managed auth error mapping', () => {
 
     expect(getManagedAuthErrorKey(error)).toBe('user_exists');
     expect(getManagedAuthErrorMessage(t, error)).toBe('该用户名已存在，请更换新的用户名。');
+  });
+
+  it('infers password policy failures from backend messages', () => {
+    const error = new AppError('UNKNOWN', '密码长度需为 8-20 位');
+
+    expect(getManagedAuthErrorKey(error)).toBe('password_policy');
+    expect(getManagedAuthErrorMessage(t, error)).toBe('密码长度需为 8-20 位。');
   });
 });

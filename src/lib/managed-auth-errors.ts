@@ -93,6 +93,14 @@ function inferManagedAuthErrorKey(message: string): string {
   if (lower.includes('invalid_username') || message.includes('用户名格式错误')) {
     return 'invalid_username';
   }
+  if (
+    lower.includes('password_policy')
+    || lower.includes('password length')
+    || lower.includes('8-20')
+    || message.includes('密码长度')
+  ) {
+    return 'password_policy';
+  }
   if (lower.includes('timeout') || lower.includes('timed out')) {
     return 'TIMEOUT';
   }

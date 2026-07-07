@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  styles.xml —— 包含 13 个预置财务风格位
+  风格索引表:
+  ┌───────┬──────────────────────────────┬────────────────┬───────────────────┐
+  │ s     │ 语义角色                       │ 字体颜色         │ 数字格式            │
+  ├───────┼──────────────────────────────┼────────────────┼───────────────────┤
+  │   0   │ 默认 Default                  │ 黑色(默认)      │ 常规               │
+  │   1   │ 输入/假设值 (蓝)              │ 蓝 0000FF       │ 常规               │
+  │   2   │ 公式/计算结果 (黑)            │ 黑 000000       │ 常规               │
+  │   3   │ 跨表引用 (绿)                 │ 绿 008000       │ 常规               │
+  │   4   │ 表头 (加粗)                   │ 黑 加粗         │ 常规               │
+  │   5   │ 货币输入 (蓝)                 │ 蓝 0000FF       │ ¥#,##0             │
+  │   6   │ 货币公式 (黑)                 │ 黑 000000       │ ¥#,##0             │
+  │   7   │ 百分比输入 (蓝)               │ 蓝 0000FF       │ 0.0%               │
+  │   8   │ 百分比公式 (黑)               │ 黑 000000       │ 0.0%               │
+  │   9   │ 整数输入 (蓝, 千分位)         │ 蓝 0000FF       │ #,##0              │
+  │  10   │ 整数公式 (黑, 千分位)         │ 黑 000000       │ #,##0              │
+  │  11   │ 年份 (蓝, 无逗号)             │ 蓝 0000FF       │ 0                  │
+  │  12   │ 关键假设 (蓝字黄底)           │ 蓝 0000FF       │ 常规               │
+  └───────┴──────────────────────────────┴────────────────┴───────────────────┘
+  设计原则: 蓝=人工输入 · 黑=公式计算 · 绿=跨表引用
+-->
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="4">
+    <numFmt numFmtId="164" formatCode="&quot;¥&quot;#,##0;(&quot;¥&quot;#,##0);&quot;-&quot;"/>
+    <numFmt numFmtId="165" formatCode="0.0%"/>
+    <numFmt numFmtId="166" formatCode="0.0x"/>
+    <numFmt numFmtId="167" formatCode="#,##0"/>
+  </numFmts>
+  <fonts count="5">
+    <!-- 0: 默认 -->
+    <font><sz val="11"/><name val="宋体"/><charset val="134"/></font>
+    <!-- 1: 输入/假设 (蓝) -->
+    <font><sz val="11"/><name val="宋体"/><charset val="134"/><color rgb="000000FF"/></font>
+    <!-- 2: 公式/结果 (黑) -->
+    <font><sz val="11"/><name val="宋体"/><charset val="134"/><color rgb="00000000"/></font>
+    <!-- 3: 跨表引用 (绿) -->
+    <font><sz val="11"/><name val="宋体"/><charset val="134"/><color rgb="00008000"/></font>
+    <!-- 4: 表头 (加粗黑) -->
+    <font><b/><sz val="11"/><name val="宋体"/><charset val="134"/><color rgb="00000000"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="00FFFF00"/></patternFill></fill>
+  </fills>
+  <borders count="1">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+  </borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellStyleXfs>
+  <cellXfs count="13">
+    <!--  0: 默认 -->
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <!--  1: 输入/假设 (蓝, 常规) -->
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  2: 公式/计算 (黑, 常规) -->
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  3: 跨表引用 (绿, 常规) -->
+    <xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  4: 表头 (加粗黑) -->
+    <xf numFmtId="0" fontId="4" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+    <!--  5: 货币输入 (蓝 + ¥#,##0) -->
+    <xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!--  6: 货币公式 (黑 + ¥#,##0) -->
+    <xf numFmtId="164" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!--  7: 百分比输入 (蓝 + 0.0%) -->
+    <xf numFmtId="165" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!--  8: 百分比公式 (黑 + 0.0%) -->
+    <xf numFmtId="165" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!--  9: 整数输入 (蓝 + #,##0) -->
+    <xf numFmtId="167" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!-- 10: 整数公式 (黑 + #,##0) -->
+    <xf numFmtId="167" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!-- 11: 年份 (蓝, 无逗号) -->
+    <xf numFmtId="1" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyNumberFormat="1"/>
+    <!-- 12: 关键假设 (蓝字黄底) -->
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
+  </cellXfs>
+  <cellStyles count="1">
+    <cellStyle name="Normal" xfId="0" builtinId="0"/>
+  </cellStyles>
+</styleSheet>

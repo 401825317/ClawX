@@ -4,7 +4,10 @@ import {
 import {
   generateVideoForChatSession,
 } from './openclaw-video-generation';
+import { basename } from 'node:path';
 import type {
+  MediaGenerationInputImageRef,
+  VideoGenerationJobPayload,
   MediaGenerationWorkerRequest,
   MediaGenerationWorkerResponse,
 } from './media-generation-types';
@@ -82,6 +85,149 @@ function getMessageData(messageEvent: unknown): unknown {
   return messageEvent;
 }
 
+function summarizeInputImagesForLog(images: MediaGenerationInputImageRef[] | undefined): Array<Record<string, unknown>> {
+  return (images ?? []).map((image, index) => ({
+    index,
+    fileName: image.fileName || null,
+    mimeType: image.mimeType || null,
+    filePath: image.filePath,
+  }));
+}
+
+function logWorkerEvent(event: string, details: Record<string, unknown>): void {
+  console.error(`[media-generation-worker] ${event} ${JSON.stringify(details)}`);
+}
+
+function getFirstOutputImageRef(result: unknown): MediaGenerationInputImageRef | null {
+  const outputs = typeof result === 'object' && result !== null && Array.isArray((result as { outputs?: unknown }).outputs)
+    ? (result as { outputs: unknown[] }).outputs
+    : [];
+  for (const output of outputs) {
+    if (!output || typeof output !== 'object') continue;
+    const record = output as { path?: unknown; mimeType?: unknown; fileName?: unknown };
+    if (typeof record.path === 'string' && record.path.trim()) {
+      const filePath = record.path.trim();
+      return {
+        filePath,
+        mimeType: typeof record.mimeType === 'string' && record.mimeType.trim()
+          ? record.mimeType.trim()
+          : 'image/png',
+        fileName: typeof record.fileName === 'string' && record.fileName.trim()
+          ? record.fileName.trim()
+          : basename(filePath),
+      };
+    }
+  }
+  return null;
+}
+
+async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unknown> {
+  if (payload.route?.mode !== 'edit_image_then_video') {
+    const startedAt = Date.now();
+    logWorkerEvent('video_start', {
+      sessionKey: payload.sessionKey,
+      mode: payload.route?.mode ?? 'direct_video',
+      size: payload.size,
+      durationSeconds: payload.durationSeconds,
+      inputImages: summarizeInputImagesForLog(payload.inputImages),
+    });
+    const result = await generateVideoForChatSession({
+      sessionKey: payload.sessionKey,
+      prompt: payload.prompt,
+      size: payload.size,
+      durationSeconds: payload.durationSeconds,
+      inputImages: payload.inputImages,
+    }, { skipManagedRelayPreparation: true });
+    logWorkerEvent('video_done', {
+      sessionKey: payload.sessionKey,
+      mode: payload.route?.mode ?? 'direct_video',
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  }
+
+  const pipelineStartedAt = Date.now();
+  logWorkerEvent('pipeline_start', {
+    sessionKey: payload.sessionKey,
+    mode: payload.route.mode,
+    selectedImageSource: payload.route.selectedImageSource,
+    selectedImageIndex: payload.route.selectedImageIndex,
+    size: payload.size,
+    durationSeconds: payload.durationSeconds,
+    inputImages: summarizeInputImagesForLog(payload.inputImages),
+    routeSourceImages: summarizeInputImagesForLog(payload.route.sourceImages),
+  });
+
+  const sourceImages = payload.route.sourceImages?.length
+    ? payload.route.sourceImages
+    : payload.inputImages;
+  const sourceImage = sourceImages?.[0];
+  if (!sourceImage) {
+    logWorkerEvent('pipeline_missing_source_image', {
+      sessionKey: payload.sessionKey,
+      mode: payload.route.mode,
+    });
+    throw new Error('edit_image_then_video requires one source image.');
+  }
+
+  const imageEditPrompt = payload.route.imageEditPrompt?.trim()
+    || payload.originalPrompt?.trim()
+    || payload.prompt;
+  const videoPrompt = payload.route.videoPrompt?.trim() || payload.prompt;
+  const imageStartedAt = Date.now();
+  logWorkerEvent('pipeline_image_edit_start', {
+    sessionKey: payload.sessionKey,
+    sourceImage,
+    promptChars: imageEditPrompt.length,
+  });
+  const imageResult = await generateImageForChatSession({
+    sessionKey: payload.sessionKey,
+    prompt: imageEditPrompt,
+    inputImages: [sourceImage],
+  }, { skipManagedRelayPreparation: true });
+  const editedImage = getFirstOutputImageRef(imageResult);
+  logWorkerEvent('pipeline_image_edit_done', {
+    sessionKey: payload.sessionKey,
+    durationMs: Date.now() - imageStartedAt,
+    editedImage,
+  });
+  if (!editedImage) {
+    throw new Error('Image edit completed without a local output image.');
+  }
+
+  const videoStartedAt = Date.now();
+  logWorkerEvent('pipeline_video_start', {
+    sessionKey: payload.sessionKey,
+    editedImage,
+    promptChars: videoPrompt.length,
+    size: payload.size,
+    durationSeconds: payload.durationSeconds,
+  });
+  const videoResult = await generateVideoForChatSession({
+    sessionKey: payload.sessionKey,
+    prompt: videoPrompt,
+    size: payload.size,
+    durationSeconds: payload.durationSeconds,
+    inputImages: [editedImage],
+  }, { skipManagedRelayPreparation: true });
+  logWorkerEvent('pipeline_video_done', {
+    sessionKey: payload.sessionKey,
+    durationMs: Date.now() - videoStartedAt,
+    totalDurationMs: Date.now() - pipelineStartedAt,
+  });
+
+  return {
+    ...(typeof videoResult === 'object' && videoResult !== null ? videoResult : {}),
+    pipeline: {
+      mode: 'edit_image_then_video',
+      imageEditPrompt,
+      videoPrompt,
+      sourceImages: [sourceImage],
+      intermediateImage: imageResult,
+    },
+  };
+}
+
 async function handleRun(message: MediaGenerationWorkerRequest): Promise<void> {
   try {
     const result = message.payload.kind === 'image'
@@ -93,13 +239,7 @@ async function handleRun(message: MediaGenerationWorkerRequest): Promise<void> {
         quality: message.payload.quality,
         inputImages: message.payload.inputImages,
       }, { skipManagedRelayPreparation: true })
-      : await generateVideoForChatSession({
-        sessionKey: message.payload.sessionKey,
-        prompt: message.payload.prompt,
-        size: message.payload.size,
-        durationSeconds: message.payload.durationSeconds,
-        inputImages: message.payload.inputImages,
-      }, { skipManagedRelayPreparation: true });
+      : await runVideoPayload(message.payload);
 
     parentPort.postMessage({
       type: 'result',

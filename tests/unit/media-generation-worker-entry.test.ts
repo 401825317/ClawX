@@ -138,4 +138,99 @@ describe('media generation worker entry', () => {
     expect(response.error).toContain('error.message: Upstream access forbidden');
     expect(response.error?.length).toBeLessThanOrEqual(4200);
   });
+
+  it('runs image edit before video for edit-image-then-video payloads', async () => {
+    let onMessage: WorkerMessageListener | null = null;
+    const parentPort: MockParentPort = {
+      on: vi.fn((event: string, listener: (messageEvent: unknown) => void) => {
+        if (event === 'message') {
+          onMessage = listener;
+        }
+      }),
+      postMessage: vi.fn(),
+    };
+    setMockParentPort(parentPort);
+    generateImageForChatSessionMock.mockResolvedValue({
+      outputs: [{ path: '/tmp/edited-frame.png', mimeType: 'image/png' }],
+    });
+    generateVideoForChatSessionMock.mockResolvedValue({
+      outputs: [{ path: '/tmp/final-video.mp4', mimeType: 'video/mp4' }],
+    });
+
+    await import('@electron/utils/media-generation-worker-entry');
+    onMessage?.({
+      data: {
+        type: 'run',
+        jobId: 'job-video-pipeline-1',
+        payload: {
+          kind: 'video',
+          sessionKey: 'agent:main:main',
+          prompt: '让蓝色调画面缓慢推进并带有电影感。',
+          originalPrompt: '用上一张图改成蓝色调，然后给我出视频',
+          durationSeconds: 6,
+          inputImages: [
+            {
+              fileName: 'old-frame.png',
+              mimeType: 'image/png',
+              filePath: '/tmp/old-frame.png',
+            },
+          ],
+          route: {
+            mode: 'edit_image_then_video',
+            source: 'router',
+            confidence: 0.92,
+            selectedImageSource: 'candidate',
+            selectedImageIndex: 0,
+            imageEditPrompt: '把参考图改成蓝色调。',
+            videoPrompt: '让蓝色调画面缓慢推进并带有电影感。',
+            sourceImages: [
+              {
+                fileName: 'old-frame.png',
+                mimeType: 'image/png',
+                filePath: '/tmp/old-frame.png',
+              },
+            ],
+          },
+        },
+      } satisfies MediaGenerationWorkerRequest,
+    });
+    await flushMicrotasks();
+
+    expect(generateImageForChatSessionMock).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      prompt: '把参考图改成蓝色调。',
+      inputImages: [
+        {
+          fileName: 'old-frame.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/old-frame.png',
+        },
+      ],
+    }, { skipManagedRelayPreparation: true });
+    expect(generateVideoForChatSessionMock).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      prompt: '让蓝色调画面缓慢推进并带有电影感。',
+      size: undefined,
+      durationSeconds: 6,
+      inputImages: [
+        {
+          fileName: 'edited-frame.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/edited-frame.png',
+        },
+      ],
+    }, { skipManagedRelayPreparation: true });
+    expect(parentPort.postMessage).toHaveBeenCalledWith({
+      type: 'result',
+      jobId: 'job-video-pipeline-1',
+      success: true,
+      result: expect.objectContaining({
+        outputs: [{ path: '/tmp/final-video.mp4', mimeType: 'video/mp4' }],
+        pipeline: expect.objectContaining({
+          mode: 'edit_image_then_video',
+          imageEditPrompt: '把参考图改成蓝色调。',
+        }),
+      }),
+    });
+  });
 });

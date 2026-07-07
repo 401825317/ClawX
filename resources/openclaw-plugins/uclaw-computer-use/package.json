@@ -12,5 +12,8 @@
   },
   "peerDependencies": {
     "openclaw": "*"
+  },
+  "dependencies": {
+    "jszip": "3.10.1"
   }
 }

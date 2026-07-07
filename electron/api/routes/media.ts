@@ -31,6 +31,27 @@ import {
   getMediaGenerationJob,
   prepareMediaGenerationJob,
 } from '../../utils/media-generation-jobs';
+import { logger } from '../../utils/logger';
+import type { MediaGenerationInputImageRef } from '../../utils/media-generation-types';
+import { planVideoGenerationRoute } from '../../utils/video-generation-route-planner';
+
+function normalizeMediaInputImageRefs(
+  images: Array<{
+    fileName?: string;
+    mimeType?: string;
+    filePath?: string;
+  }> | undefined,
+): MediaGenerationInputImageRef[] | undefined {
+  return Array.isArray(images)
+    ? images
+      .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
+      .map((image) => ({
+        fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
+        mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
+        filePath: image.filePath!.trim(),
+      }))
+    : undefined;
+}
 
 export async function handleMediaRoutes(
   req: IncomingMessage,
@@ -293,6 +314,11 @@ export async function handleMediaRoutes(
           mimeType?: string;
           filePath?: string;
         }>;
+        candidateImages?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          filePath?: string;
+        }>;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -304,28 +330,51 @@ export async function handleMediaRoutes(
         sendJson(res, 400, { success: false, error: 'prompt is required' });
         return true;
       }
-      const inputImages = Array.isArray(body.inputImages)
-        ? body.inputImages
-          .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
-          .map((image) => ({
-            fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
-            mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
-            filePath: image.filePath!.trim(),
-          }))
-        : undefined;
+      const inputImages = normalizeMediaInputImageRefs(body.inputImages);
+      const candidateImages = normalizeMediaInputImageRefs(body.candidateImages);
+      logger.info('[video-generation-route] chat_send_received', {
+        sessionKey,
+        promptChars: prompt.length,
+        size: body.size?.trim(),
+        durationSeconds: body.durationSeconds,
+        inputImageCount: inputImages?.length ?? 0,
+        candidateImageCount: candidateImages?.length ?? 0,
+      });
+      const route = await planVideoGenerationRoute({
+        prompt,
+        inputImages,
+        candidateImages,
+      });
+      logger.info('[video-generation-route] chat_send_planned', {
+        sessionKey,
+        mode: route.mode,
+        source: route.source,
+        confidence: route.confidence,
+        selectedImageSource: route.selectedImageSource,
+        selectedImageIndex: route.selectedImageIndex,
+        sourceImageCount: route.sourceImages?.length ?? 0,
+      });
 
       const payload = {
         kind: 'video' as const,
         sessionKey,
-        prompt,
+        prompt: route.videoPrompt?.trim() || prompt,
+        originalPrompt: prompt,
         size: body.size?.trim(),
         durationSeconds: typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
           ? Math.max(1, Math.floor(body.durationSeconds))
           : undefined,
-        inputImages,
+        inputImages: route.mode === 'text_to_video' ? undefined : route.sourceImages,
+        route,
       };
       await prepareMediaGenerationJob(payload);
       const job = enqueueMediaGenerationJob(payload);
+      logger.info('[video-generation-route] chat_send_enqueued', {
+        jobId: job.id,
+        sessionKey,
+        mode: route.mode,
+        status: job.status,
+      });
 
       sendJson(res, 202, { success: true, jobId: job.id, job });
     } catch (error) {

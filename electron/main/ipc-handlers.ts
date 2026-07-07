@@ -95,6 +95,120 @@ import {
 } from './ipc/request-helpers';
 
 const gatewayRpcBackpressure = new GatewayRpcBackpressure();
+const OFFICE_ARTIFACT_TOOL_NAMES = [
+  'create_pptx_file',
+  'create_docx_file',
+  'create_xlsx_file',
+  'computer_screenshot',
+  'computer_inspect_screen',
+] as const;
+const OFFICE_ARTIFACT_SKILL_IDS = [
+  'presentation-maker',
+  'document-maker',
+  'spreadsheet-maker',
+  'office-toolkit',
+  'office-toolkit-ela',
+] as const;
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function extractChatSendSessionKey(params: unknown): string | undefined {
+  return stringValue(objectValue(params)?.sessionKey);
+}
+
+function extractRunId(result: unknown): string | undefined {
+  return stringValue(objectValue(result)?.runId);
+}
+
+function collectToolNames(value: unknown, names = new Set<string>(), depth = 0): Set<string> {
+  if (depth > 5 || value == null) return names;
+  if (Array.isArray(value)) {
+    for (const item of value) collectToolNames(item, names, depth + 1);
+    return names;
+  }
+  const record = objectValue(value);
+  if (!record) return names;
+
+  const candidate = stringValue(record.name) ?? stringValue(record.toolName);
+  if (candidate) names.add(candidate);
+
+  for (const key of ['tools', 'entries', 'items', 'groups', 'catalog', 'effectiveTools']) {
+    if (key in record) collectToolNames(record[key], names, depth + 1);
+  }
+  return names;
+}
+
+function summarizeChatSendParams(params: unknown, extra?: Record<string, unknown>): Record<string, unknown> {
+  const record = objectValue(params) ?? {};
+  const message = typeof record.message === 'string' ? record.message : '';
+  const attachments = Array.isArray(record.attachments) ? record.attachments : [];
+  return {
+    sessionKey: stringValue(record.sessionKey) ?? 'unknown',
+    deliver: record.deliver,
+    messageChars: message.length,
+    attachmentCount: attachments.length,
+    idempotencyKeyPresent: Boolean(stringValue(record.idempotencyKey)),
+    ...extra,
+  };
+}
+
+async function logOfficeToolDiagnostics(
+  gatewayManager: GatewayManager,
+  source: string,
+  sessionKey: string | undefined,
+): Promise<void> {
+  if (!sessionKey) {
+    logger.warn(`[${source}] office diagnostics skipped: missing sessionKey`);
+    return;
+  }
+
+  try {
+    const effective = await gatewayManager.rpc('tools.effective', { sessionKey }, 5_000);
+    const toolNames = [...collectToolNames(effective)].sort();
+    const presentTools = OFFICE_ARTIFACT_TOOL_NAMES.filter((name) => toolNames.includes(name));
+    logger.info(`[${source}] office tools.effective`, {
+      sessionKey,
+      effectiveToolCount: toolNames.length,
+      officeToolsPresent: presentTools,
+      officeToolsMissing: OFFICE_ARTIFACT_TOOL_NAMES.filter((name) => !toolNames.includes(name)),
+      sampleToolNames: toolNames.slice(0, 40),
+    });
+  } catch (error) {
+    logger.warn(`[${source}] office tools.effective failed (sessionKey=${sessionKey}): ${String(error)}`);
+  }
+
+  try {
+    const skills = await gatewayManager.rpc('skills.list', undefined, 5_000);
+    const skillList = Array.isArray(skills) ? skills : [];
+    const officeSkills = skillList
+      .map((skill) => objectValue(skill))
+      .filter((skill): skill is Record<string, unknown> => Boolean(skill))
+      .filter((skill) => {
+        const id = stringValue(skill.id) ?? stringValue(skill.slug) ?? stringValue(skill.name) ?? '';
+        return OFFICE_ARTIFACT_SKILL_IDS.some((candidate) => id === candidate);
+      })
+      .map((skill) => ({
+        id: stringValue(skill.id) ?? stringValue(skill.slug) ?? stringValue(skill.name),
+        enabled: skill.enabled,
+        source: skill.source,
+        isBundled: skill.isBundled,
+        baseDirPresent: Boolean(stringValue(skill.baseDir)),
+      }));
+    logger.info(`[${source}] office skills.list`, {
+      sessionKey,
+      installedSkillCount: skillList.length,
+      officeSkills,
+    });
+  } catch (error) {
+    logger.warn(`[${source}] office skills.list failed (sessionKey=${sessionKey}): ${String(error)}`);
+  }
+}
 
 /**
  * Register all IPC handlers
@@ -1252,12 +1366,23 @@ function registerGatewayHandlers(
   // Gateway RPC call
   ipcMain.handle('gateway:rpc', async (_, method: string, params?: unknown, timeoutMs?: number) => {
     try {
+      if (method === 'chat.send') {
+        const sessionKey = extractChatSendSessionKey(params);
+        logger.info('[gateway:rpc] chat.send start', summarizeChatSendParams(params));
+        void logOfficeToolDiagnostics(gatewayManager, 'gateway:rpc/chat.send', sessionKey);
+      }
       const result = await gatewayRpcBackpressure.run(
         method,
         params,
         timeoutMs,
         (rpcMethod, rpcParams, rpcTimeoutMs) => gatewayManager.rpc(rpcMethod, rpcParams, rpcTimeoutMs),
       );
+      if (method === 'chat.send') {
+        logger.info('[gateway:rpc] chat.send result', {
+          sessionKey: extractChatSendSessionKey(params) ?? 'unknown',
+          runId: extractRunId(result) ?? 'none',
+        });
+      }
       return { success: true, result };
     } catch (error) {
       logger.warn(`[gateway:rpc] ${method} failed (timeoutMs=${timeoutMs ?? 30000}): ${String(error)}`);
@@ -1408,7 +1533,12 @@ function registerGatewayHandlers(
         rpcParams.attachments = imageAttachments;
       }
 
-      logger.info(`[chat:sendWithMedia] Sending: message="${message.substring(0, 100)}", attachments=${imageAttachments.length}, fileRefs=${fileReferences.length}`);
+      logger.info('[chat:sendWithMedia] Sending', summarizeChatSendParams(rpcParams, {
+        imageAttachmentCount: imageAttachments.length,
+        fileReferenceCount: fileReferences.length,
+        mediaCount: params.media?.length ?? 0,
+      }));
+      void logOfficeToolDiagnostics(gatewayManager, 'chat:sendWithMedia', params.sessionKey);
 
       const result = await gatewayRpcBackpressure.run(
         'chat.send',
@@ -1416,7 +1546,10 @@ function registerGatewayHandlers(
         CHAT_SEND_RPC_TIMEOUT_MS,
         (rpcMethod, rpcParams2, rpcTimeoutMs) => gatewayManager.rpc(rpcMethod, rpcParams2, rpcTimeoutMs),
       );
-      logger.info(`[chat:sendWithMedia] RPC result: ${JSON.stringify(result)}`);
+      logger.info('[chat:sendWithMedia] RPC result', {
+        sessionKey: params.sessionKey,
+        runId: extractRunId(result) ?? 'none',
+      });
       return { success: true, result };
     } catch (error) {
       logger.error(`[chat:sendWithMedia] Error: ${String(error)}`);

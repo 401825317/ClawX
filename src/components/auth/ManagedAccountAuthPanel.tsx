@@ -29,6 +29,9 @@ interface ManagedAccountAuthPanelProps {
   onAuthenticated?: (status: ManagedAuthStatus) => void;
 }
 
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MAX_LENGTH = 20;
+
 export function ManagedAccountAuthPanel({
   className,
   successVisible = true,
@@ -176,6 +179,10 @@ export function ManagedAccountAuthPanel({
     }
     if (mode === 'register' && !isManagedUsernameValid(normalizedAccount)) {
       toast.error(t('auth.errors.invalid_username'));
+      return;
+    }
+    if (mode === 'register' && (password.length < PASSWORD_MIN_LENGTH || password.length > PASSWORD_MAX_LENGTH)) {
+      toast.error(t('auth.errors.password_policy'));
       return;
     }
     if (showActivationCode && !activationTicket && !activationCode.trim()) {

@@ -7,6 +7,9 @@
   "enabledByDefault": false,
   "contracts": {
     "tools": [
+      "create_pptx_file",
+      "create_docx_file",
+      "create_xlsx_file",
       "computer_screenshot",
       "computer_inspect_screen",
       "computer_clipboard_read",

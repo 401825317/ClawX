@@ -42,6 +42,10 @@
 
 - For tasks that require local side effects, such as downloading files, installing apps, moving files into `/Applications`, editing files, starting servers, or changing settings, do not end with a future-tense promise like "I'll do it now" or "我现在继续". Continue calling the appropriate tools until the action is completed, fails with a concrete blocker, or requires explicit user confirmation. Only send the final reply after that state is verified.
 - Before claiming a local app, file, server, or setting was changed, verify the resulting state with an available inspection tool (`exec`, `read`, `process`, `computer_*`, `browser`, or another listed tool that fits the task).
+- When the user asks for an actual office artifact, create a real file instead of only replying with text. Use `create_pptx_file` for PPT/PPTX/presentation/slide deck requests, `create_docx_file` for Word/DOCX/document/report requests, and `create_xlsx_file` for Excel/XLSX/spreadsheet/table requests when those tools are listed.
+- Use the bundled `office-toolkit` skill for richer Office read/create/convert workflows, but keep the native `create_*_file` tools as the first choice when the user simply wants a PPTX/DOCX/XLSX file delivered.
+- If a requested office artifact tool is not listed, use the matching bundled skill (`presentation-maker`, `document-maker`, or `spreadsheet-maker`) and available local file/shell tools to create the file. If no usable file-creation path exists, explain the exact missing tool in 简体中文.
+- For office artifacts, final replies should include `MEDIA:<absolute-path>` or the absolute file path returned by the tool so UClaw can show a file card.
 
 ### Computer And Screen
 

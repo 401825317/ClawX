@@ -25,12 +25,18 @@ requiredRules:
   - renderer-main-boundary
   - api-client-transport-policy
 expectedUserBehavior:
-  - Text-only video sends do not reuse old chat images implicitly and route as text-to-video.
-  - Explicitly uploaded, pasted, or selected image references in video mode route as image-to-video.
+  - Video sends are planned by a Main-owned intent router before selecting text-to-video, image-to-video, or edit-image-then-video behavior.
+  - Text-only video sends do not pass old chat images as direct `inputImages`; recent chat images may be sent only as `candidateImages` for the router.
+  - Video prompts that refer to previous/current/reference images let the router choose whether to use the latest candidate image.
+  - Prompts that ask to alter a referenced image before making a video run image edit first, then feed the edited local image into image-to-video.
+  - Explicitly uploaded, pasted, or selected image references in video mode are available to the router as direct `inputImages`.
   - Switching from image reference mode to video mode preserves the selected image reference for the next video send.
 acceptance:
   - ChatInput sends selected image references as video attachments when the user switches to video mode.
-  - Chat store only forwards explicit video attachments as `inputImages`; previous assistant images in history are not auto-attached for video sends.
+  - Chat store forwards explicit video attachments as `inputImages`; previous assistant images in history are forwarded as `candidateImages`, not direct `inputImages`.
+  - Main video chat-send calls the video route planner and stores its route decision on the queued video job.
+  - Low-confidence, failed, or unavailable route planning falls back to explicit-image image-to-video or no-image text-to-video without failing the user request.
+  - The edit-image-then-video route first generates an edited local image and then calls image-to-video with that edited image.
   - Main video generation routing selects `grok-image-video` when `inputImages` is empty and `grok-video-1.5` when at least one explicit image is present.
   - Direct runtime generation rejects `grok-video-1.5` without exactly one reference image before calling the backend.
 docs:

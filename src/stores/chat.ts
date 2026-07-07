@@ -4350,6 +4350,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const videoReferenceInputs = effectiveMode === 'video'
       ? explicitPendingImages
       : [];
+    const videoCandidateInputs = effectiveMode === 'video' && explicitPendingImages.length === 0
+      ? resolveImageModeReferenceInputs([], currentMessages)
+      : [];
     const visibleGenerationAttachments = (effectiveMode === 'image' || effectiveMode === 'video')
       ? explicitPendingImages
       : [];
@@ -4538,6 +4541,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               size: videoOptions?.size,
               durationSeconds: videoOptions?.durationSeconds,
               inputImages: videoReferenceInputs.map((file) => ({
+                fileName: file.fileName,
+                mimeType: file.mimeType,
+                filePath: file.stagedPath,
+              })),
+              candidateImages: videoCandidateInputs.map((file) => ({
                 fileName: file.fileName,
                 mimeType: file.mimeType,
                 filePath: file.stagedPath,

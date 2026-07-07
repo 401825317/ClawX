@@ -1,4 +1,11 @@
 import { defineToolPlugin } from 'openclaw/plugin-sdk/tool-plugin';
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, mkdir, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import JSZip from 'jszip';
 
 const PLUGIN_ID = 'uclaw-computer-use';
 const DEFAULT_HOST_API_ORIGIN = 'http://127.0.0.1:13210';
@@ -11,6 +18,9 @@ const LOCAL_ACTION_CONTEXT = [
   '- 用户要求改变本地状态时，不要用承诺、计划或下一步打算结束回复。',
   '- “我现在下载并安装”“我先提取链接，再下载安装”“接下来我会处理”这类未来时回复都不算完成。',
   '- 用户要求 PPT、表格、文档、PDF、图片等具体产物时，只有在产物路径已经创建并验证，或遇到具体阻塞点时才能结束。',
+  '- 用户要求生成 PPT/PPTX 时，优先调用 create_pptx_file 创建真实 .pptx 文件；不要只输出大纲或制作计划。',
+  '- 用户要求生成 Word/DOCX/文档/报告时，优先调用 create_docx_file 创建真实 .docx 文件；不要只输出正文。',
+  '- 用户要求生成 Excel/XLSX/表格时，优先调用 create_xlsx_file 创建真实 .xlsx 文件；不要只输出 Markdown 表格。',
   '- 继续使用可用工具，直到请求的本地动作完成并验证、失败且有具体阻塞点，或需要用户明确确认。',
   '- 最终回复必须报告已验证的结果或具体阻塞点，不要只报告准备做什么。',
 ].join('\n');
@@ -114,6 +124,437 @@ const BROWSER_TARGET_PROPERTIES = {
     description: 'Optional Electron BrowserWindow id returned by computer_window_list. Defaults to the main UClaw window.',
   },
 };
+const ARTIFACT_OUTPUT_PATH_PROPERTY = {
+  type: 'string',
+  description: 'Optional absolute output file path. If omitted, UClaw writes a non-overwriting file under the user Downloads/UClaw folder.',
+};
+const ARTIFACT_TITLE_PROPERTY = {
+  type: 'string',
+  description: 'Artifact title. Use the user requested title when available.',
+};
+const ARTIFACT_PARAGRAPH_ARRAY_SCHEMA = {
+  type: 'array',
+  items: { type: 'string' },
+  description: 'Plain text paragraphs or bullet items.',
+};
+const OFFICE_REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const PACKAGE_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const CONTENT_TYPES_NS = 'http://schemas.openxmlformats.org/package/2006/content-types';
+const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const SPREADSHEET_NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const ARTIFACT_MIME_TYPES = {
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function xml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function cleanText(value) {
+  return String(value ?? '').replace(/\s+/gu, ' ').trim();
+}
+
+function compactTimestamp(date = new Date()) {
+  return date.toISOString()
+    .replace(/\.\d{3}Z$/u, 'Z')
+    .replace(/[-:]/gu, '')
+    .replace(/[TZ]/gu, '-')
+    .replace(/-$/u, '');
+}
+
+function safeFileStem(value, fallback = 'uclaw-artifact') {
+  const stem = cleanText(value)
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, '-')
+    .replace(/\s+/gu, '-')
+    .replace(/-+/gu, '-')
+    .replace(/^-|-$/gu, '')
+    .slice(0, 80);
+  return stem || fallback;
+}
+
+function expandHomePath(filePath) {
+  const raw = cleanText(filePath);
+  if (!raw) return '';
+  if (raw === '~') return homedir();
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) {
+    return join(homedir(), raw.slice(2));
+  }
+  return raw;
+}
+
+async function exists(filePath) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveArtifactOutputPath(kind, title, outputPath) {
+  const ext = kind.startsWith('.') ? kind : `.${kind}`;
+  let resolvedPath = expandHomePath(outputPath);
+  if (resolvedPath) {
+    if (!isAbsolute(resolvedPath)) {
+      throw new Error(`outputPath must be absolute: ${outputPath}`);
+    }
+    if (extname(resolvedPath).toLowerCase() !== ext.toLowerCase()) {
+      resolvedPath = `${resolvedPath}${ext}`;
+    }
+  } else {
+    const dir = join(homedir(), 'Downloads', 'UClaw');
+    const stem = safeFileStem(title, `uclaw-${kind}`);
+    resolvedPath = join(dir, `${stem}-${compactTimestamp()}-${randomUUID().slice(0, 8)}${ext}`);
+  }
+
+  await mkdir(dirname(resolvedPath), { recursive: true });
+  if (await exists(resolvedPath)) {
+    const base = resolvedPath.slice(0, -ext.length);
+    resolvedPath = `${base}-${randomUUID().slice(0, 8)}${ext}`;
+  }
+  return resolvedPath;
+}
+
+async function artifactResult(kind, filePath, extra = {}) {
+  const info = await stat(filePath);
+  const extension = kind.replace(/^\./u, '').toLowerCase();
+  return {
+    ok: true,
+    kind: extension,
+    filePath,
+    media: `MEDIA:${filePath}`,
+    mimeType: ARTIFACT_MIME_TYPES[extension] || 'application/octet-stream',
+    fileSize: info.size,
+    ...extra,
+  };
+}
+
+function packageRelsXml(target) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PACKAGE_REL_NS}">
+  <Relationship Id="rId1" Type="${OFFICE_REL_NS}/officeDocument" Target="${xml(target)}"/>
+  <Relationship Id="rId2" Type="${PACKAGE_REL_NS}/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="${OFFICE_REL_NS}/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`;
+}
+
+function corePropertiesXml(title) {
+  const now = new Date().toISOString();
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>${xml(title || 'UClaw Artifact')}</dc:title>
+  <dc:creator>UClaw</dc:creator>
+  <cp:lastModifiedBy>UClaw</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>
+</cp:coreProperties>`;
+}
+
+function appPropertiesXml(application, extra = '') {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>${xml(application)}</Application>
+  <DocSecurity>0</DocSecurity>
+  <ScaleCrop>false</ScaleCrop>
+  <LinksUpToDate>false</LinksUpToDate>
+  <SharedDoc>false</SharedDoc>
+  <HyperlinksChanged>false</HyperlinksChanged>
+${extra}
+  <AppVersion>1.0</AppVersion>
+</Properties>`;
+}
+
+function normalizeDocSections(params) {
+  const sections = Array.isArray(params?.sections) ? params.sections : [];
+  if (sections.length > 0) {
+    return sections.map((section, index) => ({
+      heading: cleanText(section?.heading || section?.title || `第 ${index + 1} 节`),
+      paragraphs: Array.isArray(section?.paragraphs)
+        ? section.paragraphs.map(cleanText).filter(Boolean)
+        : [],
+      bullets: Array.isArray(section?.bullets)
+        ? section.bullets.map(cleanText).filter(Boolean)
+        : [],
+    })).filter((section) => section.heading || section.paragraphs.length > 0 || section.bullets.length > 0);
+  }
+
+  const paragraphs = Array.isArray(params?.paragraphs)
+    ? params.paragraphs.map(cleanText).filter(Boolean)
+    : [];
+  const bullets = Array.isArray(params?.bullets)
+    ? params.bullets.map(cleanText).filter(Boolean)
+    : [];
+  return [{
+    heading: cleanText(params?.heading || '正文'),
+    paragraphs: paragraphs.length > 0 ? paragraphs : [cleanText(params?.body || '请根据需求补充文档内容。')],
+    bullets,
+  }];
+}
+
+function wordParagraph(text, style) {
+  const styleXml = style ? `<w:pPr><w:pStyle w:val="${xml(style)}"/></w:pPr>` : '';
+  return `<w:p>${styleXml}<w:r><w:t xml:space="preserve">${xml(text)}</w:t></w:r></w:p>`;
+}
+
+function wordDocumentXml(title, sections) {
+  const body = [
+    wordParagraph(title || '文档', 'Title'),
+    ...sections.flatMap((section) => [
+      section.heading ? wordParagraph(section.heading, 'Heading1') : '',
+      ...section.paragraphs.map((paragraph) => wordParagraph(paragraph)),
+      ...section.bullets.map((bullet) => wordParagraph(`• ${bullet}`)),
+    ]).filter(Boolean),
+  ].join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="${WORD_NS}">
+  <w:body>
+${body}
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>`;
+}
+
+function wordStylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="${WORD_NS}">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/><w:rFonts w:ascii="Arial" w:eastAsia="Microsoft YaHei" w:hAnsi="Arial"/></w:rPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title"/>
+    <w:basedOn w:val="Normal"/>
+    <w:rPr><w:b/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr>
+    <w:pPr><w:spacing w:after="360"/></w:pPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Heading1">
+    <w:name w:val="heading 1"/>
+    <w:basedOn w:val="Normal"/>
+    <w:rPr><w:b/><w:sz w:val="30"/><w:szCs w:val="30"/></w:rPr>
+    <w:pPr><w:spacing w:before="280" w:after="160"/></w:pPr>
+  </w:style>
+</w:styles>`;
+}
+
+async function createDocxArtifact(params = {}) {
+  const title = cleanText(params.title) || 'UClaw 文档';
+  const outputPath = await resolveArtifactOutputPath('docx', title, params.outputPath);
+  const sections = normalizeDocSections(params);
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="${CONTENT_TYPES_NS}">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`);
+  zip.file('_rels/.rels', packageRelsXml('word/document.xml'));
+  zip.file('word/_rels/document.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PACKAGE_REL_NS}"></Relationships>`);
+  zip.file('word/document.xml', wordDocumentXml(title, sections));
+  zip.file('word/styles.xml', wordStylesXml());
+  zip.file('docProps/core.xml', corePropertiesXml(title));
+  zip.file('docProps/app.xml', appPropertiesXml('UClaw Document Maker'));
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  await writeFile(outputPath, buffer);
+  console.log(`[uclaw-artifact] create_docx_file wrote ${outputPath} (${buffer.length} bytes)`);
+  return artifactResult('docx', outputPath, { title, sections: sections.length });
+}
+
+function sanitizeSheetName(name, index) {
+  const cleaned = cleanText(name || `Sheet${index + 1}`)
+    .replace(/[\[\]:*?/\\]/gu, ' ')
+    .slice(0, 31)
+    .trim();
+  return cleaned || `Sheet${index + 1}`;
+}
+
+function normalizeSheets(params = {}) {
+  const rawSheets = Array.isArray(params.sheets) && params.sheets.length > 0
+    ? params.sheets
+    : [{ name: cleanText(params.sheetName || 'Sheet1'), rows: params.rows }];
+  return rawSheets.map((sheet, index) => {
+    const rows = Array.isArray(sheet?.rows) ? sheet.rows : [];
+    return {
+      name: sanitizeSheetName(sheet?.name, index),
+      rows: rows.map((row) => (Array.isArray(row) ? row : [row])),
+    };
+  }).filter((sheet) => sheet.rows.length > 0);
+}
+
+function columnName(index) {
+  let value = index + 1;
+  let name = '';
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+  return name;
+}
+
+function worksheetXml(rows) {
+  const rowXml = rows.map((row, rowIndex) => {
+    const cells = row.map((cell, cellIndex) => {
+      const ref = `${columnName(cellIndex)}${rowIndex + 1}`;
+      if (typeof cell === 'number' && Number.isFinite(cell)) {
+        return `<c r="${ref}"><v>${cell}</v></c>`;
+      }
+      if (typeof cell === 'boolean') {
+        return `<c r="${ref}" t="b"><v>${cell ? 1 : 0}</v></c>`;
+      }
+      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xml(cell ?? '')}</t></is></c>`;
+    }).join('');
+    return `<row r="${rowIndex + 1}">${cells}</row>`;
+  }).join('\n');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="${SPREADSHEET_NS}" xmlns:r="${OFFICE_REL_NS}">
+  <sheetData>
+${rowXml}
+  </sheetData>
+</worksheet>`;
+}
+
+function workbookXml(sheets) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="${SPREADSHEET_NS}" xmlns:r="${OFFICE_REL_NS}">
+  <sheets>
+${sheets.map((sheet, index) => `    <sheet name="${xml(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('\n')}
+  </sheets>
+</workbook>`;
+}
+
+function workbookRelsXml(sheets) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="${PACKAGE_REL_NS}">
+${sheets.map((_, index) => `  <Relationship Id="rId${index + 1}" Type="${OFFICE_REL_NS}/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join('\n')}
+  <Relationship Id="rId${sheets.length + 1}" Type="${OFFICE_REL_NS}/styles" Target="styles.xml"/>
+</Relationships>`;
+}
+
+async function createXlsxArtifact(params = {}) {
+  const title = cleanText(params.title) || 'UClaw 表格';
+  const sheets = normalizeSheets(params);
+  if (sheets.length === 0) {
+    throw new Error('create_xlsx_file requires at least one non-empty rows array');
+  }
+  const outputPath = await resolveArtifactOutputPath('xlsx', title, params.outputPath);
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="${CONTENT_TYPES_NS}">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+${sheets.map((_, index) => `  <Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('\n')}
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`);
+  zip.file('_rels/.rels', packageRelsXml('xl/workbook.xml'));
+  zip.file('xl/workbook.xml', workbookXml(sheets));
+  zip.file('xl/_rels/workbook.xml.rels', workbookRelsXml(sheets));
+  zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="${SPREADSHEET_NS}"><fonts count="1"><font><sz val="11"/><name val="Arial"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
+  sheets.forEach((sheet, index) => {
+    zip.file(`xl/worksheets/sheet${index + 1}.xml`, worksheetXml(sheet.rows));
+  });
+  zip.file('docProps/core.xml', corePropertiesXml(title));
+  zip.file('docProps/app.xml', appPropertiesXml('UClaw Spreadsheet Maker', `  <Worksheets>${sheets.length}</Worksheets>\n`));
+  const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  await writeFile(outputPath, buffer);
+  console.log(`[uclaw-artifact] create_xlsx_file wrote ${outputPath} (${buffer.length} bytes, sheets=${sheets.length})`);
+  return artifactResult('xlsx', outputPath, { title, sheets: sheets.map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })) });
+}
+
+function normalizeDeck(params = {}) {
+  const title = cleanText(params.title) || 'UClaw 演示文稿';
+  const slides = Array.isArray(params.slides) ? params.slides : [];
+  return {
+    title,
+    subtitle: cleanText(params.subtitle),
+    footer: cleanText(params.footer || 'UClaw'),
+    slides: slides.map((slide, index) => ({
+      title: cleanText(slide?.title || `第 ${index + 1} 页`),
+      subtitle: cleanText(slide?.subtitle),
+      bullets: Array.isArray(slide?.bullets)
+        ? slide.bullets.map(cleanText).filter(Boolean)
+        : (cleanText(slide?.body) ? [cleanText(slide.body)] : []),
+    })).filter((slide) => slide.title || slide.bullets.length > 0),
+  };
+}
+
+async function findPptxGeneratorScript() {
+  const candidates = [
+    join(process.cwd(), 'skills', 'presentation-maker', 'scripts', 'make-pptx.mjs'),
+    join(__dirname, '..', '..', 'openclaw-skill-shims', 'presentation-maker', 'scripts', 'make-pptx.mjs'),
+    join(__dirname, 'scripts', 'make-pptx.mjs'),
+  ].map((candidate) => resolve(candidate));
+  for (const candidate of candidates) {
+    if (await exists(candidate)) return candidate;
+  }
+  throw new Error(`presentation-maker generator not found. Checked: ${candidates.join(', ')}`);
+}
+
+function spawnNode(script, args, options = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      cwd: options.cwd || dirname(script),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      rejectPromise(new Error(`Timed out running ${script}`));
+    }, options.timeoutMs || 60_000);
+    child.stdout.on('data', (chunk) => { stdout += String(chunk); });
+    child.stderr.on('data', (chunk) => { stderr += String(chunk); });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolvePromise({ stdout, stderr });
+      } else {
+        rejectPromise(new Error(`Generator exited with code ${code}: ${stderr || stdout}`));
+      }
+    });
+  });
+}
+
+async function createPptxArtifact(params = {}) {
+  const deck = normalizeDeck(params);
+  if (deck.slides.length === 0) {
+    deck.slides.push({ title: '核心内容', bullets: ['请根据需求补充要点。'] });
+  }
+  const outputPath = await resolveArtifactOutputPath('pptx', deck.title, params.outputPath);
+  const script = await findPptxGeneratorScript();
+  const tempDir = join(tmpdir(), 'uclaw-artifacts');
+  await mkdir(tempDir, { recursive: true });
+  const inputPath = join(tempDir, `deck-${compactTimestamp()}-${randomUUID().slice(0, 8)}.json`);
+  await writeFile(inputPath, JSON.stringify(deck, null, 2), 'utf8');
+  await spawnNode(script, ['--input', inputPath, '--out', outputPath], { timeoutMs: 60_000 });
+  console.log(`[uclaw-artifact] create_pptx_file wrote ${outputPath} (slides=${deck.slides.length}, generator=${script})`);
+  return artifactResult('pptx', outputPath, { title: deck.title, slides: deck.slides.length });
+}
 
 function resolveHostApiOrigin() {
   return (process.env.CLAWX_HOST_API_ORIGIN || DEFAULT_HOST_API_ORIGIN).replace(/\/+$/u, '');
@@ -427,6 +868,144 @@ export const pluginEntry = defineToolPlugin({
   name: 'UClaw Computer Use',
   description: 'Native UClaw computer-use tools for desktop observation and action: screenshots, OCR-ready inspection, Windows UI Automation, system window control, clipboard, mouse, keyboard, file dialogs, and UClaw window DOM inspection. Use these for desktop/Chrome/window/screenshot/click/type tasks when computer_* tools are available.',
   tools: (tool) => [
+    tool({
+      name: 'create_pptx_file',
+      label: 'Create PowerPoint file',
+      description: 'Create a real local .pptx presentation file from structured title/subtitle/slides. Use this whenever the user asks to make, generate, export, or deliver a PPT/PPTX/presentation/slide deck. Do not answer with only an outline when a PPT file is requested.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title', 'slides'],
+        properties: {
+          title: ARTIFACT_TITLE_PROPERTY,
+          subtitle: {
+            type: 'string',
+            description: 'Optional presentation subtitle.',
+          },
+          footer: {
+            type: 'string',
+            description: 'Optional footer text. Defaults to UClaw.',
+          },
+          slides: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['title'],
+              properties: {
+                title: { type: 'string', description: 'Slide title.' },
+                subtitle: { type: 'string', description: 'Optional slide subtitle.' },
+                bullets: ARTIFACT_PARAGRAPH_ARRAY_SCHEMA,
+                body: { type: 'string', description: 'Optional paragraph body when bullets are not suitable.' },
+              },
+            },
+            description: 'Slides to create. Prefer concise Chinese slide titles and 3-7 bullet points per slide unless the user asks otherwise.',
+          },
+          outputPath: ARTIFACT_OUTPUT_PATH_PROPERTY,
+        },
+      },
+      execute: async (params) => createPptxArtifact(params || {}),
+    }),
+    tool({
+      name: 'create_docx_file',
+      label: 'Create Word document',
+      description: 'Create a real local .docx Word document from structured title, paragraphs, bullets, and sections. Use this whenever the user asks to make, generate, export, or deliver a Word/DOCX/document/report file. Do not answer with only text when a document file is requested.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title'],
+        properties: {
+          title: ARTIFACT_TITLE_PROPERTY,
+          heading: {
+            type: 'string',
+            description: 'Optional first section heading when sections are not provided.',
+          },
+          body: {
+            type: 'string',
+            description: 'Optional body text when paragraphs are not provided.',
+          },
+          paragraphs: ARTIFACT_PARAGRAPH_ARRAY_SCHEMA,
+          bullets: ARTIFACT_PARAGRAPH_ARRAY_SCHEMA,
+          sections: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                heading: { type: 'string', description: 'Section heading.' },
+                title: { type: 'string', description: 'Alias for heading.' },
+                paragraphs: ARTIFACT_PARAGRAPH_ARRAY_SCHEMA,
+                bullets: ARTIFACT_PARAGRAPH_ARRAY_SCHEMA,
+              },
+            },
+            description: 'Optional document sections. Prefer this for multi-section reports.',
+          },
+          outputPath: ARTIFACT_OUTPUT_PATH_PROPERTY,
+        },
+      },
+      execute: async (params) => createDocxArtifact(params || {}),
+    }),
+    tool({
+      name: 'create_xlsx_file',
+      label: 'Create Excel spreadsheet',
+      description: 'Create a real local .xlsx spreadsheet file from rows or multiple sheets. Use this whenever the user asks to make, generate, export, or deliver an Excel/XLSX/spreadsheet/table file. Do not answer with only a Markdown table when a spreadsheet file is requested.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['title'],
+        properties: {
+          title: ARTIFACT_TITLE_PROPERTY,
+          sheetName: {
+            type: 'string',
+            description: 'Sheet name when rows are provided directly.',
+          },
+          rows: {
+            type: 'array',
+            items: {
+              type: 'array',
+              items: {
+                anyOf: [
+                  { type: 'string' },
+                  { type: 'number' },
+                  { type: 'boolean' },
+                  { type: 'null' },
+                ],
+              },
+            },
+            description: 'Rows for a single-sheet spreadsheet. First row should usually be headers.',
+          },
+          sheets: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['rows'],
+              properties: {
+                name: { type: 'string', description: 'Worksheet name.' },
+                rows: {
+                  type: 'array',
+                  items: {
+                    type: 'array',
+                    items: {
+                      anyOf: [
+                        { type: 'string' },
+                        { type: 'number' },
+                        { type: 'boolean' },
+                        { type: 'null' },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+            description: 'Optional multiple worksheets. Use this instead of rows for multi-sheet workbooks.',
+          },
+          outputPath: ARTIFACT_OUTPUT_PATH_PROPERTY,
+        },
+      },
+      execute: async (params) => createXlsxArtifact(params || {}),
+    }),
     tool({
       name: 'computer_screenshot',
       label: 'Capture desktop screenshot',

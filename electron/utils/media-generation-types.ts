@@ -6,6 +6,28 @@ export type MediaGenerationInputImageRef = {
   filePath: string;
 };
 
+export type VideoGenerationRouteMode =
+  | 'text_to_video'
+  | 'image_to_video'
+  | 'edit_image_then_video';
+
+export type VideoGenerationImageSource =
+  | 'explicit'
+  | 'candidate'
+  | 'none';
+
+export type VideoGenerationRouteDecision = {
+  mode: VideoGenerationRouteMode;
+  confidence?: number;
+  reason?: string;
+  source?: 'router' | 'fallback';
+  selectedImageSource?: VideoGenerationImageSource;
+  selectedImageIndex?: number;
+  videoPrompt?: string;
+  imageEditPrompt?: string;
+  sourceImages?: MediaGenerationInputImageRef[];
+};
+
 export type ImageGenerationJobPayload = {
   kind: 'image';
   sessionKey: string;
@@ -20,9 +42,11 @@ export type VideoGenerationJobPayload = {
   kind: 'video';
   sessionKey: string;
   prompt: string;
+  originalPrompt?: string;
   size?: string;
   durationSeconds?: number;
   inputImages?: MediaGenerationInputImageRef[];
+  route?: VideoGenerationRouteDecision;
 };
 
 export type MediaGenerationJobPayload = ImageGenerationJobPayload | VideoGenerationJobPayload;

@@ -193,10 +193,12 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
 
   await appendImageGenerationConversation({
     sessionKey: job.payload.sessionKey,
-    prompt: job.payload.prompt,
+    prompt: job.payload.originalPrompt || job.payload.prompt,
     outputPaths,
     inputPaths,
-    summaryText: inputPaths.length > 0 ? '已基于参考图生成视频。' : '视频已生成。',
+    summaryText: job.payload.route?.mode === 'edit_image_then_video'
+      ? '已先修改参考图并生成视频。'
+      : (inputPaths.length > 0 ? '已基于参考图生成视频。' : '视频已生成。'),
   });
 }
 
@@ -365,6 +367,9 @@ export async function prepareMediaGenerationJob(payload: MediaGenerationJobPaylo
   if (payload.kind === 'image') {
     await ensureManagedOpenAiImageRelay();
     return;
+  }
+  if (payload.route?.mode === 'edit_image_then_video') {
+    await ensureManagedOpenAiImageRelay();
   }
   await ensureManagedOpenAiVideoRelay();
 }

@@ -63,6 +63,9 @@ vi.mock('react-i18next', () => ({
       if (key === 'auth.errors.invalid_username') {
         return '用户名格式不正确，请使用字母、数字、下划线或短横线。';
       }
+      if (key === 'auth.errors.password_policy') {
+        return '密码长度需为 8-20 位。';
+      }
       return String(options?.defaultValue ?? key);
     },
   }),
@@ -92,6 +95,24 @@ describe('ManagedAccountAuthPanel username validation', () => {
     fireEvent.click(screen.getByRole('button', { name: /auth\.actions\.registerAndActivate/ }));
 
     expect(toast.error).toHaveBeenCalledWith('用户名格式不正确，请使用字母、数字、下划线或短横线。');
+    expect(hostApiFetch).not.toHaveBeenCalledWith(
+      '/api/junfeiai/register',
+      expect.anything(),
+    );
+  });
+
+  it('rejects short passwords before calling the register API', () => {
+    render(<ManagedAccountAuthPanel defaultMode="register" />);
+
+    fireEvent.change(screen.getByPlaceholderText('auth.placeholders.email'), {
+      target: { value: 'testuser' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('auth.placeholders.password'), {
+      target: { value: '1234' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /auth\.actions\.registerAndActivate/ }));
+
+    expect(toast.error).toHaveBeenCalledWith('密码长度需为 8-20 位。');
     expect(hostApiFetch).not.toHaveBeenCalledWith(
       '/api/junfeiai/register',
       expect.anything(),

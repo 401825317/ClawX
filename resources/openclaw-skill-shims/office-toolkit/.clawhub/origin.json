@@ -1,0 +1,10 @@
+{
+  "provider": "skillhub",
+  "slug": "office-toolkit-ela",
+  "installedVersion": "1.4.5",
+  "registry": "https://api.skillhub.cn",
+  "source": "https://skillhub.cn/skills/office-toolkit-ela",
+  "displayName": "Office Toolkit",
+  "displayDescription": "Office 文件读写创建转换工具箱。支持 PDF/DOCX/PPTX/XLSX 的读取、创建和格式转换，适合离线批处理、报表生成、文档读取和格式转换。",
+  "defaultDescription": "Offline Office toolkit for reading, creating, and converting PDF, DOCX, PPTX, XLSX, CSV, and Markdown files."
+}
