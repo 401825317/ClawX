@@ -117,6 +117,44 @@ describe('media generation jobs', () => {
     expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
   });
 
+  it('persists the original user prompt without leaking planner prompts or auto-selected reference images', async () => {
+    const { enqueueMediaGenerationJob } = await import('@electron/utils/media-generation-jobs');
+    const userTimestampMs = Date.parse('2026-03-11T12:00:00Z');
+    const queued = enqueueMediaGenerationJob({
+      kind: 'image',
+      sessionKey: 'agent:main:main',
+      prompt: 'Internal planner prompt: turn the single dog in the reference image into two dogs.',
+      originalPrompt: '前面那1个狗狗的图片，能不能变成2条狗？',
+      inputImages: [{
+        fileName: 'previous-dog.png',
+        mimeType: 'image/png',
+        filePath: '/tmp/previous-dog.png',
+      }],
+      userInputImages: [],
+      userMessageTimestampMs: userTimestampMs,
+    });
+
+    const completed = await waitForJobStatus(queued.id, 'succeeded');
+    expect(completed).toEqual(expect.objectContaining({ status: 'succeeded' }));
+
+    const sessionsJsonPath = join(testOpenClawConfigDir, 'agents', 'main', 'sessions', 'sessions.json');
+    const sessionsJson = JSON.parse(readFileSync(sessionsJsonPath, 'utf8')) as Record<string, Record<string, unknown>>;
+    const transcriptPath = String(sessionsJson['agent:main:main']?.sessionFile);
+    const transcript = readFileSync(transcriptPath, 'utf8');
+    const lines = transcript.trim().split(/\r?\n/).map((line) => JSON.parse(line)) as Array<{
+      type: string;
+      message?: { role?: string; content?: string; timestamp?: number };
+    }>;
+    const userMessage = lines.find((line) => line.message?.role === 'user')?.message;
+
+    expect(userMessage?.content).toBe('前面那1个狗狗的图片，能不能变成2条狗？');
+    expect(userMessage?.timestamp).toBe(userTimestampMs);
+    expect(transcript).not.toContain('Internal planner prompt');
+    expect(transcript).not.toContain('/tmp/previous-dog.png');
+    expect(transcript).toContain('图片已修改。');
+    expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
+  });
+
   it('includes bounded worker stdout and stderr when the worker exits before completion', async () => {
     let child: MockUtilityProcess | null = null;
     forkMock.mockImplementationOnce(() => {

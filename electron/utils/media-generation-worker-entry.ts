@@ -11,6 +11,10 @@ import type {
   MediaGenerationWorkerRequest,
   MediaGenerationWorkerResponse,
 } from './media-generation-types';
+import {
+  countVideoPromptCharacters,
+  getVideoPromptLengthError,
+} from './video-generation-prompt-limits';
 
 const MAX_WORKER_ENTRY_ERROR_CHARS = 4096;
 
@@ -123,10 +127,16 @@ function getFirstOutputImageRef(result: unknown): MediaGenerationInputImageRef |
 
 async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unknown> {
   if (payload.route?.mode !== 'edit_image_then_video') {
+    const promptLengthError = getVideoPromptLengthError(payload.prompt);
+    if (promptLengthError) {
+      throw new Error(promptLengthError);
+    }
+
     const startedAt = Date.now();
     logWorkerEvent('video_start', {
       sessionKey: payload.sessionKey,
       mode: payload.route?.mode ?? 'direct_video',
+      promptChars: countVideoPromptCharacters(payload.prompt),
       size: payload.size,
       durationSeconds: payload.durationSeconds,
       inputImages: summarizeInputImagesForLog(payload.inputImages),
@@ -174,11 +184,16 @@ async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unkn
     || payload.originalPrompt?.trim()
     || payload.prompt;
   const videoPrompt = payload.route.videoPrompt?.trim() || payload.prompt;
+  const promptLengthError = getVideoPromptLengthError(videoPrompt);
+  if (promptLengthError) {
+    throw new Error(promptLengthError);
+  }
+
   const imageStartedAt = Date.now();
   logWorkerEvent('pipeline_image_edit_start', {
     sessionKey: payload.sessionKey,
     sourceImage,
-    promptChars: imageEditPrompt.length,
+    promptChars: countVideoPromptCharacters(imageEditPrompt),
   });
   const imageResult = await generateImageForChatSession({
     sessionKey: payload.sessionKey,
@@ -199,7 +214,7 @@ async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unkn
   logWorkerEvent('pipeline_video_start', {
     sessionKey: payload.sessionKey,
     editedImage,
-    promptChars: videoPrompt.length,
+    promptChars: countVideoPromptCharacters(videoPrompt),
     size: payload.size,
     durationSeconds: payload.durationSeconds,
   });

@@ -185,6 +185,7 @@ export async function appendImageGenerationConversation(params: {
   outputPaths: string[];
   inputPaths?: string[];
   summaryText?: string;
+  userTimestampMs?: number;
 }): Promise<void> {
   const sessionKey = params.sessionKey.trim();
   const prompt = params.prompt.trim();
@@ -216,6 +217,10 @@ export async function appendImageGenerationConversation(params: {
 
   const priorMessageId = await readLastTranscriptMessageId(transcriptPath);
   const nowMs = Date.now();
+  const userTimestampMs = typeof params.userTimestampMs === 'number' && Number.isFinite(params.userTimestampMs)
+    ? Math.floor(params.userTimestampMs)
+    : nowMs;
+  const assistantTimestampMs = Math.max(nowMs, userTimestampMs + 1);
   const userMessageId = randomUUID();
   const assistantMessageId = randomUUID();
   const userText = buildUserText(prompt, inputPaths);
@@ -227,7 +232,7 @@ export async function appendImageGenerationConversation(params: {
       parentId: priorMessageId,
       role: 'user',
       content: userText,
-      timestampMs: nowMs,
+      timestampMs: userTimestampMs,
       idempotencySuffix: 'user',
     }),
     buildMessageEntry({
@@ -235,7 +240,7 @@ export async function appendImageGenerationConversation(params: {
       parentId: userMessageId,
       role: 'assistant',
       content: assistantText,
-      timestampMs: nowMs + 1,
+      timestampMs: assistantTimestampMs,
       idempotencySuffix: 'assistant',
     }),
   ].join('\n');

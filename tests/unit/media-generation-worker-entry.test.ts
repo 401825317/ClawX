@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaGenerationWorkerRequest } from '@electron/utils/media-generation-types';
+import { MAX_VIDEO_GENERATION_PROMPT_CHARS } from '@electron/utils/video-generation-prompt-limits';
 
 const generateImageForChatSessionMock = vi.fn();
 const generateVideoForChatSessionMock = vi.fn();
@@ -137,6 +138,41 @@ describe('media generation worker entry', () => {
     expect(response.error).toContain('code: upstream_bad_gateway');
     expect(response.error).toContain('error.message: Upstream access forbidden');
     expect(response.error?.length).toBeLessThanOrEqual(4200);
+  });
+
+  it('rejects over-limit video prompts before calling the video runtime', async () => {
+    let onMessage: WorkerMessageListener | null = null;
+    const parentPort: MockParentPort = {
+      on: vi.fn((event: string, listener: (messageEvent: unknown) => void) => {
+        if (event === 'message') {
+          onMessage = listener;
+        }
+      }),
+      postMessage: vi.fn(),
+    };
+    setMockParentPort(parentPort);
+
+    await import('@electron/utils/media-generation-worker-entry');
+    onMessage?.({
+      data: {
+        type: 'run',
+        jobId: 'job-video-long-prompt',
+        payload: {
+          kind: 'video',
+          sessionKey: 'agent:main:main',
+          prompt: '画'.repeat(MAX_VIDEO_GENERATION_PROMPT_CHARS + 1),
+        },
+      } satisfies MediaGenerationWorkerRequest,
+    });
+    await flushMicrotasks();
+
+    expect(generateVideoForChatSessionMock).not.toHaveBeenCalled();
+    expect(parentPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'result',
+      jobId: 'job-video-long-prompt',
+      success: false,
+      error: expect.stringContaining('Video prompt is too long'),
+    }));
   });
 
   it('runs image edit before video for edit-image-then-video payloads', async () => {

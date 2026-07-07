@@ -31,11 +31,14 @@ export type VideoGenerationRouteDecision = {
 export type ImageGenerationJobPayload = {
   kind: 'image';
   sessionKey: string;
+  originalPrompt?: string;
   prompt: string;
   model?: string;
   size?: string;
   quality?: 'low' | 'medium' | 'high';
   inputImages?: MediaGenerationInputImageRef[];
+  userInputImages?: MediaGenerationInputImageRef[];
+  userMessageTimestampMs?: number;
 };
 
 export type VideoGenerationJobPayload = {
@@ -46,6 +49,8 @@ export type VideoGenerationJobPayload = {
   size?: string;
   durationSeconds?: number;
   inputImages?: MediaGenerationInputImageRef[];
+  userInputImages?: MediaGenerationInputImageRef[];
+  userMessageTimestampMs?: number;
   route?: VideoGenerationRouteDecision;
 };
 

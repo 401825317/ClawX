@@ -149,6 +149,48 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
     }));
   });
 
+  it('keeps original user prompt and visible user images separate from model inputs', async () => {
+    parseJsonBodyMock.mockResolvedValueOnce({
+      sessionKey: 'agent:main:main',
+      originalPrompt: '前面那1个狗狗的图片，能不能变成2条狗？',
+      prompt: 'Internal planner prompt: turn one dog into two dogs.',
+      inputImages: [
+        {
+          fileName: 'previous-dog.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/previous-dog.png',
+        },
+      ],
+      userInputImages: [],
+      userMessageTimestampMs: 1_773_229_600_000,
+    });
+
+    const { handleMediaRoutes } = await import('@electron/api/routes/media');
+    const handled = await handleMediaRoutes(
+      makeReq(),
+      makeRes(),
+      new URL('http://127.0.0.1:13210/api/media/image-generation/chat-send'),
+      {} as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'image',
+      sessionKey: 'agent:main:main',
+      prompt: 'Internal planner prompt: turn one dog into two dogs.',
+      originalPrompt: '前面那1个狗狗的图片，能不能变成2条狗？',
+      inputImages: [
+        {
+          fileName: 'previous-dog.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/previous-dog.png',
+        },
+      ],
+      userInputImages: [],
+      userMessageTimestampMs: 1_773_229_600_000,
+    }));
+  });
+
   it('returns queued job status by id', async () => {
     getMediaGenerationJobMock.mockReturnValueOnce({
       id: 'job-image-1',

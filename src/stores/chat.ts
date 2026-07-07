@@ -4649,6 +4649,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
+              originalPrompt: trimmed,
               prompt: mediaPlan.prompt?.trim() || trimmed,
               model: imageOptions?.model,
               size: imageOptions?.size,
@@ -4658,6 +4659,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mimeType: file.mimeType,
                 filePath: file.stagedPath,
               })),
+              userInputImages: explicitPendingImages.map((file) => ({
+                fileName: file.fileName,
+                mimeType: file.mimeType,
+                filePath: file.stagedPath,
+              })),
+              userMessageTimestampMs: nowMs,
             }),
           },
         );
@@ -4708,6 +4715,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
+              originalPrompt: trimmed,
               prompt: mediaPlan.prompt?.trim() || trimmed,
               size: videoOptions?.size,
               durationSeconds: videoOptions?.durationSeconds,
@@ -4716,6 +4724,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 mimeType: file.mimeType,
                 filePath: file.stagedPath,
               })),
+              userInputImages: explicitPendingImages.map((file) => ({
+                fileName: file.fileName,
+                mimeType: file.mimeType,
+                filePath: file.stagedPath,
+              })),
+              userMessageTimestampMs: nowMs,
               candidateImages: videoCandidateInputs.map((file) => ({
                 fileName: file.fileName,
                 mimeType: file.mimeType,

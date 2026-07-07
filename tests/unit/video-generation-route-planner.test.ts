@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MAX_VIDEO_GENERATION_PROMPT_CHARS } from '@electron/utils/video-generation-prompt-limits';
 
 const getProviderSecretMock = vi.fn();
 const getProviderAccountMock = vi.fn();
@@ -83,6 +84,10 @@ describe('planVideoGenerationRoute', () => {
           'X-Test': '1',
         }),
       }),
+    );
+    const requestBody = JSON.parse(proxyAwareFetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(requestBody.messages[0].content).toContain(
+      `no more than ${MAX_VIDEO_GENERATION_PROMPT_CHARS} Unicode characters`,
     );
     expect(plan).toEqual(expect.objectContaining({
       mode: 'edit_image_then_video',

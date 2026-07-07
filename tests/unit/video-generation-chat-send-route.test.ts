@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { MAX_VIDEO_GENERATION_PROMPT_CHARS } from '@electron/utils/video-generation-prompt-limits';
 
 const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
@@ -262,5 +263,43 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
         imageEditPrompt: '把参考图改成蓝色调。',
       }),
     }));
+  });
+
+  it('rejects final video prompts that exceed the local xAI safety limit before enqueueing', async () => {
+    const longVideoPrompt = '镜'.repeat(MAX_VIDEO_GENERATION_PROMPT_CHARS + 1);
+    planVideoGenerationRouteMock.mockResolvedValueOnce({
+      mode: 'text_to_video',
+      source: 'router',
+      confidence: 0.98,
+      selectedImageSource: 'none',
+      videoPrompt: longVideoPrompt,
+    });
+    parseJsonBodyMock.mockResolvedValueOnce({
+      sessionKey: 'agent:main:main',
+      prompt: '生成一段短视频',
+      durationSeconds: 6,
+    });
+
+    const { handleMediaRoutes } = await import('@electron/api/routes/media');
+    const handled = await handleMediaRoutes(
+      makeReq(),
+      makeRes(),
+      new URL('http://127.0.0.1:13210/api/media/video-generation/chat-send'),
+      {} as never,
+    );
+
+    expect(handled).toBe(true);
+    expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
+    expect(enqueueMediaGenerationJobMock).not.toHaveBeenCalled();
+    expect(sendJsonMock).toHaveBeenCalledWith(
+      expect.anything(),
+      400,
+      expect.objectContaining({
+        success: false,
+        error: expect.stringContaining('Video prompt is too long'),
+        promptChars: MAX_VIDEO_GENERATION_PROMPT_CHARS + 1,
+        maxPromptChars: MAX_VIDEO_GENERATION_PROMPT_CHARS,
+      }),
+    );
   });
 });

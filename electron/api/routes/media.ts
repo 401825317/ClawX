@@ -38,6 +38,11 @@ import {
 import { logger } from '../../utils/logger';
 import type { MediaGenerationInputImageRef } from '../../utils/media-generation-types';
 import { planVideoGenerationRoute } from '../../utils/video-generation-route-planner';
+import {
+  countVideoPromptCharacters,
+  getVideoPromptLengthError,
+  MAX_VIDEO_GENERATION_PROMPT_CHARS,
+} from '../../utils/video-generation-prompt-limits';
 
 function normalizeMediaInputImageRefs(
   images: Array<{
@@ -207,6 +212,7 @@ export async function handleMediaRoutes(
     try {
       const body = await parseJsonBody<{
         sessionKey?: string;
+        originalPrompt?: string;
         prompt?: string;
         model?: string;
         size?: string;
@@ -216,9 +222,16 @@ export async function handleMediaRoutes(
           mimeType?: string;
           filePath?: string;
         }>;
+        userInputImages?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          filePath?: string;
+        }>;
+        userMessageTimestampMs?: number;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
+      const originalPrompt = body.originalPrompt?.trim();
       if (!sessionKey) {
         sendJson(res, 400, { success: false, error: 'sessionKey is required' });
         return true;
@@ -236,6 +249,10 @@ export async function handleMediaRoutes(
             filePath: image.filePath!.trim(),
           }))
         : undefined;
+      const userInputImages = normalizeMediaInputImageRefs(body.userInputImages);
+      const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
+        ? Math.floor(body.userMessageTimestampMs)
+        : undefined;
 
       const payload = {
         kind: 'image' as const,
@@ -245,6 +262,9 @@ export async function handleMediaRoutes(
         size: body.size?.trim(),
         quality: body.quality,
         inputImages,
+        ...(originalPrompt ? { originalPrompt } : {}),
+        ...(userInputImages ? { userInputImages } : {}),
+        ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
       };
       await prepareMediaGenerationJob(payload);
       const job = enqueueMediaGenerationJob(payload);
@@ -349,6 +369,7 @@ export async function handleMediaRoutes(
     try {
       const body = await parseJsonBody<{
         sessionKey?: string;
+        originalPrompt?: string;
         prompt?: string;
         model?: string;
         size?: string;
@@ -358,6 +379,12 @@ export async function handleMediaRoutes(
           mimeType?: string;
           filePath?: string;
         }>;
+        userInputImages?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          filePath?: string;
+        }>;
+        userMessageTimestampMs?: number;
         candidateImages?: Array<{
           fileName?: string;
           mimeType?: string;
@@ -375,10 +402,15 @@ export async function handleMediaRoutes(
         return true;
       }
       const inputImages = normalizeMediaInputImageRefs(body.inputImages);
+      const userInputImages = normalizeMediaInputImageRefs(body.userInputImages);
       const candidateImages = normalizeMediaInputImageRefs(body.candidateImages);
+      const originalPrompt = body.originalPrompt?.trim() || prompt;
+      const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
+        ? Math.floor(body.userMessageTimestampMs)
+        : undefined;
       logger.info('[video-generation-route] chat_send_received', {
         sessionKey,
-        promptChars: prompt.length,
+        promptChars: countVideoPromptCharacters(prompt),
         size: body.size?.trim(),
         durationSeconds: body.durationSeconds,
         inputImageCount: inputImages?.length ?? 0,
@@ -399,16 +431,38 @@ export async function handleMediaRoutes(
         sourceImageCount: route.sourceImages?.length ?? 0,
       });
 
+      const finalVideoPrompt = route.videoPrompt?.trim() || prompt;
+      const finalVideoPromptChars = countVideoPromptCharacters(finalVideoPrompt);
+      const promptLengthError = getVideoPromptLengthError(finalVideoPrompt);
+      if (promptLengthError) {
+        logger.warn('[video-generation-route] chat_send_prompt_too_long', {
+          sessionKey,
+          mode: route.mode,
+          source: route.source,
+          promptChars: finalVideoPromptChars,
+          maxPromptChars: MAX_VIDEO_GENERATION_PROMPT_CHARS,
+        });
+        sendJson(res, 400, {
+          success: false,
+          error: promptLengthError,
+          promptChars: finalVideoPromptChars,
+          maxPromptChars: MAX_VIDEO_GENERATION_PROMPT_CHARS,
+        });
+        return true;
+      }
+
       const payload = {
         kind: 'video' as const,
         sessionKey,
-        prompt: route.videoPrompt?.trim() || prompt,
-        originalPrompt: prompt,
+        prompt: finalVideoPrompt,
+        originalPrompt,
         size: body.size?.trim(),
         durationSeconds: typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
           ? Math.max(1, Math.floor(body.durationSeconds))
           : undefined,
         inputImages: route.mode === 'text_to_video' ? undefined : route.sourceImages,
+        ...(userInputImages ? { userInputImages } : {}),
+        ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
         route,
       };
       await prepareMediaGenerationJob(payload);

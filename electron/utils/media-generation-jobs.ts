@@ -187,13 +187,15 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
   }
 
   const inputPaths = (job.payload.inputImages ?? []).map((image) => image.filePath);
+  const userInputPaths = (job.payload.userInputImages ?? job.payload.inputImages ?? []).map((image) => image.filePath);
   if (job.payload.kind === 'image') {
     await appendImageGenerationConversation({
       sessionKey: job.payload.sessionKey,
-      prompt: job.payload.prompt,
+      prompt: job.payload.originalPrompt || job.payload.prompt,
       outputPaths,
-      inputPaths,
+      inputPaths: userInputPaths,
       summaryText: inputPaths.length > 0 ? '图片已修改。' : '图片已生成。',
+      userTimestampMs: job.payload.userMessageTimestampMs,
     });
     return;
   }
@@ -202,10 +204,11 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
     sessionKey: job.payload.sessionKey,
     prompt: job.payload.originalPrompt || job.payload.prompt,
     outputPaths,
-    inputPaths,
+    inputPaths: userInputPaths,
     summaryText: job.payload.route?.mode === 'edit_image_then_video'
       ? '已先修改参考图并生成视频。'
       : (inputPaths.length > 0 ? '已基于参考图生成视频。' : '视频已生成。'),
+    userTimestampMs: job.payload.userMessageTimestampMs,
   });
 }
 

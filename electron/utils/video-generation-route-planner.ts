@@ -13,6 +13,10 @@ import type {
   VideoGenerationRouteMode,
 } from './media-generation-types';
 import { proxyAwareFetch } from './proxy-fetch';
+import {
+  countVideoPromptCharacters,
+  MAX_VIDEO_GENERATION_PROMPT_CHARS,
+} from './video-generation-prompt-limits';
 
 const VIDEO_ROUTE_PLANNER_TIMEOUT_MS = 60_000;
 const VIDEO_ROUTE_PLANNER_MIN_CONFIDENCE = 0.6;
@@ -309,6 +313,7 @@ function buildPlannerMessages(params: {
         'Use image_to_video when the selected image should be animated or used as the visual base without a separate still-image edit.',
         'Use text_to_video when no image should influence the result, or when no usable image is available.',
         'Never invent model names. Select at most one image.',
+        `Keep video_prompt concise and no more than ${MAX_VIDEO_GENERATION_PROMPT_CHARS} Unicode characters while preserving the user's core visual intent.`,
         'JSON schema: {"mode":"text_to_video|image_to_video|edit_image_then_video","confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"image_edit_prompt":string|null,"video_prompt":string,"reason":string}',
       ].join('\n'),
     },
@@ -365,7 +370,7 @@ export async function planVideoGenerationRoute(
     logger.info('[video-route-planner] request', {
       endpoint,
       model,
-      promptChars: prompt.length,
+      promptChars: countVideoPromptCharacters(prompt),
       inputImageCount: inputImages.length,
       candidateImageCount: candidateImages.length,
     });

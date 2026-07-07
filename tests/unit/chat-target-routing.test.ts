@@ -694,6 +694,102 @@ describe('chat target routing', () => {
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
   });
 
+  it('keeps rewritten image prompts and auto-selected prior images out of the user-visible payload', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    const originalPrompt = '前面那1个狗狗的图片，能不能变成2条狗？';
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '图片已生成。',
+          _attachedFiles: [
+            {
+              fileName: 'dog.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/dog.png',
+              source: 'message-ref',
+            },
+          ],
+        },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+    hostApiFetchMock.mockImplementationOnce(async (url: string) => {
+      expect(url).toBe('/api/media/intent-plan');
+      return {
+        success: true,
+        plan: {
+          action: 'image_edit',
+          source: 'planner',
+          confidence: 0.95,
+          prompt: 'Internal planner prompt: turn the single dog into two dogs while preserving style.',
+          selectedImageSource: 'candidate',
+          selectedImageIndex: 0,
+          sourceImages: [{
+            fileName: 'dog.png',
+            mimeType: 'image/png',
+            filePath: '/tmp/dog.png',
+          }],
+        },
+      };
+    });
+
+    await useChatStore.getState().sendMessage(originalPrompt);
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      sessionKey: string;
+      originalPrompt?: string;
+      prompt: string;
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      userInputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      userMessageTimestampMs?: number;
+    };
+
+    expect(payload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      originalPrompt,
+      prompt: 'Internal planner prompt: turn the single dog into two dogs while preserving style.',
+      inputImages: [
+        {
+          fileName: 'dog.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/dog.png',
+        },
+      ],
+      userInputImages: [],
+      userMessageTimestampMs: Date.parse('2026-03-11T12:00:00Z'),
+    });
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: originalPrompt,
+    });
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
+  });
+
   it('asks a clarification instead of downgrading current-image edits when no image context exists', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
