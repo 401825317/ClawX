@@ -420,6 +420,26 @@ function withAttachedFileSource(
   return file.source ? file : { ...file, source };
 }
 
+function getAttachedFileDedupeKey(file: AttachedFileMeta): string {
+  const filePath = file.filePath?.trim();
+  if (filePath) return `path:${filePath}`;
+  const gatewayUrl = file.gatewayUrl?.trim();
+  if (gatewayUrl) return `gateway:${gatewayUrl}`;
+  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`;
+}
+
+function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
+  const seen = new Set<string>();
+  const next: AttachedFileMeta[] = [];
+  for (const file of files) {
+    const key = getAttachedFileDedupeKey(file);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(file);
+  }
+  return next;
+}
+
 /** Extract plain text from message content (string or content blocks) */
 function getMessageText(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -563,6 +583,30 @@ function extractFilePathsFromToolArgs(args: Record<string, unknown>): string[] {
   return paths;
 }
 
+function extractExplicitAttachmentPathsFromToolArgs(args: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  const attachments = args.attachments;
+  if (!Array.isArray(attachments)) return paths;
+  for (const item of attachments) {
+    if (!item || typeof item !== 'object') continue;
+    const att = item as Record<string, unknown>;
+    const filePath = att.filePath ?? att.file_path ?? att.path ?? att.file;
+    if (typeof filePath === 'string' && filePath.trim()) {
+      paths.push(filePath.trim());
+    }
+  }
+  return paths;
+}
+
+function canSurfaceToolCallAttachments(toolName: unknown, args: Record<string, unknown>): boolean {
+  const normalizedName = typeof toolName === 'string' ? toolName.toLowerCase() : '';
+  if (normalizedName !== 'message' && normalizedName !== 'send_message' && normalizedName !== 'message_send') {
+    return false;
+  }
+  const action = typeof args.action === 'string' ? args.action.toLowerCase() : '';
+  return !action || action === 'send' || action === 'reply';
+}
+
 /**
  * Surface user-facing attachments declared in assistant tool calls (e.g.
  * `message` tool `attachments: [{ filePath }]`) on the calling turn itself.
@@ -578,7 +622,8 @@ function enrichWithToolCallAttachments(messages: RawMessage[]): RawMessage[] {
         if (block.type !== 'tool_use' && block.type !== 'toolCall') continue;
         const args = (block.input ?? block.arguments) as Record<string, unknown> | undefined;
         if (!args) continue;
-        for (const filePath of extractFilePathsFromToolArgs(args)) {
+        if (!canSurfaceToolCallAttachments(block.name, args)) continue;
+        for (const filePath of extractExplicitAttachmentPathsFromToolArgs(args)) {
           attachmentPaths.add(filePath);
         }
       }
@@ -596,7 +641,8 @@ function enrichWithToolCallAttachments(messages: RawMessage[]): RawMessage[] {
             : (fn.arguments ?? fn.input) as Record<string, unknown>;
         } catch { /* ignore */ }
         if (!args) continue;
-        for (const filePath of extractFilePathsFromToolArgs(args)) {
+        if (!canSurfaceToolCallAttachments(fn.name, args)) continue;
+        for (const filePath of extractExplicitAttachmentPathsFromToolArgs(args)) {
           attachmentPaths.add(filePath);
         }
       }
@@ -614,7 +660,7 @@ function enrichWithToolCallAttachments(messages: RawMessage[]): RawMessage[] {
     if (newFiles.length === 0) return msg;
     return {
       ...msg,
-      _attachedFiles: [...(msg._attachedFiles || []), ...newFiles],
+      _attachedFiles: dedupeAttachedFiles([...(msg._attachedFiles || []), ...newFiles]),
     };
   });
 }
@@ -987,15 +1033,12 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
         return msg;
       }
       const toAttach = pending.splice(0);
-      // Deduplicate against files already on the assistant message
-      const existingPaths = new Set(
-        (msg._attachedFiles || []).map(f => f.filePath).filter(Boolean),
-      );
-      const newFiles = toAttach.filter(f => !f.filePath || !existingPaths.has(f.filePath));
-      if (newFiles.length === 0) return msg;
+      const existingFiles = msg._attachedFiles || [];
+      const attachedFiles = dedupeAttachedFiles([...existingFiles, ...toAttach]);
+      if (attachedFiles.length === existingFiles.length) return msg;
       return {
         ...msg,
-        _attachedFiles: [...(msg._attachedFiles || []), ...newFiles],
+        _attachedFiles: attachedFiles,
       };
     }
 
@@ -1131,7 +1174,15 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
         source: 'gateway-media' as const,
       }));
     if (files.length === 0 && dedupedGatewayMedia.length === 0 && markdownGatewayMedia.length === 0) return msg;
-    return { ...msg, _attachedFiles: [...existingFiles, ...files, ...dedupedGatewayMedia, ...markdownGatewayMedia] };
+    return {
+      ...msg,
+      _attachedFiles: dedupeAttachedFiles([
+        ...existingFiles,
+        ...files,
+        ...dedupedGatewayMedia,
+        ...markdownGatewayMedia,
+      ]),
+    };
   });
 }
 

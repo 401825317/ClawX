@@ -79,6 +79,26 @@ function isDirectoryAttachment(file: AttachedFileMeta): boolean {
   return file.mimeType === DIRECTORY_MIME_TYPE;
 }
 
+function getAttachedFileDedupeKey(file: AttachedFileMeta): string {
+  const filePath = file.filePath?.trim();
+  if (filePath) return `path:${filePath}`;
+  const gatewayUrl = file.gatewayUrl?.trim();
+  if (gatewayUrl) return `gateway:${gatewayUrl}`;
+  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`;
+}
+
+function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
+  const seen = new Set<string>();
+  const next: AttachedFileMeta[] = [];
+  for (const file of files) {
+    const key = getAttachedFileDedupeKey(file);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(file);
+  }
+  return next;
+}
+
 function isSkillFileAttachment(file: AttachedFileMeta): boolean {
   const path = file.filePath ?? '';
   return (
@@ -267,13 +287,13 @@ export const ChatMessage = memo(function ChatMessage({
   const tools = extractToolUse(message);
   const visibleTools = suppressToolCards ? [] : tools;
   const [validatedPaths, setValidatedPaths] = useState<Record<string, boolean>>({});
-  const rawAttachedFiles = message._attachedFiles || [];
+  const rawAttachedFiles = dedupeAttachedFiles(message._attachedFiles || []);
   const textPreviewFiles = isUser ? [] : extractPreviewDocumentPaths(text);
   const rawAttachedPaths = new Set(rawAttachedFiles.map((file) => file.filePath).filter(Boolean));
-  const derivedAttachedFiles = [
+  const derivedAttachedFiles = dedupeAttachedFiles([
     ...rawAttachedFiles,
     ...textPreviewFiles.filter((file) => !file.filePath || !rawAttachedPaths.has(file.filePath)),
-  ];
+  ]);
   const validationTargets = derivedAttachedFiles
     .map((file) => {
       const kind = validationKindForAttachment(file);

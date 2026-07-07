@@ -21,6 +21,29 @@ vi.mock('@/lib/api-client', () => ({
 }));
 
 describe('ChatMessage attachment dedupe', () => {
+  it('renders one file card when the same attachment path is present twice', () => {
+    const file = {
+      fileName: '建筑工程投标标书-PPT-20260707-070535-57b40329.pptx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      fileSize: 31393,
+      preview: null,
+      filePath: '/Users/me/Downloads/UClaw/建筑工程投标标书-PPT-20260707-070535-57b40329.pptx',
+      source: 'tool-result' as const,
+    };
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '已完成并打开了建筑工程投标标书 PPT。',
+      _attachedFiles: [
+        file,
+        { ...file, source: 'message-ref' as const, fileSize: 0 },
+      ],
+    };
+
+    render(<ChatMessage message={message} />);
+
+    expect(screen.getAllByText(file.fileName)).toHaveLength(1);
+  });
+
   it('keeps attachment-only assistant replies visible even when process attachments are suppressed', () => {
     const message: RawMessage = {
       role: 'assistant',

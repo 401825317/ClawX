@@ -1759,15 +1759,12 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
 
     if (msg.role === 'assistant' && pending.length > 0) {
       const toAttach = pending.splice(0);
-      // Deduplicate against files already on the assistant message
-      const existingPaths = new Set(
-        (msg._attachedFiles || []).map(f => f.filePath).filter(Boolean),
-      );
-      const newFiles = toAttach.filter(f => !f.filePath || !existingPaths.has(f.filePath));
-      if (newFiles.length === 0) return msg;
+      const existingFiles = msg._attachedFiles || [];
+      const attachedFiles = dedupeAttachedFiles([...existingFiles, ...toAttach]);
+      if (attachedFiles.length === existingFiles.length) return msg;
       return {
         ...msg,
-        _attachedFiles: [...(msg._attachedFiles || []), ...newFiles],
+        _attachedFiles: attachedFiles,
       };
     }
 
@@ -1872,7 +1869,10 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
       file => file.gatewayUrl && !existingGatewayUrls.has(file.gatewayUrl),
     );
     if (files.length === 0 && dedupedGatewayMedia.length === 0) return msg;
-    return { ...msg, _attachedFiles: [...existingFiles, ...files, ...dedupedGatewayMedia] };
+    return {
+      ...msg,
+      _attachedFiles: dedupeAttachedFiles([...existingFiles, ...files, ...dedupedGatewayMedia]),
+    };
   });
 }
 
@@ -3094,7 +3094,13 @@ function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
   const seen = new Set<string>();
   const next: AttachedFileMeta[] = [];
   for (const file of files) {
-    const key = file.filePath || `${file.fileName}|${file.mimeType}|${file.preview || ''}`;
+    const filePath = file.filePath?.trim();
+    const gatewayUrl = file.gatewayUrl?.trim();
+    const key = filePath
+      ? `path:${filePath}`
+      : gatewayUrl
+        ? `gateway:${gatewayUrl}`
+        : `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview || ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     next.push(file);
@@ -5075,7 +5081,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...normalizedFinalMessage,
                 role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'],
                 id: msgId,
-                _attachedFiles: [...(normalizedFinalMessage._attachedFiles || []), ...pendingImgs],
+                _attachedFiles: dedupeAttachedFiles([
+                  ...(normalizedFinalMessage._attachedFiles || []),
+                  ...pendingImgs,
+                ]),
               }
               : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
             const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };

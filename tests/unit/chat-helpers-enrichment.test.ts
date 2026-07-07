@@ -111,6 +111,49 @@ describe('enrichWithToolResultFiles', () => {
     expect(paths.find((p) => p?.endsWith('.jpg'))).toBeUndefined();
   });
 
+  it('dedupes repeated non-image artifact paths before attaching them to the final reply', () => {
+    const pptxPath = '/Users/me/Downloads/UClaw/建筑工程投标标书-PPT-20260707-070535-57b40329.pptx';
+    const messages: RawMessage[] = [
+      {
+        role: 'assistant',
+        id: 'a1',
+        content: [{ type: 'toolCall', id: 'tc1', name: 'create_pptx_file', input: {} }],
+      },
+      {
+        role: 'toolresult',
+        id: 't1',
+        toolCallId: 'tc1',
+        toolName: 'create_pptx_file',
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            ok: true,
+            filePath: pptxPath,
+            media: `MEDIA:${pptxPath}`,
+            mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          }),
+        }],
+      },
+      {
+        role: 'toolresult',
+        id: 't2',
+        toolCallId: 'tc1',
+        toolName: 'exec',
+        content: [{ type: 'text', text: `-rw-r--r-- 31K ${pptxPath}` }],
+      },
+      {
+        role: 'assistant',
+        id: 'a2',
+        content: [{ type: 'text', text: `已完成。\n\nMEDIA:${pptxPath}` }],
+      },
+    ];
+
+    const enriched = enrichWithCachedImages(enrichWithToolResultFiles(messages));
+    const reply = enriched.find((m) => m.id === 'a2')!;
+    const paths = (reply._attachedFiles ?? []).map((f) => f.filePath);
+    expect(paths).toEqual([pptxPath]);
+  });
+
   it('still promotes [media attached: ...] references emitted in tool results', () => {
     const messages: RawMessage[] = [
       {
@@ -372,6 +415,26 @@ describe('enrichWithCachedImages — Gateway media bubble dedup', () => {
 });
 
 describe('enrichWithToolCallAttachments', () => {
+  it('does not attach internal read tool paths such as bundled SKILL.md files', () => {
+    const messages: RawMessage[] = [
+      {
+        role: 'assistant',
+        id: 'read-skill',
+        content: [{
+          type: 'tool_use',
+          id: 'tool-1',
+          name: 'read',
+          input: {
+            path: '/Applications/UClaw.app/Contents/Resources/openclaw/skills/presentation-maker/SKILL.md',
+          },
+        }],
+      },
+    ];
+
+    const enriched = enrichWithToolCallAttachments(messages);
+    expect(enriched[0]?._attachedFiles ?? []).toEqual([]);
+  });
+
   it('attaches image paths from message tool attachments array', () => {
     const messages: RawMessage[] = [
       {
