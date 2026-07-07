@@ -107,6 +107,22 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
+    const { useManagedAuthStore } = await import('@/stores/managed-auth');
+    const readyAuthStatus = {
+      managed: true,
+      hasAuthToken: true,
+      hasRelayToken: true,
+      authValid: true,
+    };
+    useManagedAuthStore.setState({
+      status: readyAuthStatus,
+      initialized: true,
+      loading: false,
+      verifying: false,
+      error: null,
+      refreshStatus: vi.fn(async () => readyAuthStatus),
+    });
+
     const { useChatStore } = await import('@/stores/chat');
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
@@ -157,6 +173,22 @@ describe('gateway store event wiring', () => {
       return Promise.resolve({ success: true, result: {} });
     });
 
+    const { useManagedAuthStore } = await import('@/stores/managed-auth');
+    const readyAuthStatus = {
+      managed: true,
+      hasAuthToken: true,
+      hasRelayToken: true,
+      authValid: true,
+    };
+    useManagedAuthStore.setState({
+      status: readyAuthStatus,
+      initialized: true,
+      loading: false,
+      verifying: false,
+      error: null,
+      refreshStatus: vi.fn(async () => readyAuthStatus),
+    });
+
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -168,7 +200,8 @@ describe('gateway store event wiring', () => {
       lastUserMessageAt: null,
     });
 
-    const first = useChatStore.getState().sendMessage('first image request');
+    const first = useChatStore.getState().sendMessage('first prompt');
+    await flushAsyncImports();
     expect(useChatStore.getState().sending).toBe(true);
     expect(useChatStore.getState().lastUserMessageAt).toBe(1773281731000);
 
@@ -187,6 +220,7 @@ describe('gateway store event wiring', () => {
     });
     now = 1773281732000;
     const second = useChatStore.getState().sendMessage('second prompt');
+    await flushAsyncImports();
     expect(useChatStore.getState().sending).toBe(true);
     expect(useChatStore.getState().lastUserMessageAt).toBe(1773281732000);
 
@@ -529,6 +563,44 @@ describe('gateway store event wiring', () => {
     expect(loadHistory).toHaveBeenCalledTimes(1);
     expect(useChatStore.getState().sending).toBe(false);
     expect(useChatStore.getState().activeRunId).toBeNull();
+  });
+
+  it('surfaces reply session init conflicts that arrive after chat.send ack as run errors', async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useChatStore } = await import('@/stores/chat');
+    const loadHistory = vi.fn(async () => {});
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-conflict',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      loadHistory,
+    });
+
+    const { useGatewayStore } = await import('@/stores/gateway');
+    await useGatewayStore.getState().init();
+
+    handlers.get('gateway:chat-message')?.({
+      message: {
+        state: 'error',
+        runId: 'run-conflict',
+        sessionKey: 'agent:main:main',
+        errorMessage: 'Error: reply session initialization conflicted for agent:main:main',
+      },
+    });
+    await flushAsyncImports();
+
+    expect(loadHistory).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().sending).toBe(false);
+    expect(useChatStore.getState().activeRunId).toBeNull();
+    expect(useChatStore.getState().error).toBeNull();
+    expect(useChatStore.getState().runError).toContain('reply session handoff conflict');
   });
 
   it('forwards normalized chat runtime events through the dedicated host event channel', async () => {

@@ -22,6 +22,7 @@ import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-ski
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
+import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1060,6 +1061,19 @@ function patchBundledRuntime(outputDir) {
   });
   if (localActionFinalizePatch.patchedFiles > 0) {
     echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} local-action finalize runtime file(s)`;
+  }
+
+  // --- Reply session initialization conflict patch ---
+  // OpenClaw's chat.send RPC can ack before the async dispatch/reply resolver
+  // initializes the reply session. If the previous run is still committing a
+  // terminal lifecycle update, the reply resolver can see a stale session
+  // entry revision and fail after the ack. Retry at the reply-session init
+  // layer so the next snapshot is taken after the prior turn settles.
+  const replySessionInitConflictPatch = patchOpenClawReplySessionInitConflictRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (replySessionInitConflictPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${replySessionInitConflictPatch.patchedFiles} reply-session init runtime file(s)`;
   }
 
   // --- Prompt cache key patch ---

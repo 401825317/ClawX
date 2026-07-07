@@ -9,10 +9,12 @@
 import { patchInstalledOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
+import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 
 try {
   patchInstalledOpenClawBrowserRuntime();
   patchInstalledOpenClawFinalizeLocalActionRuntime();
+  patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
 } catch {
   // openclaw not installed yet or dist not found - skip silently

@@ -636,10 +636,23 @@ function isRecoverableRuntimeError(errorMessage: string): boolean {
     || normalized.includes('connection reset');
 }
 
+function isReplySessionInitializationConflictError(errorMessage: string): boolean {
+  const normalized = errorMessage.trim().toLowerCase();
+  return normalized.includes('reply session initialization conflicted')
+    || (
+      normalized.includes('reply session')
+      && normalized.includes('initialization')
+      && (normalized.includes('conflict') || normalized.includes('conflicted'))
+    );
+}
+
 function normalizeChatRunErrorMessage(errorMessage: string): string {
   const normalized = errorMessage.trim();
   const lower = normalized.toLowerCase();
   if (!normalized) return 'The task ended without a model response. Please retry.';
+  if (isReplySessionInitializationConflictError(normalized)) {
+    return 'UClaw hit a reply session handoff conflict while the previous turn was still settling. The conversation was refreshed; retry this message.';
+  }
   if (
     lower.includes('context overflow')
     || lower.includes('prompt too large')
@@ -5200,6 +5213,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const wasSending = get().sending;
         const sessionKeyAtError = get().currentSessionKey;
         const recoverable = wasSending && isRecoverableRuntimeError(errorMsg);
+        const replySessionInitConflict = isReplySessionInitializationConflictError(errorMsg);
 
         const commitRuntimeError = () => {
           const currentStream = get().streamingMessage as RawMessage | null;
@@ -5215,8 +5229,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           set({
-            error: terminalAssistantError ? null : normalizedErrorMsg,
-            runError: terminalAssistantError ? normalizedErrorMsg : null,
+            error: terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
+            runError: terminalAssistantError || replySessionInitConflict ? normalizedErrorMsg : null,
             sending: false,
             pendingImageGenerationLocal: false,
             pendingVideoGenerationLocal: false,
