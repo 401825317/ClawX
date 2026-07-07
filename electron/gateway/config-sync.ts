@@ -534,14 +534,6 @@ export async function syncGatewayConfigBeforeLaunch(
     logger.warn('Failed to auto-upgrade plugins:', err);
   }
 
-  if (shouldInstallParallelSearchPlugin) {
-    try {
-      measureSync(timingsMs, 'parallelPluginMaintenanceMs', ensureParallelSearchPluginInstalled);
-    } catch (err) {
-      logger.warn('Failed to install Parallel Search plugin:', err);
-    }
-  }
-
   try {
     measureSync(timingsMs, 'uclawCorePluginMaintenanceMs', ensureCoreUClawPluginsInstalled);
   } catch (err) {
@@ -555,6 +547,15 @@ export async function syncGatewayConfigBeforeLaunch(
     });
   } catch (err) {
     logger.warn('Failed to batch-sync config fields to openclaw.json:', err);
+  }
+
+  try {
+    shouldInstallParallelSearchPlugin ||= isParallelWebSearchConfigured(await readOpenClawConfig());
+    if (shouldInstallParallelSearchPlugin) {
+      measureSync(timingsMs, 'parallelPluginMaintenanceMs', ensureParallelSearchPluginInstalled);
+    }
+  } catch (err) {
+    logger.warn('Failed to install Parallel Search plugin:', err);
   }
 
   return {

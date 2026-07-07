@@ -114,6 +114,55 @@ describe('deriveTaskSteps', () => {
       }),
     ]);
   });
+
+  it('summarizes structured tool error payloads instead of exposing raw JSON wrappers', () => {
+    const steps = deriveRuntimeTaskSteps({
+      runId: 'run-1',
+      status: 'running',
+      assistantText: '',
+      thinkingText: '',
+      events: [
+        {
+          type: 'tool.completed',
+          runId: 'run-1',
+          sessionKey: 'agent:main:main',
+          toolCallId: 'search-1',
+          name: 'web_search',
+          isError: true,
+          result: {
+            content: [
+              {
+                type: 'text',
+                text: '{\n  "status": "error",\n  "tool": "web_search",\n  "error": "web_search is disabled or no provider is available."\n}',
+              },
+            ],
+            details: {
+              status: 'error',
+              tool: 'web_search',
+              error: 'web_search is disabled or no provider is available.',
+            },
+          },
+        },
+      ],
+    });
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        id: 'search-1',
+        label: 'web_search',
+        status: 'error',
+        kind: 'tool',
+        detail: [
+          'web_search 当前不可用或没有配置可用 provider。',
+          '',
+          'web_search is disabled or no provider is available.',
+        ].join('\n'),
+      }),
+    ]);
+    expect(steps[0].detail).not.toContain('"content"');
+    expect(steps[0].detail).not.toContain('"details"');
+  });
+
   it('builds running steps from streaming tool status without exposing chain-of-thought', () => {
     const streamingTools: ToolStatus[] = [
       {

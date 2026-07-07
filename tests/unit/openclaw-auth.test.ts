@@ -2257,6 +2257,85 @@ describe('batchSyncConfigFields', () => {
     expect(ssrfPolicy.allowIpv6UniqueLocalRange).toBe(true);
   });
 
+  it('seeds the key-free Parallel web_search provider', async () => {
+    await writeOpenClawJson({ gateway: { auth: { mode: 'token', token: 'old' } } });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    const web = tools.web as Record<string, Record<string, unknown>>;
+    const plugins = config.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(web.search.provider).toBe('parallel-free');
+    expect(plugins.allow).toContain('parallel');
+    expect(entries.parallel.enabled).toBe(true);
+  });
+
+  it('does not override an explicit web_search provider', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      tools: {
+        web: {
+          search: {
+            provider: 'parallel-free',
+          },
+        },
+      },
+      plugins: {
+        allow: ['parallel'],
+        entries: {
+          parallel: { enabled: true },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    const web = tools.web as Record<string, Record<string, unknown>>;
+    const plugins = config.plugins as Record<string, unknown>;
+    expect(web.search.provider).toBe('parallel-free');
+    expect(plugins.allow).toContain('parallel');
+    expect(plugins.allow).not.toContain('duckduckgo');
+  });
+
+  it('migrates the old DuckDuckGo default web_search provider to Parallel free', async () => {
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      tools: {
+        web: {
+          search: {
+            provider: 'duckduckgo',
+          },
+        },
+      },
+      plugins: {
+        allow: ['duckduckgo'],
+        entries: {
+          duckduckgo: { enabled: true },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const tools = config.tools as Record<string, unknown>;
+    const web = tools.web as Record<string, Record<string, unknown>>;
+    const plugins = config.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(web.search.provider).toBe('parallel-free');
+    expect(plugins.allow).toContain('parallel');
+    expect(plugins.allow).not.toContain('duckduckgo');
+    expect(entries.parallel.enabled).toBe(true);
+    expect(entries.duckduckgo).toBeUndefined();
+  });
+
   it('does not override explicit web_fetch SSRF policy opt-outs', async () => {
     await writeOpenClawJson({
       gateway: { auth: { mode: 'token', token: 'old' } },

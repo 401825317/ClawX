@@ -359,6 +359,42 @@ function ensureParallelWebSearchPluginRegistration(config: Record<string, unknow
   return ensurePluginEntryEnabled(config, PARALLEL_SEARCH_PLUGIN_ID);
 }
 
+/**
+ * Enable OpenClaw's key-free Parallel Search provider when no provider exists.
+ */
+function ensureFreeWebSearchProviderInConfig(config: Record<string, unknown>): boolean {
+  const tools = isPlainRecord(config.tools) ? { ...config.tools } : {};
+  const web = isPlainRecord(tools.web) ? { ...tools.web } : {};
+  const search = isPlainRecord(web.search) ? { ...web.search } : {};
+  const provider = typeof search.provider === 'string' ? search.provider.trim() : '';
+
+  let modified = false;
+  if (search.enabled === false) {
+    return false;
+  }
+  const shouldMigrateLegacyDefault = provider === LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID;
+  if (provider && !PARALLEL_WEB_SEARCH_PROVIDER_IDS.has(provider) && !shouldMigrateLegacyDefault) {
+    return false;
+  }
+
+  if (!provider || shouldMigrateLegacyDefault) {
+    search.provider = FREE_WEB_SEARCH_PROVIDER_ID;
+    web.search = search;
+    tools.web = web;
+    config.tools = tools;
+    modified = true;
+  }
+
+  if (ensurePluginEntryEnabled(config, PARALLEL_SEARCH_PLUGIN_ID)) {
+    modified = true;
+  }
+  if (shouldMigrateLegacyDefault && removePluginRegistrations(config, [LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID])) {
+    modified = true;
+  }
+
+  return modified;
+}
+
 function removePluginRegistrations(
   config: Record<string, unknown>,
   pluginIds: string[],
@@ -806,6 +842,8 @@ const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'memory-core',
   'uclaw-computer-use',
 ]);
+const FREE_WEB_SEARCH_PROVIDER_ID = 'parallel-free';
+const LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID = 'duckduckgo';
 const PARALLEL_SEARCH_PLUGIN_ID = 'parallel';
 const PARALLEL_WEB_SEARCH_PROVIDER_IDS = new Set(['parallel', 'parallel-free']);
 const AUTH_PROFILE_PROVIDER_KEY_MAP: Record<string, string> = {
@@ -2704,12 +2742,13 @@ export async function syncBrowserConfigToOpenClaw(): Promise<void> {
     }
 
     changed = ensureWebFetchSsrfPolicyInConfig(config) || changed;
+    changed = ensureFreeWebSearchProviderInConfig(config) || changed;
 
     if (!changed) return;
 
     config.browser = browser;
     await writeOpenClawJson(config);
-    console.log('Synced browser and web_fetch config to openclaw.json');
+    console.log('Synced browser, web_fetch, and web_search config to openclaw.json');
   });
 }
 
@@ -2825,6 +2864,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (ensureWebFetchSsrfPolicyInConfig(config)) {
       modified = true;
     }
+    // ── web_search provider (key-free default) ──
+    if (ensureFreeWebSearchProviderInConfig(config)) {
+      modified = true;
+    }
 
     if (ensurePluginEntryEnabled(config, 'uclaw-computer-use')) {
       modified = true;
@@ -2860,7 +2903,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 
     if (modified) {
       await writeOpenClawJson(config);
-      console.log('Synced gateway token, browser config, web_fetch SSRF policy, and session idle to openclaw.json');
+      console.log('Synced gateway token, browser config, web_fetch/web_search config, and session idle to openclaw.json');
     }
   });
 }

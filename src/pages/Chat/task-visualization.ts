@@ -368,8 +368,67 @@ function runtimeDetail(value: unknown): string | undefined {
   }
 }
 
+function parseJsonObjectText(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstTextBlock(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  for (const entry of content) {
+    if (!entry || typeof entry !== 'object') continue;
+    const text = (entry as { text?: unknown }).text;
+    if (typeof text === 'string' && text.trim()) {
+      return text.trim();
+    }
+  }
+  return undefined;
+}
+
+function extractToolErrorText(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const parsed = parseJsonObjectText(trimmed);
+    if (parsed) {
+      return extractToolErrorText(parsed) ?? trimmed;
+    }
+    return trimmed;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+
+  const record = value as Record<string, unknown>;
+  const details = record.details;
+  if (details && typeof details === 'object') {
+    const detailsError = extractToolErrorText((details as Record<string, unknown>).error);
+    if (detailsError) return detailsError;
+    const detailsMessage = extractToolErrorText((details as Record<string, unknown>).message);
+    if (detailsMessage) return detailsMessage;
+  }
+
+  const directError = extractToolErrorText(record.error);
+  if (directError) return directError;
+  const directMessage = extractToolErrorText(record.message);
+  if (directMessage) return directMessage;
+
+  const contentText = firstTextBlock(record.content);
+  if (contentText) {
+    const parsed = parseJsonObjectText(contentText);
+    if (parsed) return extractToolErrorText(parsed) ?? contentText;
+    return contentText;
+  }
+
+  return undefined;
+}
+
 function getToolErrorDetail(value: unknown): string | undefined {
-  const rendered = runtimeDetail(value);
+  const rendered = extractToolErrorText(value) ?? runtimeDetail(value);
   return appendToolErrorHint(rendered, 'zh');
 }
 

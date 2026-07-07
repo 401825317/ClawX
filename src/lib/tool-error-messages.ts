@@ -1,4 +1,4 @@
-export type ToolErrorKind = 'missing-file' | 'unsupported-file-url' | 'cron-agent-target';
+export type ToolErrorKind = 'missing-file' | 'unsupported-file-url' | 'cron-agent-target' | 'web-search-unavailable';
 
 const TOOL_ERROR_HINTS: Array<{
   kind: ToolErrorKind;
@@ -25,6 +25,12 @@ const TOOL_ERROR_HINTS: Array<{
       && /default agent|non-default agents?/i.test(text),
     zh: '非默认智能体的定时任务参数不兼容，应使用 isolated 会话和 agentTurn 负载。',
     en: 'The scheduled task used incompatible params for a non-default agent. Use an isolated session and an agentTurn payload.',
+  },
+  {
+    kind: 'web-search-unavailable',
+    test: (text) => /web_search is disabled or no provider is available/i.test(text),
+    zh: 'web_search 当前不可用或没有配置可用 provider。',
+    en: 'web_search is disabled or no provider is available.',
   },
 ];
 
