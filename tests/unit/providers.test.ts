@@ -76,6 +76,7 @@ describe('provider metadata', () => {
           expect.objectContaining({
             id: 'smart-latest',
             name: '智能路由',
+            contextWindow: 200_000,
           }),
         ]),
       }),

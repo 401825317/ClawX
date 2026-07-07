@@ -94,4 +94,34 @@ describe('provider-model-sync', () => {
       ),
     ).toBeNull();
   });
+
+  it('adds the managed smart routing context window to Lingzhi Wuxian models', () => {
+    const payload = buildNonOAuthAgentProviderUpdate(
+      providerConfig({ type: 'lingzhiwuxian', id: 'lingzhiwuxian' }),
+      'lingzhiwuxian',
+      'lingzhiwuxian/smart-latest',
+    );
+
+    expect(payload?.entry.models).toEqual([
+      expect.objectContaining({
+        id: 'smart-latest',
+        contextWindow: 200_000,
+      }),
+    ]);
+  });
+
+  it('falls back to the managed context window when Lingzhi Wuxian registry metadata is missing it', () => {
+    const payload = buildNonOAuthAgentProviderUpdate(
+      providerConfig({ type: 'lingzhiwuxian', id: 'lingzhiwuxian' }),
+      'lingzhiwuxian',
+      'lingzhiwuxian/qwen-latest',
+    );
+
+    expect(payload?.entry.models).toEqual([
+      expect.objectContaining({
+        id: 'qwen-latest',
+        contextWindow: 200_000,
+      }),
+    ]);
+  });
 });

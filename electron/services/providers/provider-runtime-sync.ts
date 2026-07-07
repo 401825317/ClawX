@@ -26,8 +26,10 @@ import {
 import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
 import {
+  JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
+  normalizeJunFeiAIModelContextWindow,
 } from '../../utils/junfeiai-distribution';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
@@ -137,9 +139,17 @@ function runtimeModelEntryForProvider(
   config: ProviderConfig,
   modelId: string,
 ): PiAiModelsJsonModelEntry {
-  return config.type === JUNFEIAI_PROVIDER_ID
-    ? piAiPromptCacheModelEntry(modelId)
-    : piAiModelsJsonModelEntry(modelId);
+  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+    return piAiModelsJsonModelEntry(modelId);
+  }
+  const registryModel = getProviderConfig(config.type)?.models?.find((model) => model.id === modelId);
+  const contextWindow = normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
+    ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
+  return piAiPromptCacheModelEntry(
+    modelId,
+    registryModel?.name || modelId,
+    contextWindow,
+  );
 }
 
 export function normalizeProviderModelRef(

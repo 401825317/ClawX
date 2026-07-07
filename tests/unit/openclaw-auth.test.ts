@@ -1076,10 +1076,63 @@ describe('syncProviderConfigToOpenClaw', () => {
     expect(entry.models).toEqual([
       expect.objectContaining({
         id: 'qwen-latest',
+        contextWindow: 200_000,
         compat: PROMPT_CACHE_KEY_COMPAT,
       }),
     ]);
     expect(((entry.models as Array<Record<string, unknown>>)[0]?.compat as Record<string, unknown>)?.supportsLongCacheRetention).toBeUndefined();
+  });
+
+  it('prefers Lingzhi Wuxian registry context window metadata when writing openclaw.json', async () => {
+    await writeOpenClawJson({
+      models: { providers: {} },
+    });
+
+    vi.doMock('@electron/utils/provider-registry', async () => {
+      const actual = await vi.importActual<typeof import('@electron/utils/provider-registry')>('@electron/utils/provider-registry');
+      return {
+        ...actual,
+        getProviderConfig: (provider: string) => {
+          if (provider !== 'lingzhiwuxian') {
+            return actual.getProviderConfig(provider);
+          }
+          const config = actual.getProviderConfig(provider);
+          return {
+            ...config,
+            models: [
+              {
+                id: 'smart-latest',
+                name: '智能路由',
+                contextWindow: 321_000,
+              },
+            ],
+          };
+        },
+      };
+    });
+
+    try {
+      const { syncProviderConfigToOpenClaw } = await import('@electron/utils/openclaw-auth');
+
+      await syncProviderConfigToOpenClaw('lingzhiwuxian', 'smart-latest', {
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        api: 'openai-completions',
+        apiKey: 'relay-valid-key',
+      });
+
+      const result = await readOpenClawJson();
+      const providers = (result.models as Record<string, unknown>).providers as Record<string, unknown>;
+      const entry = providers.lingzhiwuxian as Record<string, unknown>;
+
+      expect(entry.models).toEqual([
+        expect.objectContaining({
+          id: 'smart-latest',
+          contextWindow: 321_000,
+        }),
+      ]);
+    } finally {
+      vi.doUnmock('@electron/utils/provider-registry');
+    }
   });
 
   it('clears the managed provider env placeholder during default model override sync', async () => {
@@ -1652,6 +1705,7 @@ describe('anthropic-messages maxTokens', () => {
 
     expect(entry.apiKey).toBeUndefined();
     expect(models[0]?.compat).toEqual(PROMPT_CACHE_KEY_COMPAT);
+    expect(models[0]?.contextWindow).toBe(200_000);
   });
 
   it('does not create missing agent models.json providers when requested', async () => {

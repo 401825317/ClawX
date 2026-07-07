@@ -6,7 +6,11 @@ import {
   piAiPromptCacheModelEntry,
   type PiAiModelsJsonModelEntry,
 } from '../shared/pi-ai-model-cost';
-import { JUNFEIAI_PROVIDER_ID } from '../utils/junfeiai-distribution';
+import {
+  JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_PROVIDER_ID,
+  normalizeJunFeiAIModelContextWindow,
+} from '../utils/junfeiai-distribution';
 
 export interface AgentProviderUpdatePayload {
   providerKey: string;
@@ -27,9 +31,17 @@ export function getModelIdFromRef(modelRef: string | undefined, providerKey: str
 }
 
 function modelEntryForProvider(provider: ProviderConfig, modelId: string): PiAiModelsJsonModelEntry {
-  return provider.type === JUNFEIAI_PROVIDER_ID
-    ? piAiPromptCacheModelEntry(modelId)
-    : piAiModelsJsonModelEntry(modelId);
+  if (provider.type !== JUNFEIAI_PROVIDER_ID) {
+    return piAiModelsJsonModelEntry(modelId);
+  }
+  const registryModel = getProviderConfig(provider.type)?.models?.find((model) => model.id === modelId);
+  const contextWindow = normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
+    ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
+  return piAiPromptCacheModelEntry(
+    modelId,
+    registryModel?.name || modelId,
+    contextWindow,
+  );
 }
 
 export function buildNonOAuthAgentProviderUpdate(

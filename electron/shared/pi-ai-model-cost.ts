@@ -28,6 +28,7 @@ export type PiAiModelsJsonModelEntry = {
   id: string;
   name: string;
   cost: PiAiModelCostRates;
+  contextWindow?: number;
   compat?: PiAiPromptCacheKeyCompat;
 };
 
@@ -58,9 +59,11 @@ export function piAiModelsJsonModelEntry(
 export function piAiPromptCacheModelEntry(
   id: string,
   name: string = id,
+  contextWindow?: number,
 ): PiAiModelsJsonModelEntry {
   return {
     ...piAiModelsJsonModelEntry(id, name),
+    ...(contextWindow ? { contextWindow } : {}),
     compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
   };
 }

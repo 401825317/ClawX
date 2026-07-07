@@ -56,7 +56,11 @@ import {
   isClawXOpenAiVideoModelRef,
   orderedClawXOpenAiVideoModelIds,
 } from './openclaw-video-relay-constants';
-import { JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
+import {
+  JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_PROVIDER_ID,
+  normalizeJunFeiAIModelContextWindow,
+} from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 
 const AUTH_STORE_VERSION = 1;
@@ -1972,13 +1976,22 @@ function normalizeProviderModelEntries(
     return sanitizedModels;
   }
 
-  return sanitizedModels.map((model) => ({
-    ...model,
-    compat: {
-      ...(isPlainRecord(model.compat) ? model.compat : {}),
-      ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
-    },
-  }));
+  const registryModels = getProviderConfig(provider)?.models ?? [];
+  return sanitizedModels.map((model) => {
+    const registryModel = registryModels.find((entry) => entry.id === model.id);
+    const contextWindow = normalizeJunFeiAIModelContextWindow(model.contextWindow)
+      ?? normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
+      ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
+
+    return {
+      ...model,
+      contextWindow,
+      compat: {
+        ...(isPlainRecord(model.compat) ? model.compat : {}),
+        ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
+      },
+    };
+  });
 }
 
 function upsertOpenClawProviderEntry(

@@ -244,6 +244,7 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(mainAgentEntry.models).toEqual([
       expect.objectContaining({
         id: 'smart-latest',
+        contextWindow: 200_000,
         compat: PROMPT_CACHE_KEY_COMPAT,
       }),
     ]);
@@ -313,6 +314,39 @@ describe('provider-runtime-sync refresh strategy', () => {
       'openai',
       'fresh-relay-key',
     );
+  });
+
+  it('prefers Lingzhi Wuxian registry context window metadata when syncing agent models', async () => {
+    mocks.getApiKey.mockResolvedValue('relay-valid-key');
+    mocks.getAllProviders.mockResolvedValue([
+      createManagedProvider(),
+    ]);
+    mocks.listAgentsSnapshot.mockResolvedValue({
+      agents: [
+        { id: 'main', modelRef: 'lingzhiwuxian/smart-latest' },
+      ],
+    });
+    mocks.getProviderConfig.mockReturnValue({
+      api: 'openai-completions',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      models: [
+        { id: 'smart-latest', name: '智能路由', contextWindow: 321_000 },
+      ],
+    });
+
+    await syncSavedProviderToRuntime(createManagedProvider(), 'fresh-relay-key');
+
+    const mainAgentEntry = mocks.updateSingleAgentModelProvider.mock.calls.find(
+      ([agentId, providerKey]) => agentId === 'main' && providerKey === 'lingzhiwuxian',
+    )?.[2] as { models?: Array<Record<string, unknown>> };
+    expect(mainAgentEntry.models).toEqual([
+      expect.objectContaining({
+        id: 'smart-latest',
+        name: '智能路由',
+        contextWindow: 321_000,
+      }),
+    ]);
   });
 
   it('still syncs discovered agent models when the agent snapshot cannot be read', async () => {

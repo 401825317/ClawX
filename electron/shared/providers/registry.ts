@@ -5,6 +5,7 @@ import type {
   ProviderTypeInfo,
 } from './types';
 import { PI_AI_PROMPT_CACHE_KEY_COMPAT } from '../pi-ai-model-cost';
+import { JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW } from '../../utils/junfeiai-distribution';
 
 const LINGZHIWUXIAN_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
 
@@ -74,6 +75,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           name: '智能路由',
           reasoning: true,
           input: ['text', 'image'],
+          contextWindow: JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
         },
