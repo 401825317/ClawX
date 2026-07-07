@@ -1,10 +1,69 @@
 import { app } from 'electron';
 import { execSync, spawn } from 'child_process';
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
+import { dirname, join } from 'path';
 import { getUvMirrorEnv } from './uv-env';
 import { logger } from './logger';
-import { quoteForCmd, needsWinShell } from './paths';
+import { prependPathEntry } from './env-path';
+import { getOpenClawConfigDir, quoteForCmd, needsWinShell } from './paths';
+
+const OFFICE_PYTHON_PACKAGES = [
+  'python-pptx==1.0.2',
+  'openpyxl==3.1.5',
+  'python-docx==1.2.0',
+] as const;
+const WINDOWS_ONLY_OFFICE_PYTHON_PACKAGES = [
+  'pywin32==312',
+] as const;
+const OFFICE_PYTHON_VERIFY_SCRIPT = [
+  'import pptx',
+  'import openpyxl',
+  'import docx',
+  'print("uclaw-office-python-ok")',
+].join('; ');
+
+export function getOfficePythonPackages(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === 'win32'
+    ? [...OFFICE_PYTHON_PACKAGES, ...WINDOWS_ONLY_OFFICE_PYTHON_PACKAGES]
+    : [...OFFICE_PYTHON_PACKAGES];
+}
+
+export function getOfficePythonVenvPath(): string {
+  return join(getOpenClawConfigDir(), 'runtime', 'office-python');
+}
+
+function getOfficePythonVenvBinDir(venvPath = getOfficePythonVenvPath()): string {
+  return process.platform === 'win32'
+    ? join(venvPath, 'Scripts')
+    : join(venvPath, 'bin');
+}
+
+function getOfficePythonVenvPythonPath(venvPath = getOfficePythonVenvPath()): string {
+  return process.platform === 'win32'
+    ? join(getOfficePythonVenvBinDir(venvPath), 'python.exe')
+    : join(getOfficePythonVenvBinDir(venvPath), 'python');
+}
+
+export function getOfficePythonEnvPatch(
+  env: Record<string, string | undefined> = process.env,
+): { env: Record<string, string | undefined>; venvPath: string; present: boolean } {
+  const venvPath = getOfficePythonVenvPath();
+  const binDir = getOfficePythonVenvBinDir(venvPath);
+  const present = existsSync(join(venvPath, 'pyvenv.cfg')) && existsSync(getOfficePythonVenvPythonPath(venvPath));
+  if (!present) {
+    return { env, venvPath, present: false };
+  }
+
+  const patched = prependPathEntry(env, binDir).env;
+  return {
+    env: {
+      ...patched,
+      VIRTUAL_ENV: venvPath,
+    },
+    venvPath,
+    present: true,
+  };
+}
 
 /**
  * Get the path to the bundled uv binary
@@ -167,6 +226,111 @@ async function runPythonInstall(
   });
 }
 
+async function runCommand(
+  bin: string,
+  args: string[],
+  env: Record<string, string | undefined>,
+  label: string,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const useShell = needsWinShell(bin);
+  return new Promise<void>((resolve, reject) => {
+    const stderrChunks: string[] = [];
+    const stdoutChunks: string[] = [];
+    const child = spawn(useShell ? quoteForCmd(bin) : bin, args, {
+      shell: useShell,
+      env,
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      reject(new Error(`Command timed out after ${timeoutMs}ms [${label}]: ${bin} ${args.join(' ')}`));
+    }, timeoutMs);
+
+    child.stdout?.on('data', (data) => {
+      const line = data.toString().trim();
+      if (line) {
+        stdoutChunks.push(line);
+        logger.debug(`[${label}] stdout: ${line}`);
+      }
+    });
+
+    child.stderr?.on('data', (data) => {
+      const line = data.toString().trim();
+      if (line) {
+        stderrChunks.push(line);
+        logger.info(`[${label}] stderr: ${line}`);
+      }
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve();
+      } else {
+        const stderr = stderrChunks.join('\n');
+        const stdout = stdoutChunks.join('\n');
+        const detail = stderr || stdout || '(no output captured)';
+        reject(new Error(
+          `Command failed with code ${code} [${label}]\n` +
+          `  command: ${bin} ${args.join(' ')}\n` +
+          `  platform: ${process.platform}/${process.arch}\n` +
+          `  output: ${detail}`,
+        ));
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(new Error(
+        `Command spawn error [${label}]: ${err.message}\n` +
+        `  command: ${bin} ${args.join(' ')}\n` +
+        `  platform: ${process.platform}/${process.arch}`,
+      ));
+    });
+  });
+}
+
+async function ensureOfficePythonEnvironment(
+  uvBin: string,
+  baseEnv: Record<string, string | undefined>,
+  uvEnv: Record<string, string>,
+): Promise<void> {
+  const venvPath = getOfficePythonVenvPath();
+  const pythonPath = getOfficePythonVenvPythonPath(venvPath);
+  mkdirSync(dirname(venvPath), { recursive: true });
+
+  const mergedEnv = { ...baseEnv, ...uvEnv };
+  if (!existsSync(pythonPath)) {
+    logger.info(`Creating UClaw Office Python environment at: ${venvPath}`);
+    await runCommand(uvBin, ['venv', '--python', '3.12', venvPath], mergedEnv, 'office-python-venv');
+  }
+
+  const packages = getOfficePythonPackages();
+  logger.info(`Ensuring UClaw Office Python packages: ${packages.join(', ')}`);
+  await runCommand(
+    uvBin,
+    ['pip', 'install', '--python', venvPath, ...packages],
+    mergedEnv,
+    'office-python-deps',
+    180_000,
+  );
+
+  const officeEnvPatch = getOfficePythonEnvPatch(mergedEnv);
+  await runCommand(
+    pythonPath,
+    ['-c', OFFICE_PYTHON_VERIFY_SCRIPT],
+    officeEnvPatch.env,
+    'office-python-verify',
+    30_000,
+  );
+  logger.info(`UClaw Office Python environment ready at: ${venvPath}`);
+}
+
 /**
  * Use bundled uv to install a managed Python version (default 3.12).
  *
@@ -225,4 +389,6 @@ export async function setupManagedPython(): Promise<void> {
   } catch (err) {
     logger.warn('Could not determine Python path after install:', err);
   }
+
+  await ensureOfficePythonEnvironment(uvBin, baseEnv, uvEnv);
 }
