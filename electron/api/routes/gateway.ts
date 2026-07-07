@@ -33,9 +33,23 @@ const chatAbortSessionTails = new Map<string, Promise<void>>();
 const chatAbortSettleUntil = new Map<string, number>();
 const chatAbortSessionVersions = new Map<string, number>();
 const inFlightChatSendByIdempotencyKey = new Map<string, Promise<{ runId?: string }>>();
+const CJK_RE = /[\u3400-\u9fff]/u;
+const ARTIFACT_INTENT_RE = /(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|打开|美化|优化|润色|改(?:一下|一版)?|排版|pptx?|PPT|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|文件|文档|报告|图片|图像|海报|网页|HTML|html|脚本|代码文件|压缩包|zip|create|make|generate|build|produce|export|write|presentation|slides?|document|spreadsheet|image|file)/iu;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildChatSendDiagnostic(message: string, options: { media: boolean; mediaCount?: number; deliver?: boolean }) {
+  const normalized = String(message ?? '');
+  return {
+    messageChars: Array.from(normalized).length,
+    containsCjk: CJK_RE.test(normalized),
+    artifactIntent: ARTIFACT_INTENT_RE.test(normalized),
+    media: options.media,
+    mediaCount: options.mediaCount ?? 0,
+    deliver: options.deliver ?? false,
+  };
 }
 
 function isChatSessionInitializationConflict(error: unknown): boolean {
@@ -298,6 +312,14 @@ export async function handleGatewayRoutes(
         idempotencyKey: string;
       }>(req);
       sessionKeyForLog = body.sessionKey;
+      const sendDiagnostic = buildChatSendDiagnostic(body.message, {
+        media: false,
+        deliver: body.deliver ?? false,
+      });
+      logger.info('[diagnostic] chat.send.request', {
+        sessionKey: sessionKeyForLog,
+        ...sendDiagnostic,
+      });
       const result = await runSerializedChatSendRpc(ctx, {
         sessionKey: body.sessionKey,
         message: body.message,
@@ -308,7 +330,7 @@ export async function handleGatewayRoutes(
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,
         runId: result.runId ?? null,
-        media: false,
+        ...sendDiagnostic,
       });
       sendJson(res, 200, { success: true, result });
     } catch (error) {
@@ -369,6 +391,15 @@ export async function handleGatewayRoutes(
       const message = fileReferences.length > 0
         ? [body.message, ...fileReferences].filter(Boolean).join('\n')
         : body.message;
+      const sendDiagnostic = buildChatSendDiagnostic(message, {
+        media: true,
+        mediaCount: body.media?.length ?? 0,
+        deliver: body.deliver ?? false,
+      });
+      logger.info('[diagnostic] chat.send.request', {
+        sessionKey: sessionKeyForLog,
+        ...sendDiagnostic,
+      });
       const rpcParams: Record<string, unknown> = {
         sessionKey: body.sessionKey,
         message,
@@ -383,8 +414,7 @@ export async function handleGatewayRoutes(
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,
         runId: result.runId ?? null,
-        media: true,
-        mediaCount: body.media?.length ?? 0,
+        ...sendDiagnostic,
       });
       sendJson(res, 200, { success: true, result });
     } catch (error) {

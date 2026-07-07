@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HostApiContext } from '@electron/api/context';
 import { handleGatewayRoutes } from '@electron/api/routes/gateway';
 import { scheduleControlUiDeviceAutoApproval } from '@electron/utils/control-ui-device-pairing';
+import { logger } from '@electron/utils/logger';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 
 vi.mock('@electron/utils/store', () => ({
@@ -76,6 +77,11 @@ function waitForHandlers(): Promise<void> {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+beforeEach(() => {
+  vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+  vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+});
 
 describe('GET /api/gateway/control-ui', () => {
   beforeEach(() => {
@@ -166,6 +172,54 @@ describe('POST /api/chat/send', () => {
       },
       CHAT_SEND_RPC_TIMEOUT_MS,
     );
+    expect(logger.info).toHaveBeenCalledWith('[diagnostic] chat.send.request', {
+      sessionKey: 'agent:main:main',
+      messageChars: 11,
+      containsCjk: false,
+      artifactIntent: false,
+      media: false,
+      mediaCount: 0,
+      deliver: false,
+    });
+    expect(logger.info).toHaveBeenCalledWith('[metric] chat.send.rpc', expect.objectContaining({
+      sessionKey: 'agent:main:main',
+      runId: 'run-route-text',
+      messageChars: 11,
+      containsCjk: false,
+      artifactIntent: false,
+      media: false,
+      mediaCount: 0,
+      deliver: false,
+    }));
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('hello route');
+  });
+
+  it('logs Chinese artifact intent diagnostics without logging the prompt body', async () => {
+    const rpc = vi.fn().mockResolvedValue({ runId: 'run-route-artifact' });
+    const response = createResponse<{ success: boolean; result: { runId: string } }>();
+    await handleGatewayRoutes(
+      createJsonRequest('POST', {
+        sessionKey: 'agent:main:main',
+        message: '帮我生成一份产品介绍 PPT',
+        deliver: true,
+        idempotencyKey: 'idem-route-artifact',
+      }),
+      response.res,
+      new URL('http://127.0.0.1/api/chat/send'),
+      createContext(rpc),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(logger.info).toHaveBeenCalledWith('[diagnostic] chat.send.request', {
+      sessionKey: 'agent:main:main',
+      messageChars: 14,
+      containsCjk: true,
+      artifactIntent: true,
+      media: false,
+      mediaCount: 0,
+      deliver: true,
+    });
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('帮我生成一份产品介绍 PPT');
   });
 
   it('serializes concurrent chat.send RPCs for the same session', async () => {

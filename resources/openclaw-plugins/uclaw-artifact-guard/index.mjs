@@ -1,6 +1,14 @@
 const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
 const REVISION_REASON = 'UClaw artifact delivery final reply had no completed artifact evidence.';
+const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
+const PROMPT_CONTEXT = [
+  'UClaw 交付与语言规则：',
+  '- 默认所有面向用户的自然语言回复必须使用简体中文；不要因为工具、技能、日志、模板或上一次回复是英文而切换成英文。',
+  '- 用户要求生成、创建、导出、美化或打开 PPT/PPTX、Word/DOCX、Excel/XLSX、PDF、文档、报告、表格、图片、网页、脚本或压缩包时，必须交付真实本地产物，不能只回复计划、承诺、大纲或说明。',
+  '- 如果专用产物工具不可用，继续使用可用的 skill、exec、Node、Python 或 uv 路径创建文件；只有完成并验证、遇到具体阻塞点、或需要用户确认时才能结束。',
+  '- 文件任务最终回复必须包含 MEDIA:<absolute-path> 或已验证的绝对文件路径。',
+].join('\n');
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|html|script|zip))/iu;
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
@@ -82,6 +90,23 @@ function extractFinalAssistantText(event) {
   return '';
 }
 
+function eventId(event) {
+  return [
+    event?.runId,
+    event?.sessionId,
+    event?.sessionKey,
+    event?.messageId,
+  ].filter((value) => typeof value === 'string' && value.trim()).join('|') || 'unknown';
+}
+
+function logDiagnostic(label, payload) {
+  try {
+    console.warn(`[uclaw-artifact-guard] ${label} ${JSON.stringify(payload)}`);
+  } catch {
+    console.warn(`[uclaw-artifact-guard] ${label}`);
+  }
+}
+
 function isArtifactRequest(text) {
   return ARTIFACT_REQUEST_RE.test(text) || PAGE_ARTIFACT_RE.test(text);
 }
@@ -97,14 +122,34 @@ function isExplicitBlocker(finalText) {
   return BLOCKER_RE.test(finalText) && !CONTINUATION_RE.test(finalText);
 }
 
-function shouldReviseArtifactFinal(event) {
+function analyzeArtifactFinal(event) {
   const userText = extractUserRequestText(event);
   const finalText = extractFinalAssistantText(event);
-  if (!userText.trim() || !finalText.trim()) return false;
-  if (!isArtifactRequest(userText)) return false;
-  if (hasArtifactEvidence(event, finalText)) return false;
-  if (isExplicitBlocker(finalText)) return false;
-  return PROMISE_ONLY_RE.test(finalText);
+  const artifactRequest = isArtifactRequest(userText);
+  const artifactEvidence = hasArtifactEvidence(event, finalText);
+  const explicitBlocker = isExplicitBlocker(finalText);
+  const promiseOnly = PROMISE_ONLY_RE.test(finalText);
+  const shouldRevise = Boolean(
+    userText.trim()
+    && finalText.trim()
+    && artifactRequest
+    && !artifactEvidence
+    && !explicitBlocker
+    && promiseOnly,
+  );
+  return {
+    userText,
+    finalText,
+    artifactRequest,
+    artifactEvidence,
+    explicitBlocker,
+    promiseOnly,
+    shouldRevise,
+  };
+}
+
+function shouldReviseArtifactFinal(event) {
+  return analyzeArtifactFinal(event).shouldRevise;
 }
 
 function buildRevision() {
@@ -126,8 +171,34 @@ function buildRevision() {
 
 function registerArtifactGuard(api) {
   if (typeof api.registerHook !== 'function') return;
+  api.registerHook('before_prompt_build', (event) => {
+    logDiagnostic('prompt-context', {
+      eventId: eventId(event),
+      injected: true,
+      contextChars: PROMPT_CONTEXT.length,
+      hasChineseRule: true,
+      hasArtifactRule: true,
+    });
+    return {
+      appendSystemContext: PROMPT_CONTEXT,
+    };
+  }, {
+    name: PROMPT_CONTEXT_HOOK_ID,
+    description: 'Ensure UClaw artifact delivery and Chinese language rules are present even before workspace context is ready.',
+  });
   api.registerHook('before_agent_finalize', (event) => {
-    if (!shouldReviseArtifactFinal(event)) return;
+    const analysis = analyzeArtifactFinal(event);
+    logDiagnostic('finalize-check', {
+      eventId: eventId(event),
+      userTextChars: analysis.userText.length,
+      finalTextChars: analysis.finalText.length,
+      artifactRequest: analysis.artifactRequest,
+      artifactEvidence: analysis.artifactEvidence,
+      explicitBlocker: analysis.explicitBlocker,
+      promiseOnly: analysis.promiseOnly,
+      shouldRevise: analysis.shouldRevise,
+    });
+    if (!analysis.shouldRevise) return;
     return buildRevision();
   }, {
     name: REVISION_ID,
@@ -146,5 +217,7 @@ export default {
 
 export const __test = {
   shouldReviseArtifactFinal,
+  analyzeArtifactFinal,
   buildRevision,
+  PROMPT_CONTEXT,
 };

@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchProtocolEvent } from '@electron/gateway/event-dispatch';
+import { logger } from '@electron/utils/logger';
 
 function createMockEmitter() {
   const emitted: Array<{ event: string; payload: unknown }> = [];
@@ -13,6 +14,10 @@ function createMockEmitter() {
 }
 
 describe('dispatchProtocolEvent', () => {
+  beforeEach(() => {
+    vi.spyOn(logger, 'info').mockImplementation(() => undefined);
+  });
+
   it('dispatches gateway.ready event to gateway:ready', () => {
     const emitter = createMockEmitter();
     dispatchProtocolEvent(emitter, 'gateway.ready', { version: '4.11' });
@@ -132,6 +137,48 @@ describe('dispatchProtocolEvent', () => {
       method: 'agent',
       params: expect.objectContaining({ runId: 'run-1', stream: 'tool' }),
     });
+  });
+
+  it('logs normalized runtime event summaries without assistant text deltas', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-log-tool',
+      sessionKey: 'agent:main:main',
+      stream: 'tool',
+      seq: 7,
+      ts: 10,
+      data: {
+        phase: 'start',
+        name: 'exec_command',
+        toolCallId: 'call-log-tool',
+        args: { cmd: 'full user prompt should not be logged here' },
+      },
+    });
+
+    expect(logger.info).toHaveBeenCalledWith('[metric] chat.runtime.event', {
+      type: 'tool.started',
+      runId: 'run-log-tool',
+      sessionKey: 'agent:main:main',
+      seq: 7,
+      toolCallId: 'call-log-tool',
+      name: 'exec_command',
+      isError: undefined,
+    });
+
+    vi.mocked(logger.info).mockClear();
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-log-assistant',
+      sessionKey: 'agent:main:main',
+      stream: 'assistant',
+      seq: 8,
+      ts: 11,
+      data: {
+        delta: '这段 assistant 增量不应该进入诊断摘要',
+      },
+    });
+
+    expect(logger.info).not.toHaveBeenCalled();
   });
 
   it('suppresses tick events', () => {
