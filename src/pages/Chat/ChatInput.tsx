@@ -520,7 +520,8 @@ export function ChatInput({
 
   useEffect(() => {
     let cancelled = false;
-    const junfeiaiAccount = (providerAccounts ?? []).find((account) => account.id === 'lingzhiwuxian' && account.enabled);
+    const safeProviderAccounts = Array.isArray(providerAccounts) ? providerAccounts : [];
+    const junfeiaiAccount = safeProviderAccounts.find((account) => account.id === 'lingzhiwuxian' && account.enabled);
     if (!junfeiaiAccount || clientModelOptions.text.models.length > 0) {
       setRemoteModelOptions([]);
       return () => {
