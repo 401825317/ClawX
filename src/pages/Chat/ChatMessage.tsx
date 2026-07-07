@@ -15,7 +15,7 @@ import rehypeKatex from 'rehype-katex';
 import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { invokeIpc, statFile } from '@/lib/api-client';
+import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractImages, extractToolUse, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
@@ -492,7 +492,13 @@ export const ChatMessage = memo(function ChatMessage({
                   mimeType={img.mimeType}
                   width={referenceFile?.width ?? img.width}
                   height={referenceFile?.height ?? img.height}
-                  onPreview={() => setLightboxImg({ src, fileName: 'image', base64: img.data, mimeType: img.mimeType })}
+                  onPreview={() => setLightboxImg({
+                    src,
+                    fileName: referenceFile?.fileName ?? 'image',
+                    filePath: referenceFile?.filePath,
+                    base64: img.data,
+                    mimeType: referenceFile?.mimeType ?? img.mimeType,
+                  })}
                   onUseAsReference={referenceFile ? () => onUseImageAsReference?.(referenceFile) : undefined}
                 />
               );
@@ -1013,7 +1019,40 @@ function ImageLightbox({
   mimeType?: string;
   onClose: () => void;
 }) {
-  void src; void base64; void mimeType; void fileName;
+  void base64;
+  const [originalSrc, setOriginalSrc] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!filePath || isRemoteHttpUrl(filePath)) {
+      setOriginalSrc(null);
+      return;
+    }
+
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setOriginalSrc(null);
+    void (async () => {
+      try {
+        const result = await readBinaryFile(filePath);
+        if (cancelled || !result.ok || !result.data) return;
+        const bytes = new Uint8Array(result.data.byteLength);
+        bytes.set(result.data);
+        objectUrl = URL.createObjectURL(new Blob([bytes], { type: result.mimeType || mimeType || 'image/png' }));
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setOriginalSrc(objectUrl);
+      } catch {
+        if (!cancelled) setOriginalSrc(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [filePath, mimeType]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -1040,7 +1079,7 @@ function ImageLightbox({
         onClick={(e) => e.stopPropagation()}
       >
         <img
-          src={src}
+          src={originalSrc ?? src}
           alt={fileName}
           className="max-w-[90vw] max-h-[85vh] rounded-lg shadow-2xl object-contain"
         />

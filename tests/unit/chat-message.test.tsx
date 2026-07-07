@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import type { RawMessage } from '@/stores/chat';
 
@@ -98,6 +98,41 @@ describe('ChatMessage attachment dedupe', () => {
     );
 
     expect(screen.getByAltText('desktop_screenshot.png')).toBeInTheDocument();
+  });
+
+  it('opens file-backed image previews from the original file instead of the thumbnail data URL', async () => {
+    const { readBinaryFile } = await import('@/lib/api-client');
+    const originalBytes = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    vi.mocked(readBinaryFile).mockResolvedValueOnce({
+      ok: true,
+      data: originalBytes,
+      mimeType: 'image/png',
+      size: originalBytes.length,
+      readOnly: true,
+    });
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'Image generated.',
+      _attachedFiles: [
+        {
+          fileName: 'generated.png',
+          mimeType: 'image/png',
+          fileSize: 1234,
+          preview: 'data:image/png;base64,thumbnail',
+          filePath: '/tmp/generated.png',
+          source: 'tool-result',
+        },
+      ],
+    };
+
+    render(<ChatMessage message={message} />);
+    fireEvent.click(screen.getByTestId('chat-image-preview-card'));
+
+    await waitFor(() => {
+      expect(readBinaryFile).toHaveBeenCalledWith('/tmp/generated.png');
+      const openedImages = screen.getAllByAltText('generated.png') as HTMLImageElement[];
+      expect(openedImages.some((image) => image.src.startsWith('blob:'))).toBe(true);
+    });
   });
 
   it('keeps assistant image cards aligned to their natural height in mixed-aspect rows', () => {
