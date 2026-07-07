@@ -156,24 +156,63 @@ function resolveEditInputImages(inputImages) {
   return resolvedImages;
 }
 
-function parseImagesResponse(payload) {
+function parseDataUrlImage(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/iu);
+  if (!match) return null;
+  const mimeType = normalizeMimeType(match[1]) || DEFAULT_MIME_TYPE;
+  return {
+    buffer: Buffer.from(match[2], 'base64'),
+    mimeType,
+  };
+}
+
+async function fetchImageUrl(url) {
+  const trimmed = String(url || '').trim();
+  if (!trimmed) return null;
+  const dataImage = parseDataUrlImage(trimmed);
+  if (dataImage) return dataImage;
+  if (!/^https?:\/\//iu.test(trimmed)) {
+    throw new Error(`UClaw OpenAI image response returned unsupported image URL: ${trimmed.slice(0, 80)}`);
+  }
+  const response = await undiciFetch(trimmed, {
+    method: 'GET',
+    dispatcher: imageFetchDispatcher,
+  });
+  if (!response.ok) {
+    throw new Error(`UClaw OpenAI image URL fetch failed: HTTP ${response.status}`);
+  }
+  const contentType = normalizeMimeType(response.headers.get('content-type')) || DEFAULT_MIME_TYPE;
+  return {
+    buffer: Buffer.from(await response.arrayBuffer()),
+    mimeType: contentType,
+  };
+}
+
+async function parseImagesResponse(payload) {
   const data = Array.isArray(payload?.data) ? payload.data : [];
-  return data.map((entry, index) => {
+  const images = await Promise.all(data.map(async (entry, index) => {
     const base64 = typeof entry?.b64_json === 'string' ? entry.b64_json.trim() : '';
-    if (!base64) return null;
-    const mimeType = typeof entry?.mime_type === 'string' && entry.mime_type.trim()
-      ? entry.mime_type.trim()
-      : DEFAULT_MIME_TYPE;
+    const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
+    const fetched = base64
+      ? {
+        buffer: Buffer.from(base64, 'base64'),
+        mimeType: typeof entry?.mime_type === 'string' && entry.mime_type.trim()
+          ? entry.mime_type.trim()
+          : DEFAULT_MIME_TYPE,
+      }
+      : await fetchImageUrl(url);
+    if (!fetched) return null;
     const image = {
-      buffer: Buffer.from(base64, 'base64'),
-      mimeType,
-      fileName: uniqueImageFileName(index, mimeType),
+      buffer: fetched.buffer,
+      mimeType: fetched.mimeType,
+      fileName: uniqueImageFileName(index, fetched.mimeType),
     };
     if (typeof entry?.revised_prompt === 'string' && entry.revised_prompt.trim()) {
       image.revisedPrompt = entry.revised_prompt.trim();
     }
     return image;
-  }).filter(Boolean);
+  }));
+  return images.filter(Boolean);
 }
 
 async function readJsonResponse(response, failureLabel) {
@@ -312,10 +351,13 @@ function buildProvider() {
       const count = resolveCount(req);
       const baseUrl = normalizeRelayBaseUrl(providerConfig.baseUrl, DEFAULT_BASE_URL);
       const editMultipart = mode === 'edit' ? buildEditMultipart(req, editImages, model, count) : null;
+      const upstreamUrl = appendImagesPath(baseUrl, mode);
+      const upstreamPath = new URL(upstreamUrl).pathname;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), resolveTimeoutMs(req));
       try {
-        const response = await undiciFetch(appendImagesPath(baseUrl, mode), {
+        console.info(`[clawx-openai-image] route mode=${mode} inputImageCount=${inputImages.length} model=${model} path=${upstreamPath}`);
+        const response = await undiciFetch(upstreamUrl, {
           method: 'POST',
           headers: mode === 'edit'
             ? {
@@ -336,7 +378,7 @@ function buildProvider() {
           response,
           mode === 'edit' ? 'UClaw OpenAI image edit failed' : 'UClaw OpenAI image generation failed',
         );
-        return { images: parseImagesResponse(payload) };
+        return { images: await parseImagesResponse(payload) };
       } finally {
         clearTimeout(timeout);
       }

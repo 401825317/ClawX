@@ -31,6 +31,10 @@ import {
   getMediaGenerationJob,
   prepareMediaGenerationJob,
 } from '../../utils/media-generation-jobs';
+import {
+  planMediaIntent,
+  type MediaIntentRecentMessage,
+} from '../../utils/media-intent-planner';
 import { logger } from '../../utils/logger';
 import type { MediaGenerationInputImageRef } from '../../utils/media-generation-types';
 import { planVideoGenerationRoute } from '../../utils/video-generation-route-planner';
@@ -59,6 +63,46 @@ export async function handleMediaRoutes(
   url: URL,
   _ctx: HostApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/media/intent-plan' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{
+        prompt?: string;
+        requestedMode?: 'chat' | 'image' | 'video';
+        explicitImages?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          filePath?: string;
+        }>;
+        candidateImages?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          filePath?: string;
+        }>;
+        recentMessages?: MediaIntentRecentMessage[];
+      }>(req);
+      const plan = await planMediaIntent({
+        prompt: body.prompt?.trim() || '',
+        requestedMode: body.requestedMode,
+        explicitImages: normalizeMediaInputImageRefs(body.explicitImages),
+        candidateImages: normalizeMediaInputImageRefs(body.candidateImages),
+        recentMessages: Array.isArray(body.recentMessages) ? body.recentMessages : undefined,
+      });
+      logger.info('[media-intent-route] planned', {
+        requestedMode: body.requestedMode || 'chat',
+        action: plan.action,
+        source: plan.source,
+        confidence: plan.confidence,
+        selectedImageSource: plan.selectedImageSource,
+        selectedImageIndex: plan.selectedImageIndex,
+        sourceImageCount: plan.sourceImages?.length ?? 0,
+      });
+      sendJson(res, 200, { success: true, plan });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname.startsWith('/api/media/generation-jobs/') && req.method === 'GET') {
     const jobId = decodeURIComponent(url.pathname.slice('/api/media/generation-jobs/'.length)).trim();
     const job = jobId ? getMediaGenerationJob(jobId) : null;

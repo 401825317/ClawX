@@ -82,13 +82,6 @@ let _lastChatEventAt = 0;
 let _managedAuthBackgroundVerifyInFlight: Promise<void> | null = null;
 let _lastManagedAuthBackgroundVerifyAt = 0;
 const MANAGED_AUTH_BACKGROUND_VERIFY_MIN_INTERVAL_MS = 60_000;
-const IMAGE_GENERATION_INTENT_PATTERN = /(?:(?:生成|绘制|画|制作|做|设计|create|generate|draw|make|design|render)[\s\S]{0,24}(?:图片|图像|插画|海报|封面|头像|壁纸|图标|logo|icon|banner|poster|image|picture|illustration|photo|artwork)|(?:出图|生图|画图|作图|做图|生成图|生成海报|生成封面|生成头像)|(?:补全提示词|优化提示词)[\s\S]{0,32}(?:出图|生图|画图|作图|做图|图片|图像|image|picture))/i;
-const IMAGE_LOOKUP_INTENT_PATTERN = /(?:搜索|搜|查找|找|检索|浏览器|网页|素材|参考图|参考图片|search|find|look up|browse|reference)/i;
-const IMAGE_NEGATION_INTENT_PATTERN = /(?:不要|不用|别|不需要|do not|don't|dont|no need)[\s\S]{0,12}(?:生成|绘制|画|制作|图片|图像|image|picture)/i;
-const IMAGE_AUTOMATION_PLANNING_INTENT_PATTERN = /(?:每天|每日|定时|自动化|流程|方案|实现|开发|搭建|配置|推送|公众号|工作流|daily|schedule|automate|workflow)/i;
-const IMAGE_EDIT_INTENT_PATTERN = /(?:修改|改一下|改成|改为|换成|替换|调整|微调|修一下|修复|优化|去掉|删掉|删除|移除|抹掉|擦掉|加上|添加|补上|保留|裁剪|放大|缩小|变成|变为|换背景|背景换|这张图|这个图|原图|上一张|刚才那张|上面那张|edit|modify|change|adjust|retouch|remove|delete|erase|replace|add|crop|resize|recolor|same image|this image|previous image|last image|original image|make it|turn it)/i;
-const DESKTOP_SCREENSHOT_INTENT_PATTERN = /(?:截图|截屏|截个屏|截一下|屏幕截图|桌面截图|当前桌面|当前屏幕|screenshot|screen\s*(?:shot|capture)|capture\s+(?:the\s+)?screen|desktop\s+screenshot)/i;
-const DESKTOP_SCREENSHOT_COMPLEX_TASK_PATTERN = /(?:computer\s*use|computer_[a-z_]+|Chrome|浏览器|窗口|标签页|地址栏|输入|访问|打开|点击|聚焦|恢复|页面加载|读取页面状态|调用.*工具|自动化|navigate|browser|window|tab|address\s*bar|type|visit|open|click|focus|restore)/i;
 
 function managedAuthSendErrorMessage(stateKey: string, detail?: string | null): string {
   if (stateKey === 'loggedOut') {
@@ -162,30 +155,6 @@ function ensureManagedAuthReadyForSend(): Promise<void> | null {
   })();
 }
 
-function shouldAutoUseImageGenerationMode(
-  text: string,
-  mode: ChatSendMode,
-  attachments?: ChatSendAttachment[],
-): boolean {
-  if (mode !== 'chat') return false;
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  if (attachments?.some((file) => !file.mimeType.startsWith('image/'))) return false;
-  if (IMAGE_NEGATION_INTENT_PATTERN.test(trimmed)) return false;
-  if (IMAGE_LOOKUP_INTENT_PATTERN.test(trimmed)) return false;
-  if (IMAGE_AUTOMATION_PLANNING_INTENT_PATTERN.test(trimmed)) return false;
-  return IMAGE_GENERATION_INTENT_PATTERN.test(trimmed);
-}
-
-function shouldUseLocalDesktopScreenshot(text: string, mode: ChatSendMode, attachments?: ChatSendAttachment[]): boolean {
-  if (mode !== 'chat') return false;
-  if (attachments && attachments.length > 0) return false;
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  if (DESKTOP_SCREENSHOT_COMPLEX_TASK_PATTERN.test(trimmed)) return false;
-  return DESKTOP_SCREENSHOT_INTENT_PATTERN.test(trimmed);
-}
-
 type DesktopScreenshotResponse = {
   success?: boolean;
   screenshot?: {
@@ -205,6 +174,44 @@ type PendingImageInput = {
   fileSize: number;
   stagedPath: string;
   preview: string | null;
+};
+
+type MediaIntentAction =
+  | 'chat'
+  | 'image_generate'
+  | 'image_edit'
+  | 'video_generate'
+  | 'desktop_screenshot'
+  | 'clarify';
+
+type MediaIntentImageRef = {
+  fileName?: string;
+  mimeType?: string;
+  filePath: string;
+};
+
+type MediaIntentRecentMessage = {
+  role: RawMessage['role'];
+  text?: string;
+  images?: MediaIntentImageRef[];
+};
+
+type MediaIntentPlan = {
+  action?: MediaIntentAction;
+  source?: 'planner' | 'fallback';
+  confidence?: number;
+  reason?: string;
+  selectedImageSource?: 'explicit' | 'candidate' | 'none';
+  selectedImageIndex?: number;
+  sourceImages?: MediaIntentImageRef[];
+  prompt?: string;
+  clarification?: string;
+};
+
+type MediaIntentPlanResponse = {
+  success?: boolean;
+  plan?: MediaIntentPlan;
+  error?: string;
 };
 
 function isImageAttachmentFile(
@@ -262,11 +269,78 @@ function resolveImageModeReferenceInputs(
   return [];
 }
 
-function shouldReuseLatestImageForEdit(text: string, explicitImages: PendingImageInput[]): boolean {
-  if (explicitImages.length > 0) return true;
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  return IMAGE_EDIT_INTENT_PATTERN.test(trimmed);
+function pendingImageToIntentRef(file: PendingImageInput): MediaIntentImageRef {
+  return {
+    fileName: file.fileName,
+    mimeType: file.mimeType,
+    filePath: file.stagedPath,
+  };
+}
+
+function attachedImageToIntentRef(file: AttachedFileMeta): MediaIntentImageRef | null {
+  if (!file.filePath || !file.mimeType.startsWith('image/')) return null;
+  return {
+    fileName: file.fileName,
+    mimeType: file.mimeType,
+    filePath: file.filePath,
+  };
+}
+
+function buildRecentMessagesForMediaPlanner(messages: RawMessage[]): MediaIntentRecentMessage[] {
+  return messages.slice(-8).map((message) => {
+    const images = (message._attachedFiles ?? [])
+      .map(attachedImageToIntentRef)
+      .filter((image): image is MediaIntentImageRef => image !== null);
+    return {
+      role: message.role,
+      text: getMessageText(message.content).trim().slice(0, 600),
+      ...(images.length > 0 ? { images } : {}),
+    };
+  });
+}
+
+function planSourceImageInputs(plan: MediaIntentPlan): PendingImageInput[] {
+  return (plan.sourceImages ?? [])
+    .filter((image) => typeof image.filePath === 'string' && image.filePath.trim())
+    .map((image) => ({
+      fileName: image.fileName || image.filePath.split(/[\\/]/).pop() || 'image',
+      mimeType: image.mimeType || 'image/png',
+      fileSize: 0,
+      stagedPath: image.filePath,
+      preview: null,
+    }));
+}
+
+function mediaPlanToMode(plan: MediaIntentPlan): ChatSendMode {
+  if (plan.action === 'image_generate' || plan.action === 'image_edit') return 'image';
+  if (plan.action === 'video_generate') return 'video';
+  return 'chat';
+}
+
+async function planMediaIntentForSend(params: {
+  prompt: string;
+  requestedMode: ChatSendMode;
+  explicitImages: PendingImageInput[];
+  candidateImages: PendingImageInput[];
+  recentMessages: RawMessage[];
+}): Promise<MediaIntentPlan> {
+  const response = await hostApiFetch<MediaIntentPlanResponse>(
+    '/api/media/intent-plan',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: params.prompt,
+        requestedMode: params.requestedMode,
+        explicitImages: params.explicitImages.map(pendingImageToIntentRef),
+        candidateImages: params.candidateImages.map(pendingImageToIntentRef),
+        recentMessages: buildRecentMessagesForMediaPlanner(params.recentMessages),
+      }),
+    },
+  );
+  if (response.success === false) {
+    throw new Error(response.error || 'Media intent planner failed');
+  }
+  return response.plan?.action ? response.plan : { action: 'chat', source: 'fallback', reason: 'planner_response_missing_plan' };
 }
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
@@ -4326,9 +4400,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   ) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
-    const effectiveMode: ChatSendMode = shouldAutoUseImageGenerationMode(trimmed, mode, attachments)
-      ? 'image'
-      : mode;
 
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
       ?? get().currentSessionKey;
@@ -4357,6 +4428,95 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const currentSessionKey = targetSessionKey;
+    const currentMessages = get().messages;
+    const explicitPendingImages = (attachments ?? [])
+      .filter((file) => file.mimeType.startsWith('image/') && file.stagedPath.trim().length > 0)
+      .map((file) => ({
+        fileName: file.fileName,
+        mimeType: file.mimeType,
+        fileSize: file.fileSize,
+        stagedPath: file.stagedPath,
+        preview: file.preview,
+      }));
+    const candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
+
+    // Add user message optimistically before planner/tool routing so the UI
+    // acknowledges the submitted intent immediately.
+    const nowMs = Date.now();
+    const userMsg: RawMessage = {
+      role: 'user',
+      content: trimmed || (attachments?.length ? '(file attached)' : ''),
+      timestamp: nowMs / 1000,
+      id: crypto.randomUUID(),
+      _attachedFiles: attachments?.map(a => ({
+        fileName: a.fileName,
+        mimeType: a.mimeType,
+        fileSize: a.fileSize,
+        preview: a.preview,
+        filePath: a.stagedPath,
+      })),
+    };
+    rememberPendingOptimisticUserMessage(currentSessionKey, userMsg, nowMs);
+    set((s) => ({
+      messages: [...s.messages, userMsg],
+      sending: true,
+      error: null,
+      runError: null,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: nowMs,
+    }));
+
+    const { sessionLabels, messages } = get();
+    const isFirstMessage = !messages.slice(0, -1).some((m) => m.role === 'user');
+    if (!currentSessionKey.endsWith(':main') && isFirstMessage && !sessionLabels[currentSessionKey] && trimmed) {
+      const labelText = toSessionLabel(trimmed);
+      if (labelText) {
+        set((s) => ({ sessionLabels: { ...s.sessionLabels, [currentSessionKey]: labelText } }));
+      }
+    }
+
+    set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
+
+    let mediaPlan: MediaIntentPlan;
+    try {
+      mediaPlan = await planMediaIntentForSend({
+        prompt: trimmed,
+        requestedMode: mode,
+        explicitImages: explicitPendingImages,
+        candidateImages: candidateImageInputs,
+        recentMessages: currentMessages,
+      });
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : String(error),
+        sending: false,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
+      });
+      return;
+    }
+
+    let plannedSourceImages = planSourceImageInputs(mediaPlan);
+    if (mediaPlan.action === 'image_edit' && plannedSourceImages.length === 0) {
+      mediaPlan = {
+        action: 'clarify',
+        source: 'planner',
+        reason: 'image_edit_missing_input_image',
+        clarification: mediaPlan.clarification || '你想编辑哪张图片？请上传或选中一张图片。',
+      };
+      plannedSourceImages = [];
+    }
+    const effectiveMode = mediaPlanToMode(mediaPlan);
+    set({
+      pendingImageGenerationLocal: effectiveMode === 'image',
+      pendingVideoGenerationLocal: effectiveMode === 'video',
+    });
+
     if (effectiveMode === 'image' || effectiveMode === 'video') {
       try {
         const registeredModelRef = await ensurePendingLocalSessionRegistered(currentSessionKey);
@@ -4376,7 +4536,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
-    if (effectiveMode === 'chat') {
+    if (effectiveMode === 'chat' && mediaPlan.action !== 'desktop_screenshot' && mediaPlan.action !== 'clarify') {
       try {
         await ensureSessionManagedTextModelAllowed(get, currentSessionKey);
       } catch (error) {
@@ -4388,85 +4548,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
-    const currentMessages = get().messages;
     const sendGeneration = ++_sendGenerationCounter;
     _activeSendGenerationBySession.set(currentSessionKey, sendGeneration);
-    const explicitPendingImages = (attachments ?? [])
-      .filter((file) => file.mimeType.startsWith('image/') && file.stagedPath.trim().length > 0)
-      .map((file) => ({
-        fileName: file.fileName,
-        mimeType: file.mimeType,
-        fileSize: file.fileSize,
-        stagedPath: file.stagedPath,
-        preview: file.preview,
-      }));
-    const imageReferenceInputs = effectiveMode === 'image' && shouldReuseLatestImageForEdit(trimmed, explicitPendingImages)
-      ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
+    const imageReferenceInputs = mediaPlan.action === 'image_edit'
+      ? plannedSourceImages
       : [];
     const videoReferenceInputs = effectiveMode === 'video'
-      ? explicitPendingImages
+      ? plannedSourceImages
       : [];
-    const videoCandidateInputs = effectiveMode === 'video' && explicitPendingImages.length === 0
-      ? resolveImageModeReferenceInputs([], currentMessages)
-      : [];
-    const visibleGenerationAttachments = (effectiveMode === 'image' || effectiveMode === 'video')
-      ? explicitPendingImages
-      : [];
-
-    // Add user message optimistically (with local file metadata for UI display)
-    const nowMs = Date.now();
-    const userMsg: RawMessage = {
-      role: 'user',
-      content: (effectiveMode === 'image' || effectiveMode === 'video') ? trimmed : (trimmed || (attachments?.length ? '(file attached)' : '')),
-      timestamp: nowMs / 1000,
-      id: crypto.randomUUID(),
-      _attachedFiles: (effectiveMode === 'image' || effectiveMode === 'video')
-        ? (visibleGenerationAttachments.length > 0
-          ? visibleGenerationAttachments.map(a => ({
-            fileName: a.fileName,
-            mimeType: a.mimeType,
-            fileSize: a.fileSize,
-            preview: a.preview,
-            filePath: a.stagedPath,
-          }))
-          : undefined)
-        : attachments?.map(a => ({
-          fileName: a.fileName,
-          mimeType: a.mimeType,
-          fileSize: a.fileSize,
-          preview: a.preview,
-          filePath: a.stagedPath,
-        })),
-    };
-    rememberPendingOptimisticUserMessage(currentSessionKey, userMsg, nowMs);
-    set((s) => ({
-      messages: [...s.messages, userMsg],
-      sending: true,
-      error: null,
-      runError: null,
-      pendingImageGenerationLocal: effectiveMode === 'image',
-      pendingVideoGenerationLocal: effectiveMode === 'video',
-      streamingText: '',
-      streamingMessage: null,
-      streamingTools: [],
-      pendingFinal: false,
-      lastUserMessageAt: nowMs,
-    }));
-
-    // Update session label with first user message text as soon as it's sent
-    const { sessionLabels, messages } = get();
-    const isFirstMessage = !messages.slice(0, -1).some((m) => m.role === 'user');
-    if (!currentSessionKey.endsWith(':main') && isFirstMessage && !sessionLabels[currentSessionKey] && trimmed) {
-      const labelText = toSessionLabel(trimmed);
-      if (labelText) {
-        set((s) => ({ sessionLabels: { ...s.sessionLabels, [currentSessionKey]: labelText } }));
-      }
+    const videoCandidateInputs: PendingImageInput[] = [];
+    if (mediaPlan.action === 'clarify') {
+      const assistantMsg: RawMessage = {
+        role: 'assistant',
+        content: mediaPlan.clarification || '我需要再确认一下你想处理的对象。',
+        timestamp: Date.now() / 1000,
+        id: crypto.randomUUID(),
+      };
+      set((s) => ({
+        messages: [...s.messages, assistantMsg],
+        sending: false,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
+        activeRunId: null,
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+      }));
+      markSessionRunIdle(currentSessionKey);
+      return;
     }
 
-    // Mark this session as most recently active
-    set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
-
-    if (shouldUseLocalDesktopScreenshot(trimmed, mode, attachments)) {
+    if (mediaPlan.action === 'desktop_screenshot') {
       try {
         const result = await hostApiFetch<DesktopScreenshotResponse>(
           '/api/computer/desktop-screenshot',
@@ -4534,7 +4649,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
-              prompt: trimmed,
+              prompt: mediaPlan.prompt?.trim() || trimmed,
               model: imageOptions?.model,
               size: imageOptions?.size,
               quality: imageOptions?.quality,
@@ -4593,7 +4708,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
-              prompt: trimmed,
+              prompt: mediaPlan.prompt?.trim() || trimmed,
               size: videoOptions?.size,
               durationSeconds: videoOptions?.durationSeconds,
               inputImages: videoReferenceInputs.map((file) => ({

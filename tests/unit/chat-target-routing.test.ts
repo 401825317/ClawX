@@ -91,7 +91,69 @@ describe('chat target routing', () => {
     });
 
     hostApiFetchMock.mockReset();
-    hostApiFetchMock.mockImplementation(async (url: string) => {
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+      if (url === '/api/media/intent-plan') {
+        const body = JSON.parse(init?.body || '{}') as {
+          prompt?: string;
+          requestedMode?: 'chat' | 'image' | 'video';
+          explicitImages?: Array<{ fileName?: string; mimeType?: string; filePath: string }>;
+          candidateImages?: Array<{ fileName?: string; mimeType?: string; filePath: string }>;
+        };
+        const prompt = body.prompt || '';
+        const explicitImages = body.explicitImages ?? [];
+        const candidateImages = body.candidateImages ?? [];
+        if (/截图|screenshot/i.test(prompt)) {
+          return { success: true, plan: { action: 'desktop_screenshot', source: 'planner', confidence: 0.95 } };
+        }
+        if (body.requestedMode === 'video' || /视频|动起来|video/i.test(prompt)) {
+          const usesCandidate = /上一张|上一个|previous|last/i.test(prompt) && candidateImages.length > 0;
+          const sourceImages = explicitImages.length > 0
+            ? explicitImages
+            : (usesCandidate ? [candidateImages[0]] : []);
+          return {
+            success: true,
+            plan: {
+              action: 'video_generate',
+              source: 'planner',
+              confidence: 0.9,
+              selectedImageSource: explicitImages.length > 0 ? 'explicit' : (usesCandidate ? 'candidate' : 'none'),
+              selectedImageIndex: sourceImages.length > 0 ? 0 : undefined,
+              sourceImages,
+            },
+          };
+        }
+        const imageEditLike = /logo|去掉|remove|上一张|这个图片|这张图|加一条狗/i.test(prompt);
+        if (imageEditLike && explicitImages.length === 0 && candidateImages.length === 0) {
+          return {
+            success: true,
+            plan: {
+              action: 'clarify',
+              source: 'planner',
+              confidence: 0.9,
+              clarification: '你想编辑哪张图片？请上传或选中一张图片。',
+            },
+          };
+        }
+        if (imageEditLike || body.requestedMode === 'image' || /生成.*(图|海报)|出图|生图/i.test(prompt)) {
+          const shouldEdit = explicitImages.length > 0 || (imageEditLike && candidateImages.length > 0);
+          if (shouldEdit) {
+            const sourceImages = explicitImages.length > 0 ? [explicitImages[0]] : [candidateImages[0]];
+            return {
+              success: true,
+              plan: {
+                action: 'image_edit',
+                source: 'planner',
+                confidence: 0.9,
+                selectedImageSource: explicitImages.length > 0 ? 'explicit' : 'candidate',
+                selectedImageIndex: 0,
+                sourceImages,
+              },
+            };
+          }
+          return { success: true, plan: { action: 'image_generate', source: 'planner', confidence: 0.9 } };
+        }
+        return { success: true, plan: { action: 'chat', source: 'planner', confidence: 0.9 } };
+      }
       if (url === '/api/chat/history') {
         return { success: true, result: { messages: [] } };
       }
@@ -566,6 +628,107 @@ describe('chat target routing', () => {
     expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
   });
 
+  it('uses the planner to route default-chat current-image edits to image edit with the latest assistant image', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '图片已生成。',
+          _attachedFiles: [
+            {
+              fileName: 'room.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/room.png',
+              source: 'message-ref',
+            },
+          ],
+        },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('这个图片上能不能加一条狗？');
+
+    const imageSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (imageSendCall?.[1] as { body: string }).body,
+    ) as {
+      sessionKey: string;
+      prompt: string;
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+
+    expect(payload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      prompt: '这个图片上能不能加一条狗？',
+      inputImages: [
+        {
+          fileName: 'room.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/room.png',
+        },
+      ],
+    });
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+  });
+
+  it('asks a clarification instead of downgrading current-image edits when no image context exists', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('这个图片上能不能加一条狗？');
+
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '你想编辑哪张图片？请上传或选中一张图片。',
+    });
+  });
+
   it('does not reuse the latest assistant image for a new image-generation prompt', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
@@ -1036,13 +1199,7 @@ describe('chat target routing', () => {
 
     expect(payload.durationSeconds).toBe(6);
     expect(payload.inputImages).toEqual([]);
-    expect(payload.candidateImages).toEqual([
-      {
-        fileName: 'old-frame.png',
-        mimeType: 'image/png',
-        filePath: '/tmp/old-frame.png',
-      },
-    ]);
+    expect(payload.candidateImages).toEqual([]);
   });
 
   it('sends a previous assistant image as a candidate for explicit previous-image video prompts', async () => {
@@ -1105,13 +1262,13 @@ describe('chat target routing', () => {
     };
 
     expect(payload.durationSeconds).toBe(6);
-    expect(payload.inputImages).toEqual([]);
-    expect(payload.candidateImages).toEqual([
+    expect(payload.inputImages).toEqual([
       {
         fileName: 'old-frame.png',
         mimeType: 'image/png',
         filePath: '/tmp/old-frame.png',
       },
     ]);
+    expect(payload.candidateImages).toEqual([]);
   });
 });

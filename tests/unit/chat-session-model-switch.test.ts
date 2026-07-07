@@ -65,6 +65,9 @@ describe('chat session model switching', () => {
     });
 
     hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/media/intent-plan') {
+        return { success: true, plan: { action: 'chat', source: 'planner', confidence: 0.95 } };
+      }
       if (url === '/api/chat/sessions') {
         return { success: true, result: { sessions: [] } };
       }
@@ -432,6 +435,9 @@ describe('chat session model switching', () => {
     });
 
     hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/media/intent-plan') {
+        return { success: true, plan: { action: 'chat', source: 'planner', confidence: 0.95 } };
+      }
       if (url === '/api/chat/send') {
         return { success: true, result: { runId: 'run-1' } };
       }

@@ -103,10 +103,72 @@ describe('ClawX OpenAI image plugin request shape', () => {
     expect(pluginSource).toContain('const imageFetchDispatcher = new Agent({');
     expect(pluginSource).toContain('headersTimeout: DEFAULT_TIMEOUT_MS');
     expect(pluginSource).toContain('bodyTimeout: DEFAULT_TIMEOUT_MS');
-    expect(pluginSource).toContain('await undiciFetch(appendImagesPath(baseUrl, mode), {');
+    expect(pluginSource).toContain('const upstreamUrl = appendImagesPath(baseUrl, mode);');
+    expect(pluginSource).toContain('await undiciFetch(upstreamUrl, {');
     expect(pluginSource).toContain('dispatcher: imageFetchDispatcher');
     expect(pluginSource).not.toContain('await globalThis.fetch');
   });
+
+  it('accepts OpenAI-compatible URL image responses', async () => {
+    const imageBytes = Buffer.from('url-image-bytes');
+    const server = http.createServer((req, res) => {
+      if (req.url === '/generated.png') {
+        res.writeHead(200, { 'content-type': 'image/png' });
+        res.end(imageBytes);
+        return;
+      }
+
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server failed to bind to a port');
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: [{ url: `http://127.0.0.1:${address.port}/generated.png` }],
+        }));
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const plugin = await import('../../resources/openclaw-plugins/clawx-openai-image/index.mjs');
+      let provider: { generateImage: (req: Record<string, unknown>) => Promise<{ images: unknown[] }> } | undefined;
+      plugin.default.register({
+        registerImageGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server failed to bind to a port');
+
+      const result = await provider?.generateImage({
+        provider: 'clawx-openai-image',
+        model: 'gpt-image-2',
+        prompt: 'paint a fox',
+        cfg: {
+          models: {
+            providers: {
+              'clawx-openai-image': {
+                apiKey: 'test-key',
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+              },
+            },
+          },
+        },
+        agentDir: '/tmp/clawx-openai-image-test-agent',
+        ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+      });
+
+      expect(result?.images).toHaveLength(1);
+      const image = result?.images[0] as { buffer?: Buffer; mimeType?: string; fileName?: string };
+      expect(Buffer.from(image.buffer || [])).toEqual(imageBytes);
+      expect(image.mimeType).toBe('image/png');
+      expect(image.fileName).toMatch(/^clawx-image-1-\d{8}-\d{6}-[0-9a-f]{8}\.png$/u);
+    } finally {
+      server.close();
+    }
+  }, 15_000);
 
   it('sends reference-image edits as multipart image uploads', async () => {
     let requestContentType = '';
