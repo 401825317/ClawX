@@ -113,7 +113,7 @@ describe('long assistant transcript hydration regression', () => {
     );
 
     expect(hostApiFetchMock).toHaveBeenCalledWith(
-      `/api/sessions/transcript?sessionKey=${encodeURIComponent(SESSION_KEY)}&limit=200`,
+      `/api/sessions/transcript?sessionKey=${encodeURIComponent(SESSION_KEY)}&limit=200&includeFamily=true`,
     );
     expect(extractText(hydrated[0]?.content)).toBe(fullText);
     expect(gatewayHistoryNeedsTranscriptHydration(hydrated)).toBe(false);

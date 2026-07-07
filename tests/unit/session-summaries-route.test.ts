@@ -43,7 +43,11 @@ function createResponse() {
   return {
     res,
     get json() {
-      return JSON.parse(body) as { success: boolean; summaries?: Array<Record<string, unknown>> };
+      return JSON.parse(body) as {
+        success: boolean;
+        summaries?: Array<Record<string, unknown>>;
+        messages?: Array<Record<string, unknown>>;
+      };
     },
     get statusCode() {
       return (res as ServerResponse).statusCode;
@@ -214,5 +218,62 @@ describe('POST /api/sessions/summaries', () => {
       sessionKey: 'agent:main:session-0',
       firstUserText: 'first title 0',
     });
+  });
+
+  it('merges usage family reset transcripts when loading a session transcript', async () => {
+    const sessionsDir = join(testOpenClawConfigDir, 'agents', 'main', 'sessions');
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(join(sessionsDir, 'sessions.json'), JSON.stringify({
+      'agent:main:main': {
+        sessionFile: join(sessionsDir, 'current-session.jsonl'),
+        sessionId: 'current-session',
+        usageFamilySessionIds: ['old-session', 'current-session'],
+      },
+    }), 'utf8');
+    writeFileSync(
+      join(sessionsDir, 'old-session.jsonl.reset.2026-07-07T12-34-21.046Z'),
+      [
+        JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'assistant',
+            timestamp: 1783427166423,
+            content: '图片已生成。\n\nMEDIA:/tmp/generated-beauty.png',
+            idempotencyKey: 'old-image-message',
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      join(sessionsDir, 'current-session.jsonl'),
+      [
+        JSON.stringify({
+          type: 'message',
+          message: {
+            role: 'user',
+            timestamp: 1783427641000,
+            content: '你觉得美嘛？',
+            idempotencyKey: 'current-question',
+          },
+        }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    const response = createResponse();
+    const { handleSessionRoutes } = await import('@electron/api/routes/sessions');
+    await handleSessionRoutes(
+      { method: 'GET' } as IncomingMessage,
+      response.res,
+      new URL('http://127.0.0.1/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=10&includeFamily=true'),
+      {} as HostApiContext,
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json.messages?.map((message) => message.content)).toEqual([
+      '图片已生成。\n\nMEDIA:/tmp/generated-beauty.png',
+      '你觉得美嘛？',
+    ]);
   });
 });

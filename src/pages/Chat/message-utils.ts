@@ -30,6 +30,13 @@ function stripInboundMediaVisionEnvelope(text: string): string {
   return result.replace(/\n\s*Description:\s*\n[\s\S]*$/i, '').trim();
 }
 
+export function stripCompositeExecutionContractEnvelope(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/\s*(?:【UClaw composite execution contract】|\[UClaw composite execution contract\])[\s\S]*$/i, '')
+    .trim();
+}
+
 /**
  * Clean Gateway metadata from user message text for display.
  * Strips: [media attached: ... | ...], [message_id: ...],
@@ -37,7 +44,7 @@ function stripInboundMediaVisionEnvelope(text: string): string {
  */
 function cleanUserText(text: string): string {
   return stripInboundMediaVisionEnvelope(
-    text
+    stripCompositeExecutionContractEnvelope(text)
     // Remove [media attached: path (mime) | path] references
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     // Remove [message_id: uuid]
@@ -197,12 +204,14 @@ export function stripInternalSentinelLines(text: string): string {
     .trim();
 }
 
-/** Interim image-generation status the user should not see as a final answer. */
+/** Interim generation/execution status the user should not see as a final answer. */
 export function isGeneratingStatusNarration(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (/^(?:图片(?:正在)?生成中|正在生成(?:图片|图像)|生成中)/i.test(trimmed)) return true;
   if (/稍等(片刻|一下)?/.test(trimmed) && trimmed.length <= 80 && /生成|generat/i.test(trimmed)) return true;
+  if (/^继续收尾[：:]/u.test(trimmed)) return true;
+  if (/^继续(?:执行|处理|推进)[：:]/u.test(trimmed) && /(?:产物|文件|媒体|工具|验证|后台)/u.test(trimmed)) return true;
   return false;
 }
 

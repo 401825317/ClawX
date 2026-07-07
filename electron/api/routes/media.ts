@@ -36,8 +36,11 @@ import {
   type MediaIntentRecentMessage,
 } from '../../utils/media-intent-planner';
 import { logger } from '../../utils/logger';
-import type { MediaGenerationInputImageRef } from '../../utils/media-generation-types';
-import { planVideoGenerationRoute } from '../../utils/video-generation-route-planner';
+import type {
+  MediaGenerationInputImageRef,
+  VideoGenerationRouteDecision,
+  VideoGenerationRouteMode,
+} from '../../utils/media-generation-types';
 import {
   countVideoPromptCharacters,
   getVideoPromptLengthError,
@@ -60,6 +63,60 @@ function normalizeMediaInputImageRefs(
         filePath: image.filePath!.trim(),
       }))
     : undefined;
+}
+
+function isVideoRouteMode(value: unknown): value is VideoGenerationRouteMode {
+  return value === 'text_to_video'
+    || value === 'image_to_video'
+    || value === 'edit_image_then_video';
+}
+
+function normalizeVideoRouteDecision(
+  rawRoute: unknown,
+  params: {
+    prompt: string;
+    inputImages?: MediaGenerationInputImageRef[];
+  },
+): VideoGenerationRouteDecision {
+  const route = rawRoute && typeof rawRoute === 'object'
+    ? rawRoute as Record<string, unknown>
+    : {};
+  const rawMode = route.mode;
+  const mode = isVideoRouteMode(rawMode)
+    ? rawMode
+    : ((params.inputImages?.length ?? 0) > 0 ? 'image_to_video' : 'text_to_video');
+  const routeSourceImages = normalizeMediaInputImageRefs(route.sourceImages as Array<{
+    fileName?: string;
+    mimeType?: string;
+    filePath?: string;
+  }> | undefined);
+  const sourceImages = routeSourceImages?.length
+    ? routeSourceImages
+    : (mode === 'text_to_video' ? undefined : params.inputImages);
+  const selectedImageSource = route.selectedImageSource === 'candidate' || route.selectedImageSource === 'explicit'
+    ? route.selectedImageSource
+    : (sourceImages?.length ? 'explicit' : 'none');
+  const selectedImageIndex = typeof route.selectedImageIndex === 'number' && Number.isFinite(route.selectedImageIndex)
+    ? Math.max(0, Math.floor(route.selectedImageIndex))
+    : (sourceImages?.length ? 0 : undefined);
+
+  return {
+    mode: sourceImages?.length ? mode : 'text_to_video',
+    source: route.source === 'fallback' ? 'fallback' : 'router',
+    confidence: typeof route.confidence === 'number' && Number.isFinite(route.confidence)
+      ? Math.max(0, Math.min(1, route.confidence))
+      : undefined,
+    reason: typeof route.reason === 'string' ? route.reason : undefined,
+    selectedImageSource: sourceImages?.length ? selectedImageSource : 'none',
+    selectedImageIndex,
+    videoPrompt: typeof route.videoPrompt === 'string' && route.videoPrompt.trim()
+      ? route.videoPrompt.trim()
+      : params.prompt,
+    imageEditPrompt: typeof route.imageEditPrompt === 'string' && route.imageEditPrompt.trim()
+      ? route.imageEditPrompt.trim()
+      : undefined,
+    sourceImages,
+  };
 }
 
 export async function handleMediaRoutes(
@@ -100,6 +157,7 @@ export async function handleMediaRoutes(
         selectedImageSource: plan.selectedImageSource,
         selectedImageIndex: plan.selectedImageIndex,
         sourceImageCount: plan.sourceImages?.length ?? 0,
+        compositeTaskCount: plan.compositeTasks?.length ?? 0,
       });
       sendJson(res, 200, { success: true, plan });
     } catch (error) {
@@ -390,6 +448,7 @@ export async function handleMediaRoutes(
           mimeType?: string;
           filePath?: string;
         }>;
+        route?: unknown;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -403,7 +462,6 @@ export async function handleMediaRoutes(
       }
       const inputImages = normalizeMediaInputImageRefs(body.inputImages);
       const userInputImages = normalizeMediaInputImageRefs(body.userInputImages);
-      const candidateImages = normalizeMediaInputImageRefs(body.candidateImages);
       const originalPrompt = body.originalPrompt?.trim() || prompt;
       const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
         ? Math.floor(body.userMessageTimestampMs)
@@ -411,15 +469,14 @@ export async function handleMediaRoutes(
       logger.info('[video-generation-route] chat_send_received', {
         sessionKey,
         promptChars: countVideoPromptCharacters(prompt),
+        model: body.model?.trim(),
         size: body.size?.trim(),
         durationSeconds: body.durationSeconds,
         inputImageCount: inputImages?.length ?? 0,
-        candidateImageCount: candidateImages?.length ?? 0,
       });
-      const route = await planVideoGenerationRoute({
+      const route = normalizeVideoRouteDecision(body.route, {
         prompt,
         inputImages,
-        candidateImages,
       });
       logger.info('[video-generation-route] chat_send_planned', {
         sessionKey,
@@ -456,6 +513,7 @@ export async function handleMediaRoutes(
         sessionKey,
         prompt: finalVideoPrompt,
         originalPrompt,
+        ...(body.model?.trim() ? { model: body.model.trim() } : {}),
         size: body.size?.trim(),
         durationSeconds: typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
           ? Math.max(1, Math.floor(body.durationSeconds))

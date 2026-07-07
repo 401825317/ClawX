@@ -8,6 +8,10 @@ import {
 } from '@/pages/Chat/task-visualization';
 import { stripProcessMessagePrefix } from '@/pages/Chat/message-utils';
 import { applyRuntimeEventToRuns } from '@/stores/chat/runtime-graph';
+import {
+  buildRuntimeCompletionGateEvents,
+  buildRuntimeCompletionGateReport,
+} from '@/stores/chat/runtime-contract';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 
 describe('runtime graph state', () => {
@@ -44,6 +48,37 @@ describe('runtime graph state', () => {
     expect(duplicateSecondUpdate['run-1'].events).toHaveLength(3);
   });
 
+  it('deduplicates replayed runtime events by runId and seq while keeping distinct seq values', () => {
+    const first = applyRuntimeEventToRuns({}, {
+      type: 'tool.updated',
+      runId: 'run-replay',
+      seq: 10,
+      toolCallId: 'call-1',
+      name: 'exec',
+      partialResult: 'step 1',
+    });
+    const second = applyRuntimeEventToRuns(first, {
+      type: 'tool.updated',
+      runId: 'run-replay',
+      seq: 11,
+      toolCallId: 'call-1',
+      name: 'exec',
+      partialResult: 'step 1',
+    });
+    const replayedFirst = applyRuntimeEventToRuns(second, {
+      type: 'tool.updated',
+      runId: 'run-replay',
+      seq: 10,
+      toolCallId: 'call-1',
+      name: 'exec',
+      partialResult: 'step 1',
+    });
+
+    expect(second['run-replay'].events.map((event) => event.seq)).toEqual([10, 11]);
+    expect(replayedFirst).toBe(second);
+    expect(replayedFirst['run-replay'].events.map((event) => event.seq)).toEqual([10, 11]);
+  });
+
   it('does not drop full-text assistant deltas that do not extend the previous prefix', () => {
     const first = applyRuntimeEventToRuns({}, {
       type: 'assistant.delta',
@@ -57,6 +92,634 @@ describe('runtime graph state', () => {
     });
 
     expect(second['run-1'].assistantText).toBe('corrected');
+  });
+
+  it('aggregates plan, artifact, verification, and checkpoint events into the run contract', () => {
+    const planned = applyRuntimeEventToRuns({}, {
+      type: 'run.plan.updated',
+      runId: 'run-contract',
+      objective: '生成并验证报告',
+      summary: '先生成文件，再验证可打开',
+      steps: [
+        { id: 'write', title: '生成报告', status: 'running', order: 2 },
+        { id: 'inspect', title: '检查输入', status: 'completed', order: 1 },
+      ],
+    });
+    const withArtifact = applyRuntimeEventToRuns(planned, {
+      type: 'artifact.produced',
+      runId: 'run-contract',
+      artifact: {
+        id: 'report',
+        kind: 'document',
+        title: '报告',
+        filePath: '/tmp/report.docx',
+      },
+      toolCallId: 'tool-create',
+    });
+    const withVerification = applyRuntimeEventToRuns(withArtifact, {
+      type: 'verification.completed',
+      runId: 'run-contract',
+      verification: {
+        id: 'verify-report',
+        status: 'passed',
+        artifactId: 'report',
+        title: '文件存在',
+      },
+    });
+    const withCheckpoint = applyRuntimeEventToRuns(withVerification, {
+      type: 'run.checkpoint',
+      runId: 'run-contract',
+      checkpoint: {
+        id: 'cp-1',
+        summary: '报告已生成，准备最终回复',
+        recoverable: true,
+      },
+    });
+
+    expect(withCheckpoint['run-contract']).toMatchObject({
+      objective: '生成并验证报告',
+      planSummary: '先生成文件，再验证可打开',
+      planSteps: [
+        expect.objectContaining({ id: 'inspect' }),
+        expect.objectContaining({ id: 'write' }),
+      ],
+      artifacts: [
+        expect.objectContaining({
+          id: 'report',
+          sourceToolCallId: 'tool-create',
+        }),
+      ],
+      verifications: [
+        expect.objectContaining({ id: 'verify-report', status: 'passed' }),
+      ],
+      checkpoints: [
+        expect.objectContaining({ id: 'cp-1' }),
+      ],
+    });
+  });
+
+  it('aggregates gate issues and evaluations into the run contract', () => {
+    const withIssue = applyRuntimeEventToRuns({}, {
+      type: 'gate.issue',
+      runId: 'run-gate-contract',
+      issue: {
+        id: 'issue-1',
+        code: 'tool.failed',
+        severity: 'blocking',
+        title: '工具失败',
+        recoverable: true,
+      },
+    });
+    const withGate = applyRuntimeEventToRuns(withIssue, {
+      type: 'gate.evaluated',
+      runId: 'run-gate-contract',
+      gate: {
+        id: 'gate:run-gate-contract:completion',
+        decision: 'continue_required',
+        artifactCount: 0,
+        requiredVerificationCount: 0,
+        passedRequiredVerificationCount: 0,
+        blockingIssueCount: 1,
+        warningIssueCount: 0,
+        verificationCoverage: 1,
+        issues: [{
+          id: 'issue-1',
+          code: 'tool.failed',
+          severity: 'blocking',
+          title: '工具失败',
+          recoverable: true,
+        }],
+      },
+    });
+
+    expect(withGate['run-gate-contract']).toMatchObject({
+      issues: [expect.objectContaining({ id: 'issue-1', code: 'tool.failed' })],
+      gateEvaluations: [expect.objectContaining({ id: 'gate:run-gate-contract:completion' })],
+      gateResult: expect.objectContaining({
+        decision: 'continue_required',
+        blockingIssueCount: 1,
+      }),
+    });
+  });
+
+  it('blocks completion when runtime facts still contain failed or unfinished execution work', () => {
+    const runtimeRuns = [
+      {
+        type: 'run.plan.updated' as const,
+        runId: 'run-gate',
+        steps: [
+          { id: 'uclaw.execute', title: '执行任务', status: 'running' as const, order: 1 },
+          { id: 'tool:create', title: '生成文件', status: 'completed' as const, order: 2 },
+          { id: 'tool:inspect', title: '检查文件', status: 'running' as const, order: 3 },
+          { id: 'tool:upload', title: '上传文件', status: 'error' as const, order: 4 },
+        ],
+      },
+      {
+        type: 'artifact.produced' as const,
+        runId: 'run-gate',
+        artifact: {
+          id: 'artifact-report',
+          title: '报告',
+          filePath: '/tmp/report.docx',
+        },
+      },
+      {
+        type: 'verification.completed' as const,
+        runId: 'run-gate',
+        verification: {
+          id: 'verify-report',
+          status: 'blocked' as const,
+          artifactId: 'artifact-report',
+          detail: '文件不存在',
+        },
+      },
+      {
+        type: 'run.checkpoint' as const,
+        runId: 'run-gate',
+        checkpoint: {
+          id: 'fatal',
+          summary: '无法恢复',
+          recoverable: false,
+        },
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const run = runtimeRuns['run-gate'];
+    const report = buildRuntimeCompletionGateReport(run);
+    expect(report).toMatchObject({
+      artifactCount: 1,
+      blockedVerificationCount: 1,
+      failedStepCount: 1,
+      runningStepCount: 1,
+      blockingCheckpointCount: 1,
+      hasBlockingIssues: true,
+    });
+
+    const gateEvents = buildRuntimeCompletionGateEvents(run, {
+      runId: 'run-gate',
+      status: 'completed',
+      ts: 1,
+    });
+
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'gate.issue',
+        producer: 'gate',
+        contractVersion: 1,
+        issue: expect.objectContaining({
+          code: 'verification.required.failed',
+          severity: 'blocking',
+        }),
+      }),
+      expect.objectContaining({
+        type: 'gate.evaluated',
+        producer: 'gate',
+        contractVersion: 1,
+        gate: expect.objectContaining({
+          decision: 'blocked_needs_user',
+          blockingIssueCount: 4,
+          requiredVerificationCount: 1,
+          passedRequiredVerificationCount: 0,
+          verificationCoverage: 0,
+        }),
+      }),
+      expect.objectContaining({
+        type: 'run.step.updated',
+        step: expect.objectContaining({
+          id: 'uclaw.verify',
+          status: 'blocked',
+          detail: expect.stringContaining('阻断项 4 个'),
+        }),
+      }),
+      expect.objectContaining({
+        type: 'run.step.updated',
+        step: expect.objectContaining({
+          id: 'uclaw.deliver',
+          status: 'error',
+          detail: expect.stringContaining('上传文件 失败或阻塞'),
+        }),
+      }),
+      expect.objectContaining({
+        type: 'run.checkpoint',
+        checkpoint: expect.objectContaining({
+          id: 'checkpoint:run-gate:completion-gate',
+          summary: '完成门禁发现执行结果尚未满足交付条件。',
+          reason: expect.stringContaining('无法恢复'),
+        }),
+      }),
+    ]));
+  });
+
+  it('blocks completion on failed tool, command, and approval runtime facts even without producer steps', () => {
+    const runtimeRuns = [
+      {
+        type: 'tool.completed' as const,
+        runId: 'run-raw-failures',
+        toolCallId: 'call-write',
+        name: 'write_file',
+        isError: true,
+        result: { error: 'permission denied' },
+      },
+      {
+        type: 'command.output' as const,
+        runId: 'run-raw-failures',
+        itemId: 'cmd-1',
+        name: 'exec',
+        title: 'npm test',
+        output: 'failed',
+        exitCode: 1,
+        phase: 'end',
+      },
+      {
+        type: 'approval.updated' as const,
+        runId: 'run-raw-failures',
+        itemId: 'approval-1',
+        title: '写入授权',
+        status: 'denied',
+        message: 'user denied',
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const report = buildRuntimeCompletionGateReport(runtimeRuns['run-raw-failures']);
+    expect(report.issues.map((issue) => issue.code)).toEqual(expect.arrayContaining([
+      'tool.failed',
+      'command.failed',
+      'approval.denied',
+    ]));
+    expect(report).toMatchObject({
+      blockingIssueCount: 3,
+      failedStepCount: 3,
+      hasBlockingIssues: true,
+    });
+
+    const gateEvents = buildRuntimeCompletionGateEvents(runtimeRuns['run-raw-failures'], {
+      runId: 'run-raw-failures',
+      status: 'completed',
+    });
+
+    expect(gateEvents.filter((event) => event.type === 'gate.issue')).toHaveLength(3);
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'gate.evaluated',
+        gate: expect.objectContaining({
+          decision: 'blocked_needs_user',
+          blockingIssueCount: 3,
+        }),
+      }),
+    ]));
+    expect(gateEvents.some((event) => event.type === 'run.checkpoint')).toBe(true);
+  });
+
+  it('blocks completion on failed required command verification even without an artifact id', () => {
+    const runtimeRuns = [
+      {
+        type: 'verification.completed' as const,
+        runId: 'run-command-verification',
+        verification: {
+          id: 'verification:cmd-typecheck',
+          status: 'failed' as const,
+          kind: 'typecheck',
+          required: true,
+          severity: 'blocking' as const,
+          title: 'pnpm run typecheck',
+          targetId: 'cmd-typecheck',
+          evidence: 'exitCode=1',
+        },
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const report = buildRuntimeCompletionGateReport(runtimeRuns['run-command-verification']);
+
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'verification.required.failed',
+        verificationId: 'verification:cmd-typecheck',
+        targetId: 'cmd-typecheck',
+      }),
+    ]));
+    expect(report).toMatchObject({
+      blockedVerificationCount: 1,
+      blockingIssueCount: 1,
+      hasBlockingIssues: true,
+    });
+  });
+
+  it('blocks artifact-oriented objectives that finish without producing artifacts', () => {
+    const runtimeRuns = [
+      {
+        type: 'run.started' as const,
+        runId: 'run-missing-artifact',
+        objective: '生图，PPT，Excel，生视频，每个事儿都随便给我来一个',
+      },
+      {
+        type: 'run.plan.updated' as const,
+        runId: 'run-missing-artifact',
+        objective: '生图，PPT，Excel，生视频，每个事儿都随便给我来一个',
+        steps: [
+          { id: 'uclaw.objective', title: '理解目标', status: 'completed' as const, order: 0 },
+          { id: 'uclaw.execute', title: '执行任务', status: 'completed' as const, order: 1 },
+        ],
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const report = buildRuntimeCompletionGateReport(runtimeRuns['run-missing-artifact']);
+    expect(report).toMatchObject({
+      artifactCount: 0,
+      missingRequiredArtifactCount: 1,
+      blockingIssueCount: 1,
+      verificationCoverage: 0,
+      hasBlockingIssues: true,
+    });
+    expect(report.issues.map((issue) => issue.code)).toContain('artifact.required.missing');
+
+    const gateEvents = buildRuntimeCompletionGateEvents(runtimeRuns['run-missing-artifact'], {
+      runId: 'run-missing-artifact',
+      status: 'completed',
+    });
+
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'gate.issue',
+        issue: expect.objectContaining({
+          code: 'artifact.required.missing',
+          severity: 'blocking',
+          recoverable: true,
+        }),
+      }),
+      expect.objectContaining({
+        type: 'gate.evaluated',
+        gate: expect.objectContaining({
+          decision: 'continue_required',
+          artifactCount: 0,
+          verificationCoverage: 0,
+        }),
+      }),
+      expect.objectContaining({
+        type: 'run.checkpoint',
+        checkpoint: expect.objectContaining({
+          id: 'checkpoint:run-missing-artifact:completion-gate',
+          recoverable: true,
+        }),
+      }),
+    ]));
+  });
+
+  it('blocks composite required-artifact subtasks until each one has an artifact', () => {
+    const runtimeRuns = [
+      {
+        type: 'run.plan.updated' as const,
+        runId: 'run-composite-artifacts',
+        objective: '生成图片、PPT 和 Excel',
+        steps: [
+          { id: 'task:image', title: '生成图片', status: 'completed' as const, requiresArtifact: true, order: 1 },
+          { id: 'task:ppt', title: '生成 PPT', status: 'completed' as const, requiresArtifact: true, order: 2 },
+          { id: 'task:excel', title: '生成 Excel', status: 'running' as const, requiresArtifact: true, order: 3 },
+        ],
+      },
+      {
+        type: 'artifact.produced' as const,
+        runId: 'run-composite-artifacts',
+        artifact: {
+          id: 'artifact:image',
+          title: '图片',
+          filePath: '/tmp/image.png',
+          sourceToolCallId: 'task:image',
+        },
+      },
+      {
+        type: 'verification.completed' as const,
+        runId: 'run-composite-artifacts',
+        verification: {
+          id: 'verify-image',
+          status: 'passed' as const,
+          artifactId: 'artifact:image',
+        },
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const report = buildRuntimeCompletionGateReport(runtimeRuns['run-composite-artifacts']);
+
+    expect(report).toMatchObject({
+      artifactCount: 1,
+      missingRequiredArtifactCount: 2,
+      runningStepCount: 1,
+      blockingIssueCount: 3,
+      hasBlockingIssues: true,
+      verificationCoverage: 1,
+    });
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'artifact.required.missing',
+        stepId: 'task:ppt',
+        title: '生成 PPT 缺少必需产物',
+      }),
+      expect.objectContaining({
+        code: 'artifact.required.missing',
+        stepId: 'task:excel',
+        title: '生成 Excel 缺少必需产物',
+      }),
+      expect.objectContaining({
+        code: 'step.unfinished',
+        stepId: 'task:excel',
+      }),
+    ]));
+
+    const gateEvents = buildRuntimeCompletionGateEvents(runtimeRuns['run-composite-artifacts'], {
+      runId: 'run-composite-artifacts',
+      status: 'completed',
+    });
+
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'gate.evaluated',
+        gate: expect.objectContaining({
+          decision: 'continue_required',
+          blockingIssueCount: 3,
+          artifactCount: 1,
+        }),
+      }),
+      expect.objectContaining({
+        type: 'run.step.updated',
+        step: expect.objectContaining({
+          id: 'uclaw.deliver',
+          status: 'blocked',
+          detail: expect.stringContaining('生成 PPT 缺少必需产物'),
+        }),
+      }),
+    ]));
+  });
+
+  it('matches seven composite artifacts by structured stepId without order fallback', () => {
+    const steps = [
+      { id: 'uclaw.composite.image', title: '生成图片' },
+      { id: 'uclaw.composite.video', title: '生成视频' },
+      { id: 'uclaw.composite.ppt', title: '制作 PPT' },
+      { id: 'uclaw.composite.excel', title: '制作 Excel' },
+      { id: 'uclaw.composite.doc', title: '制作 Word' },
+      { id: 'uclaw.composite.web', title: '制作网页' },
+      { id: 'uclaw.composite.code', title: '输出代码' },
+    ].map((step, index) => ({
+      ...step,
+      status: 'completed' as const,
+      kind: 'composite-task',
+      requiresArtifact: true,
+      order: index + 1,
+    }));
+    const producedStepIds = [
+      'uclaw.composite.ppt',
+      'uclaw.composite.image',
+      'uclaw.composite.doc',
+      'uclaw.composite.web',
+      'uclaw.composite.code',
+    ];
+    const artifactEvents = producedStepIds.map((stepId, index) => ({
+      type: 'artifact.produced' as const,
+      runId: 'run-seven-composite-artifacts',
+      artifact: {
+        id: `artifact:${stepId}`,
+        title: `产物 ${index + 1}`,
+        filePath: `/tmp/artifact-${index + 1}`,
+        stepId,
+      },
+    }));
+    const verificationEvents = artifactEvents.map((event) => ({
+      type: 'verification.completed' as const,
+      runId: 'run-seven-composite-artifacts',
+      verification: {
+        id: `verify:${event.artifact.id}`,
+        status: 'passed' as const,
+        artifactId: event.artifact.id,
+      },
+    }));
+    const runtimeRuns = [
+      {
+        type: 'run.plan.updated' as const,
+        runId: 'run-seven-composite-artifacts',
+        objective: '生成 7 个 composite 子任务产物',
+        steps,
+      },
+      ...artifactEvents,
+      ...verificationEvents,
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const report = buildRuntimeCompletionGateReport(runtimeRuns['run-seven-composite-artifacts']);
+    const missingStepIds = report.issues
+      .filter((issue) => issue.code === 'artifact.required.missing')
+      .map((issue) => issue.stepId);
+
+    expect(report).toMatchObject({
+      artifactCount: 5,
+      missingRequiredArtifactCount: 2,
+      blockingIssueCount: 2,
+      hasBlockingIssues: true,
+      verificationCoverage: 1,
+    });
+    expect(missingStepIds).toEqual([
+      'uclaw.composite.video',
+      'uclaw.composite.excel',
+    ]);
+  });
+
+  it('marks completion as deliverable when artifacts are verified and no execution issues remain', () => {
+    const runtimeRuns = [
+      {
+        type: 'run.step.updated' as const,
+        runId: 'run-clean',
+        step: { id: 'tool:create', title: '生成文件', status: 'completed' as const },
+      },
+      {
+        type: 'artifact.produced' as const,
+        runId: 'run-clean',
+        artifact: {
+          id: 'artifact-report',
+          title: '报告',
+          filePath: '/tmp/report.docx',
+        },
+      },
+      {
+        type: 'verification.completed' as const,
+        runId: 'run-clean',
+        verification: {
+          id: 'verify-report',
+          status: 'passed' as const,
+          artifactId: 'artifact-report',
+        },
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const run = runtimeRuns['run-clean'];
+    expect(buildRuntimeCompletionGateReport(run)).toMatchObject({
+      hasBlockingIssues: false,
+      artifactCount: 1,
+    });
+
+    const gateEvents = buildRuntimeCompletionGateEvents(run, {
+      runId: 'run-clean',
+      status: 'completed',
+      ts: 1,
+    });
+
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'run.step.updated',
+        step: expect.objectContaining({ id: 'uclaw.verify', status: 'completed' }),
+      }),
+      expect.objectContaining({
+        type: 'run.step.updated',
+        step: expect.objectContaining({ id: 'uclaw.deliver', status: 'completed' }),
+      }),
+      expect.objectContaining({
+        type: 'gate.evaluated',
+        gate: expect.objectContaining({
+          decision: 'deliverable',
+          artifactCount: 1,
+          requiredVerificationCount: 1,
+          passedRequiredVerificationCount: 1,
+        }),
+      }),
+    ]));
+    expect(gateEvents.some((event) => event.type === 'run.checkpoint')).toBe(false);
+    expect(gateEvents.some((event) => event.type === 'gate.issue')).toBe(false);
+  });
+
+  it('does not treat optional artifact registration as required availability verification', () => {
+    const runtimeRuns = [
+      {
+        type: 'artifact.produced' as const,
+        runId: 'run-registration-only',
+        artifact: {
+          id: 'artifact-image',
+          title: '图片',
+          filePath: '/tmp/image.png',
+        },
+      },
+      {
+        type: 'verification.completed' as const,
+        runId: 'run-registration-only',
+        verification: {
+          id: 'verification:artifact-image:registration',
+          status: 'passed' as const,
+          kind: 'artifact.registration',
+          required: false,
+          severity: 'info' as const,
+          artifactId: 'artifact-image',
+        },
+      },
+    ].reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {});
+
+    const report = buildRuntimeCompletionGateReport(runtimeRuns['run-registration-only']);
+
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'artifact.verification.missing',
+        artifactId: 'artifact-image',
+      }),
+    ]));
+    expect(report).toMatchObject({
+      artifactCount: 1,
+      missingVerificationCount: 1,
+      hasBlockingIssues: true,
+    });
   });
 });
 
@@ -90,6 +753,253 @@ describe('deriveTaskSteps', () => {
         detail: 'Scanning workspace',
       }),
     ]);
+  });
+
+  it('projects runtime contract events into visible execution steps', () => {
+    const steps = deriveRuntimeTaskSteps({
+      runId: 'run-contract',
+      status: 'running',
+      assistantText: '',
+      thinkingText: '',
+      events: [
+        {
+          type: 'run.plan.updated',
+          runId: 'run-contract',
+          objective: '生成并验证报告',
+          summary: '先生成文件，再验证可打开',
+          steps: [
+            { id: 'write', title: '生成报告', status: 'running', order: 1 },
+          ],
+        },
+        {
+          type: 'artifact.produced',
+          runId: 'run-contract',
+          artifact: {
+            id: 'report',
+            kind: 'document',
+            title: '报告',
+            filePath: '/tmp/report.docx',
+          },
+        },
+        {
+          type: 'verification.completed',
+          runId: 'run-contract',
+          verification: {
+            id: 'verify-report',
+            status: 'passed',
+            artifactId: 'report',
+            title: '文件存在',
+            evidence: 'stat ok',
+          },
+        },
+      ],
+    });
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        id: 'run-plan',
+        label: 'Plan',
+        kind: 'system',
+      }),
+      expect.objectContaining({
+        id: 'plan-step:write',
+        label: '生成报告',
+        status: 'running',
+        parentId: 'run-plan',
+      }),
+      expect.objectContaining({
+        id: 'artifact:report',
+        label: '报告',
+        status: 'completed',
+        detail: expect.stringContaining('/tmp/report.docx'),
+      }),
+      expect.objectContaining({
+        id: 'verification:verify-report',
+        label: '文件存在',
+        status: 'completed',
+        depth: 2,
+        parentId: 'artifact:report',
+        detail: expect.stringContaining('stat ok'),
+      }),
+    ]);
+  });
+
+  it('projects gate issues and gate decisions into visible execution steps', () => {
+    const steps = deriveRuntimeTaskSteps({
+      runId: 'run-gate-ui',
+      status: 'running',
+      assistantText: '',
+      thinkingText: '',
+      events: [
+        {
+          type: 'gate.issue',
+          runId: 'run-gate-ui',
+          issue: {
+            id: 'issue-1',
+            code: 'tool.failed',
+            severity: 'blocking',
+            title: '工具失败',
+            detail: 'permission denied',
+            recoverable: true,
+          },
+        },
+        {
+          type: 'gate.evaluated',
+          runId: 'run-gate-ui',
+          gate: {
+            id: 'gate:run-gate-ui:completion',
+            decision: 'continue_required',
+            summary: '需要继续执行。',
+            artifactCount: 0,
+            requiredVerificationCount: 0,
+            passedRequiredVerificationCount: 0,
+            blockingIssueCount: 1,
+            warningIssueCount: 0,
+            verificationCoverage: 1,
+            issues: [{
+              id: 'issue-1',
+              code: 'tool.failed',
+              severity: 'blocking',
+              title: '工具失败',
+              detail: 'permission denied',
+              recoverable: true,
+            }],
+          },
+        },
+      ],
+    });
+
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'gate-result',
+        label: 'Gate',
+        status: 'blocked',
+        detail: expect.stringContaining('decision=continue_required'),
+      }),
+      expect.objectContaining({
+        id: 'gate-issue:issue-1',
+        label: '工具失败',
+        status: 'blocked',
+        parentId: 'gate-result',
+        detail: expect.stringContaining('recoverable=true'),
+      }),
+    ]));
+    expect(steps.find((step) => step.id === 'gate-issue:issue-1')?.detail).toEqual(expect.stringContaining('permission denied'));
+  });
+
+  it('keeps gate and checkpoint status semantics visible in execution steps', () => {
+    const steps = deriveRuntimeTaskSteps({
+      runId: 'run-gate-statuses',
+      status: 'running',
+      assistantText: '',
+      thinkingText: '',
+      events: [
+        {
+          type: 'gate.evaluated',
+          runId: 'run-gate-statuses',
+          gate: {
+            id: 'gate:run-gate-statuses:continue',
+            decision: 'continue_required',
+            summary: '需要继续补产物。',
+            artifactCount: 0,
+            requiredVerificationCount: 1,
+            passedRequiredVerificationCount: 0,
+            blockingIssueCount: 1,
+            warningIssueCount: 0,
+            verificationCoverage: 0,
+            issues: [{
+              id: 'issue-recoverable',
+              code: 'artifact.required.missing',
+              severity: 'blocking',
+              title: '缺少产物',
+              detail: '没有 artifact.produced',
+              recoverable: true,
+              suggestedRecovery: '继续生成产物。',
+            }],
+          },
+        },
+        {
+          type: 'run.checkpoint',
+          runId: 'run-gate-statuses',
+          checkpoint: {
+            id: 'completion-gate',
+            summary: '完成门禁发现执行结果尚未满足交付条件。',
+            reason: '缺少产物验证',
+            recoverable: true,
+            issues: [{
+              id: 'issue-recoverable',
+              code: 'artifact.required.missing',
+              severity: 'blocking',
+              title: '缺少产物',
+              detail: '没有 artifact.produced',
+              recoverable: true,
+              suggestedRecovery: '继续生成产物。',
+            }],
+          },
+        },
+      ],
+    });
+
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'gate-result',
+        status: 'blocked',
+        detail: expect.stringContaining('decision=continue_required'),
+      }),
+      expect.objectContaining({
+        id: 'gate-issue:issue-recoverable',
+        status: 'blocked',
+        parentId: 'gate-result',
+        detail: expect.stringContaining('code=artifact.required.missing'),
+      }),
+      expect.objectContaining({
+        id: 'checkpoint:completion-gate',
+        status: 'blocked',
+        detail: expect.stringContaining('checkpoint=completion-gate'),
+      }),
+    ]));
+    expect(steps.find((step) => step.id === 'gate-issue:issue-recoverable')?.detail)
+      .toEqual(expect.stringContaining('recovery=继续生成产物。'));
+    expect(steps.find((step) => step.id === 'checkpoint:completion-gate')?.detail)
+      .toEqual(expect.stringContaining('recoverable=true'));
+  });
+
+  it.each([
+    ['blocked_needs_user', 'blocked'],
+    ['failed', 'failed'],
+    ['aborted', 'aborted'],
+  ] as const)('maps gate decision %s to task step status %s', (decision, status) => {
+    const steps = deriveRuntimeTaskSteps({
+      runId: `run-gate-${decision}`,
+      status: 'running',
+      assistantText: '',
+      thinkingText: '',
+      events: [
+        {
+          type: 'gate.evaluated',
+          runId: `run-gate-${decision}`,
+          gate: {
+            id: `gate:run-gate-${decision}`,
+            decision,
+            artifactCount: 0,
+            requiredVerificationCount: 0,
+            passedRequiredVerificationCount: 0,
+            blockingIssueCount: 0,
+            warningIssueCount: 0,
+            verificationCoverage: 1,
+            issues: [],
+          },
+        },
+      ],
+    });
+
+    expect(steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'gate-result',
+        status,
+        detail: expect.stringContaining(`decision=${decision}`),
+      }),
+    ]));
   });
 
   it('filters noisy process runtime events from execution graph steps', () => {
@@ -447,6 +1357,7 @@ describe('deriveTaskSteps', () => {
         status: 'completed',
       }),
     ]);
+    expect(steps.map((step) => step.detail)).not.toContain('Here is the summary.');
   });
 
   it('strips folded process narration from the final reply text', () => {

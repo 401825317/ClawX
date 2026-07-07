@@ -288,13 +288,34 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
   }
 }
 
+function readPluginRuntimeDependencyNames(pluginDir: string): string[] {
+  try {
+    const raw = readFileSync(fsPath(join(pluginDir, 'package.json')), 'utf-8');
+    const pkg = JSON.parse(raw) as { dependencies?: Record<string, unknown> };
+    return Object.keys(pkg.dependencies || {}).sort();
+  } catch {
+    return [];
+  }
+}
+
+function pluginDependencyDir(pluginDir: string, dependencyName: string): string {
+  return join(pluginDir, 'node_modules', ...dependencyName.split('/'));
+}
+
+function findMissingPluginRuntimeDependencies(pluginDir: string): string[] {
+  return readPluginRuntimeDependencyNames(pluginDir).filter((dependencyName) => {
+    const depDir = pluginDependencyDir(pluginDir, dependencyName);
+    return !existsSync(fsPath(join(depDir, 'package.json')));
+  });
+}
+
 // ── pnpm-aware node_modules copy helpers ─────────────────────────────────────
 
 export function findBestBundledPluginSource(candidateSources: string[], _targetDir?: string): string | null {
   const availableSources = candidateSources.filter((dir) => existsSync(fsPath(join(dir, 'openclaw.plugin.json'))));
   if (availableSources.length === 0) return null;
 
-  let bestSource: { dir: string; mtimeMs: number } | null = null;
+  let bestSource: { dir: string; mtimeMs: number; missingRuntimeDeps: string[] } | null = null;
   for (const dir of availableSources) {
     let mtimeMs = 0;
     for (const fileName of ['openclaw.plugin.json', 'package.json']) {
@@ -328,8 +349,18 @@ export function findBestBundledPluginSource(candidateSources: string[], _targetD
       }
     }
 
-    if (!bestSource || mtimeMs > bestSource.mtimeMs) {
-      bestSource = { dir, mtimeMs };
+    const missingRuntimeDeps = findMissingPluginRuntimeDependencies(dir);
+    const isBetterPackagedSource = Boolean(
+      bestSource && app.isPackaged && missingRuntimeDeps.length < bestSource.missingRuntimeDeps.length,
+    );
+    const isNewerEquivalentSource = (
+      !bestSource ||
+      bestSource.missingRuntimeDeps.length === missingRuntimeDeps.length ||
+      !app.isPackaged
+    ) && (!bestSource || mtimeMs > bestSource.mtimeMs);
+
+    if (!bestSource || isBetterPackagedSource || isNewerEquivalentSource) {
+      bestSource = { dir, mtimeMs, missingRuntimeDeps };
     }
   }
 
@@ -442,6 +473,96 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
   logger.info(`[plugin] Copied ${copiedNames.size} deps for ${npmName}`);
 }
 
+function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pluginLabel: string): void {
+  const dependencies = readPluginRuntimeDependencyNames(targetDir);
+  if (dependencies.length === 0) return;
+
+  const SKIP_PACKAGES = new Set(['typescript', '@playwright/test']);
+  try {
+    const pluginPkg = JSON.parse(readFileSync(fsPath(join(targetDir, 'package.json')), 'utf-8'));
+    for (const peer of Object.keys(pluginPkg.peerDependencies || {})) {
+      SKIP_PACKAGES.add(peer);
+    }
+  } catch { /* ignore */ }
+
+  const collected = new Map<string, string>();
+  const queue: Array<{ nodeModulesDir: string; skipPkg: string }> = [];
+
+  for (const depName of dependencies) {
+    const depPath = join(process.cwd(), 'node_modules', ...depName.split('/'));
+    if (!existsSync(fsPath(depPath))) {
+      throw new Error(`Missing dependency "${depName}" for ${pluginLabel}. Run pnpm install first.`);
+    }
+
+    const realDepPath = realpathSync(fsPath(depPath));
+    collected.set(realDepPath, depName);
+
+    const rootVirtualNM = findParentNodeModules(realDepPath);
+    if (rootVirtualNM) {
+      queue.push({ nodeModulesDir: rootVirtualNM, skipPkg: depName });
+    }
+  }
+
+  while (queue.length > 0) {
+    const { nodeModulesDir, skipPkg } = queue.shift()!;
+    for (const { name, fullPath } of listPackagesInDir(nodeModulesDir)) {
+      if (name === skipPkg) continue;
+      if (SKIP_PACKAGES.has(name) || name.startsWith('@types/')) continue;
+
+      let depRealPath: string;
+      try {
+        depRealPath = realpathSync(fsPath(fullPath));
+      } catch {
+        continue;
+      }
+      if (collected.has(depRealPath)) continue;
+      collected.set(depRealPath, name);
+
+      const depVirtualNM = findParentNodeModules(depRealPath);
+      if (depVirtualNM && depVirtualNM !== nodeModulesDir) {
+        queue.push({ nodeModulesDir: depVirtualNM, skipPkg: name });
+      }
+    }
+  }
+
+  const outputNM = join(targetDir, 'node_modules');
+  mkdirSync(fsPath(outputNM), { recursive: true });
+  const copiedNames = new Set<string>();
+  for (const [depRealPath, pkgName] of collected) {
+    if (copiedNames.has(pkgName)) continue;
+    copiedNames.add(pkgName);
+    const dest = join(outputNM, pkgName);
+    mkdirSync(fsPath(path.dirname(dest)), { recursive: true });
+    cpSyncSafe(depRealPath, dest);
+  }
+
+  logger.info(`[plugin] Hydrated ${copiedNames.size} runtime deps for ${pluginLabel} from root node_modules`);
+}
+
+function ensurePluginRuntimeDependencies(targetDir: string, pluginLabel: string): string[] {
+  let missingDeps = findMissingPluginRuntimeDependencies(targetDir);
+  if (missingDeps.length === 0) return [];
+
+  if (!app.isPackaged) {
+    try {
+      copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir, pluginLabel);
+      missingDeps = findMissingPluginRuntimeDependencies(targetDir);
+    } catch (error) {
+      logger.warn(
+        `[plugin] Failed to hydrate runtime deps for ${pluginLabel}`,
+        {
+          targetDir,
+          missingDeps,
+          platform: process.platform,
+          ...toErrorDiagnostic(error),
+        },
+      );
+    }
+  }
+
+  return missingDeps;
+}
+
 // ── Core install / upgrade logic ─────────────────────────────────────────────
 
 export function ensurePluginInstalled(
@@ -471,12 +592,19 @@ export function ensurePluginInstalled(
     } else {
       const installedFingerprint = readPluginContentFingerprint(targetDir);
       const sourceFingerprint = readPluginContentFingerprint(sourceDir);
-      if (!installedFingerprint || !sourceFingerprint || installedFingerprint === sourceFingerprint) {
+      const missingRuntimeDeps = findMissingPluginRuntimeDependencies(targetDir);
+      if (missingRuntimeDeps.length === 0 && (!installedFingerprint || !sourceFingerprint || installedFingerprint === sourceFingerprint)) {
         return { installed: true };
       }
-      logger.info(
-        `[plugin] Refreshing ${pluginLabel} plugin: bundled content changed without version bump`,
-      );
+      if (missingRuntimeDeps.length > 0) {
+        logger.info(
+          `[plugin] Refreshing ${pluginLabel} plugin: runtime deps missing (${missingRuntimeDeps.join(', ')})`,
+        );
+      } else {
+        logger.info(
+          `[plugin] Refreshing ${pluginLabel} plugin: bundled content changed without version bump`,
+        );
+      }
     }
   }
 
@@ -492,6 +620,13 @@ export function ensurePluginInstalled(
         cpSyncSafe(sourceDir, targetDir);
         if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
           return { installed: false, warning: `Failed to install ${pluginLabel} plugin mirror (manifest missing).` };
+        }
+        const missingRuntimeDeps = ensurePluginRuntimeDependencies(targetDir, pluginLabel);
+        if (missingRuntimeDeps.length > 0) {
+          return {
+            installed: false,
+            warning: `Failed to install ${pluginLabel} plugin mirror (runtime dependencies missing: ${missingRuntimeDeps.join(', ')})`,
+          };
         }
         fixupPluginManifest(targetDir);
         logger.info(`Installed ${pluginLabel} plugin from bundled mirror: ${sourceDir}`);
@@ -628,19 +763,19 @@ export function ensureClawXOpenAiImagePluginInstalled(): { installed: boolean; w
   );
 }
 
-export function ensureUClawComputerUsePluginInstalled(): { installed: boolean; warning?: string } {
-  return ensurePluginInstalled(
-    'uclaw-computer-use',
-    buildCandidateSources('uclaw-computer-use'),
-    'UClaw Computer Use',
-  );
-}
-
 export function ensureUClawArtifactGuardPluginInstalled(): { installed: boolean; warning?: string } {
   return ensurePluginInstalled(
     'uclaw-artifact-guard',
     buildCandidateSources('uclaw-artifact-guard'),
     'UClaw Artifact Guard',
+  );
+}
+
+export function ensureUClawLocalArtifactsPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-local-artifacts',
+    buildCandidateSources('uclaw-local-artifacts'),
+    'UClaw Local Artifacts',
   );
 }
 
@@ -666,8 +801,8 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureQQBotPluginInstalled, label: 'QQBot' },
   { fn: ensureParallelPluginInstalled, label: 'Parallel Search' },
   { fn: ensureClawXOpenAiImagePluginInstalled, label: 'UClaw OpenAI Image' },
-  { fn: ensureUClawComputerUsePluginInstalled, label: 'UClaw Computer Use' },
   { fn: ensureUClawArtifactGuardPluginInstalled, label: 'UClaw Artifact Guard' },
+  { fn: ensureUClawLocalArtifactsPluginInstalled, label: 'UClaw Local Artifacts' },
 ] as const;
 
 /**

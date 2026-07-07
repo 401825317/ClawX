@@ -1,10 +1,15 @@
 {
   "id": "uclaw-artifact-guard",
   "name": "UClaw Artifact Guard",
-  "description": "Prevents artifact delivery tasks from ending with unexecuted future-tense promises.",
+  "description": "Prevents artifact and external-action tasks from ending with unexecuted future-tense promises.",
   "version": "0.1.0",
   "entry": "index.mjs",
   "enabledByDefault": false,
+  "contracts": {
+    "agentToolResultMiddleware": [
+      "openclaw"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

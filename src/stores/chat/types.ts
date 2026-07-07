@@ -1,4 +1,12 @@
-import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
+import type {
+  ChatRuntimeArtifact,
+  ChatRuntimeCheckpoint,
+  ChatRuntimeEvent,
+  ChatRuntimeGateEvaluation,
+  ChatRuntimeGateIssue,
+  ChatRuntimePlanStep,
+  ChatRuntimeVerification,
+} from '../../../shared/chat-runtime-events';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -103,6 +111,15 @@ export interface ChatRuntimeRunState {
   startedAt?: number;
   lastEventAt?: number;
   endedAt?: number;
+  objective?: string;
+  planSummary?: string;
+  planSteps?: ChatRuntimePlanStep[];
+  artifacts?: ChatRuntimeArtifact[];
+  verifications?: ChatRuntimeVerification[];
+  issues?: ChatRuntimeGateIssue[];
+  checkpoints?: ChatRuntimeCheckpoint[];
+  gateEvaluations?: ChatRuntimeGateEvaluation[];
+  gateResult?: ChatRuntimeGateEvaluation;
   assistantText: string;
   thinkingText: string;
   events: ChatRuntimeEvent[];

@@ -117,6 +117,51 @@ describe('media generation jobs', () => {
     expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
   });
 
+  it('runs up to five image jobs and five video jobs concurrently', async () => {
+    const children: MockUtilityProcess[] = [];
+    forkMock.mockImplementation(() => {
+      const child = new MockUtilityProcess();
+      child.postMessage = vi.fn();
+      children.push(child);
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    });
+
+    const { enqueueMediaGenerationJob, getMediaGenerationJob } = await import('@electron/utils/media-generation-jobs');
+    const imageJobs = Array.from({ length: 6 }, (_, index) => enqueueMediaGenerationJob({
+      kind: 'image' as const,
+      sessionKey: 'agent:main:main',
+      prompt: `draw image ${index + 1}`,
+    }));
+    const videoJobs = Array.from({ length: 6 }, (_, index) => enqueueMediaGenerationJob({
+      kind: 'video' as const,
+      sessionKey: 'agent:main:main',
+      prompt: `make video ${index + 1}`,
+    }));
+
+    await vi.waitFor(() => {
+      expect(forkMock).toHaveBeenCalledTimes(10);
+      expect(children.every((child) => child.postMessage.mock.calls.length === 1)).toBe(true);
+    });
+
+    expect(imageJobs.slice(0, 5).map((job) => getMediaGenerationJob(job.id)?.status)).toEqual([
+      'running',
+      'running',
+      'running',
+      'running',
+      'running',
+    ]);
+    expect(getMediaGenerationJob(imageJobs[5]!.id)?.status).toBe('queued');
+    expect(videoJobs.slice(0, 5).map((job) => getMediaGenerationJob(job.id)?.status)).toEqual([
+      'running',
+      'running',
+      'running',
+      'running',
+      'running',
+    ]);
+    expect(getMediaGenerationJob(videoJobs[5]!.id)?.status).toBe('queued');
+  });
+
   it('persists the original user prompt without leaking planner prompts or auto-selected reference images', async () => {
     const { enqueueMediaGenerationJob } = await import('@electron/utils/media-generation-jobs');
     const userTimestampMs = Date.parse('2026-03-11T12:00:00Z');

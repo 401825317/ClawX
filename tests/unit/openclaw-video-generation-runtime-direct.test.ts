@@ -66,6 +66,16 @@ describe('generateVideoInProcess direct OpenAI-compatible video path', () => {
       expect.objectContaining({
         url: 'https://zz-cn.lingzhiwuxian.com/video/grok/task_abc?exp=86400&sig=xyz',
         mimeType: 'video/mp4',
+        width: 1280,
+        height: 720,
+        durationSeconds: 15,
+        metadata: expect.objectContaining({
+          taskId: 'task_abc',
+          size: '1280x720',
+          width: 1280,
+          height: 720,
+          durationSeconds: 15,
+        }),
       }),
     ]);
   });

@@ -30,10 +30,14 @@ const MAX_WORKER_OUTPUT_CHARS = 4096;
 const MAX_WORKER_LOG_CHARS = 1024;
 const MAX_JOB_ERROR_CHARS = 12_000;
 const USER_FACING_UPSTREAM_MEDIA_ERROR = '上游渠道报错，生成失败了，请稍后重试。';
+const MEDIA_GENERATION_CONCURRENCY: Record<MediaGenerationKind, number> = {
+  image: 5,
+  video: 5,
+};
 
-const activeJobIds: Record<MediaGenerationKind, string | null> = {
-  image: null,
-  video: null,
+const activeJobIds: Record<MediaGenerationKind, Set<string>> = {
+  image: new Set<string>(),
+  video: new Set<string>(),
 };
 
 function resolveMainStaticScript(name: string): string {
@@ -213,7 +217,7 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
 }
 
 async function runJob(job: InternalMediaGenerationJob): Promise<void> {
-  activeJobIds[job.kind] = job.id;
+  activeJobIds[job.kind].add(job.id);
   const now = Date.now();
   job.status = 'running';
   job.startedAt = now;
@@ -223,12 +227,12 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
   const entryPath = getMediaWorkerEntryPath();
   if (!existsSync(wrapperPath)) {
     markJobFailed(job, `Media generation worker wrapper not found at ${wrapperPath}`);
-    activeJobIds[job.kind] = null;
+    activeJobIds[job.kind].delete(job.id);
     return;
   }
   if (!existsSync(entryPath)) {
     markJobFailed(job, `Media generation worker entry not found at ${entryPath}`);
-    activeJobIds[job.kind] = null;
+    activeJobIds[job.kind].delete(job.id);
     return;
   }
 
@@ -329,27 +333,29 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
     });
   });
 
-  activeJobIds[job.kind] = null;
+  activeJobIds[job.kind].delete(job.id);
 }
 
 function pumpQueue(kind: MediaGenerationKind): void {
-  if (activeJobIds[kind]) return;
-  const nextJobId = queues[kind].shift();
-  if (!nextJobId) return;
-  const job = jobs.get(nextJobId);
-  if (!job || job.status !== 'queued') {
-    setImmediate(() => pumpQueue(kind));
-    return;
+  const activeJobs = activeJobIds[kind];
+  const maxActiveJobs = MEDIA_GENERATION_CONCURRENCY[kind];
+  while (activeJobs.size < maxActiveJobs) {
+    const nextJobId = queues[kind].shift();
+    if (!nextJobId) return;
+    const job = jobs.get(nextJobId);
+    if (!job || job.status !== 'queued') {
+      continue;
+    }
+    void runJob(job)
+      .catch((error) => {
+        activeJobIds[kind].delete(job.id);
+        markJobFailed(job, error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        compactJobHistory();
+        setImmediate(() => pumpQueue(kind));
+      });
   }
-  void runJob(job)
-    .catch((error) => {
-      activeJobIds[kind] = null;
-      markJobFailed(job, error instanceof Error ? error.message : String(error));
-    })
-    .finally(() => {
-      compactJobHistory();
-      setImmediate(() => pumpQueue(kind));
-    });
 }
 
 export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): MediaGenerationJobSnapshot {

@@ -1278,6 +1278,78 @@ describe('useChatStore startup history retry', () => {
     expect(state.pendingFinal).toBe(false);
   });
 
+  it('keeps composite runs active when history poll sees a premature final reply before required artifacts', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-composite-gate',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:session-composite-gate' }],
+      messages: [
+        { id: 'user-composite', role: 'user', content: '生图，PPT，Excel，每个随便来一个', timestamp: 1000 },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: true,
+      activeRunId: 'run-composite-history',
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: true,
+      lastUserMessageAt: 1000,
+      pendingToolImages: [],
+      runtimeRuns: {
+        'run-composite-history': {
+          runId: 'run-composite-history',
+          status: 'running',
+          objective: '生图，PPT，Excel，每个随便来一个',
+          assistantText: '',
+          thinkingText: '',
+          events: [],
+          planSteps: [
+            { id: 'uclaw.composite.image', title: '生成图片', status: 'completed', kind: 'composite-task', requiresArtifact: true },
+            { id: 'uclaw.composite.ppt', title: '制作 PPT', status: 'completed', kind: 'composite-task', requiresArtifact: true },
+            { id: 'uclaw.composite.excel', title: '制作 Excel', status: 'completed', kind: 'composite-task', requiresArtifact: true },
+          ],
+          artifacts: [],
+          verifications: [],
+          checkpoints: [],
+          issues: [],
+          gateEvaluations: [],
+        },
+      },
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    gatewayRpcMock.mockResolvedValueOnce({
+      messages: [
+        { id: 'user-composite', role: 'user', content: '生图，PPT，Excel，每个随便来一个', timestamp: 1000 },
+        {
+          id: 'assistant-premature-final',
+          role: 'assistant',
+          content: [{ type: 'text', text: '已完成，我把内容都整理好了。' }],
+          stopReason: 'endTurn',
+          timestamp: 2000,
+        },
+      ],
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const state = useChatStore.getState();
+    expect(state.sending).toBe(true);
+    expect(state.activeRunId).toBe('run-composite-history');
+    expect(state.pendingFinal).toBe(true);
+    expect(state.messages.some((message) => message.id === 'assistant-premature-final')).toBe(false);
+    expect(state.runtimeRuns['run-composite-history']?.gateResult).toEqual(expect.objectContaining({
+      decision: 'continue_required',
+    }));
+    expect(state.runtimeRuns['run-composite-history']?.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'artifact.required.missing' }),
+    ]));
+  });
+
   // Cross-protocol coverage: Anthropic Messages API native shape (snake_case).
   // OpenClaw's gateway normally normalizes to camelCase, but some paths can
   // pass Anthropic responses through unchanged. `hasPendingToolUse` must still

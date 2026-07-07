@@ -41,6 +41,10 @@ function normalizeTestPath(input: unknown): string {
   return String(input).replace(/\\/g, '/');
 }
 
+function dependencyPathSegment(dependencyName: string): string {
+  return dependencyName.split('/').join('/');
+}
+
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
   const mocked = {
@@ -215,7 +219,7 @@ describe('plugin installer diagnostics', () => {
       '[plugin] Bundled mirror install failed for WeCom',
       expect.objectContaining({
         sourceDir,
-        targetDir: expect.stringContaining('.openclaw\\extensions\\wecom'),
+        targetDir: expect.stringMatching(/[\\/]\.openclaw[\\/]extensions[\\/]wecom$/),
         platform: 'win32',
         attempts: [
           expect.objectContaining({ attempt: 1, code: 'EPERM' }),
@@ -272,13 +276,13 @@ describe('plugin installer diagnostics', () => {
     const result = ensurePluginInstalled('clawx-openai-image', [sourceDir], 'UClaw OpenAI Image');
 
     expect(result).toEqual({ installed: true });
-    expect(mockRmSync).toHaveBeenCalledWith(expect.stringContaining('.openclaw\\extensions\\clawx-openai-image'), {
+    expect(mockRmSync).toHaveBeenCalledWith(expect.stringMatching(/[\\/]\.openclaw[\\/]extensions[\\/]clawx-openai-image$/), {
       recursive: true,
       force: true,
     });
     expect(mockCpSync).toHaveBeenCalledWith(
       '/bundle/clawx-openai-image',
-      expect.stringContaining('.openclaw\\extensions\\clawx-openai-image'),
+      expect.stringMatching(/[\\/]\.openclaw[\\/]extensions[\\/]clawx-openai-image$/),
       { recursive: true, dereference: true },
     );
     expect(mockLoggerInfo).toHaveBeenCalledWith(
@@ -286,10 +290,227 @@ describe('plugin installer diagnostics', () => {
     );
   });
 
+  it('installs the UClaw local artifacts plugin from bundled helper sources', async () => {
+    mockApp.isPackaged = false;
+
+    const sourceDir = '/mock/app/resources/openclaw-plugins/uclaw-local-artifacts';
+    const targetDir = '/home/test/.openclaw/extensions/uclaw-local-artifacts';
+    const sourceManifest = `${sourceDir}/openclaw.plugin.json`;
+    const sourcePackage = `${sourceDir}/package.json`;
+    const sourceEntry = `${sourceDir}/index.mjs`;
+    const targetManifest = `${targetDir}/openclaw.plugin.json`;
+    const targetPackage = `${targetDir}/package.json`;
+    const targetEntry = `${targetDir}/index.mjs`;
+    let copied = false;
+
+    mockCpSync.mockImplementation(() => {
+      copied = true;
+    });
+    mockExistsSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if ([sourceManifest, sourcePackage, sourceEntry].includes(filePath)) {
+        return true;
+      }
+      return copied && [targetManifest, targetPackage, targetEntry].includes(filePath);
+    });
+    mockReadFileSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (filePath.endsWith('/openclaw.plugin.json')) {
+        return JSON.stringify({ id: 'uclaw-local-artifacts', entry: 'index.mjs' });
+      }
+      if (filePath.endsWith('/package.json')) {
+        return JSON.stringify({ name: 'uclaw-local-artifacts-plugin', version: '0.1.0', main: 'index.mjs' });
+      }
+      if (filePath.endsWith('/index.mjs')) {
+        return 'export const plugin = { id: "uclaw-local-artifacts" };';
+      }
+      return '{}';
+    });
+
+    const { ensureUClawLocalArtifactsPluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = ensureUClawLocalArtifactsPluginInstalled();
+
+    expect(result).toEqual({ installed: true });
+    expect(mockCpSync).toHaveBeenCalledWith(
+      sourceDir,
+      expect.stringMatching(/[\\/]\.openclaw[\\/]extensions[\\/]uclaw-local-artifacts$/),
+      { recursive: true, dereference: true },
+    );
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      `Installed UClaw Local Artifacts plugin from bundled mirror: ${sourceDir}`,
+    );
+  });
+
+  it('hydrates UClaw local artifacts runtime deps when installing from raw helper sources in dev', async () => {
+    mockApp.isPackaged = false;
+
+    const sourceDir = '/mock/app/resources/openclaw-plugins/uclaw-local-artifacts';
+    const targetDir = '/home/test/.openclaw/extensions/uclaw-local-artifacts';
+    const sourceManifest = `${sourceDir}/openclaw.plugin.json`;
+    const sourcePackage = `${sourceDir}/package.json`;
+    const sourceEntry = `${sourceDir}/index.mjs`;
+    const targetManifest = `${targetDir}/openclaw.plugin.json`;
+    const targetPackage = `${targetDir}/package.json`;
+    const targetEntry = `${targetDir}/index.mjs`;
+    const runtimeDeps = ['@sinclair/typebox', 'jszip', 'xlsx'];
+    const copiedDeps = new Set<string>();
+    let copiedPlugin = false;
+
+    mockCpSync.mockImplementation((src: string, dest: string) => {
+      const sourcePath = normalizeTestPath(src);
+      const destPath = normalizeTestPath(dest);
+      if (sourcePath === sourceDir && destPath === targetDir) {
+        copiedPlugin = true;
+      }
+      for (const depName of runtimeDeps) {
+        const depSegment = dependencyPathSegment(depName);
+        if (
+          sourcePath.endsWith(`/node_modules/${depSegment}`) &&
+          destPath === `${targetDir}/node_modules/${depSegment}`
+        ) {
+          copiedDeps.add(depName);
+        }
+      }
+    });
+    mockReaddirSync.mockReturnValue([]);
+    mockExistsSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if ([sourceManifest, sourcePackage, sourceEntry].includes(filePath)) {
+        return true;
+      }
+      if (copiedPlugin && [targetManifest, targetPackage, targetEntry].includes(filePath)) {
+        return true;
+      }
+      for (const depName of runtimeDeps) {
+        const depSegment = dependencyPathSegment(depName);
+        if (filePath === `${process.cwd()}/node_modules/${depSegment}`) {
+          return true;
+        }
+        if (
+          filePath === `${targetDir}/node_modules/${depSegment}` ||
+          filePath === `${targetDir}/node_modules/${depSegment}/package.json`
+        ) {
+          return copiedDeps.has(depName);
+        }
+      }
+      return false;
+    });
+    mockReadFileSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (filePath.endsWith('/openclaw.plugin.json')) {
+        return JSON.stringify({ id: 'uclaw-local-artifacts', entry: 'index.mjs' });
+      }
+      if (filePath.endsWith('/package.json')) {
+        return JSON.stringify({
+          name: 'uclaw-local-artifacts-plugin',
+          version: '0.1.0',
+          main: 'index.mjs',
+          dependencies: {
+            '@sinclair/typebox': '^0.34.48',
+            jszip: '3.10.1',
+            xlsx: '^0.18.5',
+          },
+        });
+      }
+      if (filePath.endsWith('/index.mjs')) {
+        return 'export const plugin = { id: "uclaw-local-artifacts" };';
+      }
+      return '{}';
+    });
+
+    const { ensureUClawLocalArtifactsPluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = ensureUClawLocalArtifactsPluginInstalled();
+
+    expect(result).toEqual({ installed: true });
+    expect(copiedDeps).toEqual(new Set(runtimeDeps));
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      '[plugin] Hydrated 3 runtime deps for UClaw Local Artifacts from root node_modules',
+    );
+  });
+
+  it('refreshes an installed UClaw local artifacts plugin when runtime deps are missing', async () => {
+    const sourceDir = '/bundle/uclaw-local-artifacts';
+    const targetDir = '/home/test/.openclaw/extensions/uclaw-local-artifacts';
+    const runtimeDeps = ['@sinclair/typebox', 'jszip', 'xlsx'];
+    let refreshed = false;
+
+    mockCpSync.mockImplementation((src: string, dest: string) => {
+      if (normalizeTestPath(src) === sourceDir && normalizeTestPath(dest) === targetDir) {
+        refreshed = true;
+      }
+    });
+    mockExistsSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (
+        [
+          `${sourceDir}/openclaw.plugin.json`,
+          `${sourceDir}/package.json`,
+          `${sourceDir}/index.mjs`,
+          `${targetDir}/openclaw.plugin.json`,
+          `${targetDir}/package.json`,
+          `${targetDir}/index.mjs`,
+        ].includes(filePath)
+      ) {
+        return true;
+      }
+      for (const depName of runtimeDeps) {
+        const depSegment = dependencyPathSegment(depName);
+        if (
+          filePath === `${sourceDir}/node_modules/${depSegment}` ||
+          filePath === `${sourceDir}/node_modules/${depSegment}/package.json`
+        ) {
+          return true;
+        }
+        if (
+          filePath === `${targetDir}/node_modules/${depSegment}` ||
+          filePath === `${targetDir}/node_modules/${depSegment}/package.json`
+        ) {
+          return refreshed;
+        }
+      }
+      return false;
+    });
+    mockReadFileSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (filePath.endsWith('/openclaw.plugin.json')) {
+        return JSON.stringify({ id: 'uclaw-local-artifacts', entry: 'index.mjs' });
+      }
+      if (filePath.endsWith('/package.json')) {
+        return JSON.stringify({
+          name: 'uclaw-local-artifacts-plugin',
+          version: '0.1.0',
+          main: 'index.mjs',
+          dependencies: {
+            '@sinclair/typebox': '^0.34.48',
+            jszip: '3.10.1',
+            xlsx: '^0.18.5',
+          },
+        });
+      }
+      if (filePath.endsWith('/index.mjs')) {
+        return 'export const plugin = { id: "uclaw-local-artifacts" };';
+      }
+      return '{}';
+    });
+
+    const { ensurePluginInstalled } = await import('@electron/utils/plugin-install');
+    const result = ensurePluginInstalled('uclaw-local-artifacts', [sourceDir], 'UClaw Local Artifacts');
+
+    expect(result).toEqual({ installed: true });
+    expect(mockCpSync).toHaveBeenCalledWith(
+      sourceDir,
+      expect.stringMatching(/[\\/]\.openclaw[\\/]extensions[\\/]uclaw-local-artifacts$/),
+      { recursive: true, dereference: true },
+    );
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      '[plugin] Refreshing UClaw Local Artifacts plugin: runtime deps missing (@sinclair/typebox, jszip, xlsx)',
+    );
+  });
+
   it('chooses the newest bundled source instead of a stale source that matches the installed copy', async () => {
-    const buildDir = '/app/build/openclaw-plugins/uclaw-computer-use';
-    const resourcesDir = '/app/resources/openclaw-plugins/uclaw-computer-use';
-    const targetDir = '/home/test/.openclaw/extensions/uclaw-computer-use';
+    const buildDir = '/app/build/openclaw-plugins/uclaw-artifact-guard';
+    const resourcesDir = '/app/resources/openclaw-plugins/uclaw-artifact-guard';
+    const targetDir = '/home/test/.openclaw/extensions/uclaw-artifact-guard';
 
     mockExistsSync.mockImplementation((input: string) => normalizeTestPath(input).endsWith('/openclaw.plugin.json'));
     mockReadFileSync.mockImplementation((input: string) => {
@@ -297,20 +518,20 @@ describe('plugin installer diagnostics', () => {
       if (filePath.endsWith('/openclaw.plugin.json')) {
         const hasNewTool = filePath.startsWith(resourcesDir);
         return JSON.stringify({
-          id: 'uclaw-computer-use',
+          id: 'uclaw-artifact-guard',
           entry: 'index.mjs',
           contracts: {
-            tools: hasNewTool ? ['computer_screenshot', 'computer_web_observe'] : ['computer_screenshot'],
+            hooks: hasNewTool ? ['before_agent_finalize', 'before_prompt_build'] : ['before_agent_finalize'],
           },
         });
       }
       if (filePath.endsWith('/package.json')) {
-        return JSON.stringify({ name: 'uclaw-computer-use-plugin', version: '0.1.0', main: 'index.mjs' });
+        return JSON.stringify({ name: 'uclaw-artifact-guard-plugin', version: '0.1.0', main: 'index.mjs' });
       }
       if (filePath.endsWith('/index.mjs')) {
         return filePath.startsWith(resourcesDir)
-          ? 'export const tool = "computer_web_observe";'
-          : 'export const tool = "computer_screenshot";';
+          ? 'export const hook = "before_prompt_build";'
+          : 'export const hook = "before_agent_finalize";';
       }
       return '{}';
     });
@@ -322,5 +543,61 @@ describe('plugin installer diagnostics', () => {
     const { findBestBundledPluginSource } = await import('@electron/utils/plugin-install');
 
     expect(findBestBundledPluginSource([buildDir, resourcesDir], targetDir)).toBe(resourcesDir);
+  });
+
+  it('prefers a dependency-complete local plugin bundle over a newer raw source', async () => {
+    const buildDir = '/app/build/openclaw-plugins/uclaw-local-artifacts';
+    const resourcesDir = '/app/resources/openclaw-plugins/uclaw-local-artifacts';
+    const runtimeDeps = ['@sinclair/typebox', 'jszip', 'xlsx'];
+
+    mockExistsSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (
+        filePath === `${buildDir}/openclaw.plugin.json` ||
+        filePath === `${resourcesDir}/openclaw.plugin.json`
+      ) {
+        return true;
+      }
+      for (const depName of runtimeDeps) {
+        const depSegment = dependencyPathSegment(depName);
+        if (
+          filePath === `${buildDir}/node_modules/${depSegment}` ||
+          filePath === `${buildDir}/node_modules/${depSegment}/package.json`
+        ) {
+          return true;
+        }
+      }
+      return false;
+    });
+    mockReadFileSync.mockImplementation((input: string) => {
+      const filePath = normalizeTestPath(input);
+      if (filePath.endsWith('/openclaw.plugin.json')) {
+        return JSON.stringify({ id: 'uclaw-local-artifacts', entry: 'index.mjs' });
+      }
+      if (filePath.endsWith('/package.json')) {
+        return JSON.stringify({
+          name: 'uclaw-local-artifacts-plugin',
+          version: '0.1.0',
+          main: 'index.mjs',
+          dependencies: {
+            '@sinclair/typebox': '^0.34.48',
+            jszip: '3.10.1',
+            xlsx: '^0.18.5',
+          },
+        });
+      }
+      if (filePath.endsWith('/index.mjs')) {
+        return 'export const plugin = { id: "uclaw-local-artifacts" };';
+      }
+      return '{}';
+    });
+    mockStatSync.mockImplementation((input: string) => ({
+      isDirectory: () => false,
+      mtimeMs: normalizeTestPath(input).startsWith(resourcesDir) ? 200 : 100,
+    }) as never);
+
+    const { findBestBundledPluginSource } = await import('@electron/utils/plugin-install');
+
+    expect(findBestBundledPluginSource([buildDir, resourcesDir])).toBe(buildDir);
   });
 });

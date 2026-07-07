@@ -726,8 +726,8 @@ exports.default = async function afterPack(context) {
 
   const LOCAL_PLUGIN_IDS = [
     'clawx-openai-image',
-    'uclaw-computer-use',
     'uclaw-artifact-guard',
+    'uclaw-local-artifacts',
   ];
 
   for (const pluginId of LOCAL_PLUGIN_IDS) {

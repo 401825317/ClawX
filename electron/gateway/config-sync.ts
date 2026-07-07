@@ -35,7 +35,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled, ensureUClawArtifactGuardPluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -84,7 +84,6 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 };
 
 const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
-const ENABLE_UCLAW_COMPUTER_USE_CORE_PLUGIN = process.env.CLAWX_ENABLE_UCLAW_COMPUTER_USE === '1';
 const ENABLE_UCLAW_ARTIFACT_GUARD_CORE_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 
 function ensureCoreUClawPluginsInstalled(): boolean {
@@ -100,16 +99,13 @@ function ensureCoreUClawPluginsInstalled(): boolean {
     logger.info('[plugin] UClaw Artifact Guard disabled; skipping core plugin install');
   }
 
-  if (!ENABLE_UCLAW_COMPUTER_USE_CORE_PLUGIN) {
-    logger.info('[plugin] UClaw Computer Use temporarily disabled; skipping core plugin install');
-    return installed;
+  const localArtifactsResult = ensureUClawLocalArtifactsPluginInstalled();
+  if (localArtifactsResult.warning) {
+    logger.warn(`[plugin] UClaw Local Artifacts: ${localArtifactsResult.warning}`);
   }
+  installed = localArtifactsResult.installed || installed;
 
-  const result = ensureUClawComputerUsePluginInstalled();
-  if (result.warning) {
-    logger.warn(`[plugin] UClaw Computer Use: ${result.warning}`);
-  }
-  return result.installed || installed;
+  return installed;
 }
 
 function isParallelWebSearchConfigured(config: unknown): boolean {

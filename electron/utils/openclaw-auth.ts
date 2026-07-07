@@ -886,8 +886,8 @@ const OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS = new Set([
   'voyage',
 ]);
 const UCLAW_COMPUTER_USE_PLUGIN_ID = 'uclaw-computer-use';
-const ENABLE_UCLAW_COMPUTER_USE_PLUGIN = process.env.CLAWX_ENABLE_UCLAW_COMPUTER_USE === '1';
 const UCLAW_ARTIFACT_GUARD_PLUGIN_ID = 'uclaw-artifact-guard';
+const UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID = 'uclaw-local-artifacts';
 const ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
@@ -2930,14 +2930,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
 
-    if (ENABLE_UCLAW_COMPUTER_USE_PLUGIN) {
-      if (ensurePluginEntryEnabled(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
-        modified = true;
-      }
-      if (ensurePluginHookAccess(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
-        modified = true;
-      }
-    } else if (ensurePluginEntryDisabled(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
+    if (removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID])) {
       modified = true;
     }
     if (ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN) {
@@ -2948,6 +2941,9 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
         modified = true;
       }
     } else if (ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
+      modified = true;
+    }
+    if (ensurePluginEntryEnabled(config, UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID)) {
       modified = true;
     }
     if (ensureParallelWebSearchPluginRegistration(config)) {
@@ -3695,7 +3691,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       const explicitlyEnabledBundledPluginIds = Object.keys(pEntries)
         .filter((pluginId) => {
           if (!bundled.all.has(pluginId)) return false;
-          if (pluginId === UCLAW_COMPUTER_USE_PLUGIN_ID && !ENABLE_UCLAW_COMPUTER_USE_PLUGIN) return false;
+          if (pluginId === UCLAW_COMPUTER_USE_PLUGIN_ID) return false;
           const entry = isPlainRecord(pEntries[pluginId]) ? pEntries[pluginId] as Record<string, unknown> : {};
           if (entry.enabled === false) return false;
           if (pluginId === 'feishu' && (!isFeishuConfigured || canonicalFeishuId !== 'feishu')) {
@@ -3719,13 +3715,16 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
 
       const requiredBundledPluginIds = Array.from(new Set([
         ...BUNDLED_ALLOWLIST_PRESERVE_IDS,
-        ...(ENABLE_UCLAW_COMPUTER_USE_PLUGIN ? [UCLAW_COMPUTER_USE_PLUGIN_ID] : []),
         ...activeBundledProviderPluginIds,
         ...explicitlyEnabledBundledPluginIds,
       ])).filter((pluginId) => bundled.all.has(pluginId));
 
       const externalPluginIds: string[] = [];
       for (const pluginId of allowArr2) {
+        if (pluginId === UCLAW_COMPUTER_USE_PLUGIN_ID) {
+          modified = true;
+          continue;
+        }
         if (BUILTIN_CHANNEL_IDS.has(pluginId) || bundled.all.has(pluginId)) continue;
         const isConfiguredExternal = Boolean(pEntries[pluginId])
           || (pluginId === PARALLEL_SEARCH_PLUGIN_ID && parallelWebSearchConfigured);
@@ -3771,7 +3770,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         delete pluginsObj.allow;
         modified = true;
       }
-      if (!ENABLE_UCLAW_COMPUTER_USE_PLUGIN && ensurePluginEntryDisabled(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
+      if (removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID])) {
         modified = true;
       }
       if (!ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN && ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {

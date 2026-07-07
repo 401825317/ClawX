@@ -6,7 +6,6 @@ const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
 const prepareMediaGenerationJobMock = vi.fn();
 const enqueueMediaGenerationJobMock = vi.fn();
-const planVideoGenerationRouteMock = vi.fn();
 
 vi.mock('@electron/api/route-utils', () => ({
   parseJsonBody: (...args: unknown[]) => parseJsonBodyMock(...args),
@@ -33,10 +32,6 @@ vi.mock('@electron/utils/media-generation-jobs', () => ({
   enqueueMediaGenerationJob: (...args: unknown[]) => enqueueMediaGenerationJobMock(...args),
   prepareMediaGenerationJob: (...args: unknown[]) => prepareMediaGenerationJobMock(...args),
   getMediaGenerationJob: vi.fn(),
-}));
-
-vi.mock('@electron/utils/video-generation-route-planner', () => ({
-  planVideoGenerationRoute: (...args: unknown[]) => planVideoGenerationRouteMock(...args),
 }));
 
 vi.mock('@electron/utils/logger', () => ({
@@ -69,29 +64,6 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
       updatedAt: 1,
     });
     prepareMediaGenerationJobMock.mockResolvedValue(undefined);
-    planVideoGenerationRouteMock.mockImplementation(async ({ prompt, inputImages }: {
-      prompt: string;
-      inputImages?: Array<{ fileName?: string; mimeType?: string; filePath: string }>;
-    }) => {
-      if (inputImages?.length) {
-        return {
-          mode: 'image_to_video',
-          source: 'router',
-          confidence: 1,
-          selectedImageSource: 'explicit',
-          selectedImageIndex: 0,
-          videoPrompt: prompt,
-          sourceImages: [inputImages[0]],
-        };
-      }
-      return {
-        mode: 'text_to_video',
-        source: 'router',
-        confidence: 1,
-        selectedImageSource: 'none',
-        videoPrompt: prompt,
-      };
-    });
   });
 
   it('enqueues a video generation job and returns immediately', async () => {
@@ -183,6 +155,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
       kind: 'video',
       sessionKey: 'agent:main:main',
       prompt: 'animate this frame',
+      model: 'grok-image-video',
       inputImages: [
         {
           fileName: 'frame.png',
@@ -191,38 +164,29 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
         },
       ],
     }));
-    expect(enqueueMediaGenerationJobMock.mock.calls[0]?.[0]).not.toHaveProperty('model');
   });
 
-  it('enqueues an edit-image-then-video pipeline when the router selects a candidate image edit', async () => {
-    planVideoGenerationRouteMock.mockResolvedValueOnce({
-      mode: 'edit_image_then_video',
-      source: 'router',
-      confidence: 0.92,
-      selectedImageSource: 'candidate',
-      selectedImageIndex: 0,
-      imageEditPrompt: '把参考图改成蓝色调。',
-      videoPrompt: '让蓝色调画面缓慢推进并带有电影感。',
-      sourceImages: [
-        {
-          fileName: 'old-frame.png',
-          mimeType: 'image/png',
-          filePath: '/tmp/old-frame.png',
-        },
-      ],
-    });
+  it('enqueues an edit-image-then-video pipeline from the unified media route', async () => {
     parseJsonBodyMock.mockResolvedValueOnce({
       sessionKey: 'agent:main:main',
       prompt: '用上一张图改成蓝色调，然后给我出视频',
       durationSeconds: 6,
-      inputImages: [],
-      candidateImages: [
-        {
-          fileName: 'old-frame.png',
-          mimeType: 'image/png',
-          filePath: '/tmp/old-frame.png',
-        },
-      ],
+      route: {
+        mode: 'edit_image_then_video',
+        source: 'router',
+        confidence: 0.92,
+        selectedImageSource: 'candidate',
+        selectedImageIndex: 0,
+        imageEditPrompt: '把参考图改成蓝色调。',
+        videoPrompt: '让蓝色调画面缓慢推进并带有电影感。',
+        sourceImages: [
+          {
+            fileName: 'old-frame.png',
+            mimeType: 'image/png',
+            filePath: '/tmp/old-frame.png',
+          },
+        ],
+      },
     });
 
     const { handleMediaRoutes } = await import('@electron/api/routes/media');
@@ -234,17 +198,6 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(planVideoGenerationRouteMock).toHaveBeenCalledWith({
-      prompt: '用上一张图改成蓝色调，然后给我出视频',
-      inputImages: [],
-      candidateImages: [
-        {
-          fileName: 'old-frame.png',
-          mimeType: 'image/png',
-          filePath: '/tmp/old-frame.png',
-        },
-      ],
-    });
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'video',
       sessionKey: 'agent:main:main',
@@ -267,17 +220,17 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
 
   it('rejects final video prompts that exceed the local xAI safety limit before enqueueing', async () => {
     const longVideoPrompt = '镜'.repeat(MAX_VIDEO_GENERATION_PROMPT_CHARS + 1);
-    planVideoGenerationRouteMock.mockResolvedValueOnce({
-      mode: 'text_to_video',
-      source: 'router',
-      confidence: 0.98,
-      selectedImageSource: 'none',
-      videoPrompt: longVideoPrompt,
-    });
     parseJsonBodyMock.mockResolvedValueOnce({
       sessionKey: 'agent:main:main',
       prompt: '生成一段短视频',
       durationSeconds: 6,
+      route: {
+        mode: 'text_to_video',
+        source: 'router',
+        confidence: 0.98,
+        selectedImageSource: 'none',
+        videoPrompt: longVideoPrompt,
+      },
     });
 
     const { handleMediaRoutes } = await import('@electron/api/routes/media');

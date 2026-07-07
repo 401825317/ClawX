@@ -162,6 +162,47 @@ function hasRunningRuntimeTool(run: ChatRuntimeRunState | null): boolean {
   return Array.from(toolStatuses.values()).some((status) => status === 'running');
 }
 
+function hasRuntimeGraphActivity(run: ChatRuntimeRunState | null): boolean {
+  return Boolean(run?.events.some((event) =>
+    event.type === 'tool.started'
+    || event.type === 'tool.updated'
+    || event.type === 'tool.completed'
+    || event.type === 'artifact.produced'
+    || event.type === 'verification.completed'
+    || event.type === 'gate.issue'
+    || event.type === 'run.checkpoint'
+    || event.type === 'gate.evaluated'
+    || event.type === 'command.output'
+    || event.type === 'patch.completed'
+    || event.type === 'approval.updated',
+  ));
+}
+
+function buildHistoricalRunIdForMessage(sessionKey: string, triggerMessage: RawMessage, index: number): string {
+  return `history:${sessionKey}:${triggerMessage.id ?? triggerMessage.timestamp ?? index}`;
+}
+
+function getRuntimeRunForSegment(
+  runtimeRuns: Record<string, ChatRuntimeRunState>,
+  sessionKey: string,
+  triggerMessage: RawMessage,
+  triggerIndex: number,
+  activeRunId: string | null,
+  isLatestRunSegment: boolean,
+): ChatRuntimeRunState | null {
+  if (isLatestRunSegment && activeRunId) {
+    const activeRun = runtimeRuns[activeRunId] ?? null;
+    if (activeRun) return activeRun;
+  }
+
+  const historicalRun = runtimeRuns[buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)];
+  if (historicalRun?.sessionKey === sessionKey) {
+    return historicalRun;
+  }
+
+  return null;
+}
+
 // Keep the last non-empty execution-graph snapshot per session/run outside
 // React state so `loadHistory` refreshes can still fall back to the previous
 // steps without tripping React's set-state-in-effect lint rule.
@@ -407,14 +448,7 @@ export function Chat() {
   const hasStreamToolStatus = streamingTools.length > 0;
   const hasRunningStreamToolStatus = streamingTools.some((tool) => tool.status === 'running');
   const currentRuntimeRun = activeRunId ? runtimeRuns[activeRunId] ?? null : null;
-  const currentRuntimeHasToolActivity = Boolean(currentRuntimeRun?.events.some((event) =>
-    event.type === 'tool.started'
-    || event.type === 'tool.updated'
-    || event.type === 'tool.completed'
-    || event.type === 'command.output'
-    || event.type === 'patch.completed'
-    || event.type === 'approval.updated',
-  ));
+  const currentRuntimeHasToolActivity = hasRuntimeGraphActivity(currentRuntimeRun);
   const hasRunningRuntimeToolStatus = hasRunningRuntimeTool(currentRuntimeRun);
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamTools || hasStreamImages || hasStreamToolStatus);
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
@@ -505,16 +539,16 @@ export function Chat() {
     //    tool execution — Gateway fires phase "end" per tool round which
     //    briefly clears sending, but the run is still in progress)
     const isLatestRunSegment = nextUserIndex === -1;
-    const activeRuntimeRun = isLatestRunSegment && activeRunId ? runtimeRuns[activeRunId] ?? null : null;
-    const runtimeHasToolActivity = Boolean(activeRuntimeRun?.events.some((event) =>
-      event.type === 'tool.started'
-      || event.type === 'tool.updated'
-      || event.type === 'tool.completed'
-      || event.type === 'command.output'
-      || event.type === 'patch.completed'
-      || event.type === 'approval.updated',
-    ));
-    const runtimeHasRunningTool = hasRunningRuntimeTool(activeRuntimeRun);
+    const segmentRuntimeRun = getRuntimeRunForSegment(
+      runtimeRuns,
+      currentSessionKey,
+      message,
+      idx,
+      activeRunId,
+      isLatestRunSegment,
+    );
+    const runtimeHasToolActivity = hasRuntimeGraphActivity(segmentRuntimeRun);
+    const runtimeHasRunningTool = hasRunningRuntimeTool(segmentRuntimeRun);
     const hasToolActivity = runtimeHasToolActivity || postTriggerMessages.some((m) =>
       m.role === 'assistant' && extractToolUse(m).length > 0,
     );
@@ -629,8 +663,8 @@ export function Chat() {
       && !hasRunningStreamToolStatus
       && !runtimeHasRunningTool;
 
-    let steps = activeRuntimeRun && runtimeHasToolActivity
-      ? sanitizeGraphSteps(deriveRuntimeTaskSteps(activeRuntimeRun))
+    let steps = segmentRuntimeRun && runtimeHasToolActivity
+      ? sanitizeGraphSteps(deriveRuntimeTaskSteps(segmentRuntimeRun))
       : sanitizeGraphSteps(buildSteps(rawStreamingReplyCandidate));
     let streamingReplyText: string | null = null;
     if (rawStreamingReplyCandidate) {
@@ -640,8 +674,8 @@ export function Chat() {
       if (hasReplyText || hasStreamImages) {
         streamingReplyText = hasReplyText ? trimmedReplyText : '';
       } else {
-        steps = activeRuntimeRun && runtimeHasToolActivity
-          ? sanitizeGraphSteps(deriveRuntimeTaskSteps(activeRuntimeRun))
+        steps = segmentRuntimeRun && runtimeHasToolActivity
+          ? sanitizeGraphSteps(deriveRuntimeTaskSteps(segmentRuntimeRun))
           : sanitizeGraphSteps(buildSteps(false));
       }
     }

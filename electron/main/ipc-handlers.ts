@@ -99,8 +99,8 @@ const OFFICE_ARTIFACT_TOOL_NAMES = [
   'create_pptx_file',
   'create_docx_file',
   'create_xlsx_file',
-  'computer_screenshot',
-  'computer_inspect_screen',
+  'create_text_file',
+  'create_html_app_file',
 ] as const;
 const OFFICE_ARTIFACT_SKILL_IDS = [
   'presentation-maker',

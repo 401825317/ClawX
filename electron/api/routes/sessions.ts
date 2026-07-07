@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { open, readdir } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { getOpenClawConfigDir } from '../../utils/paths';
 import {
   removeSessionEntry,
@@ -21,6 +21,7 @@ const SESSION_SUMMARY_RECENT_MESSAGE_LIMIT = 500;
 const TRANSCRIPT_CACHE_TTL_MS = 2_000;
 const TRANSCRIPT_CACHE_MAX_ENTRIES = 96;
 const TRANSCRIPT_FILE_READ_CONCURRENCY = 2;
+const SESSION_TRANSCRIPT_FAMILY_MAX_FILES = 32;
 
 type SessionSummary = {
   sessionKey: string;
@@ -179,8 +180,14 @@ function isInternalSummaryText(text: string): boolean {
 }
 
 function normalizeTimestamp(value: unknown): number | null {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  return value < 1e12 ? value * 1000 : value;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value < 1e12 ? value * 1000 : value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function parseMessageLine(line: string): TranscriptMessage | null {
@@ -291,6 +298,76 @@ async function readTranscriptHeadMessages(transcriptPath: string, limit: number)
   });
 }
 
+function getTranscriptMessageIdentity(message: TranscriptMessage): string | null {
+  const record = message as Record<string, unknown>;
+  const id = record.id ?? record.messageId ?? record.idempotencyKey;
+  return typeof id === 'string' && id.trim() ? id.trim() : null;
+}
+
+async function readRecentTranscriptMessagesFromPaths(
+  transcriptPaths: string[],
+  limit: number,
+): Promise<TranscriptMessage[]> {
+  const boundedLimit = Math.max(1, Math.min(Math.floor(limit), 1000));
+  const rows: Array<{ message: TranscriptMessage; sourceIndex: number; messageIndex: number; timestamp: number | null }> = [];
+
+  await Promise.all(transcriptPaths.map(async (transcriptPath, sourceIndex) => {
+    try {
+      const messages = await readRecentTranscriptMessages(transcriptPath, boundedLimit);
+      messages.forEach((message, messageIndex) => {
+        rows.push({
+          message,
+          sourceIndex,
+          messageIndex,
+          timestamp: normalizeTimestamp(message.timestamp),
+        });
+      });
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+        return;
+      }
+      logger.debug('Failed to read transcript family member:', {
+        transcriptPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }));
+
+  rows.sort((a, b) => {
+    if (a.timestamp != null && b.timestamp != null && a.timestamp !== b.timestamp) {
+      return a.timestamp - b.timestamp;
+    }
+    if (a.timestamp != null && b.timestamp == null) return -1;
+    if (a.timestamp == null && b.timestamp != null) return 1;
+    if (a.sourceIndex !== b.sourceIndex) return a.sourceIndex - b.sourceIndex;
+    return a.messageIndex - b.messageIndex;
+  });
+
+  const byIdentity = new Map<string, typeof rows[number]>();
+  const anonymousRows: typeof rows = [];
+  for (const row of rows) {
+    const identity = getTranscriptMessageIdentity(row.message);
+    if (identity) {
+      byIdentity.set(identity, row);
+    } else {
+      anonymousRows.push(row);
+    }
+  }
+
+  return [...byIdentity.values(), ...anonymousRows]
+    .sort((a, b) => {
+      if (a.timestamp != null && b.timestamp != null && a.timestamp !== b.timestamp) {
+        return a.timestamp - b.timestamp;
+      }
+      if (a.timestamp != null && b.timestamp == null) return -1;
+      if (a.timestamp == null && b.timestamp != null) return 1;
+      if (a.sourceIndex !== b.sourceIndex) return a.sourceIndex - b.sourceIndex;
+      return a.messageIndex - b.messageIndex;
+    })
+    .slice(-boundedLimit)
+    .map((row) => row.message);
+}
+
 function summarizeTranscriptMessages(
   sessionKey: string,
   firstMessages: TranscriptMessage[],
@@ -350,6 +427,85 @@ async function readSessionsJson(agentId: string): Promise<Record<string, unknown
   const sessionsJsonPath = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions', 'sessions.json');
   const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
   return JSON.parse(raw) as Record<string, unknown>;
+}
+
+function findSessionEntryByKey(
+  sessionKey: string,
+  sessionsJson: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (Array.isArray(sessionsJson.sessions)) {
+    const entry = (sessionsJson.sessions as Array<Record<string, unknown>>)
+      .find((session) => session.key === sessionKey || session.sessionKey === sessionKey);
+    if (entry) return entry;
+  }
+
+  const value = sessionsJson[sessionKey];
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function transcriptBaseIdFromPath(transcriptPath: string): string {
+  return basename(transcriptPath).replace(/\.jsonl$/, '');
+}
+
+function resolveUsageFamilyBaseIds(
+  sessionKey: string,
+  sessionsJson: Record<string, unknown>,
+  fallbackBaseId: string,
+): string[] {
+  const entry = findSessionEntryByKey(sessionKey, sessionsJson);
+  const rawFamilyIds = Array.isArray(entry?.usageFamilySessionIds)
+    ? entry.usageFamilySessionIds
+    : [];
+  const baseIds = rawFamilyIds
+    .filter((value): value is string => typeof value === 'string' && SAFE_SESSION_SEGMENT.test(value));
+  if (SAFE_SESSION_SEGMENT.test(fallbackBaseId)) {
+    baseIds.push(fallbackBaseId);
+  }
+  return Array.from(new Set(baseIds));
+}
+
+async function listTranscriptFilesForBaseId(sessionsDir: string, baseId: string): Promise<string[]> {
+  if (!SAFE_SESSION_SEGMENT.test(baseId)) return [];
+
+  let names: string[];
+  try {
+    names = await readdir(sessionsDir);
+  } catch {
+    return [];
+  }
+
+  const liveName = `${baseId}.jsonl`;
+  const resetNames = names
+    .filter((name) => name.startsWith(`${liveName}.reset.`))
+    .sort((a, b) => a.localeCompare(b));
+  const orderedNames = [
+    ...resetNames,
+    ...(names.includes(liveName) ? [liveName] : []),
+  ];
+  return orderedNames.map((name) => join(sessionsDir, name));
+}
+
+async function resolveSessionTranscriptPathsByKey(
+  sessionKey: string,
+  sessionsDir: string,
+  sessionsJson: Record<string, unknown>,
+  includeFamily: boolean,
+): Promise<string[] | null> {
+  const transcriptPath = resolveSessionTranscriptPathByKey(sessionKey, sessionsDir, sessionsJson);
+  if (!transcriptPath) return null;
+  if (!includeFamily) return [transcriptPath];
+
+  const fallbackBaseId = transcriptBaseIdFromPath(transcriptPath);
+  const familyBaseIds = resolveUsageFamilyBaseIds(sessionKey, sessionsJson, fallbackBaseId);
+  const paths: string[] = [];
+  for (const baseId of familyBaseIds) {
+    paths.push(...await listTranscriptFilesForBaseId(sessionsDir, baseId));
+  }
+  if (paths.length === 0) paths.push(transcriptPath);
+
+  return Array.from(new Set(paths)).slice(-SESSION_TRANSCRIPT_FAMILY_MAX_FILES);
 }
 
 function resolveSessionTranscriptPathByKey(
@@ -446,17 +602,28 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function loadSessionTranscriptByKey(sessionKey: string, limit: number): Promise<unknown[] | null> {
+async function loadSessionTranscriptByKey(
+  sessionKey: string,
+  limit: number,
+  includeFamily = false,
+): Promise<unknown[] | null> {
   const parsed = parseSessionKey(sessionKey);
   if (!parsed) return null;
 
   try {
     const sessionsDir = join(getOpenClawConfigDir(), 'agents', parsed.agentId, 'sessions');
     const sessionsJson = await readSessionsJson(parsed.agentId);
-    const transcriptPath = resolveSessionTranscriptPathByKey(sessionKey, sessionsDir, sessionsJson);
-    if (!transcriptPath) return null;
+    const transcriptPaths = await resolveSessionTranscriptPathsByKey(
+      sessionKey,
+      sessionsDir,
+      sessionsJson,
+      includeFamily,
+    );
+    if (!transcriptPaths?.length) return null;
 
-    return await readRecentTranscriptMessages(transcriptPath, limit);
+    return includeFamily
+      ? await readRecentTranscriptMessagesFromPaths(transcriptPaths, limit)
+      : await readRecentTranscriptMessages(transcriptPaths[0]!, limit);
   } catch {
     return null;
   }
@@ -497,9 +664,12 @@ export async function handleSessionRoutes(
       const sessionKey = url.searchParams.get('sessionKey')?.trim() || '';
       const limitRaw = Number(url.searchParams.get('limit') ?? '200');
       const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 1000) : 200;
+      const includeFamily = ['1', 'true', 'yes'].includes(
+        (url.searchParams.get('includeFamily') ?? '').trim().toLowerCase(),
+      );
 
       if (sessionKey) {
-        const messages = await loadSessionTranscriptByKey(sessionKey, limit);
+        const messages = await loadSessionTranscriptByKey(sessionKey, limit, includeFamily);
         if (!messages) {
           sendJson(res, 404, { success: false, error: 'Transcript not found' });
           return true;

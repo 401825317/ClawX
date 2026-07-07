@@ -159,7 +159,7 @@ export function buildGatewayConnectFrame(options: {
         auth: {
           token: options.token,
         },
-        caps: ['tool-events'],
+        caps: ['tool-events', 'runtime-events'],
         role,
         scopes,
         device,

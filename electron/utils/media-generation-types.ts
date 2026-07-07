@@ -46,6 +46,7 @@ export type VideoGenerationJobPayload = {
   sessionKey: string;
   prompt: string;
   originalPrompt?: string;
+  model?: string;
   size?: string;
   durationSeconds?: number;
   inputImages?: MediaGenerationInputImageRef[];
@@ -57,6 +58,25 @@ export type VideoGenerationJobPayload = {
 export type MediaGenerationJobPayload = ImageGenerationJobPayload | VideoGenerationJobPayload;
 
 export type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+
+export type MediaGenerationJobOutput = {
+  path?: string;
+  url?: string;
+  mimeType?: string;
+  size?: number;
+  fileName?: string;
+  width?: number;
+  height?: number;
+  durationSeconds?: number;
+  metadata?: Record<string, unknown>;
+  outputIndex?: number;
+};
+
+export type MediaGenerationJobResult = {
+  ok?: boolean;
+  outputs?: MediaGenerationJobOutput[];
+  metadata?: Record<string, unknown>;
+};
 
 export type MediaGenerationWorkerRequest = {
   type: 'run';
@@ -82,5 +102,5 @@ export type MediaGenerationJobSnapshot = {
   startedAt?: number;
   completedAt?: number;
   error?: string;
-  result?: unknown;
+  result?: MediaGenerationJobResult | unknown;
 };

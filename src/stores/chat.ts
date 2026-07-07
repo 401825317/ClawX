@@ -12,7 +12,7 @@ import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
-import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import type { ChatRuntimeArtifact, ChatRuntimeEvent } from '../../shared/chat-runtime-events';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -58,11 +58,19 @@ import {
 } from './chat/types';
 import type { ChatGet, ChatSet } from './chat/store-api';
 import { applyRuntimeEventToRuns, extractToolCompletedFiles, shouldFilterRuntimeExecutionGraphEvent } from './chat/runtime-graph';
+import {
+  buildRuntimeArtifactEventsFromAttachedFiles,
+  buildRuntimeArtifactVerificationEvent,
+  buildRuntimeCheckpointEvent,
+  buildRuntimeCompletionGateEvents,
+  buildRuntimeStartContractEvents,
+} from './chat/runtime-contract';
 import { enrichWithToolCallAttachments, shouldDropMessageFromHistory } from './chat/helpers';
 import {
   isGeneratingStatusNarration,
   isInternalAssistantReplyText,
   isOpenClawRuntimeEventPrompt,
+  stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 
 export type {
@@ -178,6 +186,7 @@ type PendingImageInput = {
 
 type MediaIntentAction =
   | 'chat'
+  | 'vision_chat'
   | 'image_generate'
   | 'image_edit'
   | 'video_generate'
@@ -188,6 +197,28 @@ type MediaIntentImageRef = {
   fileName?: string;
   mimeType?: string;
   filePath: string;
+};
+
+type MediaIntentCompositeTaskKind =
+  | 'image_generate'
+  | 'presentation'
+  | 'spreadsheet'
+  | 'video_generate'
+  | 'image_edit'
+  | 'mini_program'
+  | 'copywriting';
+
+type MediaIntentCompositeTask = {
+  id: string;
+  kind: MediaIntentCompositeTaskKind;
+  title: string;
+  prompt: string;
+  requiresArtifact?: boolean;
+  dependsOn?: string[];
+  fallback?: string;
+  selectedImageSource?: 'explicit' | 'candidate' | 'none';
+  selectedImageIndex?: number;
+  sourceImages?: MediaIntentImageRef[];
 };
 
 type MediaIntentRecentMessage = {
@@ -205,7 +236,15 @@ type MediaIntentPlan = {
   selectedImageIndex?: number;
   sourceImages?: MediaIntentImageRef[];
   prompt?: string;
+  imageSize?: string;
+  imageQuality?: 'low' | 'medium' | 'high';
+  videoMode?: 'text_to_video' | 'image_to_video' | 'edit_image_then_video';
+  videoSize?: string;
+  videoDurationSeconds?: number;
+  videoPrompt?: string;
+  imageEditPrompt?: string;
   clarification?: string;
+  compositeTasks?: MediaIntentCompositeTask[];
 };
 
 type MediaIntentPlanResponse = {
@@ -269,6 +308,37 @@ function resolveImageModeReferenceInputs(
   return [];
 }
 
+function shouldLoadFamilyImageReferences(prompt: string, mode: ChatSendMode): boolean {
+  const referencesImage = /(?:这张|这幅|这个图|这图|这张图|这个图片|图片|照片|画面|上一张|上一个|刚才|刚生成|它|previous|last|this image|this picture|this photo|the image|the picture|it)/i.test(prompt);
+  const asksAboutImage = /(?:美吗|美嘛|好看吗|漂亮吗|丑吗|怎么样|咋样|如何|评价|点评|审美|哪里.*(?:好|不好|优化|改进)|what do you think|look good|beautiful|pretty|rate|review|critique|analy[sz]e)/i.test(prompt);
+  const editsImage = /(?:去掉|删除|移除|替换|添加|加一|加个|改成|修一下|调整|换成|美化|背景|动起来|animate|turn .* into video|make .* move|remove|replace|add|edit)/i.test(prompt);
+  if (mode === 'image' || mode === 'video') {
+    return referencesImage || asksAboutImage || editsImage;
+  }
+  return referencesImage || asksAboutImage;
+}
+
+async function loadFamilyImageReferenceInputs(
+  sessionKey: string,
+  prompt: string,
+  mode: ChatSendMode,
+): Promise<PendingImageInput[]> {
+  if (!shouldLoadFamilyImageReferences(prompt, mode)) return [];
+
+  try {
+    const transcriptMessages = await withTimeout(
+      loadSessionTranscriptFallback(sessionKey, PREVIEW_HYDRATION_MESSAGE_LIMIT, { includeFamily: true }),
+      CHAT_HISTORY_DISK_FALLBACK_TIMEOUT_MS,
+    );
+    const messagesWithToolImages = enrichWithToolResultFiles(transcriptMessages);
+    const enrichedMessages = enrichWithCachedImages(messagesWithToolImages);
+    return resolveImageModeReferenceInputs([], enrichedMessages);
+  } catch (error) {
+    console.warn('[chat.media] family image reference fallback failed:', error);
+    return [];
+  }
+}
+
 function pendingImageToIntentRef(file: PendingImageInput): MediaIntentImageRef {
   return {
     fileName: file.fileName,
@@ -312,9 +382,250 @@ function planSourceImageInputs(plan: MediaIntentPlan): PendingImageInput[] {
 }
 
 function mediaPlanToMode(plan: MediaIntentPlan): ChatSendMode {
+  if ((plan.compositeTasks?.length ?? 0) > 0) return 'chat';
   if (plan.action === 'image_generate' || plan.action === 'image_edit') return 'image';
   if (plan.action === 'video_generate') return 'video';
   return 'chat';
+}
+
+function hasCompositeTasks(plan: MediaIntentPlan): plan is MediaIntentPlan & { compositeTasks: MediaIntentCompositeTask[] } {
+  return (plan.compositeTasks?.length ?? 0) > 0;
+}
+
+function sanitizeCompositeTaskId(value: string, index: number): string {
+  const cleaned = value.trim().replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '');
+  return cleaned || `task-${index + 1}`;
+}
+
+function compositeTaskKindLabel(kind: MediaIntentCompositeTaskKind): string {
+  switch (kind) {
+    case 'image_generate':
+      return '图片生成';
+    case 'image_edit':
+      return '图片编辑';
+    case 'video_generate':
+      return '视频生成';
+    case 'presentation':
+      return '演示文稿';
+    case 'spreadsheet':
+      return '表格';
+    case 'mini_program':
+      return '小程序';
+    case 'copywriting':
+      return '文案';
+    default:
+      return kind;
+  }
+}
+
+function describeCompositeTaskImages(task: MediaIntentCompositeTask): string {
+  const images = (task.sourceImages ?? []).filter((image) => image.filePath?.trim());
+  if (images.length === 0) {
+    return task.kind === 'image_edit'
+      ? '参考图：未指定；如本轮前序子任务刚生成图片，优先使用该图片作为修图输入，否则把该子任务标记为待补输入。'
+      : '参考图：无。';
+  }
+  return `参考图：${images.map((image, index) => {
+    const name = image.fileName?.trim() || `image-${index + 1}`;
+    return `${name} (${image.filePath})`;
+  }).join('；')}`;
+}
+
+function describeCompositeTaskDependency(task: MediaIntentCompositeTask): string | null {
+  const dependencies = (task.dependsOn ?? []).filter(Boolean);
+  if (dependencies.length === 0 && !task.fallback) return null;
+  return [
+    dependencies.length > 0 ? `依赖：${dependencies.join('、')}` : null,
+    task.fallback ? `兜底：${task.fallback}` : null,
+  ].filter((item): item is string => Boolean(item)).join('；');
+}
+
+function buildCompositeChatContractMessage(originalPrompt: string, tasks: MediaIntentCompositeTask[]): string {
+  const taskLines = tasks.map((task, index) => [
+    `${index + 1}. [${compositeTaskKindLabel(task.kind)}] ${task.title || `子任务 ${index + 1}`}`,
+    `   - 执行要求：${task.prompt}`,
+    task.requiresArtifact === false
+      ? '   - 产物要求：该子任务可以只落地为最终回复中的结构化结果。'
+      : '   - 产物要求：必须为这个子任务生成一个可见、可追踪的产物，并在回复或运行事件中给出产物路径/链接/卡片。',
+    `   - ${describeCompositeTaskImages(task)}`,
+    describeCompositeTaskDependency(task) ? `   - ${describeCompositeTaskDependency(task)}` : '',
+  ].join('\n')).join('\n');
+
+  return [
+    originalPrompt,
+    '',
+    '【UClaw composite execution contract】',
+    '这是一个组合任务，请按下面合同执行：',
+    '- 自动确定一个简洁主题/标题，不要反问用户主题。',
+    '- 按子任务顺序推进；不要询问用户先做哪个，也不要把选择权交回给用户。',
+    '- 每个子任务都必须产生自己的可交付产物；不能只给说明或计划。',
+    '- 如果图片编辑子任务没有显式输入图，可以使用本轮前序子任务刚生成的图片；如果仍无可用图片，明确标记该子任务为待补输入，并继续执行其他不依赖该输入的子任务。',
+    '- 最终回复必须包含产物清单、每项验证结果、完成项与待补输入项；不能用“我一次只能执行一种类型”来结束。',
+    '',
+    '子任务清单：',
+    taskLines,
+  ].join('\n');
+}
+
+function dimensionArea(value: string): number {
+  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
+  if (!match) return 0;
+  return Number(match[1]) * Number(match[2]);
+}
+
+function strongestSize(sizes: string[] | undefined, fallback: string): string {
+  const candidates = (sizes ?? []).filter(Boolean);
+  if (candidates.length === 0) return fallback;
+  return candidates.reduce((best, current) => (
+    dimensionArea(current) > dimensionArea(best) ? current : best
+  ), candidates[0]!);
+}
+
+function strongestQuality(qualities: string[] | undefined, fallback: string): string {
+  const rank: Record<string, number> = { low: 1, medium: 2, high: 3 };
+  const candidates = (qualities ?? []).filter(Boolean);
+  if (candidates.length === 0) return fallback;
+  return candidates.reduce((best, current) => (
+    (rank[current] ?? 0) > (rank[best] ?? 0) ? current : best
+  ), candidates[0]!);
+}
+
+function strongestDuration(durations: number[] | undefined, fallback: number): number {
+  const candidates = (durations ?? []).filter((value) => Number.isFinite(value) && value > 0);
+  if (candidates.length === 0) return fallback;
+  return Math.max(...candidates);
+}
+
+function normalizeOptionValue<T extends string | number>(
+  requested: T | undefined,
+  allowed: T[] | undefined,
+  fallback: T,
+): T {
+  return requested !== undefined && (allowed ?? []).includes(requested) ? requested : fallback;
+}
+
+function parseExplicitDimension(prompt: string): string | undefined {
+  const match = prompt.match(/(\d{3,4})\s*[xX×]\s*(\d{3,4})/);
+  return match ? `${match[1]}x${match[2]}` : undefined;
+}
+
+function parseImageSizeHint(prompt: string, allowedSizes: string[], fallback: string): string | undefined {
+  const explicit = parseExplicitDimension(prompt);
+  if (explicit && allowedSizes.includes(explicit)) return explicit;
+  if (/(?:4k|超清|最高|最大|最强)/i.test(prompt)) {
+    return strongestSize(allowedSizes, fallback);
+  }
+  if (/(?:2k|高清)/i.test(prompt)) {
+    return allowedSizes.includes('2048x2048') ? '2048x2048' : undefined;
+  }
+  if (/(?:1k|普通)/i.test(prompt)) {
+    return allowedSizes.includes('1024x1024') ? '1024x1024' : undefined;
+  }
+  return undefined;
+}
+
+function parseImageQualityHint(prompt: string, allowedQualities: string[], fallback: string): string | undefined {
+  if (/(?:high|高清|高质量|最高|最强|精细)/i.test(prompt)) return normalizeOptionValue('high', allowedQualities, fallback);
+  if (/(?:medium|标准|中等)/i.test(prompt)) return normalizeOptionValue('medium', allowedQualities, fallback);
+  if (/(?:low|草稿|低)/i.test(prompt)) return normalizeOptionValue('low', allowedQualities, fallback);
+  return undefined;
+}
+
+function parseVideoSizeHint(prompt: string, allowedSizes: string[], fallback: string): string | undefined {
+  const explicit = parseExplicitDimension(prompt);
+  if (explicit && allowedSizes.includes(explicit)) return explicit;
+  if (/(?:9\s*:\s*16|竖屏|竖版|portrait|vertical)/i.test(prompt)) {
+    return allowedSizes.find((size) => {
+      const match = size.match(/^(\d+)x(\d+)$/);
+      return match ? Number(match[2]) > Number(match[1]) : false;
+    });
+  }
+  if (/(?:16\s*:\s*9|横屏|横版|landscape|wide)/i.test(prompt)) {
+    return allowedSizes.find((size) => {
+      const match = size.match(/^(\d+)x(\d+)$/);
+      return match ? Number(match[1]) > Number(match[2]) : false;
+    });
+  }
+  if (/(?:1\s*:\s*1|方形|正方形|square)/i.test(prompt)) {
+    return allowedSizes.find((size) => {
+      const match = size.match(/^(\d+)x(\d+)$/);
+      return match ? Number(match[1]) === Number(match[2]) : false;
+    });
+  }
+  if (/(?:最高|最大|最强)/i.test(prompt)) {
+    return strongestSize(allowedSizes, fallback);
+  }
+  return undefined;
+}
+
+function parseVideoDurationHint(prompt: string, allowedDurations: number[], fallback: number): number | undefined {
+  const match = prompt.match(/(\d{1,2})\s*(?:秒|s|sec|secs|second|seconds)/i);
+  if (!match) return undefined;
+  const requested = Number(match[1]);
+  return normalizeOptionValue(requested, allowedDurations, fallback);
+}
+
+function resolveDefaultChatImageOptions(): ChatImageSendOptions {
+  const options = useClientConfigStore.getState().modelOptions.image;
+  const model = options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
+  const size = strongestSize(model?.sizes, model?.defaultSize ?? options.defaultSize);
+  const quality = strongestQuality(model?.qualities, model?.defaultQuality ?? options.defaultQuality);
+  return {
+    model: model?.id ?? options.defaultModel,
+    size: model?.sizes.includes(size) ? size : options.defaultSize,
+    quality: model?.qualities.includes(quality) ? quality : options.defaultQuality,
+  };
+}
+
+function resolveDefaultChatVideoOptions(hasSourceImage = false): ChatVideoSendOptions {
+  const options = useClientConfigStore.getState().modelOptions.video;
+  const model = hasSourceImage
+    ? options.models.find((entry) => entry.requiresImage) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0]
+    : options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
+  const size = strongestSize(model?.sizes, model?.defaultSize ?? options.defaultSize);
+  const durationSeconds = strongestDuration(model?.durations, model?.defaultDurationSeconds ?? options.defaultDurationSeconds);
+  return {
+    model: model?.id ?? options.defaultModel,
+    size: model?.sizes.includes(size) ? size : options.defaultSize,
+    durationSeconds: model?.durations.includes(durationSeconds) ? durationSeconds : options.defaultDurationSeconds,
+  };
+}
+
+function resolveChatImageOptions(prompt: string, plan: MediaIntentPlan, overrides?: ChatImageSendOptions): ChatImageSendOptions {
+  const base = { ...resolveDefaultChatImageOptions(), ...overrides };
+  const options = useClientConfigStore.getState().modelOptions.image;
+  const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
+  const sizes = model?.sizes ?? [];
+  const qualities = model?.qualities ?? [];
+  const strongest = resolveDefaultChatImageOptions();
+  const requestedSize = parseImageSizeHint(prompt, sizes, strongest.size) ?? plan.imageSize;
+  const requestedQuality = parseImageQualityHint(prompt, qualities, strongest.quality) ?? plan.imageQuality;
+  return {
+    model: model?.id ?? base.model,
+    size: normalizeOptionValue(requestedSize, sizes, base.size),
+    quality: normalizeOptionValue(requestedQuality, qualities, base.quality) as ChatImageSendOptions['quality'],
+  };
+}
+
+function resolveChatVideoOptions(
+  prompt: string,
+  plan: MediaIntentPlan,
+  hasSourceImage: boolean,
+  overrides?: ChatVideoSendOptions,
+): ChatVideoSendOptions {
+  const base = { ...resolveDefaultChatVideoOptions(hasSourceImage), ...overrides };
+  const options = useClientConfigStore.getState().modelOptions.video;
+  const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
+  const sizes = model?.sizes ?? [];
+  const durations = model?.durations ?? [];
+  const strongest = resolveDefaultChatVideoOptions(hasSourceImage);
+  const requestedSize = parseVideoSizeHint(prompt, sizes, strongest.size) ?? plan.videoSize;
+  const requestedDuration = parseVideoDurationHint(prompt, durations, strongest.durationSeconds) ?? plan.videoDurationSeconds;
+  return {
+    model: model?.id ?? base.model,
+    size: normalizeOptionValue(requestedSize, sizes, base.size),
+    durationSeconds: normalizeOptionValue(requestedDuration, durations, base.durationSeconds),
+  };
 }
 
 async function planMediaIntentForSend(params: {
@@ -341,6 +652,75 @@ async function planMediaIntentForSend(params: {
     throw new Error(response.error || 'Media intent planner failed');
   }
   return response.plan?.action ? response.plan : { action: 'chat', source: 'fallback', reason: 'planner_response_missing_plan' };
+}
+
+function buildHistoricalRunId(sessionKey: string, triggerMessage: RawMessage, index: number): string {
+  return `history:${sessionKey}:${triggerMessage.id ?? triggerMessage.timestamp ?? index}`;
+}
+
+function applyHistoricalRuntimeRunsFromMessages(
+  runtimeRuns: ChatState['runtimeRuns'],
+  sessionKey: string,
+  messages: RawMessage[],
+): ChatState['runtimeRuns'] {
+  let nextRuns = runtimeRuns;
+  for (let index = 0; index < messages.length; index += 1) {
+    const trigger = messages[index];
+    if (!trigger || !isRealUserBoundaryMessage(trigger)) continue;
+    const nextUserIndex = messages.findIndex((message, candidateIndex) => (
+      candidateIndex > index && isRealUserBoundaryMessage(message)
+    ));
+    const segmentEnd = nextUserIndex === -1 ? messages.length : nextUserIndex;
+    const segment = messages.slice(index + 1, segmentEnd);
+    const artifactFiles = segment
+      .filter((message) => message.role === 'assistant' && (message._attachedFiles?.length ?? 0) > 0)
+      .flatMap((message) => message._attachedFiles ?? []);
+    if (artifactFiles.length === 0) continue;
+
+    const runId = buildHistoricalRunId(sessionKey, trigger, index);
+    const existing = nextRuns[runId];
+    if (existing?.gateResult?.decision === 'deliverable') continue;
+
+    const objective = getMessageText(trigger.content).trim();
+    const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
+    const startEvents = buildRuntimeStartContractEvents(existing, {
+      runId,
+      sessionKey,
+      objective,
+      mode: 'chat',
+      ts,
+    });
+    const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
+      runId,
+      sessionKey,
+      ts,
+      producer: 'history',
+      verificationDetail: '从历史消息产物卡片恢复的产物。',
+    }, artifactFiles);
+    nextRuns = applyRuntimeContractEvents(nextRuns, [
+      ...startEvents,
+      ...artifactEvents,
+      {
+        contractVersion: 1,
+        producer: 'history',
+        runId,
+        sessionKey,
+        ts,
+        type: 'run.ended',
+        status: 'completed',
+      },
+    ]);
+    nextRuns = applyRuntimeContractEvents(
+      nextRuns,
+      buildRuntimeCompletionGateEvents(nextRuns[runId], {
+        runId,
+        sessionKey,
+        ts,
+        status: 'completed',
+      }),
+    );
+  }
+  return nextRuns;
 }
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
@@ -401,12 +781,23 @@ const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
 const _sessionRunStateCache = new Map<string, SessionRunState>();
 let _sendGenerationCounter = 0;
 const _activeSendGenerationBySession = new Map<string, number>();
+type PendingRuntimeIntent = {
+  objective?: string;
+  mode: ChatSendMode;
+  compositeTasks?: MediaIntentCompositeTask[];
+  createdAt: number;
+};
+const _pendingRuntimeIntentBySession = new Map<string, PendingRuntimeIntent>();
+const _runtimeArtifactVerificationInFlight = new Set<string>();
 
 type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 type MediaGenerationJobSnapshot = {
   id: string;
+  kind?: 'image' | 'video';
+  sessionKey?: string;
   status: MediaGenerationJobStatus;
   error?: string;
+  result?: unknown;
 };
 type MediaGenerationSendResponse = {
   success: boolean;
@@ -436,6 +827,248 @@ async function waitForMediaGenerationJob(jobId: string): Promise<MediaGeneration
     }
     await sleep(MEDIA_GENERATION_JOB_POLL_INTERVAL_MS);
   }
+}
+
+function mediaOutputRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function mediaResultOutputs(result: unknown): Record<string, unknown>[] {
+  const record = mediaOutputRecord(result);
+  const outputs = Array.isArray(record?.outputs) ? record.outputs : [];
+  return outputs
+    .map(mediaOutputRecord)
+    .filter((output): output is Record<string, unknown> => output !== null);
+}
+
+function readPositiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function basenameFromPathOrUrl(value: string, fallback: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      return parsed.pathname.split('/').filter(Boolean).pop()?.split(/[?#]/)[0] || fallback;
+    } catch {
+      // Fall through to path parsing.
+    }
+  }
+  return trimmed.split(/[\\/]/).pop()?.split(/[?#]/)[0] || fallback;
+}
+
+function attachedFilesFromMediaGenerationJob(
+  job: MediaGenerationJobSnapshot | undefined,
+  fallbackKind: 'image' | 'video',
+): AttachedFileMeta[] {
+  if (!job) return [];
+  const files: AttachedFileMeta[] = [];
+  const outputs = mediaResultOutputs(job.result);
+  for (const [index, output] of outputs.entries()) {
+    const path = typeof output.path === 'string' && output.path.trim() ? output.path.trim() : undefined;
+    const url = typeof output.url === 'string' && output.url.trim() ? output.url.trim() : undefined;
+    if (!path && !url) continue;
+    const mimeType = typeof output.mimeType === 'string' && output.mimeType.trim()
+      ? output.mimeType.trim()
+      : (fallbackKind === 'image' ? 'image/png' : 'video/mp4');
+    const size = typeof output.size === 'number' && Number.isFinite(output.size) && output.size > 0
+      ? Math.floor(output.size)
+      : 0;
+    const title = typeof output.fileName === 'string' && output.fileName.trim()
+      ? output.fileName.trim()
+      : basenameFromPathOrUrl(path ?? url ?? '', `${fallbackKind}-${index + 1}`);
+    files.push({
+      fileName: title,
+      mimeType,
+      fileSize: size,
+      preview: null,
+      width: readPositiveNumber(output.width),
+      height: readPositiveNumber(output.height),
+      filePath: path,
+      gatewayUrl: url,
+      source: 'tool-result',
+    });
+  }
+  return dedupeAttachedFiles(files);
+}
+
+function buildMediaMetadataVerificationEvents(params: {
+  runId: string;
+  sessionKey: string;
+  ts: number;
+  job: MediaGenerationJobSnapshot | undefined;
+  artifacts: ChatRuntimeArtifact[];
+  kind: 'image' | 'video';
+}): ChatRuntimeEvent[] {
+  if (!params.job || params.artifacts.length === 0) return [];
+  const outputs = mediaResultOutputs(params.job.result);
+  return params.artifacts.flatMap((artifact, index): ChatRuntimeEvent[] => {
+    const output = outputs[index];
+    if (!output) return [];
+    const width = readPositiveNumber(output.width);
+    const height = readPositiveNumber(output.height);
+    const durationSeconds = readPositiveNumber(output.durationSeconds);
+    const metadata = mediaOutputRecord(output.metadata);
+    const hasExpectedMetadata = params.kind === 'image'
+      ? Boolean(width || height || metadata)
+      : Boolean(width || height || durationSeconds || metadata);
+    const details = [
+      width && height ? `${Math.round(width)}x${Math.round(height)}` : undefined,
+      durationSeconds ? `${durationSeconds}s` : undefined,
+      metadata ? 'metadata present' : undefined,
+    ].filter(Boolean).join('; ');
+    return [{
+      contractVersion: 1,
+      producer: 'media',
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts: params.ts,
+      type: 'verification.completed',
+      toolCallId: params.job?.id,
+      verification: {
+        id: `verification:${artifact.id}:media.metadata`,
+        status: hasExpectedMetadata ? 'passed' : 'skipped',
+        kind: 'media.metadata',
+        required: false,
+        severity: hasExpectedMetadata ? 'info' : 'warning',
+        title: params.kind === 'image' ? '图片元数据' : '视频元数据',
+        detail: details || '生成结果未返回可展示的媒体元数据。',
+        artifactId: artifact.id,
+        targetId: artifact.id,
+        evidence: JSON.stringify({
+          width,
+          height,
+          durationSeconds,
+          metadata,
+        }),
+        source: 'media-generation-job',
+      },
+    }];
+  });
+}
+
+function gateDecisionAllowsTerminalIdle(decision: string | undefined): boolean {
+  return decision === 'deliverable'
+    || decision === 'blocked_needs_user'
+    || decision === 'failed'
+    || decision === 'aborted';
+}
+
+function applyMediaRuntimeFailure(params: {
+  runId: string;
+  sessionKey: string;
+  error: string;
+}): void {
+  const ts = Date.now();
+  useChatStore.setState((state) => ({
+    runtimeRuns: applyRuntimeContractEvents(
+      state.runtimeRuns,
+      buildRuntimeCompletionGateEvents(state.runtimeRuns[params.runId], {
+        runId: params.runId,
+        sessionKey: params.sessionKey,
+        ts,
+        status: 'error',
+        error: params.error,
+      }),
+    ),
+  }));
+}
+
+function applyMediaRuntimeSuccess(params: {
+  runId: string;
+  sessionKey: string;
+  job: MediaGenerationJobSnapshot | undefined;
+  kind: 'image' | 'video';
+}): { decision?: string; artifacts: ChatRuntimeArtifact[] } {
+  const ts = Date.now();
+  const attachedFiles = attachedFilesFromMediaGenerationJob(params.job, params.kind);
+  let artifacts: ChatRuntimeArtifact[] = [];
+  let decision: string | undefined;
+  useChatStore.setState((state) => {
+    const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts,
+      producer: 'media',
+      toolCallId: params.job?.id,
+      verificationDetail: params.kind === 'image'
+        ? '图片生成 job 已返回产物输出。'
+        : '视频生成 job 已返回产物输出。',
+    }, attachedFiles);
+    artifacts = artifactEvents
+      .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
+        runtimeEvent.type === 'artifact.produced')
+      .map((runtimeEvent) => runtimeEvent.artifact);
+    const metadataEvents = buildMediaMetadataVerificationEvents({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts,
+      job: params.job,
+      artifacts,
+      kind: params.kind,
+    });
+    let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, [...artifactEvents, ...metadataEvents]);
+    runtimeRuns = applyRuntimeContractEvents(
+      runtimeRuns,
+      buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
+        runId: params.runId,
+        sessionKey: params.sessionKey,
+        ts,
+        status: 'completed',
+      }),
+    );
+    decision = runtimeRuns[params.runId]?.gateResult?.decision;
+    return { runtimeRuns };
+  });
+  return { decision, artifacts };
+}
+
+function getActiveCompletionGateDecision(state: Pick<ChatState, 'activeRunId' | 'runtimeRuns'>): string | undefined {
+  const runId = state.activeRunId;
+  return runId ? state.runtimeRuns[runId]?.gateResult?.decision : undefined;
+}
+
+function applyHistoryCompletionGateForActiveRun(sessionKey: string): string | undefined {
+  let decision: string | undefined;
+  useChatStore.setState((state) => {
+    const runId = state.activeRunId;
+    if (!runId) return {};
+    const runtimeRuns = applyRuntimeContractEvents(
+      state.runtimeRuns,
+      buildRuntimeCompletionGateEvents(state.runtimeRuns[runId], {
+        runId,
+        sessionKey,
+        ts: Date.now(),
+        status: 'completed',
+      }),
+    );
+    decision = runtimeRuns[runId]?.gateResult?.decision;
+    return { runtimeRuns };
+  });
+  return decision;
+}
+
+function shouldHoldActiveRunForCompletionGate(sessionKey: string): boolean {
+  const decision = applyHistoryCompletionGateForActiveRun(sessionKey);
+  if (decision !== 'continue_required') return false;
+  useChatStore.setState((state) => ({
+    messages: suppressPrematureAssistantFinals(state.messages, state.lastUserMessageAt),
+    sending: true,
+    activeRunId: state.activeRunId,
+    pendingFinal: true,
+    pendingImageGenerationLocal: false,
+    pendingVideoGenerationLocal: false,
+    streamingText: '',
+    streamingMessage: null,
+    runError: null,
+  }));
+  return true;
 }
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const SESSION_LABEL_HYDRATION_BATCH_SIZE = 40;
@@ -637,7 +1270,7 @@ async function refreshVisibleSessionSummaries(
 }
 
 function cleanSessionLabelText(text: string): string {
-  return text
+  return stripCompositeExecutionContractEnvelope(text)
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*\{[\s\S]*?\}\s*/i, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*[^\n]*(?:\n\s*)*/i, '')
@@ -681,7 +1314,7 @@ async function loadLocalHistoryFallback(
 ): Promise<RawMessage[]> {
   const fallbackPromise = isCronSessionKey(sessionKey)
     ? loadCronFallbackMessages(sessionKey, limit)
-    : loadSessionTranscriptFallback(sessionKey, limit);
+    : loadSessionTranscriptFallback(sessionKey, limit, { includeFamily: true });
   const timeoutMs = options.timeoutMs ?? CHAT_HISTORY_DISK_FALLBACK_TIMEOUT_MS;
   if (timeoutMs <= 0) {
     return [];
@@ -819,6 +1452,252 @@ function hasRecentRuntimeActivityForSend(
     if (state.activeRunId && run.runId === state.activeRunId) return true;
     return run.sessionKey === sessionKey;
   });
+}
+
+function rememberPendingRuntimeIntent(sessionKey: string, intent: Omit<PendingRuntimeIntent, 'createdAt'>): void {
+  _pendingRuntimeIntentBySession.set(sessionKey, {
+    ...intent,
+    objective: intent.objective?.trim() || undefined,
+    compositeTasks: intent.compositeTasks?.length ? intent.compositeTasks : undefined,
+    createdAt: Date.now(),
+  });
+}
+
+function getPendingRuntimeIntent(sessionKey: string | undefined | null): PendingRuntimeIntent | undefined {
+  if (!sessionKey) return undefined;
+  const intent = _pendingRuntimeIntentBySession.get(sessionKey);
+  if (!intent) return undefined;
+  if (Date.now() - intent.createdAt > NO_RESPONSE_SAFETY_TIMEOUT_MS + LLM_IDLE_HINT_MS) {
+    _pendingRuntimeIntentBySession.delete(sessionKey);
+    return undefined;
+  }
+  return intent;
+}
+
+function clearPendingRuntimeIntent(sessionKey: string | undefined | null): void {
+  if (!sessionKey) return;
+  _pendingRuntimeIntentBySession.delete(sessionKey);
+}
+
+function applyRuntimeContractEvents(
+  currentRuns: ChatState['runtimeRuns'],
+  events: ChatRuntimeEvent[],
+): ChatState['runtimeRuns'] {
+  if (events.length === 0) return currentRuns;
+  return events.reduce((runs, event) => applyRuntimeEventToRuns(runs, event), currentRuns);
+}
+
+function buildRuntimeStartEventsForRun(
+  runtimeRuns: ChatState['runtimeRuns'],
+  params: {
+    runId: string;
+    sessionKey?: string;
+    objective?: string;
+    mode?: ChatSendMode;
+    compositeTasks?: MediaIntentCompositeTask[];
+    ts?: number;
+    includeStarted?: boolean;
+  },
+): ChatRuntimeEvent[] {
+  if (!params.runId) return [];
+  const intent = getPendingRuntimeIntent(params.sessionKey);
+  const objective = params.objective ?? intent?.objective;
+  const compositeTasks = params.compositeTasks ?? intent?.compositeTasks;
+  const events = buildRuntimeStartContractEvents(runtimeRuns[params.runId], {
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    objective,
+    mode: params.mode ?? intent?.mode,
+    ts: params.ts,
+    includeStarted: params.includeStarted,
+  });
+  if ((compositeTasks?.length ?? 0) > 0 && !runtimeRuns[params.runId]?.planSteps?.some((step) => step.kind === 'composite-task')) {
+    const baseTs = params.ts ?? Date.now();
+    events.push({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts: baseTs,
+      type: 'run.plan.updated',
+      objective,
+      summary: 'UClaw 已接管组合任务，将按顺序执行所有子任务并逐项交付产物。',
+      steps: [
+        {
+          id: 'uclaw.objective',
+          title: '理解组合目标',
+          status: 'completed',
+          detail: objective,
+          kind: 'objective',
+          order: 0,
+        },
+        {
+          id: 'uclaw.composite',
+          title: '执行组合任务',
+          status: 'running',
+          detail: '按合同顺序执行，不要求用户选择先做哪个。',
+          kind: 'composite',
+          order: 1,
+        },
+        ...compositeTasks!.map((task, index) => ({
+          id: `uclaw.composite.${sanitizeCompositeTaskId(task.id, index)}`,
+          title: task.title || `子任务 ${index + 1}`,
+          status: 'pending' as const,
+          detail: [
+            `${compositeTaskKindLabel(task.kind)}：${task.prompt}`,
+            describeCompositeTaskImages(task),
+            '必须产出该子任务自己的可交付产物。',
+          ].join('\n'),
+          kind: 'composite-task',
+          parentId: 'uclaw.composite',
+          requiresArtifact: task.requiresArtifact !== false,
+          order: 2 + index,
+        })),
+        {
+          id: 'uclaw.verify',
+          title: '验证每项产物',
+          status: 'pending',
+          kind: 'verification',
+          order: 2 + compositeTasks!.length,
+        },
+        {
+          id: 'uclaw.deliver',
+          title: '交付组合结果',
+          status: 'pending',
+          kind: 'delivery',
+          order: 3 + compositeTasks!.length,
+        },
+      ],
+    });
+  }
+  return events;
+}
+
+type ThumbnailVerificationResult = {
+  preview: string | null;
+  fileSize: number;
+  filePath?: string;
+  width?: number;
+  height?: number;
+};
+
+function scheduleRuntimeArtifactVerification(
+  runId: string,
+  sessionKey: string | undefined,
+  artifacts: ChatRuntimeArtifact[],
+): void {
+  const requests = artifacts
+    .map((artifact) => {
+      const filePath = artifact.filePath?.trim();
+      const gatewayUrl = artifact.url?.startsWith('/api/chat/media/') ? artifact.url : undefined;
+      if (!filePath && !gatewayUrl) return null;
+      const key = `${runId}|${artifact.id}|${filePath ?? gatewayUrl}`;
+      if (_runtimeArtifactVerificationInFlight.has(key)) return null;
+      _runtimeArtifactVerificationInFlight.add(key);
+      return {
+        key,
+        artifact,
+        request: {
+          filePath,
+          gatewayUrl,
+          mimeType: artifact.mimeType ?? 'application/octet-stream',
+        },
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry != null);
+
+  if (requests.length === 0) return;
+
+  void hostApiFetch<Record<string, ThumbnailVerificationResult>>('/api/files/thumbnails', {
+    method: 'POST',
+    body: JSON.stringify({ paths: requests.map((entry) => entry.request) }),
+  })
+    .then((results) => {
+      const events: ChatRuntimeEvent[] = [];
+      const ts = Date.now();
+      for (const entry of requests) {
+        const resultKey = entry.request.filePath ?? entry.request.gatewayUrl ?? '';
+        const result = resultKey ? results[resultKey] : undefined;
+        const verifiedPath = result?.filePath ?? entry.artifact.filePath;
+        const verifiedArtifact = result && result.fileSize > 0
+          ? {
+              ...entry.artifact,
+              filePath: verifiedPath,
+              sizeBytes: result.fileSize,
+            }
+          : entry.artifact;
+        if (result && result.fileSize > 0) {
+          events.push({
+            runId,
+            sessionKey,
+            ts,
+            type: 'artifact.produced',
+            artifact: verifiedArtifact,
+          });
+        }
+        events.push(buildRuntimeArtifactVerificationEvent({ runId, sessionKey, ts }, {
+          artifact: verifiedArtifact,
+          status: result && result.fileSize > 0 ? 'passed' : 'blocked',
+          detail: result && result.fileSize > 0
+            ? '本地文件存在性验证已通过。'
+            : '没有在本地找到可读取的产物文件。',
+          evidence: result && result.fileSize > 0
+            ? `filePath=${verifiedPath ?? resultKey}; sizeBytes=${result.fileSize}`
+            : resultKey,
+        }));
+      }
+
+      if (events.length > 0) {
+        useChatStore.setState((state) => ({
+          runtimeRuns: (() => {
+            let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, events);
+            const run = runtimeRuns[runId];
+            if (run?.status === 'completed') {
+              runtimeRuns = applyRuntimeContractEvents(
+                runtimeRuns,
+                buildRuntimeCompletionGateEvents(run, {
+                  runId,
+                  sessionKey,
+                  ts,
+                  status: 'completed',
+                }),
+              );
+            }
+            return runtimeRuns;
+          })(),
+        }));
+      }
+    })
+    .catch((error) => {
+      const ts = Date.now();
+      const events = requests.map((entry) => buildRuntimeArtifactVerificationEvent({ runId, sessionKey, ts }, {
+        artifact: entry.artifact,
+        status: 'blocked',
+        detail: '本地文件存在性验证请求失败。',
+        evidence: error instanceof Error ? error.message : String(error),
+      }));
+      useChatStore.setState((state) => ({
+        runtimeRuns: (() => {
+          let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, events);
+          const run = runtimeRuns[runId];
+          if (run?.status === 'completed') {
+            runtimeRuns = applyRuntimeContractEvents(
+              runtimeRuns,
+              buildRuntimeCompletionGateEvents(run, {
+                runId,
+                sessionKey,
+                ts,
+                status: 'completed',
+              }),
+            );
+          }
+          return runtimeRuns;
+        })(),
+      }));
+    })
+    .finally(() => {
+      for (const entry of requests) {
+        _runtimeArtifactVerificationInFlight.delete(entry.key);
+      }
+    });
 }
 
 function clearActiveSendGeneration(sessionKey: string): void {
@@ -1180,7 +2059,7 @@ function stripInboundMediaVisionEnvelope(text: string): string {
 
 function stripGatewayUserMetadata(text: string): string {
   return stripInboundMediaVisionEnvelope(
-    text
+    stripCompositeExecutionContractEnvelope(text)
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
@@ -3038,6 +3917,33 @@ function hasPendingToolUse(message: RawMessage | undefined): boolean {
   return false;
 }
 
+function isTextOnlyAssistantFinal(message: RawMessage): boolean {
+  if (message.role !== 'assistant') return false;
+  if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
+  if (!hasNonToolAssistantContent(message)) return false;
+  return !messageHasImageContent(message);
+}
+
+function suppressPrematureAssistantFinals(messages: RawMessage[], lastUserMessageAt: number | null): RawMessage[] {
+  if (messages.length === 0) return messages;
+  const userMsTs = lastUserMessageAt != null ? toMs(lastUserMessageAt) : null;
+  const lastUserIndex = userMsTs == null
+    ? (() => {
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          if (messages[index].role === 'user') return index;
+        }
+        return -1;
+      })()
+    : -1;
+  return messages.filter((message, index) => {
+    if (!isTextOnlyAssistantFinal(message)) return true;
+    const isAfterUser = userMsTs != null
+      ? (message.timestamp != null && toMs(message.timestamp) >= userMsTs)
+      : index > lastUserIndex;
+    return !isAfterUser;
+  });
+}
+
 function isRealUserBoundaryMessage(msg: RawMessage): boolean {
   if (msg.role !== 'user') return false;
   if (!Array.isArray(msg.content)) return true;
@@ -3910,12 +4816,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ? normalizeChatRunErrorMessage(latestTerminalAssistantErrorMessage)
         : null;
 
-      set({
+      set((state) => ({
         messages: finalMessages,
         thinkingLevel,
         loading: false,
         runError: historyErrorIsTransient ? null : normalizedTerminalAssistantErrorMessage,
-      });
+        runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, finalMessages),
+      }));
       cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
 
       // Seed a missing label from immutable history only. Once a label exists
@@ -3952,7 +4859,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!isCurrentSession()) return;
         if (updated) {
           set((state) => ({
-            messages: mergeHydratedMessages(state.messages, previewHydrationMessages),
+            ...(() => {
+              const messages = mergeHydratedMessages(state.messages, previewHydrationMessages);
+              return {
+                messages,
+                runtimeRuns: applyHistoricalRuntimeRunsFromMessages(
+                  state.runtimeRuns,
+                  currentSessionKey,
+                  messages,
+                ),
+              };
+            })(),
           }));
         }
       });
@@ -4014,6 +4931,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return hasNonToolAssistantContent(msg);
         });
         if (recentAssistant) {
+          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+            return true;
+          }
           clearHistoryPoll();
           set({
             sending: false,
@@ -4041,6 +4961,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         const hasDeliveredImageReply = openSegment.some((message) => message.role === 'assistant' && messageHasImageContent(message));
         if (hasDeliveredImageReply && !segmentHasOpenToolRun(openSegment)) {
+          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+            return true;
+          }
           clearHistoryPoll();
           set({
             sending: false,
@@ -4057,6 +4980,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
           markSessionRunIdle(currentSessionKey);
         } else if (hasConclusiveReply && !segmentHasOpenToolRun(openSegment)) {
+          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+            return true;
+          }
           clearHistoryPoll();
           set({
             sending: false,
@@ -4075,6 +5001,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // need an explicit conclusive-reply fallback for the case where
         // hasConclusiveReply is false (thinking-only terminal turn).
         if (!hasConclusiveReply && !segmentHasOpenToolRun(openSegment) && openSegment.length > 0) {
+          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+            return true;
+          }
           clearHistoryPoll();
           set({
             sending: false,
@@ -4110,6 +5039,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (
         get().sending
         && !latestTerminalAssistantErrorMessage
+        && getActiveCompletionGateDecision(get()) !== 'continue_required'
         && !shouldTrackInboundRunLifecycle(get(), currentSessionKey)
       ) {
         clearHistoryPoll();
@@ -4359,23 +5289,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = messagesWithToolAttachments.filter((msg) => !shouldDropMessageFromHistory(msg));
       const enrichedMessages = enrichWithCachedImages(filteredMessages);
-      set({
+      set((state) => ({
         messages: enrichedMessages,
         loadingMoreHistory: false,
         hasMoreHistory: rawMessages.length >= nextLimit && nextLimit < HISTORY_MAX_RENDERED_MESSAGES,
-      });
+        runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, enrichedMessages),
+      }));
       cacheSessionHistory(currentSessionKey, enrichedMessages, get().thinkingLevel);
       const previewHydrationMessages = enrichedMessages.slice(-PREVIEW_HYDRATION_MESSAGE_LIMIT);
       void loadMissingPreviews(previewHydrationMessages).then((updated) => {
         if (!updated || get().currentSessionKey !== currentSessionKey) return;
         set((state) => ({
-          messages: state.messages.map((message) => {
+          ...(() => {
+            const messages = state.messages.map((message) => {
             const match = previewHydrationMessages.find((candidate) => (
               `${candidate.id ?? ''}|${candidate.role}|${candidate.timestamp ?? ''}|${getMessageText(candidate.content)}`
               === `${message.id ?? ''}|${message.role}|${message.timestamp ?? ''}|${getMessageText(message.content)}`
             ));
             return match?._attachedFiles?.length ? { ...message, _attachedFiles: match._attachedFiles } : message;
-          }),
+            });
+            return {
+              messages,
+              runtimeRuns: applyHistoricalRuntimeRunsFromMessages(
+                state.runtimeRuns,
+                currentSessionKey,
+                messages,
+              ),
+            };
+          })(),
         }));
       });
     } catch (error) {
@@ -4438,7 +5379,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         stagedPath: file.stagedPath,
         preview: file.preview,
       }));
-    const candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
+    let candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
+    if (candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
+      candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
+    }
+    rememberPendingRuntimeIntent(currentSessionKey, {
+      objective: trimmed,
+      mode,
+    });
 
     // Add user message optimistically before planner/tool routing so the UI
     // acknowledges the submitted intent immediately.
@@ -4511,7 +5459,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
       plannedSourceImages = [];
     }
+    const compositeTasks = hasCompositeTasks(mediaPlan) ? mediaPlan.compositeTasks : undefined;
+    const runtimeMessage = compositeTasks
+      ? buildCompositeChatContractMessage(trimmed, compositeTasks)
+      : trimmed;
     const effectiveMode = mediaPlanToMode(mediaPlan);
+    rememberPendingRuntimeIntent(currentSessionKey, {
+      objective: mediaPlan.prompt?.trim() || trimmed,
+      mode: effectiveMode,
+      compositeTasks,
+    });
     set({
       pendingImageGenerationLocal: effectiveMode === 'image',
       pendingVideoGenerationLocal: effectiveMode === 'video',
@@ -4556,7 +5513,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const videoReferenceInputs = effectiveMode === 'video'
       ? plannedSourceImages
       : [];
-    const videoCandidateInputs: PendingImageInput[] = [];
     if (mediaPlan.action === 'clarify') {
       const assistantMsg: RawMessage = {
         role: 'assistant',
@@ -4642,7 +5598,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (effectiveMode === 'image') {
+      const mediaRunId = `media:${crypto.randomUUID()}`;
+      set((state) => ({
+        activeRunId: mediaRunId,
+        runtimeRuns: applyRuntimeContractEvents(
+          state.runtimeRuns,
+          buildRuntimeStartEventsForRun(state.runtimeRuns, {
+            runId: mediaRunId,
+            sessionKey: currentSessionKey,
+            objective: mediaPlan.prompt?.trim() || trimmed,
+            mode: 'image',
+            ts: Date.now(),
+          }),
+        ),
+      }));
       try {
+        const effectiveImageOptions = resolveChatImageOptions(trimmed, mediaPlan, imageOptions);
         const result = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/image-generation/chat-send',
           {
@@ -4651,9 +5622,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               sessionKey: currentSessionKey,
               originalPrompt: trimmed,
               prompt: mediaPlan.prompt?.trim() || trimmed,
-              model: imageOptions?.model,
-              size: imageOptions?.size,
-              quality: imageOptions?.quality,
+              model: effectiveImageOptions.model,
+              size: effectiveImageOptions.size,
+              quality: effectiveImageOptions.quality,
               inputImages: imageReferenceInputs.map((file) => ({
                 fileName: file.fileName,
                 mimeType: file.mimeType,
@@ -4671,26 +5642,45 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (result.success === false) {
           throw new Error(result.error || 'Failed to generate image');
         }
+        let completedJob = result.job;
         if (result.jobId) {
-          await waitForMediaGenerationJob(result.jobId);
+          completedJob = await waitForMediaGenerationJob(result.jobId);
         }
+        const { decision, artifacts } = applyMediaRuntimeSuccess({
+          runId: mediaRunId,
+          sessionKey: currentSessionKey,
+          job: completedJob,
+          kind: 'image',
+        });
+        if (artifacts.length > 0) {
+          scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
+        }
+        const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
         set({
-          sending: false,
+          sending: !shouldIdle,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
-          activeRunId: null,
+          activeRunId: shouldIdle ? null : mediaRunId,
           streamingText: '',
           streamingMessage: null,
           streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
+          pendingFinal: !shouldIdle,
+          lastUserMessageAt: shouldIdle ? null : nowMs,
           pendingToolImages: [],
         });
         await get().loadHistory(true);
-        markSessionRunIdle(currentSessionKey);
+        if (shouldIdle) {
+          markSessionRunIdle(currentSessionKey);
+        }
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        applyMediaRuntimeFailure({
+          runId: mediaRunId,
+          sessionKey: currentSessionKey,
+          error: errorMessage,
+        });
         set({
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -4708,7 +5698,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (effectiveMode === 'video') {
+      const mediaRunId = `media:${crypto.randomUUID()}`;
+      set((state) => ({
+        activeRunId: mediaRunId,
+        runtimeRuns: applyRuntimeContractEvents(
+          state.runtimeRuns,
+          buildRuntimeStartEventsForRun(state.runtimeRuns, {
+            runId: mediaRunId,
+            sessionKey: currentSessionKey,
+            objective: mediaPlan.videoPrompt?.trim() || mediaPlan.prompt?.trim() || trimmed,
+            mode: 'video',
+            ts: Date.now(),
+          }),
+        ),
+      }));
       try {
+        const videoMode = mediaPlan.videoMode
+          ?? (videoReferenceInputs.length > 0 ? 'image_to_video' : 'text_to_video');
+        const effectiveVideoPrompt = mediaPlan.videoPrompt?.trim()
+          || mediaPlan.prompt?.trim()
+          || trimmed;
+        const effectiveVideoOptions = resolveChatVideoOptions(
+          trimmed,
+          mediaPlan,
+          videoReferenceInputs.length > 0,
+          videoOptions,
+        );
+        const routeSourceImages = videoReferenceInputs.map((file) => ({
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          filePath: file.stagedPath,
+        }));
         const result = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/video-generation/chat-send',
           {
@@ -4716,51 +5736,73 @@ export const useChatStore = create<ChatState>((set, get) => ({
             body: JSON.stringify({
               sessionKey: currentSessionKey,
               originalPrompt: trimmed,
-              prompt: mediaPlan.prompt?.trim() || trimmed,
-              size: videoOptions?.size,
-              durationSeconds: videoOptions?.durationSeconds,
-              inputImages: videoReferenceInputs.map((file) => ({
-                fileName: file.fileName,
-                mimeType: file.mimeType,
-                filePath: file.stagedPath,
-              })),
+              prompt: effectiveVideoPrompt,
+              model: effectiveVideoOptions.model,
+              size: effectiveVideoOptions.size,
+              durationSeconds: effectiveVideoOptions.durationSeconds,
+              inputImages: routeSourceImages,
               userInputImages: explicitPendingImages.map((file) => ({
                 fileName: file.fileName,
                 mimeType: file.mimeType,
                 filePath: file.stagedPath,
               })),
               userMessageTimestampMs: nowMs,
-              candidateImages: videoCandidateInputs.map((file) => ({
-                fileName: file.fileName,
-                mimeType: file.mimeType,
-                filePath: file.stagedPath,
-              })),
+              route: {
+                mode: videoMode,
+                source: mediaPlan.source === 'fallback' ? 'fallback' : 'router',
+                confidence: mediaPlan.confidence,
+                reason: mediaPlan.reason,
+                selectedImageSource: mediaPlan.selectedImageSource,
+                selectedImageIndex: mediaPlan.selectedImageIndex,
+                videoPrompt: effectiveVideoPrompt,
+                imageEditPrompt: mediaPlan.imageEditPrompt,
+                sourceImages: routeSourceImages,
+              },
             }),
           },
         );
         if (result.success === false) {
           throw new Error(result.error || 'Failed to generate video');
         }
+        let completedJob = result.job;
         if (result.jobId) {
-          await waitForMediaGenerationJob(result.jobId);
+          completedJob = await waitForMediaGenerationJob(result.jobId);
         }
+        const { decision, artifacts } = applyMediaRuntimeSuccess({
+          runId: mediaRunId,
+          sessionKey: currentSessionKey,
+          job: completedJob,
+          kind: 'video',
+        });
+        if (artifacts.length > 0) {
+          scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
+        }
+        const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
         set({
-          sending: false,
+          sending: !shouldIdle,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
-          activeRunId: null,
+          activeRunId: shouldIdle ? null : mediaRunId,
           streamingText: '',
           streamingMessage: null,
           streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
+          pendingFinal: !shouldIdle,
+          lastUserMessageAt: shouldIdle ? null : nowMs,
           pendingToolImages: [],
         });
         await get().loadHistory(true);
-        markSessionRunIdle(currentSessionKey);
+        if (shouldIdle) {
+          markSessionRunIdle(currentSessionKey);
+        }
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        applyMediaRuntimeFailure({
+          runId: mediaRunId,
+          sessionKey: currentSessionKey,
+          error: errorMessage,
+        });
         set({
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -4849,7 +5891,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       clearHistoryPoll();
+      const noResponseRunId = state.activeRunId;
+      const noResponseEvents = noResponseRunId
+        ? [
+            buildRuntimeCheckpointEvent({
+              runId: noResponseRunId,
+              sessionKey: currentSessionKey,
+              ts: Date.now(),
+              id: `checkpoint:${noResponseRunId}:no-response`,
+              summary: '执行侧长时间没有产生新的可见进展。',
+              reason: buildNoResponseSafetyMessage(),
+              recoverable: true,
+            }),
+            {
+              runId: noResponseRunId,
+              sessionKey: currentSessionKey,
+              ts: Date.now(),
+              type: 'run.ended' as const,
+              status: 'error' as const,
+              error: buildNoResponseSafetyMessage(),
+              stopReason: 'no_response_safety_timeout',
+            },
+          ]
+        : [];
       set({
+        runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, noResponseEvents),
         error: buildNoResponseSafetyMessage(),
         sending: false,
         pendingImageGenerationLocal: false,
@@ -4861,6 +5927,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streamingText: '',
       });
       markSessionRunIdle(currentSessionKey);
+      clearPendingRuntimeIntent(currentSessionKey);
     };
     setTimeout(checkStuck, 30_000);
 
@@ -4900,13 +5967,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const idempotencyKey = crypto.randomUUID();
-      const hasMedia = attachments && attachments.length > 0;
+      const chatMediaAttachments: PendingImageInput[] = attachments && attachments.length > 0
+        ? (compositeTasks ? [] : attachments)
+        : (effectiveMode === 'chat' ? plannedSourceImages : []);
+      const hasMedia = chatMediaAttachments.length > 0;
 
       // Cache image attachments BEFORE the IPC call to avoid race condition:
       // history may reload (via Gateway event) before the RPC returns.
       // Keyed by staged file path which appears in [media attached: <path> ...].
-      if (hasMedia && attachments) {
-        for (const a of attachments) {
+      if (hasMedia) {
+        for (const a of chatMediaAttachments) {
           _imageCache.set(a.stagedPath, {
             fileName: a.fileName,
             mimeType: a.mimeType,
@@ -4926,10 +5996,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
-              message: trimmed || 'Process the attached file(s).',
+              message: runtimeMessage || 'Process the attached file(s).',
               deliver: false,
               idempotencyKey,
-              media: attachments.map((a) => ({
+              media: chatMediaAttachments.map((a) => ({
                 filePath: a.stagedPath,
                 mimeType: a.mimeType,
                 fileName: a.fileName,
@@ -4940,7 +6010,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         const rpcResult = await sendChatMessageViaHostApi({
           sessionKey: currentSessionKey,
-          message: trimmed,
+          message: runtimeMessage,
           deliver: false,
           idempotencyKey,
         });
@@ -4965,7 +6035,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         if (sendStillCurrent && canAttachToCurrentSession) {
           clearSendGenerationIfCurrent();
-          set({ activeRunId: returnedRunId });
+          set((state) => ({
+            activeRunId: returnedRunId,
+            runtimeRuns: applyRuntimeContractEvents(
+              state.runtimeRuns,
+              buildRuntimeStartEventsForRun(state.runtimeRuns, {
+                runId: returnedRunId,
+                sessionKey: currentSessionKey,
+                ts: Date.now(),
+              }),
+            ),
+          }));
         } else if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
           const cached = _sessionRunStateCache.get(currentSessionKey);
           if (cached?.sending
@@ -4973,6 +6053,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             && (cached.activeRunId == null || cached.activeRunId === returnedRunId)) {
             clearSendGenerationIfCurrent();
             captureSessionRunState(currentSessionKey, { ...cached, activeRunId: returnedRunId });
+            set((state) => ({
+              runtimeRuns: applyRuntimeContractEvents(
+                state.runtimeRuns,
+                buildRuntimeStartEventsForRun(state.runtimeRuns, {
+                  runId: returnedRunId,
+                  sessionKey: currentSessionKey,
+                  ts: Date.now(),
+                }),
+              ),
+            }));
           }
         } else {
           console.warn('[sendMessage] Ignoring stale chat.send runId', {
@@ -4998,8 +6088,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
   abortRun: async () => {
     clearHistoryPoll();
     clearErrorRecoveryTimer();
-    const { currentSessionKey } = get();
+    const { currentSessionKey, activeRunId } = get();
     set({
+      runtimeRuns: activeRunId
+        ? applyRuntimeContractEvents(
+            get().runtimeRuns,
+            [
+              buildRuntimeCheckpointEvent({
+                runId: activeRunId,
+                sessionKey: currentSessionKey,
+                ts: Date.now(),
+                id: `checkpoint:${activeRunId}:user-abort`,
+                summary: '用户停止了当前任务。',
+                recoverable: true,
+              }),
+              {
+                runId: activeRunId,
+                sessionKey: currentSessionKey,
+                ts: Date.now(),
+                type: 'run.ended',
+                status: 'aborted',
+              } satisfies ChatRuntimeEvent,
+            ],
+          )
+        : get().runtimeRuns,
       sending: false,
       pendingImageGenerationLocal: false,
       pendingVideoGenerationLocal: false,
@@ -5011,6 +6123,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     set({ streamingTools: [] });
     markSessionRunIdle(currentSessionKey);
+    clearPendingRuntimeIntent(currentSessionKey);
 
     try {
       await abortChatRunViaHostApi(currentSessionKey);
@@ -5091,8 +6204,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     switch (resolvedState) {
       case 'started': {
         const { sending: currentSending } = get();
-        if (!currentSending && runId && shouldTrackInboundRunLifecycle(get(), currentSessionKey)) {
-          set({ sending: true, activeRunId: runId, error: null, runError: null });
+        if (runId) {
+          set((state) => ({
+            ...(!currentSending && shouldTrackInboundRunLifecycle(state, currentSessionKey)
+              ? { sending: true, activeRunId: runId, error: null, runError: null }
+              : {}),
+            runtimeRuns: applyRuntimeContractEvents(
+              state.runtimeRuns,
+              buildRuntimeStartEventsForRun(state.runtimeRuns, {
+                runId,
+                sessionKey: eventSessionKey ?? currentSessionKey,
+                ts: Date.now(),
+              }),
+            ),
+          }));
         }
         break;
       }
@@ -5200,6 +6325,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 toolFiles.push(makeAttachedFile(ref));
               }
             }
+            const toolArtifactEvents = runId && toolFiles.length > 0
+              ? buildRuntimeArtifactEventsFromAttachedFiles({
+                  runId,
+                  sessionKey: eventSessionKey ?? currentSessionKey,
+                  ts: Date.now(),
+                  toolCallId: normalizedFinalMessage.toolCallId,
+                  verificationDetail: '工具结果中的产物已进入 UClaw 产物跟踪。',
+                }, toolFiles)
+              : [];
+            const toolArtifacts = toolArtifactEvents
+              .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
+                runtimeEvent.type === 'artifact.produced')
+              .map((runtimeEvent) => runtimeEvent.artifact);
             set((s) => {
               // Preserve the assistant turn that requested the tool before the
               // tool result clears streaming state. Runtime events render the
@@ -5217,8 +6355,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ? dedupeAttachedFiles([...s.pendingToolImages, ...toolFiles])
                   : s.pendingToolImages,
                 streamingTools: updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools,
+                runtimeRuns: applyRuntimeContractEvents(s.runtimeRuns, toolArtifactEvents),
               };
             });
+            if (toolArtifacts.length > 0) {
+              scheduleRuntimeArtifactVerification(runId, eventSessionKey ?? currentSessionKey, toolArtifacts);
+            }
             break;
           }
           // Mixed `[thinking, text, toolCall]` messages with stop_reason="tool_use"
@@ -5239,6 +6381,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const isEmptyTerminalResponse = !toolOnly && !hasOutput && !pendingTool;
           const clearLifecycle = hasOutput || isEmptyTerminalResponse;
           const msgId = normalizedFinalMessage.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
+          let finalArtifactsToVerify: ChatRuntimeArtifact[] = [];
+          let terminalGateDecision: string | undefined;
           set((s) => {
             const nextTools = updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools;
             const streamingTools = clearLifecycle ? [] : nextTools;
@@ -5267,6 +6411,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
               : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
             const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
+            const finalArtifactEvents = runId && (msgWithImages._attachedFiles?.length ?? 0) > 0
+              ? buildRuntimeArtifactEventsFromAttachedFiles({
+                  runId,
+                  sessionKey: eventSessionKey ?? currentSessionKey,
+                  ts: Date.now(),
+                  verificationDetail: '最终回复中的产物已进入 UClaw 产物卡片。',
+                }, msgWithImages._attachedFiles ?? [])
+              : [];
+            finalArtifactsToVerify = finalArtifactEvents
+              .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
+                runtimeEvent.type === 'artifact.produced')
+              .map((runtimeEvent) => runtimeEvent.artifact);
+            let runtimeRuns = applyRuntimeContractEvents(s.runtimeRuns, finalArtifactEvents);
+            if (runId && clearLifecycle && !toolOnly) {
+              runtimeRuns = applyRuntimeContractEvents(
+                runtimeRuns,
+                buildRuntimeCompletionGateEvents(runtimeRuns[runId], {
+                  runId,
+                  sessionKey: eventSessionKey ?? currentSessionKey,
+                  ts: Date.now(),
+                  status: 'completed',
+                }),
+              );
+              terminalGateDecision = runtimeRuns[runId]?.gateResult?.decision;
+            }
+            const shouldHoldForContinuation = clearLifecycle
+              && !toolOnly
+              && terminalGateDecision === 'continue_required';
+            const shouldClearTerminalLifecycle = clearLifecycle
+              && !toolOnly
+              && (!terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision));
+            if (shouldHoldForContinuation) {
+              return {
+                streamingText: '',
+                streamingMessage: null,
+                pendingFinal: true,
+                streamingTools,
+                runtimeRuns,
+                ...clearPendingImages,
+              };
+            }
             // Check if message already exists (prevent duplicates)
             const alreadyExists = s.messages.some(m => m.id === msgId);
             if (alreadyExists) {
@@ -5275,14 +6460,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 streamingMessage: null,
                 pendingFinal: true,
                 streamingTools,
+                runtimeRuns,
                 ...clearPendingImages,
               } : {
                 streamingText: '',
                 streamingMessage: null,
-                sending: clearLifecycle ? false : s.sending,
-                activeRunId: clearLifecycle ? null : s.activeRunId,
-                pendingFinal: clearLifecycle ? false : true,
+                sending: shouldClearTerminalLifecycle ? false : s.sending,
+                activeRunId: shouldClearTerminalLifecycle ? null : s.activeRunId,
+                pendingFinal: shouldClearTerminalLifecycle ? false : true,
                 streamingTools,
+                runtimeRuns,
                 ...clearPendingImages,
               };
             }
@@ -5292,28 +6479,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
               streamingMessage: null,
               pendingFinal: true,
               streamingTools,
+              runtimeRuns,
               ...clearPendingImages,
             } : {
               messages: [...s.messages, msgWithImages],
               streamingText: '',
               streamingMessage: null,
-              sending: clearLifecycle ? false : s.sending,
-              activeRunId: clearLifecycle ? null : s.activeRunId,
-              pendingFinal: clearLifecycle ? false : true,
+              sending: shouldClearTerminalLifecycle ? false : s.sending,
+              activeRunId: shouldClearTerminalLifecycle ? null : s.activeRunId,
+              pendingFinal: shouldClearTerminalLifecycle ? false : true,
               streamingTools,
+              runtimeRuns,
               ...clearPendingImages,
             };
           });
+          if (runId && finalArtifactsToVerify.length > 0) {
+            scheduleRuntimeArtifactVerification(runId, eventSessionKey ?? currentSessionKey, finalArtifactsToVerify);
+          }
           // After the final response, quietly reload history to surface all intermediate
           // tool-use turns (thinking + tool blocks) from the Gateway's authoritative record.
           // Also reload for empty terminal responses (thinking-only) so the
           // delayed follow-up can pick up the Gateway's `assistant-media`
           // bubble that may still be getting written.
-          if (clearLifecycle && !toolOnly) {
+          const shouldIdleAfterGate = !terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision);
+          if (clearLifecycle && !toolOnly && shouldIdleAfterGate) {
             const sessionKeyAtFinal = get().currentSessionKey;
             clearHistoryPoll();
             markSessionRunIdle(sessionKeyAtFinal);
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
+            clearPendingRuntimeIntent(sessionKeyAtFinal);
             void get().loadHistory(true);
 
             // OpenClaw's gateway processes `MEDIA:/path` markers in the
@@ -5395,6 +6589,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           set({
+            runtimeRuns: runId
+              ? applyRuntimeContractEvents(
+                  get().runtimeRuns,
+                  [
+                    ...buildRuntimeCompletionGateEvents(get().runtimeRuns[runId], {
+                      runId,
+                      sessionKey: sessionKeyAtError,
+                      ts: Date.now(),
+                      status: 'error',
+                      error: normalizedErrorMsg,
+                    }),
+                    {
+                      runId,
+                      sessionKey: sessionKeyAtError,
+                      ts: Date.now(),
+                      type: 'run.ended',
+                      status: 'error',
+                      error: normalizedErrorMsg,
+                    } satisfies ChatRuntimeEvent,
+                  ],
+                )
+              : get().runtimeRuns,
             error: terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
             runError: terminalAssistantError || replySessionInitConflict ? normalizedErrorMsg : null,
             sending: false,
@@ -5412,6 +6628,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearHistoryPoll();
           clearErrorRecoveryTimer();
           markSessionRunIdle(sessionKeyAtError);
+          clearPendingRuntimeIntent(sessionKeyAtError);
           if (wasSending) {
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtError);
             void get().loadHistory(true);
@@ -5435,6 +6652,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearHistoryPoll();
         clearErrorRecoveryTimer();
         set({
+          runtimeRuns: runId
+            ? applyRuntimeContractEvents(
+                get().runtimeRuns,
+                [
+                  ...buildRuntimeCompletionGateEvents(get().runtimeRuns[runId], {
+                    runId,
+                    sessionKey: eventSessionKey ?? currentSessionKey,
+                    ts: Date.now(),
+                    status: 'aborted',
+                  }),
+                  {
+                    runId,
+                    sessionKey: eventSessionKey ?? currentSessionKey,
+                    ts: Date.now(),
+                    type: 'run.ended',
+                    status: 'aborted',
+                  } satisfies ChatRuntimeEvent,
+                ],
+              )
+            : get().runtimeRuns,
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5447,6 +6684,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         markSessionRunIdle(get().currentSessionKey);
+        clearPendingRuntimeIntent(get().currentSessionKey);
         break;
       }
       default: {
@@ -5481,8 +6719,73 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    const runtimeRuns = applyRuntimeEventToRuns(initialState.runtimeRuns, event);
+    let runtimeRuns = applyRuntimeEventToRuns(initialState.runtimeRuns, event);
+    if (event.type === 'run.started') {
+      runtimeRuns = applyRuntimeContractEvents(
+        runtimeRuns,
+        buildRuntimeStartEventsForRun(runtimeRuns, {
+          runId: event.runId,
+          sessionKey: event.sessionKey ?? currentSessionKey,
+          objective: event.objective,
+          ts: event.ts ?? event.startedAt ?? Date.now(),
+          includeStarted: false,
+        }),
+      );
+    }
     const nextPatch: Partial<ChatState> = { runtimeRuns };
+    const appliesToActiveUi = matchesActiveRun || (activeRunId == null && matchesCurrentSession);
+    let completedToolFiles: AttachedFileMeta[] = [];
+
+    if (event.type === 'artifact.produced') {
+      scheduleRuntimeArtifactVerification(
+        event.runId,
+        event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+        [event.artifact],
+      );
+    }
+
+    if (event.type === 'tool.completed') {
+      completedToolFiles = extractToolCompletedFiles(event);
+      if (completedToolFiles.length > 0) {
+        const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
+          runId: event.runId,
+          sessionKey: event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          ts: event.ts ?? Date.now(),
+          toolCallId: event.toolCallId,
+          verificationDetail: '工具结果中的产物已进入 UClaw 产物跟踪。',
+        }, completedToolFiles);
+        runtimeRuns = applyRuntimeContractEvents(runtimeRuns, artifactEvents);
+        nextPatch.runtimeRuns = runtimeRuns;
+        scheduleRuntimeArtifactVerification(
+          event.runId,
+          event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          artifactEvents
+            .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
+              runtimeEvent.type === 'artifact.produced')
+            .map((runtimeEvent) => runtimeEvent.artifact),
+        );
+      }
+    }
+
+    if (event.type === 'run.ended') {
+      runtimeRuns = applyRuntimeContractEvents(
+        runtimeRuns,
+        buildRuntimeCompletionGateEvents(runtimeRuns[event.runId], {
+          runId: event.runId,
+          sessionKey: event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          ts: event.endedAt ?? event.ts ?? Date.now(),
+          status: event.status,
+          error: event.error,
+        }),
+      );
+      nextPatch.runtimeRuns = runtimeRuns;
+      const terminalGateDecision = runtimeRuns[event.runId]?.gateResult?.decision;
+      if (terminalGateDecision === 'continue_required') {
+        nextPatch.pendingFinal = true;
+      } else {
+        clearPendingRuntimeIntent(event.sessionKey);
+      }
+    }
 
     // Always retain structured runtime events, even for inactive sessions.
     // When the user switches away during a run and returns later, the Chat page
@@ -5498,7 +6801,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     _lastChatEventAt = Date.now();
-    const appliesToActiveUi = matchesActiveRun || (activeRunId == null && matchesCurrentSession);
 
     if (event.type === 'run.started') {
       if (matchesCurrentSession && (activeRunId == null || matchesActiveRun)) {
@@ -5529,11 +6831,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (event.type === 'tool.completed' && appliesToActiveUi) {
-      const files = extractToolCompletedFiles(event);
-      if (files.length > 0) {
+      if (completedToolFiles.length > 0) {
         nextPatch.pendingToolImages = dedupeAttachedFiles([
           ...initialState.pendingToolImages,
-          ...files,
+          ...completedToolFiles,
         ]);
       }
     }
@@ -5552,11 +6853,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const shouldClearActiveRun = terminalMatchesActiveRun || terminalIsForCurrentUntrackedSend;
 
       if (shouldClearActiveRun) {
-        nextPatch.sending = false;
-        nextPatch.activeRunId = null;
-        nextPatch.pendingFinal = false;
-        nextPatch.lastUserMessageAt = null;
-        nextPatch.streamingTools = [];
+        const terminalGateDecision = runtimeRuns[event.runId]?.gateResult?.decision;
+        const shouldHoldForContinuation = terminalGateDecision === 'continue_required';
+        nextPatch.sending = shouldHoldForContinuation ? true : false;
+        nextPatch.activeRunId = shouldHoldForContinuation ? event.runId : null;
+        nextPatch.pendingFinal = shouldHoldForContinuation ? true : false;
+        nextPatch.lastUserMessageAt = shouldHoldForContinuation ? latestState.lastUserMessageAt : null;
+        nextPatch.streamingTools = shouldHoldForContinuation ? latestState.streamingTools : [];
         if (event.status === 'error' && event.error) {
           nextPatch.error = null;
           nextPatch.runError = normalizeChatRunErrorMessage(event.error);
@@ -5566,8 +6869,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           nextPatch.streamingText = '';
           nextPatch.pendingToolImages = [];
         }
-        markSessionRunIdle(currentSessionKey);
-        markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+        if (!shouldHoldForContinuation) {
+          markSessionRunIdle(currentSessionKey);
+          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+          clearPendingRuntimeIntent(currentSessionKey);
+        }
       }
     }
 

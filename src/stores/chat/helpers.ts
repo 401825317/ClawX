@@ -3,6 +3,7 @@ import {
   isGeneratingStatusNarration,
   isInternalAssistantReplyText,
   isOpenClawRuntimeEventPrompt,
+  stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 import type { AttachedFileMeta, ChatSession, ContentBlock, RawMessage, ToolStatus } from './types';
@@ -210,7 +211,7 @@ function stripInboundMediaVisionEnvelope(text: string): string {
 
 function stripGatewayUserMetadata(text: string): string {
   return stripInboundMediaVisionEnvelope(
-    text
+    stripCompositeExecutionContractEnvelope(text)
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')

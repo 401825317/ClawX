@@ -7,6 +7,21 @@ function flushAsyncImports(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function importRealChatStore() {
+  vi.doUnmock('@/stores/chat');
+  return vi.importActual<typeof import('../../src/stores/chat')>('../../src/stores/chat');
+}
+
+async function importRealGatewayStore() {
+  vi.doUnmock('@/stores/gateway');
+  return vi.importActual<typeof import('../../src/stores/gateway')>('../../src/stores/gateway');
+}
+
+async function importRealManagedAuthStore() {
+  vi.doUnmock('@/stores/managed-auth');
+  return vi.importActual<typeof import('../../src/stores/managed-auth')>('../../src/stores/managed-auth');
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -25,6 +40,10 @@ vi.mock('@/lib/host-events', () => ({
   subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
 }));
 
+vi.unmock('@/stores/chat');
+vi.unmock('@/stores/gateway');
+vi.unmock('@/stores/managed-auth');
+
 describe('gateway store event wiring', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -41,7 +60,7 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     expect(subscribeHostEventMock).toHaveBeenCalledWith('gateway:status', expect.any(Function));
@@ -72,7 +91,7 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     // Initially gatewayReady=false from the status fetch
@@ -92,7 +111,7 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     const status = useGatewayStore.getState().status;
@@ -107,7 +126,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useManagedAuthStore } = await import('@/stores/managed-auth');
+    const { useManagedAuthStore } = await importRealManagedAuthStore();
     const readyAuthStatus = {
       managed: true,
       hasAuthToken: true,
@@ -123,7 +142,7 @@ describe('gateway store event wiring', () => {
       refreshStatus: vi.fn(async () => readyAuthStatus),
     });
 
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -135,7 +154,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -148,6 +167,7 @@ describe('gateway store event wiring', () => {
       result: { summary: 'done' },
       isError: false,
     });
+    await flushAsyncImports();
     await flushAsyncImports();
 
     expect(loadHistory).not.toHaveBeenCalled();
@@ -162,18 +182,13 @@ describe('gateway store event wiring', () => {
     ]);
   });
 
-  it('does not let a stale send RPC re-arm a completed run after a newer send starts', async () => {
-    let now = 1773281731000;
-    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
-    const firstSend = deferred<{ success: boolean; result?: { runId?: string } }>();
-    const secondSend = deferred<{ success: boolean; result?: { runId?: string } }>();
-    const sendPromises = [firstSend.promise, secondSend.promise];
-    hostApiFetchMock.mockImplementation((path: string) => {
-      if (path === '/api/chat/send') return sendPromises.shift();
-      return Promise.resolve({ success: true, result: {} });
+  it('stores gate issue and evaluation events without clearing the active send', async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
     });
-
-    const { useManagedAuthStore } = await import('@/stores/managed-auth');
+    const { useManagedAuthStore } = await importRealManagedAuthStore();
     const readyAuthStatus = {
       managed: true,
       hasAuthToken: true,
@@ -189,7 +204,91 @@ describe('gateway store event wiring', () => {
       refreshStatus: vi.fn(async () => readyAuthStatus),
     });
 
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-gate-nonterminal',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'gate.issue',
+      runId: 'run-gate-nonterminal',
+      sessionKey: 'agent:main:main',
+      issue: {
+        id: 'issue-1',
+        code: 'tool.failed',
+        severity: 'blocking',
+        title: '工具失败',
+        recoverable: true,
+      },
+    });
+    handlers.get('chat:runtime-event')?.({
+      type: 'gate.evaluated',
+      runId: 'run-gate-nonterminal',
+      sessionKey: 'agent:main:main',
+      gate: {
+        id: 'gate:run-gate-nonterminal:completion',
+        decision: 'continue_required',
+        artifactCount: 0,
+        requiredVerificationCount: 0,
+        passedRequiredVerificationCount: 0,
+        blockingIssueCount: 1,
+        warningIssueCount: 0,
+        verificationCoverage: 1,
+        issues: [{
+          id: 'issue-1',
+          code: 'tool.failed',
+          severity: 'blocking',
+          title: '工具失败',
+          recoverable: true,
+        }],
+      },
+    });
+    await flushAsyncImports();
+
+    expect(useChatStore.getState().sending).toBe(true);
+    expect(useChatStore.getState().activeRunId).toBe('run-gate-nonterminal');
+    expect(useChatStore.getState().runtimeRuns['run-gate-nonterminal']?.gateResult).toEqual(expect.objectContaining({
+      decision: 'continue_required',
+      blockingIssueCount: 1,
+    }));
+  });
+
+  it('does not let a stale send RPC re-arm a completed run after a newer send starts', async () => {
+    let now = 1773281731000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const firstSend = deferred<{ success: boolean; result?: { runId?: string } }>();
+    const secondSend = deferred<{ success: boolean; result?: { runId?: string } }>();
+    const sendPromises = [firstSend.promise, secondSend.promise];
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/chat/send') return sendPromises.shift();
+      return Promise.resolve({ success: true, result: {} });
+    });
+
+    const { useManagedAuthStore } = await importRealManagedAuthStore();
+    const readyAuthStatus = {
+      managed: true,
+      hasAuthToken: true,
+      hasRelayToken: true,
+      authValid: true,
+    };
+    useManagedAuthStore.setState({
+      status: readyAuthStatus,
+      initialized: true,
+      loading: false,
+      verifying: false,
+      error: null,
+      refreshStatus: vi.fn(async () => readyAuthStatus),
+    });
+
+    const { useChatStore } = await importRealChatStore();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       sessions: [{ key: 'agent:main:main' }],
@@ -238,7 +337,7 @@ describe('gateway store event wiring', () => {
 
   it('preserves a running session lifecycle when creating a new chat and switching back', async () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1773281731555);
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:a',
@@ -273,7 +372,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:a',
@@ -293,7 +392,7 @@ describe('gateway store event wiring', () => {
     await flushAsyncImports();
     loadHistory.mockClear();
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -340,7 +439,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:a',
@@ -360,7 +459,7 @@ describe('gateway store event wiring', () => {
     await flushAsyncImports();
     loadHistory.mockClear();
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -387,7 +486,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -399,7 +498,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -424,7 +523,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -436,7 +535,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -460,7 +559,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -472,7 +571,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -495,7 +594,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
       sessions: [{ key: 'agent:main:main' }],
@@ -505,7 +604,7 @@ describe('gateway store event wiring', () => {
       lastUserMessageAt: 1773281731000,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -518,6 +617,267 @@ describe('gateway store event wiring', () => {
 
     expect(useChatStore.getState().sending).toBe(true);
     expect(useChatStore.getState().activeRunId).toBe('run-started-before-rpc-return');
+    expect(useChatStore.getState().runtimeRuns['run-started-before-rpc-return']?.planSteps).toEqual([
+      expect.objectContaining({ id: 'uclaw.objective', status: 'completed' }),
+      expect.objectContaining({ id: 'uclaw.execute', status: 'running' }),
+      expect.objectContaining({ id: 'uclaw.verify', status: 'pending' }),
+      expect.objectContaining({ id: 'uclaw.deliver', status: 'pending' }),
+    ]);
+  });
+
+  it('produces artifact and verification runtime events from completed tool outputs', async () => {
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/files/thumbnails') {
+        return Promise.resolve({
+          '/tmp/uclaw-report.pdf': {
+            preview: null,
+            fileSize: 2048,
+            filePath: '/tmp/uclaw-report.pdf',
+          },
+        });
+      }
+      return Promise.resolve({ state: 'running', port: 18789 });
+    });
+
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useChatStore } = await importRealChatStore();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-artifact',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      pendingToolImages: [],
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'tool.completed',
+      runId: 'run-artifact',
+      sessionKey: 'agent:main:main',
+      toolCallId: 'call-create-report',
+      name: 'write_report',
+      result: { stdout: 'created MEDIA:/tmp/uclaw-report.pdf' },
+      isError: false,
+    });
+    await flushAsyncImports();
+    await flushAsyncImports();
+
+    const run = useChatStore.getState().runtimeRuns['run-artifact'];
+    expect(run?.artifacts).toEqual([
+      expect.objectContaining({
+        filePath: '/tmp/uclaw-report.pdf',
+        mimeType: 'application/pdf',
+        sourceToolCallId: 'call-create-report',
+      }),
+    ]);
+    expect(run?.verifications).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        artifactId: run?.artifacts?.[0]?.id,
+        kind: 'artifact.registration',
+        required: false,
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        artifactId: run?.artifacts?.[0]?.id,
+        kind: 'artifact.availability',
+        required: true,
+        status: 'passed',
+        evidence: expect.stringContaining('sizeBytes=2048'),
+      }),
+    ]));
+    expect(useChatStore.getState().pendingToolImages).toEqual([
+      expect.objectContaining({ filePath: '/tmp/uclaw-report.pdf' }),
+    ]);
+  });
+
+  it('runs completion gate before holding a completed runtime run with unverified artifacts', async () => {
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/files/thumbnails') {
+        return Promise.resolve({
+          '/tmp/missing-deck.pptx': {
+            preview: null,
+            fileSize: 0,
+          },
+        });
+      }
+      return Promise.resolve({ state: 'running', port: 18789 });
+    });
+
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useChatStore } = await importRealChatStore();
+    const loadHistory = vi.fn(async () => {});
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-gate',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      loadHistory,
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'artifact.produced',
+      runId: 'run-gate',
+      sessionKey: 'agent:main:main',
+      artifact: {
+        id: 'artifact:deck',
+        kind: 'presentation',
+        title: 'missing-deck.pptx',
+        filePath: '/tmp/missing-deck.pptx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      },
+    });
+    handlers.get('chat:runtime-event')?.({
+      type: 'run.ended',
+      runId: 'run-gate',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+      endedAt: 1773281732000,
+    });
+    await flushAsyncImports();
+    await flushAsyncImports();
+
+    const run = useChatStore.getState().runtimeRuns['run-gate'];
+    expect(run?.status).toBe('completed');
+    expect(run?.verifications).toEqual([
+      expect.objectContaining({
+        artifactId: 'artifact:deck',
+        status: 'blocked',
+      }),
+    ]);
+    expect(run?.planSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'uclaw.verify', status: 'blocked' }),
+      expect.objectContaining({ id: 'uclaw.deliver', status: 'blocked' }),
+    ]));
+    expect(run?.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'verification.required.failed',
+        severity: 'blocking',
+      }),
+    ]));
+    expect(run?.gateResult).toEqual(expect.objectContaining({
+      decision: 'continue_required',
+      blockingIssueCount: 1,
+      requiredVerificationCount: 1,
+      passedRequiredVerificationCount: 0,
+    }));
+    expect(run?.checkpoints).toEqual([
+      expect.objectContaining({
+        id: 'checkpoint:run-gate:completion-gate',
+        recoverable: true,
+      }),
+    ]);
+    expect(useChatStore.getState().sending).toBe(true);
+    expect(useChatStore.getState().activeRunId).toBe('run-gate');
+    expect(useChatStore.getState().pendingFinal).toBe(true);
+  });
+
+  it('holds completed composite runs when any required-artifact subtask is missing output', async () => {
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/files/thumbnails') {
+        return Promise.resolve({
+          '/tmp/image.png': {
+            preview: null,
+            fileSize: 1024,
+            filePath: '/tmp/image.png',
+          },
+        });
+      }
+      return Promise.resolve({ state: 'running', port: 18789 });
+    });
+
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useChatStore } = await importRealChatStore();
+    const loadHistory = vi.fn(async () => {});
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-composite-gate',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      loadHistory,
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'run.plan.updated',
+      runId: 'run-composite-gate',
+      sessionKey: 'agent:main:main',
+      objective: '生成图片和 PPT',
+      steps: [
+        { id: 'task:image', title: '生成图片', status: 'completed', requiresArtifact: true, order: 1 },
+        { id: 'task:ppt', title: '生成 PPT', status: 'completed', requiresArtifact: true, order: 2 },
+      ],
+    });
+    handlers.get('chat:runtime-event')?.({
+      type: 'artifact.produced',
+      runId: 'run-composite-gate',
+      sessionKey: 'agent:main:main',
+      artifact: {
+        id: 'artifact:image',
+        kind: 'image',
+        title: '图片',
+        filePath: '/tmp/image.png',
+        sourceToolCallId: 'task:image',
+      },
+    });
+    handlers.get('chat:runtime-event')?.({
+      type: 'verification.completed',
+      runId: 'run-composite-gate',
+      sessionKey: 'agent:main:main',
+      verification: {
+        id: 'verify-image',
+        status: 'passed',
+        artifactId: 'artifact:image',
+      },
+    });
+    handlers.get('chat:runtime-event')?.({
+      type: 'run.ended',
+      runId: 'run-composite-gate',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+      endedAt: 1773281732000,
+    });
+    await flushAsyncImports();
+    await flushAsyncImports();
+
+    const run = useChatStore.getState().runtimeRuns['run-composite-gate'];
+    expect(run?.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'artifact.required.missing',
+        stepId: 'task:ppt',
+      }),
+    ]));
+    expect(run?.gateResult).toEqual(expect.objectContaining({
+      decision: 'continue_required',
+      artifactCount: 1,
+      blockingIssueCount: 1,
+    }));
+    expect(useChatStore.getState().sending).toBe(true);
+    expect(useChatStore.getState().activeRunId).toBe('run-composite-gate');
   });
 
   it('forces a terminal history reload when the runtime emits run.ended', async () => {
@@ -526,7 +886,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -538,7 +898,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -571,7 +931,7 @@ describe('gateway store event wiring', () => {
       handlers.set(eventName, handler);
       return () => {};
     });
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -583,7 +943,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('gateway:chat-message')?.({
@@ -610,7 +970,7 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const handleRuntimeEvent = vi.fn();
     const loadHistory = vi.fn(async () => {});
     useChatStore.setState({
@@ -621,7 +981,7 @@ describe('gateway store event wiring', () => {
       loadHistory,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('chat:runtime-event')?.({
@@ -665,7 +1025,7 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const handleChatEvent = vi.fn();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -673,7 +1033,7 @@ describe('gateway store event wiring', () => {
       handleChatEvent,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     handlers.get('gateway:chat-message')?.({
@@ -714,7 +1074,7 @@ describe('gateway store event wiring', () => {
       return () => {};
     });
 
-    const { useChatStore } = await import('@/stores/chat');
+    const { useChatStore } = await importRealChatStore();
     const handleChatEvent = vi.fn();
     useChatStore.setState({
       currentSessionKey: 'agent:main:main',
@@ -722,7 +1082,7 @@ describe('gateway store event wiring', () => {
       handleChatEvent,
     });
 
-    const { useGatewayStore } = await import('@/stores/gateway');
+    const { useGatewayStore } = await importRealGatewayStore();
     await useGatewayStore.getState().init();
 
     const replayedDelta = {

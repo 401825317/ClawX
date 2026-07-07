@@ -19,7 +19,9 @@ const DEFAULT_CONTEXT_TARGETS = new Set(['AGENTS.md', 'TOOLS.md']);
 // ── Helpers ──────────────────────────────────────────────────────
 
 function isClawXContextMergeEnabled(): boolean {
-  return process.env.CLAWX_ENABLE_CONTEXT_MERGE === '1';
+  if (process.env.CLAWX_DISABLE_CONTEXT_MERGE === '1') return false;
+  if (process.env.CLAWX_ENABLE_CONTEXT_MERGE === '0') return false;
+  return true;
 }
 
 async function fileExists(p: string): Promise<boolean> {

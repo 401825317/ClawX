@@ -671,7 +671,7 @@ describe('ChatInput agent targeting', () => {
     );
   });
 
-  it('toggles image mode on and off from the single image button', () => {
+  it('does not render standalone image or video mode controls', () => {
     const onSend = vi.fn();
     agentsState.agents = [
       {
@@ -689,11 +689,11 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput(onSend);
 
-    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
-    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
-    expect(screen.queryByTestId('chat-image-model')).not.toBeInTheDocument();
-    expect(screen.getByTestId('chat-image-size')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-image-quality')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-composer-mode-image')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-composer-mode-video')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-video-options')).not.toBeInTheDocument();
+
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'draw a cat poster' } });
     fireEvent.click(screen.getByTitle('Send'));
 
@@ -701,20 +701,13 @@ describe('ChatInput agent targeting', () => {
       'draw a cat poster',
       undefined,
       null,
-      'image',
-      { model: 'gpt-image-2', size: '1024x1024', quality: 'medium' },
+      'chat',
+      undefined,
       undefined,
     );
-
-    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
-    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'normal chat' } });
-    fireEvent.click(screen.getByTitle('Send'));
-
-    expect(onSend).toHaveBeenLastCalledWith('normal chat', undefined, null, 'chat', undefined, undefined);
   });
 
-  it('sends the selected image edit reference as an image attachment', () => {
+  it('sends the selected image edit reference as a chat attachment', () => {
     const onSend = vi.fn();
     const onClearImageEditReference = vi.fn();
     agentsState.agents = [
@@ -743,7 +736,7 @@ describe('ChatInput agent targeting', () => {
     });
 
     expect(screen.getByTestId('chat-image-edit-reference')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '把背景改成白色' } });
     fireEvent.click(screen.getByTitle('Send'));
@@ -761,14 +754,14 @@ describe('ChatInput agent targeting', () => {
         }),
       ],
       null,
-      'image',
-      { model: 'gpt-image-2', size: '1024x1024', quality: 'medium' },
+      'chat',
+      undefined,
       undefined,
     );
     expect(onClearImageEditReference).toHaveBeenCalled();
   });
 
-  it('preserves the selected image reference when switching from image mode to video mode', () => {
+  it('keeps the selected image reference for video-style chat prompts', () => {
     const onSend = vi.fn();
     const onClearImageEditReference = vi.fn();
     agentsState.agents = [
@@ -797,11 +790,7 @@ describe('ChatInput agent targeting', () => {
     });
 
     expect(screen.getByTestId('chat-image-edit-reference')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
-    expect(onClearImageEditReference).not.toHaveBeenCalled();
-    expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-video-options')).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '让这张图动起来' } });
     fireEvent.click(screen.getByTitle('Send'));
@@ -819,120 +808,11 @@ describe('ChatInput agent targeting', () => {
         }),
       ],
       null,
-      'video',
+      'chat',
       undefined,
-      { size: '1280x720', durationSeconds: 4 },
+      undefined,
     );
     expect(onClearImageEditReference).toHaveBeenCalledTimes(1);
-  });
-
-  it('keeps video parameters selectable while using the configured default model', () => {
-    const onSend = vi.fn();
-    agentsState.agents = [
-      {
-        id: 'main',
-        name: 'Main',
-        isDefault: true,
-        modelDisplay: 'MiniMax',
-        inheritedModel: true,
-        workspace: '~/.openclaw/workspace',
-        agentDir: '~/.openclaw/agents/main/agent',
-        mainSessionKey: 'agent:main:main',
-        channelTypes: [],
-      },
-    ];
-
-    renderChatInput(onSend);
-
-    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
-    expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
-    expect(screen.queryByTestId('chat-video-model')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByTestId('chat-video-size'), { target: { value: '720x1280' } });
-    fireEvent.change(screen.getByTestId('chat-video-duration'), { target: { value: '10' } });
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'make a vertical product video' } });
-    fireEvent.click(screen.getByTitle('Send'));
-
-    expect(onSend).toHaveBeenCalledWith(
-      'make a vertical product video',
-      undefined,
-      null,
-      'video',
-      undefined,
-      { size: '720x1280', durationSeconds: 10 },
-    );
-  });
-
-  it('keeps image mode isolated per session', () => {
-    const onSend = vi.fn();
-    agentsState.agents = [
-      {
-        id: 'main',
-        name: 'Main',
-        isDefault: true,
-        modelDisplay: 'MiniMax',
-        inheritedModel: true,
-        workspace: '~/.openclaw/workspace',
-        agentDir: '~/.openclaw/agents/main/agent',
-        mainSessionKey: 'agent:main:main',
-        channelTypes: [],
-      },
-    ];
-    chatState.sessions = [
-      { key: 'agent:main:main', model: 'lingzhiwuxian/smart-latest' },
-      { key: 'agent:main:session-b', model: 'lingzhiwuxian/smart-latest' },
-    ];
-
-    const view = renderChatInput(onSend);
-
-    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
-    fireEvent.change(screen.getByTestId('chat-image-size'), { target: { value: '2048x2048' } });
-    fireEvent.change(screen.getByTestId('chat-image-quality'), { target: { value: 'high' } });
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session a image' } });
-    fireEvent.click(screen.getByTitle('Send'));
-
-    expect(onSend).toHaveBeenLastCalledWith(
-      'session a image',
-      undefined,
-      null,
-      'image',
-      { model: 'gpt-image-2', size: '2048x2048', quality: 'high' },
-      undefined,
-    );
-
-    chatState.currentSessionKey = 'agent:main:session-b';
-    view.rerender(
-      <TooltipProvider>
-        <ChatInput onSend={onSend} />
-      </TooltipProvider>,
-    );
-
-    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session b chat' } });
-    fireEvent.click(screen.getByTitle('Send'));
-
-    expect(onSend).toHaveBeenLastCalledWith('session b chat', undefined, null, 'chat', undefined, undefined);
-
-    chatState.currentSessionKey = 'agent:main:main';
-    view.rerender(
-      <TooltipProvider>
-        <ChatInput onSend={onSend} />
-      </TooltipProvider>,
-    );
-
-    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-image-size')).toHaveValue('2048x2048');
-    expect(screen.getByTestId('chat-image-quality')).toHaveValue('high');
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'session a image again' } });
-    fireEvent.click(screen.getByTitle('Send'));
-
-    expect(onSend).toHaveBeenLastCalledWith(
-      'session a image again',
-      undefined,
-      null,
-      'image',
-      { model: 'gpt-image-2', size: '2048x2048', quality: 'high' },
-      undefined,
-    );
   });
 
   it('removes the full inline skill token with one backspace', async () => {

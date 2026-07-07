@@ -1058,7 +1058,7 @@ function patchBundledRuntime(outputDir) {
   // --- Local action finalization patch ---
   // OpenClaw normally refuses before_agent_finalize revisions after
   // deterministic side effects. UClaw needs one narrow exception for the
-  // computer-use hook that catches final replies like "I will install it now"
+  // artifact guard hook that catches final replies like "I will create it now"
   // after browser/exec activity.
   if (ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH) {
     const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {

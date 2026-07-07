@@ -31,6 +31,15 @@ function cloneRunState(runId: string, event: ChatRuntimeEvent): ChatRuntimeRunSt
     startedAt: event.type === 'run.started' ? event.startedAt : undefined,
     lastEventAt: eventTs,
     endedAt: event.type === 'run.ended' ? event.endedAt : undefined,
+    objective: event.type === 'run.started' ? event.objective : undefined,
+    planSummary: undefined,
+    planSteps: [],
+    artifacts: [],
+    verifications: [],
+    issues: [],
+    checkpoints: [],
+    gateEvaluations: [],
+    gateResult: undefined,
     assistantText: '',
     thinkingText: '',
     events: [],
@@ -92,8 +101,53 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
     return right.type === left.type && right.text === left.text && right.delta === left.delta;
   }
   if (left.type === 'run.started') return right.type === left.type;
+  if (left.type === 'run.plan.updated') {
+    return right.type === left.type
+      && right.objective === left.objective
+      && right.summary === left.summary
+      && stableRuntimeFingerprint(right.steps) === stableRuntimeFingerprint(left.steps);
+  }
+  if (left.type === 'run.step.updated') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.step) === stableRuntimeFingerprint(left.step);
+  }
+  if (left.type === 'artifact.produced') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.artifact) === stableRuntimeFingerprint(left.artifact);
+  }
+  if (left.type === 'verification.completed') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.verification) === stableRuntimeFingerprint(left.verification);
+  }
+  if (left.type === 'gate.issue') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.issue) === stableRuntimeFingerprint(left.issue);
+  }
+  if (left.type === 'run.checkpoint') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.checkpoint) === stableRuntimeFingerprint(left.checkpoint);
+  }
+  if (left.type === 'gate.evaluated') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.gate) === stableRuntimeFingerprint(left.gate);
+  }
   if (left.type === 'run.ended') return right.type === left.type && right.status === left.status && right.endedAt === left.endedAt;
   return false;
+}
+
+function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
+  const existingIndex = items.findIndex((item) => item.id === next.id);
+  if (existingIndex === -1) return [...items, next];
+  return items.map((item, index) => (index === existingIndex ? { ...item, ...next } : item));
+}
+
+function sortPlanSteps(steps: NonNullable<ChatRuntimeRunState['planSteps']>): NonNullable<ChatRuntimeRunState['planSteps']> {
+  return [...steps].sort((left, right) => {
+    const leftOrder = typeof left.order === 'number' ? left.order : Number.MAX_SAFE_INTEGER;
+    const rightOrder = typeof right.order === 'number' ? right.order : Number.MAX_SAFE_INTEGER;
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return left.id.localeCompare(right.id);
+  });
 }
 
 export function applyRuntimeEventToRuns(
@@ -104,6 +158,12 @@ export function applyRuntimeEventToRuns(
     return currentRuns;
   }
   const existing = currentRuns[event.runId] ?? cloneRunState(event.runId, event);
+  if (
+    typeof event.seq === 'number'
+    && existing.events.some((existingEvent) => existingEvent.seq === event.seq)
+  ) {
+    return currentRuns;
+  }
   const nextRun: ChatRuntimeRunState = {
     ...existing,
     sessionKey: event.sessionKey ?? existing.sessionKey,
@@ -117,11 +177,43 @@ export function applyRuntimeEventToRuns(
     case 'run.started':
       nextRun.status = 'running';
       nextRun.startedAt = event.startedAt ?? nextRun.startedAt;
+      nextRun.objective = event.objective ?? nextRun.objective;
       nextRun.endedAt = undefined;
+      break;
+    case 'run.plan.updated':
+      nextRun.objective = event.objective ?? nextRun.objective;
+      nextRun.planSummary = event.summary ?? nextRun.planSummary;
+      nextRun.planSteps = sortPlanSteps(event.steps);
+      break;
+    case 'run.step.updated':
+      nextRun.planSteps = sortPlanSteps(upsertById(nextRun.planSteps ?? [], event.step));
       break;
     case 'run.ended':
       nextRun.status = event.status;
       nextRun.endedAt = event.endedAt ?? event.ts ?? Date.now();
+      break;
+    case 'artifact.produced':
+      nextRun.artifacts = upsertById(nextRun.artifacts ?? [], {
+        ...event.artifact,
+        sourceToolCallId: event.artifact.sourceToolCallId ?? event.toolCallId,
+      });
+      break;
+    case 'verification.completed':
+      nextRun.verifications = upsertById(nextRun.verifications ?? [], event.verification);
+      break;
+    case 'gate.issue':
+      nextRun.issues = upsertById(nextRun.issues ?? [], event.issue);
+      break;
+    case 'run.checkpoint':
+      nextRun.checkpoints = upsertById(nextRun.checkpoints ?? [], event.checkpoint);
+      break;
+    case 'gate.evaluated':
+      nextRun.gateEvaluations = upsertById(nextRun.gateEvaluations ?? [], event.gate);
+      nextRun.gateResult = event.gate;
+      nextRun.issues = event.gate.issues.reduce(
+        (items, issue) => upsertById(items, issue),
+        nextRun.issues ?? [],
+      );
       break;
     case 'assistant.delta': {
       const incoming = event.text ?? event.delta ?? '';

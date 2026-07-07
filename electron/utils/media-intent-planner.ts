@@ -6,7 +6,10 @@ import {
   JUNFEIAI_PROVIDER_ID,
 } from './junfeiai-distribution';
 import { logger } from './logger';
-import type { MediaGenerationInputImageRef } from './media-generation-types';
+import type {
+  MediaGenerationInputImageRef,
+  VideoGenerationRouteMode,
+} from './media-generation-types';
 import { proxyAwareFetch } from './proxy-fetch';
 
 const MEDIA_INTENT_PLANNER_TIMEOUT_MS = 60_000;
@@ -17,6 +20,7 @@ const MAX_LOG_TEXT_CHARS = 800;
 
 export type MediaIntentAction =
   | 'chat'
+  | 'vision_chat'
   | 'image_generate'
   | 'image_edit'
   | 'video_generate'
@@ -24,6 +28,28 @@ export type MediaIntentAction =
   | 'clarify';
 
 export type MediaIntentImageSource = 'explicit' | 'candidate' | 'none';
+
+export type MediaIntentCompositeTaskKind =
+  | 'image_generate'
+  | 'presentation'
+  | 'spreadsheet'
+  | 'video_generate'
+  | 'image_edit'
+  | 'mini_program'
+  | 'copywriting';
+
+export type MediaIntentCompositeTask = {
+  id: string;
+  kind: MediaIntentCompositeTaskKind;
+  title: string;
+  prompt: string;
+  requiresArtifact?: boolean;
+  dependsOn?: string[];
+  fallback?: string;
+  selectedImageSource?: MediaIntentImageSource;
+  selectedImageIndex?: number;
+  sourceImages?: MediaGenerationInputImageRef[];
+};
 
 export type MediaIntentRecentMessage = {
   role: 'user' | 'assistant' | 'system' | 'toolresult';
@@ -40,7 +66,15 @@ export type MediaIntentPlan = {
   selectedImageIndex?: number;
   sourceImages?: MediaGenerationInputImageRef[];
   prompt?: string;
+  imageSize?: string;
+  imageQuality?: 'low' | 'medium' | 'high';
+  videoMode?: VideoGenerationRouteMode;
+  videoSize?: string;
+  videoDurationSeconds?: number;
+  videoPrompt?: string;
+  imageEditPrompt?: string;
   clarification?: string;
+  compositeTasks?: MediaIntentCompositeTask[];
 };
 
 type MediaIntentPlannerParams = {
@@ -87,7 +121,26 @@ function summarizePlanForLog(plan: MediaIntentPlan): Record<string, unknown> {
     selectedImageIndex: plan.selectedImageIndex,
     sourceImages: summarizeImagesForLog(plan.sourceImages ?? []),
     prompt: plan.prompt ? truncateForLog(plan.prompt) : undefined,
+    imageSize: plan.imageSize,
+    imageQuality: plan.imageQuality,
+    videoMode: plan.videoMode,
+    videoSize: plan.videoSize,
+    videoDurationSeconds: plan.videoDurationSeconds,
+    videoPrompt: plan.videoPrompt ? truncateForLog(plan.videoPrompt) : undefined,
+    imageEditPrompt: plan.imageEditPrompt ? truncateForLog(plan.imageEditPrompt) : undefined,
     clarification: plan.clarification ? truncateForLog(plan.clarification, 300) : undefined,
+    compositeTasks: plan.compositeTasks?.map((task) => ({
+      id: task.id,
+      kind: task.kind,
+      title: task.title,
+      prompt: truncateForLog(task.prompt, 300),
+      requiresArtifact: task.requiresArtifact,
+      dependsOn: task.dependsOn,
+      fallback: task.fallback,
+      selectedImageSource: task.selectedImageSource,
+      selectedImageIndex: task.selectedImageIndex,
+      sourceImages: summarizeImagesForLog(task.sourceImages ?? []),
+    })),
   };
 }
 
@@ -99,6 +152,13 @@ function summarizeRawPlannerJsonForLog(raw: Record<string, unknown>): Record<str
     selected_image_source: raw.selected_image_source ?? raw.selectedImageSource,
     selected_image_index: raw.selected_image_index ?? raw.selectedImageIndex,
     prompt: typeof prompt === 'string' ? truncateForLog(prompt) : prompt,
+    image_size: raw.image_size ?? raw.imageSize,
+    image_quality: raw.image_quality ?? raw.imageQuality,
+    video_mode: raw.video_mode ?? raw.videoMode,
+    video_size: raw.video_size ?? raw.videoSize,
+    video_duration_seconds: raw.video_duration_seconds ?? raw.videoDurationSeconds,
+    video_prompt: raw.video_prompt ?? raw.videoPrompt,
+    image_edit_prompt: raw.image_edit_prompt ?? raw.imageEditPrompt,
     clarification: typeof raw.clarification === 'string'
       ? truncateForLog(raw.clarification, 300)
       : raw.clarification,
@@ -121,13 +181,38 @@ function normalizeOptionalText(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function normalizeImageQuality(value: unknown): 'low' | 'medium' | 'high' | undefined {
+  return value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
+}
+
+function normalizeVideoMode(value: unknown): VideoGenerationRouteMode | undefined {
+  return value === 'text_to_video'
+    || value === 'image_to_video'
+    || value === 'edit_image_then_video'
+    ? value
+    : undefined;
+}
+
 function isIntentAction(value: unknown): value is MediaIntentAction {
   return value === 'chat'
+    || value === 'vision_chat'
     || value === 'image_generate'
     || value === 'image_edit'
     || value === 'video_generate'
     || value === 'desktop_screenshot'
     || value === 'clarify';
+}
+
+function isVisualQuestionPrompt(prompt: string): boolean {
+  const referencesImage = /(?:这张|这幅|这个图|这图|图片|照片|画面|上一张|上一个|刚才|刚生成|previous|last|this image|this picture|this photo|the image|the picture)/i.test(prompt);
+  const asksAboutImage = /(?:美吗|美嘛|好看吗|漂亮吗|丑吗|怎么样|咋样|如何|评价|点评|审美|哪里.*(?:好|不好|优化|改进)|what do you think|look good|beautiful|pretty|rate|review|critique|analy[sz]e)/i.test(prompt);
+  return asksAboutImage || (referencesImage && /(?:看|分析|评价|点评|怎么样|如何|哪里|review|critique|analy[sz]e)/i.test(prompt));
 }
 
 function isImageSource(value: unknown): value is PlannerImageSource {
@@ -209,6 +294,17 @@ function clarificationPlan(reason: string, clarification?: string): MediaIntentP
   };
 }
 
+function compositePlan(tasks: MediaIntentCompositeTask[]): MediaIntentPlan {
+  return {
+    action: 'chat',
+    source: 'fallback',
+    confidence: 1,
+    reason: 'composite_intent_local',
+    selectedImageSource: 'none',
+    compositeTasks: tasks,
+  };
+}
+
 function selectImage(params: {
   selectedImageSource: unknown;
   selectedImageIndex: unknown;
@@ -244,6 +340,179 @@ function selectImage(params: {
   };
 }
 
+function selectPreferredImage(params: {
+  selectedImageSource: unknown;
+  selectedImageIndex: unknown;
+  explicitImages: MediaGenerationInputImageRef[];
+  candidateImages: MediaGenerationInputImageRef[];
+}): {
+  selectedImageSource: MediaIntentImageSource;
+  selectedImageIndex?: number;
+  sourceImages?: MediaGenerationInputImageRef[];
+} {
+  const selected = selectImage(params);
+  if (selected.sourceImages?.length) return selected;
+  const fallbackSource: MediaIntentImageSource = params.explicitImages.length > 0
+    ? 'explicit'
+    : (params.candidateImages.length > 0 ? 'candidate' : 'none');
+  if (fallbackSource === 'none') return { selectedImageSource: 'none' };
+  return selectImage({
+    ...params,
+    selectedImageSource: fallbackSource,
+    selectedImageIndex: 0,
+  });
+}
+
+function containsCompositeSeparator(prompt: string): boolean {
+  return /[、,，;；]/.test(prompt)
+    || /(?:以及|并且|同时|顺便|再(?:帮我)?|然后|另外|还有|和|与|\band\b|\bthen\b|\balso\b)/i.test(prompt);
+}
+
+function taskPrompt(prompt: string, fallback: string): string {
+  return prompt.trim() || fallback;
+}
+
+function buildCompositeTask(params: {
+  index: number;
+  kind: MediaIntentCompositeTaskKind;
+  title: string;
+  prompt: string;
+  requiresArtifact?: boolean;
+  dependsOn?: string[];
+  fallback?: string;
+  imageSelection?: ReturnType<typeof selectPreferredImage>;
+}): MediaIntentCompositeTask {
+  return {
+    id: `task-${params.index + 1}-${params.kind}`,
+    kind: params.kind,
+    title: params.title,
+    prompt: params.prompt,
+    requiresArtifact: params.requiresArtifact ?? true,
+    ...(params.dependsOn?.length ? { dependsOn: params.dependsOn } : {}),
+    ...(params.fallback ? { fallback: params.fallback } : {}),
+    ...(params.imageSelection
+      ? {
+        selectedImageSource: params.imageSelection.selectedImageSource,
+        ...(typeof params.imageSelection.selectedImageIndex === 'number'
+          ? { selectedImageIndex: params.imageSelection.selectedImageIndex }
+          : {}),
+        ...(params.imageSelection.sourceImages?.length
+          ? { sourceImages: params.imageSelection.sourceImages }
+          : {}),
+      }
+      : {}),
+  };
+}
+
+function detectCompositeTasks(params: {
+  prompt: string;
+  requestedMode: 'chat' | 'image' | 'video';
+  explicitImages: MediaGenerationInputImageRef[];
+  candidateImages: MediaGenerationInputImageRef[];
+}): MediaIntentCompositeTask[] {
+  if (params.requestedMode !== 'chat') return [];
+  const prompt = params.prompt.trim();
+  if (!prompt) return [];
+
+  const normalized = prompt.toLowerCase();
+  const imageSelection = selectPreferredImage({
+    selectedImageSource: params.explicitImages.length > 0 ? 'explicit' : 'candidate',
+    selectedImageIndex: 0,
+    explicitImages: params.explicitImages,
+    candidateImages: params.candidateImages,
+  });
+  const specs: Array<{
+    kind: MediaIntentCompositeTaskKind;
+    title: string;
+    pattern: RegExp;
+    needsImage?: boolean;
+    prompt: string;
+  }> = [
+    {
+      kind: 'image_edit',
+      title: '根据图片修图',
+      pattern: /(?:根据|基于|用|把|将|给)?(?:这张|这幅|这个图|图片|照片|image|picture|photo).*(?:修图|改图|精修|调整|优化|编辑|换背景|去背景|抠图|加上|去掉|edit|retouch|modify)|(?:修图|改图|精修|edit image|image edit|retouch)/i,
+      needsImage: true,
+      prompt: taskPrompt(prompt, '根据图片修图'),
+    },
+    {
+      kind: 'image_generate',
+      title: '生成图片',
+      pattern: /(?:生图|生成(?:一张|几张)?图|画(?:一张|个)?|出图|做(?:一张)?(?:海报|插画|图片)|image generation|generate (?:an? )?image|create (?:an? )?image)/i,
+      prompt: taskPrompt(prompt, '生成图片'),
+    },
+    {
+      kind: 'presentation',
+      title: '制作 PPT',
+      pattern: /(?:ppt|powerpoint|slides?|幻灯片|演示文稿|路演稿|汇报材料|做(?:一份)?(?:PPT|ppt|幻灯片))/i,
+      prompt: taskPrompt(prompt, '制作 PPT'),
+    },
+    {
+      kind: 'spreadsheet',
+      title: '制作 Excel',
+      pattern: /(?:excel|xlsx|spreadsheet|表格|电子表格|数据表|做(?:一份)?(?:Excel|excel|表格)|整理(?:成)?表)/i,
+      prompt: taskPrompt(prompt, '制作 Excel 表格'),
+    },
+    {
+      kind: 'video_generate',
+      title: '生成视频',
+      pattern: /(?:生视频|生成(?:一段|个)?视频|做(?:一段|个)?视频|视频生成|图生视频|动画|动起来|video generation|generate (?:a )?video|create (?:a )?video)/i,
+      prompt: taskPrompt(prompt, '生成视频'),
+    },
+    {
+      kind: 'mini_program',
+      title: '制作小程序',
+      pattern: /(?:小程序|微信小程序|支付宝小程序|mini\s*program|wechat mini)/i,
+      prompt: taskPrompt(prompt, '制作小程序'),
+    },
+    {
+      kind: 'copywriting',
+      title: '撰写文案',
+      pattern: /(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|copywriter|write copy|ad copy)/i,
+      prompt: taskPrompt(prompt, '撰写文案'),
+    },
+  ];
+
+  const matches = specs
+    .map((spec, specIndex) => {
+      const match = normalized.match(spec.pattern);
+      return match
+        ? { spec, specIndex, matchIndex: match.index ?? Number.MAX_SAFE_INTEGER }
+        : null;
+    })
+    .filter((match): match is NonNullable<typeof match> => Boolean(match))
+    .sort((left, right) => (left.matchIndex - right.matchIndex) || (left.specIndex - right.specIndex));
+
+  const tasks = matches.map(({ spec }, index) => buildCompositeTask({
+      index,
+      kind: spec.kind,
+      title: spec.title,
+      prompt: spec.prompt,
+      imageSelection: spec.needsImage ? imageSelection : undefined,
+      fallback: spec.needsImage
+        ? '没有显式输入图时，优先使用本轮前序图片生成子任务的结果；仍不可用时标记该子任务待补输入，并继续执行其他子任务。'
+        : undefined,
+    }));
+
+  for (const [index, task] of tasks.entries()) {
+    if (task.kind !== 'image_edit' || task.sourceImages?.length) continue;
+    let dependency: MediaIntentCompositeTask | undefined;
+    for (let candidateIndex = index - 1; candidateIndex >= 0; candidateIndex -= 1) {
+      const candidate = tasks[candidateIndex];
+      if (candidate?.kind === 'image_generate') {
+        dependency = candidate;
+        break;
+      }
+    }
+    if (dependency) {
+      task.dependsOn = [dependency.id];
+    }
+  }
+
+  if (tasks.length < 2) return [];
+  return containsCompositeSeparator(prompt) ? tasks : [];
+}
+
 function normalizePlannerDecision(params: {
   raw: Record<string, unknown>;
   prompt: string;
@@ -263,6 +532,40 @@ function normalizePlannerDecision(params: {
     params.raw.prompt ?? params.raw.rewritten_prompt ?? params.raw.rewrittenPrompt,
     params.prompt,
   );
+  const imageSize = normalizeOptionalText(params.raw.image_size ?? params.raw.imageSize);
+  const imageQuality = normalizeImageQuality(params.raw.image_quality ?? params.raw.imageQuality);
+  const videoSize = normalizeOptionalText(params.raw.video_size ?? params.raw.videoSize);
+  const videoDurationSeconds = normalizePositiveInteger(
+    params.raw.video_duration_seconds ?? params.raw.videoDurationSeconds,
+  );
+  const rawVideoMode = normalizeVideoMode(params.raw.video_mode ?? params.raw.videoMode);
+  const videoPrompt = normalizePrompt(params.raw.video_prompt ?? params.raw.videoPrompt, prompt);
+  const imageEditPrompt = normalizePrompt(
+    params.raw.image_edit_prompt ?? params.raw.imageEditPrompt,
+    prompt,
+  );
+
+  if (action === 'vision_chat') {
+    const imageSelection = selectPreferredImage({
+      selectedImageSource,
+      selectedImageIndex,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+    });
+    if (!imageSelection.sourceImages?.length) {
+      return clarificationPlan('vision_chat_missing_input_image', normalizeOptionalText(params.raw.clarification));
+    }
+    return {
+      action,
+      source: 'planner',
+      confidence,
+      reason,
+      selectedImageSource: imageSelection.selectedImageSource,
+      selectedImageIndex: imageSelection.selectedImageIndex,
+      sourceImages: imageSelection.sourceImages,
+      prompt,
+    };
+  }
 
   if (action === 'image_edit') {
     const imageSelection = selectImage({
@@ -283,6 +586,8 @@ function normalizePlannerDecision(params: {
       selectedImageIndex: imageSelection.selectedImageIndex,
       sourceImages: imageSelection.sourceImages,
       prompt,
+      imageSize,
+      imageQuality,
     };
   }
 
@@ -293,6 +598,11 @@ function normalizePlannerDecision(params: {
       explicitImages: params.explicitImages,
       candidateImages: params.candidateImages,
     });
+    const videoMode = rawVideoMode
+      ?? (imageSelection.sourceImages?.length ? 'image_to_video' : 'text_to_video');
+    if (videoMode !== 'text_to_video' && !imageSelection.sourceImages?.length) {
+      return clarificationPlan('video_generate_missing_input_image', normalizeOptionalText(params.raw.clarification));
+    }
     return {
       action,
       source: 'planner',
@@ -302,11 +612,41 @@ function normalizePlannerDecision(params: {
       selectedImageIndex: imageSelection.selectedImageIndex,
       sourceImages: imageSelection.sourceImages,
       prompt,
+      videoMode,
+      videoSize,
+      videoDurationSeconds,
+      videoPrompt,
+      imageEditPrompt: videoMode === 'edit_image_then_video' ? imageEditPrompt : undefined,
     };
   }
 
   if (action === 'clarify') {
     return clarificationPlan(reason || 'planner_requested_clarification', normalizeOptionalText(params.raw.clarification));
+  }
+
+  if (
+    action === 'chat'
+    && isVisualQuestionPrompt(params.prompt)
+    && (params.explicitImages.length > 0 || params.candidateImages.length > 0)
+  ) {
+    const imageSelection = selectPreferredImage({
+      selectedImageSource,
+      selectedImageIndex,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+    });
+    if (imageSelection.sourceImages?.length) {
+      return {
+        action: 'vision_chat',
+        source: 'planner',
+        confidence,
+        reason: reason || 'chat_with_referenced_image',
+        selectedImageSource: imageSelection.selectedImageSource,
+        selectedImageIndex: imageSelection.selectedImageIndex,
+        sourceImages: imageSelection.sourceImages,
+        prompt,
+      };
+    }
   }
 
   return {
@@ -316,6 +656,10 @@ function normalizePlannerDecision(params: {
     reason,
     selectedImageSource: 'none',
     prompt,
+    imageSize,
+    imageQuality,
+    videoSize,
+    videoDurationSeconds,
   };
 }
 
@@ -331,18 +675,24 @@ function buildPlannerMessages(params: {
       role: 'system',
       content: [
         'You are UClaw media/tool intent planner. Return strict JSON only.',
-        'Your job is to decide whether the next step should be normal chat, still-image generation, still-image editing, video generation, desktop screenshot capture, or a clarification question.',
+        'Your job is to decide whether the next step should be normal chat, visual chat about an existing image, still-image generation, still-image editing, video generation, desktop screenshot capture, or a clarification question.',
         'Do not answer the user. Do not execute tools. Only produce the route plan.',
-        'Actions: chat, image_generate, image_edit, video_generate, desktop_screenshot, clarify.',
+        'Actions: chat, vision_chat, image_generate, image_edit, video_generate, desktop_screenshot, clarify.',
         'Use chat for explanations, research/search requests, planning, automation workflows, coding, and requests that do not require immediate media tool execution.',
+        'Use vision_chat when the user asks to inspect, evaluate, describe, compare, rate, or suggest improvements for an existing image. vision_chat MUST select exactly one explicit_images or candidate_images item.',
         'Use image_generate only when the user wants a new still image from text.',
         'Use image_edit only when the user wants to change an existing image. image_edit MUST select exactly one explicit_images or candidate_images item.',
         'If the user asks to edit "this image", "it", "the previous image", or similar but no usable image exists, use clarify. Never downgrade image_edit to image_generate.',
         'Use explicit_images before candidate_images. Use candidate_images only when the user clearly refers to current/recent/previous image context.',
         'Use video_generate only when the user wants video creation, animation, or image-to-video.',
-        'Use desktop_screenshot only for a direct request to capture the current desktop/screen. Use chat for broader computer-use/browser automation tasks.',
+        'For video_generate, also choose video_mode: text_to_video, image_to_video, or edit_image_then_video.',
+        'Use edit_image_then_video when the image should be changed first, then animated.',
+        'Use image_to_video when the selected image should be animated or used as the visual base without a separate still-image edit.',
+        'Use desktop_screenshot only for a direct request to capture the current desktop/screen. Use chat for broader browser automation or local workflow tasks.',
+        'Extract media parameters only when the user explicitly asks for them: image_size, image_quality, video_size, video_duration_seconds. Leave them null otherwise.',
+        'Never invent model names. Use only the user-requested size/quality/duration values you can infer from the text.',
         'requested_mode is a UI hint, not a substitute for reasoning. Respect image/video mode when it is compatible with the prompt; otherwise choose clarify or chat.',
-        'Return JSON schema: {"action":"chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"clarification":string|null,"reason":string}',
+        'Return JSON schema: {"action":"chat|vision_chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"image_size":string|null,"image_quality":"low|medium|high|null","video_mode":"text_to_video|image_to_video|edit_image_then_video|null","video_size":string|null,"video_duration_seconds":number|null,"video_prompt":string|null,"image_edit_prompt":string|null,"clarification":string|null,"reason":string}',
       ].join('\n'),
     },
     {
@@ -374,6 +724,21 @@ export async function planMediaIntent(
     explicitImages: summarizeImagesForLog(explicitImages),
     candidateImages: summarizeImagesForLog(candidateImages),
   });
+
+  const compositeTasks = detectCompositeTasks({
+    prompt,
+    requestedMode,
+    explicitImages,
+    candidateImages,
+  });
+  if (compositeTasks.length > 0) {
+    const plan = compositePlan(compositeTasks);
+    logger.info('[media-intent-planner] composite_local', {
+      durationMs: Date.now() - startedAt,
+      plan: summarizePlanForLog(plan),
+    });
+    return plan;
+  }
 
   try {
     const secret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);

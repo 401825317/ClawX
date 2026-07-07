@@ -12,7 +12,7 @@ import type { RawMessage, ToolStatus } from '@/stores/chat';
 import type { ChatRuntimeRunState } from '@/stores/chat/types';
 import { appendToolErrorHint, normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 
-export type TaskStepStatus = 'running' | 'completed' | 'error';
+export type TaskStepStatus = 'running' | 'completed' | 'error' | 'blocked' | 'failed' | 'aborted';
 
 export interface TaskStep {
   id: string;
@@ -267,7 +267,11 @@ function attachTopology(steps: TaskStep[]): TaskStep[] {
   for (const step of steps) {
     if (step.kind === 'system') {
       activeBranchNodeId = null;
-      withTopology.push({ ...step, depth: 1, parentId: 'agent-run' });
+      withTopology.push({
+        ...step,
+        depth: step.parentId ? step.depth : 1,
+        parentId: step.parentId ?? 'agent-run',
+      });
       continue;
     }
 
@@ -439,6 +443,104 @@ function getToolSummaryDetail(tool: ToolStatus): string | undefined {
   return normalizeText(tool.summary);
 }
 
+function runtimeStepStatus(status: string | undefined): TaskStepStatus {
+  if (status === 'completed' || status === 'passed' || status === 'skipped') return 'completed';
+  if (status === 'blocked') return 'blocked';
+  if (status === 'failed') return 'failed';
+  if (status === 'aborted') return 'aborted';
+  if (status === 'error') return 'error';
+  return 'running';
+}
+
+function artifactDetail(artifact: NonNullable<ChatRuntimeRunState['artifacts']>[number]): string | undefined {
+  const lines = [
+    artifact.filePath,
+    artifact.url,
+    artifact.mimeType,
+    typeof artifact.sizeBytes === 'number' ? `${artifact.sizeBytes} bytes` : undefined,
+  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+function verificationDetail(verification: NonNullable<ChatRuntimeRunState['verifications']>[number]): string | undefined {
+  const meta = [
+    verification.kind ? `kind=${verification.kind}` : undefined,
+    verification.required === false ? 'optional' : verification.required === true ? 'required' : undefined,
+    verification.severity ? `severity=${verification.severity}` : undefined,
+  ].filter(Boolean).join(' · ');
+  const lines = [
+    meta || undefined,
+    verification.detail,
+    verification.evidence,
+  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+function checkpointDetail(checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number]): string | undefined {
+  const issueLines = (checkpoint.issues ?? []).map((issue, index) => {
+    const meta = [
+      issue.severity,
+      `code=${issue.code}`,
+      typeof issue.recoverable === 'boolean' ? `recoverable=${issue.recoverable}` : undefined,
+    ].filter(Boolean).join(' · ');
+    const prefix = `${index + 1}. [${meta}] ${issue.title}`;
+    return [
+      issue.detail ? `${prefix}: ${issue.detail}` : prefix,
+      issue.suggestedRecovery ? `recovery=${issue.suggestedRecovery}` : undefined,
+    ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0).join('\n');
+  });
+  const lines = [
+    `checkpoint=${checkpoint.id}`,
+    typeof checkpoint.recoverable === 'boolean' ? `recoverable=${checkpoint.recoverable}` : undefined,
+    checkpoint.summary,
+    checkpoint.reason,
+    ...issueLines,
+  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+function gateIssueDetail(issue: NonNullable<ChatRuntimeRunState['issues']>[number]): string | undefined {
+  const lines = [
+    `code=${issue.code}`,
+    typeof issue.recoverable === 'boolean' ? `recoverable=${issue.recoverable}` : undefined,
+    issue.detail,
+    issue.suggestedRecovery ? `recovery=${issue.suggestedRecovery}` : undefined,
+  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+function gateEvaluationStatus(decision: NonNullable<ChatRuntimeRunState['gateResult']>['decision']): TaskStepStatus {
+  if (decision === 'deliverable') return 'completed';
+  if (decision === 'continue_required' || decision === 'blocked_needs_user') return 'blocked';
+  if (decision === 'failed') return 'failed';
+  if (decision === 'aborted') return 'aborted';
+  return 'error';
+}
+
+function gateEvaluationDetail(gate: NonNullable<ChatRuntimeRunState['gateResult']>): string | undefined {
+  const lines = [
+    gate.summary,
+    `decision=${gate.decision}`,
+    `artifacts=${gate.artifactCount}`,
+    `required_verifications=${gate.passedRequiredVerificationCount}/${gate.requiredVerificationCount}`,
+    `blocking=${gate.blockingIssueCount}`,
+    `warnings=${gate.warningIssueCount}`,
+    `coverage=${Math.round(gate.verificationCoverage * 100)}%`,
+  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+function gateIssueStatus(issue: NonNullable<ChatRuntimeRunState['issues']>[number]): TaskStepStatus {
+  if (issue.severity !== 'blocking') return 'completed';
+  return issue.recoverable === false ? 'failed' : 'blocked';
+}
+
+function checkpointStatus(checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number]): TaskStepStatus {
+  if (checkpoint.recoverable === false) return 'failed';
+  if (checkpoint.recoverable === true || (checkpoint.issues?.length ?? 0) > 0 || checkpoint.reason) return 'blocked';
+  return 'completed';
+}
+
 export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | undefined): TaskStep[] {
   if (!runState) return [];
 
@@ -462,6 +564,40 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
 
   for (const event of runState.events) {
     switch (event.type) {
+      case 'run.plan.updated': {
+        upsertStep({
+          id: 'run-plan',
+          label: 'Plan',
+          status: event.steps.some((step) => step.status === 'running') ? 'running' : 'completed',
+          kind: 'system',
+          detail: [event.objective, event.summary].filter(Boolean).join('\n') || undefined,
+          depth: 1,
+        });
+        for (const planStep of event.steps) {
+          upsertStep({
+            id: `plan-step:${planStep.id}`,
+            label: planStep.title,
+            status: runtimeStepStatus(planStep.status),
+            kind: 'system',
+            detail: planStep.detail,
+            depth: planStep.parentId ? 2 : 1,
+            parentId: planStep.parentId ? `plan-step:${planStep.parentId}` : 'run-plan',
+          });
+        }
+        break;
+      }
+      case 'run.step.updated': {
+        upsertStep({
+          id: `plan-step:${event.step.id}`,
+          label: event.step.title,
+          status: runtimeStepStatus(event.step.status),
+          kind: 'system',
+          detail: event.step.detail,
+          depth: event.step.parentId ? 2 : 1,
+          parentId: event.step.parentId ? `plan-step:${event.step.parentId}` : 'run-plan',
+        });
+        break;
+      }
       case 'tool.started': {
         if (isFilteredExecutionGraphTool(event.name)) {
           break;
@@ -505,6 +641,74 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           detail: event.isError ? getToolErrorDetail(event.result) : runtimeDetail(event.result),
           depth: 1,
         });
+        break;
+      }
+      case 'artifact.produced': {
+        upsertStep({
+          id: `artifact:${event.artifact.id}`,
+          label: event.artifact.title || event.artifact.kind || 'Artifact',
+          status: 'completed',
+          kind: 'system',
+          detail: artifactDetail(event.artifact),
+          depth: 1,
+        });
+        break;
+      }
+      case 'verification.completed': {
+        upsertStep({
+          id: `verification:${event.verification.id}`,
+          label: event.verification.title || 'Verification',
+          status: runtimeStepStatus(event.verification.status),
+          kind: 'system',
+          detail: verificationDetail(event.verification),
+          depth: event.verification.artifactId ? 2 : 1,
+          parentId: event.verification.artifactId ? `artifact:${event.verification.artifactId}` : undefined,
+        });
+        break;
+      }
+      case 'gate.issue': {
+        upsertStep({
+          id: `gate-issue:${event.issue.id}`,
+          label: event.issue.title,
+          status: gateIssueStatus(event.issue),
+          kind: 'system',
+          detail: gateIssueDetail(event.issue),
+          depth: 2,
+          parentId: 'gate-result',
+        });
+        break;
+      }
+      case 'run.checkpoint': {
+        upsertStep({
+          id: `checkpoint:${event.checkpoint.id}`,
+          label: 'Checkpoint',
+          status: checkpointStatus(event.checkpoint),
+          kind: 'message',
+          detail: checkpointDetail(event.checkpoint),
+          depth: 1,
+        });
+        break;
+      }
+      case 'gate.evaluated': {
+        upsertStep({
+          id: 'gate-result',
+          label: 'Gate',
+          status: gateEvaluationStatus(event.gate.decision),
+          kind: 'system',
+          detail: gateEvaluationDetail(event.gate),
+          depth: 1,
+        });
+        for (const issue of event.gate.issues) {
+          upsertStep({
+            id: `gate-issue:${issue.id}`,
+            label: issue.title,
+            status: gateIssueStatus(issue),
+            kind: 'system',
+            detail: gateIssueDetail(issue),
+            depth: 2,
+            parentId: 'gate-result',
+          });
+        }
         break;
       }
       case 'command.output': {

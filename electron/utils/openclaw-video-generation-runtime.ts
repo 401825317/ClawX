@@ -172,6 +172,39 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function parseVideoSize(size: string | undefined): { width?: number; height?: number } {
+  const match = size?.trim().match(/^(\d{2,5})\s*x\s*(\d{2,5})$/i);
+  if (!match) {
+    return {};
+  }
+  return {
+    width: Number.parseInt(match[1]!, 10),
+    height: Number.parseInt(match[2]!, 10),
+  };
+}
+
+function normalizeDurationSeconds(durationSeconds: number | undefined): number {
+  return typeof durationSeconds === 'number' && Number.isFinite(durationSeconds)
+    ? Math.max(1, Math.round(durationSeconds))
+    : 4;
+}
+
+function buildVideoOutputMetadata(params: {
+  metadata?: Record<string, unknown>;
+  size?: string;
+  durationSeconds?: number;
+  width?: number;
+  height?: number;
+}): Record<string, unknown> {
+  return {
+    ...(params.metadata ?? {}),
+    ...(params.size ? { size: params.size } : {}),
+    width: params.width,
+    height: params.height,
+    durationSeconds: params.durationSeconds,
+  };
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, '');
 }
@@ -517,6 +550,9 @@ export async function generateVideoInProcess(params: {
   const inputImages = await loadInputImages(params.inputImages);
   const parsedModel = parseModelRef(params.model);
   const imageCount = inputImages?.filter((image) => image.buffer && image.buffer.length > 0).length ?? 0;
+  const requestedSize = params.size?.trim() || '1280x720';
+  const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds);
+  const requestedDimensions = parseVideoSize(requestedSize);
 
   if (parsedModel?.provider === 'openai' && parsedModel.model === CLAWX_OPENAI_VIDEO_15_MODEL && imageCount !== 1) {
     throw new Error('grok-video-1.5 requires exactly one reference image.');
@@ -533,8 +569,8 @@ export async function generateVideoInProcess(params: {
       apiKey: params.directOpenAiCompatible.apiKey,
       prompt: params.prompt,
       model: parsedModel.model,
-      size: params.size ?? '1280x720',
-      durationSeconds: params.durationSeconds ?? 4,
+      size: requestedSize,
+      durationSeconds: requestedDurationSeconds,
       timeoutMs: params.timeoutMs,
       inputImages,
     });
@@ -550,7 +586,15 @@ export async function generateVideoInProcess(params: {
         url: video.url,
         mimeType: video.mimeType,
         fileName: video.fileName,
-        metadata: video.metadata,
+        width: requestedDimensions.width,
+        height: requestedDimensions.height,
+        durationSeconds: requestedDurationSeconds,
+        metadata: buildVideoOutputMetadata({
+          metadata: video.metadata,
+          size: requestedSize,
+          durationSeconds: requestedDurationSeconds,
+          ...requestedDimensions,
+        }),
         outputIndex: index,
       })),
       metadata: result.metadata,
@@ -566,8 +610,8 @@ export async function generateVideoInProcess(params: {
     agentDir: params.agentDir,
     prompt: params.prompt,
     modelOverride: params.model,
-    size: params.size ?? '1280x720',
-    durationSeconds: params.durationSeconds ?? 4,
+    size: requestedSize,
+    durationSeconds: requestedDurationSeconds,
     timeoutMs: params.timeoutMs,
     inputImages,
   });
@@ -586,7 +630,15 @@ export async function generateVideoInProcess(params: {
         mimeType: saved.contentType,
         size: saved.size,
         fileName: video.fileName,
-        metadata: video.metadata,
+        width: requestedDimensions.width,
+        height: requestedDimensions.height,
+        durationSeconds: requestedDurationSeconds,
+        metadata: buildVideoOutputMetadata({
+          metadata: video.metadata,
+          size: requestedSize,
+          durationSeconds: requestedDurationSeconds,
+          ...requestedDimensions,
+        }),
         outputIndex: index,
       };
     }
@@ -596,7 +648,15 @@ export async function generateVideoInProcess(params: {
         url: video.url.trim(),
         mimeType: video.mimeType,
         fileName: video.fileName,
-        metadata: video.metadata,
+        width: requestedDimensions.width,
+        height: requestedDimensions.height,
+        durationSeconds: requestedDurationSeconds,
+        metadata: buildVideoOutputMetadata({
+          metadata: video.metadata,
+          size: requestedSize,
+          durationSeconds: requestedDurationSeconds,
+          ...requestedDimensions,
+        }),
         outputIndex: index,
       };
     }

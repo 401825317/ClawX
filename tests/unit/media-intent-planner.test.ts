@@ -39,6 +39,118 @@ describe('planMediaIntent', () => {
     });
   });
 
+  it('returns a local composite chat plan for multi-deliverable requests without calling the LLM planner', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '帮我生图、做PPT、整理Excel、生视频、根据这张图片修图、做小程序、写文案',
+      requestedMode: 'chat',
+      explicitImages: [
+        {
+          fileName: 'input.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/input.png',
+        },
+      ],
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      reason: 'composite_intent_local',
+      selectedImageSource: 'none',
+    }));
+    expect(plan.compositeTasks?.map((task) => task.kind)).toEqual([
+      'image_generate',
+      'presentation',
+      'spreadsheet',
+      'video_generate',
+      'image_edit',
+      'mini_program',
+      'copywriting',
+    ]);
+    expect(plan.compositeTasks?.[4]).toEqual(expect.objectContaining({
+      kind: 'image_edit',
+      selectedImageSource: 'explicit',
+      selectedImageIndex: 0,
+      sourceImages: [
+        {
+          fileName: 'input.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/input.png',
+        },
+      ],
+    }));
+  });
+
+  it('keeps image-edit in a composite sample pack even without an input image', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+      requestedMode: 'chat',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      reason: 'composite_intent_local',
+    }));
+    expect(plan.compositeTasks?.map((task) => task.kind)).toEqual([
+      'image_generate',
+      'presentation',
+      'spreadsheet',
+      'video_generate',
+      'image_edit',
+      'mini_program',
+      'copywriting',
+    ]);
+    expect(plan.compositeTasks?.[4]).toEqual(expect.objectContaining({
+      kind: 'image_edit',
+      selectedImageSource: 'none',
+      dependsOn: ['task-1-image_generate'],
+      fallback: expect.stringContaining('本轮前序图片生成子任务'),
+    }));
+  });
+
+  it('keeps single-deliverable chat requests on the existing LLM planner path', async () => {
+    proxyAwareFetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: 'image_generate',
+                confidence: 0.9,
+                selected_image_source: 'none',
+                prompt: '画一张城市夜景。',
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '画一张城市夜景',
+      requestedMode: 'chat',
+    });
+
+    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'image_generate',
+      source: 'planner',
+      prompt: '画一张城市夜景。',
+    }));
+    expect(plan.compositeTasks).toBeUndefined();
+  });
+
   it('uses planner JSON to route a current-image edit to the candidate image', async () => {
     proxyAwareFetchMock.mockResolvedValueOnce({
       ok: true,
@@ -133,6 +245,54 @@ describe('planMediaIntent', () => {
     }));
   });
 
+  it('upgrades visual chat about a recent image into vision_chat with the candidate image', async () => {
+    proxyAwareFetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: 'chat',
+                confidence: 0.91,
+                selected_image_source: 'none',
+                prompt: '你觉得美嘛？',
+                reason: '用户是在询问最近生成图片的审美评价。',
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '你觉得美嘛？',
+      requestedMode: 'chat',
+      candidateImages: [
+        {
+          fileName: 'beauty.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/beauty.png',
+        },
+      ],
+    });
+
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'vision_chat',
+      source: 'planner',
+      selectedImageSource: 'candidate',
+      selectedImageIndex: 0,
+      sourceImages: [
+        {
+          fileName: 'beauty.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/beauty.png',
+        },
+      ],
+    }));
+  });
+
   it('falls back to chat instead of guessing a media route when planner credentials are unavailable', async () => {
     getProviderSecretMock.mockResolvedValueOnce(null);
 
@@ -149,4 +309,5 @@ describe('planMediaIntent', () => {
       reason: 'planner_api_key_unavailable',
     }));
   });
+
 });

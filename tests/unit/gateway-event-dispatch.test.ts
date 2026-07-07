@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { dispatchProtocolEvent } from '@electron/gateway/event-dispatch';
+import { dispatchJsonRpcNotification, dispatchProtocolEvent } from '@electron/gateway/event-dispatch';
 import { logger } from '@electron/utils/logger';
 
 function createMockEmitter() {
@@ -93,8 +93,10 @@ describe('dispatchProtocolEvent', () => {
       },
     });
 
-    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', {
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
       type: 'run.ended',
+      contractVersion: 1,
+      producer: 'gateway',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
       seq: 5,
@@ -104,7 +106,7 @@ describe('dispatchProtocolEvent', () => {
       livenessState: undefined,
       replayInvalid: undefined,
       stopReason: undefined,
-    });
+    }));
   });
 
   it('dispatches normalized agent runtime events alongside the legacy notification path', () => {
@@ -123,8 +125,10 @@ describe('dispatchProtocolEvent', () => {
       },
     });
 
-    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', {
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
       type: 'tool.started',
+      contractVersion: 1,
+      producer: 'gateway',
       runId: 'run-1',
       sessionKey: 'agent:main:main',
       seq: 3,
@@ -132,11 +136,508 @@ describe('dispatchProtocolEvent', () => {
       toolCallId: 'call-1',
       name: 'read',
       args: { filePath: '/tmp/demo.md' },
-    });
+    }));
     expect(emitter.emit).toHaveBeenCalledWith('notification', {
       method: 'agent',
       params: expect.objectContaining({ runId: 'run-1', stream: 'tool' }),
     });
+  });
+
+  it('normalizes run contract events for plan, artifacts, and verification', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      stream: 'plan',
+      seq: 11,
+      ts: 100,
+      data: {
+        objective: '生成并验证报告',
+        summary: '先生成，再检查',
+        steps: [
+          { id: 'write', title: '生成报告', status: 'running', order: 1 },
+        ],
+      },
+    });
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      stream: 'artifact',
+      seq: 12,
+      ts: 101,
+      data: {
+        artifact: {
+          id: 'report',
+          kind: 'document',
+          title: '报告',
+          filePath: '/tmp/report.docx',
+          stepId: 'write',
+        },
+        toolCallId: 'tool-create',
+      },
+    });
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      stream: 'verification',
+      seq: 13,
+      ts: 102,
+      data: {
+        id: 'verify-report',
+        status: 'passed',
+        artifactId: 'report',
+        title: '文件存在',
+        evidence: 'stat ok',
+      },
+    });
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      stream: 'checkpoint',
+      seq: 14,
+      ts: 103,
+      data: {
+        checkpointId: 'cp-1',
+        summary: '报告已生成，准备最终回复',
+        reason: 'final-review',
+        recoverable: true,
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'run.plan.updated',
+      contractVersion: 1,
+      producer: 'gateway',
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      seq: 11,
+      ts: 100,
+      objective: '生成并验证报告',
+      summary: '先生成，再检查',
+      steps: [
+        {
+          id: 'write',
+          title: '生成报告',
+          status: 'running',
+          detail: undefined,
+          kind: undefined,
+          order: 1,
+          parentId: undefined,
+        },
+      ],
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'artifact.produced',
+      contractVersion: 1,
+      producer: 'gateway',
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      seq: 12,
+      ts: 101,
+      artifact: {
+        id: 'report',
+        kind: 'document',
+        title: '报告',
+        filePath: '/tmp/report.docx',
+        url: undefined,
+        mimeType: undefined,
+        sizeBytes: undefined,
+        stepId: 'write',
+        sourceToolCallId: undefined,
+        source: undefined,
+      },
+      toolCallId: 'tool-create',
+      itemId: undefined,
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'verification.completed',
+      contractVersion: 1,
+      producer: 'gateway',
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      seq: 13,
+      ts: 102,
+      verification: expect.objectContaining({
+        id: 'verify-report',
+        status: 'passed',
+        title: '文件存在',
+        artifactId: 'report',
+        evidence: 'stat ok',
+      }),
+      toolCallId: undefined,
+      itemId: undefined,
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'run.checkpoint',
+      contractVersion: 1,
+      producer: 'gateway',
+      runId: 'run-contract',
+      sessionKey: 'agent:main:main',
+      seq: 14,
+      ts: 103,
+      checkpoint: expect.objectContaining({
+        id: 'cp-1',
+        summary: '报告已生成，准备最终回复',
+        reason: 'final-review',
+        recoverable: true,
+      }),
+    }));
+  });
+
+  it('does not default missing or invalid verification status to passed', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-verification',
+      sessionKey: 'agent:main:main',
+      stream: 'verification',
+      seq: 1,
+      data: {
+        id: 'verify-missing-status',
+        artifactId: 'artifact-1',
+        title: '缺少状态',
+      },
+    });
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-verification',
+      sessionKey: 'agent:main:main',
+      stream: 'verification',
+      seq: 2,
+      data: {
+        id: 'verify-invalid-status',
+        status: 'ok',
+        artifactId: 'artifact-1',
+        title: '非法状态',
+      },
+    });
+
+    expect(emitter.emit).not.toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'verification.completed',
+    }));
+  });
+
+  it('produces verification contract events from terminal command outputs', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-command-verification',
+      sessionKey: 'agent:main:main',
+      stream: 'command_output',
+      seq: 21,
+      ts: 200,
+      data: {
+        itemId: 'cmd-typecheck',
+        toolCallId: 'call-typecheck',
+        name: 'exec_command',
+        title: 'pnpm run typecheck',
+        output: 'tsc --noEmit completed',
+        phase: 'end',
+        exitCode: 0,
+        durationMs: 1200,
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'command.output',
+      runId: 'run-command-verification',
+      itemId: 'cmd-typecheck',
+      exitCode: 0,
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'verification.completed',
+      contractVersion: 1,
+      producer: 'gateway',
+      runId: 'run-command-verification',
+      sessionKey: 'agent:main:main',
+      toolCallId: 'call-typecheck',
+      itemId: 'cmd-typecheck',
+      verification: expect.objectContaining({
+        id: 'verification:cmd-typecheck',
+        status: 'passed',
+        kind: 'typecheck',
+        required: true,
+        title: 'pnpm run typecheck',
+        targetId: 'cmd-typecheck',
+        evidence: 'exitCode=0',
+        source: 'command.output',
+      }),
+    }));
+  });
+
+  it('produces blocking gate issues from failed terminal command outputs', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-command-failed',
+      sessionKey: 'agent:main:main',
+      stream: 'command_output',
+      seq: 22,
+      ts: 210,
+      data: {
+        itemId: 'cmd-test',
+        toolCallId: 'call-test',
+        name: 'exec_command',
+        title: 'pnpm test',
+        output: '1 failed',
+        phase: 'end',
+        exitCode: 1,
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'verification.completed',
+      runId: 'run-command-failed',
+      verification: expect.objectContaining({
+        id: 'verification:cmd-test',
+        status: 'failed',
+        kind: 'test',
+        severity: 'blocking',
+        title: 'pnpm test',
+      }),
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'gate.issue',
+      runId: 'run-command-failed',
+      issue: expect.objectContaining({
+        id: 'issue:verification:cmd-test',
+        code: 'verification.command.failed',
+        severity: 'blocking',
+        title: 'pnpm test 验证未通过',
+        targetId: 'cmd-test',
+        stepId: 'call-test',
+        verificationId: 'verification:cmd-test',
+        recoverable: true,
+      }),
+    }));
+  });
+
+  it('classifies build command results as build verifications', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-build-verification',
+      sessionKey: 'agent:main:main',
+      stream: 'command_output',
+      seq: 23,
+      data: {
+        itemId: 'cmd-build',
+        name: 'exec_command',
+        title: 'pnpm run build',
+        status: 'completed',
+        phase: 'completed',
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'verification.completed',
+      runId: 'run-build-verification',
+      verification: expect.objectContaining({
+        id: 'verification:cmd-build',
+        status: 'passed',
+        kind: 'build',
+        title: 'pnpm run build',
+      }),
+    }));
+  });
+
+  it('normalizes artifact aliases and gate events from gateway payloads', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-gate',
+      sessionKey: 'agent:main:main',
+      stream: 'artifact',
+      producer: 'uclaw-artifact-guard',
+      seq: 1,
+      data: {
+        artifact: {
+          id: 'artifact-output',
+          kind: 'document',
+          title: '输出文档',
+          outputPath: '/tmp/output.docx',
+          source: 'uclaw-artifact-guard',
+          toolCallId: 'call-write',
+        },
+      },
+    });
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-gate',
+      sessionKey: 'agent:main:main',
+      stream: 'issue',
+      producer: 'gate',
+      seq: 2,
+      data: {
+        issue: {
+          id: 'issue-1',
+          code: 'tool.failed',
+          severity: 'blocking',
+          title: '工具失败',
+          targetId: 'call-write',
+          recoverable: true,
+        },
+      },
+    });
+    dispatchProtocolEvent(emitter, 'agent', {
+      runId: 'run-gate',
+      sessionKey: 'agent:main:main',
+      stream: 'gate',
+      producer: 'gate',
+      seq: 3,
+      data: {
+        id: 'gate:run-gate:completion',
+        decision: 'continue_required',
+        artifactCount: 1,
+        requiredVerificationCount: 1,
+        passedRequiredVerificationCount: 0,
+        blockingIssueCount: 1,
+        warningIssueCount: 0,
+        verificationCoverage: 0,
+        issues: [{
+          id: 'issue-1',
+          code: 'tool.failed',
+          severity: 'blocking',
+          title: '工具失败',
+          targetId: 'call-write',
+          recoverable: true,
+        }],
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'artifact.produced',
+      producer: 'uclaw-artifact-guard',
+      artifact: expect.objectContaining({
+        id: 'artifact-output',
+        filePath: '/tmp/output.docx',
+        source: 'uclaw-artifact-guard',
+        sourceToolCallId: 'call-write',
+      }),
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'gate.issue',
+      producer: 'gate',
+      issue: expect.objectContaining({
+        id: 'issue-1',
+        code: 'tool.failed',
+        severity: 'blocking',
+      }),
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'gate.evaluated',
+      producer: 'gate',
+      gate: expect.objectContaining({
+        id: 'gate:run-gate:completion',
+        decision: 'continue_required',
+        artifactCount: 1,
+        requiredVerificationCount: 1,
+        passedRequiredVerificationCount: 0,
+        blockingIssueCount: 1,
+        verificationCoverage: 0,
+      }),
+    }));
+  });
+
+  it('normalizes agent events from JSON-RPC notifications', () => {
+    const emitter = createMockEmitter();
+
+    dispatchJsonRpcNotification(emitter, {
+      jsonrpc: '2.0',
+      method: 'agent',
+      params: {
+        runId: 'run-json-rpc',
+        sessionKey: 'agent:main:main',
+        stream: 'gate.evaluated',
+        producer: 'gate',
+        data: {
+          id: 'gate:run-json-rpc:completion',
+          decision: 'deliverable',
+          artifactCount: 0,
+          requiredVerificationCount: 0,
+          passedRequiredVerificationCount: 0,
+          blockingIssueCount: 0,
+          warningIssueCount: 0,
+          verificationCoverage: 1,
+          issues: [],
+        },
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('notification', expect.objectContaining({
+      method: 'agent',
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'gate.evaluated',
+      runId: 'run-json-rpc',
+      gate: expect.objectContaining({
+        decision: 'deliverable',
+      }),
+    }));
+  });
+
+  it('normalizes semantic runtime protocol event names', () => {
+    const emitter = createMockEmitter();
+
+    dispatchProtocolEvent(emitter, 'chat.runtime_event', {
+      runId: 'run-semantic-protocol',
+      sessionKey: 'agent:main:main',
+      stream: 'gate.evaluated',
+      producer: 'gate',
+      data: {
+        id: 'gate:run-semantic-protocol:completion',
+        decision: 'deliverable',
+        artifactCount: 0,
+        requiredVerificationCount: 0,
+        passedRequiredVerificationCount: 0,
+        blockingIssueCount: 0,
+        warningIssueCount: 0,
+        verificationCoverage: 1,
+        issues: [],
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'gate.evaluated',
+      runId: 'run-semantic-protocol',
+      gate: expect.objectContaining({ decision: 'deliverable' }),
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('notification', expect.objectContaining({
+      method: 'chat.runtime_event',
+    }));
+  });
+
+  it('normalizes semantic runtime JSON-RPC method names', () => {
+    const emitter = createMockEmitter();
+
+    dispatchJsonRpcNotification(emitter, {
+      jsonrpc: '2.0',
+      method: 'agent.runtime',
+      params: {
+        runId: 'run-semantic-rpc',
+        sessionKey: 'agent:main:main',
+        stream: 'issue',
+        producer: 'gate',
+        data: {
+          id: 'issue-semantic',
+          code: 'runtime.test',
+          severity: 'blocking',
+          title: '语义事件名测试',
+          recoverable: true,
+        },
+      },
+    });
+
+    expect(emitter.emit).toHaveBeenCalledWith('notification', expect.objectContaining({
+      method: 'agent.runtime',
+    }));
+    expect(emitter.emit).toHaveBeenCalledWith('chat:runtime-event', expect.objectContaining({
+      type: 'gate.issue',
+      runId: 'run-semantic-rpc',
+      issue: expect.objectContaining({
+        id: 'issue-semantic',
+        code: 'runtime.test',
+      }),
+    }));
   });
 
   it('logs normalized runtime event summaries without assistant text deltas', () => {
@@ -158,6 +659,8 @@ describe('dispatchProtocolEvent', () => {
 
     expect(logger.info).toHaveBeenCalledWith('[metric] chat.runtime.event', {
       type: 'tool.started',
+      contractVersion: 1,
+      producer: 'gateway',
       runId: 'run-log-tool',
       sessionKey: 'agent:main:main',
       seq: 7,

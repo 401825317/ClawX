@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const hostApiFetchMock = vi.fn();
 
@@ -172,6 +172,7 @@ describe('Chat execution graph lifecycle', () => {
       currentAgentId: 'main',
       sessionLabels: {},
       sessionLastActivity: {},
+      runtimeRuns: {},
       thinkingLevel: null,
     });
   });
@@ -351,6 +352,333 @@ describe('Chat execution graph lifecycle', () => {
 
     expect(screen.getByText('+1')).toBeInTheDocument();
     expect(screen.getByText('-1')).toBeInTheDocument();
+  });
+
+  it('hydrates historical runtime graph steps from the matching history run id after reload', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          id: 'turn-1',
+          content: 'Create the report',
+        },
+        {
+          role: 'assistant',
+          id: 'reply-1',
+          content: [{ type: 'text', text: 'Report is ready.' }],
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {
+        'history:agent:main:main:turn-1': {
+          runId: 'history:agent:main:main:turn-1',
+          sessionKey: 'agent:main:main',
+          status: 'completed',
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'artifact.produced',
+              runId: 'history:agent:main:main:turn-1',
+              sessionKey: 'agent:main:main',
+              artifact: {
+                id: 'artifact-1',
+                title: 'report.md',
+                kind: 'file',
+                filePath: '/tmp/report.md',
+              },
+            },
+            {
+              type: 'verification.completed',
+              runId: 'history:agent:main:main:turn-1',
+              sessionKey: 'agent:main:main',
+              verification: {
+                id: 'verification-1',
+                artifactId: 'artifact-1',
+                title: 'Smoke check',
+                status: 'passed',
+                kind: 'manual',
+                detail: 'Opened successfully',
+              },
+            },
+            {
+              type: 'run.checkpoint',
+              runId: 'history:agent:main:main:turn-1',
+              sessionKey: 'agent:main:main',
+              checkpoint: {
+                id: 'checkpoint-1',
+                summary: 'Recovered from history',
+                recoverable: true,
+              },
+            },
+            {
+              type: 'gate.evaluated',
+              runId: 'history:agent:main:main:turn-1',
+              sessionKey: 'agent:main:main',
+              gate: {
+                id: 'gate-1',
+                decision: 'deliverable',
+                summary: 'Ready to deliver',
+                artifactCount: 1,
+                requiredVerificationCount: 1,
+                passedRequiredVerificationCount: 1,
+                blockingIssueCount: 0,
+                warningIssueCount: 0,
+                verificationCoverage: 1,
+                issues: [],
+              },
+            },
+          ],
+        },
+      },
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+
+    expect(await screen.findByText('report.md')).toBeInTheDocument();
+    expect(screen.getByText('Smoke check')).toBeInTheDocument();
+    expect(screen.getByText(/Recovered from history/)).toBeInTheDocument();
+    expect(screen.getByText('Gate')).toBeInTheDocument();
+  });
+
+  it('replays runtime artifact, gate, and checkpoint steps for historical assistant attachments without an active run', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          id: 'image-turn-1',
+          content: 'Create a project badge image',
+        },
+        {
+          role: 'assistant',
+          id: 'image-reply-1',
+          content: [{
+            type: 'image',
+            url: '/api/chat/media/outgoing/agent%3Amain%3Amain/badge-image/full',
+            mimeType: 'image/png',
+            alt: 'badge.png',
+          }],
+          _attachedFiles: [{
+            fileName: 'badge.png',
+            mimeType: 'image/png',
+            fileSize: 128,
+            preview: 'data:image/png;base64,badge',
+            gatewayUrl: '/api/chat/media/outgoing/agent%3Amain%3Amain/badge-image/full',
+            source: 'gateway-media',
+          }],
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {
+        'history:agent:main:main:image-turn-1': {
+          runId: 'history:agent:main:main:image-turn-1',
+          sessionKey: 'agent:main:main',
+          status: 'completed',
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'artifact.produced',
+              runId: 'history:agent:main:main:image-turn-1',
+              sessionKey: 'agent:main:main',
+              artifact: {
+                id: 'badge-artifact',
+                title: 'badge.png',
+                kind: 'image',
+                filePath: '/tmp/badge.png',
+              },
+            },
+            {
+              type: 'run.checkpoint',
+              runId: 'history:agent:main:main:image-turn-1',
+              sessionKey: 'agent:main:main',
+              checkpoint: {
+                id: 'badge-checkpoint',
+                summary: 'Image file was recovered from history.',
+                recoverable: true,
+              },
+            },
+            {
+              type: 'gate.evaluated',
+              runId: 'history:agent:main:main:image-turn-1',
+              sessionKey: 'agent:main:main',
+              gate: {
+                id: 'badge-gate',
+                decision: 'deliverable',
+                summary: 'Attachment is ready to show',
+                artifactCount: 1,
+                requiredVerificationCount: 0,
+                passedRequiredVerificationCount: 0,
+                blockingIssueCount: 0,
+                warningIssueCount: 0,
+                verificationCoverage: 1,
+                issues: [],
+              },
+            },
+          ],
+        },
+      },
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+
+    expect(await screen.findByText('badge.png')).toBeInTheDocument();
+    expect(screen.getByText(/Image file was recovered from history/)).toBeInTheDocument();
+    expect(screen.getByText('Gate')).toBeInTheDocument();
+    expect(screen.getByText('Attachment is ready to show')).toBeInTheDocument();
+  });
+
+  it('does not split a historical run on user-role tool_result wrapper messages', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          id: 'tool-wrapper-turn',
+          content: 'Read package metadata',
+        },
+        {
+          role: 'assistant',
+          id: 'tool-wrapper-call',
+          content: [
+            { type: 'tool_use', id: 'read-package', name: 'read_file', input: { path: '/workspace/package.json' } },
+          ],
+        },
+        {
+          role: 'user',
+          id: 'tool-wrapper-result',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'read-package',
+              content: 'package.json contents',
+            },
+          ],
+        },
+        {
+          role: 'assistant',
+          id: 'tool-wrapper-final',
+          content: [{ type: 'text', text: 'The package metadata was read.' }],
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {
+        'history:agent:main:main:tool-wrapper-turn': {
+          runId: 'history:agent:main:main:tool-wrapper-turn',
+          sessionKey: 'agent:main:main',
+          status: 'completed',
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'artifact.produced',
+              runId: 'history:agent:main:main:tool-wrapper-turn',
+              sessionKey: 'agent:main:main',
+              artifact: {
+                id: 'package-artifact',
+                title: 'package.json',
+                kind: 'file',
+                filePath: '/workspace/package.json',
+              },
+            },
+            {
+              type: 'gate.evaluated',
+              runId: 'history:agent:main:main:tool-wrapper-turn',
+              sessionKey: 'agent:main:main',
+              gate: {
+                id: 'package-gate',
+                decision: 'deliverable',
+                summary: 'Metadata read completed',
+                artifactCount: 1,
+                requiredVerificationCount: 0,
+                passedRequiredVerificationCount: 0,
+                blockingIssueCount: 0,
+                warningIssueCount: 0,
+                verificationCoverage: 1,
+                issues: [],
+              },
+            },
+          ],
+        },
+      },
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+
+    expect(await screen.findByText('package.json')).toBeInTheDocument();
+    expect(screen.getAllByTestId('chat-execution-graph')).toHaveLength(1);
+    expect(screen.getByText('The package metadata was read.')).toBeInTheDocument();
   });
 
   it('shows a scroll-to-latest button when the chat is scrolled away from the bottom', async () => {

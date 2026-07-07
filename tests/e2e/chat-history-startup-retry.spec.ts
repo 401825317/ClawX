@@ -124,7 +124,7 @@ test.describe('ClawX startup chat history recovery', () => {
               json: { success: true, agents: [{ id: 'main', name: 'main' }] },
             },
           },
-          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=200', 'GET'])]: {
+          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=200&includeFamily=true', 'GET'])]: {
             ok: true,
             data: {
               status: 200,

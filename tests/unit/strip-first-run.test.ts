@@ -273,7 +273,7 @@ describe('ensureClawXContext', () => {
     await ensureClawXContext();
 
     await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw 环境');
-    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('UClaw has native computer-use tools');
+    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('legacy `uclaw-computer-use` plugin is not part of the reliable execution surface');
   });
 
   it('does not wait for missing files in non-default agent workspaces', async () => {

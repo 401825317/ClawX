@@ -144,6 +144,7 @@ async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unkn
     const result = await generateVideoForChatSession({
       sessionKey: payload.sessionKey,
       prompt: payload.prompt,
+      model: payload.model,
       size: payload.size,
       durationSeconds: payload.durationSeconds,
       inputImages: payload.inputImages,
@@ -221,6 +222,7 @@ async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unkn
   const videoResult = await generateVideoForChatSession({
     sessionKey: payload.sessionKey,
     prompt: videoPrompt,
+    model: payload.model,
     size: payload.size,
     durationSeconds: payload.durationSeconds,
     inputImages: [editedImage],

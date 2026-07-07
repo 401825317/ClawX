@@ -49,8 +49,8 @@ const PLUGINS = [
 
 const LOCAL_PLUGINS = [
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'), pluginId: 'clawx-openai-image' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-computer-use'), pluginId: 'uclaw-computer-use' },
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-artifact-guard'), pluginId: 'uclaw-artifact-guard' },
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-local-artifacts'), pluginId: 'uclaw-local-artifacts' },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {
@@ -91,6 +91,24 @@ function listPackages(nodeModulesDir) {
     }
   }
   return result;
+}
+
+function readRuntimeDependencies(pluginDir) {
+  const pkgJsonPath = path.join(pluginDir, 'package.json');
+  if (!fs.existsSync(pkgJsonPath)) return [];
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  return Object.keys(pkg.dependencies || {}).sort();
+}
+
+function assertRuntimeDependencies(pluginDir, pluginId) {
+  const missing = readRuntimeDependencies(pluginDir).filter((depName) => {
+    const depDir = path.join(pluginDir, 'node_modules', ...depName.split('/'));
+    return !fs.existsSync(path.join(depDir, 'package.json'));
+  });
+
+  if (missing.length > 0) {
+    throw new Error(`Bundled plugin "${pluginId}" is missing runtime dependencies: ${missing.join(', ')}`);
+  }
 }
 
 function bundleOnePlugin({ npmName, pluginId }) {
@@ -275,6 +293,8 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
     fs.cpSync(normWin(realDepPath), normWin(depOutputPath), { recursive: true, dereference: true });
     copiedCount++;
   }
+
+  assertRuntimeDependencies(outputDir, pluginId);
 
   echo`   ✅ ${pluginId}: copied ${copiedCount} local deps (skipped dupes: ${skippedDupes})`;
 }

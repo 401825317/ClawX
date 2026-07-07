@@ -55,4 +55,28 @@ describe('user message display cleanup', () => {
 
     expect(matchesOptimisticUserMessage(candidate, optimistic, 1_700_000_000_000)).toBe(true);
   });
+
+  it('hides the composite execution contract from user bubbles and optimistic dedupe', () => {
+    const original = '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个';
+    const gatewayEcho = [
+      original,
+      '',
+      '【UClaw composite execution contract】',
+      '这是一个组合任务，请按下面合同执行：',
+      '- 不要询问用户先做哪个。',
+    ].join('\n');
+    const optimistic = {
+      role: 'user' as const,
+      content: original,
+      timestamp: 1_700_000_000,
+    };
+    const candidate = {
+      role: 'user' as const,
+      content: gatewayEcho,
+      timestamp: 1_700_000_000,
+    };
+
+    expect(extractText(candidate)).toBe(original);
+    expect(matchesOptimisticUserMessage(candidate, optimistic, 1_700_000_000_000)).toBe(true);
+  });
 });

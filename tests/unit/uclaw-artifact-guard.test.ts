@@ -1,3 +1,5 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,15 +10,46 @@ async function loadGuard() {
 }
 
 type HookHandler = (event: unknown) => unknown;
+type ToolResultMiddleware = (event: unknown, ctx: unknown) => unknown | Promise<unknown>;
 
-function registerHooks(pluginModule: { default: { register(api: unknown): void } }) {
+const RAW_SEVEN_ARTIFACT_PROMPT = '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个';
+const REQUIRED_ARTIFACT_LINE = '   - 产物要求：必须为这个子任务生成一个可见、可追踪的产物，并在回复或运行事件中给出产物路径/链接/卡片。';
+
+function createHookRegistry(
+  pluginModule: { default: { register(api: unknown): void } },
+  apiExtras: Record<string, unknown> = {},
+) {
   const hooks = new Map<string, HookHandler>();
+  const toolResultMiddlewares: Array<{ handler: ToolResultMiddleware; options?: unknown }> = [];
   pluginModule.default.register({
+    ...apiExtras,
     registerHook(name: string, handler: HookHandler) {
       hooks.set(name, handler);
     },
+    registerAgentToolResultMiddleware(handler: ToolResultMiddleware, options?: unknown) {
+      toolResultMiddlewares.push({ handler, options });
+    },
   });
-  return hooks;
+  return { hooks, toolResultMiddlewares };
+}
+
+function registerHooks(pluginModule: { default: { register(api: unknown): void } }) {
+  return createHookRegistry(pluginModule).hooks;
+}
+
+function registerHooksWithRuntimeEvents(pluginModule: { default: { register(api: unknown): void } }) {
+  const emitAgentEvent = vi.fn((params: { stream: string }) => ({
+    emitted: true,
+    stream: params.stream,
+  }));
+  const { hooks, toolResultMiddlewares } = createHookRegistry(pluginModule, {
+    agent: {
+      events: {
+        emitAgentEvent,
+      },
+    },
+  });
+  return { hooks, toolResultMiddlewares, emitAgentEvent };
 }
 
 function registerFinalizeHook(pluginModule: { default: { register(api: unknown): void } }) {
@@ -49,6 +82,16 @@ describe('uclaw-artifact-guard', () => {
     expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('做个电站维保'));
   });
 
+  it('registers an OpenClaw tool-result middleware as an execution event producer', async () => {
+    const pluginModule = await loadGuard();
+    const { toolResultMiddlewares } = createHookRegistry(pluginModule);
+
+    expect(toolResultMiddlewares).toHaveLength(1);
+    expect(toolResultMiddlewares[0]?.options).toEqual({
+      runtimes: ['openclaw'],
+    });
+  });
+
   it('classifies promise-only artifact replies as revision candidates', async () => {
     const pluginModule = await loadGuard();
 
@@ -62,10 +105,12 @@ describe('uclaw-artifact-guard', () => {
     expect(analysis).toMatchObject({
       artifactRequest: true,
       artifactEvidence: false,
+      verificationPassed: false,
       explicitBlocker: false,
       promiseOnly: true,
       shouldRevise: true,
     });
+    expect(analysis.artifacts).toEqual([]);
   });
 
   it('retries artifact requests that end with an unexecuted promise', async () => {
@@ -89,28 +134,355 @@ describe('uclaw-artifact-guard', () => {
     expect(result?.retry?.maxAttempts).toBe(2);
   });
 
-  it('allows artifact replies that include a concrete file path', async () => {
+  it('retries artifact requests that claim completion without evidence', async () => {
     const pluginModule = await loadGuard();
     const finalizeHook = registerFinalizeHook(pluginModule);
 
     const result = finalizeHook({
+      finalPromptText: '帮我生成一份产品介绍 PPT',
+      lastAssistantMessage: '已完成，我把产品介绍内容都整理好了。',
+      messages: [
+        { role: 'user', content: '帮我生成一份产品介绍 PPT' },
+        { role: 'assistant', content: '已完成，我把产品介绍内容都整理好了。' },
+      ],
+    }) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.reason).toContain('artifact delivery');
+    expect(result?.retry?.instruction).toContain('MEDIA:<absolute-path>');
+  });
+
+  it('counts raw seven-item composite artifact prompts without an injected contract', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-raw-composite-guard-'));
+    const imagePath = join(tempDir, 'image.png');
+    writeFileSync(imagePath, 'ok');
+
+    try {
+      const event = {
+        runId: 'run-raw-composite-final',
+        messages: [
+          { role: 'user', content: RAW_SEVEN_ARTIFACT_PROMPT },
+          { role: 'assistant', content: `已生成第一张图。\n\nMEDIA:${imagePath}` },
+          { role: 'assistant', content: '只完成了第一项。' },
+        ],
+      };
+
+      const result = finalizeHook(event) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+      expect(result?.action).toBe('revise');
+
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+      expect(analysis).toMatchObject({
+        artifactRequest: true,
+        compositeRequiredArtifactCount: 0,
+        rawCompositeRequiredArtifactCount: 7,
+        requiredArtifactCount: 7,
+        passedArtifactCount: 1,
+        missingRequiredArtifactCount: 6,
+        shouldRevise: true,
+      });
+      expect(analysis.artifacts).toHaveLength(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries full seven-item composite contracts until every required subtask has artifact evidence', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-composite-guard-'));
+    const imagePath = join(tempDir, 'image.png');
+    writeFileSync(imagePath, 'ok');
+
+    try {
+      const compositePrompt = [
+        RAW_SEVEN_ARTIFACT_PROMPT,
+        '',
+        '【UClaw composite execution contract】',
+        '这是一个组合任务，请按下面合同执行：',
+        '子任务清单：',
+        '1. [图片生成] 生成图片',
+        REQUIRED_ARTIFACT_LINE,
+        '2. [演示文稿] 制作 PPT',
+        REQUIRED_ARTIFACT_LINE,
+        '3. [表格] 制作 Excel',
+        REQUIRED_ARTIFACT_LINE,
+        '4. [视频生成] 生成视频',
+        REQUIRED_ARTIFACT_LINE,
+        '5. [图片编辑] 根据图片修图',
+        REQUIRED_ARTIFACT_LINE,
+        '6. [小程序] 做小程序',
+        REQUIRED_ARTIFACT_LINE,
+        '7. [文案] 生成文案',
+        REQUIRED_ARTIFACT_LINE,
+      ].join('\n');
+      const result = finalizeHook({
+        runId: 'run-composite-final',
+        messages: [
+          { role: 'user', content: compositePrompt },
+          { role: 'assistant', content: `已生成第一张图。\n\nMEDIA:${imagePath}` },
+          { role: 'assistant', content: '继续收尾：我先把不依赖后台生成的文件产物做出来。' },
+        ],
+      }) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+
+      expect(result?.action).toBe('revise');
+      const analysis = pluginModule.__test.analyzeArtifactFinal({
+        messages: [
+          { role: 'user', content: compositePrompt },
+          { role: 'assistant', content: `已生成第一张图。\n\nMEDIA:${imagePath}` },
+          { role: 'assistant', content: '继续收尾：我先把不依赖后台生成的文件产物做出来。' },
+        ],
+      });
+      expect(analysis).toMatchObject({
+        artifactRequest: true,
+        compositeRequiredArtifactCount: 7,
+        rawCompositeRequiredArtifactCount: 7,
+        requiredArtifactCount: 7,
+        passedArtifactCount: 1,
+        missingRequiredArtifactCount: 6,
+        shouldRevise: true,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('revises WeChat desktop-message replies when no reliable connector evidence exists', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+
+    const result = finalizeHook({
+      runId: 'run-wechat-no-evidence',
+      messages: [
+        { role: 'user', content: '帮我打开微信并给Uclaw技术保障群发一条消息，内容你随便生成' },
+        { role: 'assistant', content: '好的，我现在打开微信并发送一条测试消息。' },
+      ],
+    }) as { action?: string; retry?: { instruction?: string; maxAttempts?: number }; reason?: string } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.reason).toContain('desktop or external message action');
+    expect(result?.retry?.instruction).toContain('可靠结构化 connector');
+    expect(result?.retry?.instruction).toContain('不要建议启用 uclaw-computer-use');
+    expect(result?.retry?.instruction).toContain('未发送');
+    expect(result?.retry?.maxAttempts).toBe(1);
+  });
+
+  it('allows WeChat desktop-message blockers that clearly say the message was not sent', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+
+    const result = finalizeHook({
+      runId: 'run-wechat-blocked',
+      messages: [
+        { role: 'user', content: '帮我打开微信并给Uclaw技术保障群发一条消息，内容你随便生成' },
+        {
+          role: 'assistant',
+          content: '当前运行时没有可用的可靠微信 connector，不能直接打开本机微信或代发群消息。消息未发送。草稿：UClaw 保障测试消息。',
+        },
+      ],
+    }) as { action?: string } | undefined;
+
+    expect(result).toBeUndefined();
+    const analysis = pluginModule.__test.analyzeArtifactFinal({
+      messages: [
+        { role: 'user', content: '帮我打开微信并给Uclaw技术保障群发一条消息，内容你随便生成' },
+        {
+          role: 'assistant',
+          content: '当前运行时没有可用的可靠微信 connector，不能直接打开本机微信或代发群消息。消息未发送。草稿：UClaw 保障测试消息。',
+        },
+      ],
+    });
+    expect(analysis).toMatchObject({
+      desktopActionRequest: true,
+      desktopActionEvidence: false,
+      explicitBlocker: true,
+      shouldRevise: false,
+    });
+  });
+
+  it('allows artifact replies that include a concrete file path', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-artifact-guard-'));
+    const artifactPath = join(tempDir, 'station-report.docx');
+    writeFileSync(artifactPath, 'ok');
+
+    try {
+      const { hooks, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+      const finalizeHook = hooks.get('before_agent_finalize');
+      expect(finalizeHook).toBeTypeOf('function');
+
+      const result = finalizeHook!({
+        runId: 'run-artifact-ok',
+        sessionKey: 'agent:main:main',
+        messages: [
+          { role: 'user', content: '做个电站维保的招投标书，做20页' },
+          {
+            role: 'assistant',
+            content: `已生成并验证。\n\nMEDIA:${artifactPath}`,
+          },
+        ],
+      });
+
+      expect(result).toBeUndefined();
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-artifact-ok',
+        sessionKey: 'agent:main:main',
+        stream: 'artifact',
+        contractVersion: 1,
+        producer: 'uclaw-artifact-guard',
+        ts: expect.any(Number),
+        seq: expect.any(Number),
+        data: expect.objectContaining({
+          artifact: expect.objectContaining({
+            filePath: artifactPath,
+            kind: 'document',
+            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            sizeBytes: 2,
+          }),
+        }),
+      }));
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-artifact-ok',
+        sessionKey: 'agent:main:main',
+        stream: 'verification',
+        data: expect.objectContaining({
+          verification: expect.objectContaining({
+            status: 'passed',
+            evidence: 'stat ok; sizeBytes=2',
+          }),
+        }),
+      }));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits artifacts from structured top-level tool result outputPath fields', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-artifact-guard-tool-'));
+    const artifactPath = join(tempDir, 'tool-output.docx');
+    writeFileSync(artifactPath, 'ok');
+
+    try {
+      const { toolResultMiddlewares, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+
+      expect(toolResultMiddlewares[0]?.handler).toBeTypeOf('function');
+      await toolResultMiddlewares[0]!.handler({
+        toolCallId: 'call-structured',
+        toolName: 'create_document',
+        result: {
+          outputPath: artifactPath,
+          artifacts: [{ filePath: artifactPath }],
+          details: { status: 'ok' },
+        },
+      }, {
+        runId: 'run-tool-structured',
+        sessionKey: 'agent:main:main',
+      });
+
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-tool-structured',
+        sessionKey: 'agent:main:main',
+        stream: 'artifact',
+        contractVersion: 1,
+        producer: 'uclaw-artifact-guard',
+        ts: expect.any(Number),
+        seq: expect.any(Number),
+        data: expect.objectContaining({
+          artifact: expect.objectContaining({
+            filePath: artifactPath,
+            sourceToolCallId: 'call-structured',
+          }),
+        }),
+      }));
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-tool-structured',
+        stream: 'verification',
+        data: expect.objectContaining({
+          verification: expect.objectContaining({
+            status: 'passed',
+            artifactId: expect.stringMatching(/^artifact:/),
+          }),
+        }),
+      }));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries artifact replies when the referenced file is not available', async () => {
+    const pluginModule = await loadGuard();
+    const { hooks, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+    const finalizeHook = hooks.get('before_agent_finalize');
+    expect(finalizeHook).toBeTypeOf('function');
+    const missingPath = join(tmpdir(), `uclaw-missing-${Date.now()}-${Math.random()}.docx`);
+
+    const result = finalizeHook!({
+      runId: 'run-artifact-missing',
       messages: [
         { role: 'user', content: '做个电站维保的招投标书，做20页' },
         {
           role: 'assistant',
-          content: '已生成。\n\nMEDIA:/Users/me/Downloads/UClaw/电站维保招投标书.docx',
+          content: `已生成。\n\nMEDIA:${missingPath}`,
         },
       ],
-    });
+    }) as { action?: string; reason?: string } | undefined;
 
-    expect(result).toBeUndefined();
+    expect(result?.action).toBe('revise');
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-artifact-missing',
+      stream: 'artifact',
+      data: expect.objectContaining({
+        artifact: expect.objectContaining({
+          filePath: missingPath,
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-artifact-missing',
+      stream: 'verification',
+      data: expect.objectContaining({
+        verification: expect.objectContaining({
+          status: 'blocked',
+          evidence: missingPath,
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-artifact-missing',
+      stream: 'issue',
+      data: expect.objectContaining({
+        issue: expect.objectContaining({
+          code: 'artifact.required.missing',
+          severity: 'blocking',
+          recoverable: true,
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-artifact-missing',
+      stream: 'checkpoint',
+      data: expect.objectContaining({
+        recoverable: true,
+        reason: expect.stringContaining('没有得到通过'),
+        issues: [
+          expect.objectContaining({
+            code: 'artifact.required.missing',
+          }),
+        ],
+      }),
+    }));
   });
 
   it('allows explicit blockers instead of looping forever', async () => {
     const pluginModule = await loadGuard();
-    const finalizeHook = registerFinalizeHook(pluginModule);
+    const { hooks, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+    const finalizeHook = hooks.get('before_agent_finalize');
+    expect(finalizeHook).toBeTypeOf('function');
 
-    const result = finalizeHook({
+    const result = finalizeHook!({
+      runId: 'run-artifact-blocked',
       messages: [
         { role: 'user', content: '做个电站维保的招投标书，做20页' },
         {
@@ -121,6 +493,209 @@ describe('uclaw-artifact-guard', () => {
     });
 
     expect(result).toBeUndefined();
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-artifact-blocked',
+      stream: 'issue',
+      data: expect.objectContaining({
+        issue: expect.objectContaining({
+          code: 'artifact.delivery.blocked',
+          severity: 'blocking',
+          recoverable: true,
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-artifact-blocked',
+      stream: 'checkpoint',
+      data: expect.objectContaining({
+        summary: '最终回复声明产物交付存在阻塞。',
+        recoverable: true,
+        reason: expect.stringContaining('无法继续'),
+        issues: [
+          expect.objectContaining({
+            code: 'artifact.delivery.blocked',
+          }),
+        ],
+      }),
+    }));
+  });
+
+  it('emits tool step, artifact, and verification events from successful tool results', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-tool-result-'));
+    const artifactPath = join(tempDir, 'deck.pptx');
+    writeFileSync(artifactPath, 'pptx');
+
+    try {
+      const { toolResultMiddlewares, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+      const middleware = toolResultMiddlewares[0]?.handler;
+      expect(middleware).toBeTypeOf('function');
+
+      await middleware!({
+        toolCallId: 'call-create-ppt',
+        toolName: 'create_pptx_file',
+        args: { title: 'Deck' },
+        result: {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ filePath: artifactPath, media: `MEDIA:${artifactPath}` }),
+          }],
+          details: {
+            ok: true,
+            filePath: artifactPath,
+          },
+        },
+      }, {
+        runId: 'run-tool-artifact',
+        sessionKey: 'agent:main:main',
+        runtime: 'openclaw',
+      });
+
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-tool-artifact',
+        sessionKey: 'agent:main:main',
+        stream: 'step',
+        data: expect.objectContaining({
+          step: expect.objectContaining({
+            id: 'tool:call-create-ppt',
+            title: '工具 create_pptx_file',
+            status: 'completed',
+            kind: 'tool',
+          }),
+        }),
+      }));
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-tool-artifact',
+        sessionKey: 'agent:main:main',
+        stream: 'artifact',
+        data: expect.objectContaining({
+          toolCallId: 'call-create-ppt',
+          artifact: expect.objectContaining({
+            filePath: artifactPath,
+            kind: 'presentation',
+            sourceToolCallId: 'call-create-ppt',
+            sizeBytes: 4,
+          }),
+        }),
+      }));
+      expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+        runId: 'run-tool-artifact',
+        sessionKey: 'agent:main:main',
+        stream: 'verification',
+        data: expect.objectContaining({
+          toolCallId: 'call-create-ppt',
+          verification: expect.objectContaining({
+            status: 'passed',
+            evidence: 'stat ok; sizeBytes=4',
+          }),
+        }),
+      }));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('emits a checkpoint when a tool result reports failure', async () => {
+    const pluginModule = await loadGuard();
+    const { toolResultMiddlewares, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+    const middleware = toolResultMiddlewares[0]?.handler;
+    expect(middleware).toBeTypeOf('function');
+
+    await middleware!({
+      toolCallId: 'call-export',
+      toolName: 'export_pdf',
+      args: { outputPath: '/tmp/report.pdf' },
+      isError: true,
+      result: {
+        content: [{ type: 'text', text: 'permission denied' }],
+        details: {
+          status: 'error',
+          message: 'permission denied',
+        },
+      },
+    }, {
+      runId: 'run-tool-error',
+      runtime: 'openclaw',
+    });
+
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-tool-error',
+      stream: 'step',
+      data: expect.objectContaining({
+        step: expect.objectContaining({
+          id: 'tool:call-export',
+          status: 'error',
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-tool-error',
+      stream: 'issue',
+      data: expect.objectContaining({
+        issue: expect.objectContaining({
+          code: 'tool.failed',
+          severity: 'blocking',
+          recoverable: true,
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-tool-error',
+      stream: 'checkpoint',
+      data: expect.objectContaining({
+        summary: '工具 export_pdf 执行失败。',
+        reason: 'permission denied',
+        recoverable: true,
+        issues: [
+          expect.objectContaining({
+            code: 'tool.failed',
+            detail: 'permission denied',
+          }),
+        ],
+      }),
+    }));
+    expect(emitAgentEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      stream: 'artifact',
+    }));
+  });
+
+  it('does not promote ordinary read-tool paths into artifacts', async () => {
+    const pluginModule = await loadGuard();
+    const { toolResultMiddlewares, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+    const middleware = toolResultMiddlewares[0]?.handler;
+    expect(middleware).toBeTypeOf('function');
+
+    await middleware!({
+      toolCallId: 'call-read',
+      toolName: 'read',
+      args: { filePath: '/tmp/source.md' },
+      result: {
+        content: [{ type: 'text', text: 'Read /tmp/source.md for context.' }],
+        details: {
+          ok: true,
+        },
+      },
+    }, {
+      runId: 'run-tool-read',
+      runtime: 'openclaw',
+    });
+
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-tool-read',
+      stream: 'step',
+      data: expect.objectContaining({
+        step: expect.objectContaining({
+          id: 'tool:call-read',
+          status: 'completed',
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      stream: 'artifact',
+    }));
+    expect(emitAgentEvent).not.toHaveBeenCalledWith(expect.objectContaining({
+      stream: 'verification',
+    }));
   });
 
   it('ignores ordinary chat promises', async () => {

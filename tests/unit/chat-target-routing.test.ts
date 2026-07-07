@@ -183,7 +183,29 @@ describe('chat target routing', () => {
         };
       }
       if (url === '/api/media/generation-jobs/job-image' || url === '/api/media/generation-jobs/job-video') {
-        return { success: true, job: { id: url.endsWith('job-image') ? 'job-image' : 'job-video', status: 'succeeded' } };
+        const isImage = url.endsWith('job-image');
+        return {
+          success: true,
+          job: {
+            id: isImage ? 'job-image' : 'job-video',
+            kind: isImage ? 'image' : 'video',
+            status: 'succeeded',
+            result: {
+              outputs: [isImage
+                ? { path: '/tmp/generated.png', mimeType: 'image/png', size: 1024 }
+                : { path: '/tmp/generated.mp4', mimeType: 'video/mp4', size: 4096 }],
+            },
+          },
+        };
+      }
+      if (url === '/api/files/thumbnails') {
+        const body = JSON.parse(init?.body || '{}') as {
+          paths?: Array<{ filePath?: string; gatewayUrl?: string }>;
+        };
+        return Object.fromEntries((body.paths ?? []).map((entry) => {
+          const key = entry.filePath ?? entry.gatewayUrl ?? '';
+          return [key, { preview: null, fileSize: key.endsWith('.mp4') ? 4096 : 1024, filePath: entry.filePath }];
+        }));
       }
       return { success: true, result: {} };
     });
@@ -481,6 +503,93 @@ describe('chat target routing', () => {
     expect(payload.media[0]?.filePath).toBe('/tmp/design.png');
   });
 
+  it('sends planner-selected vision chat images through the media chat endpoint', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '图片已生成。',
+          _attachedFiles: [
+            {
+              fileName: 'beauty.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/beauty.png',
+              source: 'message-ref',
+            },
+          ],
+        },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url.toString().startsWith('/api/sessions/transcript?')) {
+        return { messages: [] };
+      }
+      if (url === '/api/chat/send') {
+        return { success: true, result: { runId: 'run-text' } };
+      }
+      if (url !== '/api/media/intent-plan') {
+        return { success: true, result: {} };
+      }
+      return {
+        success: true,
+        plan: {
+          action: 'vision_chat',
+          source: 'planner',
+          confidence: 0.95,
+          selectedImageSource: 'candidate',
+          selectedImageIndex: 0,
+          sourceImages: [{
+            fileName: 'beauty.png',
+            mimeType: 'image/png',
+            filePath: '/tmp/beauty.png',
+          }],
+        },
+      };
+    });
+
+    await useChatStore.getState().sendMessage('你觉得美嘛？');
+
+    const mediaSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send-with-media');
+    expect(mediaSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (mediaSendCall?.[1] as { body: string }).body,
+    ) as {
+      message: string;
+      media: Array<{ filePath: string; mimeType: string; fileName: string }>;
+    };
+    expect(payload.message).toBe('你觉得美嘛？');
+    expect(payload.media).toEqual([
+      {
+        filePath: '/tmp/beauty.png',
+        mimeType: 'image/png',
+        fileName: 'beauty.png',
+      },
+    ]);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+  });
+
   it('registers a pending new session before sending video generation jobs', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
@@ -734,8 +843,16 @@ describe('chat target routing', () => {
       loading: false,
       thinkingLevel: null,
     });
-    hostApiFetchMock.mockImplementationOnce(async (url: string) => {
-      expect(url).toBe('/api/media/intent-plan');
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url.toString().startsWith('/api/sessions/transcript?')) {
+        return { messages: [] };
+      }
+      if (url === '/api/chat/send') {
+        return { success: true, result: { runId: 'run-text' } };
+      }
+      if (url !== '/api/media/intent-plan') {
+        return { success: true, result: {} };
+      }
       return {
         success: true,
         plan: {
@@ -921,12 +1038,18 @@ describe('chat target routing', () => {
     ) as {
       sessionKey: string;
       prompt: string;
+      model?: string;
+      size?: string;
+      quality?: string;
       inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
     };
 
     expect(payload).toMatchObject({
       sessionKey: 'agent:main:main',
       prompt: '帮我生成一张产品海报',
+      model: 'gpt-image-2',
+      size: '3840x2160',
+      quality: 'high',
       inputImages: [],
     });
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
@@ -1016,6 +1139,212 @@ describe('chat target routing', () => {
       message: '帮我搜索几张参考图片',
     });
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+  });
+
+  it('routes composite media plans through normal chat with an execution contract and runtime plan steps', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url.toString().startsWith('/api/sessions/transcript?')) {
+        return { messages: [] };
+      }
+      if (url === '/api/chat/send') {
+        return { success: true, result: { runId: 'run-text' } };
+      }
+      if (url !== '/api/media/intent-plan') {
+        return { success: true, result: {} };
+      }
+      return {
+        success: true,
+        plan: {
+          action: 'chat',
+          source: 'fallback',
+          confidence: 1,
+          reason: 'composite_intent_local',
+          selectedImageSource: 'none',
+          compositeTasks: [
+            {
+              id: 'poster',
+              kind: 'image_generate',
+              title: '生成活动主视觉',
+              prompt: '生成一张科技活动主视觉海报。',
+            },
+            {
+              id: 'edit-poster',
+              kind: 'image_edit',
+              title: '调整主视觉色调',
+              prompt: '把刚生成的主视觉调整为蓝色调。',
+            },
+          ],
+        },
+      };
+    });
+
+    await useChatStore.getState().sendMessage('生成一张活动主视觉，再改成蓝色调');
+
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    expect(sendCall).toBeTruthy();
+    const payload = JSON.parse((sendCall?.[1] as { body: string }).body) as {
+      sessionKey: string;
+      message: string;
+    };
+    expect(payload.sessionKey).toBe('agent:main:main');
+    expect(payload.message).toContain('【UClaw composite execution contract】');
+    expect(payload.message).toContain('自动确定一个简洁主题/标题');
+    expect(payload.message).toContain('不要询问用户先做哪个');
+    expect(payload.message).toContain('每个子任务都必须产生自己的可交付产物');
+    expect(payload.message).toContain('可以使用本轮前序子任务刚生成的图片');
+    expect(payload.message).toContain('生成活动主视觉');
+    expect(payload.message).toContain('调整主视觉色调');
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/video-generation/chat-send')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
+
+    const run = useChatStore.getState().runtimeRuns['run-text'];
+    expect(run?.planSteps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'uclaw.composite', kind: 'composite', status: 'running' }),
+      expect.objectContaining({
+        id: 'uclaw.composite.poster',
+        kind: 'composite-task',
+        parentId: 'uclaw.composite',
+        title: '生成活动主视觉',
+        requiresArtifact: true,
+      }),
+      expect.objectContaining({
+        id: 'uclaw.composite.edit-poster',
+        kind: 'composite-task',
+        parentId: 'uclaw.composite',
+        title: '调整主视觉色调',
+        detail: expect.stringContaining('刚生成图片'),
+        requiresArtifact: true,
+      }),
+    ]));
+  });
+
+  it('routes a no-attachment multi-deliverable sample pack through normal chat instead of asking for one mode', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url.toString().startsWith('/api/sessions/transcript?')) {
+        return { messages: [] };
+      }
+      if (url === '/api/chat/send') {
+        return { success: true, result: { runId: 'run-text' } };
+      }
+      if (url !== '/api/media/intent-plan') {
+        return { success: true, result: {} };
+      }
+      return {
+        success: true,
+        plan: {
+          action: 'chat',
+          source: 'fallback',
+          confidence: 1,
+          reason: 'composite_intent_local',
+          selectedImageSource: 'none',
+          compositeTasks: [
+            { id: 'task-1-image_generate', kind: 'image_generate', title: '生成图片', prompt: '生成一张未来工作台概念图。' },
+            { id: 'task-2-presentation', kind: 'presentation', title: '制作 PPT', prompt: '制作一份 AI 工作流效率提升 PPT。' },
+            { id: 'task-3-spreadsheet', kind: 'spreadsheet', title: '制作 Excel', prompt: '制作一份月度预算 Excel。' },
+            { id: 'task-4-video_generate', kind: 'video_generate', title: '生成视频', prompt: '生成一段未来城市工作台短视频。' },
+            {
+              id: 'task-5-image_edit',
+              kind: 'image_edit',
+              title: '根据图片修图',
+              prompt: '用刚生成的图片做一版暖色电影感改图。',
+              selectedImageSource: 'none',
+              dependsOn: ['task-1-image_generate'],
+              fallback: '没有显式输入图时，优先使用本轮前序图片生成子任务的结果。',
+            },
+            { id: 'task-6-mini_program', kind: 'mini_program', title: '制作小程序', prompt: '制作一个 Todo/灵感收集小工具。' },
+            { id: 'task-7-copywriting', kind: 'copywriting', title: '撰写文案', prompt: '写一版产品宣传短文。' },
+          ],
+        },
+      };
+    });
+
+    const prompt = '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个';
+    await useChatStore.getState().sendMessage(prompt);
+
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    expect(sendCall).toBeTruthy();
+    const payload = JSON.parse((sendCall?.[1] as { body: string }).body) as {
+      sessionKey: string;
+      message: string;
+    };
+    expect(payload.sessionKey).toBe('agent:main:main');
+    expect(payload.message).toContain('【UClaw composite execution contract】');
+    expect(payload.message).toContain('不要询问用户先做哪个');
+    expect(payload.message).toContain('不能用“我一次只能执行一种类型”来结束');
+    expect(payload.message).toContain('生成图片');
+    expect(payload.message).toContain('制作 PPT');
+    expect(payload.message).toContain('制作 Excel');
+    expect(payload.message).toContain('生成视频');
+    expect(payload.message).toContain('根据图片修图');
+    expect(payload.message).toContain('制作小程序');
+    expect(payload.message).toContain('撰写文案');
+    expect(payload.message).toContain('依赖：task-1-image_generate');
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/video-generation/chat-send')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
+
+    const run = useChatStore.getState().runtimeRuns['run-text'];
+    const compositeSteps = run?.planSteps.filter((step) => step.kind === 'composite-task') ?? [];
+    expect(compositeSteps).toHaveLength(7);
+    expect(compositeSteps.map((step) => step.title)).toEqual([
+      '生成图片',
+      '制作 PPT',
+      '制作 Excel',
+      '生成视频',
+      '根据图片修图',
+      '制作小程序',
+      '撰写文案',
+    ]);
+    expect(compositeSteps.every((step) => step.requiresArtifact === true)).toBe(true);
   });
 
   it('keeps automation planning requests with illustration wording on the normal chat path', async () => {
@@ -1218,7 +1547,7 @@ describe('chat target routing', () => {
     };
 
     expect(payload.durationSeconds).toBe(15);
-    expect(payload.model).toBeUndefined();
+    expect(payload.model).toBe('grok-video-1.5');
     expect(payload.inputImages).toEqual([
       {
         fileName: 'frame.png',
@@ -1290,12 +1619,14 @@ describe('chat target routing', () => {
     ) as {
       inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       candidateImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      model?: string;
       durationSeconds?: number;
     };
 
+    expect(payload.model).toBe('grok-image-video');
     expect(payload.durationSeconds).toBe(6);
     expect(payload.inputImages).toEqual([]);
-    expect(payload.candidateImages).toEqual([]);
+    expect(payload.candidateImages).toBeUndefined();
   });
 
   it('sends a previous assistant image as a candidate for explicit previous-image video prompts', async () => {
@@ -1354,10 +1685,12 @@ describe('chat target routing', () => {
     ) as {
       inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       candidateImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      model?: string;
       durationSeconds?: number;
     };
 
     expect(payload.durationSeconds).toBe(6);
+    expect(payload.model).toBe('grok-video-1.5');
     expect(payload.inputImages).toEqual([
       {
         fileName: 'old-frame.png',
@@ -1365,6 +1698,6 @@ describe('chat target routing', () => {
         filePath: '/tmp/old-frame.png',
       },
     ]);
-    expect(payload.candidateImages).toEqual([]);
+    expect(payload.candidateImages).toBeUndefined();
   });
 });
