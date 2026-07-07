@@ -224,22 +224,46 @@ function slideLayoutXml() {
 </p:sldLayout>`;
 }
 
-function rectShape(id, x, y, w, h, color) {
+const PALETTE = {
+  navy: '0B1220',
+  navy2: '111827',
+  blue: '2563EB',
+  cyan: '06B6D4',
+  green: '10B981',
+  amber: 'F59E0B',
+  red: 'EF4444',
+  purple: '8B5CF6',
+  slate: '0F172A',
+  body: '334155',
+  muted: '64748B',
+  line: 'E2E8F0',
+  bg: 'F8FAFC',
+  white: 'FFFFFF',
+};
+
+const ACCENTS = [PALETTE.blue, PALETTE.green, PALETTE.amber, PALETTE.purple, PALETTE.cyan, PALETTE.red];
+
+function rectShape(id, x, y, w, h, color, options = {}) {
+  const prst = options.prst || 'rect';
+  const line = options.lineColor
+    ? `<a:ln w="${options.lineWidth || 9525}"><a:solidFill><a:srgbClr val="${options.lineColor}"/></a:solidFill><a:prstDash val="solid"/></a:ln>`
+    : '<a:ln><a:noFill/></a:ln>';
   return `<p:sp>
   <p:nvSpPr><p:cNvPr id="${id}" name="Accent ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
-  <p:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${w}" cy="${h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>
+  <p:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${w}" cy="${h}"/></a:xfrm><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${color}"/></a:solidFill>${line}</p:spPr>
   <p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>
 </p:sp>`;
 }
 
 function paragraphXml(text, options = {}) {
   const size = Math.round((options.size ?? 24) * 100);
-  const color = options.color ?? '1F2937';
+  const color = options.color ?? PALETTE.body;
   const bold = options.bold ? ' b="1"' : '';
   const bullet = options.bullet ? '<a:buChar char="•"/>' : '';
+  const align = options.align ? ` algn="${options.align}"` : '';
   const pPr = options.bullet
-    ? `<a:pPr marL="342900" indent="-228600">${bullet}<a:defRPr sz="${size}"/></a:pPr>`
-    : `<a:pPr><a:defRPr sz="${size}"/></a:pPr>`;
+    ? `<a:pPr marL="342900" indent="-228600"${align}>${bullet}<a:defRPr sz="${size}"/></a:pPr>`
+    : `<a:pPr${align}><a:defRPr sz="${size}"/></a:pPr>`;
   return `<a:p>${pPr}<a:r><a:rPr lang="zh-CN" sz="${size}"${bold}><a:solidFill><a:srgbClr val="${color}"/></a:solidFill></a:rPr><a:t>${xml(text)}</a:t></a:r><a:endParaRPr lang="zh-CN" sz="${size}"/></a:p>`;
 }
 
@@ -254,9 +278,93 @@ function textShape(id, name, x, y, w, h, paragraphs, options = {}) {
 
 function footerShape(id, footer, slideNo) {
   const text = footer ? `${footer} · ${slideNo}` : String(slideNo);
-  return textShape(id, 'Footer', inch(0.65), inch(6.95), inch(12.0), inch(0.25), [
-    { text, size: 9, color: '64748B' },
+  return textShape(id, 'Footer', inch(0.65), inch(6.92), inch(12.0), inch(0.25), [
+    { text, size: 9, color: PALETTE.muted },
   ]);
+}
+
+function buildTitleSlideShapes(slide, nextId) {
+  const shapes = [];
+  shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, SLIDE_H, PALETTE.navy));
+  shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.18), SLIDE_H, PALETTE.blue));
+  shapes.push(rectShape(nextId++, inch(0.18), inch(0), inch(0.08), SLIDE_H, PALETTE.green));
+  shapes.push(rectShape(nextId++, inch(10.4), inch(0.65), inch(2.35), inch(0.16), PALETTE.cyan));
+  shapes.push(rectShape(nextId++, inch(11.45), inch(0.9), inch(1.1), inch(0.16), PALETTE.green));
+  shapes.push(rectShape(nextId++, inch(0.95), inch(1.0), inch(1.35), inch(0.36), PALETTE.blue, { prst: 'roundRect' }));
+  shapes.push(textShape(nextId++, 'Deck Label', inch(1.05), inch(1.075), inch(1.15), inch(0.22), [
+    { text: 'UClaw Deck', size: 10, bold: true, color: PALETTE.white, align: 'ctr' },
+  ], { anchor: 'mid' }));
+  shapes.push(textShape(nextId++, 'Title', inch(0.92), inch(2.12), inch(11.4), inch(1.15), [
+    { text: slide.title, size: slide.title.length > 22 ? 32 : 40, bold: true, color: PALETTE.white },
+  ], { anchor: 'mid' }));
+  if (slide.subtitle) {
+    shapes.push(textShape(nextId++, 'Subtitle', inch(0.98), inch(3.34), inch(10.85), inch(0.72), [
+      { text: slide.subtitle, size: 17, color: 'CBD5E1' },
+    ]));
+  }
+  shapes.push(rectShape(nextId++, inch(0.98), inch(4.42), inch(2.8), inch(0.07), PALETTE.green));
+  shapes.push(rectShape(nextId++, inch(0.98), inch(4.64), inch(1.55), inch(0.07), PALETTE.amber));
+  shapes.push(textShape(nextId++, 'Tagline', inch(0.98), inch(5.62), inch(6.8), inch(0.35), [
+    { text: '自动生成 · 可编辑 · 本地文件', size: 12, color: '94A3B8' },
+  ]));
+  return { shapes, nextId };
+}
+
+function bulletCardShapes(startId, bullets, options = {}) {
+  const shapes = [];
+  let nextId = startId;
+  const count = Math.min(Math.max(bullets.length, 1), 8);
+  const cols = count <= 3 ? 1 : 2;
+  const rows = Math.ceil(count / cols);
+  const x0 = inch(0.78);
+  const y0 = inch(options.y ?? 1.55);
+  const gapX = inch(0.28);
+  const gapY = inch(0.22);
+  const cardW = cols === 1 ? inch(11.78) : inch(5.75);
+  const cardH = Math.min(inch(1.18), Math.floor((inch(5.1) - gapY * (rows - 1)) / rows));
+  const textSize = rows >= 4 ? 13 : rows === 3 ? 15 : 17;
+
+  bullets.slice(0, count).forEach((text, index) => {
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    const x = x0 + col * (cardW + gapX);
+    const y = y0 + row * (cardH + gapY);
+    const accent = ACCENTS[index % ACCENTS.length];
+    shapes.push(rectShape(nextId++, x, y, cardW, cardH, PALETTE.white, { prst: 'roundRect', lineColor: PALETTE.line }));
+    shapes.push(rectShape(nextId++, x, y, inch(0.10), cardH, accent, { prst: 'rect' }));
+    shapes.push(rectShape(nextId++, x + inch(0.34), y + inch(0.28), inch(0.46), inch(0.46), accent, { prst: 'ellipse' }));
+    shapes.push(textShape(nextId++, `No ${index + 1}`, x + inch(0.34), y + inch(0.35), inch(0.46), inch(0.20), [
+      { text: String(index + 1).padStart(2, '0'), size: 8, bold: true, color: PALETTE.white, align: 'ctr' },
+    ], { anchor: 'mid' }));
+    shapes.push(textShape(nextId++, `Point ${index + 1}`, x + inch(0.98), y + inch(0.20), cardW - inch(1.22), cardH - inch(0.30), [
+      { text, size: textSize, color: PALETTE.body },
+    ], { anchor: 'mid' }));
+  });
+  return { shapes, nextId };
+}
+
+function buildContentSlideShapes(slide, index, nextId) {
+  const shapes = [];
+  shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, SLIDE_H, PALETTE.bg));
+  shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.12), ACCENTS[index % ACCENTS.length]));
+  shapes.push(rectShape(nextId++, inch(12.65), inch(0.12), inch(0.18), inch(6.55), ACCENTS[(index + 2) % ACCENTS.length]));
+  shapes.push(textShape(nextId++, 'Section', inch(0.66), inch(0.34), inch(1.25), inch(0.25), [
+    { text: `/${String(index).padStart(2, '0')}`, size: 11, bold: true, color: ACCENTS[index % ACCENTS.length] },
+  ]));
+  shapes.push(textShape(nextId++, 'Slide Title', inch(0.65), inch(0.66), inch(11.35), inch(0.52), [
+    { text: slide.title, size: slide.title.length > 24 ? 22 : 25, bold: true, color: PALETTE.slate },
+  ]));
+  if (slide.subtitle) {
+    shapes.push(textShape(nextId++, 'Subtitle', inch(0.67), inch(1.16), inch(10.9), inch(0.30), [
+      { text: slide.subtitle, size: 11, color: PALETTE.muted },
+    ]));
+  }
+
+  const bullets = (slide.bullets.length > 0 ? slide.bullets : [' ']).slice(0, 8);
+  const cardResult = bulletCardShapes(nextId, bullets, { y: slide.subtitle ? 1.62 : 1.45 });
+  shapes.push(...cardResult.shapes);
+  nextId = cardResult.nextId;
+  return { shapes, nextId };
 }
 
 function slideXml(slide, index, footer) {
@@ -264,33 +372,13 @@ function slideXml(slide, index, footer) {
   let nextId = 2;
 
   if (slide.kind === 'title') {
-    shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.16), SLIDE_H, '2563EB'));
-    shapes.push(textShape(nextId++, 'Title', inch(0.75), inch(2.05), inch(11.8), inch(0.9), [
-      { text: slide.title, size: 38, bold: true, color: '0F172A' },
-    ], { anchor: 'mid' }));
-    if (slide.subtitle) {
-      shapes.push(textShape(nextId++, 'Subtitle', inch(0.78), inch(3.05), inch(11.4), inch(0.6), [
-        { text: slide.subtitle, size: 18, color: '475569' },
-      ]));
-    }
-    shapes.push(rectShape(nextId++, inch(0.78), inch(3.9), inch(2.2), inch(0.06), '10B981'));
+    const result = buildTitleSlideShapes(slide, nextId);
+    shapes.push(...result.shapes);
+    nextId = result.nextId;
   } else {
-    shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.12), '2563EB'));
-    shapes.push(textShape(nextId++, 'Slide Title', inch(0.65), inch(0.42), inch(12.0), inch(0.65), [
-      { text: slide.title, size: 27, bold: true, color: '0F172A' },
-    ]));
-    if (slide.subtitle) {
-      shapes.push(textShape(nextId++, 'Subtitle', inch(0.67), inch(1.1), inch(12.0), inch(0.35), [
-        { text: slide.subtitle, size: 12, color: '64748B' },
-      ]));
-    }
-    const bullets = (slide.bullets.length > 0 ? slide.bullets : [' ']).slice(0, 9);
-    shapes.push(textShape(nextId++, 'Bullets', inch(0.9), inch(slide.subtitle ? 1.58 : 1.35), inch(11.55), inch(5.2), bullets.map((text) => ({
-      text,
-      bullet: true,
-      size: bullets.length > 6 ? 17 : 20,
-      color: '1F2937',
-    }))));
+    const result = buildContentSlideShapes(slide, index, nextId);
+    shapes.push(...result.shapes);
+    nextId = result.nextId;
   }
 
   shapes.push(footerShape(nextId++, footer, index + 1));

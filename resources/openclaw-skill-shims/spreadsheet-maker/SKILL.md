@@ -12,6 +12,7 @@ metadata: { "openclaw": { "emoji": "📊" } }
 
 - 面向用户的进度、解释和最终回复必须使用简体中文，除非用户明确要求其他语言。
 - 优先调用 `create_xlsx_file` 生成真实 `.xlsx` 文件。
+- 用户说“做完打开/生成后打开”时设置 `openAfterCreate: true`，不要再额外调用 `exec open`。
 - 不要只输出 Markdown 表格或制作计划来代替文件。
 - 第一行通常作为表头，除非用户明确给了不同结构。
 - 多主题数据优先拆成多个 sheet。

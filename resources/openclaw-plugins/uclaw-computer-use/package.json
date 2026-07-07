@@ -1,6 +1,6 @@
 {
   "name": "uclaw-computer-use-plugin",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "UClaw local computer-use tools for OpenClaw",
   "private": true,
   "type": "module",

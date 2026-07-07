@@ -36,7 +36,11 @@ describe('presentation-maker skill', () => {
     expect(zip.file('ppt/slides/slide1.xml')).toBeTruthy();
     expect(zip.file('ppt/slides/slide2.xml')).toBeTruthy();
     expect(zip.file('ppt/slides/slide3.xml')).toBeTruthy();
+    const coverXml = await zip.file('ppt/slides/slide1.xml')?.async('string');
+    expect(coverXml).toContain('0B1220');
+    expect(coverXml).toContain('UClaw Deck');
     const slideXml = await zip.file('ppt/slides/slide2.xml')?.async('string');
     expect(slideXml).toContain('执行摘要');
+    expect(slideXml).toContain('roundRect');
   });
 });

@@ -6,6 +6,9 @@ import { describe, expect, it } from 'vitest';
 
 type RegisteredTool = {
   name: string;
+  parameters?: {
+    properties?: Record<string, unknown>;
+  };
   execute: (toolCallId: string, params: unknown, signal?: AbortSignal, onUpdate?: unknown) => Promise<unknown>;
 };
 
@@ -31,6 +34,9 @@ describe('uclaw-computer-use office artifact tools', () => {
       'create_docx_file',
       'create_xlsx_file',
     ]));
+    expect(tools.get('create_pptx_file')?.parameters?.properties).toHaveProperty('openAfterCreate');
+    expect(tools.get('create_docx_file')?.parameters?.properties).toHaveProperty('openAfterCreate');
+    expect(tools.get('create_xlsx_file')?.parameters?.properties).toHaveProperty('openAfterCreate');
 
     const root = mkdtempSync(join(tmpdir(), 'uclaw-office-artifacts-'));
     const cases = [

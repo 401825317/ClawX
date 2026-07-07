@@ -21,6 +21,7 @@ const LOCAL_ACTION_CONTEXT = [
   '- 用户要求生成 PPT/PPTX 时，优先调用 create_pptx_file 创建真实 .pptx 文件；不要只输出大纲或制作计划。',
   '- 用户要求生成 Word/DOCX/文档/报告时，优先调用 create_docx_file 创建真实 .docx 文件；不要只输出正文。',
   '- 用户要求生成 Excel/XLSX/表格时，优先调用 create_xlsx_file 创建真实 .xlsx 文件；不要只输出 Markdown 表格。',
+  '- 用户要求“生成后打开/做完打开”时，在 create_pptx_file/create_docx_file/create_xlsx_file 中设置 openAfterCreate=true，不要再额外调用 exec/open。',
   '- 继续使用可用工具，直到请求的本地动作完成并验证、失败且有具体阻塞点，或需要用户明确确认。',
   '- 最终回复必须报告已验证的结果或具体阻塞点，不要只报告准备做什么。',
 ].join('\n');
@@ -127,6 +128,10 @@ const BROWSER_TARGET_PROPERTIES = {
 const ARTIFACT_OUTPUT_PATH_PROPERTY = {
   type: 'string',
   description: 'Optional absolute output file path. If omitted, UClaw writes a non-overwriting file under the user Downloads/UClaw folder.',
+};
+const ARTIFACT_OPEN_AFTER_CREATE_PROPERTY = {
+  type: 'boolean',
+  description: 'Open the created file with the system default application after it is written. Set true when the user asks to open the file after creation.',
 };
 const ARTIFACT_TITLE_PROPERTY = {
   type: 'string',
@@ -239,6 +244,56 @@ async function artifactResult(kind, filePath, extra = {}) {
   };
 }
 
+function openArtifactFile(filePath) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let command;
+    let args;
+    if (process.platform === 'darwin') {
+      command = 'open';
+      args = [filePath];
+    } else if (process.platform === 'win32') {
+      command = 'cmd';
+      args = ['/c', 'start', '', filePath];
+    } else {
+      command = 'xdg-open';
+      args = [filePath];
+    }
+
+    const child = spawn(command, args, {
+      detached: process.platform !== 'win32',
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      rejectPromise(new Error(`Timed out opening ${filePath}`));
+    }, 15_000);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        rejectPromise(new Error(`Open command exited with code ${code}`));
+      }
+    });
+    child.unref?.();
+  });
+}
+
+async function maybeOpenArtifact(filePath, params = {}) {
+  if (!params.openAfterCreate) return {};
+  try {
+    await openArtifactFile(filePath);
+    return { opened: true };
+  } catch (error) {
+    return { opened: false, openError: error?.message || String(error) };
+  }
+}
+
 function packageRelsXml(target) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="${PACKAGE_REL_NS}">
@@ -334,17 +389,18 @@ function wordStylesXml() {
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
     <w:name w:val="Normal"/>
     <w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/><w:rFonts w:ascii="Arial" w:eastAsia="Microsoft YaHei" w:hAnsi="Arial"/></w:rPr>
+    <w:pPr><w:spacing w:after="120" w:line="360" w:lineRule="auto"/></w:pPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Title">
     <w:name w:val="Title"/>
     <w:basedOn w:val="Normal"/>
-    <w:rPr><w:b/><w:sz w:val="40"/><w:szCs w:val="40"/></w:rPr>
-    <w:pPr><w:spacing w:after="360"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="0F172A"/><w:sz w:val="44"/><w:szCs w:val="44"/></w:rPr>
+    <w:pPr><w:spacing w:after="420"/><w:jc w:val="center"/></w:pPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Heading1">
     <w:name w:val="heading 1"/>
     <w:basedOn w:val="Normal"/>
-    <w:rPr><w:b/><w:sz w:val="30"/><w:szCs w:val="30"/></w:rPr>
+    <w:rPr><w:b/><w:color w:val="2563EB"/><w:sz w:val="30"/><w:szCs w:val="30"/></w:rPr>
     <w:pPr><w:spacing w:before="280" w:after="160"/></w:pPr>
   </w:style>
 </w:styles>`;
@@ -374,7 +430,8 @@ async function createDocxArtifact(params = {}) {
   const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
   await writeFile(outputPath, buffer);
   console.log(`[uclaw-artifact] create_docx_file wrote ${outputPath} (${buffer.length} bytes)`);
-  return artifactResult('docx', outputPath, { title, sections: sections.length });
+  const openState = await maybeOpenArtifact(outputPath, params);
+  return artifactResult('docx', outputPath, { title, sections: sections.length, ...openState });
 }
 
 function sanitizeSheetName(name, index) {
@@ -410,21 +467,29 @@ function columnName(index) {
 }
 
 function worksheetXml(rows) {
+  const columnCount = Math.max(1, ...rows.map((row) => row.length));
+  const columnWidths = Array.from({ length: columnCount }, (_, index) => {
+    const maxLen = Math.max(8, ...rows.map((row) => cleanText(row[index] ?? '').length));
+    return Math.min(36, Math.max(10, maxLen + 4));
+  });
+  const colsXml = `<cols>${columnWidths.map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join('')}</cols>`;
   const rowXml = rows.map((row, rowIndex) => {
     const cells = row.map((cell, cellIndex) => {
       const ref = `${columnName(cellIndex)}${rowIndex + 1}`;
+      const style = rowIndex === 0 ? ' s="1"' : ' s="2"';
       if (typeof cell === 'number' && Number.isFinite(cell)) {
-        return `<c r="${ref}"><v>${cell}</v></c>`;
+        return `<c r="${ref}"${style}><v>${cell}</v></c>`;
       }
       if (typeof cell === 'boolean') {
-        return `<c r="${ref}" t="b"><v>${cell ? 1 : 0}</v></c>`;
+        return `<c r="${ref}" t="b"${style}><v>${cell ? 1 : 0}</v></c>`;
       }
-      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xml(cell ?? '')}</t></is></c>`;
+      return `<c r="${ref}" t="inlineStr"${style}><is><t xml:space="preserve">${xml(cell ?? '')}</t></is></c>`;
     }).join('');
-    return `<row r="${rowIndex + 1}">${cells}</row>`;
+    return `<row r="${rowIndex + 1}"${rowIndex === 0 ? ' ht="24" customHeight="1"' : ''}>${cells}</row>`;
   }).join('\n');
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="${SPREADSHEET_NS}" xmlns:r="${OFFICE_REL_NS}">
+${colsXml}
   <sheetData>
 ${rowXml}
   </sheetData>
@@ -470,7 +535,27 @@ ${sheets.map((_, index) => `  <Override PartName="/xl/worksheets/sheet${index + 
   zip.file('xl/workbook.xml', workbookXml(sheets));
   zip.file('xl/_rels/workbook.xml.rels', workbookRelsXml(sheets));
   zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="${SPREADSHEET_NS}"><fonts count="1"><font><sz val="11"/><name val="Arial"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
+<styleSheet xmlns="${SPREADSHEET_NS}">
+  <fonts count="2">
+    <font><sz val="11"/><color rgb="FF111827"/><name val="Arial"/></font>
+    <font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF2563EB"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border/>
+    <border><left style="thin"><color rgb="FFE2E8F0"/></left><right style="thin"><color rgb="FFE2E8F0"/></right><top style="thin"><color rgb="FFE2E8F0"/></top><bottom style="thin"><color rgb="FFE2E8F0"/></bottom></border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="3">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf>
+  </cellXfs>
+</styleSheet>`);
   sheets.forEach((sheet, index) => {
     zip.file(`xl/worksheets/sheet${index + 1}.xml`, worksheetXml(sheet.rows));
   });
@@ -479,7 +564,8 @@ ${sheets.map((_, index) => `  <Override PartName="/xl/worksheets/sheet${index + 
   const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
   await writeFile(outputPath, buffer);
   console.log(`[uclaw-artifact] create_xlsx_file wrote ${outputPath} (${buffer.length} bytes, sheets=${sheets.length})`);
-  return artifactResult('xlsx', outputPath, { title, sheets: sheets.map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })) });
+  const openState = await maybeOpenArtifact(outputPath, params);
+  return artifactResult('xlsx', outputPath, { title, sheets: sheets.map((sheet) => ({ name: sheet.name, rows: sheet.rows.length })), ...openState });
 }
 
 function normalizeDeck(params = {}) {
@@ -553,7 +639,8 @@ async function createPptxArtifact(params = {}) {
   await writeFile(inputPath, JSON.stringify(deck, null, 2), 'utf8');
   await spawnNode(script, ['--input', inputPath, '--out', outputPath], { timeoutMs: 60_000 });
   console.log(`[uclaw-artifact] create_pptx_file wrote ${outputPath} (slides=${deck.slides.length}, generator=${script})`);
-  return artifactResult('pptx', outputPath, { title: deck.title, slides: deck.slides.length });
+  const openState = await maybeOpenArtifact(outputPath, params);
+  return artifactResult('pptx', outputPath, { title: deck.title, slides: deck.slides.length, ...openState });
 }
 
 function resolveHostApiOrigin() {
@@ -903,6 +990,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Slides to create. Prefer concise Chinese slide titles and 3-7 bullet points per slide unless the user asks otherwise.',
           },
           outputPath: ARTIFACT_OUTPUT_PATH_PROPERTY,
+          openAfterCreate: ARTIFACT_OPEN_AFTER_CREATE_PROPERTY,
         },
       },
       execute: async (params) => createPptxArtifact(params || {}),
@@ -942,6 +1030,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Optional document sections. Prefer this for multi-section reports.',
           },
           outputPath: ARTIFACT_OUTPUT_PATH_PROPERTY,
+          openAfterCreate: ARTIFACT_OPEN_AFTER_CREATE_PROPERTY,
         },
       },
       execute: async (params) => createDocxArtifact(params || {}),
@@ -1002,6 +1091,7 @@ export const pluginEntry = defineToolPlugin({
             description: 'Optional multiple worksheets. Use this instead of rows for multi-sheet workbooks.',
           },
           outputPath: ARTIFACT_OUTPUT_PATH_PROPERTY,
+          openAfterCreate: ARTIFACT_OPEN_AFTER_CREATE_PROPERTY,
         },
       },
       execute: async (params) => createXlsxArtifact(params || {}),
