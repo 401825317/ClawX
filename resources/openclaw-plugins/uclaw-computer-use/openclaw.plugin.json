@@ -2,7 +2,7 @@
   "id": "uclaw-computer-use",
   "name": "UClaw Computer Use",
   "description": "Local desktop computer-use tools provided by the UClaw Electron host.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "entry": "index.mjs",
   "enabledByDefault": false,
   "contracts": {

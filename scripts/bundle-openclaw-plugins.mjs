@@ -215,18 +215,67 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
   const dependencies = Object.keys(pkg.dependencies || {});
   if (dependencies.length === 0) return;
 
-  const outputNodeModules = path.join(outputDir, 'node_modules');
-  fs.mkdirSync(outputNodeModules, { recursive: true });
+  const SKIP_PACKAGES = new Set(['typescript', '@playwright/test']);
+  const SKIP_SCOPES = ['@types/'];
+  for (const peer of Object.keys(pkg.peerDependencies || {})) {
+    SKIP_PACKAGES.add(peer);
+  }
+
+  const collected = new Map();
+  const queue = [];
   for (const depName of dependencies) {
     const depPath = path.join(NODE_MODULES, ...depName.split('/'));
     if (!fs.existsSync(depPath)) {
       throw new Error(`Missing dependency "${depName}" for local plugin "${pluginId}". Run pnpm install first.`);
     }
     const realDepPath = fs.realpathSync(depPath);
+    collected.set(realDepPath, depName);
+    const rootVirtualNM = getVirtualStoreNodeModules(realDepPath);
+    if (rootVirtualNM) {
+      queue.push({ nodeModulesDir: rootVirtualNM, skipPkg: depName });
+    }
+  }
+
+  while (queue.length > 0) {
+    const { nodeModulesDir, skipPkg } = queue.shift();
+    for (const { name, fullPath } of listPackages(nodeModulesDir)) {
+      if (name === skipPkg) continue;
+      if (SKIP_PACKAGES.has(name) || SKIP_SCOPES.some((s) => name.startsWith(s))) continue;
+
+      let realPath;
+      try {
+        realPath = fs.realpathSync(fullPath);
+      } catch {
+        continue;
+      }
+      if (collected.has(realPath)) continue;
+      collected.set(realPath, name);
+
+      const depVirtualNM = getVirtualStoreNodeModules(realPath);
+      if (depVirtualNM && depVirtualNM !== nodeModulesDir) {
+        queue.push({ nodeModulesDir: depVirtualNM, skipPkg: name });
+      }
+    }
+  }
+
+  const outputNodeModules = path.join(outputDir, 'node_modules');
+  fs.mkdirSync(outputNodeModules, { recursive: true });
+  const copiedNames = new Set();
+  let copiedCount = 0;
+  let skippedDupes = 0;
+  for (const [realDepPath, depName] of collected) {
+    if (copiedNames.has(depName)) {
+      skippedDupes++;
+      continue;
+    }
+    copiedNames.add(depName);
     const depOutputPath = path.join(outputNodeModules, depName);
     fs.mkdirSync(normWin(path.dirname(depOutputPath)), { recursive: true });
     fs.cpSync(normWin(realDepPath), normWin(depOutputPath), { recursive: true, dereference: true });
+    copiedCount++;
   }
+
+  echo`   ✅ ${pluginId}: copied ${copiedCount} local deps (skipped dupes: ${skippedDupes})`;
 }
 
 /**

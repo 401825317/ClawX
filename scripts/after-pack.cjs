@@ -724,6 +724,31 @@ exports.default = async function afterPack(context) {
     }
   }
 
+  const LOCAL_PLUGIN_IDS = [
+    'clawx-openai-image',
+    'uclaw-computer-use',
+  ];
+
+  for (const pluginId of LOCAL_PLUGIN_IDS) {
+    const buildPluginDir = join(__dirname, '..', 'build', 'openclaw-plugins', pluginId);
+    const pluginDestDir = join(pluginsDestRoot, pluginId);
+    if (!existsSync(buildPluginDir)) {
+      throw new Error(
+        `[after-pack] Missing bundled local plugin mirror: ${buildPluginDir}. Run \`pnpm run package\` before electron-builder.`,
+      );
+    }
+    console.log(`[after-pack] Copying local plugin ${pluginId} -> ${pluginDestDir}`);
+    rmSync(pluginDestDir, { recursive: true, force: true });
+    cpSync(buildPluginDir, pluginDestDir, { recursive: true, dereference: true });
+    cleanupUnnecessaryFiles(pluginDestDir);
+    const pluginNM = join(pluginDestDir, 'node_modules');
+    if (existsSync(pluginNM)) {
+      cleanupKoffi(pluginNM, platform, arch);
+      cleanupNativePlatformPackages(pluginNM, platform, arch);
+    }
+    patchPluginIds(pluginDestDir, pluginId);
+  }
+
   // 1.2 Copy built-in extension node_modules that electron-builder skipped.
   //     OpenClaw 3.31+ ships built-in extensions (discord, qqbot, etc.) under
   //     dist/extensions/<ext>/node_modules/. These are skipped by extraResources
