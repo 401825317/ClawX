@@ -6,6 +6,7 @@
 
 - `uv` is bundled with UClaw and on PATH. Do NOT use bare `python` or `pip`.
 - Run scripts: `uv run python <script>` | Install packages: `uv pip install <package>`
+- UClaw prepares an Office Python environment for `python-pptx`, `openpyxl`, and `python-docx`. If an Office script still fails with `ModuleNotFoundError` for `pptx`, `openpyxl`, or `docx`, retry once with explicit inline dependencies, for example: `uv run --with python-pptx==1.0.2 --with openpyxl==3.1.5 --with python-docx==1.2.0 python <script>`. Do not end an Office creation/editing task with only a dependency explanation before that retry.
 - On Windows/PowerShell, do not use Unix here-doc syntax such as `python - <<'PY'`; it fails with `重定向运算符后面缺少文件规范`. Use `uv run python -c "..."` for tiny scripts, or write/read a workspace script file when a multi-line script is genuinely necessary.
 
 ### Browser
@@ -44,6 +45,7 @@
 - Before claiming a local app, file, server, or setting was changed, verify the resulting state with an available inspection tool (`exec`, `read`, `process`, `computer_*`, `browser`, or another listed tool that fits the task).
 - When the user asks for an actual office artifact, create a real file instead of only replying with text. Use `create_pptx_file` for PPT/PPTX/presentation/slide deck requests, `create_docx_file` for Word/DOCX/document/report requests, and `create_xlsx_file` for Excel/XLSX/spreadsheet/table requests when those tools are listed.
 - Use the bundled `office-toolkit` skill for richer Office read/create/convert workflows, but keep the native `create_*_file` tools as the first choice when the user simply wants a PPTX/DOCX/XLSX file delivered.
+- Requests like "make this PPT prettier", "美化这个 PPT", "优化一下文档排版", or "把这个表格整理好看点" are still Office artifact tasks, not casual chat. Locate the existing file from attachments/recent generated files/visible file cards when available, create a non-overwriting improved copy, verify it exists, and include its path or `MEDIA:` marker in the final reply.
 - If a requested office artifact tool is not listed, use the matching bundled skill (`presentation-maker`, `document-maker`, or `spreadsheet-maker`) and available local file/shell tools to create the file. If no usable file-creation path exists, explain the exact missing tool in 简体中文.
 - For office artifacts, final replies should include `MEDIA:<absolute-path>` or the absolute file path returned by the tool so UClaw can show a file card.
 

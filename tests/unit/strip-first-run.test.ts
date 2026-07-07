@@ -27,6 +27,7 @@ import {
 } from '../../electron/utils/openclaw-workspace';
 
 beforeEach(async () => {
+  delete process.env.CLAWX_ENABLE_CONTEXT_MERGE;
   await rm(testHome, { recursive: true, force: true });
 });
 
@@ -234,7 +235,28 @@ describe('ensureClawXDefaultIdentity', () => {
 });
 
 describe('ensureClawXContext', () => {
+  it('does not create or merge workspace context unless explicitly enabled', async () => {
+    const openclawDir = join(testHome, '.openclaw');
+    const defaultWorkspace = join(openclawDir, 'workspace');
+    await mkdir(defaultWorkspace, { recursive: true });
+    await writeFile(
+      join(openclawDir, 'openclaw.json'),
+      JSON.stringify({
+        agents: {
+          defaults: { workspace: defaultWorkspace },
+        },
+      }),
+      'utf-8',
+    );
+
+    await ensureClawXContext();
+
+    await expect(access(join(defaultWorkspace, 'AGENTS.md'))).rejects.toThrow();
+    await expect(access(join(defaultWorkspace, 'TOOLS.md'))).rejects.toThrow();
+  });
+
   it('seeds missing default workspace context files before merging ClawX instructions', async () => {
+    process.env.CLAWX_ENABLE_CONTEXT_MERGE = '1';
     const openclawDir = join(testHome, '.openclaw');
     const defaultWorkspace = join(openclawDir, 'workspace');
     await mkdir(defaultWorkspace, { recursive: true });
@@ -255,6 +277,7 @@ describe('ensureClawXContext', () => {
   });
 
   it('does not wait for missing files in non-default agent workspaces', async () => {
+    process.env.CLAWX_ENABLE_CONTEXT_MERGE = '1';
     const openclawDir = join(testHome, '.openclaw');
     const defaultWorkspace = join(openclawDir, 'workspace-main');
     const agentWorkspace = join(openclawDir, 'workspace-agent');
@@ -288,6 +311,7 @@ describe('ensureClawXContext', () => {
   });
 
   it('does not wait for missing external default workspaces', async () => {
+    process.env.CLAWX_ENABLE_CONTEXT_MERGE = '1';
     const openclawDir = join(testHome, '.openclaw');
     const externalWorkspace = join(testHome, '..', `external-missing-${Date.now()}`);
     await mkdir(openclawDir, { recursive: true });

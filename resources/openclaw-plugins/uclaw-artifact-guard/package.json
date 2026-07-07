@@ -1,0 +1,16 @@
+{
+  "name": "uclaw-artifact-guard-plugin",
+  "version": "0.1.0",
+  "description": "UClaw artifact delivery completion guard for OpenClaw",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

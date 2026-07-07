@@ -50,6 +50,7 @@ const PLUGINS = [
 const LOCAL_PLUGINS = [
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'), pluginId: 'clawx-openai-image' },
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-computer-use'), pluginId: 'uclaw-computer-use' },
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-artifact-guard'), pluginId: 'uclaw-artifact-guard' },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {

@@ -2290,6 +2290,8 @@ describe('batchSyncConfigFields', () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.restoreAllMocks();
+    delete process.env.CLAWX_ENABLE_UCLAW_COMPUTER_USE;
+    delete process.env.CLAWX_DISABLE_ARTIFACT_GUARD;
     getSettingMock.mockImplementation(async (key: string) => {
       if (key === 'gatewayPort') return 18789;
       return undefined;
@@ -2415,7 +2417,7 @@ describe('batchSyncConfigFields', () => {
     expect(ssrfPolicy.allowIpv6UniqueLocalRange).toBe(false);
   });
 
-  it('enables hook access for the UClaw computer-use local-action guards', async () => {
+  it('disables UClaw computer-use by default to keep OpenClaw closer to vanilla behavior', async () => {
     await writeOpenClawJson({
       gateway: { auth: { mode: 'token', token: 'old' } },
       plugins: {
@@ -2435,6 +2437,68 @@ describe('batchSyncConfigFields', () => {
     const config = await readOpenClawJson();
     const plugins = config.plugins as Record<string, unknown>;
     const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(plugins.allow).not.toContain('uclaw-computer-use');
+    expect(plugins.allow).toContain('uclaw-artifact-guard');
+    expect(entries['uclaw-computer-use']).toEqual({
+      enabled: false,
+      config: { preserved: true },
+      hooks: { allowConversationAccess: false, allowPromptInjection: false },
+    });
+    expect(entries['uclaw-artifact-guard']).toEqual({
+      enabled: true,
+      hooks: { allowConversationAccess: true, allowPromptInjection: true },
+    });
+  });
+
+  it('can disable UClaw artifact guard with CLAWX_DISABLE_ARTIFACT_GUARD=1', async () => {
+    process.env.CLAWX_DISABLE_ARTIFACT_GUARD = '1';
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      plugins: {
+        allow: ['uclaw-artifact-guard'],
+        entries: {
+          'uclaw-artifact-guard': {
+            enabled: true,
+          },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(plugins.allow).not.toContain('uclaw-artifact-guard');
+    expect(entries['uclaw-artifact-guard']).toEqual({
+      enabled: false,
+      hooks: { allowConversationAccess: false, allowPromptInjection: false },
+    });
+  });
+
+  it('can re-enable UClaw computer-use with CLAWX_ENABLE_UCLAW_COMPUTER_USE=1', async () => {
+    process.env.CLAWX_ENABLE_UCLAW_COMPUTER_USE = '1';
+    await writeOpenClawJson({
+      gateway: { auth: { mode: 'token', token: 'old' } },
+      plugins: {
+        allow: ['uclaw-computer-use'],
+        entries: {
+          'uclaw-computer-use': {
+            enabled: true,
+            config: { preserved: true },
+          },
+        },
+      },
+    });
+
+    const { batchSyncConfigFields } = await import('@electron/utils/openclaw-auth');
+    await batchSyncConfigFields('new-token');
+
+    const config = await readOpenClawJson();
+    const plugins = config.plugins as Record<string, unknown>;
+    const entries = plugins.entries as Record<string, Record<string, unknown>>;
+    expect(plugins.allow).toContain('uclaw-computer-use');
     expect(entries['uclaw-computer-use']).toEqual({
       enabled: true,
       config: { preserved: true },

@@ -11,9 +11,16 @@ import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-fin
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 
+const ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_BROWSER_PATCH === '1';
+const ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH === '1';
+
 try {
-  patchInstalledOpenClawBrowserRuntime();
-  patchInstalledOpenClawFinalizeLocalActionRuntime();
+  if (ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH) {
+    patchInstalledOpenClawBrowserRuntime();
+  }
+  if (ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH) {
+    patchInstalledOpenClawFinalizeLocalActionRuntime();
+  }
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
 } catch {

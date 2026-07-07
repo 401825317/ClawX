@@ -27,6 +27,7 @@ import {
   isOpenClawPresent,
 } from '../utils/paths';
 import { getUvMirrorEnv } from '../utils/uv-env';
+import { getGatewayOfficePythonEnvPatch } from '../utils/uv-setup';
 import { cleanupDanglingWeChatPluginState, listConfiguredChannelsFromConfig, readOpenClawConfig } from '../utils/channel-config';
 import { repairMissingWeChatMainBindings } from '../utils/agent-config';
 import { sanitizeOpenClawConfig, batchSyncConfigFields } from '../utils/openclaw-auth';
@@ -34,7 +35,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawComputerUsePluginInstalled, ensureUClawArtifactGuardPluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -83,13 +84,32 @@ const CHANNEL_PLUGIN_MAP: Record<string, { dirName: string; npmName: string }> =
 };
 
 const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
+const ENABLE_UCLAW_COMPUTER_USE_CORE_PLUGIN = process.env.CLAWX_ENABLE_UCLAW_COMPUTER_USE === '1';
+const ENABLE_UCLAW_ARTIFACT_GUARD_CORE_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 
 function ensureCoreUClawPluginsInstalled(): boolean {
+  let installed = false;
+
+  if (ENABLE_UCLAW_ARTIFACT_GUARD_CORE_PLUGIN) {
+    const result = ensureUClawArtifactGuardPluginInstalled();
+    if (result.warning) {
+      logger.warn(`[plugin] UClaw Artifact Guard: ${result.warning}`);
+    }
+    installed = result.installed || installed;
+  } else {
+    logger.info('[plugin] UClaw Artifact Guard disabled; skipping core plugin install');
+  }
+
+  if (!ENABLE_UCLAW_COMPUTER_USE_CORE_PLUGIN) {
+    logger.info('[plugin] UClaw Computer Use temporarily disabled; skipping core plugin install');
+    return installed;
+  }
+
   const result = ensureUClawComputerUsePluginInstalled();
   if (result.warning) {
     logger.warn(`[plugin] UClaw Computer Use: ${result.warning}`);
   }
-  return result.installed;
+  return result.installed || installed;
 }
 
 function isParallelWebSearchConfigured(config: unknown): boolean {
@@ -681,8 +701,16 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
   const baseEnvPatched = binPathExists
     ? prependPathEntry(baseEnvRecord, binPath).env
     : baseEnvRecord;
+  const officePythonEnv = getGatewayOfficePythonEnvPatch(baseEnvPatched);
+  if (!officePythonEnv.enabled) {
+    logger.info('UClaw Office Python environment injection disabled for gateway');
+  } else if (officePythonEnv.present) {
+    logger.info(`Using UClaw Office Python environment for gateway: ${officePythonEnv.venvPath}`);
+  } else {
+    logger.info(`UClaw Office Python environment not present yet: ${officePythonEnv.venvPath}`);
+  }
   const forkEnv: Record<string, string | undefined> = {
-    ...stripSystemdSupervisorEnv(baseEnvPatched),
+    ...stripSystemdSupervisorEnv(officePythonEnv.env),
     ...providerEnv,
     ...uvEnv,
     ...proxyEnv,

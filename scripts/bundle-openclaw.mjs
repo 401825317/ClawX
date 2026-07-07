@@ -29,6 +29,8 @@ const ROOT = path.resolve(__dirname, '..');
 const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
 const OPENCLAW_SKILL_SHIMS = path.join(ROOT, 'resources', 'openclaw-skill-shims');
+const ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_BROWSER_PATCH === '1';
+const ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH === '1';
 
 function isJunFeiAIManagedDistribution() {
   return process.env.CLAWX_MANAGED_PROVIDER !== '0';
@@ -1044,11 +1046,13 @@ function patchBundledRuntime(outputDir) {
   // Keep UClaw's packaged browser tool resilient across transient errors,
   // stale target IDs, stale refs, and lightweight observation summaries.
   const distDir = path.join(outputDir, 'dist');
-  const browserPatch = patchOpenClawBrowserRuntime(distDir, {
-    logger: { log: (message) => echo`   ${message}` },
-  });
-  if (browserPatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${browserPatch.patchedFiles} browser runtime file(s)`;
+  if (ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH) {
+    const browserPatch = patchOpenClawBrowserRuntime(distDir, {
+      logger: { log: (message) => echo`   ${message}` },
+    });
+    if (browserPatch.patchedFiles > 0) {
+      echo`   🩹 Patched ${browserPatch.patchedFiles} browser runtime file(s)`;
+    }
   }
 
   // --- Local action finalization patch ---
@@ -1056,11 +1060,13 @@ function patchBundledRuntime(outputDir) {
   // deterministic side effects. UClaw needs one narrow exception for the
   // computer-use hook that catches final replies like "I will install it now"
   // after browser/exec activity.
-  const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {
-    logger: { log: (message) => echo`   ${message}` },
-  });
-  if (localActionFinalizePatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} local-action finalize runtime file(s)`;
+  if (ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH) {
+    const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {
+      logger: { log: (message) => echo`   ${message}` },
+    });
+    if (localActionFinalizePatch.patchedFiles > 0) {
+      echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} local-action finalize runtime file(s)`;
+    }
   }
 
   // --- Reply session initialization conflict patch ---

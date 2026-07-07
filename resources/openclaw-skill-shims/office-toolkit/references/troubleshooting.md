@@ -15,7 +15,7 @@
 | `转换失败（已重试 3 次）` | 文件被占用/Office 异常/文件过大 | 见下方"转换失败"详细排查 |
 | `文件过大 (XXMB)，超过 100MB 限制` | 超过 COM 转换上限 | 拆分文档后分别转换 |
 | `XLSX 模板骨架不存在` | skill 安装不完整 | 重新安装 office-toolkit skill |
-| `PPTX 创建失败` | python-pptx 未安装或数据格式错误 | `pip install python-pptx` |
+| `PPTX 创建失败` | python-pptx 未安装或数据格式错误 | 在 UClaw 中用 `uv run --with python-pptx==1.0.2 python <script>` 重试 |
 
 ---
 
@@ -131,7 +131,8 @@ taskkill /f /im wpp.exe
 
 1. **Python 版本**: `python --version`（需 3.11+）
 2. **pywin32**: `python -c "import win32com"`（COM 转换需要）
-3. **python-pptx**: `python -c "import pptx"`（PPTX 创建需要）
-4. **openpyxl**: `python -c "import openpyxl"`（XLSX 创建推荐）
+3. **python-pptx**: `uv run python -c "import pptx"`（PPTX 创建/编辑需要）
+4. **openpyxl**: `uv run python -c "import openpyxl"`（XLSX 创建推荐）
+5. **python-docx**: `uv run python -c "import docx"`（DOCX 创建/编辑需要）
 5. **WPS/Office**: 打开 WPS 或 Word，确认能正常使用
 6. **pdftotext**: `pdftotext -v`（PDF 读取需要，Git Bash 内置）

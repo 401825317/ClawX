@@ -10,6 +10,9 @@
       "./index.mjs"
     ]
   },
+  "dependencies": {
+    "undici": "8.1.0"
+  },
   "peerDependencies": {
     "openclaw": "*"
   }

@@ -497,7 +497,7 @@ create_docx('output.docx', [
 ## PPTX 创建 (需 python-pptx)
 
 **验证:** ✅ WPS 可正常打开
-**必须安装:** `pip install python-pptx` (已在 venv 中)
+**依赖:** UClaw Office Python 环境通常已提供 `python-pptx==1.0.2`；如果缺失，使用 `uv run --with python-pptx==1.0.2 python <script>` 重试。
 
 > **为什么不能用 stdlib?**
 > WPS/Office 要求 PPTX 最小结构包含 11 个 slideLayout、thumbnail.jpeg、
@@ -570,7 +570,7 @@ def create_pptx(output_path, slides_data):
     except Exception as e:
         raise RuntimeError(
             f"PPTX 创建失败: {e}\n"
-            f"建议: 确认 python-pptx 已安装 (pip install python-pptx)"
+            f"建议: 确认 python-pptx 已安装；UClaw 中可用 uv run --with python-pptx==1.0.2 python <script> 重试"
         )
 
 # 使用

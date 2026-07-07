@@ -318,7 +318,52 @@ function ensurePluginEntryEnabled(config: Record<string, unknown>, pluginId: str
   }
 
   plugins.entries = entries;
-  if (modified || config.plugins !== plugins) {
+  if (modified) {
+    config.plugins = plugins;
+  }
+  return modified;
+}
+
+function ensurePluginEntryDisabled(config: Record<string, unknown>, pluginId: string): boolean {
+  const plugins = isPlainRecord(config.plugins) ? config.plugins as Record<string, unknown> : {};
+  const allow = Array.isArray(plugins.allow)
+    ? (plugins.allow as unknown[]).filter((value): value is string => typeof value === 'string')
+    : [];
+  const entries = isPlainRecord(plugins.entries) ? plugins.entries as Record<string, Record<string, unknown>> : {};
+  let modified = false;
+
+  const nextAllow = allow.filter((allowedPluginId) => allowedPluginId !== pluginId);
+  if (nextAllow.length !== allow.length) {
+    if (nextAllow.length > 0) {
+      plugins.allow = nextAllow;
+    } else {
+      delete plugins.allow;
+    }
+    modified = true;
+  }
+
+  const existingEntry = isPlainRecord(entries[pluginId]) ? entries[pluginId] : null;
+  if (existingEntry) {
+    const hooks = isPlainRecord(existingEntry.hooks) ? existingEntry.hooks as Record<string, unknown> : {};
+    const nextEntry: Record<string, unknown> = {
+      ...existingEntry,
+      enabled: false,
+    };
+    if (hooks.allowConversationAccess !== false || hooks.allowPromptInjection !== false) {
+      nextEntry.hooks = {
+        ...hooks,
+        allowConversationAccess: false,
+        allowPromptInjection: false,
+      };
+    }
+    if (JSON.stringify(nextEntry) !== JSON.stringify(existingEntry)) {
+      entries[pluginId] = nextEntry;
+      plugins.entries = entries;
+      modified = true;
+    }
+  }
+
+  if (modified) {
     config.plugins = plugins;
   }
   return modified;
@@ -840,11 +885,14 @@ const OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS = new Set([
   'talk-voice',
   'voyage',
 ]);
+const UCLAW_COMPUTER_USE_PLUGIN_ID = 'uclaw-computer-use';
+const ENABLE_UCLAW_COMPUTER_USE_PLUGIN = process.env.CLAWX_ENABLE_UCLAW_COMPUTER_USE === '1';
+const UCLAW_ARTIFACT_GUARD_PLUGIN_ID = 'uclaw-artifact-guard';
+const ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
   'acpx',
   'memory-core',
-  'uclaw-computer-use',
 ]);
 const FREE_WEB_SEARCH_PROVIDER_ID = 'parallel-free';
 const LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID = 'duckduckgo';
@@ -2882,10 +2930,24 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
 
-    if (ensurePluginEntryEnabled(config, 'uclaw-computer-use')) {
+    if (ENABLE_UCLAW_COMPUTER_USE_PLUGIN) {
+      if (ensurePluginEntryEnabled(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
+        modified = true;
+      }
+      if (ensurePluginHookAccess(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
+        modified = true;
+      }
+    } else if (ensurePluginEntryDisabled(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
       modified = true;
     }
-    if (ensurePluginHookAccess(config, 'uclaw-computer-use')) {
+    if (ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN) {
+      if (ensurePluginEntryEnabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
+        modified = true;
+      }
+      if (ensurePluginHookAccess(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
+        modified = true;
+      }
+    } else if (ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
       modified = true;
     }
     if (ensureParallelWebSearchPluginRegistration(config)) {
@@ -3633,6 +3695,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       const explicitlyEnabledBundledPluginIds = Object.keys(pEntries)
         .filter((pluginId) => {
           if (!bundled.all.has(pluginId)) return false;
+          if (pluginId === UCLAW_COMPUTER_USE_PLUGIN_ID && !ENABLE_UCLAW_COMPUTER_USE_PLUGIN) return false;
           const entry = isPlainRecord(pEntries[pluginId]) ? pEntries[pluginId] as Record<string, unknown> : {};
           if (entry.enabled === false) return false;
           if (pluginId === 'feishu' && (!isFeishuConfigured || canonicalFeishuId !== 'feishu')) {
@@ -3656,6 +3719,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
 
       const requiredBundledPluginIds = Array.from(new Set([
         ...BUNDLED_ALLOWLIST_PRESERVE_IDS,
+        ...(ENABLE_UCLAW_COMPUTER_USE_PLUGIN ? [UCLAW_COMPUTER_USE_PLUGIN_ID] : []),
         ...activeBundledProviderPluginIds,
         ...explicitlyEnabledBundledPluginIds,
       ])).filter((pluginId) => bundled.all.has(pluginId));
@@ -3705,6 +3769,12 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
 
       if (Array.isArray(pluginsObj.allow) && pluginsObj.allow.length === 0) {
         delete pluginsObj.allow;
+        modified = true;
+      }
+      if (!ENABLE_UCLAW_COMPUTER_USE_PLUGIN && ensurePluginEntryDisabled(config, UCLAW_COMPUTER_USE_PLUGIN_ID)) {
+        modified = true;
+      }
+      if (!ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN && ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
         modified = true;
       }
       if (pluginsObj.entries && Object.keys(pEntries).length === 0) {

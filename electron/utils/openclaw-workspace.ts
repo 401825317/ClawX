@@ -18,6 +18,10 @@ const DEFAULT_CONTEXT_TARGETS = new Set(['AGENTS.md', 'TOOLS.md']);
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+function isClawXContextMergeEnabled(): boolean {
+  return process.env.CLAWX_ENABLE_CONTEXT_MERGE === '1';
+}
+
 async function fileExists(p: string): Promise<boolean> {
   try { await access(p, constants.F_OK); return true; } catch { return false; }
 }
@@ -268,6 +272,11 @@ async function resolveAllWorkspaceDirs(): Promise<WorkspaceDir[]> {
  * with no meaningful OpenClaw content outside them.
  */
 export async function repairClawXOnlyBootstrapFiles(): Promise<void> {
+  if (!isClawXContextMergeEnabled()) {
+    logger.debug('ClawX context merge disabled; skipping ClawX-only bootstrap repair');
+    return;
+  }
+
   const workspaceDirs = await resolveAllWorkspaceDirs();
   for (const { dir: workspaceDir } of workspaceDirs) {
     if (!(await fileExists(workspaceDir))) continue;
@@ -410,6 +419,11 @@ let ensureClawXContextWaitsForAll = false;
  * bootstrap files.
  */
 export async function ensureClawXContext(options: EnsureClawXContextOptions = {}): Promise<void> {
+  if (!isClawXContextMergeEnabled()) {
+    logger.debug('ClawX context merge disabled; skipping AGENTS.md/TOOLS.md merge');
+    return;
+  }
+
   if (ensureClawXContextPromise) {
     if (options.waitForAllConfiguredWorkspaces && !ensureClawXContextWaitsForAll) {
       return ensureClawXContextPromise.then(() => ensureClawXContext(options));

@@ -419,6 +419,84 @@ describe('chat target routing', () => {
     expect(payload.media[0]?.filePath).toBe('/tmp/design.png');
   });
 
+  it('registers a pending new session before sending video generation jobs', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [{ role: 'user', content: 'previous chat' }],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    gatewayRpcMock.mockImplementation(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'sessions.create') {
+        return {
+          ok: true,
+          key: params?.key,
+          entry: {
+            key: params?.key,
+            updatedAt: Date.now(),
+          },
+        };
+      }
+      if (method === 'config.get') {
+        return { messages: [] };
+      }
+      if (method === 'chat.history') {
+        return { messages: [] };
+      }
+      if (method === 'sessions.list') {
+        return { sessions: [] };
+      }
+      throw new Error(`Unexpected gateway RPC: ${method}`);
+    });
+
+    useChatStore.getState().newSession();
+    const newSessionKey = useChatStore.getState().currentSessionKey;
+
+    await useChatStore.getState().sendMessage(
+      '生成一个短视频',
+      undefined,
+      undefined,
+      'video',
+      undefined,
+      { size: '1280x720', durationSeconds: 4 },
+    );
+
+    expect(gatewayRpcMock).toHaveBeenCalledWith('sessions.create', {
+      key: newSessionKey,
+      agentId: 'main',
+      model: 'lingzhiwuxian/smart-latest',
+    });
+
+    const createCallOrder = gatewayRpcMock.mock.invocationCallOrder[
+      gatewayRpcMock.mock.calls.findIndex(([method]) => method === 'sessions.create')
+    ];
+    const videoSendCallIndex = hostApiFetchMock.mock.calls.findIndex(([url]) => url === '/api/media/video-generation/chat-send');
+    const videoSendCallOrder = hostApiFetchMock.mock.invocationCallOrder[videoSendCallIndex];
+
+    expect(videoSendCallIndex).toBeGreaterThanOrEqual(0);
+    expect(createCallOrder).toBeLessThan(videoSendCallOrder);
+    expect(useChatStore.getState().sessions.some((session) => session.key === newSessionKey)).toBe(true);
+  });
+
   it('reuses the latest assistant image for edit-like image-mode sends without explicit attachments', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

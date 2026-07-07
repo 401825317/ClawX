@@ -21,6 +21,8 @@ const LOCAL_ACTION_CONTEXT = [
   '- 用户要求生成 PPT/PPTX 时，优先调用 create_pptx_file 创建真实 .pptx 文件；不要只输出大纲或制作计划。',
   '- 用户要求生成 Word/DOCX/文档/报告时，优先调用 create_docx_file 创建真实 .docx 文件；不要只输出正文。',
   '- 用户要求生成 Excel/XLSX/表格时，优先调用 create_xlsx_file 创建真实 .xlsx 文件；不要只输出 Markdown 表格。',
+  '- 用户要求“美化/优化/润色/改一下/变漂亮/高大上/排版”已有 PPT、Word 或 Excel 时，也是在要求交付本地文件：定位输入文件，读取结构，生成不覆盖原文件的新版本，验证文件存在。',
+  '- Office 脚本遇到 ModuleNotFoundError("No module named \'pptx\'/\'openpyxl\'/\'docx\'") 时，不要直接结束；使用 UClaw Office Python 环境，或用 uv run --with python-pptx==1.0.2 --with openpyxl==3.1.5 --with python-docx==1.2.0 python <script> 重试一次。',
   '- 用户要求“生成后打开/做完打开”时，在 create_pptx_file/create_docx_file/create_xlsx_file 中设置 openAfterCreate=true，不要再额外调用 exec/open。',
   '- 继续使用可用工具，直到请求的本地动作完成并验证、失败且有具体阻塞点，或需要用户明确确认。',
   '- 最终回复必须报告已验证的结果或具体阻塞点，不要只报告准备做什么。',
@@ -29,26 +31,28 @@ const LOCAL_ACTION_PROMISE_RE = /(?:我(?:先|现在|会|将|要|再|继续)|(?:
 const LOCAL_ACTION_TASK_RE = /(?:下载|安装|\/Applications|本机|本地|文件|启动|停止|重启|运行|打开|复制|移动|写入|修改|设置|配置)/u;
 const TERMINAL_STATE_RE = /(?:已(?:经)?(?:完成|安装|下载|启动|停止|重启|复制|移动|写入|修改|配置)|无法|失败|报错|需要(?:你|用户).{0,20}确认|请(?:你|用户).{0,20}确认|阻塞|权限|找不到|不存在|未找到)/u;
 const CONTINUATION_STATE_RE = /(?:正在|我(?:会|将|要|再|继续|换|改用|准备|打算)|(?:先|再|然后|接着|下一步|马上).{0,40}(?:做|生成|创建|补|拉取|抓|写|导出|制作|运行|调用|下载|安装|验证|分析|处理))/u;
+const RECOVERABLE_OFFICE_DEPENDENCY_RE = /(?:ModuleNotFoundError|No module named|Cannot find module|missing ModuleNotFoundError).{0,120}(?:pptx|openpyxl|docx|python-pptx|python-docx)/iu;
+const OFFICE_DEPENDENCY_RETRY_INSTRUCTION = 'Office 依赖缺失属于可恢复问题。继续使用工具修复：优先使用 UClaw Office Python 环境；若仍缺包，用 `uv run --with python-pptx==1.0.2 --with openpyxl==3.1.5 --with python-docx==1.2.0 python <script>` 重试一次，然后继续生成/编辑文件。';
 const DELIVERABLE_CONTRACTS = [
   {
     id: 'presentation',
-    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:pptx?|PPT|演示文稿|幻灯片)|(?:pptx?|PPT|演示文稿|幻灯片).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:pptx?|presentation|slide deck|slides?))/iu,
+    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成|美化|优化|润色|改(?:一下|一版)?|编辑|调整|排版|重做|变漂亮|好看|高大上).{0,36}(?:pptx?|PPT|演示文稿|幻灯片)|(?:pptx?|PPT|演示文稿|幻灯片).{0,36}(?:文件|下载|生成|创建|制作|导出|成稿|成品|美化|优化|润色|改(?:一下|一版)?|编辑|调整|排版|重做|变漂亮|好看|高大上)|(?:create|make|generate|build|produce|export|beautify|polish|improve|revamp|redesign).{0,40}(?:pptx?|presentation|slide deck|slides?))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.pptx?\b|[^\s`"'<>)\]}。！？；;，,]+\.pptx\b/iu,
-    instruction: '用户要求交付 PPT/演示文稿。继续使用工具，直到已经创建并验证 .ppt/.pptx 文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
+    instruction: '用户要求交付或美化 PPT/演示文稿。继续使用工具，直到已经创建/编辑并验证新的 .ppt/.pptx 文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
   {
     id: 'spreadsheet',
-    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:xlsx?|Excel|表格|电子表格)|(?:xlsx?|Excel|表格|电子表格).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:xlsx?|spreadsheet|excel))/iu,
+    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成|美化|优化|润色|改(?:一下|一版)?|编辑|调整|排版).{0,24}(?:xlsx?|Excel|表格|电子表格)|(?:xlsx?|Excel|表格|电子表格).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品|美化|优化|润色|改(?:一下|一版)?|编辑|调整|排版)|(?:create|make|generate|build|produce|export|beautify|polish|improve).{0,40}(?:xlsx?|spreadsheet|excel))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:xlsx?|csv|tsv)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:xlsx?|csv|tsv)\b/iu,
-    instruction: '用户要求交付表格/电子表格。继续使用工具，直到已经创建并验证表格文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
+    instruction: '用户要求交付或优化表格/电子表格。继续使用工具，直到已经创建/编辑并验证表格文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
   {
     id: 'document',
-    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成).{0,24}(?:docx?|Word|文档|报告|PDF|pdf)|(?:docx?|Word|文档|报告|PDF|pdf).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品)|(?:create|make|generate|build|produce|export).{0,40}(?:docx?|document|report|pdf))/iu,
+    requestRe: /(?:(?:做|制作|生成|创建|输出|导出|整理成|做成|美化|优化|润色|改(?:一下|一版)?|编辑|调整|排版).{0,24}(?:docx?|Word|文档|报告|PDF|pdf)|(?:docx?|Word|文档|报告|PDF|pdf).{0,24}(?:文件|下载|生成|创建|制作|导出|成稿|成品|美化|优化|润色|改(?:一下|一版)?|编辑|调整|排版)|(?:create|make|generate|build|produce|export|beautify|polish|improve|revise).{0,40}(?:docx?|document|report|pdf))/iu,
     evidenceRe: /(?:^|[\s`"'([{<（【“‘])(?:[A-Za-z]:[\\/]|\/|~\/|\.\.?\/)[^\s`"'<>)\]}。！？；;，,]+\.(?:docx?|pdf|md)\b|[^\s`"'<>)\]}。！？；;，,]+\.(?:docx?|pdf|md)\b/iu,
-    instruction: '用户要求交付文档/报告。继续使用工具，直到已经创建并验证文档文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
+    instruction: '用户要求交付或优化文档/报告。继续使用工具，直到已经创建/编辑并验证文档文件路径；如果无法继续，必须用简体中文报告具体阻塞点。',
     maxAttempts: 2,
   },
   {
@@ -805,9 +809,18 @@ function hasDeliverableEvidence(contract, event, finalText) {
   }));
 }
 
+function hasRecoverableOfficeDependencyFailure(event) {
+  return extractMessageLists(event).some((messages) => messages.some((message) => {
+    if (!isToolResultMessage(message)) return false;
+    return RECOVERABLE_OFFICE_DEPENDENCY_RE.test(extractSearchableMessageText(message));
+  }));
+}
+
 function resolveUnfinishedDeliverable(event, finalText) {
   const userText = extractUserRequestText(event);
-  if (!userText || isConcreteTerminalState(finalText)) return null;
+  if (!userText) return null;
+  const dependencyFailure = hasRecoverableOfficeDependencyFailure(event);
+  if (isConcreteTerminalState(finalText) && !dependencyFailure) return null;
   for (const contract of DELIVERABLE_CONTRACTS) {
     if (!contract.requestRe.test(userText)) continue;
     if (hasDeliverableEvidence(contract, event, finalText)) continue;
@@ -822,12 +835,21 @@ function resolveUnfinishedLocalActionRevision(event) {
 
   const unfinishedDeliverable = resolveUnfinishedDeliverable(event, text);
   if (unfinishedDeliverable) {
+    const dependencyRetry = hasRecoverableOfficeDependencyFailure(event)
+      ? `\n${OFFICE_DEPENDENCY_RETRY_INSTRUCTION}`
+      : '';
     return {
-      instruction: unfinishedDeliverable.instruction,
+      instruction: `${unfinishedDeliverable.instruction}${dependencyRetry}`,
       maxAttempts: unfinishedDeliverable.maxAttempts,
     };
   }
 
+  if (hasRecoverableOfficeDependencyFailure(event)) {
+    return {
+      instruction: OFFICE_DEPENDENCY_RETRY_INSTRUCTION,
+      maxAttempts: 2,
+    };
+  }
   if (isConcreteTerminalState(text)) return null;
   if (!extractMessageLists(event).some(hasToolActivity)) return null;
   if (!LOCAL_ACTION_TASK_RE.test(text) || !LOCAL_ACTION_PROMISE_RE.test(text)) return null;

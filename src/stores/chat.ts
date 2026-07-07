@@ -2281,6 +2281,24 @@ async function persistSessionModelSelection(
   return buildEffectiveSessionModelRef(patched) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
 }
 
+async function ensurePendingLocalSessionRegistered(
+  sessionKey: string,
+): Promise<string | null> {
+  if (!_pendingLocalSessionKeys.has(sessionKey)) {
+    return null;
+  }
+
+  const modelRef = resolveEffectiveAgentModelRefForSession(sessionKey);
+  const normalizedModelRef = normalizeChatManagedModelRef(modelRef, { fallbackEmpty: true });
+  const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+    key: sessionKey,
+    agentId: getAgentIdFromSessionKey(sessionKey),
+    ...(normalizedModelRef ? { model: normalizedModelRef } : {}),
+  });
+  _pendingLocalSessionKeys.delete(sessionKey);
+  return buildEffectiveSessionModelRef(created) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+}
+
 function mergeSessionRowWithLocalState(
   nextSession: ChatSession,
   localSession: ChatSession | undefined,
@@ -4339,6 +4357,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     const currentSessionKey = targetSessionKey;
+    if (effectiveMode === 'image' || effectiveMode === 'video') {
+      try {
+        const registeredModelRef = await ensurePendingLocalSessionRegistered(currentSessionKey);
+        if (registeredModelRef) {
+          set((state) => ({
+            sessions: upsertSessionWithModel(state.sessions, currentSessionKey, registeredModelRef, Date.now()),
+          }));
+        }
+      } catch (error) {
+        set({
+          error: error instanceof Error ? error.message : String(error),
+          sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+        });
+        return;
+      }
+    }
+
     if (effectiveMode === 'chat') {
       try {
         await ensureSessionManagedTextModelAllowed(get, currentSessionKey);

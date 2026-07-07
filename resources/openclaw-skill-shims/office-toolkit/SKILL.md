@@ -15,6 +15,7 @@ metadata:
     pipDeps:
       - python-pptx==1.0.2
       - openpyxl==3.1.5
+      - python-docx==1.2.0
       - pywin32==312
     platforms:
       - windows
@@ -80,6 +81,7 @@ metadata:
 | "Excel 有 3 个 Sheet，都要读" | 多 Sheet 读取 | `read_xlsx(path, sheet_index='all')` |
 | "把 Excel 导出成 CSV 给别的系统用" | XLSX→CSV/JSON | 纯 stdlib，不依赖 Office |
 | "从零生成一份 PPT 汇报文稿" | 创建 PPTX | `create_pptx()` + python-pptx |
+| "把这个 PPT 变漂亮一点" | 编辑/美化已有 PPTX | 读取原文件 → python-pptx 生成不覆盖的新版本 |
 | "文件打不开 / 转换报错 / 进程卡死" | 排查问题 | 先看 `troubleshooting.md`，再查 `anti-patterns.md` |
 
 > **什么时候不用本工具？**
@@ -93,7 +95,7 @@ metadata:
 |:----:|:----:|:----------:|:-------:|:---:|:---:|:-----:|
 | PDF | ✅ pdftotext | ❌ | reportlab/fpdf2 | — | — | →TXT/→DOCX |
 | DOCX | ✅ unzip+XML | ✅ WPS验证 | python-docx | — | — | →PDF ✅COM(WPS+MSO) |
-| PPTX | ✅ unzip+XML | ❌ 结构复杂 | python-pptx ✅已装 | — | ✅ | →PDF ✅COM(WPS+MSO) |
+| PPTX | ✅ unzip+XML | ❌ 结构复杂 | python-pptx | — | ✅ | →PDF ✅COM(WPS+MSO) |
 | XLSX | ✅ unzip+XML | ✅ WPS验证 | openpyxl | ✅ SUM/AVG/IF等 | ✅ 13位财务色系 | →CSV/→JSON/→PDF ✅COM(WPS+MSO) |
 
 ## 环境依赖
@@ -106,9 +108,12 @@ metadata:
 ### 可选 pip 安装
 | 库 | 用途 | 安装命令 |
 |:---|:-----|:---------|
-| `python-pptx` | PPTX 创建 | `pip install python-pptx==1.0.2` |
-| `openpyxl` | XLSX 创建（推荐） | `pip install openpyxl==3.1.5` |
-| `pywin32` | COM 自动化转 PDF（仅 Windows） | `pip install pywin32==312` |
+| `python-pptx` | PPTX 创建/编辑 | `uv run --with python-pptx==1.0.2 python <script>` |
+| `openpyxl` | XLSX 创建（推荐） | `uv run --with openpyxl==3.1.5 python <script>` |
+| `python-docx` | DOCX 创建/编辑 | `uv run --with python-docx==1.2.0 python <script>` |
+| `pywin32` | COM 自动化转 PDF（仅 Windows） | `uv run --with pywin32==312 python <script>` |
+
+> UClaw normally prepares these Office Python dependencies in its managed Office environment. If `uv run python` reports `ModuleNotFoundError` for `pptx`, `openpyxl`, or `docx`, retry the same script once with explicit `uv run --with ...` dependencies instead of ending the task.
 
 ### 系统软件（仅 PDF 转换需要）
 - WPS Office（免费个人版）或 Microsoft Office 2016+
@@ -120,7 +125,7 @@ metadata:
 - Python 3.13 `ET.iter('{ns}tag')` 不稳定 → 用 `_find_all_recursive(tag.endswith)` 替代
 - XLSX stdlib 手写必须设中文字体(宋体/微软雅黑) + charset=134，否则 WPS 转 PDF 乱码
 
-**其他可选库:** reportlab(PDF创建), python-docx(DOCX创建), docx2pdf(DOCX→PDF), pdf2docx(PDF→DOCX)
+**其他可选库:** reportlab(PDF创建), docx2pdf(DOCX→PDF), pdf2docx(PDF→DOCX)
 
 ## 关键技术警告
 

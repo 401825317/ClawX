@@ -1,14 +1,19 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
 import { imageSourceUploadFileName } from 'openclaw/plugin-sdk/image-generation';
 import { randomUUID } from 'node:crypto';
+import { Agent } from 'undici';
 
 const PROVIDER_ID = 'clawx-openai-image';
 const DEFAULT_MODEL = 'gpt-image-2';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_SIZE = '1024x1024';
-const DEFAULT_TIMEOUT_MS = 900_000;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MIME_TYPE = 'image/png';
 const MAX_INPUT_IMAGES = 5;
+const imageFetchDispatcher = new Agent({
+  headersTimeout: DEFAULT_TIMEOUT_MS,
+  bodyTimeout: DEFAULT_TIMEOUT_MS,
+});
 const SUPPORTED_EDIT_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -325,6 +330,7 @@ function buildProvider() {
             ? editMultipart.body
             : JSON.stringify(buildGenerateBody(req, model, count)),
           signal: controller.signal,
+          dispatcher: imageFetchDispatcher,
         });
         const payload = await readJsonResponse(
           response,

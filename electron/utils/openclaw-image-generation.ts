@@ -107,8 +107,8 @@ export interface ImageGenerationInputImageRef {
 const DEFAULT_TEST_PROMPT = 'A small red circle on a white background, minimal flat illustration.';
 /** Some relays (e.g. gpt-image-2) reject 512×512 as below minimum pixel budget. */
 const DEFAULT_TEST_IMAGE_SIZE = '1024x1024';
-const DEFAULT_TEST_TIMEOUT_MS = 900_000;
-export const IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS = 900_000;
+const DEFAULT_TEST_TIMEOUT_MS = 30 * 60 * 1000;
+export const IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 /** Cap UI test duration so Models page does not wait on multi-minute config timeouts. */
 export const IMAGE_GEN_UI_TEST_MAX_TIMEOUT_MS = 90_000;
 

@@ -65,6 +65,20 @@ export function getOfficePythonEnvPatch(
   };
 }
 
+export function getGatewayOfficePythonEnvPatch(
+  env: Record<string, string | undefined> = process.env,
+): { env: Record<string, string | undefined>; venvPath: string; present: boolean; enabled: boolean } {
+  const venvPath = getOfficePythonVenvPath();
+  if (process.env.CLAWX_ENABLE_OFFICE_PYTHON_ENV !== '1') {
+    return { env, venvPath, present: false, enabled: false };
+  }
+
+  return {
+    ...getOfficePythonEnvPatch(env),
+    enabled: true,
+  };
+}
+
 /**
  * Get the path to the bundled uv binary
  */

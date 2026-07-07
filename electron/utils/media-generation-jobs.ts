@@ -6,6 +6,7 @@ import { appendImageGenerationConversation } from './chat-session-image-message'
 import { getElectronStoreUserDataEnvKey } from './electron-store-options';
 import { logger } from './logger';
 import type {
+  MediaGenerationKind,
   MediaGenerationJobPayload,
   MediaGenerationJobSnapshot,
   MediaGenerationWorkerRequest,
@@ -20,14 +21,20 @@ type InternalMediaGenerationJob = MediaGenerationJobSnapshot & {
 };
 
 const jobs = new Map<string, InternalMediaGenerationJob>();
-const queue: string[] = [];
+const queues: Record<MediaGenerationKind, string[]> = {
+  image: [],
+  video: [],
+};
 const MAX_JOB_HISTORY = 50;
 const MAX_WORKER_OUTPUT_CHARS = 4096;
 const MAX_WORKER_LOG_CHARS = 1024;
 const MAX_JOB_ERROR_CHARS = 12_000;
 const USER_FACING_UPSTREAM_MEDIA_ERROR = '上游渠道报错，生成失败了，请稍后重试。';
 
-let activeJobId: string | null = null;
+const activeJobIds: Record<MediaGenerationKind, string | null> = {
+  image: null,
+  video: null,
+};
 
 function resolveMainStaticScript(name: string): string {
   if (app.isPackaged) {
@@ -203,7 +210,7 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
 }
 
 async function runJob(job: InternalMediaGenerationJob): Promise<void> {
-  activeJobId = job.id;
+  activeJobIds[job.kind] = job.id;
   const now = Date.now();
   job.status = 'running';
   job.startedAt = now;
@@ -213,12 +220,12 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
   const entryPath = getMediaWorkerEntryPath();
   if (!existsSync(wrapperPath)) {
     markJobFailed(job, `Media generation worker wrapper not found at ${wrapperPath}`);
-    activeJobId = null;
+    activeJobIds[job.kind] = null;
     return;
   }
   if (!existsSync(entryPath)) {
     markJobFailed(job, `Media generation worker entry not found at ${entryPath}`);
-    activeJobId = null;
+    activeJobIds[job.kind] = null;
     return;
   }
 
@@ -319,25 +326,26 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
     });
   });
 
-  activeJobId = null;
+  activeJobIds[job.kind] = null;
 }
 
-function pumpQueue(): void {
-  if (activeJobId) return;
-  const nextJobId = queue.shift();
+function pumpQueue(kind: MediaGenerationKind): void {
+  if (activeJobIds[kind]) return;
+  const nextJobId = queues[kind].shift();
   if (!nextJobId) return;
   const job = jobs.get(nextJobId);
   if (!job || job.status !== 'queued') {
-    setImmediate(pumpQueue);
+    setImmediate(() => pumpQueue(kind));
     return;
   }
   void runJob(job)
     .catch((error) => {
+      activeJobIds[kind] = null;
       markJobFailed(job, error instanceof Error ? error.message : String(error));
     })
     .finally(() => {
       compactJobHistory();
-      setImmediate(pumpQueue);
+      setImmediate(() => pumpQueue(kind));
     });
 }
 
@@ -353,8 +361,8 @@ export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): M
     payload,
   };
   jobs.set(job.id, job);
-  queue.push(job.id);
-  setImmediate(pumpQueue);
+  queues[payload.kind].push(job.id);
+  setImmediate(() => pumpQueue(payload.kind));
   return cloneSnapshot(job);
 }
 

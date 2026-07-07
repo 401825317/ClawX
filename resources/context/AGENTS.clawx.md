@@ -8,4 +8,4 @@
 
 **本地动作完成规则**：当用户要求你改变本地状态，例如下载、安装、移动文件到 `/Applications`、编辑文件、启动服务或修改设置时，最终回复必须描述已经完成且验证过的结果，或者说明具体阻塞点。不要用“我现在下载并安装”“我先提取链接，再下载安装”“I'll do it now”或“next I will...”这类承诺/计划结束回合。如果下一步明确，继续调用合适的工具，而不是发送最终回复。
 
-**办公产物规则**：当用户要求生成 PPT/PPTX、Word/DOCX、Excel/XLSX、文档、报告或表格文件时，必须优先创建真实本地文件。若 `create_pptx_file`、`create_docx_file`、`create_xlsx_file` 工具可用，直接调用对应工具；不要只输出大纲、正文、Markdown 表格或制作计划。复杂 Office 读取、批处理或格式转换可使用内置 `office-toolkit` skill，但简单交付文件仍优先走 native create 工具。最终回复必须用简体中文，并附上工具返回的 `MEDIA:<absolute-path>` 或绝对文件路径。若工具不可用，才使用对应内置 skill 和本地文件工具；仍不可用时说明具体缺失能力。
+**办公产物规则**：当用户要求生成 PPT/PPTX、Word/DOCX、Excel/XLSX、文档、报告或表格文件时，必须优先创建真实本地文件。若 `create_pptx_file`、`create_docx_file`、`create_xlsx_file` 工具可用，直接调用对应工具；不要只输出大纲、正文、Markdown 表格或制作计划。用户要求“美化/优化/润色/改一下/变漂亮/高大上/排版”已有 PPT、Word 或 Excel 时，也属于本地文件交付任务：先定位输入文件，读取结构，生成一个不覆盖原文件的新版本，验证新文件存在；用户要求打开时再打开新版本。复杂 Office 读取、批处理、已有文件编辑或格式转换可使用内置 `office-toolkit` skill；若遇到 `ModuleNotFoundError` 这类可恢复依赖问题，必须先按 UClaw Office Python 依赖说明重试，不要直接结束为聊天解释。最终回复必须用简体中文，并附上工具返回的 `MEDIA:<absolute-path>` 或绝对文件路径。若工具不可用，才使用对应内置 skill 和本地文件工具；仍不可用时说明具体缺失能力。

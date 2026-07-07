@@ -636,6 +636,14 @@ export function ensureUClawComputerUsePluginInstalled(): { installed: boolean; w
   );
 }
 
+export function ensureUClawArtifactGuardPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-artifact-guard',
+    buildCandidateSources('uclaw-artifact-guard'),
+    'UClaw Artifact Guard',
+  );
+}
+
 export function ensureParallelPluginInstalled(): { installed: boolean; warning?: string } {
   return ensurePluginInstalled(
     'parallel',
@@ -659,6 +667,7 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureParallelPluginInstalled, label: 'Parallel Search' },
   { fn: ensureClawXOpenAiImagePluginInstalled, label: 'UClaw OpenAI Image' },
   { fn: ensureUClawComputerUsePluginInstalled, label: 'UClaw Computer Use' },
+  { fn: ensureUClawArtifactGuardPluginInstalled, label: 'UClaw Artifact Guard' },
 ] as const;
 
 /**

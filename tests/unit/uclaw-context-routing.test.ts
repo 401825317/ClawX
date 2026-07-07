@@ -69,7 +69,10 @@ describe('UClaw tool routing context', () => {
     expect(computerUsePlugin).toContain('UClaw 本地动作最终回复仍像未执行的计划');
     expect(computerUsePlugin).toContain('DELIVERABLE_CONTRACTS');
     expect(computerUsePlugin).toContain('具体产物');
-    expect(computerUsePlugin).toContain('用户要求交付 PPT/演示文稿');
+    expect(computerUsePlugin).toContain('用户要求交付或美化 PPT/演示文稿');
+    expect(computerUsePlugin).toContain('用户要求“美化/优化/润色/改一下/变漂亮/高大上/排版”已有 PPT');
+    expect(computerUsePlugin).toContain('ModuleNotFoundError');
+    expect(computerUsePlugin).toContain('uv run --with python-pptx==1.0.2');
     expect(computerUsePlugin).toContain('必须使用简体中文');
     expect(computerUsePlugin).toContain('registerLocalActionCompletionGuard(api)');
     expect(computerUsePlugin).toContain('需要(?:你|用户).{0,20}确认');
@@ -197,7 +200,7 @@ describe('UClaw tool routing context', () => {
 
     expect(result?.action).toBe('revise');
     expect(result?.reason).toContain('未执行的计划');
-    expect(result?.retry?.instruction).toContain('用户要求交付 PPT/演示文稿');
+    expect(result?.retry?.instruction).toContain('用户要求交付或美化 PPT/演示文稿');
     expect(result?.retry?.instruction).toContain('必须使用简体中文');
     expect(result?.retry?.maxAttempts).toBe(2);
   });
@@ -228,6 +231,37 @@ describe('UClaw tool routing context', () => {
     expect(result).toBeUndefined();
   });
 
+  it('retries recoverable Office dependency failures for PPT beautification instead of finalizing', async () => {
+    const pluginModule = await import(
+      `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
+    );
+    let finalizeHook: ((event: unknown) => unknown) | null = null;
+    pluginModule.default.register({
+      pluginConfig: {},
+      registerTool() {},
+      registerHook(name: string, handler: (event: unknown) => unknown) {
+        if (name === 'before_agent_finalize') {
+          finalizeHook = handler;
+        }
+      },
+    });
+
+    const result = finalizeHook?.({
+      lastAssistantMessage: '当前运行环境缺少 python-pptx，无法完成 PPT 美化。',
+      messages: [
+        { role: 'user', content: '你能帮我把这个PPT变漂亮一点吗？' },
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'exec' }] },
+        { role: 'tool', tool_call_id: 'call_1', content: `missing ModuleNotFoundError("No module named 'pptx'")` },
+      ],
+    }) as { action?: string; retry?: { instruction?: string; maxAttempts?: number }; reason?: string } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.reason).toContain('Office 依赖缺失属于可恢复问题');
+    expect(result?.retry?.instruction).toContain('用户要求交付或美化 PPT/演示文稿');
+    expect(result?.retry?.instruction).toContain('uv run --with python-pptx==1.0.2');
+    expect(result?.retry?.maxAttempts).toBe(2);
+  });
+
   it('does not treat recoverable data-source failures as completed deliverables', async () => {
     const pluginModule = await import(
       `${join(process.cwd(), 'resources', 'openclaw-plugins', 'uclaw-computer-use', 'index.mjs')}?t=${Date.now()}`
@@ -252,7 +286,7 @@ describe('UClaw tool routing context', () => {
     }) as { action?: string; retry?: { instruction?: string } } | undefined;
 
     expect(result?.action).toBe('revise');
-    expect(result?.retry?.instruction).toContain('用户要求交付 PPT/演示文稿');
+    expect(result?.retry?.instruction).toContain('用户要求交付或美化 PPT/演示文稿');
     expect(result?.retry?.instruction).toContain('必须使用简体中文');
   });
 
