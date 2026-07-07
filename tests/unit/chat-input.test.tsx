@@ -768,6 +768,64 @@ describe('ChatInput agent targeting', () => {
     expect(onClearImageEditReference).toHaveBeenCalled();
   });
 
+  it('preserves the selected image reference when switching from image mode to video mode', () => {
+    const onSend = vi.fn();
+    const onClearImageEditReference = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderChatInput(onSend, {
+      imageEditReference: {
+        fileName: 'generated.png',
+        mimeType: 'image/png',
+        fileSize: 2048,
+        filePath: '/tmp/generated.png',
+        preview: 'data:image/png;base64,abc',
+      },
+      onClearImageEditReference,
+    });
+
+    expect(screen.getByTestId('chat-image-edit-reference')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
+    expect(onClearImageEditReference).not.toHaveBeenCalled();
+    expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '让这张图动起来' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith(
+      '让这张图动起来',
+      [
+        expect.objectContaining({
+          fileName: 'generated.png',
+          mimeType: 'image/png',
+          fileSize: 2048,
+          stagedPath: '/tmp/generated.png',
+          preview: 'data:image/png;base64,abc',
+          status: 'ready',
+        }),
+      ],
+      null,
+      'video',
+      undefined,
+      { size: '1280x720', durationSeconds: 4 },
+    );
+    expect(onClearImageEditReference).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps video parameters selectable while using the configured default model', () => {
     const onSend = vi.fn();
     agentsState.agents = [

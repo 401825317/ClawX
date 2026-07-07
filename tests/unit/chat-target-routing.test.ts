@@ -896,4 +896,66 @@ describe('chat target routing', () => {
       preview: 'data:image/png;base64,abc',
     });
   });
+
+  it('does not reuse a previous assistant image for text-only video sends', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '图片已生成。',
+          _attachedFiles: [
+            {
+              fileName: 'old-frame.png',
+              mimeType: 'image/png',
+              fileSize: 1024,
+              preview: 'data:image/png;base64,abc',
+              filePath: '/tmp/old-frame.png',
+              source: 'message-ref',
+            },
+          ],
+        },
+      ],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      '生成一段城市夜景视频',
+      undefined,
+      undefined,
+      'video',
+      undefined,
+      { size: '1280x720', durationSeconds: 6 },
+    );
+
+    const videoSendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/video-generation/chat-send');
+    expect(videoSendCall).toBeTruthy();
+    const payload = JSON.parse(
+      (videoSendCall?.[1] as { body: string }).body,
+    ) as {
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      durationSeconds?: number;
+    };
+
+    expect(payload.durationSeconds).toBe(6);
+    expect(payload.inputImages).toEqual([]);
+  });
 });
