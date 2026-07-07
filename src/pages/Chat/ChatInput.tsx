@@ -879,7 +879,7 @@ export function ChatInput({
     if (!canSend) return;
     const readyAttachments = attachments.filter(a => a.status === 'ready');
     const textToSend = input.trim();
-    const imageReferenceAttachment = sendMode === 'image' && imageEditReference?.filePath
+    const imageReferenceAttachment = (sendMode === 'image' || sendMode === 'video') && imageEditReference?.filePath
       ? {
         id: `image-edit-reference:${imageEditReference.filePath}`,
         fileName: imageEditReference.fileName || imageEditReference.filePath.split(/[\\/]/).pop() || 'image',
@@ -1448,10 +1448,13 @@ export function ChatInput({
                     : 'hover:bg-black/5 dark:hover:bg-white/10 hover:text-foreground',
                 )}
                 onClick={() => {
-                  onClearImageEditReference?.();
+                  const nextMode = sendMode === 'video' ? 'chat' : 'video';
+                  if (nextMode === 'chat') {
+                    onClearImageEditReference?.();
+                  }
                   setSessionSendModes((current) => ({
                     ...current,
-                    [currentSessionKey]: current[currentSessionKey] === 'video' ? 'chat' : 'video',
+                    [currentSessionKey]: nextMode,
                   }));
                 }}
                 disabled={inputDisabled || sending}

@@ -4348,7 +4348,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
       : [];
     const videoReferenceInputs = effectiveMode === 'video'
-      ? resolveImageModeReferenceInputs(explicitPendingImages, currentMessages)
+      ? explicitPendingImages
       : [];
     const visibleGenerationAttachments = (effectiveMode === 'image' || effectiveMode === 'video')
       ? explicitPendingImages
