@@ -1,7 +1,7 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
 import { imageSourceUploadFileName } from 'openclaw/plugin-sdk/image-generation';
 import { randomUUID } from 'node:crypto';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 const PROVIDER_ID = 'clawx-openai-image';
 const DEFAULT_MODEL = 'gpt-image-2';
@@ -315,7 +315,7 @@ function buildProvider() {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), resolveTimeoutMs(req));
       try {
-        const response = await globalThis.fetch(appendImagesPath(baseUrl, mode), {
+        const response = await undiciFetch(appendImagesPath(baseUrl, mode), {
           method: 'POST',
           headers: mode === 'edit'
             ? {

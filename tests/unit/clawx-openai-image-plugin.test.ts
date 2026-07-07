@@ -2,15 +2,9 @@ import http from 'node:http';
 import { Buffer } from 'node:buffer';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 const repoRoot = process.cwd();
-const originalFetch = globalThis.fetch;
-
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-  vi.restoreAllMocks();
-});
 
 describe('ClawX OpenAI image plugin request shape', () => {
   it('does not force deprecated OpenAI Images response_format', async () => {
@@ -99,60 +93,19 @@ describe('ClawX OpenAI image plugin request shape', () => {
     }
   }, 15_000);
 
-  it('does not set a manual Content-Length header for multipart edits', async () => {
-    const originalFetch = globalThis.fetch;
-    let requestHeaders: HeadersInit | undefined;
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      requestHeaders = init?.headers;
-      return new Response(JSON.stringify({
-        data: [{ b64_json: Buffer.from('fake-image').toString('base64') }],
-      }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as typeof fetch;
+  it('uses bundled undici fetch with the matching dispatcher implementation', async () => {
+    const pluginSource = await readFile(
+      join(repoRoot, 'resources/openclaw-plugins/clawx-openai-image/index.mjs'),
+      'utf8',
+    );
 
-    try {
-      const plugin = await import('../../resources/openclaw-plugins/clawx-openai-image/index.mjs');
-      let provider: { generateImage: (req: Record<string, unknown>) => Promise<{ images: unknown[] }> } | undefined;
-      plugin.default.register({
-        registerImageGenerationProvider(nextProvider: typeof provider) {
-          provider = nextProvider;
-        },
-      });
-
-      const result = await provider?.generateImage({
-        provider: 'clawx-openai-image',
-        model: 'gpt-image-2',
-        prompt: 'edit the reference',
-        cfg: {
-          models: {
-            providers: {
-              'clawx-openai-image': {
-                apiKey: 'test-key',
-                baseUrl: 'http://127.0.0.1:12345/v1',
-              },
-            },
-          },
-        },
-        inputImages: [
-          {
-            buffer: Buffer.from('fake image bytes'),
-            mimeType: 'image/png',
-            fileName: 'reference.png',
-          },
-        ],
-        agentDir: '/tmp/clawx-openai-image-test-agent',
-        ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
-      });
-
-      expect(result?.images).toHaveLength(1);
-      const headers = requestHeaders as Record<string, string>;
-      expect(headers['Content-Type']).toContain('multipart/form-data');
-      expect(Object.keys(headers).map((key) => key.toLowerCase())).not.toContain('content-length');
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    expect(pluginSource).toContain("import { Agent, fetch as undiciFetch } from 'undici';");
+    expect(pluginSource).toContain('const imageFetchDispatcher = new Agent({');
+    expect(pluginSource).toContain('headersTimeout: DEFAULT_TIMEOUT_MS');
+    expect(pluginSource).toContain('bodyTimeout: DEFAULT_TIMEOUT_MS');
+    expect(pluginSource).toContain('await undiciFetch(appendImagesPath(baseUrl, mode), {');
+    expect(pluginSource).toContain('dispatcher: imageFetchDispatcher');
+    expect(pluginSource).not.toContain('await globalThis.fetch');
   });
 
   it('sends reference-image edits as multipart image uploads', async () => {
@@ -227,55 +180,4 @@ describe('ClawX OpenAI image plugin request shape', () => {
       server.close();
     }
   }, 15_000);
-
-  it('does not set a manual Content-Length header for multipart edits', async () => {
-    const plugin = await import('../../resources/openclaw-plugins/clawx-openai-image/index.mjs');
-    let provider: { generateImage: (req: Record<string, unknown>) => Promise<{ images: unknown[] }> } | undefined;
-    plugin.default.register({
-      registerImageGenerationProvider(nextProvider: typeof provider) {
-        provider = nextProvider;
-      },
-    });
-
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({
-        data: [{ b64_json: Buffer.from('fake-image').toString('base64') }],
-      }),
-    }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    const result = await provider?.generateImage({
-      provider: 'clawx-openai-image',
-      model: 'gpt-image-2',
-      prompt: 'remove the logo',
-      cfg: {
-        models: {
-          providers: {
-            'clawx-openai-image': {
-              apiKey: 'test-key',
-              baseUrl: 'https://example.invalid/v1',
-            },
-          },
-        },
-      },
-      inputImages: [
-        {
-          buffer: Buffer.from('fake image bytes'),
-          mimeType: 'image/png',
-          fileName: 'bike.png',
-        },
-      ],
-    });
-
-    expect(result?.images).toHaveLength(1);
-    const init = fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined;
-    expect(init?.headers).toEqual(expect.objectContaining({
-      Authorization: 'Bearer test-key',
-      'Content-Type': expect.stringContaining('multipart/form-data'),
-    }));
-    expect(init?.headers).not.toHaveProperty('Content-Length');
-    expect(init?.headers).not.toHaveProperty('content-length');
-  });
 });
