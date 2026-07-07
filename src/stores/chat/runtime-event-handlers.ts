@@ -24,6 +24,26 @@ import {
 import type { AttachedFileMeta, RawMessage } from './types';
 import type { ChatGet, ChatSet } from './store-api';
 
+function getAttachedFileDedupeKey(file: AttachedFileMeta): string {
+  const filePath = file.filePath?.trim();
+  if (filePath) return `path:${filePath}`;
+  const gatewayUrl = file.gatewayUrl?.trim();
+  if (gatewayUrl) return `gateway:${gatewayUrl}`;
+  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`;
+}
+
+function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
+  const seen = new Set<string>();
+  const next: AttachedFileMeta[] = [];
+  for (const file of files) {
+    const key = getAttachedFileDedupeKey(file);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push(file);
+  }
+  return next;
+}
+
 export function handleRuntimeEventState(
   set: ChatSet,
   get: ChatGet,
@@ -163,7 +183,7 @@ export function handleRuntimeEventState(
                   streamingMessage: null,
                   pendingFinal: true,
                   pendingToolImages: toolFiles.length > 0
-                    ? [...s.pendingToolImages, ...toolFiles]
+                    ? dedupeAttachedFiles([...s.pendingToolImages, ...toolFiles])
                     : s.pendingToolImages,
                   streamingTools: updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools,
                 };
@@ -207,21 +227,18 @@ export function handleRuntimeEventState(
                 if (file.filePath) attachedPaths.add(file.filePath);
                 attachedFiles.push(file);
               }
-              const msgWithImages: RawMessage = pendingImgs.length > 0
+              const finalAttachedFiles = dedupeAttachedFiles([
+                ...(normalizedFinalMessage._attachedFiles || []),
+                ...attachedFiles,
+              ]);
+              const msgWithImages: RawMessage = finalAttachedFiles.length > 0
                 ? {
                   ...normalizedFinalMessage,
                   role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'],
                   id: msgId,
-                  _attachedFiles: [...(normalizedFinalMessage._attachedFiles || []), ...attachedFiles],
+                  _attachedFiles: finalAttachedFiles,
                 }
-                : attachedFiles.length > 0
-                  ? {
-                    ...normalizedFinalMessage,
-                    role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'],
-                    id: msgId,
-                    _attachedFiles: [...(normalizedFinalMessage._attachedFiles || []), ...attachedFiles],
-                  }
-                  : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
+                : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
               const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
 
               // Check if message already exists (prevent duplicates)

@@ -199,6 +199,92 @@ describe('chat runtime event handlers', () => {
     ]));
   });
 
+  it('dedupes generated file cards collected from tool results and final assistant media refs', async () => {
+    const pptxPath = '/Users/huajing002/Downloads/UClaw/建筑工程投标标书-PPT-20260707-074002-b100683e.pptx';
+    const pptxMime = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
+    getMessageText.mockImplementation((content: unknown) => {
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content
+          .map((block) => {
+            if (block && typeof block === 'object' && 'text' in block && typeof block.text === 'string') {
+              return block.text;
+            }
+            return '';
+          })
+          .filter(Boolean)
+          .join('\n');
+      }
+      return '';
+    });
+    extractImagesAsAttachedFiles.mockImplementation((content: unknown) => {
+      const text = getMessageText(content);
+      return text.includes(pptxPath)
+        ? [{
+          fileName: pptxPath.split('/').pop() || 'file',
+          mimeType: pptxMime,
+          fileSize: 40400,
+          preview: null,
+          filePath: pptxPath,
+          source: 'tool-result',
+        }]
+        : [];
+    });
+    extractMediaRefs.mockImplementation((text: string) => text.includes(`MEDIA:${pptxPath}`)
+      ? [{ filePath: pptxPath, mimeType: pptxMime }]
+      : []);
+    extractRawFilePaths.mockImplementation((text: string) => text.includes(pptxPath)
+      ? [{ filePath: pptxPath, mimeType: pptxMime }]
+      : []);
+    hasNonToolAssistantContent.mockReturnValue(true);
+
+    const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
+    const h = makeHarness({ pendingToolImages: [] });
+
+    handleRuntimeEventState(h.set as never, h.get as never, {
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call-create-ppt',
+        toolName: 'create_pptx_file',
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            filePath: pptxPath,
+            media: `MEDIA:${pptxPath}`,
+          }),
+        }],
+      },
+    }, 'final', 'run-ppt');
+
+    handleRuntimeEventState(h.set as never, h.get as never, {
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call-ls',
+        toolName: 'exec',
+        content: [{ type: 'text', text: `-rw-r--r--  1 user  staff  40K ${pptxPath}` }],
+      },
+    }, 'final', 'run-ppt');
+
+    handleRuntimeEventState(h.set as never, h.get as never, {
+      message: {
+        role: 'assistant',
+        id: 'final-ppt',
+        content: [{ type: 'text', text: `已生成建筑工程投标标书 PPT。\n\nMEDIA:${pptxPath}` }],
+        _attachedFiles: [makeAttachedFile({ filePath: pptxPath, mimeType: pptxMime }, 'message-ref')],
+      },
+    }, 'final', 'run-ppt');
+
+    const final = h.read().messages.find((message) => message.id === 'final-ppt');
+    expect(final?._attachedFiles).toHaveLength(1);
+    expect(final?._attachedFiles).toEqual([
+      expect.objectContaining({
+        filePath: pptxPath,
+      }),
+    ]);
+    expect(h.read().pendingToolImages).toEqual([]);
+  });
+
   it('handles error event and finalizes immediately when not sending', async () => {
     const { handleRuntimeEventState } = await import('@/stores/chat/runtime-event-handlers');
     const h = makeHarness({ sending: false, activeRunId: 'r1', lastUserMessageAt: 123 });
