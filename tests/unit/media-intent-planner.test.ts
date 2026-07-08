@@ -117,7 +117,43 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('keeps single-deliverable chat requests on the existing LLM planner path', async () => {
+  it('routes explicit current-turn image generation when the planner authorizes media execution', async () => {
+    proxyAwareFetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: 'image_generate',
+                intent_kind: 'current_media_task',
+                current_turn_media_request: true,
+                confidence: 0.9,
+                selected_image_source: 'none',
+                prompt: '画一张城市夜景。',
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '画一张城市夜景',
+      requestedMode: 'chat',
+    });
+
+    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'image_generate',
+      source: 'planner',
+      prompt: '画一张城市夜景。',
+    }));
+    expect(plan.compositeTasks).toBeUndefined();
+  });
+
+  it('keeps media side effects on chat when planner omits current-turn authorization', async () => {
     proxyAwareFetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -144,11 +180,49 @@ describe('planMediaIntent', () => {
 
     expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
     expect(plan).toEqual(expect.objectContaining({
-      action: 'image_generate',
+      action: 'chat',
       source: 'planner',
-      prompt: '画一张城市夜景。',
+      reason: 'planner_missing_current_media_authorization',
+      selectedImageSource: 'none',
     }));
-    expect(plan.compositeTasks).toBeUndefined();
+  });
+
+  it('keeps future sourcing preferences on chat even when the planner proposes image generation', async () => {
+    proxyAwareFetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: 'image_generate',
+                intent_kind: 'preference_or_memory_update',
+                current_turn_media_request: false,
+                confidence: 0.9,
+                selected_image_source: 'none',
+                prompt: '以后生成作品的时候，如果需要图片就从网上获取，如果需要公开数据就从网上获取。保存在记忆体里',
+                reason: '用户是在设置后续生成作品的素材来源偏好，而不是要求当前回合生成图片。',
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '以后生成作品的时候，如果需要图片就从网上获取，如果需要公开数据就从网上获取。保存在记忆体里',
+      requestedMode: 'chat',
+    });
+
+    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'planner',
+      intentKind: 'preference_or_memory_update',
+      currentTurnMediaRequest: false,
+      selectedImageSource: 'none',
+    }));
   });
 
   it('uses planner JSON to route a current-image edit to the candidate image', async () => {
@@ -160,6 +234,8 @@ describe('planMediaIntent', () => {
             message: {
               content: JSON.stringify({
                 action: 'image_edit',
+                intent_kind: 'current_media_task',
+                current_turn_media_request: true,
                 confidence: 0.94,
                 selected_image_source: 'candidate',
                 selected_image_index: 0,
@@ -221,6 +297,8 @@ describe('planMediaIntent', () => {
             message: {
               content: JSON.stringify({
                 action: 'image_edit',
+                intent_kind: 'current_media_task',
+                current_turn_media_request: true,
                 confidence: 0.92,
                 selected_image_source: 'candidate',
                 selected_image_index: 0,

@@ -131,7 +131,7 @@ function translate(key: string, vars?: Record<string, unknown>): string {
     case 'composer.chatMode':
       return 'Chat';
     case 'composer.imageMode':
-      return 'Image';
+      return '图片模式';
     case 'composer.imageGenerateLabel':
       return 'Image generation';
     case 'composer.imageModeActive':
@@ -150,6 +150,14 @@ function translate(key: string, vars?: Record<string, unknown>): string {
       return 'Medium';
     case 'composer.imageQualityHigh':
       return 'High';
+    case 'composer.videoMode':
+      return '视频模式';
+    case 'composer.videoModeActive':
+      return 'Video mode on';
+    case 'composer.videoSizeLabel':
+      return 'Video size';
+    case 'composer.videoDurationLabel':
+      return 'Video duration';
     case 'composer.clearTarget':
       return 'Clear target agent';
     case 'composer.targetChip':
@@ -671,7 +679,7 @@ describe('ChatInput agent targeting', () => {
     );
   });
 
-  it('does not render standalone image or video mode controls', () => {
+  it('keeps chat as the default while exposing opt-in image and video controls', () => {
     const onSend = vi.fn();
     agentsState.agents = [
       {
@@ -689,10 +697,20 @@ describe('ChatInput agent targeting', () => {
 
     renderChatInput(onSend);
 
-    expect(screen.queryByTestId('chat-composer-mode-image')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('chat-composer-mode-video')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-composer-mode-image')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-composer-mode-video')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-composer-mode-image')).toHaveTextContent('图片模式');
+    expect(screen.getByTestId('chat-composer-mode-video')).toHaveTextContent('视频模式');
     expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
     expect(screen.queryByTestId('chat-video-options')).not.toBeInTheDocument();
+
+    const modelTrigger = screen.getByTestId('chat-model-picker-button');
+    const imageTrigger = screen.getByTestId('chat-composer-mode-image');
+    const videoTrigger = screen.getByTestId('chat-composer-mode-video');
+    const sendTrigger = screen.getByTestId('chat-composer-send');
+    expect(modelTrigger.compareDocumentPosition(imageTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(imageTrigger.compareDocumentPosition(videoTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(videoTrigger.compareDocumentPosition(sendTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'draw a cat poster' } });
     fireEvent.click(screen.getByTitle('Send'));
@@ -704,6 +722,92 @@ describe('ChatInput agent targeting', () => {
       'chat',
       undefined,
       undefined,
+    );
+  });
+
+  it('sends explicit image mode with composer parameter overrides', () => {
+    const onSend = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-image'));
+    expect(screen.getByTestId('chat-image-options')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-video-options')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-image-model')).not.toBeInTheDocument();
+    expect(Array.from((screen.getByTestId('chat-image-size') as HTMLSelectElement).options).map((option) => option.textContent)).toEqual([
+      '1K',
+      '2K',
+      '4K',
+    ]);
+
+    fireEvent.change(screen.getByTestId('chat-image-size'), { target: { value: '2048x2048' } });
+    fireEvent.change(screen.getByTestId('chat-image-quality'), { target: { value: 'high' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'draw a launch poster' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith(
+      'draw a launch poster',
+      undefined,
+      null,
+      'image',
+      { size: '2048x2048', quality: 'high' },
+      undefined,
+    );
+  });
+
+  it('sends explicit video mode with composer parameter overrides', () => {
+    const onSend = vi.fn();
+    agentsState.agents = [
+      {
+        id: 'main',
+        name: 'Main',
+        isDefault: true,
+        modelDisplay: 'MiniMax',
+        inheritedModel: true,
+        workspace: '~/.openclaw/workspace',
+        agentDir: '~/.openclaw/agents/main/agent',
+        mainSessionKey: 'agent:main:main',
+        channelTypes: [],
+      },
+    ];
+
+    renderChatInput(onSend);
+
+    fireEvent.click(screen.getByTestId('chat-composer-mode-video'));
+    expect(screen.getByTestId('chat-video-options')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-image-options')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('chat-video-model')).not.toBeInTheDocument();
+    expect(Array.from((screen.getByTestId('chat-video-size') as HTMLSelectElement).options).map((option) => option.textContent)).toEqual([
+      '16:9',
+      '9:16',
+      '1:1',
+    ]);
+
+    fireEvent.change(screen.getByTestId('chat-video-size'), { target: { value: '720x1280' } });
+    fireEvent.change(screen.getByTestId('chat-video-duration'), { target: { value: '10' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'make a vertical launch teaser' } });
+    fireEvent.click(screen.getByTitle('Send'));
+
+    expect(onSend).toHaveBeenCalledWith(
+      'make a vertical launch teaser',
+      undefined,
+      null,
+      'video',
+      undefined,
+      { size: '720x1280', durationSeconds: 10 },
     );
   });
 

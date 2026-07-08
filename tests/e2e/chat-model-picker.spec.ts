@@ -1,7 +1,45 @@
 import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
 
-const alphaModelRef = 'custom-alpha123/model-alpha';
-const betaModelRef = 'custom-beta5678/provider/model-beta';
+const alphaModelRef = 'lingzhiwuxian/smart-latest';
+const betaModelRef = 'lingzhiwuxian/qwen-latest';
+const managedClientModelOptions = {
+  text: {
+    defaultModel: 'smart-latest',
+    models: [
+      { id: 'smart-latest', label: '智能路由', enabled: true },
+      { id: 'qwen-latest', label: '通义千问', enabled: true },
+    ],
+  },
+  image: {
+    defaultModel: 'gpt-image-2',
+    defaultSize: '1024x1024',
+    defaultQuality: 'medium',
+    models: [{
+      id: 'gpt-image-2',
+      label: 'Image 2',
+      sizes: ['1024x1024', '2048x2048', '3840x2160'],
+      qualities: ['low', 'medium', 'high'],
+      defaultSize: '1024x1024',
+      defaultQuality: 'medium',
+      enabled: true,
+    }],
+  },
+  video: {
+    defaultModel: 'grok-image-video',
+    defaultSize: '1280x720',
+    defaultDurationSeconds: 4,
+    models: [{
+      id: 'grok-image-video',
+      label: 'Grok Video',
+      modes: ['text-to-video', 'image-to-video'],
+      sizes: ['1280x720', '720x1280', '1024x1024'],
+      durations: [4, 6, 8, 10, 12, 15],
+      defaultSize: '1280x720',
+      defaultDurationSeconds: 4,
+      enabled: true,
+    }],
+  },
+};
 
 test.describe('ClawX chat model picker', () => {
   test('switches only the current session model without mutating the agent default', async ({ launchElectronApp }) => {
@@ -98,6 +136,13 @@ test.describe('ClawX chat model picker', () => {
           if (path === '/api/agents' && method === 'GET') {
             return makeResponse(agentsSnapshot());
           }
+          if (path === '/api/junfeiai/client-config' && method === 'GET') {
+            return makeResponse({
+              announcements: { enabled: false, items: [] },
+              support: { enabled: false },
+              modelOptions: refs.clientModelOptions,
+            });
+          }
           if (path === '/api/provider-accounts' && method === 'GET') {
             return makeResponse([
               {
@@ -143,9 +188,15 @@ test.describe('ClawX chat model picker', () => {
         });
 
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: typeof hostRequests }).__chatModelPickerRequests = hostRequests;
-      }, { alphaModelRef, betaModelRef });
+      }, { alphaModelRef, betaModelRef, clientModelOptions: managedClientModelOptions });
 
       const page = await getStableWindow(app);
+      await page.evaluate((modelOptions) => {
+        localStorage.setItem('clawx-client-config', JSON.stringify({
+          state: { modelOptions },
+          version: 0,
+        }));
+      }, managedClientModelOptions);
       await page.reload();
       await expect(page.getByTestId('main-layout')).toBeVisible();
       await app.evaluate(({ BrowserWindow }) => {
@@ -153,11 +204,40 @@ test.describe('ClawX chat model picker', () => {
         win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
       });
 
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('model-alpha');
+      await expect(page.getByTestId('chat-model-picker-button')).toContainText('智能路由');
+
+      await expect.poll(async () => page.evaluate(() => {
+        const modelTrigger = document.querySelector('[data-testid="chat-model-picker-button"]');
+        const imageTrigger = document.querySelector('[data-testid="chat-composer-mode-image"]');
+        const videoTrigger = document.querySelector('[data-testid="chat-composer-mode-video"]');
+        const sendTrigger = document.querySelector('[data-testid="chat-composer-send"]');
+        return Boolean(
+          modelTrigger
+          && imageTrigger
+          && videoTrigger
+          && sendTrigger
+          && (modelTrigger.compareDocumentPosition(imageTrigger) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && (imageTrigger.compareDocumentPosition(videoTrigger) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && (videoTrigger.compareDocumentPosition(sendTrigger) & Node.DOCUMENT_POSITION_FOLLOWING),
+        );
+      })).toBe(true);
+
+      await page.getByTestId('chat-composer-mode-image').click();
+      await expect(page.getByTestId('chat-image-options')).toBeVisible();
+      await expect(page.getByTestId('chat-video-options')).toHaveCount(0);
+      await expect(page.getByTestId('chat-image-model')).toHaveCount(0);
+      await expect(await page.getByTestId('chat-image-size').locator('option').allTextContents()).toEqual(['1K', '2K', '4K']);
+
+      await page.getByTestId('chat-composer-mode-video').click();
+      await expect(page.getByTestId('chat-video-options')).toBeVisible();
+      await expect(page.getByTestId('chat-image-options')).toHaveCount(0);
+      await expect(page.getByTestId('chat-video-model')).toHaveCount(0);
+      await expect(await page.getByTestId('chat-video-size').locator('option').allTextContents()).toEqual(['16:9', '9:16', '1:1']);
+
       await page.getByTestId('chat-model-picker-button').click();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
-      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('provider/model-beta');
-      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'provider/model-beta' }).click();
+      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('通义千问');
+      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: '通义千问' }).click();
 
       await expect.poll(async () => app.evaluate(() => (
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []
@@ -173,7 +253,7 @@ test.describe('ClawX chat model picker', () => {
         const win = BrowserWindow.getAllWindows()[0];
         win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
       });
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('provider/model-beta');
+      await expect(page.getByTestId('chat-model-picker-button')).toContainText('通义千问');
 
       const requests = await app.evaluate(() => (
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []

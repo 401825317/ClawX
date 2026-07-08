@@ -22,6 +22,7 @@ import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-ski
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
+import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
@@ -1091,6 +1092,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (promptCacheKeyPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
+  }
+
+  // --- Raw tool signal diagnostics patch ---
+  // UClaw needs to distinguish "provider returned no raw tool_calls" from
+  // "OpenClaw parsed/dropped them" and "UClaw failed to execute them".
+  const rawToolSignalPatch = patchOpenClawRawToolSignalRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (rawToolSignalPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${rawToolSignalPatch.patchedFiles} raw tool signal runtime file(s)`;
   }
 
 }

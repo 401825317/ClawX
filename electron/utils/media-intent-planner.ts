@@ -28,6 +28,12 @@ export type MediaIntentAction =
   | 'clarify';
 
 export type MediaIntentImageSource = 'explicit' | 'candidate' | 'none';
+export type MediaIntentKind =
+  | 'current_media_task'
+  | 'current_non_media_task'
+  | 'preference_or_memory_update'
+  | 'ordinary_chat'
+  | 'clarification';
 
 export type MediaIntentCompositeTaskKind =
   | 'image_generate'
@@ -60,6 +66,8 @@ export type MediaIntentRecentMessage = {
 export type MediaIntentPlan = {
   action: MediaIntentAction;
   source: 'planner' | 'fallback';
+  intentKind?: MediaIntentKind;
+  currentTurnMediaRequest?: boolean;
   confidence?: number;
   reason?: string;
   selectedImageSource?: MediaIntentImageSource;
@@ -115,6 +123,8 @@ function summarizePlanForLog(plan: MediaIntentPlan): Record<string, unknown> {
   return {
     action: plan.action,
     source: plan.source,
+    intentKind: plan.intentKind,
+    currentTurnMediaRequest: plan.currentTurnMediaRequest,
     confidence: plan.confidence,
     reason: plan.reason ? truncateForLog(plan.reason, 300) : undefined,
     selectedImageSource: plan.selectedImageSource,
@@ -148,6 +158,8 @@ function summarizeRawPlannerJsonForLog(raw: Record<string, unknown>): Record<str
   const prompt = raw.prompt ?? raw.rewritten_prompt ?? raw.rewrittenPrompt;
   return {
     action: raw.action,
+    intent_kind: raw.intent_kind ?? raw.intentKind,
+    current_turn_media_request: raw.current_turn_media_request ?? raw.currentTurnMediaRequest,
     confidence: raw.confidence,
     selected_image_source: raw.selected_image_source ?? raw.selectedImageSource,
     selected_image_index: raw.selected_image_index ?? raw.selectedImageIndex,
@@ -207,6 +219,20 @@ function isIntentAction(value: unknown): value is MediaIntentAction {
     || value === 'video_generate'
     || value === 'desktop_screenshot'
     || value === 'clarify';
+}
+
+function normalizeIntentKind(value: unknown): MediaIntentKind | undefined {
+  return value === 'current_media_task'
+    || value === 'current_non_media_task'
+    || value === 'preference_or_memory_update'
+    || value === 'ordinary_chat'
+    || value === 'clarification'
+    ? value
+    : undefined;
+}
+
+function normalizeOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function isVisualQuestionPrompt(prompt: string): boolean {
@@ -525,6 +551,10 @@ function normalizePlannerDecision(params: {
   const confidence = clampConfidence(params.raw.confidence) ?? 0;
   if (confidence < MEDIA_INTENT_PLANNER_MIN_CONFIDENCE) return null;
 
+  const intentKind = normalizeIntentKind(params.raw.intent_kind ?? params.raw.intentKind);
+  const currentTurnMediaRequest = normalizeOptionalBoolean(
+    params.raw.current_turn_media_request ?? params.raw.currentTurnMediaRequest,
+  );
   const reason = normalizeOptionalText(params.raw.reason);
   const selectedImageSource = params.raw.selected_image_source ?? params.raw.selectedImageSource;
   const selectedImageIndex = params.raw.selected_image_index ?? params.raw.selectedImageIndex;
@@ -545,6 +575,25 @@ function normalizePlannerDecision(params: {
     prompt,
   );
 
+  const isMediaSideEffectAction = action === 'image_generate'
+    || action === 'image_edit'
+    || action === 'video_generate'
+    || action === 'desktop_screenshot';
+  const plannerAuthorizesCurrentMedia = intentKind === 'current_media_task'
+    && currentTurnMediaRequest === true;
+  if (isMediaSideEffectAction && !plannerAuthorizesCurrentMedia) {
+    return {
+      action: 'chat',
+      source: 'planner',
+      intentKind,
+      currentTurnMediaRequest,
+      confidence,
+      reason: reason || 'planner_missing_current_media_authorization',
+      selectedImageSource: 'none',
+      prompt,
+    };
+  }
+
   if (action === 'vision_chat') {
     const imageSelection = selectPreferredImage({
       selectedImageSource,
@@ -558,6 +607,8 @@ function normalizePlannerDecision(params: {
     return {
       action,
       source: 'planner',
+      intentKind,
+      currentTurnMediaRequest,
       confidence,
       reason,
       selectedImageSource: imageSelection.selectedImageSource,
@@ -580,6 +631,8 @@ function normalizePlannerDecision(params: {
     return {
       action,
       source: 'planner',
+      intentKind,
+      currentTurnMediaRequest,
       confidence,
       reason,
       selectedImageSource: imageSelection.selectedImageSource,
@@ -606,6 +659,8 @@ function normalizePlannerDecision(params: {
     return {
       action,
       source: 'planner',
+      intentKind,
+      currentTurnMediaRequest,
       confidence,
       reason,
       selectedImageSource: imageSelection.selectedImageSource,
@@ -639,6 +694,8 @@ function normalizePlannerDecision(params: {
       return {
         action: 'vision_chat',
         source: 'planner',
+        intentKind,
+        currentTurnMediaRequest,
         confidence,
         reason: reason || 'chat_with_referenced_image',
         selectedImageSource: imageSelection.selectedImageSource,
@@ -652,6 +709,8 @@ function normalizePlannerDecision(params: {
   return {
     action,
     source: 'planner',
+    intentKind,
+    currentTurnMediaRequest,
     confidence,
     reason,
     selectedImageSource: 'none',
@@ -677,8 +736,14 @@ function buildPlannerMessages(params: {
         'You are UClaw media/tool intent planner. Return strict JSON only.',
         'Your job is to decide whether the next step should be normal chat, visual chat about an existing image, still-image generation, still-image editing, video generation, desktop screenshot capture, or a clarification question.',
         'Do not answer the user. Do not execute tools. Only produce the route plan.',
+        'First decide whether the user is requesting an immediate media side effect in this current turn.',
+        'Set intent_kind to one of: current_media_task, current_non_media_task, preference_or_memory_update, ordinary_chat, clarification.',
+        'Set current_turn_media_request=true only when the current user message itself asks to create, edit, inspect, capture, or animate media now.',
+        'Future/default behavior, memory/profile/preference updates, and instructions about how to source images or public data for later generated works are preference_or_memory_update with current_turn_media_request=false.',
         'Actions: chat, vision_chat, image_generate, image_edit, video_generate, desktop_screenshot, clarify.',
+        'Only choose image_generate, image_edit, video_generate, or desktop_screenshot when intent_kind=current_media_task and current_turn_media_request=true.',
         'Use chat for explanations, research/search requests, planning, automation workflows, coding, and requests that do not require immediate media tool execution.',
+        'Use chat for preference_or_memory_update even when the text mentions images, web sources, public data, or generated works.',
         'Use vision_chat when the user asks to inspect, evaluate, describe, compare, rate, or suggest improvements for an existing image. vision_chat MUST select exactly one explicit_images or candidate_images item.',
         'Use image_generate only when the user wants a new still image from text.',
         'Use image_edit only when the user wants to change an existing image. image_edit MUST select exactly one explicit_images or candidate_images item.',
@@ -692,7 +757,7 @@ function buildPlannerMessages(params: {
         'Extract media parameters only when the user explicitly asks for them: image_size, image_quality, video_size, video_duration_seconds. Leave them null otherwise.',
         'Never invent model names. Use only the user-requested size/quality/duration values you can infer from the text.',
         'requested_mode is a UI hint, not a substitute for reasoning. Respect image/video mode when it is compatible with the prompt; otherwise choose clarify or chat.',
-        'Return JSON schema: {"action":"chat|vision_chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"image_size":string|null,"image_quality":"low|medium|high|null","video_mode":"text_to_video|image_to_video|edit_image_then_video|null","video_size":string|null,"video_duration_seconds":number|null,"video_prompt":string|null,"image_edit_prompt":string|null,"clarification":string|null,"reason":string}',
+        'Return JSON schema: {"action":"chat|vision_chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","intent_kind":"current_media_task|current_non_media_task|preference_or_memory_update|ordinary_chat|clarification","current_turn_media_request":boolean,"confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"image_size":string|null,"image_quality":"low|medium|high|null","video_mode":"text_to_video|image_to_video|edit_image_then_video|null","video_size":string|null,"video_duration_seconds":number|null,"video_prompt":string|null,"image_edit_prompt":string|null,"clarification":string|null,"reason":string}',
       ].join('\n'),
     },
     {

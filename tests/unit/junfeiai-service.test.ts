@@ -68,6 +68,7 @@ vi.mock('@electron/utils/junfeiai-device', () => ({
 import {
   createJunFeiAITopupOrder,
   ensureJunFeiAIProviderSeeded,
+  getJunFeiAIClientConfig,
   getJunFeiAILocalStatus,
   getJunFeiAITopupOrderStatus,
   getJunFeiAITopupOverview,
@@ -418,6 +419,57 @@ describe('JunFeiAI managed provider service', () => {
         }),
       }),
     );
+  });
+
+  it('unwraps success/data client config envelopes from the managed backend', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({
+      success: true,
+      message: '',
+      data: {
+        modelOptions: {
+          image: {
+            defaultModel: 'gpt-image-2',
+            defaultSize: '1024x1024',
+            defaultQuality: 'medium',
+            models: [{
+              id: 'gpt-image-2',
+              label: 'Image 2',
+              sizes: ['1024x1024', '2048x2048'],
+              qualities: ['medium', 'high'],
+              defaultSize: '1024x1024',
+              defaultQuality: 'medium',
+              enabled: true,
+            }],
+          },
+          video: {
+            defaultModel: 'grok-image-video',
+            defaultSize: '1280x720',
+            defaultDurationSeconds: 15,
+            models: [{
+              id: 'grok-image-video',
+              label: 'Grok Video',
+              modes: ['text-to-video'],
+              sizes: ['1280x720', '720x1280'],
+              durations: [4, 10, 15],
+              defaultSize: '1280x720',
+              defaultDurationSeconds: 15,
+              enabled: true,
+            }],
+          },
+        },
+      },
+    }), { status: 200 }));
+
+    const result = await getJunFeiAIClientConfig();
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://zz-cn.lingzhiwuxian.com/api/clawx/client-config',
+      expect.any(Object),
+    );
+    expect(result.modelOptions?.image?.models?.[0]?.sizes).toEqual(['1024x1024', '2048x2048']);
+    expect(result.modelOptions?.image?.models?.[0]?.qualities).toEqual(['medium', 'high']);
+    expect(result.modelOptions?.video?.defaultDurationSeconds).toBe(15);
+    expect(result.modelOptions?.video?.models?.[0]?.durations).toEqual([4, 10, 15]);
   });
 
   it('defaults to the production backend outside Vite development', async () => {

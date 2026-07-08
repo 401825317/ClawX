@@ -10,6 +10,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Image as ImageIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { Select } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
@@ -90,6 +91,8 @@ const DEFAULT_TEXT_MODEL_OPTION: RemoteModelOption = {
 const IMAGE_EDIT_SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const IMAGE_EDIT_SUPPORTED_EXTENSIONS = /\.(jpe?g|jfif|png|webp)$/i;
 const KNOWN_IMAGE_EXTENSIONS = /\.(avif|bmp|gif|heic|heif|jfif|jpe?g|png|svg|tiff?|webp)$/i;
+const COMPOSER_MEDIA_SELECT_CLASS =
+  'h-8 rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none';
 
 type ImageEditReferenceCandidate = {
   fileName?: string;
@@ -145,6 +148,53 @@ function showUnsupportedImageEditReferenceToast(
     files,
     defaultValue: `这些图片可以作为普通附件上传，但不能作为 OpenAI 图片编辑参考图：${files}。请先转成 PNG、JPEG 或 WebP 后再图生图。`,
   }), { duration: 8000 });
+}
+
+function firstEnabled<T extends { enabled?: boolean }>(items: T[]): T | undefined {
+  return items.find((item) => item.enabled !== false) ?? items[0];
+}
+
+function optionValue<T>(value: T | undefined, options: T[], fallback: T): T {
+  return value !== undefined && options.includes(value) ? value : fallback;
+}
+
+function formatImageSizeLabel(value: string): string {
+  switch (value) {
+    case '1024x1024':
+      return '1K';
+    case '2048x2048':
+      return '2K';
+    case '3840x2160':
+      return '4K';
+    default:
+      return value;
+  }
+}
+
+function formatVideoSizeLabel(value: string): string {
+  switch (value) {
+    case '1280x720':
+      return '16:9';
+    case '720x1280':
+      return '9:16';
+    case '1024x1024':
+      return '1:1';
+    default:
+      return value;
+  }
+}
+
+function formatImageQualityLabel(value: string, t: ReturnType<typeof useTranslation>['t']): string {
+  switch (value) {
+    case 'low':
+      return t('composer.imageQualityLow', 'Low');
+    case 'medium':
+      return t('composer.imageQualityMedium', 'Medium');
+    case 'high':
+      return t('composer.imageQualityHigh', 'High');
+    default:
+      return value;
+  }
 }
 
 function getSkillPrefix(skillName: string): string {
@@ -301,6 +351,9 @@ export function ChatInput({
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
   const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
+  const [sessionSendModes, setSessionSendModes] = useState<Record<string, ChatSendMode>>({});
+  const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, ChatImageSendOptions>>({});
+  const [sessionVideoOptions, setSessionVideoOptions] = useState<Record<string, ChatVideoSendOptions>>({});
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
@@ -326,6 +379,79 @@ export function ChatInput({
     [currentSessionKey, sessions],
   );
   const hasImageEditReference = !!imageEditReference?.filePath;
+  const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
+  const imageModelOptions = useMemo(() => {
+    const configured = clientModelOptions.image.models.length > 0
+      ? clientModelOptions.image.models
+      : DEFAULT_CLIENT_MODEL_OPTIONS.image.models;
+    const enabled = configured.filter((model) => model.enabled !== false);
+    return enabled.length > 0 ? enabled : DEFAULT_CLIENT_MODEL_OPTIONS.image.models;
+  }, [clientModelOptions.image.models]);
+  const videoModelOptions = useMemo(() => {
+    const configured = clientModelOptions.video.models.length > 0
+      ? clientModelOptions.video.models
+      : DEFAULT_CLIENT_MODEL_OPTIONS.video.models;
+    const enabled = configured.filter((model) => model.enabled !== false);
+    return enabled.length > 0 ? enabled : DEFAULT_CLIENT_MODEL_OPTIONS.video.models;
+  }, [clientModelOptions.video.models]);
+  const defaultImageOptions = useMemo<ChatImageSendOptions>(() => {
+    const configuredDefault = imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel);
+    const model = configuredDefault ?? firstEnabled(imageModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.models[0];
+    const fallbackSize = model?.defaultSize ?? clientModelOptions.image.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize;
+    const fallbackQuality = model?.defaultQuality ?? clientModelOptions.image.defaultQuality ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality;
+    return {
+      model: model?.id ?? clientModelOptions.image.defaultModel,
+      size: optionValue(fallbackSize, model?.sizes ?? [], fallbackSize),
+      quality: optionValue(fallbackQuality, model?.qualities ?? [], fallbackQuality),
+    };
+  }, [
+    clientModelOptions.image.defaultModel,
+    clientModelOptions.image.defaultQuality,
+    clientModelOptions.image.defaultSize,
+    imageModelOptions,
+  ]);
+  const defaultVideoOptions = useMemo<ChatVideoSendOptions>(() => {
+    const configuredDefault = videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel);
+    const model = configuredDefault ?? firstEnabled(videoModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.models[0];
+    const fallbackSize = model?.defaultSize ?? clientModelOptions.video.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultSize;
+    const fallbackDuration = model?.defaultDurationSeconds
+      ?? clientModelOptions.video.defaultDurationSeconds
+      ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultDurationSeconds;
+    return {
+      model: model?.id ?? clientModelOptions.video.defaultModel,
+      size: optionValue(fallbackSize, model?.sizes ?? [], fallbackSize),
+      durationSeconds: optionValue(fallbackDuration, model?.durations ?? [], fallbackDuration),
+    };
+  }, [
+    clientModelOptions.video.defaultDurationSeconds,
+    clientModelOptions.video.defaultModel,
+    clientModelOptions.video.defaultSize,
+    videoModelOptions,
+  ]);
+  const selectedImageModel = imageModelOptions.find((model) => model.id === sessionImageOptions[currentSessionKey]?.model)
+    ?? imageModelOptions.find((model) => model.id === defaultImageOptions.model)
+    ?? imageModelOptions[0];
+  const selectedVideoModel = videoModelOptions.find((model) => model.id === sessionVideoOptions[currentSessionKey]?.model)
+    ?? videoModelOptions.find((model) => model.id === defaultVideoOptions.model)
+    ?? videoModelOptions[0];
+  const imageOptions: ChatImageSendOptions = {
+    ...defaultImageOptions,
+    ...sessionImageOptions[currentSessionKey],
+  };
+  imageOptions.model = selectedImageModel?.id ?? imageOptions.model;
+  imageOptions.size = optionValue(imageOptions.size, selectedImageModel?.sizes ?? [], defaultImageOptions.size);
+  imageOptions.quality = optionValue(imageOptions.quality, selectedImageModel?.qualities ?? [], defaultImageOptions.quality);
+  const videoOptions: ChatVideoSendOptions = {
+    ...defaultVideoOptions,
+    ...sessionVideoOptions[currentSessionKey],
+  };
+  videoOptions.model = selectedVideoModel?.id ?? videoOptions.model;
+  videoOptions.size = optionValue(videoOptions.size, selectedVideoModel?.sizes ?? [], defaultVideoOptions.size);
+  videoOptions.durationSeconds = optionValue(
+    videoOptions.durationSeconds,
+    selectedVideoModel?.durations ?? [],
+    defaultVideoOptions.durationSeconds,
+  );
 
   useEffect(() => {
     if (!hasImageEditReference) return;
@@ -635,6 +761,39 @@ export function ChatInput({
     })();
   }, [currentSessionKey, defaultModelRef, effectiveModelRef, requestedModelRef, t, updateSessionModel]);
 
+  const toggleMediaMode = useCallback((mode: Exclude<ChatSendMode, 'chat'>) => {
+    setPickerOpen(false);
+    setSkillPickerOpen(false);
+    setModelPickerOpen(false);
+    setSessionSendModes((current) => ({
+      ...current,
+      [currentSessionKey]: current[currentSessionKey] === mode ? 'chat' : mode,
+    }));
+    textareaRef.current?.focus();
+  }, [currentSessionKey]);
+
+  const updateImageOptions = useCallback((next: Partial<ChatImageSendOptions>) => {
+    setSessionImageOptions((current) => ({
+      ...current,
+      [currentSessionKey]: {
+        size: imageOptions.size,
+        quality: imageOptions.quality,
+        ...next,
+      },
+    }));
+  }, [currentSessionKey, imageOptions]);
+
+  const updateVideoOptions = useCallback((next: Partial<ChatVideoSendOptions>) => {
+    setSessionVideoOptions((current) => ({
+      ...current,
+      [currentSessionKey]: {
+        size: videoOptions.size,
+        durationSeconds: videoOptions.durationSeconds,
+        ...next,
+      },
+    }));
+  }, [currentSessionKey, videoOptions]);
+
   // ── File staging via native dialog / Electron drag-drop paths ──
 
   const stagePathFiles = useCallback(async (filePaths: string[]) => {
@@ -845,13 +1004,19 @@ export function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
+    const imageSendOptions: ChatImageSendOptions | undefined = sendMode === 'image'
+      ? { size: imageOptions.size, quality: imageOptions.quality }
+      : undefined;
+    const videoSendOptions: ChatVideoSendOptions | undefined = sendMode === 'video'
+      ? { size: videoOptions.size, durationSeconds: videoOptions.durationSeconds }
+      : undefined;
     onSend(
       textToSend,
       attachmentsToSend,
       targetAgentId,
-      'chat',
-      undefined,
-      undefined,
+      sendMode,
+      imageSendOptions,
+      videoSendOptions,
     );
     if (imageReferenceAttachment) {
       onClearImageEditReference?.();
@@ -866,12 +1031,15 @@ export function ChatInput({
     effectiveModelRef,
     input,
     imageEditReference,
+    imageOptions,
     onSend,
     onClearImageEditReference,
     requestedModelRef,
+    sendMode,
     t,
     targetAgentId,
     updateSessionModel,
+    videoOptions,
   ]);
 
   const handleStop = useCallback(() => {
@@ -1309,6 +1477,103 @@ export function ChatInput({
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            <div className="ml-1 flex items-center">
+              <button
+                type="button"
+                data-testid="chat-composer-mode-image"
+                className={cn(
+                  'inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors',
+                  sendMode === 'image'
+                    ? 'bg-black/10 text-foreground dark:bg-white/10'
+                    : 'hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
+                )}
+                onClick={() => toggleMediaMode('image')}
+                disabled={inputDisabled || sending}
+                title={sendMode === 'image' ? t('composer.imageModeActive', 'Image mode on') : t('composer.imageMode', 'Image')}
+              >
+                <ImageIcon className="h-4 w-4 shrink-0" />
+                <span>{t('composer.imageMode', '图片模式')}</span>
+              </button>
+              <button
+                type="button"
+                data-testid="chat-composer-mode-video"
+                className={cn(
+                  'ml-1 inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors',
+                  sendMode === 'video'
+                    ? 'bg-black/10 text-foreground dark:bg-white/10'
+                    : 'hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
+                )}
+                onClick={() => toggleMediaMode('video')}
+                disabled={inputDisabled || sending}
+                title={sendMode === 'video' ? t('composer.videoModeActive', 'Video mode on') : t('composer.videoMode', 'Video')}
+              >
+                <Film className="h-4 w-4 shrink-0" />
+                <span>{t('composer.videoMode', '视频模式')}</span>
+              </button>
+            </div>
+
+            {sendMode === 'image' && (
+              <div className="ml-2 flex items-center gap-2" data-testid="chat-image-options">
+                <Select
+                  value={imageOptions.size}
+                  onChange={(event) => updateImageOptions({ size: event.target.value })}
+                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[74px]')}
+                  data-testid="chat-image-size"
+                  aria-label={t('composer.imageSizeLabel')}
+                >
+                  {(selectedImageModel?.sizes ?? [imageOptions.size]).map((size) => (
+                    <option key={size} value={size}>
+                      {formatImageSizeLabel(size)}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={imageOptions.quality}
+                  onChange={(event) => updateImageOptions({ quality: event.target.value })}
+                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[88px]')}
+                  data-testid="chat-image-quality"
+                  aria-label={t('composer.imageQualityLabel')}
+                >
+                  {(selectedImageModel?.qualities ?? [imageOptions.quality]).map((quality) => (
+                    <option key={quality} value={quality}>
+                      {formatImageQualityLabel(quality, t)}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
+
+            {sendMode === 'video' && (
+              <div className="ml-2 flex items-center gap-2" data-testid="chat-video-options">
+                <Select
+                  value={videoOptions.size}
+                  onChange={(event) => updateVideoOptions({ size: event.target.value })}
+                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[82px]')}
+                  data-testid="chat-video-size"
+                  aria-label={t('composer.videoSizeLabel', 'Video size')}
+                >
+                  {(selectedVideoModel?.sizes ?? [videoOptions.size]).map((size) => (
+                    <option key={size} value={size}>
+                      {formatVideoSizeLabel(size)}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={String(videoOptions.durationSeconds)}
+                  onChange={(event) => updateVideoOptions({ durationSeconds: Number(event.target.value) })}
+                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[74px]')}
+                  data-testid="chat-video-duration"
+                  aria-label={t('composer.videoDurationLabel', 'Video duration')}
+                >
+                  {(selectedVideoModel?.durations ?? [videoOptions.durationSeconds]).map((duration) => (
+                    <option key={duration} value={duration}>
+                      {duration}s
+                    </option>
+                  ))}
+                </Select>
               </div>
             )}
 

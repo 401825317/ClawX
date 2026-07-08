@@ -37,6 +37,7 @@ interface Sub2APIEnvelope<T> {
   code?: number;
   message?: string;
   data?: T;
+  success?: boolean;
 }
 
 class JunFeiAIHttpError extends Error {
@@ -397,6 +398,10 @@ function unwrapEnvelope<T>(payload: unknown): T {
 
   const envelope = payload as Sub2APIEnvelope<T>;
   if (envelope && typeof envelope === 'object' && 'data' in envelope) {
+    if (envelope.success === false) {
+      const code = getPayloadErrorCode(payload);
+      throw new JunFeiAIHttpError(envelope.message || 'Request failed', 400, code, payload);
+    }
     if (typeof envelope.code === 'number' && envelope.code !== 0) {
       throw new JunFeiAIHttpError(envelope.message || `API error ${envelope.code}`, envelope.code, String(envelope.code), payload);
     }
