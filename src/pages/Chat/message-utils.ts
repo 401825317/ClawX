@@ -212,6 +212,15 @@ export function isGeneratingStatusNarration(text: string): boolean {
   if (/稍等(片刻|一下)?/.test(trimmed) && trimmed.length <= 80 && /生成|generat/i.test(trimmed)) return true;
   if (/^继续收尾[：:]/u.test(trimmed)) return true;
   if (/^继续(?:执行|处理|推进)[：:]/u.test(trimmed) && /(?:产物|文件|媒体|工具|验证|后台)/u.test(trimmed)) return true;
+  const hasConcreteArtifactEvidence = /(?:MEDIA:\s*(?:[A-Za-z]:[\\/]|\/|~\/|\.{1,2}\/)|(?:[A-Za-z]:[\\/]|\/|~\/|\.{1,2}\/)[^\s`"'<>]+\.(?:pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|mp4|mov|webm)\b)/iu.test(trimmed);
+  if (
+    !hasConcreteArtifactEvidence
+    && trimmed.length <= 260
+    && /(?:上次|上一(?:轮|版)|刚才|前面|之前|我(?:现在|会|将|来|直接|马上)|先).{0,90}(?:补(?:一版|交付)?|重做|重新(?:做|制作|生成)?|继续(?:做|执行|生成|制作|补)?|生成|制作|交付|做出来)/u.test(trimmed)
+    && /(?:PPT|ppt|产物|文件|文档|图片|图像|视频|媒体|本地文件|发布会|高级版|重做)/u.test(trimmed)
+  ) {
+    return true;
+  }
   return false;
 }
 

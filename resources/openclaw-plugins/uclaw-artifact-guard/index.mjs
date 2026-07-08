@@ -10,6 +10,7 @@ const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
 let runtimeEventSeq = 0;
 const PROMPT_CONTEXT = [
   'UClaw 交付与语言规则：',
+  '- 如果最新用户消息是内部心跳 `[OpenClaw heartbeat poll]`，必须只回复 `HEARTBEAT_OK`，不能继续、评价、补做或复述任何历史任务。',
   '- 默认所有面向用户的自然语言回复必须使用简体中文；不要因为工具、技能、日志、模板或上一次回复是英文而切换成英文。',
   '- 用户要求生成、创建、导出、美化或打开 PPT/PPTX、Word/DOCX、Excel/XLSX、PDF、文档、报告、表格、图片、网页、脚本或压缩包时，必须交付真实本地产物，不能只回复计划、承诺、大纲或说明。',
   '- 用户对上一轮已生成的产物给出负反馈或修改意图（例如太丑、不满意、不行、重做、换一版、美化、优化）时，应视为新的产物修订任务：必须直接制作一个新的非覆盖改进版，不能只评价或承诺。',
@@ -24,6 +25,8 @@ const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
 const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|不行|不对|太差|太简陋|占位|模板感|不够.{0,12}(?:高级|好看|精致|正式|苹果|产品|宣传)|重新(?:做|制作|生成|来|搞)|重做|再做|再来|换一版|改一版|美化|优化|润色|升级|高级一点|好看一点|精致一点|重新直接制作|make it better|too ugly|ugly|not good|redo|remake|regenerate|make another|improve|polish)/iu;
 const ARTIFACT_REVISION_NEGATION_RE = /(?:不要|别|不用|先别|无需|不需要|do not|don't|no need).{0,12}(?:重做|重新|修改|改|美化|优化|生成|制作|redo|remake|regenerate|improve|polish)/iu;
+const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
+const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
 const PROMISE_ONLY_RE = /(?:^(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在会)|(?:接下来|下一步|随后|稍后).{0,12}(?:我)?(?:会|将)|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish))/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
 const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm';
@@ -234,6 +237,16 @@ function isArtifactRevisionFeedback(text) {
 
 function isDesktopActionRequest(text) {
   return DESKTOP_ACTION_REQUEST_RE.test(text ?? '');
+}
+
+function isHeartbeatPoll(text) {
+  resetRegex(HEARTBEAT_POLL_RE);
+  return HEARTBEAT_POLL_RE.test(String(text ?? ''));
+}
+
+function isHeartbeatOk(text) {
+  resetRegex(HEARTBEAT_OK_RE);
+  return HEARTBEAT_OK_RE.test(String(text ?? ''));
 }
 
 function inferRequestedArtifactKind(text) {
@@ -804,6 +817,8 @@ function analyzeArtifactFinal(event) {
   const latestUserText = extractLatestUserRequestText(event);
   const activeUserText = latestUserText || userText;
   const finalText = extractFinalAssistantText(event);
+  const heartbeatPoll = isHeartbeatPoll(activeUserText);
+  const heartbeatOk = isHeartbeatOk(finalText);
   const { before: eventBeforeLatestUser, after: eventAfterLatestUser } = splitEventMessagesAroundLatestUser(event);
   const priorArtifacts = buildArtifactEvidence(eventBeforeLatestUser, '');
   const priorArtifactEvidence = priorArtifacts.length > 0 || hasArtifactEvidence(eventBeforeLatestUser, '');
@@ -858,12 +873,19 @@ function analyzeArtifactFinal(event) {
     && !explicitBlocker
     && missingDesktopActionEffects.length > 0,
   );
-  const shouldRevise = shouldReviseArtifact || shouldReviseDesktopAction;
+  const shouldReviseHeartbeat = Boolean(
+    heartbeatPoll
+    && finalText.trim()
+    && !heartbeatOk,
+  );
+  const shouldRevise = shouldReviseHeartbeat || shouldReviseArtifact || shouldReviseDesktopAction;
   return {
     userText,
     latestUserText,
     activeUserText,
     finalText,
+    heartbeatPoll,
+    heartbeatOk,
     artifactRequest,
     artifactRevisionFeedback,
     artifactRevisionRequest,
@@ -886,6 +908,7 @@ function analyzeArtifactFinal(event) {
     verificationBlocked,
     explicitBlocker,
     promiseOnly,
+    shouldReviseHeartbeat,
     shouldReviseArtifact,
     shouldReviseDesktopAction,
     shouldRevise,
@@ -897,6 +920,21 @@ function shouldReviseArtifactFinal(event) {
 }
 
 function buildRevision(analysis) {
+  if (analysis?.shouldReviseHeartbeat) {
+    return {
+      action: 'revise',
+      reason: 'UClaw heartbeat poll produced user-visible non-heartbeat content.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:heartbeat`,
+        maxAttempts: 1,
+        instruction: [
+          '最新用户消息是内部心跳 `[OpenClaw heartbeat poll]`，不是用户的新任务。',
+          '不要继续历史任务、不要评价上一轮、不要承诺补做，也不要输出任何产物说明。',
+          '本轮最终回复必须只包含：HEARTBEAT_OK',
+        ].join('\n'),
+      },
+    };
+  }
   if (analysis?.shouldReviseDesktopAction && !analysis?.shouldReviseArtifact) {
     return {
       action: 'revise',
@@ -1237,6 +1275,8 @@ function registerArtifactGuard(api) {
         eventId: eventId(event),
         userTextChars: analysis.userText.length,
         finalTextChars: analysis.finalText.length,
+        heartbeatPoll: analysis.heartbeatPoll,
+        heartbeatOk: analysis.heartbeatOk,
         artifactRequest: analysis.artifactRequest,
         artifactRevisionFeedback: analysis.artifactRevisionFeedback,
         artifactRevisionRequest: analysis.artifactRevisionRequest,
@@ -1258,6 +1298,7 @@ function registerArtifactGuard(api) {
         promiseOnly: analysis.promiseOnly,
         desktopActionRequest: analysis.desktopActionRequest,
         desktopActionEvidence: analysis.desktopActionEvidence,
+        shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
         shouldRevise: analysis.shouldRevise,
       });
       emitRuntimeContractEvents(api, event, analysis);

@@ -92,6 +92,60 @@ describe('uclaw-artifact-guard', () => {
     });
   });
 
+  it('forces heartbeat polls to return only the internal heartbeat sentinel', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+
+    const result = finalizeHook({
+      runId: 'run-heartbeat-leaked-promise',
+      messages: [
+        { role: 'user', content: '太丑了 你自己看看' },
+        { role: 'assistant', content: '我直接重做一版更干净高级的。' },
+        { role: 'user', content: '[OpenClaw heartbeat poll]' },
+        { role: 'assistant', content: '上次确实没完成重做，我现在直接补一版更像发布会风格的高级版。' },
+      ],
+    }) as { action?: string; retry?: { instruction?: string; maxAttempts?: number }; reason?: string } | undefined;
+
+    expect(result?.action).toBe('revise');
+    expect(result?.reason).toContain('heartbeat poll');
+    expect(result?.retry?.instruction).toContain('HEARTBEAT_OK');
+    expect(result?.retry?.maxAttempts).toBe(1);
+
+    const analysis = pluginModule.__test.analyzeArtifactFinal({
+      messages: [
+        { role: 'user', content: '[OpenClaw heartbeat poll]' },
+        { role: 'assistant', content: '上次确实没完成重做，我现在直接补一版更像发布会风格的高级版。' },
+      ],
+    });
+    expect(analysis).toMatchObject({
+      heartbeatPoll: true,
+      heartbeatOk: false,
+      shouldReviseHeartbeat: true,
+      shouldRevise: true,
+    });
+  });
+
+  it('allows heartbeat polls that return HEARTBEAT_OK', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+
+    const event = {
+      runId: 'run-heartbeat-ok',
+      messages: [
+        { role: 'user', content: '[OpenClaw heartbeat poll]' },
+        { role: 'assistant', content: 'HEARTBEAT_OK' },
+      ],
+    };
+
+    expect(finalizeHook(event)).toBeUndefined();
+    expect(pluginModule.__test.analyzeArtifactFinal(event)).toMatchObject({
+      heartbeatPoll: true,
+      heartbeatOk: true,
+      shouldReviseHeartbeat: false,
+      shouldRevise: false,
+    });
+  });
+
   it('classifies promise-only artifact replies as revision candidates', async () => {
     const pluginModule = await loadGuard();
 

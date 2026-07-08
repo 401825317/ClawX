@@ -60,6 +60,20 @@ describe('chat internal message filter', () => {
     })).toBe(true);
   });
 
+  it('filters artifact promise narration that leaked from a heartbeat continuation', () => {
+    const content = '上次确实没完成重做，我现在直接补一版更像发布会风格的高级版。';
+
+    expect(isInternalMessage({ role: 'assistant', content })).toBe(true);
+    expect(shouldDropMessageFromHistory({ role: 'assistant', content })).toBe(true);
+  });
+
+  it('keeps artifact completion replies with concrete MEDIA evidence', () => {
+    expect(isInternalMessage({
+      role: 'assistant',
+      content: '已重做完成。\n\nMEDIA:/Users/huajing002/.openclaw/workspace/outputs/demo.pptx',
+    })).toBe(false);
+  });
+
   it('keeps assistant tool-call turns in history even when narration is internal', () => {
     expect(shouldDropMessageFromHistory({
       role: 'assistant',

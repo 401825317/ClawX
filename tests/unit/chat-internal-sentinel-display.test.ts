@@ -25,6 +25,13 @@ describe('internal sentinel display cleanup', () => {
     expect(extractText({ role: 'assistant', content: 'NO_REPLY' })).toBe('');
   });
 
+  it('returns empty for artifact promise narration without concrete evidence', () => {
+    expect(extractText({
+      role: 'assistant',
+      content: '上次确实没完成重做，我现在直接补一版更像发布会风格的高级版。',
+    })).toBe('');
+  });
+
   it('does not strip the token when embedded mid-sentence', () => {
     const text = 'The constant NO_REPLY signals a skipped turn.';
     expect(extractText({ role: 'assistant', content: text })).toBe(text);
