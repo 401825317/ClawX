@@ -154,6 +154,58 @@ describe('enrichWithToolResultFiles', () => {
     expect(paths).toEqual([pptxPath]);
   });
 
+  it('does not attach verification artifacts to an intermediate tool-call assistant', () => {
+    const pptxPath = '/Users/me/outputs/iPhone16_产品宣传PPT_20260708_175217_ebkl15.pptx';
+    const messages: RawMessage[] = [
+      {
+        role: 'assistant',
+        id: 'make-ppt',
+        content: [{ type: 'toolCall', id: 'tc1', name: 'exec', input: { command: 'make ppt' } }],
+      },
+      {
+        role: 'toolresult',
+        id: 'made-ppt',
+        toolCallId: 'tc1',
+        toolName: 'exec',
+        content: [{ type: 'text', text: `OUT=${pptxPath}` }],
+      },
+      {
+        role: 'assistant',
+        id: 'verify-call',
+        content: [{ type: 'toolCall', id: 'tc2', name: 'exec', input: { command: `ls -lh ${pptxPath}` } }],
+      },
+      {
+        role: 'toolresult',
+        id: 'verified-ppt',
+        toolCallId: 'tc2',
+        toolName: 'exec',
+        content: [{ type: 'text', text: `-rw-r--r-- 2.2M ${pptxPath}` }],
+      },
+      {
+        role: 'assistant',
+        id: 'plan-call',
+        content: [{ type: 'toolCall', id: 'tc3', name: 'update_plan', input: { plan: [] } }],
+      },
+      {
+        role: 'toolresult',
+        id: 'plan-updated',
+        toolCallId: 'tc3',
+        toolName: 'update_plan',
+        content: [],
+      },
+      {
+        role: 'assistant',
+        id: 'final',
+        content: [{ type: 'text', text: `已生成。\n\nMEDIA:${pptxPath}` }],
+      },
+    ];
+
+    const enriched = enrichWithCachedImages(enrichWithToolResultFiles(messages));
+    expect(enriched.find((m) => m.id === 'verify-call')?._attachedFiles ?? []).toEqual([]);
+    expect(enriched.find((m) => m.id === 'plan-call')?._attachedFiles ?? []).toEqual([]);
+    expect(enriched.find((m) => m.id === 'final')?._attachedFiles?.map((file) => file.filePath)).toEqual([pptxPath]);
+  });
+
   it('still promotes [media attached: ...] references emitted in tool results', () => {
     const messages: RawMessage[] = [
       {

@@ -1028,9 +1028,10 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
     }
 
     if (msg.role === 'assistant' && pending.length > 0) {
-      // Internal-only turns (NO_REPLY, interim narration, ...) must not consume
-      // pending attachments — the next visible assistant reply should get them.
-      if (isInternalMessage(msg) && !messageHasToolUse(msg)) {
+      // Internal-only and intermediate tool-use turns must not consume pending
+      // attachments. Otherwise a verification stdout path can render as a
+      // standalone card before the final MEDIA: delivery repeats it.
+      if ((isInternalMessage(msg) && !messageHasToolUse(msg)) || hasPendingToolUse(msg) || isToolOnlyMessage(msg)) {
         return msg;
       }
       const toAttach = pending.splice(0);

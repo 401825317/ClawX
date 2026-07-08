@@ -2858,6 +2858,9 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
     }
 
     if (msg.role === 'assistant' && pending.length > 0) {
+      if (hasPendingToolUse(msg) || isToolOnlyMessage(msg) || isInternalMessage(msg)) {
+        return msg;
+      }
       const toAttach = pending.splice(0);
       const existingFiles = msg._attachedFiles || [];
       const attachedFiles = dedupeAttachedFiles([...existingFiles, ...toAttach]);
@@ -6576,7 +6579,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // below + `enrichWithCachedImages` (which dereferences the
             // assistant-media bubble's `block.url`).
             const pendingImgs = s.pendingToolImages;
-            const msgWithImages: RawMessage = pendingImgs.length > 0
+            const shouldAttachPendingFiles = pendingImgs.length > 0 && !pendingTool;
+            const msgWithImages: RawMessage = shouldAttachPendingFiles
               ? {
                 ...normalizedFinalMessage,
                 role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'],
@@ -6587,7 +6591,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ]),
               }
               : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
-            const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
+            const clearPendingImages = pendingTool
+              ? {}
+              : { pendingToolImages: [] as AttachedFileMeta[] };
             const finalArtifactEvents = runId && (msgWithImages._attachedFiles?.length ?? 0) > 0
               ? buildRuntimeArtifactEventsFromAttachedFiles({
                   runId,
