@@ -142,30 +142,35 @@ function isStandaloneSessionPath(value: string): boolean {
     || /^[A-Za-z]:[\\/]/u.test(value);
 }
 
-function resolveAgentSessionPath(agentDir: string, value: string): string {
+function resolveAgentRuntimeDir(agentDir: string): string {
+  const trimmed = agentDir.trim().replace(/[\\/]+$/u, '');
+  return trimmed.replace(/[\\/]agent$/u, '') || trimmed;
+}
+
+function resolveAgentSessionPath(agentRuntimeDir: string, value: string): string {
   const sessionPath = withJsonlExtension(value);
   if (isStandaloneSessionPath(sessionPath)) return sessionPath;
   const normalized = sessionPath.replace(/^\.?[\\/]/u, '');
   if (normalized.startsWith('sessions/') || normalized.startsWith('sessions\\')) {
-    return `${agentDir}/${normalized}`;
+    return `${agentRuntimeDir}/${normalized}`;
   }
   if (normalized.includes('/') || normalized.includes('\\')) {
-    return `${agentDir}/${normalized}`;
+    return `${agentRuntimeDir}/${normalized}`;
   }
-  return `${agentDir}/sessions/${normalized}`;
+  return `${agentRuntimeDir}/sessions/${normalized}`;
 }
 
-function resolveSessionFilePath(session: ChatSession, agentDir: string, sessionId: string): string {
+function resolveSessionFilePath(session: ChatSession, agentRuntimeDir: string, sessionId: string): string {
   const explicitPath = session.sessionFile?.trim();
   if (explicitPath) {
-    return resolveAgentSessionPath(agentDir, explicitPath);
+    return resolveAgentSessionPath(agentRuntimeDir, explicitPath);
   }
   const fileName = session.fileName?.trim();
   if (fileName) {
-    return resolveAgentSessionPath(agentDir, fileName);
+    return resolveAgentSessionPath(agentRuntimeDir, fileName);
   }
   return isSafeSessionFileSegment(sessionId)
-    ? `${agentDir}/sessions/${withJsonlExtension(sessionId)}`
+    ? `${agentRuntimeDir}/sessions/${withJsonlExtension(sessionId)}`
     : '';
 }
 
@@ -180,8 +185,8 @@ function buildSessionDiagnosticText({
 }): string {
   const agentId = getAgentIdFromSessionKey(session.key);
   const sessionId = session.sessionId || session.id || getSessionIdFromSessionKey(session.key);
-  const agentDir = agent?.agentDir || `~/.openclaw/agents/${agentId}`;
-  const sessionFile = resolveSessionFilePath(session, agentDir, sessionId);
+  const agentRuntimeDir = resolveAgentRuntimeDir(agent?.agentDir || `~/.openclaw/agents/${agentId}`);
+  const sessionFile = resolveSessionFilePath(session, agentRuntimeDir, sessionId);
   return [
     'UClaw session diagnostic',
     `sessionKey: ${session.key}`,

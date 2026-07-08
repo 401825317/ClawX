@@ -12,6 +12,7 @@ const PROMPT_CONTEXT = [
   'UClaw 交付与语言规则：',
   '- 默认所有面向用户的自然语言回复必须使用简体中文；不要因为工具、技能、日志、模板或上一次回复是英文而切换成英文。',
   '- 用户要求生成、创建、导出、美化或打开 PPT/PPTX、Word/DOCX、Excel/XLSX、PDF、文档、报告、表格、图片、网页、脚本或压缩包时，必须交付真实本地产物，不能只回复计划、承诺、大纲或说明。',
+  '- 用户对上一轮已生成的产物给出负反馈或修改意图（例如太丑、不满意、不行、重做、换一版、美化、优化）时，应视为新的产物修订任务：必须直接制作一个新的非覆盖改进版，不能只评价或承诺。',
   '- 如果专用产物工具不可用，继续使用可用的 skill、exec、Node、Python 或 uv 路径创建文件；只有完成并验证、遇到具体阻塞点、或需要用户确认时才能结束。',
   '- 文件任务最终回复必须包含 MEDIA:<absolute-path> 或已验证的绝对文件路径。',
   '- 旧的 uclaw-computer-use 插件不属于可靠执行面；不要把启用它当作恢复路径，也不要假装存在 computer_* 桌面工具。',
@@ -21,7 +22,9 @@ const PROMPT_CONTEXT = [
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|video|html|script|zip))/iu;
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
-const PROMISE_ONLY_RE = /(?:^(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在会)|(?:接下来|下一步|随后|稍后).{0,12}(?:我)?(?:会|将)|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,160}(?:生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|make|create|generate|write|produce|export))/iu;
+const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|不行|不对|太差|太简陋|占位|模板感|不够.{0,12}(?:高级|好看|精致|正式|苹果|产品|宣传)|重新(?:做|制作|生成|来|搞)|重做|再做|再来|换一版|改一版|美化|优化|润色|升级|高级一点|好看一点|精致一点|重新直接制作|make it better|too ugly|ugly|not good|redo|remake|regenerate|make another|improve|polish)/iu;
+const ARTIFACT_REVISION_NEGATION_RE = /(?:不要|别|不用|先别|无需|不需要|do not|don't|no need).{0,12}(?:重做|重新|修改|改|美化|优化|生成|制作|redo|remake|regenerate|improve|polish)/iu;
+const PROMISE_ONLY_RE = /(?:^(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在会)|(?:接下来|下一步|随后|稍后).{0,12}(?:我)?(?:会|将)|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish))/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
 const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm';
 const ARTIFACT_EVIDENCE_RE = new RegExp(`(?:MEDIA:\\s*(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+|(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|https?://[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|(?:filePath|outputPath|output_path|mediaUrl|media_url|url)["']?\\s*:\\s*["'][^"']+|(?:^|[\\s"'\`])out["']?\\s*:\\s*["'][^"']+)`, 'iu');
@@ -127,6 +130,50 @@ function extractUserRequestText(event) {
   return [direct, ...userMessages].filter(Boolean).join('\n');
 }
 
+function latestUserMessageIndex(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message && typeof message === 'object' && message.role === 'user') {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function extractLatestUserRequestText(event) {
+  const direct = [
+    event?.userMessage,
+    event?.userText,
+    event?.prompt,
+    event?.finalPromptText,
+  ].filter((value) => typeof value === 'string' && value.trim()).join('\n');
+  if (direct.trim()) return direct;
+
+  for (const messages of extractMessageLists(event)) {
+    const index = latestUserMessageIndex(messages);
+    if (index >= 0) {
+      const text = extractMessageText(messages[index]);
+      if (text.trim()) return text;
+    }
+  }
+  return '';
+}
+
+function splitEventMessagesAroundLatestUser(event) {
+  const before = [];
+  const after = [];
+  for (const messages of extractMessageLists(event)) {
+    const index = latestUserMessageIndex(messages);
+    if (index < 0) continue;
+    before.push(...messages.slice(0, index));
+    after.push(...messages.slice(index + 1));
+  }
+  return {
+    before: { ...event, messages: before },
+    after: { ...event, messages: after },
+  };
+}
+
 function extractFinalAssistantText(event) {
   const direct = [event?.finalText, event?.assistantText, event?.lastAssistantMessage]
     .filter((value) => typeof value === 'string')
@@ -164,6 +211,11 @@ function logDiagnostic(label, payload) {
 
 function isArtifactRequest(text) {
   return ARTIFACT_REQUEST_RE.test(text) || PAGE_ARTIFACT_RE.test(text);
+}
+
+function isArtifactRevisionFeedback(text) {
+  const value = String(text ?? '');
+  return ARTIFACT_REVISION_FEEDBACK_RE.test(value) && !ARTIFACT_REVISION_NEGATION_RE.test(value);
 }
 
 function isDesktopActionRequest(text) {
@@ -546,14 +598,21 @@ function isExplicitBlocker(finalText) {
 
 function analyzeArtifactFinal(event) {
   const userText = extractUserRequestText(event);
+  const latestUserText = extractLatestUserRequestText(event);
+  const activeUserText = latestUserText || userText;
   const finalText = extractFinalAssistantText(event);
-  const compositeRequiredArtifactCount = countCompositeRequiredArtifacts(userText);
-  const rawCompositeRequiredArtifactCount = countRawCompositeRequiredArtifacts(userText);
+  const { before: eventBeforeLatestUser, after: eventAfterLatestUser } = splitEventMessagesAroundLatestUser(event);
+  const priorArtifacts = buildArtifactEvidence(eventBeforeLatestUser, '');
+  const priorArtifactEvidence = priorArtifacts.length > 0 || hasArtifactEvidence(eventBeforeLatestUser, '');
+  const artifactRevisionFeedback = isArtifactRevisionFeedback(activeUserText);
+  const artifactRevisionRequest = artifactRevisionFeedback && priorArtifactEvidence;
+  const compositeRequiredArtifactCount = countCompositeRequiredArtifacts(activeUserText);
+  const rawCompositeRequiredArtifactCount = countRawCompositeRequiredArtifacts(activeUserText);
   const inferredRequiredArtifactCount = Math.max(compositeRequiredArtifactCount, rawCompositeRequiredArtifactCount);
-  const artifactRequest = isArtifactRequest(userText) || inferredRequiredArtifactCount > 0;
-  const desktopActionRequest = isDesktopActionRequest(userText);
-  const artifacts = buildArtifactEvidence(event, finalText);
-  const artifactEvidence = artifacts.length > 0 || hasArtifactEvidence(event, finalText);
+  const artifactRequest = isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest;
+  const desktopActionRequest = isDesktopActionRequest(activeUserText);
+  const artifacts = buildArtifactEvidence(eventAfterLatestUser, finalText);
+  const artifactEvidence = artifacts.length > 0 || hasArtifactEvidence(eventAfterLatestUser, finalText);
   const desktopActionEvidence = hasDesktopActionEvidence(event, finalText);
   const verificationPassed = artifacts.some(({ verification }) => verification.status === 'passed');
   const verificationBlocked = artifacts.some(({ verification }) => verification.status === 'blocked' || verification.status === 'failed');
@@ -579,8 +638,14 @@ function analyzeArtifactFinal(event) {
   const shouldRevise = shouldReviseArtifact || shouldReviseDesktopAction;
   return {
     userText,
+    latestUserText,
+    activeUserText,
     finalText,
     artifactRequest,
+    artifactRevisionFeedback,
+    artifactRevisionRequest,
+    priorArtifactEvidence,
+    priorArtifactCount: priorArtifacts.length,
     desktopActionRequest,
     compositeRequiredArtifactCount,
     rawCompositeRequiredArtifactCount,
@@ -617,6 +682,23 @@ function buildRevision(analysis) {
           '先检查当前工具清单是否有可靠结构化 connector（例如 message、directory 或 channel 工具）并能解析目标；如果有，继续用该 connector 执行并验证。',
           '不要建议启用 uclaw-computer-use，也不要使用 shell/盲键鼠/UI 脚本假装完成微信或桌面操作。',
           '如果没有可靠 connector，最终回复必须明确说明当前运行时缺少可靠桌面/消息发送能力；可以给出待发送消息草稿，但必须标明未发送。',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.artifactRevisionRequest) {
+    return {
+      action: 'revise',
+      reason: 'UClaw artifact revision final reply had no new completed artifact evidence.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:artifact-revision`,
+        maxAttempts: 2,
+        instruction: [
+          '用户是在评价或否定上一轮已生成产物，这等价于要求重做/改进产物。',
+          '不要只说“我会重做/我直接重做/我来优化”；现在必须继续执行，定位上一轮 MEDIA 路径或最近产物，创建一个新的非覆盖改进版。',
+          '优先使用可用的 create_* 文件工具或相关 skill；如果没有专用工具，就用 exec 结合 Node/Python/uv 读取旧产物信息并重新生成。',
+          '生成后必须用可用工具验证新文件存在，并在最终回复中返回新的 MEDIA:<absolute-path> 或新的绝对文件路径。',
+          '如果确实无法继续，最终回复必须说明已经尝试的路径、具体缺失能力或阻塞点。',
         ].join('\n'),
       },
     };
@@ -924,6 +1006,10 @@ function registerArtifactGuard(api) {
         userTextChars: analysis.userText.length,
         finalTextChars: analysis.finalText.length,
         artifactRequest: analysis.artifactRequest,
+        artifactRevisionFeedback: analysis.artifactRevisionFeedback,
+        artifactRevisionRequest: analysis.artifactRevisionRequest,
+        priorArtifactEvidence: analysis.priorArtifactEvidence,
+        priorArtifactCount: analysis.priorArtifactCount,
         compositeRequiredArtifactCount: analysis.compositeRequiredArtifactCount,
         rawCompositeRequiredArtifactCount: analysis.rawCompositeRequiredArtifactCount,
         requiredArtifactCount: analysis.requiredArtifactCount,

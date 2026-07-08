@@ -152,6 +152,84 @@ describe('uclaw-artifact-guard', () => {
     expect(result?.retry?.instruction).toContain('MEDIA:<absolute-path>');
   });
 
+  it('retries revision feedback on a previous artifact when the assistant only promises to remake it', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-artifact-revision-'));
+    const oldPpt = join(tempDir, 'iphone18-old.pptx');
+    writeFileSync(oldPpt, 'old');
+
+    try {
+      const event = {
+        runId: 'run-artifact-revision-feedback',
+        messages: [
+          { role: 'user', content: '生成一个苹果18的宣传ppt' },
+          { role: 'assistant', content: `已生成。\n\nMEDIA:${oldPpt}` },
+          { role: 'user', content: '太丑了 你自己看看' },
+          { role: 'assistant', content: '我看了，上一版确实太像占位模板。我直接重做一版更干净高级的。' },
+        ],
+      };
+
+      const result = finalizeHook(event) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+      expect(result?.action).toBe('revise');
+      expect(result?.reason).toContain('artifact revision');
+      expect(result?.retry?.instruction).toContain('新的非覆盖改进版');
+      expect(result?.retry?.instruction).toContain('MEDIA:<absolute-path>');
+
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+      expect(analysis).toMatchObject({
+        latestUserText: '太丑了 你自己看看',
+        artifactRequest: true,
+        artifactRevisionFeedback: true,
+        artifactRevisionRequest: true,
+        priorArtifactEvidence: true,
+        artifactEvidence: false,
+        verificationPassed: false,
+        shouldRevise: true,
+      });
+      expect(analysis.priorArtifactCount).toBeGreaterThanOrEqual(1);
+      expect(analysis.artifacts).toEqual([]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('allows revision feedback when the assistant delivers a new artifact after the latest user message', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-artifact-revision-ok-'));
+    const oldPpt = join(tempDir, 'iphone18-old.pptx');
+    const newPpt = join(tempDir, 'iphone18-new.pptx');
+    writeFileSync(oldPpt, 'old');
+    writeFileSync(newPpt, 'new');
+
+    try {
+      const event = {
+        runId: 'run-artifact-revision-ok',
+        messages: [
+          { role: 'user', content: '生成一个苹果18的宣传ppt' },
+          { role: 'assistant', content: `已生成。\n\nMEDIA:${oldPpt}` },
+          { role: 'user', content: '太丑了 你自己看看' },
+          { role: 'assistant', content: `已重做并验证。\n\nMEDIA:${newPpt}` },
+        ],
+      };
+
+      expect(finalizeHook(event)).toBeUndefined();
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+      expect(analysis).toMatchObject({
+        artifactRevisionRequest: true,
+        priorArtifactEvidence: true,
+        artifactEvidence: true,
+        verificationPassed: true,
+        shouldRevise: false,
+      });
+      expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).toContain(newPpt);
+      expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).not.toContain(oldPpt);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('counts raw seven-item composite artifact prompts without an injected contract', async () => {
     const pluginModule = await loadGuard();
     const finalizeHook = registerFinalizeHook(pluginModule);
