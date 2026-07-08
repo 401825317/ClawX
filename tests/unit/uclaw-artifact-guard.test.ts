@@ -110,6 +110,21 @@ describe('uclaw-artifact-guard', () => {
       promiseOnly: true,
       shouldRevise: true,
     });
+    expect(analysis.requiredEffects).toEqual([
+      expect.objectContaining({
+        type: 'create_artifact',
+        intent: 'artifact_delivery',
+        kind: 'presentation',
+        minCount: 1,
+        afterLatestUser: true,
+      }),
+    ]);
+    expect(analysis.effectResults).toEqual([
+      expect.objectContaining({
+        satisfied: false,
+        effect: expect.objectContaining({ type: 'create_artifact' }),
+      }),
+    ]);
     expect(analysis.artifacts).toEqual([]);
   });
 
@@ -187,8 +202,62 @@ describe('uclaw-artifact-guard', () => {
         verificationPassed: false,
         shouldRevise: true,
       });
+      expect(analysis.requiredEffects).toEqual([
+        expect.objectContaining({
+          type: 'create_artifact_revision',
+          intent: 'artifact_revision',
+          kind: 'presentation',
+          mustBeNewArtifact: true,
+          targetArtifactRef: oldPpt,
+        }),
+      ]);
+      expect(analysis.effectResults).toEqual([
+        expect.objectContaining({
+          satisfied: false,
+          effect: expect.objectContaining({ type: 'create_artifact_revision' }),
+        }),
+      ]);
       expect(analysis.priorArtifactCount).toBeGreaterThanOrEqual(1);
       expect(analysis.artifacts).toEqual([]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let an old artifact path satisfy a requested revision', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-artifact-revision-old-path-'));
+    const oldPpt = join(tempDir, 'iphone18-old.pptx');
+    writeFileSync(oldPpt, 'old');
+
+    try {
+      const event = {
+        runId: 'run-artifact-revision-old-path',
+        messages: [
+          { role: 'user', content: '生成一个苹果18的宣传ppt' },
+          { role: 'assistant', content: `已生成。\n\nMEDIA:${oldPpt}` },
+          { role: 'user', content: '太丑了 你自己看看' },
+          { role: 'assistant', content: `我优化好了。\n\nMEDIA:${oldPpt}` },
+        ],
+      };
+
+      const result = finalizeHook(event) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+      expect(result?.action).toBe('revise');
+
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+      expect(analysis).toMatchObject({
+        artifactRevisionRequest: true,
+        artifactEvidence: true,
+        verificationPassed: true,
+        shouldRevise: true,
+      });
+      expect(analysis.effectResults).toEqual([
+        expect.objectContaining({
+          satisfied: false,
+          reason: expect.stringContaining('非覆盖新产物'),
+        }),
+      ]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -223,6 +292,19 @@ describe('uclaw-artifact-guard', () => {
         verificationPassed: true,
         shouldRevise: false,
       });
+      expect(analysis.requiredEffects).toEqual([
+        expect.objectContaining({
+          type: 'create_artifact_revision',
+          kind: 'presentation',
+          mustBeNewArtifact: true,
+        }),
+      ]);
+      expect(analysis.effectResults).toEqual([
+        expect.objectContaining({
+          satisfied: true,
+          matchedArtifactIds: [expect.stringMatching(/^artifact:/)],
+        }),
+      ]);
       expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).toContain(newPpt);
       expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).not.toContain(oldPpt);
     } finally {
@@ -260,6 +342,18 @@ describe('uclaw-artifact-guard', () => {
         missingRequiredArtifactCount: 6,
         shouldRevise: true,
       });
+      expect(analysis.requiredEffects).toHaveLength(7);
+      expect(analysis.requiredEffects.map((effect) => effect.kind)).toEqual([
+        'image',
+        'presentation',
+        'spreadsheet',
+        'video',
+        'image',
+        'webpage',
+        'document',
+      ]);
+      expect(analysis.effectResults.filter((result) => result.satisfied)).toHaveLength(1);
+      expect(analysis.missingRequiredEffects).toHaveLength(6);
       expect(analysis.artifacts).toHaveLength(1);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -321,6 +415,8 @@ describe('uclaw-artifact-guard', () => {
         missingRequiredArtifactCount: 6,
         shouldRevise: true,
       });
+      expect(analysis.requiredEffects).toHaveLength(7);
+      expect(analysis.missingRequiredEffects).toHaveLength(6);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -344,6 +440,22 @@ describe('uclaw-artifact-guard', () => {
     expect(result?.retry?.instruction).toContain('不要建议启用 uclaw-computer-use');
     expect(result?.retry?.instruction).toContain('未发送');
     expect(result?.retry?.maxAttempts).toBe(1);
+
+    const analysis = pluginModule.__test.analyzeArtifactFinal({
+      runId: 'run-wechat-no-evidence',
+      messages: [
+        { role: 'user', content: '帮我打开微信并给Uclaw技术保障群发一条消息，内容你随便生成' },
+        { role: 'assistant', content: '好的，我现在打开微信并发送一条测试消息。' },
+      ],
+    });
+    expect(analysis.requiredEffects).toEqual([
+      expect.objectContaining({
+        type: 'external_action',
+        intent: 'desktop_or_message_action',
+        kind: 'desktop_or_message',
+      }),
+    ]);
+    expect(analysis.missingRequiredEffects).toHaveLength(1);
   });
 
   it('allows WeChat desktop-message blockers that clearly say the message was not sent', async () => {

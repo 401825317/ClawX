@@ -47,30 +47,44 @@ const RAW_COMPOSITE_SEPARATOR_RE = /[，、,；;]|(?:\s+(?:和|以及|还有|并
 const RAW_COMPOSITE_ARTIFACT_DETECTORS = [
   {
     id: 'image-generation',
+    kind: 'image',
+    title: '图片生成',
     pattern: /(?:生图|生成.{0,12}(?:图片|图像|海报|插画|封面)|(?:图片|图像|海报|插画|封面).{0,12}(?:生成|制作|做))/iu,
   },
   {
     id: 'presentation',
+    kind: 'presentation',
+    title: '演示文稿',
     pattern: /(?:PPT|pptx?|演示文稿|幻灯片|deck|slides?)/iu,
   },
   {
     id: 'spreadsheet',
+    kind: 'spreadsheet',
+    title: '表格',
     pattern: /(?:Excel|xlsx?|电子表格|工作簿|spreadsheet|workbook)/iu,
   },
   {
     id: 'video-generation',
+    kind: 'video',
+    title: '视频生成',
     pattern: /(?:生视频|生成.{0,12}视频|视频.{0,12}(?:生成|制作|做)|video)/iu,
   },
   {
     id: 'image-edit',
+    kind: 'image',
+    title: '图片编辑',
     pattern: /(?:(?:根据|用|拿|基于).{0,12}(?:图片|图像|照片).{0,18}(?:修图|改图|编辑|美化|处理)|(?:修图|改图|图片编辑|图像编辑|美化图片|图片处理|image edit))/iu,
   },
   {
     id: 'mini-app',
+    kind: 'webpage',
+    title: '小程序或网页',
     pattern: /(?:(?:做|制作|生成|创建|开发|写|搭).{0,16}(?:小程序|网页|HTML|应用|app|工具|小游戏|页面)|(?:小程序|网页|HTML|应用|app|工具|小游戏|页面).{0,16}(?:做|制作|生成|创建|开发|写|搭))/iu,
   },
   {
     id: 'copywriting',
+    kind: 'document',
+    title: '文案',
     pattern: /(?:(?:生成|写|出|产出|起草|创作).{0,16}(?:文案|copy|宣传语|广告语|稿子|短文|内容)|(?:文案|copy|宣传语|广告语|稿子|短文|内容).{0,16}(?:生成|写|出|产出|起草|创作))/iu,
   },
 ];
@@ -222,6 +236,20 @@ function isDesktopActionRequest(text) {
   return DESKTOP_ACTION_REQUEST_RE.test(text ?? '');
 }
 
+function inferRequestedArtifactKind(text) {
+  const source = String(text ?? '');
+  if (/(?:PPT|pptx?|演示文稿|幻灯片|deck|slides?)/iu.test(source)) return 'presentation';
+  if (/(?:Word|docx?|文档|报告|标书|投标书|招投标书|方案|稿子|文章|内容|文案|copy)/iu.test(source)) return 'document';
+  if (/(?:Excel|xlsx?|表格|电子表格|工作簿|spreadsheet|workbook|csv|tsv)/iu.test(source)) return 'spreadsheet';
+  if (/(?:PDF|pdf)/iu.test(source)) return 'pdf';
+  if (/(?:图片|图像|海报|插画|封面|照片|image|photo|png|jpe?g|webp|svg)/iu.test(source)) return 'image';
+  if (/(?:视频|video|mp4|mov|webm)/iu.test(source)) return 'video';
+  if (/(?:网页|HTML|html|页面|小程序|webpage|website|site|app|应用)/iu.test(source)) return 'webpage';
+  if (/(?:脚本|代码|script|code|js|ts|python|py)/iu.test(source)) return 'code';
+  if (/(?:压缩包|zip|archive)/iu.test(source)) return 'archive';
+  return undefined;
+}
+
 function countCompositeRequiredArtifacts(text) {
   if (!COMPOSITE_CONTRACT_RE.test(text ?? '')) return 0;
   const taskMatches = String(text ?? '').match(COMPOSITE_TASK_RE) ?? [];
@@ -229,21 +257,25 @@ function countCompositeRequiredArtifacts(text) {
   return Math.max(taskMatches.length, requiredMatches.length);
 }
 
-function countRawCompositeRequiredArtifacts(text) {
+function matchRawCompositeArtifactDetectors(text) {
   const source = String(text ?? '');
-  if (!source.trim()) return 0;
+  if (!source.trim()) return [];
 
-  const matchedIds = new Set();
+  const matched = [];
   for (const detector of RAW_COMPOSITE_ARTIFACT_DETECTORS) {
-    detector.pattern.lastIndex = 0;
-    if (detector.pattern.test(source)) matchedIds.add(detector.id);
+    resetRegex(detector.pattern);
+    if (detector.pattern.test(source)) matched.push(detector);
   }
 
   const hasCompositeCue = RAW_COMPOSITE_STRONG_CUE_RE.test(source) || RAW_COMPOSITE_SEPARATOR_RE.test(source);
   const hasStrongCompositeCue = RAW_COMPOSITE_STRONG_CUE_RE.test(source);
-  if (!hasCompositeCue) return 0;
-  if (!hasStrongCompositeCue && matchedIds.size < 3) return 0;
-  return matchedIds.size >= 2 ? matchedIds.size : 0;
+  if (!hasCompositeCue) return [];
+  if (!hasStrongCompositeCue && matched.length < 3) return [];
+  return matched.length >= 2 ? matched : [];
+}
+
+function countRawCompositeRequiredArtifacts(text) {
+  return matchRawCompositeArtifactDetectors(text).length;
 }
 
 function isRecord(value) {
@@ -591,6 +623,177 @@ function hasDesktopActionEvidence(event, finalText) {
   return STRUCTURED_CONNECTOR_TOOL_RE.test(evidenceText) && STRUCTURED_CONNECTOR_SUCCESS_RE.test(evidenceText);
 }
 
+function artifactIdentityKeys(entry) {
+  const artifact = entry?.artifact ?? entry;
+  return [
+    entry?.ref,
+    artifact?.id,
+    artifact?.filePath,
+    artifact?.url,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.toLowerCase());
+}
+
+function makeRequiredEffect(params) {
+  const baseId = [
+    params.type,
+    params.intent,
+    params.kind,
+    params.index,
+    params.targetArtifactId,
+  ].filter((value) => value !== undefined && value !== null && String(value).trim()).join(':');
+
+  return {
+    id: `effect:${baseId || hashString(JSON.stringify(params))}`,
+    type: params.type,
+    intent: params.intent,
+    kind: params.kind,
+    title: params.title,
+    minCount: params.minCount ?? 1,
+    afterLatestUser: params.afterLatestUser ?? true,
+    mustBeNewArtifact: params.mustBeNewArtifact ?? false,
+    targetArtifactId: params.targetArtifactId,
+    targetArtifactRef: params.targetArtifactRef,
+    targetArtifactKeys: params.targetArtifactKeys,
+    required: true,
+    source: RUNTIME_EVENT_SOURCE,
+  };
+}
+
+function deriveRequiredEffects({
+  activeUserText,
+  artifactRequest,
+  artifactRevisionRequest,
+  priorArtifacts,
+  desktopActionRequest,
+  compositeRequiredArtifactCount,
+}) {
+  const effects = [];
+  const rawCompositeDetectors = matchRawCompositeArtifactDetectors(activeUserText);
+  const compositeCount = Math.max(compositeRequiredArtifactCount, rawCompositeDetectors.length);
+
+  if (artifactRevisionRequest) {
+    const target = priorArtifacts.at(-1);
+    effects.push(makeRequiredEffect({
+      type: 'create_artifact_revision',
+      intent: 'artifact_revision',
+      kind: inferRequestedArtifactKind(activeUserText) ?? target?.artifact?.kind,
+      title: '产物修订',
+      minCount: 1,
+      mustBeNewArtifact: true,
+      targetArtifactId: target?.artifact?.id,
+      targetArtifactRef: target?.ref,
+      targetArtifactKeys: target ? artifactIdentityKeys(target) : undefined,
+    }));
+  } else if (artifactRequest) {
+    if (compositeCount > 1) {
+      rawCompositeDetectors.forEach((detector, index) => {
+        effects.push(makeRequiredEffect({
+          type: 'create_artifact',
+          intent: detector.id,
+          kind: detector.kind,
+          title: detector.title,
+          index: index + 1,
+          minCount: 1,
+        }));
+      });
+      for (let index = effects.length; index < compositeCount; index += 1) {
+        effects.push(makeRequiredEffect({
+          type: 'create_artifact',
+          intent: 'composite_artifact',
+          title: `组合产物 ${index + 1}`,
+          index: index + 1,
+          minCount: 1,
+        }));
+      }
+    } else {
+      effects.push(makeRequiredEffect({
+        type: 'create_artifact',
+        intent: 'artifact_delivery',
+        kind: inferRequestedArtifactKind(activeUserText),
+        title: '产物交付',
+        minCount: 1,
+      }));
+    }
+  }
+
+  if (desktopActionRequest) {
+    effects.push(makeRequiredEffect({
+      type: 'external_action',
+      intent: 'desktop_or_message_action',
+      kind: 'desktop_or_message',
+      title: '桌面或外部消息动作',
+      minCount: 1,
+    }));
+  }
+
+  return effects;
+}
+
+function artifactKindSatisfies(requiredKind, actualKind) {
+  if (!requiredKind || requiredKind === 'file') return true;
+  if (!actualKind) return false;
+  if (requiredKind === actualKind) return true;
+  const compatibleKinds = {
+    document: ['document', 'pdf'],
+    webpage: ['webpage', 'code', 'archive'],
+    code: ['code', 'archive'],
+  };
+  return compatibleKinds[requiredKind]?.includes(actualKind) ?? false;
+}
+
+function artifactSatisfiesEffect(effect, entry, usedArtifactIds) {
+  const artifact = entry?.artifact;
+  if (!artifact?.id || usedArtifactIds.has(artifact.id)) return false;
+  if (entry?.verification?.status !== 'passed') return false;
+  if (!artifactKindSatisfies(effect.kind, artifact.kind)) return false;
+  if (effect.mustBeNewArtifact) {
+    const targetKeys = new Set(effect.targetArtifactKeys ?? []);
+    if (artifactIdentityKeys(entry).some((key) => targetKeys.has(key))) return false;
+  }
+  return true;
+}
+
+function evaluateRequiredEffects(requiredEffects, evidence) {
+  const usedArtifactIds = new Set();
+  return requiredEffects.map((effect) => {
+    if (effect.type === 'external_action') {
+      return {
+        effect,
+        satisfied: Boolean(evidence.desktopActionEvidence),
+        matchedCount: evidence.desktopActionEvidence ? 1 : 0,
+        matchedArtifactIds: [],
+        reason: evidence.desktopActionEvidence ? '可靠 connector 执行证据已存在。' : '缺少可靠 connector 执行证据。',
+      };
+    }
+
+    const matches = [];
+    for (const entry of evidence.artifacts ?? []) {
+      if (!artifactSatisfiesEffect(effect, entry, usedArtifactIds)) continue;
+      matches.push(entry);
+      if (matches.length >= effect.minCount) break;
+    }
+
+    const satisfied = matches.length >= effect.minCount;
+    if (satisfied) {
+      for (const entry of matches) usedArtifactIds.add(entry.artifact.id);
+    }
+
+    return {
+      effect,
+      satisfied,
+      matchedCount: matches.length,
+      matchedArtifactIds: matches.map((entry) => entry.artifact.id),
+      reason: satisfied
+        ? '已找到满足 effect 的新产物证据。'
+        : effect.mustBeNewArtifact
+          ? '缺少 latest user 之后产生的非覆盖新产物证据。'
+          : '缺少满足 effect 的产物证据或可用性验证未通过。',
+    };
+  });
+}
+
 function isExplicitBlocker(finalText) {
   const narrativeText = removeArtifactRefsFromText(finalText);
   return BLOCKER_RE.test(narrativeText) && !CONTINUATION_RE.test(narrativeText);
@@ -614,11 +817,31 @@ function analyzeArtifactFinal(event) {
   const artifacts = buildArtifactEvidence(eventAfterLatestUser, finalText);
   const artifactEvidence = artifacts.length > 0 || hasArtifactEvidence(eventAfterLatestUser, finalText);
   const desktopActionEvidence = hasDesktopActionEvidence(event, finalText);
+  const requiredEffects = deriveRequiredEffects({
+    activeUserText,
+    artifactRequest,
+    artifactRevisionRequest,
+    priorArtifacts,
+    desktopActionRequest,
+    compositeRequiredArtifactCount,
+  });
+  const effectResults = evaluateRequiredEffects(requiredEffects, {
+    artifacts,
+    desktopActionEvidence,
+  });
+  const missingRequiredEffects = effectResults.filter((result) => !result.satisfied);
+  const satisfiedRequiredEffects = effectResults.filter((result) => result.satisfied);
+  const missingArtifactEffects = missingRequiredEffects.filter((result) => (
+    result.effect.type === 'create_artifact' || result.effect.type === 'create_artifact_revision'
+  ));
+  const missingDesktopActionEffects = missingRequiredEffects.filter((result) => result.effect.type === 'external_action');
   const verificationPassed = artifacts.some(({ verification }) => verification.status === 'passed');
   const verificationBlocked = artifacts.some(({ verification }) => verification.status === 'blocked' || verification.status === 'failed');
   const passedArtifactCount = artifacts.filter(({ verification }) => verification.status === 'passed').length;
-  const requiredArtifactCount = inferredRequiredArtifactCount > 0 ? inferredRequiredArtifactCount : (artifactRequest ? 1 : 0);
-  const missingRequiredArtifactCount = Math.max(0, requiredArtifactCount - passedArtifactCount);
+  const requiredArtifactCount = requiredEffects
+    .filter((effect) => effect.type === 'create_artifact' || effect.type === 'create_artifact_revision')
+    .reduce((total, effect) => total + (effect.minCount ?? 1), 0);
+  const missingRequiredArtifactCount = missingArtifactEffects.length;
   const explicitBlocker = isExplicitBlocker(finalText);
   const promiseOnly = PROMISE_ONLY_RE.test(finalText);
   const shouldReviseArtifact = Boolean(
@@ -626,14 +849,14 @@ function analyzeArtifactFinal(event) {
     && finalText.trim()
     && artifactRequest
     && !explicitBlocker
-    && (!artifactEvidence || !verificationPassed || missingRequiredArtifactCount > 0),
+    && missingArtifactEffects.length > 0,
   );
   const shouldReviseDesktopAction = Boolean(
     userText.trim()
     && finalText.trim()
     && desktopActionRequest
     && !explicitBlocker
-    && !desktopActionEvidence,
+    && missingDesktopActionEffects.length > 0,
   );
   const shouldRevise = shouldReviseArtifact || shouldReviseDesktopAction;
   return {
@@ -649,6 +872,10 @@ function analyzeArtifactFinal(event) {
     desktopActionRequest,
     compositeRequiredArtifactCount,
     rawCompositeRequiredArtifactCount,
+    requiredEffects,
+    effectResults,
+    satisfiedRequiredEffects,
+    missingRequiredEffects,
     requiredArtifactCount,
     passedArtifactCount,
     missingRequiredArtifactCount,
@@ -858,13 +1085,18 @@ function emitRuntimeContractEvents(api, event, analysis) {
   }
 
   if (analysis.shouldRevise) {
+    const artifactGateReason = analysis.missingRequiredArtifactCount > 0 && analysis.passedArtifactCount > 0
+      ? `最终回复只满足 ${analysis.passedArtifactCount}/${analysis.requiredArtifactCount} 个产物 effect，仍缺少 ${analysis.missingRequiredArtifactCount} 个。`
+      : analysis.artifactEvidence
+        ? '最终回复引用了产物，但完成门禁没有得到通过：缺少满足当前 effect 的产物验证证据。'
+        : '最终回复缺少真实产物证据。';
     emitCompletionCheckpoint(
       api,
       event,
       analysis,
-      analysis.artifactEvidence
-        ? '最终回复引用了产物，但完成门禁没有得到通过的产物可用性验证。'
-        : '最终回复缺少真实产物证据。',
+      analysis.shouldReviseDesktopAction && !analysis.shouldReviseArtifact
+        ? '最终回复缺少可靠桌面或外部消息动作执行证据。'
+        : artifactGateReason,
     );
   }
 }
@@ -1012,6 +1244,9 @@ function registerArtifactGuard(api) {
         priorArtifactCount: analysis.priorArtifactCount,
         compositeRequiredArtifactCount: analysis.compositeRequiredArtifactCount,
         rawCompositeRequiredArtifactCount: analysis.rawCompositeRequiredArtifactCount,
+        requiredEffectCount: analysis.requiredEffects.length,
+        missingRequiredEffectCount: analysis.missingRequiredEffects.length,
+        requiredEffectTypes: analysis.requiredEffects.map((effect) => effect.type),
         requiredArtifactCount: analysis.requiredArtifactCount,
         passedArtifactCount: analysis.passedArtifactCount,
         missingRequiredArtifactCount: analysis.missingRequiredArtifactCount,
@@ -1047,6 +1282,8 @@ export default {
 export const __test = {
   shouldReviseArtifactFinal,
   analyzeArtifactFinal,
+  deriveRequiredEffects,
+  evaluateRequiredEffects,
   buildRevision,
   buildArtifactEvidence,
   buildToolArtifactEvidence,
