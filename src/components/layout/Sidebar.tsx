@@ -19,6 +19,7 @@ import {
   CreditCard,
   Trash2,
   Pencil,
+  Copy,
   Check,
   X,
   Cpu,
@@ -42,10 +43,12 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { SIDEBAR_COLLAPSED_WIDTH, MAC_SIDEBAR_CHROME_HEIGHT } from '../../../shared/sidebar-layout';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import logoPng from '@/assets/logo-uclaw.png';
 import { AnnouncementBell } from '@/components/client/AnnouncementBell';
 import { SupportContactButton } from '@/components/client/SupportContactButton';
 import type { ChatSession } from '@/stores/chat/types';
+import type { AgentSummary } from '@/types/agent';
 
 interface NavItemProps {
   to: string;
@@ -118,6 +121,78 @@ function getAgentIdFromSessionKey(sessionKey: string): string {
   return agentId || 'main';
 }
 
+function getSessionIdFromSessionKey(sessionKey: string): string {
+  if (!sessionKey.startsWith('agent:')) return sessionKey;
+  const parts = sessionKey.split(':');
+  return parts.slice(2).join(':') || sessionKey;
+}
+
+function isSafeSessionFileSegment(value: string): boolean {
+  return /^[A-Za-z0-9_.-]+$/u.test(value);
+}
+
+function withJsonlExtension(value: string): string {
+  return value.endsWith('.jsonl') ? value : `${value}.jsonl`;
+}
+
+function isStandaloneSessionPath(value: string): boolean {
+  return value.startsWith('/')
+    || value.startsWith('~/')
+    || /^file:\/\//iu.test(value)
+    || /^[A-Za-z]:[\\/]/u.test(value);
+}
+
+function resolveAgentSessionPath(agentDir: string, value: string): string {
+  const sessionPath = withJsonlExtension(value);
+  if (isStandaloneSessionPath(sessionPath)) return sessionPath;
+  const normalized = sessionPath.replace(/^\.?[\\/]/u, '');
+  if (normalized.startsWith('sessions/') || normalized.startsWith('sessions\\')) {
+    return `${agentDir}/${normalized}`;
+  }
+  if (normalized.includes('/') || normalized.includes('\\')) {
+    return `${agentDir}/${normalized}`;
+  }
+  return `${agentDir}/sessions/${normalized}`;
+}
+
+function resolveSessionFilePath(session: ChatSession, agentDir: string, sessionId: string): string {
+  const explicitPath = session.sessionFile?.trim();
+  if (explicitPath) {
+    return resolveAgentSessionPath(agentDir, explicitPath);
+  }
+  const fileName = session.fileName?.trim();
+  if (fileName) {
+    return resolveAgentSessionPath(agentDir, fileName);
+  }
+  return isSafeSessionFileSegment(sessionId)
+    ? `${agentDir}/sessions/${withJsonlExtension(sessionId)}`
+    : '';
+}
+
+function buildSessionDiagnosticText({
+  session,
+  sessionLabel,
+  agent,
+}: {
+  session: ChatSession;
+  sessionLabel: string;
+  agent?: AgentSummary;
+}): string {
+  const agentId = getAgentIdFromSessionKey(session.key);
+  const sessionId = session.sessionId || session.id || getSessionIdFromSessionKey(session.key);
+  const agentDir = agent?.agentDir || `~/.openclaw/agents/${agentId}`;
+  const sessionFile = resolveSessionFilePath(session, agentDir, sessionId);
+  return [
+    'UClaw session diagnostic',
+    `sessionKey: ${session.key}`,
+    `sessionId: ${sessionId}`,
+    `agentId: ${agentId}`,
+    `agentName: ${agent?.name || agentId}`,
+    `title: ${sessionLabel}`,
+    `sessionFile: ${sessionFile || '(unresolved; use sessionKey)'}`,
+  ].join('\n');
+}
+
 type SessionBucketGroup = {
   key: SessionBucketKey;
   label: string;
@@ -136,7 +211,7 @@ function resolveSessionLabel(
 const SessionRow = memo(function SessionRow({
   session,
   sessionLabel,
-  agentName,
+  agent,
   labels,
   isActive,
   isEditing,
@@ -151,12 +226,15 @@ const SessionRow = memo(function SessionRow({
 }: {
   session: ChatSession;
   sessionLabel: string;
-  agentName: string;
+  agent?: AgentSummary;
   labels: {
     renamePlaceholder: string;
     saveRename: string;
     cancelRename: string;
     rename: string;
+    copyInfo: string;
+    copiedInfo: string;
+    copyFailed: string;
     delete: string;
   };
   isActive: boolean;
@@ -170,6 +248,44 @@ const SessionRow = memo(function SessionRow({
   onRenameCancel: () => void;
   onDelete: (session: { key: string; label: string }) => void;
 }) {
+  const agentId = getAgentIdFromSessionKey(session.key);
+  const agentName = agent?.name || agentId;
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+  const handleCopySessionInfo = useCallback(async (event?: React.MouseEvent) => {
+    event?.stopPropagation();
+    const text = buildSessionDiagnosticText({ session, sessionLabel, agent });
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(labels.copiedInfo);
+    } catch {
+      toast.error(labels.copyFailed);
+    }
+    closeContextMenu();
+  }, [agent, closeContextMenu, labels.copiedInfo, labels.copyFailed, session, sessionLabel]);
+  const handleOpenContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 192)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 132)),
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return undefined;
+    const handleClose = () => closeContextMenu();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeContextMenu();
+    };
+    window.addEventListener('click', handleClose);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', handleClose);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [closeContextMenu, contextMenu]);
+
   if (isEditing) {
     return (
       <div className="group relative flex items-center">
@@ -203,13 +319,13 @@ const SessionRow = memo(function SessionRow({
   }
 
   return (
-    <div className="group relative flex items-center">
+    <div className="group relative flex items-center" onContextMenu={handleOpenContextMenu}>
       <button
         data-testid={`sidebar-session-${session.key}`}
         onClick={() => onClick(session.key)}
         onDoubleClick={() => onStartRename(session.key, sessionLabel)}
         className={cn(
-          'w-full text-left rounded-lg px-2.5 py-1.5 text-meta transition-colors pr-16',
+          'w-full text-left rounded-lg px-2.5 py-1.5 text-meta transition-colors pr-12',
           'hover:bg-black/5 dark:hover:bg-white/5',
           isActive
             ? 'bg-black/5 dark:bg-white/10 text-foreground font-medium'
@@ -251,6 +367,47 @@ const SessionRow = memo(function SessionRow({
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
+      {contextMenu && (
+        <div
+          className="fixed z-50 w-44 rounded-lg border border-black/10 bg-surface-modal p-1 text-sm shadow-xl dark:border-white/10"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/80 hover:bg-black/5 dark:hover:bg-white/10"
+            onClick={(event) => void handleCopySessionInfo(event)}
+          >
+            <Copy className="h-3.5 w-3.5" />
+            <span>{labels.copyInfo}</span>
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground/80 hover:bg-black/5 dark:hover:bg-white/10"
+            onClick={(event) => {
+              event.stopPropagation();
+              closeContextMenu();
+              onStartRename(session.key, sessionLabel);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            <span>{labels.rename}</span>
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-destructive hover:bg-destructive/10"
+            onClick={(event) => {
+              event.stopPropagation();
+              closeContextMenu();
+              onDelete({ key: session.key, label: sessionLabel });
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>{labels.delete}</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 });
@@ -260,7 +417,7 @@ const SessionHistoryList = memo(function SessionHistoryList({
   expandedBuckets,
   activeSessionKey,
   sessionLabels,
-  agentNameById,
+  agentById,
   editingSessionKey,
   editingLabel,
   onToggleBucket,
@@ -276,7 +433,7 @@ const SessionHistoryList = memo(function SessionHistoryList({
   expandedBuckets: Record<SessionBucketKey, boolean>;
   activeSessionKey: string | null;
   sessionLabels: Record<string, string>;
-  agentNameById: Record<string, string>;
+  agentById: Record<string, AgentSummary>;
   editingSessionKey: string | null;
   editingLabel: string;
   onToggleBucket: (bucketKey: SessionBucketKey) => void;
@@ -294,6 +451,9 @@ const SessionHistoryList = memo(function SessionHistoryList({
     saveRename: t('common:sidebar.saveSessionRename'),
     cancelRename: t('common:sidebar.cancelSessionRename'),
     rename: t('common:sidebar.renameSession'),
+    copyInfo: t('common:sidebar.copySessionInfo'),
+    copiedInfo: t('common:sidebar.sessionInfoCopied'),
+    copyFailed: t('common:sidebar.sessionInfoCopyFailed'),
     delete: t('common:sidebar.deleteSession'),
   }), [t]);
 
@@ -330,7 +490,7 @@ const SessionHistoryList = memo(function SessionHistoryList({
                   key={session.key}
                   session={session}
                   sessionLabel={sessionLabel}
-                  agentName={agentNameById[agentId] || agentId}
+                  agent={agentById[agentId]}
                   labels={rowLabels}
                   isActive={activeSessionKey === session.key}
                   isEditing={editingSessionKey === session.key}
@@ -616,8 +776,8 @@ function SidebarComponent() {
 
   useEffect(() => stopResizing, [stopResizing]);
 
-  const agentNameById = useMemo(
-    () => Object.fromEntries((agents ?? []).map((agent) => [agent.id, agent.name])),
+  const agentById = useMemo(
+    () => Object.fromEntries((agents ?? []).map((agent) => [agent.id, agent])),
     [agents],
   );
   const sessionBuckets = useMemo<SessionBucketGroup[]>(() => {
@@ -712,7 +872,7 @@ function SidebarComponent() {
           expandedBuckets={expandedSessionBuckets}
           activeSessionKey={currentSessionKey}
           sessionLabels={sessionLabels}
-          agentNameById={agentNameById}
+          agentById={agentById}
           editingSessionKey={editingSessionKey}
           editingLabel={editingLabel}
           onToggleBucket={toggleSessionBucket}

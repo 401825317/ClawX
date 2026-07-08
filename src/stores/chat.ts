@@ -4340,8 +4340,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const { currentSessionKey, sessions: localSessions } = get();
           const localSessionByKey = new Map(localSessions.map((session) => [session.key, session] as const));
           const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => {
+            const id = typeof s.id === 'string' && s.id.trim() ? s.id.trim() : undefined;
+            const sessionId = typeof s.sessionId === 'string' && s.sessionId.trim() ? s.sessionId.trim() : id;
+            const sessionFile = typeof s.sessionFile === 'string' && s.sessionFile.trim()
+              ? s.sessionFile.trim()
+              : typeof s.absolutePath === 'string' && s.absolutePath.trim()
+                ? s.absolutePath.trim()
+                : typeof s.path === 'string' && s.path.trim()
+                  ? s.path.trim()
+                  : undefined;
+            const fileName = typeof s.fileName === 'string' && s.fileName.trim()
+              ? s.fileName.trim()
+              : typeof s.file === 'string' && s.file.trim()
+                ? s.file.trim()
+                : undefined;
             const nextSession: ChatSession = {
               key: String(s.key || ''),
+              id,
+              sessionId,
+              sessionFile,
+              fileName,
               label: s.label ? String(s.label) : undefined,
               displayName: s.displayName ? String(s.displayName) : undefined,
               derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,

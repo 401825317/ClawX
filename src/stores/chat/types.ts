@@ -83,6 +83,10 @@ export interface ContentBlock {
 /** Session from sessions.list */
 export interface ChatSession {
   key: string;
+  id?: string;
+  sessionId?: string;
+  sessionFile?: string;
+  fileName?: string;
   label?: string;
   displayName?: string;
   derivedTitle?: string;
