@@ -29,10 +29,10 @@ describe('generated media store', () => {
     const { saveGeneratedMediaBuffer } = await import('@electron/utils/generated-media-store');
     const buffer = Buffer.from('generated-image');
 
-    const saved = await saveGeneratedMediaBuffer(buffer, 'image/png', '../unsafe image?.jpg');
+    const saved = await saveGeneratedMediaBuffer(buffer, 'image/png', '../unsafe clawx image?.jpg');
 
     expect(saved.path.startsWith(join(mediaRoot, 'generated'))).toBe(true);
-    expect(saved.path).toMatch(/unsafe_image---[a-f0-9-]+\.png$/);
+    expect(saved.path).toMatch(/unsafe_UClaw_image---[a-f0-9-]+\.png$/);
     expect(saved.contentType).toBe('image/png');
     expect(saved.size).toBe(buffer.byteLength);
     await expect(readFile(saved.path, 'utf8')).resolves.toBe('generated-image');

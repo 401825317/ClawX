@@ -21,7 +21,6 @@ import { ExecutionGraphCard } from './ExecutionGraphCard';
 import { ChatToolbar } from './ChatToolbar';
 import { extractImages, extractText, extractThinking, extractToolUse, isInternalAssistantReplyText, isInternalProcessNarration, normalizeMessageRole, stripProcessMessagePrefix } from './message-utils';
 import {
-  buildRunSegmentMessageIndices,
   deriveRuntimeTaskSteps,
   deriveTaskSteps,
   findReplyMessageIndex,
@@ -667,11 +666,6 @@ export function Chat() {
     [subagentCompletionInfos],
   );
 
-  const runSegmentMessageIndices = useMemo(
-    () => buildRunSegmentMessageIndices(messages, nextUserMessageIndexes, isRunTrigger),
-    [messages, nextUserMessageIndexes, isRunTrigger],
-  );
-
   const {
     userRunCards,
     foldedNarrationIndices,
@@ -903,25 +897,30 @@ export function Chat() {
       }];
     }
 
+    const cardActive = isLatestOpenRun;
+
     // Mark intermediate assistant messages whose process output should be folded into
     // the ExecutionGraphCard. We fold the text regardless of whether the
     // message ALSO carries tool calls (mixed `text + toolCall` messages are
     // common — e.g. "waiting for the page to load…" followed by a `wait`
-    // tool call). This prevents orphan narration bubbles from leaking into
-    // the chat stream once the graph is collapsed.
+    // tool call). This keeps the in-progress run compact while the graph is
+    // live. Once the run completes, keep the process visible in the chat
+    // stream so the user can inspect the full execution after the fact.
     //
     // While the live stream carries the answer, fold assistant history into the
     // graph. If the reply is already in history but not streaming, keep it in
     // the chat stream (do not pass `isLatestOpenRun` alone — that folds all).
-    const segmentReplyOffset = findReplyMessageIndex(postTriggerMessages, hasActiveStreamingReply);
-    for (let offset = 0; offset < postTriggerMessages.length; offset += 1) {
-      if (offset === segmentReplyOffset) continue;
-      const candidate = postTriggerMessages[offset];
-      if (!candidate || candidate.role !== 'assistant') continue;
-      const hasNarrationText = extractText(candidate).trim().length > 0;
-      const hasThinking = !!extractThinking(candidate);
-      if (!hasNarrationText && !hasThinking) continue;
-      foldedNarrationIndices.add(idx + 1 + offset);
+    if (cardActive) {
+      const segmentReplyOffset = findReplyMessageIndex(postTriggerMessages, hasActiveStreamingReply);
+      for (let offset = 0; offset < postTriggerMessages.length; offset += 1) {
+        if (offset === segmentReplyOffset) continue;
+        const candidate = postTriggerMessages[offset];
+        if (!candidate || candidate.role !== 'assistant') continue;
+        const hasNarrationText = extractText(candidate).trim().length > 0;
+        const hasThinking = !!extractThinking(candidate);
+        if (!hasNarrationText && !hasThinking) continue;
+        foldedNarrationIndices.add(idx + 1 + offset);
+      }
     }
 
     // The graph should stay "active" (expanded, can show trailing thinking)
@@ -929,7 +928,6 @@ export function Chat() {
     // appears.  Tying active to streamingReplyText caused a flicker: a brief
     // active→false→true transition collapsed the graph via ExecutionGraphCard's
     // uncontrolled path before the controlled `expanded` override could kick in.
-    const cardActive = isLatestOpenRun;
 
     // Suppress the trailing "Thinking..." indicator only when the live stream is
     // currently rendered AS a streaming step inside this card's graph. In
@@ -981,6 +979,16 @@ export function Chat() {
     };
   }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns, lastUserMessageAt]);
   const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
+  const foldedProcessMessageIndices = useMemo(() => {
+    const indices = new Set<number>();
+    for (const card of userRunCards) {
+      if (!card.active && card.streamingReplyText == null) continue;
+      for (let index = card.triggerIndex + 1; index <= card.segmentEnd; index += 1) {
+        indices.add(index);
+      }
+    }
+    return indices;
+  }, [userRunCards]);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
   let pendingVideoGeneration = false;
@@ -1092,21 +1100,11 @@ export function Chat() {
   }, [sending, lastUserMessageAt]);
 
   const autoCollapsedRunKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const card of userRunCards) {
-      // Auto-collapse once the run is complete and a final reply exists.
-      // Don't collapse while the reply is still streaming.
-      const isStillStreaming = card.streamingReplyText != null;
-      const shouldCollapse = !isStillStreaming && !card.active && card.replyIndex != null;
-      if (!shouldCollapse) continue;
-      const triggerMsg = messages[card.triggerIndex];
-      const runKey = triggerMsg?.id
-        ? `msg-${triggerMsg.id}`
-        : `${currentSessionKey}:trigger-${card.triggerIndex}`;
-      keys.add(runKey);
-    }
-    return keys;
-  }, [currentSessionKey, messages, userRunCards]);
+    // Keep the execution process expanded after completion. Users can still
+    // collapse a run manually; we just no longer replace finished runs with
+    // the one-line "tool calls / process messages" summary by default.
+    return new Set<string>();
+  }, []);
 
   useEffect(() => {
     if (userRunCards.length === 0) return;
@@ -1228,7 +1226,7 @@ export function Chat() {
                     if (isInternalMessage(msg) && !hasUserFacingMediaAttachments(msg)) return null;
                     const isFoldedNarration = foldedNarrationIndices.has(idx);
                     if (isFoldedNarration && !hasUserFacingMediaAttachments(msg)) return null;
-                    const suppressToolCards = runSegmentMessageIndices.has(idx);
+                    const suppressToolCards = foldedProcessMessageIndices.has(idx);
                     const isToolOnlyAssistant = normalizeMessageRole(msg.role) === 'assistant'
                       && extractToolUse(msg).length > 0
                       && extractText(msg).trim().length === 0
@@ -1310,7 +1308,7 @@ export function Chat() {
                     || (hasStreamText && streamTools.length === 0 && !hasRunningStreamToolStatus && !hasRunningRuntimeToolStatus)
                   ) && (
                     <ChatMessage
-                      suppressToolCards={hasActiveExecutionGraph || runSegmentMessageIndices.size > 0}
+                      suppressToolCards={hasActiveExecutionGraph || foldedProcessMessageIndices.size > 0}
                       assistantAvatarSrc={currentAgentAvatarSrc}
                       message={(() => {
                         const base = streamMsg

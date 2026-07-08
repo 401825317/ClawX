@@ -400,6 +400,17 @@ describe('ChatMessage attachment dedupe', () => {
     expect(await screen.findByText('测试PDF文件.pdf')).toBeInTheDocument();
   });
 
+  it('derives PPTX cards from MEDIA tags when attachment enrichment is missing', async () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: '已生成好了。\n\nMEDIA:/Users/huajing002/.openclaw/workspace/outputs/iPhone18_概念宣传PPT_20260708_184350_lr15rt.pptx',
+    };
+
+    render(<ChatMessage message={message} suppressProcessAttachments />);
+
+    expect(await screen.findByText('iPhone18_概念宣传PPT_20260708_184350_lr15rt.pptx')).toBeInTheDocument();
+  });
+
   it('derives skill directory cards from assistant text paths', async () => {
     const message: RawMessage = {
       role: 'assistant',

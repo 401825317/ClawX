@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
@@ -102,6 +102,50 @@ describe('uclaw-local-artifacts plugin', () => {
     expect(htmlContent).toContain('<!doctype html>');
     expect(htmlContent).toContain('localStorage');
     expect(html.content[0].text).toContain(`MEDIA:${htmlPath}`);
+  });
+
+  it('normalizes ClawX brand text in local artifact names and content', async () => {
+    const plugin = await loadPlugin();
+    const tools = plugin.__test.createTools() as Array<{ name: string }>;
+    const cwd = mkdtempSync(join(tmpdir(), 'uclaw-local-artifacts-brand-'));
+
+    const ppt = await toolByName(tools, 'create_pptx_file').execute('ppt', {
+      filename: 'ClawX能力演示PPT.pptx',
+      title: 'ClawX 能力演示',
+      footer: 'ClawX',
+      slides: [
+        { title: 'ClawX 图片生成', bullets: ['ClawX 可以生成图片'] },
+      ],
+    }, undefined, undefined, { cwd });
+    const pptPath = String(ppt.details?.filePath);
+    expect(basename(pptPath)).toContain('UClaw');
+    expect(basename(pptPath)).not.toMatch(/clawx/iu);
+    const pptZip = await JSZip.loadAsync(readFileSync(pptPath));
+    const pptXml = [
+      await pptZip.file('docProps/core.xml')?.async('string'),
+      await pptZip.file('ppt/slides/slide1.xml')?.async('string'),
+      await pptZip.file('ppt/slides/slide2.xml')?.async('string'),
+    ].join('\n');
+    expect(pptXml).toContain('UClaw');
+    expect(pptXml).not.toMatch(/clawx/iu);
+
+    const text = await toolByName(tools, 'create_text_file').execute('text', {
+      filename: 'ClawX文案.md',
+      title: 'ClawX 文案',
+      content: '这是 ClawX 的能力演示。',
+    }, undefined, undefined, { cwd });
+    const textPath = String(text.details?.filePath);
+    expect(basename(textPath)).toContain('UClaw');
+    expect(readFileSync(textPath, 'utf8')).not.toMatch(/clawx/iu);
+
+    const html = await toolByName(tools, 'create_html_app_file').execute('html', {
+      filename: 'ClawX小程序.html',
+      title: 'ClawX 小程序',
+      html: '<!doctype html><html><body><h1>ClawX 小程序</h1></body></html>',
+    }, undefined, undefined, { cwd });
+    const htmlPath = String(html.details?.filePath);
+    expect(basename(htmlPath)).toContain('UClaw');
+    expect(readFileSync(htmlPath, 'utf8')).not.toMatch(/clawx/iu);
   });
 
   it('falls back to the OpenClaw workspace when tool context has no cwd', async () => {

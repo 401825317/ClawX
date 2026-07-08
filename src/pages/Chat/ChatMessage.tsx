@@ -68,11 +68,27 @@ function isChatPreviewDocument(file: AttachedFileMeta): boolean {
   const mime = file.mimeType.toLowerCase();
   return (
     mime === 'application/pdf'
+    || mime === 'application/msword'
+    || mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    || mime === 'application/vnd.ms-powerpoint'
+    || mime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
     || mime === 'application/vnd.ms-excel'
     || mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     || name.endsWith('.pdf')
+    || name.endsWith('.doc')
+    || name.endsWith('.docx')
+    || name.endsWith('.ppt')
+    || name.endsWith('.pptx')
     || name.endsWith('.xls')
     || name.endsWith('.xlsx')
+  );
+}
+
+function isSupportedMediaAttachment(file: AttachedFileMeta): boolean {
+  return (
+    file.mimeType.startsWith('image/')
+    || file.mimeType.startsWith('video/')
+    || file.mimeType.startsWith('audio/')
   );
 }
 
@@ -128,6 +144,7 @@ function isUserFacingAttachmentWhenFolded(file: AttachedFileMeta): boolean {
   if (file.mimeType.startsWith('audio/')) return true;
   if (isDirectoryAttachment(file)) return true;
   if (isSkillFileAttachment(file)) return true;
+  if (isSupportedMediaAttachment(file)) return true;
   if (isChatPreviewDocument(file)) return true;
   // Paths parsed from the assistant reply (e.g. "/workspace/demo.html") are
   // intentional user-facing links. Generic tool-result markdown attachments
@@ -147,18 +164,81 @@ function validationKindForAttachment(file: AttachedFileMeta): 'file' | 'dir' | n
   return isDirectoryAttachment(file) ? 'dir' : 'file';
 }
 
-function previewMimeFromPath(filePath: string): string | null {
-  const lower = filePath.toLowerCase();
+function pathForExtension(filePath: string): string {
+  const trimmed = filePath.trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      return new URL(trimmed).pathname;
+    } catch {
+      return trimmed.split(/[?#]/)[0] || trimmed;
+    }
+  }
+  return trimmed.split(/[?#]/)[0] || trimmed;
+}
+
+function previewMimeFromPath(filePath: string, taggedMedia = false): string | null {
+  const lower = pathForExtension(filePath).toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.bmp')) return 'image/bmp';
+  if (lower.endsWith('.avif')) return 'image/avif';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'video/mp4';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.avi')) return 'video/x-msvideo';
+  if (lower.endsWith('.mkv')) return 'video/x-matroska';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.aac')) return 'audio/aac';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.m4a')) return 'audio/mp4';
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'text/markdown';
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html';
   if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.doc')) return 'application/msword';
+  if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (lower.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+  if (lower.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
   if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (taggedMedia && /^https?:\/\//i.test(filePath.trim())) return 'video/mp4';
   return null;
 }
 
 function fileNameFromPath(filePath: string): string {
+  if (/^https?:\/\//i.test(filePath.trim())) {
+    try {
+      const url = new URL(filePath);
+      const name = url.pathname.split('/').filter(Boolean).pop();
+      return name || 'media';
+    } catch {
+      // Fall through to path splitting.
+    }
+  }
   return filePath.split(/[\\/]/).pop() || 'file';
+}
+
+function previewForMediaPath(filePath: string, mimeType: string): string | null {
+  if (!mimeType.startsWith('image/')) return null;
+  if (isRemoteHttpUrl(filePath)) return filePath;
+  return null;
+}
+
+function rawTextForPreviewExtraction(message: RawMessage): string {
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => (block.type === 'text' && block.text ? block.text : ''))
+      .filter(Boolean)
+      .join('\n\n');
+  }
+  const fallback = (message as { text?: unknown }).text;
+  return typeof fallback === 'string' ? fallback : '';
 }
 
 function trimPathTerminators(filePath: string): string {
@@ -177,17 +257,18 @@ function extractPreviewDocumentPaths(text: string): AttachedFileMeta[] {
       fileName: fileNameFromPath(normalizedPath),
       mimeType,
       fileSize: 0,
-      preview: null,
+      preview: previewForMediaPath(normalizedPath, mimeType),
       filePath: normalizedPath,
       source: 'message-ref',
     });
   };
   // Deliberately narrow this render-layer fallback to user-facing artifacts:
-  // HTML / Markdown / PDF / spreadsheet previews and OpenClaw skill directories.
+  // media, HTML / Markdown / Office / PDF previews, and OpenClaw skill directories.
   // The store-level extractor still handles broad file categories; this keeps
   // visible outputs clickable even before history enrichment runs.
-  const exts = 'html?|md|markdown|pdf|xlsx?|HTML?|MD|MARKDOWN|PDF|XLSX?';
-  const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/)[^\\s\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'g');
+  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|mp4|mov|avi|mkv|webm|m4v|mp3|wav|ogg|aac|flac|m4a|html?|md|markdown|pdf|docx?|pptx?|xlsx?|PNG|JPE?G|GIF|WEBP|BMP|AVIF|SVG|MP4|MOV|AVI|MKV|WEBM|M4V|MP3|WAV|OGG|AAC|FLAC|M4A|HTML?|MD|MARKDOWN|PDF|DOCX?|PPTX?|XLSX?';
+  const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/)[^\\n"'()\\[\\],<>]*?\\.(?:${exts}))`, 'g');
+  const remoteTaggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):(https?:\\/\\/[^\\s\\n"'()\\[\\],<>` + '`' + `]+)`, 'g');
   const unixRegex = new RegExp('(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"\'`()\\[\\],<>]*?\\.(?:' + exts + '))', 'g');
   const skillPathBoundary = '(?=$|\\s|[\\x5b\\x5d"\'`(),<>，。；;,.!?])';
   const skillPathPart = '[^\\\\/\\s\\n"\'`()\\x5b\\x5d,<>]+';
@@ -203,6 +284,14 @@ function extractPreviewDocumentPaths(text: string): AttachedFileMeta[] {
 
   let workingText = text;
   let taggedMatch: RegExpExecArray | null;
+  while ((taggedMatch = remoteTaggedRegex.exec(text)) !== null) {
+    const filePath = taggedMatch[1];
+    const mimeType = previewMimeFromPath(filePath, true);
+    if (mimeType) pushRef(filePath, mimeType);
+    const start = taggedMatch.index;
+    const end = start + taggedMatch[0].length;
+    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
+  }
   while ((taggedMatch = taggedRegex.exec(text)) !== null) {
     const filePath = taggedMatch[1];
     const mimeType = previewMimeFromPath(filePath);
@@ -289,7 +378,7 @@ export const ChatMessage = memo(function ChatMessage({
   const visibleTools = suppressToolCards ? [] : tools;
   const [validatedPaths, setValidatedPaths] = useState<Record<string, boolean>>({});
   const rawAttachedFiles = dedupeAttachedFiles(message._attachedFiles || []);
-  const textPreviewFiles = isUser ? [] : extractPreviewDocumentPaths(text);
+  const textPreviewFiles = isUser ? [] : extractPreviewDocumentPaths(textOverride ?? rawTextForPreviewExtraction(message));
   const rawAttachedPaths = new Set(rawAttachedFiles.map((file) => file.filePath).filter(Boolean));
   const derivedAttachedFiles = dedupeAttachedFiles([
     ...rawAttachedFiles,
@@ -451,6 +540,14 @@ export const ChatMessage = memo(function ChatMessage({
                     onPreview={() => setLightboxImg({ src: file.preview!, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
                     onUseAsReference={file.filePath ? () => onUseImageAsReference?.(file) : undefined}
                   />
+                ) : file.filePath ? (
+                  <AsyncImageAttachmentCard
+                    key={`local-${i}`}
+                    file={file}
+                    variant="thumbnail"
+                    onPreview={(src) => setLightboxImg({ src, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
+                    onUseAsReference={file.filePath ? () => onUseImageAsReference?.(file) : undefined}
+                  />
                 ) : (
                   <ImagePreviewPlaceholder key={`local-${i}`} file={file} />
                 );
@@ -525,6 +622,17 @@ export const ChatMessage = memo(function ChatMessage({
                     width={file.width}
                     height={file.height}
                     onPreview={() => setLightboxImg({ src: file.preview!, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
+                    onUseAsReference={file.filePath ? () => onUseImageAsReference?.(file) : undefined}
+                  />
+                );
+              }
+              if (isImage && file.filePath) {
+                return (
+                  <AsyncImageAttachmentCard
+                    key={`local-${i}`}
+                    file={file}
+                    variant="preview"
+                    onPreview={(src) => setLightboxImg({ src, fileName: file.fileName, filePath: file.filePath, mimeType: file.mimeType })}
                     onUseAsReference={file.filePath ? () => onUseImageAsReference?.(file) : undefined}
                   />
                 );
@@ -907,6 +1015,81 @@ function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (
         <span className="truncate">{file.fileName}</span>
       </button>
     </div>
+  );
+}
+
+function AsyncImageAttachmentCard({
+  file,
+  variant,
+  onPreview,
+  onUseAsReference,
+}: {
+  file: AttachedFileMeta;
+  variant: 'thumbnail' | 'preview';
+  onPreview: (src: string) => void;
+  onUseAsReference?: () => void;
+}) {
+  const [src, setSrc] = useState<string | null>(() => immediateMediaSrcFromFilePath(file.filePath));
+  const [unavailable, setUnavailable] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const immediate = immediateMediaSrcFromFilePath(file.filePath);
+    setSrc(immediate);
+    setUnavailable(false);
+    if (immediate) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    void mediaSrcFromFilePath(file.filePath)
+      .then((resolved) => {
+        if (cancelled) return;
+        setSrc(resolved);
+        setUnavailable(!resolved);
+      })
+      .catch(() => {
+        if (!cancelled) setUnavailable(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file.filePath]);
+
+  if (!src) {
+    return (
+      <ImagePreviewPlaceholder
+        file={unavailable ? { ...file, previewStatus: 'unavailable' } : file}
+      />
+    );
+  }
+
+  if (variant === 'thumbnail') {
+    return (
+      <ImageThumbnail
+        src={src}
+        fileName={file.fileName}
+        filePath={file.filePath}
+        mimeType={file.mimeType}
+        width={file.width}
+        height={file.height}
+        onPreview={() => onPreview(src)}
+        onUseAsReference={onUseAsReference}
+      />
+    );
+  }
+
+  return (
+    <ImagePreviewCard
+      src={src}
+      fileName={file.fileName}
+      filePath={file.filePath}
+      mimeType={file.mimeType}
+      width={file.width}
+      height={file.height}
+      onPreview={() => onPreview(src)}
+      onUseAsReference={onUseAsReference}
+    />
   );
 }
 

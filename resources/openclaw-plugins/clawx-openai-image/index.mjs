@@ -74,7 +74,7 @@ function compactTimestamp(date = new Date()) {
 }
 
 function uniqueImageFileName(index, mimeType) {
-  return `clawx-image-${index + 1}-${compactTimestamp()}-${randomUUID().slice(0, 8)}.${imageFileExtensionForMimeType(mimeType)}`;
+  return `uclaw-image-${index + 1}-${compactTimestamp()}-${randomUUID().slice(0, 8)}.${imageFileExtensionForMimeType(mimeType)}`;
 }
 
 function normalizeMimeType(mimeType) {

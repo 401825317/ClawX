@@ -38,7 +38,22 @@ function xml(value) {
 }
 
 function cleanText(value) {
-  return String(value ?? '').replace(/\s+/gu, ' ').trim();
+  return normalizeBrandText(value).replace(/\s+/gu, ' ').trim();
+}
+
+function normalizeBrandText(value) {
+  return String(value ?? '').replace(/clawx/giu, 'UClaw');
+}
+
+function normalizeBrandValue(value) {
+  if (typeof value === 'string') return normalizeBrandText(value);
+  if (Array.isArray(value)) return value.map(normalizeBrandValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, normalizeBrandValue(item)]),
+    );
+  }
+  return value;
 }
 
 function textList(value) {
@@ -651,9 +666,10 @@ function createTools() {
         slides: Type.Optional(Type.Array(slideSchema)),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const filePath = await uniqueOutputPath(ctx, params, 'pptx', 'UClaw_PPT');
-        await writeFile(filePath, await createPptxBuffer(params));
-        return artifactResult(filePath, MIME.pptx, 'presentation', cleanText(params?.title), params?.openAfterCreate === true);
+        const safeParams = normalizeBrandValue(params);
+        const filePath = await uniqueOutputPath(ctx, safeParams, 'pptx', 'UClaw_PPT');
+        await writeFile(filePath, await createPptxBuffer(safeParams));
+        return artifactResult(filePath, MIME.pptx, 'presentation', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
       },
     },
     {
@@ -669,9 +685,10 @@ function createTools() {
         sections: Type.Optional(Type.Array(sectionSchema)),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const filePath = await uniqueOutputPath(ctx, params, 'docx', 'UClaw_DOCX');
-        await writeFile(filePath, await createDocxBuffer(params));
-        return artifactResult(filePath, MIME.docx, 'document', cleanText(params?.title), params?.openAfterCreate === true);
+        const safeParams = normalizeBrandValue(params);
+        const filePath = await uniqueOutputPath(ctx, safeParams, 'docx', 'UClaw_DOCX');
+        await writeFile(filePath, await createDocxBuffer(safeParams));
+        return artifactResult(filePath, MIME.docx, 'document', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
       },
     },
     {
@@ -692,9 +709,10 @@ function createTools() {
         }))),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const filePath = await uniqueOutputPath(ctx, params, 'xlsx', 'UClaw_XLSX');
-        await writeFile(filePath, createXlsxBuffer(params));
-        return artifactResult(filePath, MIME.xlsx, 'spreadsheet', cleanText(params?.title), params?.openAfterCreate === true);
+        const safeParams = normalizeBrandValue(params);
+        const filePath = await uniqueOutputPath(ctx, safeParams, 'xlsx', 'UClaw_XLSX');
+        await writeFile(filePath, createXlsxBuffer(safeParams));
+        return artifactResult(filePath, MIME.xlsx, 'spreadsheet', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
       },
     },
     {
@@ -710,10 +728,11 @@ function createTools() {
         sections: Type.Optional(Type.Array(sectionSchema)),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const extension = params?.extension === 'txt' ? 'txt' : 'md';
-        const filePath = await uniqueOutputPath(ctx, params, extension, 'UClaw_Text');
-        await writeFile(filePath, renderTextContent(params), 'utf8');
-        return artifactResult(filePath, MIME[extension], 'document', cleanText(params?.title), params?.openAfterCreate === true);
+        const safeParams = normalizeBrandValue(params);
+        const extension = safeParams?.extension === 'txt' ? 'txt' : 'md';
+        const filePath = await uniqueOutputPath(ctx, safeParams, extension, 'UClaw_Text');
+        await writeFile(filePath, renderTextContent(safeParams), 'utf8');
+        return artifactResult(filePath, MIME[extension], 'document', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
       },
     },
     {
@@ -730,9 +749,10 @@ function createTools() {
         js: Type.Optional(Type.String()),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const filePath = await uniqueOutputPath(ctx, params, 'html', 'UClaw_HTML_App');
-        await writeFile(filePath, renderHtmlApp(params), 'utf8');
-        return artifactResult(filePath, MIME.html, 'webpage', cleanText(params?.title), params?.openAfterCreate === true);
+        const safeParams = normalizeBrandValue(params);
+        const filePath = await uniqueOutputPath(ctx, safeParams, 'html', 'UClaw_HTML_App');
+        await writeFile(filePath, renderHtmlApp(safeParams), 'utf8');
+        return artifactResult(filePath, MIME.html, 'webpage', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
       },
     },
   ];

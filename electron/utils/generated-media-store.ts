@@ -25,8 +25,12 @@ function normalizeContentType(contentType: string): string {
   return contentType.split(';')[0]?.trim().toLowerCase() || 'application/octet-stream';
 }
 
+function normalizeBrandText(value: string): string {
+  return value.replace(/clawx/giu, 'UClaw');
+}
+
 function safeOriginalName(originalFilename: string | undefined): string {
-  const base = basename(originalFilename || '').trim();
+  const base = normalizeBrandText(basename(originalFilename || '').trim());
   if (!base) return '';
   return base
     .replace(/[^\p{L}\p{N}._-]+/gu, '_')
@@ -63,7 +67,7 @@ function uniqueCandidateDirs(): string[] {
   return [...new Set([
     join(getOpenClawMediaDir(), 'generated'),
     join(resolveClawXDataDir(), 'generated-media'),
-    join(tmpdir(), 'clawx-generated-media'),
+    join(tmpdir(), 'uclaw-generated-media'),
   ])];
 }
 

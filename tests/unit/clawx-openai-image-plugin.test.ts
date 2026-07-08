@@ -80,7 +80,7 @@ describe('ClawX OpenAI image plugin request shape', () => {
 
       expect(result?.images).toHaveLength(1);
       const image = result?.images[0] as { fileName?: string };
-      expect(image.fileName).toMatch(/^clawx-image-1-\d{8}-\d{6}-[0-9a-f]{8}\.png$/u);
+      expect(image.fileName).toMatch(/^uclaw-image-1-\d{8}-\d{6}-[0-9a-f]{8}\.png$/u);
       expect(JSON.parse(requestBody)).toEqual({
         model: 'gpt-image-2',
         prompt: 'paint a fox',
@@ -164,7 +164,7 @@ describe('ClawX OpenAI image plugin request shape', () => {
       const image = result?.images[0] as { buffer?: Buffer; mimeType?: string; fileName?: string };
       expect(Buffer.from(image.buffer || [])).toEqual(imageBytes);
       expect(image.mimeType).toBe('image/png');
-      expect(image.fileName).toMatch(/^clawx-image-1-\d{8}-\d{6}-[0-9a-f]{8}\.png$/u);
+      expect(image.fileName).toMatch(/^uclaw-image-1-\d{8}-\d{6}-[0-9a-f]{8}\.png$/u);
     } finally {
       server.close();
     }
