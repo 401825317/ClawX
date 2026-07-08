@@ -16,6 +16,7 @@ import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
+import { createAuthenticatedHostApiUrl } from '@/lib/host-api';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractImages, extractToolUse, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
@@ -819,22 +820,60 @@ function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: At
   );
 }
 
-function mediaSrcFromFilePath(filePath: string | undefined): string | null {
+function localPathFromMediaFilePath(filePath: string): string | null {
+  if (/^file:\/\//i.test(filePath)) {
+    try {
+      return decodeURIComponent(new URL(filePath).pathname);
+    } catch {
+      return filePath.replace(/^file:\/\/\/?/i, '');
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(filePath)) return null;
+  return filePath;
+}
+
+async function mediaSrcFromFilePath(filePath: string | undefined): Promise<string | null> {
   if (!filePath) return null;
   const trimmed = filePath.trim();
   if (!trimmed) return null;
-  if (/^https?:\/\//i.test(trimmed) || /^file:\/\//i.test(trimmed)) {
+  if (/^https?:\/\//i.test(trimmed)) {
     return trimmed;
   }
-  const normalized = trimmed.replace(/\\/g, '/');
-  const fileUrl = normalized.startsWith('/')
-    ? `file://${normalized}`
-    : `file:///${normalized}`;
-  return encodeURI(fileUrl);
+  const localPath = localPathFromMediaFilePath(trimmed);
+  if (!localPath) return trimmed;
+  return createAuthenticatedHostApiUrl(`/api/files/local-media?path=${encodeURIComponent(localPath)}`);
+}
+
+function immediateMediaSrcFromFilePath(filePath: string | undefined): string | null {
+  const trimmed = filePath?.trim();
+  if (!trimmed) return null;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
 function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
-  const src = mediaSrcFromFilePath(file.filePath);
+  const [src, setSrc] = useState<string | null>(() => immediateMediaSrcFromFilePath(file.filePath));
+
+  useEffect(() => {
+    let cancelled = false;
+    const immediate = immediateMediaSrcFromFilePath(file.filePath);
+    setSrc(immediate);
+    if (immediate) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    void mediaSrcFromFilePath(file.filePath)
+      .then((resolved) => {
+        if (!cancelled) setSrc(resolved);
+      })
+      .catch(() => {
+        if (!cancelled) setSrc(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file.filePath]);
+
   const handleOpen = useCallback(() => {
     if (!file.filePath) return;
     if (onOpen) {

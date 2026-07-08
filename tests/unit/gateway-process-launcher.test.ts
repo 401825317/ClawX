@@ -47,6 +47,47 @@ function runGatewayPreloadInVm(params: {
 }
 
 describe('Gateway process preload', () => {
+  it('loads the fetch preload from the wrapper before importing OpenClaw', () => {
+    const wrapperSource = readFileSync(
+      resolve(process.cwd(), 'electron/gateway/gateway-entry-wrapper.cjs'),
+      'utf-8',
+    );
+
+    expect(wrapperSource.indexOf("require('./gateway-fetch-preload.cjs')")).toBeGreaterThanOrEqual(0);
+    expect(wrapperSource.indexOf("require('./gateway-fetch-preload.cjs')")).toBeLessThan(
+      wrapperSource.indexOf('await import(pathToFileURL(entry).href)'),
+    );
+  });
+
+  it('emits a readiness diagnostic when the fetch preload is loaded', async () => {
+    const preloadSource = readFileSync(
+      resolve(process.cwd(), 'electron/gateway/gateway-fetch-preload.cjs'),
+      'utf-8',
+    );
+    const stderrWrite = vi.fn();
+
+    runGatewayPreloadInVm({
+      preloadSource,
+      childProcess: {
+        spawn: vi.fn(),
+        execFile: vi.fn(),
+        fork: vi.fn(),
+        spawnSync: vi.fn(),
+        execFileSync: vi.fn(),
+      },
+      processMock: {
+        platform: 'darwin',
+        execPath: '/Applications/UClaw.app/Contents/MacOS/UClaw',
+        env: { PATH: '/usr/bin' },
+        stderr: { write: stderrWrite },
+      },
+    });
+
+    expect(stderrWrite).toHaveBeenCalledWith(
+      '[diagnostic] gateway.fetch.preload.ready {"fetchAvailable":true,"patched":true}\n',
+    );
+  });
+
   it('runs process.execPath children in Node mode inside Electron utility process', async () => {
     const preloadSource = readFileSync(
       resolve(process.cwd(), 'electron/gateway/gateway-fetch-preload.cjs'),
@@ -181,9 +222,11 @@ describe('Gateway process launcher', () => {
   function makeUtilityProcessMock() {
     const child = new EventEmitter() as EventEmitter & {
       pid: number;
+      stdout?: EventEmitter;
       stderr?: EventEmitter;
     };
     child.pid = 12345;
+    child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     vi.mocked(utilityProcess.fork).mockReturnValueOnce(child as never);
     return child;
@@ -207,6 +250,7 @@ describe('Gateway process launcher', () => {
       sanitizeSpawnArgs: (args: string[]) => args,
       getCurrentState: () => 'starting' as const,
       getShouldReconnect: () => true,
+      onStdoutLine: vi.fn(),
       onStderrLine: vi.fn(),
       onSpawn: vi.fn(),
       onExit: vi.fn(),
@@ -286,5 +330,20 @@ describe('Gateway process launcher', () => {
         value: originalResourcesPath,
       });
     }
+  });
+
+  it('forwards Gateway stdout lines to the launch callback', async () => {
+    const { launchGatewayProcess } = await import('@electron/gateway/process-launcher');
+    const onStdoutLine = vi.fn();
+    const child = makeUtilityProcessMock();
+
+    const launchPromise = launchGatewayProcess(makeLaunchOptions({ onStdoutLine }));
+
+    child.emit('spawn');
+    await launchPromise;
+    child.stdout?.emit('data', Buffer.from('one\ntwo\n'));
+
+    expect(onStdoutLine).toHaveBeenCalledWith('one');
+    expect(onStdoutLine).toHaveBeenCalledWith('two');
   });
 });

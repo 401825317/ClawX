@@ -253,6 +253,103 @@ describe('Chat execution graph lifecycle', () => {
     expect(screen.queryByTestId('chat-streaming-tool-status-bar')).not.toBeInTheDocument();
   });
 
+  it('aggregates same-turn continuation runs into the latest execution graph', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          timestamp: 1773281731,
+          content: '生图，PPT，Excel，生视频，每个随便来一个',
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: true,
+      activeRunId: 'run-main',
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      runtimeRuns: {
+        'run-main': {
+          runId: 'run-main',
+          sessionKey: 'agent:main:main',
+          status: 'running',
+          startedAt: 1773281731000,
+          lastEventAt: 1773281731500,
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'run.plan.updated',
+              runId: 'run-main',
+              sessionKey: 'agent:main:main',
+              ts: 1773281731000,
+              objective: '生成一组示例产物',
+              steps: [
+                { id: 'task:ppt', title: '制作 PPT', status: 'completed', order: 1 },
+                { id: 'task:video', title: '生成视频', status: 'running', order: 2 },
+              ],
+            },
+            {
+              type: 'tool.completed',
+              runId: 'run-main',
+              sessionKey: 'agent:main:main',
+              ts: 1773281731500,
+              toolCallId: 'ppt-1',
+              name: 'create_ppt',
+              result: { filePath: '/tmp/demo.pptx' },
+              isError: false,
+            },
+          ],
+        },
+        'video_generate:job-1:ok': {
+          runId: 'video_generate:job-1:ok',
+          sessionKey: 'agent:main:main',
+          status: 'running',
+          startedAt: 1773281732000,
+          lastEventAt: 1773281732000,
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'tool.started',
+              runId: 'video_generate:job-1:ok',
+              sessionKey: 'agent:main:main',
+              ts: 1773281732000,
+              toolCallId: 'video-1',
+              name: 'video_generate',
+              args: { prompt: 'demo video' },
+            },
+          ],
+        },
+      },
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      pendingToolImages: [],
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+
+    expect(await screen.findByText('create_ppt')).toBeInTheDocument();
+    expect(screen.getByText('video_generate')).toBeInTheDocument();
+    expect(screen.getByText('生成视频')).toBeInTheDocument();
+  });
+
   it('renders the execution graph immediately for an active run before any stream content arrives', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({

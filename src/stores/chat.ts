@@ -56,7 +56,6 @@ import {
   type RawMessage,
   type ToolStatus,
 } from './chat/types';
-import type { ChatGet, ChatSet } from './chat/store-api';
 import { applyRuntimeEventToRuns, extractToolCompletedFiles, shouldFilterRuntimeExecutionGraphEvent } from './chat/runtime-graph';
 import {
   buildRuntimeArtifactEventsFromAttachedFiles,
@@ -81,6 +80,13 @@ export type {
   ToolStatus,
   ChatRuntimeRunState,
 } from './chat/types';
+
+type ChatSet = (
+  partial: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>),
+  replace?: false,
+) => void;
+
+type ChatGet = () => ChatState;
 
 // Module-level timestamp tracking the last chat event received.
 // Used by the safety timeout to avoid false-positive "no response" errors
@@ -727,6 +733,53 @@ function applyHistoricalRuntimeRunsFromMessages(
 function toMs(ts: number): number {
   // Timestamps < 1e12 are in seconds (before ~2033); >= 1e12 are milliseconds
   return ts < 1e12 ? ts * 1000 : ts;
+}
+
+function optionalToMs(ts: number | undefined | null): number | null {
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
+  return toMs(ts);
+}
+
+function getRuntimeEventTimestampMs(event: ChatRuntimeEvent): number | null {
+  const direct = optionalToMs(event.ts);
+  if (direct != null) return direct;
+  if (event.type === 'run.started') return optionalToMs(event.startedAt);
+  if (event.type === 'run.ended') return optionalToMs(event.endedAt);
+  return null;
+}
+
+function getRuntimeRunFirstEventMs(run: ChatState['runtimeRuns'][string] | undefined): number | null {
+  if (!run) return null;
+  const startedAt = optionalToMs(run.startedAt);
+  const eventTimes = run.events
+    .map(getRuntimeEventTimestampMs)
+    .filter((value): value is number => value != null);
+  const firstEventAt = eventTimes.length > 0 ? Math.min(...eventTimes) : null;
+  if (startedAt == null) return firstEventAt;
+  if (firstEventAt == null) return startedAt;
+  return Math.min(startedAt, firstEventAt);
+}
+
+function runtimeEventBelongsToActiveTurn(
+  state: Pick<ChatState, 'currentSessionKey' | 'sending' | 'activeRunId' | 'pendingFinal' | 'lastUserMessageAt' | 'runtimeRuns'>,
+  event: ChatRuntimeEvent,
+  eventSessionKey: string | null,
+): boolean {
+  if (!eventSessionKey || eventSessionKey !== state.currentSessionKey) return false;
+  if (!state.sending && state.activeRunId == null && !state.pendingFinal) return false;
+  if (state.activeRunId && event.runId === state.activeRunId) return true;
+
+  const activeRunStartMs = state.activeRunId
+    ? getRuntimeRunFirstEventMs(state.runtimeRuns[state.activeRunId])
+    : null;
+  const userTurnStartMs = optionalToMs(state.lastUserMessageAt);
+  const boundaryMs = activeRunStartMs ?? userTurnStartMs;
+  if (boundaryMs == null) return false;
+
+  const eventMs = getRuntimeEventTimestampMs(event)
+    ?? getRuntimeRunFirstEventMs(state.runtimeRuns[event.runId]);
+  if (eventMs == null) return false;
+  return eventMs >= boundaryMs - 5_000;
 }
 
 // Timer for fallback history polling during active sends.
@@ -6839,9 +6892,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       : event;
     const matchesCurrentSession = eventSessionKey != null && eventSessionKey === currentSessionKey;
     const matchesActiveRun = activeRunId != null && event.runId === activeRunId;
+    const matchesActiveTurn = runtimeEventBelongsToActiveTurn(initialState, eventForSession, eventSessionKey);
 
     if (shouldFilterRuntimeExecutionGraphEvent(eventForSession)) {
-      if (matchesCurrentSession || matchesActiveRun) {
+      if (matchesCurrentSession || matchesActiveRun || matchesActiveTurn) {
         _lastChatEventAt = Date.now();
       }
       return;
@@ -6861,7 +6915,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
     }
     const nextPatch: Partial<ChatState> = { runtimeRuns };
-    const appliesToActiveUi = matchesActiveRun || (activeRunId == null && matchesCurrentSession);
+    const appliesToActiveUi = matchesActiveRun || matchesActiveTurn || (activeRunId == null && matchesCurrentSession);
     let completedToolFiles: AttachedFileMeta[] = [];
 
     if (eventForSession.type === 'artifact.produced') {
@@ -6980,7 +7034,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           || latestState.lastUserMessageAt == null
           || eventForSession.ts >= latestState.lastUserMessageAt - 1_000
         );
-      const shouldClearActiveRun = terminalMatchesActiveRun || terminalIsForCurrentUntrackedSend;
+      const terminalMatchesActiveTurn = !terminalMatchesActiveRun
+        && !terminalIsForCurrentUntrackedSend
+        && runtimeEventBelongsToActiveTurn(latestState, eventForSession, eventSessionKey);
+      const shouldClearActiveRun = terminalMatchesActiveRun || terminalIsForCurrentUntrackedSend || terminalMatchesActiveTurn;
 
       if (shouldClearActiveRun) {
         const terminalGateDecision = runtimeRuns[eventForSession.runId]?.gateResult?.decision;

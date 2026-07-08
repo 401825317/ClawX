@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog, nativeImage } from 'electron';
 import crypto from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
-import { getOpenClawMediaDir } from '../../utils/paths';
+import { expandFilePreviewPath, getOpenClawMediaDir } from '../../utils/paths';
 
 const EXT_MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
@@ -47,6 +48,10 @@ function getMimeType(ext: string): string {
   return EXT_MIME_MAP[ext.toLowerCase()] || 'application/octet-stream';
 }
 
+function isStreamableMediaMime(mimeType: string): boolean {
+  return mimeType.startsWith('video/') || mimeType.startsWith('audio/') || mimeType.startsWith('image/');
+}
+
 function mimeToExt(mimeType: string): string {
   for (const [ext, mime] of Object.entries(EXT_MIME_MAP)) {
     if (mime === mimeType) return ext;
@@ -58,6 +63,85 @@ const DIRECTORY_MIME_TYPE = 'application/x-directory';
 
 function getOutboundDir(): string {
   return join(getOpenClawMediaDir(), 'outbound');
+}
+
+function parseRangeHeader(rangeHeader: string | undefined, fileSize: number): { start: number; end: number } | null {
+  if (!rangeHeader) return null;
+  const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+  const startRaw = match[1] ?? '';
+  const endRaw = match[2] ?? '';
+  if (!startRaw && !endRaw) return null;
+
+  let start: number;
+  let end: number;
+  if (!startRaw) {
+    const suffixLength = Number.parseInt(endRaw, 10);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+    start = Math.max(fileSize - suffixLength, 0);
+    end = fileSize - 1;
+  } else {
+    start = Number.parseInt(startRaw, 10);
+    end = endRaw ? Number.parseInt(endRaw, 10) : fileSize - 1;
+  }
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= fileSize) {
+    return null;
+  }
+  return { start, end: Math.min(end, fileSize - 1) };
+}
+
+async function resolveLocalMediaFile(filePath: string): Promise<{ realPath: string; size: number; mimeType: string } | null> {
+  if (typeof filePath !== 'string' || !filePath.trim() || filePath.includes('\0')) {
+    return null;
+  }
+  const expanded = expandFilePreviewPath(filePath.trim());
+  const fsP = await import('node:fs/promises');
+  const realPath = await fsP.realpath(resolve(expanded));
+  const stat = await fsP.stat(realPath);
+  if (!stat.isFile()) return null;
+  const mimeType = getMimeType(extname(realPath));
+  if (!isStreamableMediaMime(mimeType)) return null;
+  return { realPath, size: stat.size, mimeType };
+}
+
+function sendLocalMediaResponse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  file: { realPath: string; size: number; mimeType: string },
+): void {
+  res.setHeader('Content-Type', file.mimeType);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+
+  const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : undefined;
+  if (rangeHeader) {
+    const range = parseRangeHeader(rangeHeader, file.size);
+    if (!range) {
+      res.statusCode = 416;
+      res.setHeader('Content-Range', `bytes */${file.size}`);
+      res.end();
+      return;
+    }
+    const chunkSize = range.end - range.start + 1;
+    res.statusCode = 206;
+    res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${file.size}`);
+    res.setHeader('Content-Length', String(chunkSize));
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    createReadStream(file.realPath, { start: range.start, end: range.end }).pipe(res);
+    return;
+  }
+
+  res.statusCode = 200;
+  res.setHeader('Content-Length', String(file.size));
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  createReadStream(file.realPath).pipe(res);
 }
 
 async function generateImagePreview(filePath: string, mimeType: string): Promise<string | null> {
@@ -131,6 +215,21 @@ export async function handleFileRoutes(
   url: URL,
   _ctx: HostApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/files/local-media' && (req.method === 'GET' || req.method === 'HEAD')) {
+    try {
+      const filePath = url.searchParams.get('path') || '';
+      const file = await resolveLocalMediaFile(filePath);
+      if (!file) {
+        sendJson(res, 404, { success: false, error: 'Media file not found' });
+        return true;
+      }
+      sendLocalMediaResponse(req, res, file);
+    } catch (error) {
+      sendJson(res, 404, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/files/stage-paths' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{ filePaths: string[] }>(req);

@@ -7,6 +7,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { PassThrough } from 'node:stream';
 
 const sendJsonMock = vi.fn();
 const parseJsonBodyMock = vi.fn();
@@ -23,8 +24,8 @@ function resetFixtures(): void {
   mkdirSync(testRootDir, { recursive: true });
 }
 
-function makeReq(method = 'POST'): IncomingMessage {
-  return { method } as IncomingMessage;
+function makeReq(method = 'POST', headers: Record<string, string> = {}): IncomingMessage {
+  return { method, headers } as IncomingMessage;
 }
 
 function makeRes(): ServerResponse {
@@ -36,7 +37,32 @@ function makeRes(): ServerResponse {
 
 const STAGE_PATHS_URL = new URL('http://127.0.0.1:13210/api/files/stage-paths');
 const THUMBNAILS_URL = new URL('http://127.0.0.1:13210/api/files/thumbnails');
+const LOCAL_MEDIA_URL = new URL('http://127.0.0.1:13210/api/files/local-media');
 const ctx = {} as never;
+
+function makeStreamingRes(): {
+  res: ServerResponse;
+  headers: Record<string, string>;
+  body: Promise<Buffer>;
+} {
+  const stream = new PassThrough() as PassThrough & ServerResponse;
+  const headers: Record<string, string> = {};
+  const chunks: Buffer[] = [];
+  stream.statusCode = 200;
+  stream.setHeader = vi.fn((name: string, value: number | string | readonly string[]) => {
+    headers[name.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
+    return stream;
+  }) as unknown as ServerResponse['setHeader'];
+  stream.getHeader = vi.fn((name: string) => headers[name.toLowerCase()]) as unknown as ServerResponse['getHeader'];
+  stream.on('data', (chunk) => {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  });
+  const body = new Promise<Buffer>((resolve, reject) => {
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+  });
+  return { res: stream, headers, body };
+}
 
 describe('handleFileRoutes — POST /api/files/stage-paths', () => {
   beforeEach(() => {
@@ -95,5 +121,24 @@ describe('handleFileRoutes — POST /api/files/stage-paths', () => {
       preview: `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`,
       fileSize: Buffer.byteLength(svg),
     });
+  });
+
+  it('streams local media with byte range support', async () => {
+    const mediaPath = join(testRootDir, 'clip.mp4');
+    writeFileSync(mediaPath, Buffer.from('0123456789'));
+    const url = new URL(LOCAL_MEDIA_URL);
+    url.searchParams.set('path', mediaPath);
+    const { res, headers, body } = makeStreamingRes();
+
+    const { handleFileRoutes } = await import('@electron/api/routes/files');
+    const handled = await handleFileRoutes(makeReq('GET', { range: 'bytes=2-5' }), res, url, ctx);
+
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(206);
+    expect(headers['content-type']).toBe('video/mp4');
+    expect(headers['accept-ranges']).toBe('bytes');
+    expect(headers['content-range']).toBe('bytes 2-5/10');
+    expect(headers['content-length']).toBe('4');
+    await expect(body).resolves.toEqual(Buffer.from('2345'));
   });
 });

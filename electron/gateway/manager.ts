@@ -47,7 +47,11 @@ import {
   loadGatewayReloadPolicy,
   type GatewayReloadPolicy,
 } from './reload-policy';
-import { classifyGatewayStderrMessage, recordGatewayStartupStderrLine } from './startup-stderr';
+import {
+  classifyGatewayStderrMessage,
+  classifyGatewayStdoutMessage,
+  recordGatewayStartupStderrLine,
+} from './startup-stderr';
 import { runGatewayStartupSequence } from './startup-orchestrator';
 import {
   GatewayCapabilityMonitor,
@@ -1252,6 +1256,7 @@ export class GatewayManager extends EventEmitter {
 
     // Per-process dedup map for stderr lines — resets on each new spawn.
     const stderrDedup = new Map<string, number>();
+    const stdoutDedup = new Map<string, number>();
 
     const { child, lastSpawnSummary } = await launchGatewayProcess({
       port: this.status.port,
@@ -1259,6 +1264,25 @@ export class GatewayManager extends EventEmitter {
       sanitizeSpawnArgs: (args) => this.sanitizeSpawnArgs(args),
       getCurrentState: () => this.status.state,
       getShouldReconnect: () => this.shouldReconnect,
+      onStdoutLine: (line) => {
+        const classified = classifyGatewayStdoutMessage(line);
+        if (classified.level === 'drop') return;
+
+        const count = (stdoutDedup.get(classified.normalized) ?? 0) + 1;
+        stdoutDedup.set(classified.normalized, count);
+        if (count > 1) {
+          if (count % 50 === 0) {
+            logger.debug(`[Gateway stdout] (suppressed ${count} repeats) ${classified.normalized}`);
+          }
+          return;
+        }
+
+        if (classified.level === 'info') {
+          logger.info(`[Gateway stdout] ${classified.normalized}`);
+          return;
+        }
+        logger.debug(`[Gateway stdout] ${classified.normalized}`);
+      },
       onStderrLine: (line) => {
         recordGatewayStartupStderrLine(this.recentStartupStderrLines, line);
         const classified = classifyGatewayStderrMessage(line);
@@ -1277,6 +1301,10 @@ export class GatewayManager extends EventEmitter {
 
         if (classified.level === 'debug') {
           logger.debug(`[Gateway stderr] ${classified.normalized}`);
+          return;
+        }
+        if (classified.level === 'info') {
+          logger.info(`[Gateway stderr] ${classified.normalized}`);
           return;
         }
         logger.warn(`[Gateway stderr] ${classified.normalized}`);

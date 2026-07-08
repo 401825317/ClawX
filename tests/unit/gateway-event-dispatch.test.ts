@@ -53,6 +53,42 @@ describe('dispatchProtocolEvent', () => {
     expect(emitter.emit).toHaveBeenCalledWith('chat:message', { message: { text: 'hello' } });
   });
 
+  it('logs chat message tool signals without logging message text', () => {
+    const emitter = createMockEmitter();
+    dispatchProtocolEvent(emitter, 'chat', {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'call-1',
+          type: 'function',
+          function: {
+            name: 'create_docx_file',
+            arguments: '{"title":"sensitive body"}',
+          },
+        },
+      ],
+    });
+
+    expect(logger.info).toHaveBeenCalledWith('[diagnostic] chat.message.signal', {
+      role: 'assistant',
+      messageType: undefined,
+      contentKind: 'string',
+      contentParts: undefined,
+      contentTextChars: 0,
+      hasToolCalls: true,
+      toolCallsCount: 1,
+      toolCallNames: ['create_docx_file'],
+      hasFunctionCall: false,
+      outputCount: 0,
+      outputTypes: [],
+      contentTypes: [],
+      finishReason: undefined,
+      topLevelKeys: ['content', 'role', 'tool_calls'],
+    });
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('sensitive body');
+  });
+
   it('does not normalize non-terminal lifecycle phase=end as run.ended', () => {
     const emitter = createMockEmitter();
     const payload = {

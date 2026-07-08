@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatMessage } from '@/pages/Chat/ChatMessage';
 import type { RawMessage } from '@/stores/chat';
+import { invokeIpc } from '@/lib/api-client';
 
 vi.mock('@/lib/api-client', () => ({
   invokeIpc: vi.fn(),
@@ -510,6 +511,39 @@ describe('ChatMessage attachment dedupe', () => {
     expect(video).not.toBeNull();
     expect(video?.getAttribute('src')).toBe(url);
     expect(screen.getByText('task_demo.mp4')).toBeInTheDocument();
+  });
+
+  it('renders local video files through the authenticated Host API media route', async () => {
+    vi.mocked(invokeIpc).mockResolvedValueOnce('host-token-1');
+    const filePath = '/Users/me/.openclaw/media/tool-video-generation/demo.mp4';
+    const message: RawMessage = {
+      role: 'assistant',
+      content: 'Video generated.',
+      _attachedFiles: [
+        {
+          fileName: 'demo.mp4',
+          mimeType: 'video/mp4',
+          fileSize: 4096,
+          preview: null,
+          filePath,
+          source: 'tool-result',
+        },
+      ],
+    };
+
+    const { container } = render(
+      <ChatMessage
+        message={message}
+        suppressProcessAttachments
+      />,
+    );
+
+    await waitFor(() => {
+      const src = container.querySelector('video')?.getAttribute('src') || '';
+      expect(src).toContain('http://127.0.0.1:13210/api/files/local-media?');
+      expect(src).toContain(`path=${encodeURIComponent(filePath)}`);
+      expect(src).toContain('token=host-token-1');
+    });
   });
 });
 

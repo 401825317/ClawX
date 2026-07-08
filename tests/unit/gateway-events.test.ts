@@ -595,6 +595,64 @@ describe('gateway store event wiring', () => {
     expect(useChatStore.getState().lastUserMessageAt).toBe(1773281731000);
   });
 
+  it('clears the active send when a same-turn continuation run ends successfully', async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useChatStore } = await importRealChatStore();
+    const loadHistory = vi.fn(async () => {});
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-main',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      runtimeRuns: {
+        'run-main': {
+          runId: 'run-main',
+          sessionKey: 'agent:main:main',
+          status: 'running',
+          startedAt: 1773281731000,
+          lastEventAt: 1773281731000,
+          assistantText: '',
+          thinkingText: '',
+          events: [{
+            type: 'run.started',
+            runId: 'run-main',
+            sessionKey: 'agent:main:main',
+            startedAt: 1773281731000,
+            ts: 1773281731000,
+          }],
+        },
+      },
+      loadHistory,
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'run.ended',
+      runId: 'video_generate:job-1:ok',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+      endedAt: 1773281733000,
+      ts: 1773281733000,
+    });
+    await flushAsyncImports();
+
+    expect(loadHistory).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().sending).toBe(false);
+    expect(useChatStore.getState().activeRunId).toBeNull();
+    expect(useChatStore.getState().pendingFinal).toBe(false);
+    expect(useChatStore.getState().runtimeRuns['video_generate:job-1:ok']?.gateResult).toEqual(expect.objectContaining({
+      decision: 'deliverable',
+    }));
+  });
+
   it('ignores session-less runtime terminals that do not match the active run', async () => {
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {

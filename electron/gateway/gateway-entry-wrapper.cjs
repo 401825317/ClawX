@@ -1,6 +1,6 @@
 'use strict';
 
-require('./gateway-child-process-patch.cjs');
+require('./gateway-fetch-preload.cjs');
 
 (async function () {
   var entry = process.env.CLAWX_OPENCLAW_ENTRY;

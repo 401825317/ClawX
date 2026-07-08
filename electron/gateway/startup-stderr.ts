@@ -1,5 +1,10 @@
 export type GatewayStderrClassification = {
-  level: 'drop' | 'debug' | 'warn';
+  level: 'drop' | 'debug' | 'info' | 'warn';
+  normalized: string;
+};
+
+export type GatewayStdoutClassification = {
+  level: 'drop' | 'debug' | 'info';
   normalized: string;
 };
 
@@ -33,12 +38,35 @@ export function classifyGatewayStderrMessage(message: string): GatewayStderrClas
   // Gateway config warnings (e.g. stale plugin entries) are informational, not actionable.
   if (msg.includes('Config warnings:')) return { level: 'debug', normalized: msg };
 
+  if (msg.startsWith('[diagnostic] model.fetch.') || msg.startsWith('[diagnostic] gateway.fetch.preload.')) {
+    return { level: 'info', normalized: msg };
+  }
+
   // Electron restricts NODE_OPTIONS in packaged apps; this is expected and harmless.
   if (msg.includes('node: --require is not allowed in NODE_OPTIONS')) {
     return { level: 'debug', normalized: msg };
   }
 
   return { level: 'warn', normalized: msg };
+}
+
+export function classifyGatewayStdoutMessage(message: string): GatewayStdoutClassification {
+  const msg = message.trim();
+  if (!msg) {
+    return { level: 'drop', normalized: msg };
+  }
+
+  if (
+    msg.startsWith('[diagnostic] model.fetch.')
+    || msg.startsWith('[diagnostic] gateway.fetch.preload.')
+    || msg.includes('[model-fetch]')
+    || msg.includes('[responses]')
+    || msg.includes('[completions]')
+  ) {
+    return { level: 'info', normalized: msg };
+  }
+
+  return { level: 'debug', normalized: msg };
 }
 
 export function recordGatewayStartupStderrLine(lines: string[], line: string): void {

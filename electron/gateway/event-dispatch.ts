@@ -6,6 +6,81 @@ type GatewayEventEmitter = {
   emit: (event: string, payload: unknown) => boolean;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function countTextChars(value: unknown): number {
+  if (typeof value === 'string') return Array.from(value).length;
+  if (!Array.isArray(value)) return 0;
+  return value.reduce((sum, item) => {
+    if (typeof item === 'string') return sum + Array.from(item).length;
+    if (isRecord(item) && typeof item.text === 'string') {
+      return sum + Array.from(item.text).length;
+    }
+    if (isRecord(item) && typeof item.content === 'string') {
+      return sum + Array.from(item.content).length;
+    }
+    return sum;
+  }, 0);
+}
+
+function summarizeToolCallNames(toolCalls: unknown[]): string[] {
+  return toolCalls.map((toolCall) => {
+    if (!isRecord(toolCall)) return null;
+    if (typeof toolCall.name === 'string') return toolCall.name;
+    if (isRecord(toolCall.function) && typeof toolCall.function.name === 'string') {
+      return toolCall.function.name;
+    }
+    if (typeof toolCall.type === 'string') return toolCall.type;
+    return null;
+  }).filter((name): name is string => Boolean(name)).slice(0, 30);
+}
+
+function summarizeChatMessagePayload(payload: unknown): Record<string, unknown> {
+  const message = isRecord(payload) && isRecord(payload.message) ? payload.message : payload;
+  if (!isRecord(message)) {
+    return {
+      messageKind: typeof message,
+    };
+  }
+
+  const content = message.content;
+  const toolCalls = asArray(message.tool_calls ?? message.toolCalls);
+  const output = asArray(message.output);
+  const outputTypes = output.map((item) => (
+    isRecord(item) && typeof item.type === 'string' ? item.type : null
+  )).filter(Boolean);
+  const contentTypes = asArray(content).map((item) => (
+    isRecord(item) && typeof item.type === 'string' ? item.type : null
+  )).filter(Boolean);
+
+  return {
+    role: typeof message.role === 'string' ? message.role : undefined,
+    messageType: typeof message.type === 'string' ? message.type : undefined,
+    contentKind: Array.isArray(content) ? 'array' : typeof content,
+    contentParts: Array.isArray(content) ? content.length : undefined,
+    contentTextChars: countTextChars(content),
+    hasToolCalls: toolCalls.length > 0,
+    toolCallsCount: toolCalls.length,
+    toolCallNames: summarizeToolCallNames(toolCalls),
+    hasFunctionCall: Boolean(message.function_call ?? message.functionCall),
+    outputCount: output.length,
+    outputTypes: outputTypes.slice(0, 20),
+    contentTypes: contentTypes.slice(0, 20),
+    finishReason: typeof message.finish_reason === 'string' ? message.finish_reason : undefined,
+    topLevelKeys: Object.keys(message).sort(),
+  };
+}
+
+function logChatMessageDiagnostic(payload: unknown): void {
+  logger.info('[diagnostic] chat.message.signal', summarizeChatMessagePayload(payload));
+}
+
 function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatRuntimeEvent>): void {
   if (!event) return;
   if (event.type === 'assistant.delta' || event.type === 'thinking.delta') return;
@@ -197,6 +272,7 @@ export function dispatchProtocolEvent(
     case 'tick':
       break;
     case 'chat':
+      logChatMessageDiagnostic(payload);
       emitter.emit('chat:message', { message: payload });
       break;
     case 'channel.status':
@@ -231,6 +307,7 @@ export function dispatchJsonRpcNotification(
       emitter.emit('channel:status', notification.params as { channelId: string; status: string });
       break;
     case GatewayEventType.MESSAGE_RECEIVED:
+      logChatMessageDiagnostic(notification.params);
       emitter.emit('chat:message', notification.params as { message: unknown });
       break;
     case GatewayEventType.ERROR: {

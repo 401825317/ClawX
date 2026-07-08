@@ -125,6 +125,16 @@ function isRealUserMessage(msg: RawMessage): boolean {
   return blocks.length === 0 || !blocks.every((b) => b.type === 'tool_result' || b.type === 'toolResult');
 }
 
+function findLatestRealUserMessage(messages: RawMessage[]): { message: RawMessage; index: number } | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message && isRealUserMessage(message)) {
+      return { message, index };
+    }
+  }
+  return null;
+}
+
 function hasUserFacingMediaAttachments(msg: RawMessage): boolean {
   return (msg._attachedFiles ?? []).some((file) => (
     file.mimeType.startsWith('image/')
@@ -182,6 +192,131 @@ function buildHistoricalRunIdForMessage(sessionKey: string, triggerMessage: RawM
   return `history:${sessionKey}:${triggerMessage.id ?? triggerMessage.timestamp ?? index}`;
 }
 
+function toTimestampMs(value: number | undefined | null): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return value < 1e12 ? value * 1000 : value;
+}
+
+function getRuntimeEventMs(event: ChatRuntimeRunState['events'][number]): number | null {
+  const direct = toTimestampMs(event.ts);
+  if (direct != null) return direct;
+  if (event.type === 'run.started') return toTimestampMs(event.startedAt);
+  if (event.type === 'run.ended') return toTimestampMs(event.endedAt);
+  return null;
+}
+
+function getRunFirstEventMs(run: ChatRuntimeRunState): number | null {
+  const startedAt = toTimestampMs(run.startedAt);
+  const eventTimes = run.events
+    .map(getRuntimeEventMs)
+    .filter((value): value is number => value != null);
+  const firstEventAt = eventTimes.length > 0 ? Math.min(...eventTimes) : null;
+  if (startedAt == null) return firstEventAt;
+  if (firstEventAt == null) return startedAt;
+  return Math.min(startedAt, firstEventAt);
+}
+
+function getRunLastEventMs(run: ChatRuntimeRunState): number | null {
+  const lastEventAt = toTimestampMs(run.lastEventAt);
+  const endedAt = toTimestampMs(run.endedAt);
+  const eventTimes = run.events
+    .map(getRuntimeEventMs)
+    .filter((value): value is number => value != null);
+  const latest = [lastEventAt, endedAt, ...eventTimes]
+    .filter((value): value is number => value != null);
+  return latest.length > 0 ? Math.max(...latest) : null;
+}
+
+function getSegmentStartMs(triggerMessage: RawMessage, lastUserMessageAt: number | null): number | null {
+  return toTimestampMs(triggerMessage.timestamp) ?? toTimestampMs(lastUserMessageAt);
+}
+
+function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
+  const index = items.findIndex((item) => item.id === next.id);
+  if (index === -1) return [...items, next];
+  return items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...next } : item));
+}
+
+function mergeRuntimeRunsForSegment(
+  sessionKey: string,
+  triggerMessage: RawMessage,
+  triggerIndex: number,
+  runs: ChatRuntimeRunState[],
+): ChatRuntimeRunState | null {
+  if (runs.length === 0) return null;
+  if (runs.length === 1) return runs[0];
+
+  const sortedRuns = [...runs].sort((left, right) => {
+    const leftStart = getRunFirstEventMs(left) ?? Number.MAX_SAFE_INTEGER;
+    const rightStart = getRunFirstEventMs(right) ?? Number.MAX_SAFE_INTEGER;
+    if (leftStart !== rightStart) return leftStart - rightStart;
+    return left.runId.localeCompare(right.runId);
+  });
+
+  const events = sortedRuns
+    .flatMap((run) => run.events)
+    .sort((left, right) => {
+      const leftTs = getRuntimeEventMs(left) ?? Number.MAX_SAFE_INTEGER;
+      const rightTs = getRuntimeEventMs(right) ?? Number.MAX_SAFE_INTEGER;
+      if (leftTs !== rightTs) return leftTs - rightTs;
+      return left.runId.localeCompare(right.runId);
+    });
+  const startedAt = sortedRuns
+    .map(getRunFirstEventMs)
+    .filter((value): value is number => value != null)
+    .sort((left, right) => left - right)[0];
+  const lastEventAt = sortedRuns
+    .map(getRunLastEventMs)
+    .filter((value): value is number => value != null)
+    .sort((left, right) => right - left)[0];
+  const status = sortedRuns.some((run) => run.status === 'running')
+    ? 'running'
+    : sortedRuns.some((run) => run.status === 'error')
+      ? 'error'
+      : sortedRuns.some((run) => run.status === 'aborted')
+        ? 'aborted'
+        : 'completed';
+
+  return {
+    runId: `segment:${buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)}`,
+    sessionKey,
+    status,
+    startedAt,
+    lastEventAt,
+    endedAt: status === 'running' ? undefined : lastEventAt,
+    objective: sortedRuns.find((run) => run.objective)?.objective,
+    planSummary: [...sortedRuns].reverse().find((run) => run.planSummary)?.planSummary,
+    planSteps: sortedRuns.flatMap((run) => run.planSteps ?? []).reduce(
+      (items, step) => upsertById(items, step),
+      [] as NonNullable<ChatRuntimeRunState['planSteps']>,
+    ),
+    artifacts: sortedRuns.flatMap((run) => run.artifacts ?? []).reduce(
+      (items, artifact) => upsertById(items, artifact),
+      [] as NonNullable<ChatRuntimeRunState['artifacts']>,
+    ),
+    verifications: sortedRuns.flatMap((run) => run.verifications ?? []).reduce(
+      (items, verification) => upsertById(items, verification),
+      [] as NonNullable<ChatRuntimeRunState['verifications']>,
+    ),
+    issues: sortedRuns.flatMap((run) => run.issues ?? []).reduce(
+      (items, issue) => upsertById(items, issue),
+      [] as NonNullable<ChatRuntimeRunState['issues']>,
+    ),
+    checkpoints: sortedRuns.flatMap((run) => run.checkpoints ?? []).reduce(
+      (items, checkpoint) => upsertById(items, checkpoint),
+      [] as NonNullable<ChatRuntimeRunState['checkpoints']>,
+    ),
+    gateEvaluations: sortedRuns.flatMap((run) => run.gateEvaluations ?? []).reduce(
+      (items, gate) => upsertById(items, gate),
+      [] as NonNullable<ChatRuntimeRunState['gateEvaluations']>,
+    ),
+    gateResult: [...sortedRuns].reverse().find((run) => run.gateResult)?.gateResult,
+    assistantText: sortedRuns.map((run) => run.assistantText).filter(Boolean).join('\n\n'),
+    thinkingText: sortedRuns.map((run) => run.thinkingText).filter(Boolean).join('\n\n'),
+    events,
+  };
+}
+
 function getRuntimeRunForSegment(
   runtimeRuns: Record<string, ChatRuntimeRunState>,
   sessionKey: string,
@@ -189,10 +324,24 @@ function getRuntimeRunForSegment(
   triggerIndex: number,
   activeRunId: string | null,
   isLatestRunSegment: boolean,
+  lastUserMessageAt: number | null,
 ): ChatRuntimeRunState | null {
   if (isLatestRunSegment && activeRunId) {
     const activeRun = runtimeRuns[activeRunId] ?? null;
-    if (activeRun) return activeRun;
+    const activeRunStartMs = activeRun ? getRunFirstEventMs(activeRun) : null;
+    const segmentStartMs = getSegmentStartMs(triggerMessage, lastUserMessageAt);
+    const startBoundaryMs = activeRunStartMs ?? segmentStartMs;
+    const sameTurnRuns = Object.values(runtimeRuns).filter((run) => {
+      if (run.runId.startsWith('history:')) return false;
+      if (run.sessionKey && run.sessionKey !== sessionKey) return false;
+      if (run.runId === activeRunId) return true;
+      if (startBoundaryMs == null) return false;
+      const firstEventMs = getRunFirstEventMs(run);
+      if (firstEventMs == null) return false;
+      return firstEventMs >= startBoundaryMs - 5_000;
+    });
+    const mergedRun = mergeRuntimeRunsForSegment(sessionKey, triggerMessage, triggerIndex, sameTurnRuns);
+    if (mergedRun) return mergedRun;
   }
 
   const historicalRun = runtimeRuns[buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)];
@@ -447,7 +596,23 @@ export function Chat() {
   const hasStreamImages = streamImages.length > 0;
   const hasStreamToolStatus = streamingTools.length > 0;
   const hasRunningStreamToolStatus = streamingTools.some((tool) => tool.status === 'running');
-  const currentRuntimeRun = activeRunId ? runtimeRuns[activeRunId] ?? null : null;
+  const latestRealUserMessage = findLatestRealUserMessage(messages);
+  const currentRuntimeRun = activeRunId
+    ? mergeRuntimeRunsForSegment(
+      currentSessionKey,
+      latestRealUserMessage?.message ?? { role: 'user', content: '' },
+      latestRealUserMessage?.index ?? 0,
+      Object.values(runtimeRuns).filter((run) => {
+        if (run.runId.startsWith('history:')) return false;
+        if (run.sessionKey && run.sessionKey !== currentSessionKey) return false;
+        if (run.runId === activeRunId) return true;
+        const activeRun = runtimeRuns[activeRunId];
+        const activeStartMs = activeRun ? getRunFirstEventMs(activeRun) : null;
+        const firstEventMs = getRunFirstEventMs(run);
+        return activeStartMs != null && firstEventMs != null && firstEventMs >= activeStartMs - 5_000;
+      }),
+    )
+    : null;
   const currentRuntimeHasToolActivity = hasRuntimeGraphActivity(currentRuntimeRun);
   const hasRunningRuntimeToolStatus = hasRunningRuntimeTool(currentRuntimeRun);
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamTools || hasStreamImages || hasStreamToolStatus);
@@ -546,6 +711,7 @@ export function Chat() {
       idx,
       activeRunId,
       isLatestRunSegment,
+      lastUserMessageAt,
     );
     const runtimeHasToolActivity = hasRuntimeGraphActivity(segmentRuntimeRun);
     const runtimeHasRunningTool = hasRunningRuntimeTool(segmentRuntimeRun);
@@ -813,7 +979,7 @@ export function Chat() {
       foldedNarrationIndices,
       userRunCardsByTriggerIndex,
     };
-  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns]);
+  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns, lastUserMessageAt]);
   const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
