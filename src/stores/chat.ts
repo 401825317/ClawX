@@ -908,9 +908,12 @@ type MediaGenerationSendResponse = {
   job?: MediaGenerationJobSnapshot;
 };
 
-const MEDIA_GENERATION_JOB_POLL_INTERVAL_MS = 1500;
+const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
+const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
+const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
 
 async function waitForMediaGenerationJob(jobId: string): Promise<MediaGenerationJobSnapshot> {
+  const startedAt = Date.now();
   for (;;) {
     const response = await hostApiFetch<{ success: boolean; error?: string; job?: MediaGenerationJobSnapshot }>(
       `/api/media/generation-jobs/${encodeURIComponent(jobId)}`,
@@ -927,7 +930,10 @@ async function waitForMediaGenerationJob(jobId: string): Promise<MediaGeneration
     if (response.job.status === 'failed') {
       throw new Error(response.job.error || 'Media generation failed');
     }
-    await sleep(MEDIA_GENERATION_JOB_POLL_INTERVAL_MS);
+    const pollInterval = Date.now() - startedAt < MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS
+      ? MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS
+      : MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS;
+    await sleep(pollInterval);
   }
 }
 
@@ -998,6 +1004,62 @@ function attachedFilesFromMediaGenerationJob(
     });
   }
   return dedupeAttachedFiles(files);
+}
+
+function appendMediaGenerationResultMessage(params: {
+  set: ChatSet;
+  get: ChatGet;
+  sessionKey: string;
+  job: MediaGenerationJobSnapshot | undefined;
+  kind: 'image' | 'video';
+}): void {
+  const attachedFiles = attachedFilesFromMediaGenerationJob(params.job, params.kind);
+  if (attachedFiles.length === 0) return;
+  const message: RawMessage = {
+    role: 'assistant',
+    content: params.kind === 'image' ? '图片已生成。' : '视频已生成。',
+    timestamp: Date.now() / 1000,
+    id: params.job?.id ? `media-result:${params.job.id}` : crypto.randomUUID(),
+    _attachedFiles: attachedFiles,
+  };
+  appendLocalMessageForSession(params.set, params.get, params.sessionKey, message);
+}
+
+function isOptimisticMediaResultMessage(message: RawMessage): boolean {
+  return message.role === 'assistant'
+    && typeof message.id === 'string'
+    && message.id.startsWith('media-result:')
+    && (message._attachedFiles?.length ?? 0) > 0;
+}
+
+function preserveOptimisticMediaResultMessages(
+  currentMessages: RawMessage[],
+  loadedMessages: RawMessage[],
+): RawMessage[] {
+  const pendingMediaResults = currentMessages.filter(isOptimisticMediaResultMessage);
+  if (pendingMediaResults.length === 0) return loadedMessages;
+
+  const loadedAttachmentKeys = new Set(
+    loadedMessages
+      .flatMap((message) => message._attachedFiles ?? [])
+      .map((file) => file.filePath || file.gatewayUrl || `${file.fileName}|${file.mimeType}|${file.fileSize}`)
+      .filter(Boolean),
+  );
+  const loadedIds = new Set(loadedMessages.map((message) => message.id).filter(Boolean));
+  const missingResults = pendingMediaResults.filter((message) => {
+    if (message.id && loadedIds.has(message.id)) return false;
+    const files = message._attachedFiles ?? [];
+    return files.some((file) => {
+      const key = file.filePath || file.gatewayUrl || `${file.fileName}|${file.mimeType}|${file.fileSize}`;
+      return key && !loadedAttachmentKeys.has(key);
+    });
+  });
+  if (missingResults.length === 0) return loadedMessages;
+  return [...loadedMessages, ...missingResults].sort((left, right) => {
+    const leftTs = typeof left.timestamp === 'number' ? toMs(left.timestamp) : 0;
+    const rightTs = typeof right.timestamp === 'number' ? toMs(right.timestamp) : 0;
+    return leftTs - rightTs;
+  });
 }
 
 function buildMediaMetadataVerificationEvents(params: {
@@ -4967,6 +5029,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
       finalMessages = dropRedundantOptimisticUserMessages(currentSessionKey, finalMessages);
+      finalMessages = preserveOptimisticMediaResultMessages(get().messages, finalMessages);
       finalMessages = preserveExistingAttachmentPreviews(get().messages, finalMessages);
 
       const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
@@ -5866,6 +5929,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (artifacts.length > 0) {
           scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
         }
+        appendMediaGenerationResultMessage({
+          set,
+          get,
+          sessionKey: currentSessionKey,
+          job: completedJob,
+          kind: 'image',
+        });
         const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
         commitSessionRunState(set, get, currentSessionKey, {
           sending: !shouldIdle,
@@ -5880,7 +5950,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         if (get().currentSessionKey === currentSessionKey) {
-          await get().loadHistory(true);
+          void get().loadHistory(true);
         } else {
           markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
         }
@@ -5996,6 +6066,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (artifacts.length > 0) {
           scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
         }
+        appendMediaGenerationResultMessage({
+          set,
+          get,
+          sessionKey: currentSessionKey,
+          job: completedJob,
+          kind: 'video',
+        });
         const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
         commitSessionRunState(set, get, currentSessionKey, {
           sending: !shouldIdle,
@@ -6010,7 +6087,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         if (get().currentSessionKey === currentSessionKey) {
-          await get().loadHistory(true);
+          void get().loadHistory(true);
         } else {
           markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
         }

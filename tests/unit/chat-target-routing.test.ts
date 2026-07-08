@@ -835,7 +835,17 @@ describe('chat target routing', () => {
         filePath: '/tmp/bike.png',
       },
     ]);
-    expect(useChatStore.getState().messages.at(-1)?._attachedFiles).toBeUndefined();
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '图片已生成。',
+      _attachedFiles: [
+        expect.objectContaining({
+          fileName: 'generated.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/generated.png',
+        }),
+      ],
+    });
   });
 
   it('uses the planner to route default-chat current-image edits to image edit with the latest assistant image', async () => {
@@ -1589,11 +1599,17 @@ describe('chat target routing', () => {
         filePath: '/tmp/bike.png',
       },
     ]);
-    expect(useChatStore.getState().messages.at(-1)?._attachedFiles?.[0]).toMatchObject({
+    const imageModeUserMessage = useChatStore.getState().messages.find((message) => message.role === 'user');
+    expect(imageModeUserMessage?._attachedFiles?.[0]).toMatchObject({
       fileName: 'bike.png',
       mimeType: 'image/png',
       filePath: '/tmp/bike.png',
       preview: 'data:image/png;base64,abc',
+    });
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles?.[0]).toMatchObject({
+      fileName: 'generated.png',
+      mimeType: 'image/png',
+      filePath: '/tmp/generated.png',
     });
   });
 
@@ -1656,11 +1672,17 @@ describe('chat target routing', () => {
         filePath: '/tmp/frame.png',
       },
     ]);
-    expect(useChatStore.getState().messages.at(-1)?._attachedFiles?.[0]).toMatchObject({
+    const videoModeUserMessage = useChatStore.getState().messages.find((message) => message.role === 'user');
+    expect(videoModeUserMessage?._attachedFiles?.[0]).toMatchObject({
       fileName: 'frame.png',
       mimeType: 'image/png',
       filePath: '/tmp/frame.png',
       preview: 'data:image/png;base64,abc',
+    });
+    expect(useChatStore.getState().messages.at(-1)?._attachedFiles?.[0]).toMatchObject({
+      fileName: 'generated.mp4',
+      mimeType: 'video/mp4',
+      filePath: '/tmp/generated.mp4',
     });
   });
 

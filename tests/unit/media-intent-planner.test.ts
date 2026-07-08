@@ -117,43 +117,28 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('routes explicit current-turn image generation when the planner authorizes media execution', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'image_generate',
-                intent_kind: 'current_media_task',
-                current_turn_media_request: true,
-                confidence: 0.9,
-                selected_image_source: 'none',
-                prompt: '画一张城市夜景。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('routes explicit image mode locally without calling the LLM planner', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '画一张城市夜景',
-      requestedMode: 'chat',
+      requestedMode: 'image',
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'image_generate',
-      source: 'planner',
-      prompt: '画一张城市夜景。',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      reason: 'local_fast_path_explicit_image_mode',
+      prompt: '画一张城市夜景',
     }));
     expect(plan.compositeTasks).toBeUndefined();
   });
 
-  it('keeps media side effects on chat when planner omits current-turn authorization', async () => {
+  it('keeps ambiguous media side effects on chat when planner omits current-turn authorization', async () => {
     proxyAwareFetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -174,7 +159,7 @@ describe('planMediaIntent', () => {
 
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
-      prompt: '画一张城市夜景',
+      prompt: '给我一个城市夜景视觉素材',
       requestedMode: 'chat',
     });
 
@@ -225,33 +210,11 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('uses planner JSON to route a current-image edit to the candidate image', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'image_edit',
-                intent_kind: 'current_media_task',
-                current_turn_media_request: true,
-                confidence: 0.94,
-                selected_image_source: 'candidate',
-                selected_image_index: 0,
-                prompt: '在图片右侧添加一条狗。',
-                reason: '用户明确指代当前图片并要求添加对象。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('routes explicit image-mode edits locally to the candidate image', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '这个图片上能不能加一条狗？',
-      requestedMode: 'chat',
+      requestedMode: 'image',
       candidateImages: [
         {
           fileName: 'room.png',
@@ -261,23 +224,16 @@ describe('planMediaIntent', () => {
       ],
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenCalledWith(
-      'https://zz-cn.lingzhiwuxian.com/v1/chat/completions',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          Authorization: 'Bearer sk-test',
-          'Content-Type': 'application/json',
-          'X-Test': '1',
-        }),
-      }),
-    );
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'image_edit',
-      source: 'planner',
+      source: 'fallback',
+      reason: 'local_fast_path_explicit_image_mode',
       selectedImageSource: 'candidate',
       selectedImageIndex: 0,
-      prompt: '在图片右侧添加一条狗。',
+      prompt: '这个图片上能不能加一条狗？',
       sourceImages: [
         {
           fileName: 'room.png',
@@ -288,34 +244,16 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('turns image-edit decisions without an image into clarification', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'image_edit',
-                intent_kind: 'current_media_task',
-                current_turn_media_request: true,
-                confidence: 0.92,
-                selected_image_source: 'candidate',
-                selected_image_index: 0,
-                prompt: '加一条狗。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('turns explicit image-mode edit requests without an image into a local clarification', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '这个图片上能不能加一条狗？',
-      requestedMode: 'chat',
+      requestedMode: 'image',
     });
 
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'clarify',
       source: 'planner',
@@ -323,26 +261,7 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('upgrades visual chat about a recent image into vision_chat with the candidate image', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'chat',
-                confidence: 0.91,
-                selected_image_source: 'none',
-                prompt: '你觉得美嘛？',
-                reason: '用户是在询问最近生成图片的审美评价。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('upgrades visual chat about a recent image locally into vision_chat with the candidate image', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '你觉得美嘛？',
@@ -356,9 +275,12 @@ describe('planMediaIntent', () => {
       ],
     });
 
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'vision_chat',
-      source: 'planner',
+      source: 'fallback',
       selectedImageSource: 'candidate',
       selectedImageIndex: 0,
       sourceImages: [
@@ -376,7 +298,7 @@ describe('planMediaIntent', () => {
 
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
-      prompt: '这个图片上能不能加一条狗？',
+      prompt: '给我分析一下这个需求',
       requestedMode: 'chat',
     });
 

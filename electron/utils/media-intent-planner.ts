@@ -539,6 +539,222 @@ function detectCompositeTasks(params: {
   return containsCompositeSeparator(prompt) ? tasks : [];
 }
 
+function isPreferenceOrFutureRulePrompt(prompt: string): boolean {
+  return /(?:以后|之后|以后.*如果|之后.*如果|默认|每次|记住|偏好|保存在记忆|素材来源|from now on|remember|preference|always)/i.test(prompt)
+    && /(?:如果|需要|来源|获取|搜索|找|素材|记住|偏好|保存在记忆|默认|以后|之后|when|if|source|remember|preference)/i.test(prompt)
+    && !/(?:现在|马上|立刻|这次|本次|直接).*(?:生成|生图|出图|视频|修图|改图|做)/i.test(prompt);
+}
+
+function isImageLookupPrompt(prompt: string): boolean {
+  return /(?:搜索|搜一下|找几张|找一些|参考图|参考图片|素材图|网上找|网上获取|search|find).*(?:图|图片|照片|image|picture|photo)/i.test(prompt)
+    && !/(?:生成|生图|出图|画|做(?:一张)?(?:海报|图片|插画)|generate|create|draw|paint)/i.test(prompt);
+}
+
+function isImageGenerationPrompt(prompt: string): boolean {
+  return /(?:生图|出图|生成(?:一张|几张|个|些)?(?:图|图片|照片|海报|插画|头像|壁纸|主视觉)|画(?:一张|个|幅)?|做(?:一张)?(?:海报|插画|图片|主视觉)|generate (?:an? |some )?(?:image|picture|poster|illustration)|create (?:an? |some )?(?:image|picture|poster|illustration)|draw|paint)/i.test(prompt);
+}
+
+function promptReferencesExistingImage(prompt: string): boolean {
+  return /(?:这张|这幅|这个图|这图|图片上|照片上|上一张|上一个|刚才(?:那张|生成的)?|刚生成|根据(?:这张|图片|照片|上一个|上一张)|基于(?:这张|图片|照片|上一个|上一张)|用(?:这张|图片|照片|上一个|上一张)|previous image|last image|this image|this picture|the image|the picture)/i.test(prompt);
+}
+
+function isImageEditPrompt(prompt: string): boolean {
+  return /(?:修图|改图|精修|编辑图片|图片编辑|调整图片|优化图片|换背景|去背景|抠图|加上|去掉|删除|移除|把.+改成|把.+换成|logo|remove|edit image|image edit|retouch|modify)/i.test(prompt)
+    || (promptReferencesExistingImage(prompt) && /(?:改|修|换|加|去|删|调整|优化|编辑|变成|edit|modify|remove|replace|add)/i.test(prompt));
+}
+
+function isVideoGenerationPrompt(prompt: string): boolean {
+  return /(?:生视频|生成(?:一段|一个|个)?视频|做(?:一段|一个|个)?视频|视频生成|图生视频|动起来|动画|animate|video generation|generate (?:a )?video|create (?:a )?video)/i.test(prompt);
+}
+
+function localSelectedImageForPrompt(params: {
+  prompt: string;
+  explicitImages: MediaGenerationInputImageRef[];
+  candidateImages: MediaGenerationInputImageRef[];
+  allowImplicitExplicitImage?: boolean;
+}): ReturnType<typeof selectPreferredImage> {
+  if (params.explicitImages.length > 0 && (params.allowImplicitExplicitImage || promptReferencesExistingImage(params.prompt) || isImageEditPrompt(params.prompt))) {
+    return selectImage({
+      selectedImageSource: 'explicit',
+      selectedImageIndex: 0,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+    });
+  }
+  if (params.candidateImages.length > 0 && (promptReferencesExistingImage(params.prompt) || (params.allowImplicitExplicitImage && isImageEditPrompt(params.prompt)))) {
+    return selectImage({
+      selectedImageSource: 'candidate',
+      selectedImageIndex: 0,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+    });
+  }
+  return { selectedImageSource: 'none' };
+}
+
+function localFastPathPlan(params: {
+  prompt: string;
+  requestedMode: 'chat' | 'image' | 'video';
+  explicitImages: MediaGenerationInputImageRef[];
+  candidateImages: MediaGenerationInputImageRef[];
+}): MediaIntentPlan | null {
+  const prompt = params.prompt.trim();
+  if (!prompt) return null;
+  if (isPreferenceOrFutureRulePrompt(prompt)) return null;
+
+  if (params.requestedMode === 'image') {
+    const imageSelection = localSelectedImageForPrompt({
+      prompt,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+      allowImplicitExplicitImage: true,
+    });
+    if (imageSelection.sourceImages?.length) {
+      return {
+        action: 'image_edit',
+        source: 'fallback',
+        intentKind: 'current_media_task',
+        currentTurnMediaRequest: true,
+        confidence: 1,
+        reason: 'local_fast_path_explicit_image_mode',
+        selectedImageSource: imageSelection.selectedImageSource,
+        selectedImageIndex: imageSelection.selectedImageIndex,
+        sourceImages: imageSelection.sourceImages,
+        prompt,
+      };
+    }
+    if (isImageEditPrompt(prompt)) {
+      return clarificationPlan('local_fast_path_image_edit_missing_input_image');
+    }
+    return {
+      action: 'image_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 1,
+      reason: 'local_fast_path_explicit_image_mode',
+      selectedImageSource: 'none',
+      sourceImages: [],
+      prompt,
+    };
+  }
+
+  if (params.requestedMode === 'video') {
+    const imageSelection = localSelectedImageForPrompt({
+      prompt,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+      allowImplicitExplicitImage: true,
+    });
+    const hasSourceImage = Boolean(imageSelection.sourceImages?.length);
+    const shouldEditFirst = hasSourceImage && isImageEditPrompt(prompt);
+    return {
+      action: 'video_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 1,
+      reason: 'local_fast_path_explicit_video_mode',
+      selectedImageSource: imageSelection.selectedImageSource,
+      selectedImageIndex: imageSelection.selectedImageIndex,
+      sourceImages: imageSelection.sourceImages,
+      prompt,
+      videoMode: shouldEditFirst ? 'edit_image_then_video' : (hasSourceImage ? 'image_to_video' : 'text_to_video'),
+      videoPrompt: prompt,
+      imageEditPrompt: shouldEditFirst ? prompt : undefined,
+    };
+  }
+
+  if (isVisualQuestionPrompt(prompt) && (params.explicitImages.length > 0 || params.candidateImages.length > 0)) {
+    const imageSelection = selectPreferredImage({
+      selectedImageSource: params.explicitImages.length > 0 ? 'explicit' : 'candidate',
+      selectedImageIndex: 0,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+    });
+    if (imageSelection.sourceImages?.length) {
+      return {
+        action: 'vision_chat',
+        source: 'fallback',
+        intentKind: 'current_media_task',
+        currentTurnMediaRequest: true,
+        confidence: 1,
+        reason: 'local_fast_path_visual_question',
+        selectedImageSource: imageSelection.selectedImageSource,
+        selectedImageIndex: imageSelection.selectedImageIndex,
+        sourceImages: imageSelection.sourceImages,
+        prompt,
+      };
+    }
+  }
+
+  if (isImageEditPrompt(prompt)) {
+    const imageSelection = localSelectedImageForPrompt({
+      prompt,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+      allowImplicitExplicitImage: true,
+    });
+    if (!imageSelection.sourceImages?.length) {
+      return clarificationPlan('local_fast_path_image_edit_missing_input_image');
+    }
+    return {
+      action: 'image_edit',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 1,
+      reason: 'local_fast_path_image_edit',
+      selectedImageSource: imageSelection.selectedImageSource,
+      selectedImageIndex: imageSelection.selectedImageIndex,
+      sourceImages: imageSelection.sourceImages,
+      prompt,
+    };
+  }
+
+  if (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt)) {
+    return {
+      action: 'image_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 1,
+      reason: 'local_fast_path_image_generate',
+      selectedImageSource: 'none',
+      sourceImages: [],
+      prompt,
+    };
+  }
+
+  if (isVideoGenerationPrompt(prompt)) {
+    const imageSelection = localSelectedImageForPrompt({
+      prompt,
+      explicitImages: params.explicitImages,
+      candidateImages: params.candidateImages,
+      allowImplicitExplicitImage: false,
+    });
+    const hasSourceImage = Boolean(imageSelection.sourceImages?.length);
+    const shouldEditFirst = hasSourceImage && isImageEditPrompt(prompt);
+    return {
+      action: 'video_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 1,
+      reason: 'local_fast_path_video_generate',
+      selectedImageSource: imageSelection.selectedImageSource,
+      selectedImageIndex: imageSelection.selectedImageIndex,
+      sourceImages: imageSelection.sourceImages,
+      prompt,
+      videoMode: shouldEditFirst ? 'edit_image_then_video' : (hasSourceImage ? 'image_to_video' : 'text_to_video'),
+      videoPrompt: prompt,
+      imageEditPrompt: shouldEditFirst ? prompt : undefined,
+    };
+  }
+
+  return null;
+}
+
 function normalizePlannerDecision(params: {
   raw: Record<string, unknown>;
   prompt: string;
@@ -803,6 +1019,20 @@ export async function planMediaIntent(
       plan: summarizePlanForLog(plan),
     });
     return plan;
+  }
+
+  const localPlan = localFastPathPlan({
+    prompt,
+    requestedMode,
+    explicitImages,
+    candidateImages,
+  });
+  if (localPlan) {
+    logger.info('[media-intent-planner] local_fast_path', {
+      durationMs: Date.now() - startedAt,
+      plan: summarizePlanForLog(localPlan),
+    });
+    return localPlan;
   }
 
   try {
