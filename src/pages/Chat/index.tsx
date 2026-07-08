@@ -187,8 +187,36 @@ function hasRuntimeGraphActivity(run: ChatRuntimeRunState | null): boolean {
   ));
 }
 
+function historicalRunIdFromKey(sessionKey: string, key: string | number): string {
+  return `history:${sessionKey}:${key}`;
+}
+
+function historicalTimestampKeys(timestamp: number | undefined): Array<string | number> {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return [];
+  const keys: Array<string | number> = [timestamp];
+  const timestampMs = toTimestampMs(timestamp);
+  if (timestampMs != null && timestampMs !== timestamp) keys.push(timestampMs);
+  return keys;
+}
+
+function buildHistoricalRunIdsForMessage(sessionKey: string, triggerMessage: RawMessage, index: number): string[] {
+  const keys: Array<string | number> = [
+    ...(triggerMessage.id ? [triggerMessage.id] : []),
+    ...historicalTimestampKeys(triggerMessage.timestamp),
+    index,
+  ];
+  const seen = new Set<string>();
+  return keys
+    .map((key) => historicalRunIdFromKey(sessionKey, key))
+    .filter((runId) => {
+      if (seen.has(runId)) return false;
+      seen.add(runId);
+      return true;
+    });
+}
+
 function buildHistoricalRunIdForMessage(sessionKey: string, triggerMessage: RawMessage, index: number): string {
-  return `history:${sessionKey}:${triggerMessage.id ?? triggerMessage.timestamp ?? index}`;
+  return buildHistoricalRunIdsForMessage(sessionKey, triggerMessage, index)[0] ?? historicalRunIdFromKey(sessionKey, index);
 }
 
 function toTimestampMs(value: number | undefined | null): number | null {
@@ -343,7 +371,9 @@ function getRuntimeRunForSegment(
     if (mergedRun) return mergedRun;
   }
 
-  const historicalRun = runtimeRuns[buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)];
+  const historicalRun = buildHistoricalRunIdsForMessage(sessionKey, triggerMessage, triggerIndex)
+    .map((runId) => runtimeRuns[runId])
+    .find((run): run is ChatRuntimeRunState => Boolean(run && run.sessionKey === sessionKey));
   if (historicalRun?.sessionKey === sessionKey) {
     return historicalRun;
   }

@@ -660,8 +660,49 @@ async function planMediaIntentForSend(params: {
   return response.plan?.action ? response.plan : { action: 'chat', source: 'fallback', reason: 'planner_response_missing_plan' };
 }
 
+function historicalRunIdFromKey(sessionKey: string, key: string | number): string {
+  return `history:${sessionKey}:${key}`;
+}
+
+function historicalTimestampKeys(timestamp: number | undefined): Array<string | number> {
+  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return [];
+  const keys: Array<string | number> = [timestamp];
+  const timestampMs = toMs(timestamp);
+  if (timestampMs !== timestamp) keys.push(timestampMs);
+  return keys;
+}
+
+function buildTimestampHistoricalRunId(sessionKey: string, timestampMs: number): string {
+  return historicalRunIdFromKey(sessionKey, Math.floor(timestampMs));
+}
+
+function buildHistoricalRunIds(sessionKey: string, triggerMessage: RawMessage, index: number): string[] {
+  const keys: Array<string | number> = [
+    ...(triggerMessage.id ? [triggerMessage.id] : []),
+    ...historicalTimestampKeys(triggerMessage.timestamp),
+    index,
+  ];
+  const seen = new Set<string>();
+  return keys
+    .map((key) => historicalRunIdFromKey(sessionKey, key))
+    .filter((runId) => {
+      if (seen.has(runId)) return false;
+      seen.add(runId);
+      return true;
+    });
+}
+
 function buildHistoricalRunId(sessionKey: string, triggerMessage: RawMessage, index: number): string {
-  return `history:${sessionKey}:${triggerMessage.id ?? triggerMessage.timestamp ?? index}`;
+  return buildHistoricalRunIds(sessionKey, triggerMessage, index)[0] ?? historicalRunIdFromKey(sessionKey, index);
+}
+
+function inferHistoricalRunMode(artifactFiles: AttachedFileMeta[]): ChatSendMode {
+  const mimeTypes = artifactFiles
+    .map((file) => file.mimeType)
+    .filter((mimeType): mimeType is string => Boolean(mimeType));
+  if (mimeTypes.some((mimeType) => mimeType.startsWith('video/'))) return 'video';
+  if (mimeTypes.length > 0 && mimeTypes.every((mimeType) => mimeType.startsWith('image/'))) return 'image';
+  return 'chat';
 }
 
 function applyHistoricalRuntimeRunsFromMessages(
@@ -683,17 +724,20 @@ function applyHistoricalRuntimeRunsFromMessages(
       .flatMap((message) => message._attachedFiles ?? []);
     if (artifactFiles.length === 0) continue;
 
-    const runId = buildHistoricalRunId(sessionKey, trigger, index);
+    const runId = buildHistoricalRunIds(sessionKey, trigger, index)
+      .find((candidateRunId) => nextRuns[candidateRunId])
+      ?? buildHistoricalRunId(sessionKey, trigger, index);
     const existing = nextRuns[runId];
     if (existing?.gateResult?.decision === 'deliverable') continue;
 
     const objective = getMessageText(trigger.content).trim();
     const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
+    const mode = inferHistoricalRunMode(artifactFiles);
     const startEvents = buildRuntimeStartContractEvents(existing, {
       runId,
       sessionKey,
       objective,
-      mode: 'chat',
+      mode,
       ts,
     });
     const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
@@ -5765,7 +5809,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (effectiveMode === 'image') {
-      const mediaRunId = `media:${crypto.randomUUID()}`;
+      const mediaRunId = buildTimestampHistoricalRunId(currentSessionKey, nowMs);
       set((state) => ({
         runtimeRuns: applyRuntimeContractEvents(
           state.runtimeRuns,
@@ -5873,7 +5917,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (effectiveMode === 'video') {
-      const mediaRunId = `media:${crypto.randomUUID()}`;
+      const mediaRunId = buildTimestampHistoricalRunId(currentSessionKey, nowMs);
       set((state) => ({
         runtimeRuns: applyRuntimeContractEvents(
           state.runtimeRuns,
