@@ -493,15 +493,16 @@ function createXlsxBuffer(params) {
   const sheets = normalizeSheets(params);
   for (const sheet of sheets) {
     const worksheet = XLSX.utils.aoa_to_sheet(sheet.data);
-    const firstRow = sheet.data[0] ?? [];
-    worksheet['!cols'] = firstRow.map((header, index) => {
-      const width = Math.max(
-        cleanText(header).length + 4,
-        ...sheet.data.slice(1).map((row) => cleanText(row[index]).length + 2),
-        10,
-      );
-      return { wch: Math.min(width, 36) };
-    });
+    const colWidths = [];
+    for (const row of sheet.data) {
+      const cells = Array.isArray(row) ? row : [];
+      for (let index = 0; index < cells.length; index += 1) {
+        const padding = row === sheet.data[0] ? 4 : 2;
+        const width = cleanText(cells[index]).length + padding;
+        colWidths[index] = Math.max(colWidths[index] ?? 10, width, 10);
+      }
+    }
+    worksheet['!cols'] = colWidths.map((width) => ({ wch: Math.min(width, 36) }));
     XLSX.utils.book_append_sheet(workbook, worksheet, sheet.name || 'Sheet1');
   }
   return XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });

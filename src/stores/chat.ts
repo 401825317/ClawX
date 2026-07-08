@@ -796,6 +796,11 @@ type MediaGenerationJobSnapshot = {
   kind?: 'image' | 'video';
   sessionKey?: string;
   status: MediaGenerationJobStatus;
+  queuePosition?: number;
+  activeJobs?: number;
+  maxActiveJobs?: number;
+  queueWaitMs?: number;
+  runDurationMs?: number;
   error?: string;
   result?: unknown;
 };
@@ -1454,6 +1459,26 @@ function hasRecentRuntimeActivityForSend(
   });
 }
 
+function inferSessionKeyForRun(
+  state: Pick<ChatState, 'activeRunId' | 'currentSessionKey' | 'runtimeRuns'>,
+  runId: string | null,
+  explicitSessionKey: string | null,
+): string | null {
+  if (explicitSessionKey) return explicitSessionKey;
+  if (!runId) return null;
+
+  const runtimeSessionKey = state.runtimeRuns[runId]?.sessionKey;
+  if (runtimeSessionKey) return runtimeSessionKey;
+
+  if (state.activeRunId === runId) return state.currentSessionKey;
+
+  for (const [sessionKey, runState] of _sessionRunStateCache.entries()) {
+    if (runState.activeRunId === runId) return sessionKey;
+  }
+
+  return null;
+}
+
 function rememberPendingRuntimeIntent(sessionKey: string, intent: Omit<PendingRuntimeIntent, 'createdAt'>): void {
   _pendingRuntimeIntentBySession.set(sessionKey, {
     ...intent,
@@ -1707,6 +1732,62 @@ function clearActiveSendGeneration(sessionKey: string): void {
 function markSessionRunIdle(sessionKey: string): void {
   clearActiveSendGeneration(sessionKey);
   captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
+}
+
+function mergeSessionRunStatePatch(
+  base: SessionRunState,
+  patch: Partial<SessionRunState>,
+): SessionRunState {
+  return {
+    sending: patch.sending ?? base.sending,
+    pendingImageGenerationLocal: patch.pendingImageGenerationLocal ?? base.pendingImageGenerationLocal,
+    pendingVideoGenerationLocal: patch.pendingVideoGenerationLocal ?? base.pendingVideoGenerationLocal,
+    activeRunId: patch.activeRunId !== undefined ? patch.activeRunId : base.activeRunId,
+    pendingFinal: patch.pendingFinal ?? base.pendingFinal,
+    lastUserMessageAt: patch.lastUserMessageAt !== undefined ? patch.lastUserMessageAt : base.lastUserMessageAt,
+    streamingText: patch.streamingText ?? base.streamingText,
+    streamingMessage: patch.streamingMessage !== undefined ? patch.streamingMessage : base.streamingMessage,
+    streamingTools: patch.streamingTools ? [...patch.streamingTools] : [...base.streamingTools],
+    pendingToolImages: patch.pendingToolImages
+      ? patch.pendingToolImages.map((file) => ({ ...file }))
+      : base.pendingToolImages.map((file) => ({ ...file })),
+  };
+}
+
+function commitSessionRunState(
+  set: ChatSet,
+  get: ChatGet,
+  sessionKey: string,
+  patch: Partial<SessionRunState>,
+): void {
+  if (get().currentSessionKey === sessionKey) {
+    set(patch);
+    return;
+  }
+
+  captureSessionRunState(
+    sessionKey,
+    mergeSessionRunStatePatch(getCachedSessionRunState(sessionKey), patch),
+  );
+}
+
+function appendLocalMessageForSession(
+  set: ChatSet,
+  get: ChatGet,
+  sessionKey: string,
+  message: RawMessage,
+): void {
+  if (get().currentSessionKey === sessionKey) {
+    set((state) => ({ messages: [...state.messages, message] }));
+    return;
+  }
+
+  const cached = getCachedSessionHistory(sessionKey);
+  cacheSessionHistory(
+    sessionKey,
+    [...(cached?.messages ?? []), message],
+    cached?.thinkingLevel ?? null,
+  );
 }
 
 function markSessionNeedsTerminalHistoryRefresh(sessionKey: string): void {
@@ -5440,8 +5521,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         recentMessages: currentMessages,
       });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : String(error),
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (get().currentSessionKey === currentSessionKey) {
+        set({ error: errorMessage });
+      }
+      commitSessionRunState(set, get, currentSessionKey, {
         sending: false,
         pendingImageGenerationLocal: false,
         pendingVideoGenerationLocal: false,
@@ -5469,7 +5553,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       mode: effectiveMode,
       compositeTasks,
     });
-    set({
+    commitSessionRunState(set, get, currentSessionKey, {
       pendingImageGenerationLocal: effectiveMode === 'image',
       pendingVideoGenerationLocal: effectiveMode === 'video',
     });
@@ -5483,8 +5567,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }));
         }
       } catch (error) {
-        set({
-          error: error instanceof Error ? error.message : String(error),
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (get().currentSessionKey === currentSessionKey) {
+          set({ error: errorMessage });
+        }
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5497,8 +5584,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         await ensureSessionManagedTextModelAllowed(get, currentSessionKey);
       } catch (error) {
-        set({
-          error: error instanceof Error ? error.message : String(error),
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (get().currentSessionKey === currentSessionKey) {
+          set({ error: errorMessage });
+        }
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
         });
         return;
@@ -5520,8 +5610,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         timestamp: Date.now() / 1000,
         id: crypto.randomUUID(),
       };
-      set((s) => ({
-        messages: [...s.messages, assistantMsg],
+      appendLocalMessageForSession(set, get, currentSessionKey, assistantMsg);
+      commitSessionRunState(set, get, currentSessionKey, {
         sending: false,
         pendingImageGenerationLocal: false,
         pendingVideoGenerationLocal: false,
@@ -5532,7 +5622,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingFinal: false,
         lastUserMessageAt: null,
         pendingToolImages: [],
-      }));
+      });
       markSessionRunIdle(currentSessionKey);
       return;
     }
@@ -5564,8 +5654,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             source: 'tool-result',
           }],
         };
-        set((s) => ({
-          messages: [...s.messages, assistantMsg],
+        appendLocalMessageForSession(set, get, currentSessionKey, assistantMsg);
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5576,11 +5666,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingFinal: false,
           lastUserMessageAt: null,
           pendingToolImages: [],
-        }));
+        });
         markSessionRunIdle(currentSessionKey);
       } catch (error) {
-        set({
-          error: error instanceof Error ? error.message : String(error),
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (get().currentSessionKey === currentSessionKey) {
+          set({ error: errorMessage });
+        }
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5600,7 +5693,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (effectiveMode === 'image') {
       const mediaRunId = `media:${crypto.randomUUID()}`;
       set((state) => ({
-        activeRunId: mediaRunId,
         runtimeRuns: applyRuntimeContractEvents(
           state.runtimeRuns,
           buildRuntimeStartEventsForRun(state.runtimeRuns, {
@@ -5612,6 +5704,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }),
         ),
       }));
+      commitSessionRunState(set, get, currentSessionKey, { activeRunId: mediaRunId });
       try {
         const effectiveImageOptions = resolveChatImageOptions(trimmed, mediaPlan, imageOptions);
         const result = await hostApiFetch<MediaGenerationSendResponse>(
@@ -5656,7 +5749,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
         }
         const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
-        set({
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: !shouldIdle,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5668,7 +5761,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           lastUserMessageAt: shouldIdle ? null : nowMs,
           pendingToolImages: [],
         });
-        await get().loadHistory(true);
+        if (get().currentSessionKey === currentSessionKey) {
+          await get().loadHistory(true);
+        } else {
+          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+        }
         if (shouldIdle) {
           markSessionRunIdle(currentSessionKey);
         }
@@ -5679,8 +5776,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           sessionKey: currentSessionKey,
           error: errorMessage,
         });
-        set({
-          error: errorMessage,
+        if (get().currentSessionKey === currentSessionKey) {
+          set({ error: errorMessage });
+        } else {
+          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+        }
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5700,7 +5801,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (effectiveMode === 'video') {
       const mediaRunId = `media:${crypto.randomUUID()}`;
       set((state) => ({
-        activeRunId: mediaRunId,
         runtimeRuns: applyRuntimeContractEvents(
           state.runtimeRuns,
           buildRuntimeStartEventsForRun(state.runtimeRuns, {
@@ -5712,6 +5812,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }),
         ),
       }));
+      commitSessionRunState(set, get, currentSessionKey, { activeRunId: mediaRunId });
       try {
         const videoMode = mediaPlan.videoMode
           ?? (videoReferenceInputs.length > 0 ? 'image_to_video' : 'text_to_video');
@@ -5778,7 +5879,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
         }
         const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
-        set({
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: !shouldIdle,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5790,7 +5891,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           lastUserMessageAt: shouldIdle ? null : nowMs,
           pendingToolImages: [],
         });
-        await get().loadHistory(true);
+        if (get().currentSessionKey === currentSessionKey) {
+          await get().loadHistory(true);
+        } else {
+          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+        }
         if (shouldIdle) {
           markSessionRunIdle(currentSessionKey);
         }
@@ -5801,8 +5906,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           sessionKey: currentSessionKey,
           error: errorMessage,
         });
-        set({
-          error: errorMessage,
+        if (get().currentSessionKey === currentSessionKey) {
+          set({ error: errorMessage });
+        } else {
+          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
+        }
+        commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
@@ -5828,6 +5937,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const checkStuck = () => {
       const state = get();
+      if (state.currentSessionKey !== currentSessionKey) {
+        if (getCachedSessionRunState(currentSessionKey).sending) {
+          setTimeout(checkStuck, 10_000);
+        }
+        return;
+      }
       if (!state.sending) return;
 
       const hasStream = hasMeaningfulStreamingActivity(
@@ -6137,8 +6252,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleChatEvent: (event: Record<string, unknown>) => {
     const runId = String(event.runId || '');
     const eventState = String(event.state || '');
-    const eventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
-    const { activeRunId, currentSessionKey } = get();
+    const rawEventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
+    const initialState = get();
+    const eventSessionKey = inferSessionKeyForRun(initialState, runId || null, rawEventSessionKey);
+    const { activeRunId, currentSessionKey } = initialState;
     const terminalEvent = eventState === 'final'
       || eventState === 'error'
       || eventState === 'aborted'
@@ -6151,6 +6268,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         markSessionRunIdle(eventSessionKey);
         markSessionNeedsTerminalHistoryRefresh(eventSessionKey);
       }
+      console.info('[handleChatEvent] Routed non-current chat event to session cache', {
+        runId,
+        eventSessionKey,
+        currentSessionKey,
+        state: eventState,
+        terminalEvent,
+      });
       return;
     }
 
@@ -6503,7 +6627,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // bubble that may still be getting written.
           const shouldIdleAfterGate = !terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision);
           if (clearLifecycle && !toolOnly && shouldIdleAfterGate) {
-            const sessionKeyAtFinal = get().currentSessionKey;
+            const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
             clearHistoryPoll();
             markSessionRunIdle(sessionKeyAtFinal);
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
@@ -6571,7 +6695,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const normalizedErrorMsg = normalizeChatRunErrorMessage(errorMsg);
         const terminalAssistantError = isTerminalAssistantErrorMessage(event.message);
         const wasSending = get().sending;
-        const sessionKeyAtError = get().currentSessionKey;
+        const sessionKeyAtError = eventSessionKey ?? currentSessionKey;
         const recoverable = wasSending && isRecoverableRuntimeError(errorMsg);
         const replySessionInitConflict = isReplySessionInitializationConflictError(errorMsg);
 
@@ -6683,8 +6807,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           lastUserMessageAt: null,
           pendingToolImages: [],
         });
-        markSessionRunIdle(get().currentSessionKey);
-        clearPendingRuntimeIntent(get().currentSessionKey);
+        const sessionKeyAtAbort = eventSessionKey ?? currentSessionKey;
+        markSessionRunIdle(sessionKeyAtAbort);
+        clearPendingRuntimeIntent(sessionKeyAtAbort);
         break;
       }
       default: {
@@ -6706,28 +6831,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleRuntimeEvent: (event: ChatRuntimeEvent) => {
-    const eventSessionKey = event.sessionKey ?? null;
     const initialState = get();
     const { activeRunId, currentSessionKey } = initialState;
+    const eventSessionKey = inferSessionKeyForRun(initialState, event.runId, event.sessionKey ?? null);
+    const eventForSession: ChatRuntimeEvent = eventSessionKey && event.sessionKey !== eventSessionKey
+      ? { ...event, sessionKey: eventSessionKey }
+      : event;
     const matchesCurrentSession = eventSessionKey != null && eventSessionKey === currentSessionKey;
     const matchesActiveRun = activeRunId != null && event.runId === activeRunId;
 
-    if (shouldFilterRuntimeExecutionGraphEvent(event)) {
+    if (shouldFilterRuntimeExecutionGraphEvent(eventForSession)) {
       if (matchesCurrentSession || matchesActiveRun) {
         _lastChatEventAt = Date.now();
       }
       return;
     }
 
-    let runtimeRuns = applyRuntimeEventToRuns(initialState.runtimeRuns, event);
-    if (event.type === 'run.started') {
+    let runtimeRuns = applyRuntimeEventToRuns(initialState.runtimeRuns, eventForSession);
+    if (eventForSession.type === 'run.started') {
       runtimeRuns = applyRuntimeContractEvents(
         runtimeRuns,
         buildRuntimeStartEventsForRun(runtimeRuns, {
-          runId: event.runId,
-          sessionKey: event.sessionKey ?? currentSessionKey,
-          objective: event.objective,
-          ts: event.ts ?? event.startedAt ?? Date.now(),
+          runId: eventForSession.runId,
+          sessionKey: eventSessionKey ?? currentSessionKey,
+          objective: eventForSession.objective,
+          ts: eventForSession.ts ?? eventForSession.startedAt ?? Date.now(),
           includeStarted: false,
         }),
       );
@@ -6736,29 +6864,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const appliesToActiveUi = matchesActiveRun || (activeRunId == null && matchesCurrentSession);
     let completedToolFiles: AttachedFileMeta[] = [];
 
-    if (event.type === 'artifact.produced') {
+    if (eventForSession.type === 'artifact.produced') {
       scheduleRuntimeArtifactVerification(
-        event.runId,
-        event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
-        [event.artifact],
+        eventForSession.runId,
+        eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+        [eventForSession.artifact],
       );
     }
 
-    if (event.type === 'tool.completed') {
-      completedToolFiles = extractToolCompletedFiles(event);
+    if (eventForSession.type === 'tool.completed') {
+      completedToolFiles = extractToolCompletedFiles(eventForSession);
       if (completedToolFiles.length > 0) {
         const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
-          runId: event.runId,
-          sessionKey: event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
-          ts: event.ts ?? Date.now(),
-          toolCallId: event.toolCallId,
+          runId: eventForSession.runId,
+          sessionKey: eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          ts: eventForSession.ts ?? Date.now(),
+          toolCallId: eventForSession.toolCallId,
           verificationDetail: '工具结果中的产物已进入 UClaw 产物跟踪。',
         }, completedToolFiles);
         runtimeRuns = applyRuntimeContractEvents(runtimeRuns, artifactEvents);
         nextPatch.runtimeRuns = runtimeRuns;
         scheduleRuntimeArtifactVerification(
-          event.runId,
-          event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          eventForSession.runId,
+          eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
           artifactEvents
             .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
               runtimeEvent.type === 'artifact.produced')
@@ -6767,23 +6895,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
-    if (event.type === 'run.ended') {
+    if (eventForSession.type === 'run.ended') {
       runtimeRuns = applyRuntimeContractEvents(
         runtimeRuns,
-        buildRuntimeCompletionGateEvents(runtimeRuns[event.runId], {
-          runId: event.runId,
-          sessionKey: event.sessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
-          ts: event.endedAt ?? event.ts ?? Date.now(),
-          status: event.status,
-          error: event.error,
+        buildRuntimeCompletionGateEvents(runtimeRuns[eventForSession.runId], {
+          runId: eventForSession.runId,
+          sessionKey: eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          ts: eventForSession.endedAt ?? eventForSession.ts ?? Date.now(),
+          status: eventForSession.status,
+          error: eventForSession.error,
         }),
       );
       nextPatch.runtimeRuns = runtimeRuns;
-      const terminalGateDecision = runtimeRuns[event.runId]?.gateResult?.decision;
+      const terminalGateDecision = runtimeRuns[eventForSession.runId]?.gateResult?.decision;
       if (terminalGateDecision === 'continue_required') {
-        nextPatch.pendingFinal = true;
+        if (appliesToActiveUi) {
+          nextPatch.pendingFinal = true;
+        }
       } else {
-        clearPendingRuntimeIntent(event.sessionKey);
+        clearPendingRuntimeIntent(eventSessionKey);
       }
     }
 
@@ -6795,16 +6925,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // match the active run; otherwise they are stored but do not affect the
     // current composer/graph state.
     if (!matchesCurrentSession && !matchesActiveRun) {
-      updateCachedSessionRunStateFromRuntimeEvent(event);
+      updateCachedSessionRunStateFromRuntimeEvent(eventForSession);
       set(nextPatch);
       return;
     }
 
     _lastChatEventAt = Date.now();
 
-    if (event.type === 'run.started') {
+    if (eventForSession.type === 'run.started') {
       if (matchesCurrentSession && (activeRunId == null || matchesActiveRun)) {
-        nextPatch.activeRunId = event.runId;
+        nextPatch.activeRunId = eventForSession.runId;
         nextPatch.error = null;
         nextPatch.runError = null;
         if (!initialState.sending && shouldTrackInboundRunLifecycle(initialState, currentSessionKey)) {
@@ -6815,7 +6945,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    if (event.type === 'assistant.delta' || event.type === 'thinking.delta') {
+    if (eventForSession.type === 'assistant.delta' || eventForSession.type === 'thinking.delta') {
       if (appliesToActiveUi && (initialState.error || initialState.runError)) {
         nextPatch.error = null;
         nextPatch.runError = null;
@@ -6824,13 +6954,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    const toolStatus = runtimeToolEventToStatus(event);
+    const toolStatus = runtimeToolEventToStatus(eventForSession);
     if (toolStatus && appliesToActiveUi && (initialState.error || initialState.runError)) {
       nextPatch.error = null;
       nextPatch.runError = null;
     }
 
-    if (event.type === 'tool.completed' && appliesToActiveUi) {
+    if (eventForSession.type === 'tool.completed' && appliesToActiveUi) {
       if (completedToolFiles.length > 0) {
         nextPatch.pendingToolImages = dedupeAttachedFiles([
           ...initialState.pendingToolImages,
@@ -6839,32 +6969,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
-    if (event.type === 'run.ended') {
+    if (eventForSession.type === 'run.ended') {
       const latestState = get();
-      const terminalMatchesActiveRun = latestState.activeRunId != null && event.runId === latestState.activeRunId;
+      const terminalMatchesActiveRun = latestState.activeRunId != null && eventForSession.runId === latestState.activeRunId;
       const terminalIsForCurrentUntrackedSend = latestState.activeRunId == null
         && matchesCurrentSession
         && latestState.sending
         && (
-          typeof event.ts !== 'number'
+          typeof eventForSession.ts !== 'number'
           || latestState.lastUserMessageAt == null
-          || event.ts >= latestState.lastUserMessageAt - 1_000
+          || eventForSession.ts >= latestState.lastUserMessageAt - 1_000
         );
       const shouldClearActiveRun = terminalMatchesActiveRun || terminalIsForCurrentUntrackedSend;
 
       if (shouldClearActiveRun) {
-        const terminalGateDecision = runtimeRuns[event.runId]?.gateResult?.decision;
+        const terminalGateDecision = runtimeRuns[eventForSession.runId]?.gateResult?.decision;
         const shouldHoldForContinuation = terminalGateDecision === 'continue_required';
         nextPatch.sending = shouldHoldForContinuation ? true : false;
-        nextPatch.activeRunId = shouldHoldForContinuation ? event.runId : null;
+        nextPatch.activeRunId = shouldHoldForContinuation ? eventForSession.runId : null;
         nextPatch.pendingFinal = shouldHoldForContinuation ? true : false;
         nextPatch.lastUserMessageAt = shouldHoldForContinuation ? latestState.lastUserMessageAt : null;
         nextPatch.streamingTools = shouldHoldForContinuation ? latestState.streamingTools : [];
-        if (event.status === 'error' && event.error) {
+        if (eventForSession.status === 'error' && eventForSession.error) {
           nextPatch.error = null;
-          nextPatch.runError = normalizeChatRunErrorMessage(event.error);
+          nextPatch.runError = normalizeChatRunErrorMessage(eventForSession.error);
         }
-        if (event.status === 'aborted') {
+        if (eventForSession.status === 'aborted') {
           nextPatch.streamingMessage = null;
           nextPatch.streamingText = '';
           nextPatch.pendingToolImages = [];

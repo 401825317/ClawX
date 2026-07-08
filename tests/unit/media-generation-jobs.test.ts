@@ -152,6 +152,11 @@ describe('media generation jobs', () => {
       'running',
     ]);
     expect(getMediaGenerationJob(imageJobs[5]!.id)?.status).toBe('queued');
+    expect(getMediaGenerationJob(imageJobs[5]!.id)).toEqual(expect.objectContaining({
+      queuePosition: 1,
+      activeJobs: 5,
+      maxActiveJobs: 5,
+    }));
     expect(videoJobs.slice(0, 5).map((job) => getMediaGenerationJob(job.id)?.status)).toEqual([
       'running',
       'running',
@@ -160,6 +165,11 @@ describe('media generation jobs', () => {
       'running',
     ]);
     expect(getMediaGenerationJob(videoJobs[5]!.id)?.status).toBe('queued');
+    expect(getMediaGenerationJob(videoJobs[5]!.id)).toEqual(expect.objectContaining({
+      queuePosition: 1,
+      activeJobs: 5,
+      maxActiveJobs: 5,
+    }));
   });
 
   it('persists the original user prompt without leaking planner prompts or auto-selected reference images', async () => {

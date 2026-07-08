@@ -65,7 +65,19 @@ function getMediaWorkerEntryPath(): string {
 
 function cloneSnapshot(job: InternalMediaGenerationJob): MediaGenerationJobSnapshot {
   const { payload: _payload, ...snapshot } = job;
-  return { ...snapshot };
+  const queueIndex = job.status === 'queued' ? queues[job.kind].indexOf(job.id) : -1;
+  const startedAt = typeof job.startedAt === 'number' ? job.startedAt : undefined;
+  const completedAt = typeof job.completedAt === 'number' ? job.completedAt : undefined;
+  return {
+    ...snapshot,
+    activeJobs: activeJobIds[job.kind].size,
+    maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[job.kind],
+    queuePosition: queueIndex >= 0 ? queueIndex + 1 : undefined,
+    queueWaitMs: startedAt ? Math.max(0, startedAt - job.createdAt) : undefined,
+    runDurationMs: startedAt
+      ? Math.max(0, (completedAt ?? Date.now()) - startedAt)
+      : undefined,
+  };
 }
 
 function compactJobHistory(): void {
@@ -82,6 +94,13 @@ function compactJobHistory(): void {
 function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
   const now = Date.now();
   logger.warn(`[media-generation] ${job.kind} job ${job.id} failed: ${truncateText(error, MAX_JOB_ERROR_CHARS)}`);
+  logger.warn('[media-generation] job_failed', {
+    jobId: job.id,
+    kind: job.kind,
+    sessionKey: job.sessionKey,
+    queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+    runDurationMs: job.startedAt ? now - job.startedAt : undefined,
+  });
   job.status = 'failed';
   job.updatedAt = now;
   job.completedAt = now;
@@ -222,6 +241,15 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
   job.status = 'running';
   job.startedAt = now;
   job.updatedAt = now;
+  logger.info('[media-generation] job_started', {
+    jobId: job.id,
+    kind: job.kind,
+    sessionKey: job.sessionKey,
+    queueWaitMs: now - job.createdAt,
+    activeJobs: activeJobIds[job.kind].size,
+    queuedJobs: queues[job.kind].length,
+    maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[job.kind],
+  });
 
   const wrapperPath = getMediaWorkerWrapperPath();
   const entryPath = getMediaWorkerEntryPath();
@@ -279,6 +307,14 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
         job.status = 'succeeded';
         job.updatedAt = completedAt;
         job.completedAt = completedAt;
+        logger.info('[media-generation] job_succeeded', {
+          jobId: job.id,
+          kind: job.kind,
+          sessionKey: job.sessionKey,
+          queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+          runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
+          outputs: getOutputLocations(job.result).length,
+        });
       } catch (error) {
         markJobFailed(job, error instanceof Error ? error.message : String(error));
       }
@@ -371,6 +407,14 @@ export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): M
   };
   jobs.set(job.id, job);
   queues[payload.kind].push(job.id);
+  logger.info('[media-generation] job_enqueued', {
+    jobId: job.id,
+    kind: job.kind,
+    sessionKey: job.sessionKey,
+    queuePosition: queues[payload.kind].length,
+    activeJobs: activeJobIds[payload.kind].size,
+    maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[payload.kind],
+  });
   setImmediate(() => pumpQueue(payload.kind));
   return cloneSnapshot(job);
 }

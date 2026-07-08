@@ -442,6 +442,107 @@ describe('chat target routing', () => {
     expect('queuedSends' in useChatStore.getState()).toBe(false);
   });
 
+  it('does not let a completed background media job clear the foreground session run state', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    const mediaJobPoll = deferred<{
+      success: true;
+      job: {
+        id: string;
+        kind: 'image';
+        status: 'succeeded';
+        result: { outputs: Array<{ path: string; mimeType: string; size: number }> };
+      };
+    }>();
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:a',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:a' }, { key: 'agent:main:b' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+      if (url === '/api/media/intent-plan') {
+        return { success: true, plan: { action: 'image_generate', source: 'planner', confidence: 0.95 } };
+      }
+      if (url === '/api/media/image-generation/chat-send') {
+        return { success: true, jobId: 'job-image-a', job: { id: 'job-image-a', kind: 'image', status: 'queued' } };
+      }
+      if (url === '/api/media/generation-jobs/job-image-a') {
+        return mediaJobPoll.promise;
+      }
+      if (url === '/api/files/thumbnails') {
+        const body = JSON.parse(init?.body || '{}') as { paths?: Array<{ filePath?: string }> };
+        return Object.fromEntries((body.paths ?? []).map((entry) => [
+          entry.filePath ?? '',
+          { preview: null, fileSize: 1024, filePath: entry.filePath },
+        ]));
+      }
+      if (url === '/api/chat/history') {
+        return { success: true, result: { messages: [] } };
+      }
+      return { success: true, result: {} };
+    });
+
+    const backgroundSend = useChatStore.getState().sendMessage('生成一张背景图', undefined, undefined, 'image');
+
+    await vi.waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/generation-jobs/job-image-a')).toBe(true);
+    });
+    expect(useChatStore.getState().currentSessionKey).toBe('agent:main:a');
+    expect(useChatStore.getState().pendingImageGenerationLocal).toBe(true);
+
+    useChatStore.getState().switchSession('agent:main:b');
+    useChatStore.setState({
+      messages: [{ role: 'user', content: 'B is still running' }],
+      sending: true,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: 'run-b',
+      pendingFinal: true,
+      lastUserMessageAt: Date.now(),
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+    });
+
+    mediaJobPoll.resolve({
+      success: true,
+      job: {
+        id: 'job-image-a',
+        kind: 'image',
+        status: 'succeeded',
+        result: { outputs: [{ path: '/tmp/generated-a.png', mimeType: 'image/png', size: 1024 }] },
+      },
+    });
+    await backgroundSend;
+
+    expect(useChatStore.getState().currentSessionKey).toBe('agent:main:b');
+    expect(useChatStore.getState().sending).toBe(true);
+    expect(useChatStore.getState().activeRunId).toBe('run-b');
+    expect(useChatStore.getState().pendingFinal).toBe(true);
+    expect(useChatStore.getState().messages).toEqual([{ role: 'user', content: 'B is still running' }]);
+
+    useChatStore.getState().switchSession('agent:main:a');
+    expect(useChatStore.getState().pendingImageGenerationLocal).toBe(false);
+  });
+
   it('uses the selected agent main session for attachment sends', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

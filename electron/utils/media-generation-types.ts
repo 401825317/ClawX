@@ -101,6 +101,11 @@ export type MediaGenerationJobSnapshot = {
   updatedAt: number;
   startedAt?: number;
   completedAt?: number;
+  queuePosition?: number;
+  activeJobs?: number;
+  maxActiveJobs?: number;
+  queueWaitMs?: number;
+  runDurationMs?: number;
   error?: string;
   result?: MediaGenerationJobResult | unknown;
 };

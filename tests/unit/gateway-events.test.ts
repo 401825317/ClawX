@@ -419,6 +419,48 @@ describe('gateway store event wiring', () => {
     ]);
   });
 
+  it('does not apply a session-less final chat event to the foreground task when runId belongs to another session', async () => {
+    const { useChatStore } = await importRealChatStore();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:a',
+      sessions: [{ key: 'agent:main:a' }, { key: 'agent:main:b' }],
+      messages: [{ role: 'user', content: 'run in a' }],
+      sending: true,
+      activeRunId: 'run-a',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingToolImages: [],
+      runtimeRuns: {},
+    });
+    useChatStore.getState().switchSession('agent:main:b');
+    useChatStore.setState({
+      messages: [{ role: 'user', content: 'run in b' }],
+      sending: true,
+      activeRunId: 'run-b',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281732000,
+    });
+
+    useChatStore.getState().handleChatEvent({
+      state: 'final',
+      runId: 'run-a',
+      message: { role: 'assistant', content: 'A finished' },
+    });
+
+    expect(useChatStore.getState().currentSessionKey).toBe('agent:main:b');
+    expect(useChatStore.getState().sending).toBe(true);
+    expect(useChatStore.getState().activeRunId).toBe('run-b');
+    expect(useChatStore.getState().messages).toEqual([{ role: 'user', content: 'run in b' }]);
+
+    useChatStore.getState().switchSession('agent:main:a');
+    expect(useChatStore.getState().sending).toBe(false);
+    expect(useChatStore.getState().activeRunId).toBeNull();
+    expect(useChatStore.getState().messages).toEqual([{ role: 'user', content: 'run in a' }]);
+  });
+
   it('clears cached inactive-session run state when run.ended arrives while another session is selected', async () => {
     hostApiFetchMock.mockImplementation((path: string) => {
       if (path === '/api/chat/sessions') {
