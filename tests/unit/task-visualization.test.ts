@@ -798,7 +798,7 @@ describe('deriveTaskSteps', () => {
     expect(steps).toEqual([
       expect.objectContaining({
         id: 'run-plan',
-        label: 'Plan',
+        label: '计划',
         kind: 'system',
       }),
       expect.objectContaining({

@@ -152,18 +152,35 @@
         "stepStatus": {
             "running": "実行中",
             "completed": "完了",
-            "error": "エラー"
+            "error": "エラー",
+            "blocked": "ブロック中",
+            "failed": "失敗",
+            "aborted": "停止済み"
         }
     },
     "executionGraph": {
-        "title": "実行グラフ",
+        "title": "進行状況",
         "branchLabel": "branch",
         "thinkingLabel": "考え中",
         "errorLabel": "エラー",
         "imageGenerateLabel": "画像生成",
-        "agentRun": "{{agent}} の実行",
+        "agentRun": "{{agent}} が処理中",
         "collapsedSummary": "ツール呼び出し {{toolCount}} 件 · プロセスメッセージ {{processCount}} 件",
-        "collapseAction": "実行グラフを折りたたむ"
+        "collapseAction": "進行状況を折りたたむ",
+        "detailsAction": "実行詳細",
+        "compact": {
+            "working": "処理しています…",
+            "generatingImage": "画像を生成しています…",
+            "generatingVideo": "動画を生成しています。少し時間がかかる場合があります…",
+            "workingArtifact": "成果物を作成しています…",
+            "done": "タスクが完了しました",
+            "imageDone": "画像を生成しました",
+            "videoDone": "動画を生成しました",
+            "artifactDone": "成果物を作成しました",
+            "blocked": "タスクの確認が必要です",
+            "failed": "タスクが失敗しました",
+            "aborted": "タスクを停止しました"
+        }
     },
     "imageGeneration": {
         "generating": "画像を生成しています。少々お待ちください…",

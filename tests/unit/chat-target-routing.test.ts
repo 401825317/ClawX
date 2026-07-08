@@ -769,6 +769,117 @@ describe('chat target routing', () => {
     expect(useChatStore.getState().sessions.some((session) => session.key === newSessionKey)).toBe(true);
   });
 
+  it('treats URL-only video generation outputs as verified deliverable artifacts', async () => {
+    const signedVideoUrl = 'content?u=aHR0cHM6Ly92aWRnZW4ueC5haS9kZW1vLm1wNA&exp=1783612254&sig=test-signature';
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/media/intent-plan') {
+        return { success: true, plan: { action: 'video_generate', source: 'planner', confidence: 0.9 } };
+      }
+      if (url === '/api/media/video-generation/chat-send') {
+        return { success: true, jobId: 'job-video-url', job: { id: 'job-video-url', kind: 'video', status: 'queued' } };
+      }
+      if (url === '/api/media/generation-jobs/job-video-url') {
+        return {
+          success: true,
+          job: {
+            id: 'job-video-url',
+            kind: 'video',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                url: signedVideoUrl,
+                mimeType: 'video/mp4',
+                durationSeconds: 4,
+                metadata: { taskId: 'task-demo' },
+              }],
+            },
+          },
+        };
+      }
+      if (url === '/api/chat/history') {
+        return { success: true, result: { messages: [] } };
+      }
+      return { success: true, result: {} };
+    });
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      '生成一个短视频',
+      undefined,
+      undefined,
+      'video',
+      undefined,
+      { size: '1280x720', durationSeconds: 4 },
+    );
+
+    const run = Object.values(useChatStore.getState().runtimeRuns)
+      .find((item) => item.artifacts?.some((artifact) => artifact.url === signedVideoUrl));
+    const artifactId = run?.artifacts?.[0]?.id;
+
+    expect(run?.gateResult).toEqual(expect.objectContaining({
+      decision: 'deliverable',
+      artifactCount: 1,
+      requiredVerificationCount: 1,
+      passedRequiredVerificationCount: 1,
+      verificationCoverage: 1,
+    }));
+    expect(run?.gateResult?.issues).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'artifact.verification.missing' }),
+    ]));
+    expect(run?.verifications).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        artifactId,
+        kind: 'artifact.availability',
+        required: true,
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        artifactId,
+        kind: 'media.metadata',
+        required: false,
+        status: 'passed',
+      }),
+    ]));
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '视频已生成。',
+      _attachedFiles: [
+        expect.objectContaining({
+          mimeType: 'video/mp4',
+          gatewayUrl: signedVideoUrl,
+        }),
+      ],
+    });
+    expect(useChatStore.getState().sending).toBe(false);
+    expect(useChatStore.getState().activeRunId).toBeNull();
+    expect(useChatStore.getState().pendingFinal).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/files/thumbnails')).toBe(false);
+  });
+
   it('reuses the latest assistant image for edit-like image-mode sends without explicit attachments', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

@@ -152,18 +152,35 @@
         "stepStatus": {
             "running": "进行中",
             "completed": "完成",
-            "error": "错误"
+            "error": "错误",
+            "blocked": "受阻",
+            "failed": "失败",
+            "aborted": "已停止"
         }
     },
     "executionGraph": {
-        "title": "执行关系图",
+        "title": "执行过程",
         "branchLabel": "分支",
         "thinkingLabel": "思考中",
         "errorLabel": "模型调用失败",
         "imageGenerateLabel": "图片生成",
-        "agentRun": "{{agent}} 执行",
+        "agentRun": "{{agent}} 正在处理",
         "collapsedSummary": "{{toolCount}} 个工具调用，{{processCount}} 条过程消息",
-        "collapseAction": "收起执行关系图"
+        "collapseAction": "收起执行过程",
+        "detailsAction": "运行详情",
+        "compact": {
+            "working": "正在处理…",
+            "generatingImage": "正在生成图片…",
+            "generatingVideo": "正在生成视频，可能需要久一点…",
+            "workingArtifact": "正在制作产物…",
+            "done": "任务已完成",
+            "imageDone": "图片已生成",
+            "videoDone": "视频已生成",
+            "artifactDone": "产物已生成",
+            "blocked": "任务需要补充处理",
+            "failed": "任务执行失败",
+            "aborted": "任务已停止"
+        }
     },
     "imageGeneration": {
         "generating": "图片生成中，请稍候…",

@@ -130,8 +130,8 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
   },
   image: {
     defaultModel: 'gpt-image-2',
-    defaultSize: '1024x1024',
-    defaultQuality: 'medium',
+    defaultSize: '3840x2160',
+    defaultQuality: 'high',
     models: [
       {
         id: 'gpt-image-2',
@@ -139,8 +139,8 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
         description: 'Image generation and editing.',
         sizes: ['1024x1024', '2048x2048', '3840x2160'],
         qualities: ['low', 'medium', 'high'],
-        defaultSize: '1024x1024',
-        defaultQuality: 'medium',
+        defaultSize: '3840x2160',
+        defaultQuality: 'high',
         supportsEditing: true,
         enabled: true,
       },
@@ -149,7 +149,7 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
   video: {
     defaultModel: 'grok-image-video',
     defaultSize: '1280x720',
-    defaultDurationSeconds: 4,
+    defaultDurationSeconds: 15,
     models: [
       {
         id: 'grok-image-video',
@@ -159,7 +159,7 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
         sizes: ['1280x720', '720x1280', '1024x1024'],
         durations: [4, 6, 8, 10, 12, 15],
         defaultSize: '1280x720',
-        defaultDurationSeconds: 4,
+        defaultDurationSeconds: 15,
         requiresImage: false,
         enabled: true,
       },
@@ -171,7 +171,7 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
         sizes: ['1280x720', '720x1280', '1024x1024'],
         durations: [4, 6, 8, 10, 12, 15],
         defaultSize: '1280x720',
-        defaultDurationSeconds: 4,
+        defaultDurationSeconds: 15,
         requiresImage: true,
         enabled: true,
       },

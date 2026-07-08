@@ -152,18 +152,35 @@
         "stepStatus": {
             "running": "Выполняется",
             "completed": "Готово",
-            "error": "Ошибка"
+            "error": "Ошибка",
+            "blocked": "Заблокировано",
+            "failed": "Сбой",
+            "aborted": "Остановлено"
         }
     },
     "executionGraph": {
-        "title": "Граф выполнения",
+        "title": "Ход выполнения",
         "branchLabel": "ветвь",
         "thinkingLabel": "Думаю",
         "errorLabel": "Ошибка модели",
         "imageGenerateLabel": "Генерация изображения",
-        "agentRun": "Выполнение {{agent}}",
+        "agentRun": "{{agent}} работает",
         "collapsedSummary": "Вызовов инструментов: {{toolCount}} · Промежуточных сообщений: {{processCount}}",
-        "collapseAction": "Свернуть граф выполнения"
+        "collapseAction": "Свернуть ход выполнения",
+        "detailsAction": "Детали запуска",
+        "compact": {
+            "working": "Выполняю…",
+            "generatingImage": "Генерирую изображение…",
+            "generatingVideo": "Генерирую видео. Это может занять немного больше времени…",
+            "workingArtifact": "Создаю артефакты…",
+            "done": "Задача завершена",
+            "imageDone": "Изображение создано",
+            "videoDone": "Видео создано",
+            "artifactDone": "Артефакты готовы",
+            "blocked": "Задача требует внимания",
+            "failed": "Задача завершилась ошибкой",
+            "aborted": "Задача остановлена"
+        }
     },
     "imageGeneration": {
         "generating": "Изображение генерируется, подождите…",

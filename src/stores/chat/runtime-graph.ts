@@ -210,10 +210,7 @@ export function applyRuntimeEventToRuns(
     case 'gate.evaluated':
       nextRun.gateEvaluations = upsertById(nextRun.gateEvaluations ?? [], event.gate);
       nextRun.gateResult = event.gate;
-      nextRun.issues = event.gate.issues.reduce(
-        (items, issue) => upsertById(items, issue),
-        nextRun.issues ?? [],
-      );
+      nextRun.issues = event.gate.issues;
       break;
     case 'assistant.delta': {
       const incoming = event.text ?? event.delta ?? '';

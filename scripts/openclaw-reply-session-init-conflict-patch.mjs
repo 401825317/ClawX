@@ -2,6 +2,11 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 const PATCH_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS';
+const QUEUE_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_MARKER';
+const QUEUE_GUARD_MARKER = '__uclawReplySessionInitQueued';
+const RETRY_TIMEOUT_MS = 30_000;
+const RETRY_TIMEOUT_DECLARATION_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = [^;]+;/u;
+const RETRY_BASE_DECLARATION_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_BASE_DELAY_MS = [^;]+;/u;
 
 const INIT_SESSION_STATE_ANCHOR = `async function initSessionState(params) {
 \treturn await initSessionStateAttempt(params, false);
@@ -9,9 +14,40 @@ const INIT_SESSION_STATE_ANCHOR = `async function initSessionState(params) {
 async function initSessionStateAttempt(params, staleSnapshotRetried) {
 `;
 
-const INIT_SESSION_STATE_PATCH = `const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = 8e3;
+const SESSION_KEY_ANCHOR = `\tconst sessionKey = canonicalizeMainSessionAlias({
+\t\tcfg,
+\t\tagentId,
+\t\tsessionKey: resolveSessionKey(sessionScope, sessionCtxForState, mainKey)
+\t});
+`;
+
+const SESSION_KEY_QUEUE_GUARD = `${SESSION_KEY_ANCHOR}\tif (!params.__uclawReplySessionInitQueued) {
+\t\treturn await runUclawReplySessionInitializationInQueue(sessionKey, () => initSessionStateAttempt({
+\t\t\t...params,
+\t\t\t__uclawReplySessionInitQueued: true
+\t\t}, staleSnapshotRetried));
+\t}
+`;
+
+const INIT_SESSION_QUEUE_HELPERS = `const ${QUEUE_MARKER} = true;
+const UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES = globalThis.__uclawReplySessionInitConflictQueues || (globalThis.__uclawReplySessionInitConflictQueues = new Map());
+function runUclawReplySessionInitializationInQueue(sessionKey, task) {
+\tconst key = String(sessionKey || "__unknown__");
+\tconst previous = UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) || Promise.resolve();
+\tconst run = previous.catch(() => void 0).then(task);
+\tconst cleanup = run.finally(() => {
+\t\tif (UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) === cleanup) {
+\t\t\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.delete(key);
+\t\t}
+\t});
+\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.set(key, cleanup);
+\treturn run;
+}
+`;
+
+const INIT_SESSION_STATE_PATCH = `const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = ${RETRY_TIMEOUT_MS};
 const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_BASE_DELAY_MS = 150;
-function isUclawReplySessionInitializationConflict(error) {
+${INIT_SESSION_QUEUE_HELPERS}function isUclawReplySessionInitializationConflict(error) {
 \treturn String(error).toLowerCase().includes("reply session initialization conflicted");
 }
 function sleepUclawReplySessionInitializationConflictRetry(ms) {
@@ -37,18 +73,45 @@ async function initSessionState(params) {
 async function initSessionStateAttempt(params, staleSnapshotRetried) {
 `;
 
+function patchQueueGuard(content) {
+  if (content.includes(QUEUE_MARKER) && content.includes(QUEUE_GUARD_MARKER)) {
+    return content;
+  }
+
+  let next = content;
+  if (!next.includes(QUEUE_MARKER)) {
+    next = next.replace(
+      RETRY_BASE_DECLARATION_RE,
+      (match) => `${match}\n${INIT_SESSION_QUEUE_HELPERS.trimEnd()}`,
+    );
+    if (next === content) {
+      return content;
+    }
+  }
+  if (!next.includes(QUEUE_GUARD_MARKER)) {
+    next = next.replace(SESSION_KEY_ANCHOR, SESSION_KEY_QUEUE_GUARD);
+  }
+  return next;
+}
+
 function patchReplySessionInitConflictContent(content) {
   if (content.includes(PATCH_MARKER)) {
-    return { content, changed: false };
+    const withTimeout = content.replace(
+      RETRY_TIMEOUT_DECLARATION_RE,
+      `const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = ${RETRY_TIMEOUT_MS};`,
+    );
+    const next = patchQueueGuard(withTimeout);
+    return { content: next, changed: next !== content };
   }
 
   if (!content.includes(INIT_SESSION_STATE_ANCHOR)) {
     return { content, changed: false };
   }
 
+  const next = patchQueueGuard(content.replace(INIT_SESSION_STATE_ANCHOR, INIT_SESSION_STATE_PATCH));
   return {
-    content: content.replace(INIT_SESSION_STATE_ANCHOR, INIT_SESSION_STATE_PATCH),
-    changed: true,
+    content: next,
+    changed: next !== content,
   };
 }
 

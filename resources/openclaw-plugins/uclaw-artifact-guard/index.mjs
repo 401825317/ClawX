@@ -6,6 +6,7 @@ const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
 const REVISION_REASON = 'UClaw artifact delivery final reply had no completed artifact evidence.';
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
+const MEDIA_INTENT_TOOL_GATE_HOOK_ID = `${PLUGIN_ID}:media-intent-tool-gate`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
 let runtimeEventSeq = 0;
 const PROMPT_CONTEXT = [
@@ -20,6 +21,13 @@ const PROMPT_CONTEXT = [
   '- 用户要求打开/操作微信、QQ、钉钉、飞书、本机浏览器或其他本地应用并发送外部消息时，只有在当前工具清单存在可靠结构化 connector 且已经得到工具成功证据后，才能说“已发送/已打开”。',
   '- 如果没有可靠 connector，必须用简体中文说明具体能力缺失或阻塞点，可以给出消息草稿，但不能声称已经操作桌面或发出消息。',
 ].join('\n');
+
+const MEDIA_INTENT_GATE_TIMEOUT_MS = 8_000;
+const MEDIA_INTENT_GATE_TTL_MS = 10 * 60 * 1000;
+const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate']);
+const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
+const mediaIntentGateByRunId = new Map();
+const mediaIntentGateBySessionKey = new Map();
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|video|html|script|zip))/iu;
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
@@ -209,11 +217,14 @@ function extractFinalAssistantText(event) {
   return '';
 }
 
-function eventId(event) {
+function eventId(event, ctx) {
   return [
     event?.runId,
+    ctx?.runId,
     event?.sessionId,
+    ctx?.sessionId,
     event?.sessionKey,
+    ctx?.sessionKey,
     event?.messageId,
   ].filter((value) => typeof value === 'string' && value.trim()).join('|') || 'unknown';
 }
@@ -224,6 +235,263 @@ function logDiagnostic(label, payload) {
   } catch {
     console.warn(`[uclaw-artifact-guard] ${label}`);
   }
+}
+
+function isPlainRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeOptionalString(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function boundedText(value, maxChars = 600) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+}
+
+function normalizePlannerRole(role) {
+  if (role === 'user' || role === 'assistant' || role === 'system' || role === 'toolresult') return role;
+  if (role === 'tool') return 'toolresult';
+  return undefined;
+}
+
+function buildRecentMessagesForMediaIntent(event) {
+  const messages = extractMessageLists(event)[0] ?? [];
+  return messages
+    .slice(-8)
+    .map((message) => {
+      if (!isPlainRecord(message)) return null;
+      const role = normalizePlannerRole(message.role);
+      if (!role) return null;
+      const text = boundedText(extractMessageText(message));
+      return text ? { role, text } : { role };
+    })
+    .filter(Boolean);
+}
+
+function isCurrentTurnMediaSideEffectAuthorized(plan) {
+  return isPlainRecord(plan)
+    && plan.intentKind === 'current_media_task'
+    && plan.currentTurnMediaRequest === true
+    && (
+      plan.action === 'image_generate'
+      || plan.action === 'image_edit'
+      || plan.action === 'video_generate'
+      || plan.action === 'desktop_screenshot'
+    );
+}
+
+function allowedMediaToolsForPlan(plan) {
+  if (!isCurrentTurnMediaSideEffectAuthorized(plan)) return [];
+  if (plan.action === 'image_generate' || plan.action === 'image_edit') return ['image_generate'];
+  if (plan.action === 'video_generate') return ['video_generate'];
+  return [];
+}
+
+function summarizeMediaIntentPlan(plan) {
+  if (!isPlainRecord(plan)) return {};
+  return {
+    action: plan.action,
+    source: plan.source,
+    intentKind: plan.intentKind,
+    currentTurnMediaRequest: plan.currentTurnMediaRequest,
+    confidence: plan.confidence,
+    reason: typeof plan.reason === 'string' ? boundedText(plan.reason, 160) : undefined,
+  };
+}
+
+function rememberMediaIntentGate(event, ctx, gate) {
+  const runId = getRunId(event, ctx);
+  const sessionKey = getSessionKey(event, ctx);
+  const record = {
+    ...gate,
+    runId,
+    sessionKey,
+    updatedAt: Date.now(),
+  };
+  if (runId) mediaIntentGateByRunId.set(runId, record);
+  if (sessionKey) mediaIntentGateBySessionKey.set(sessionKey, record);
+  pruneMediaIntentGateCache();
+  return record;
+}
+
+function pruneMediaIntentGateCache(now = Date.now()) {
+  for (const [runId, record] of mediaIntentGateByRunId.entries()) {
+    if (!record?.updatedAt || now - record.updatedAt > MEDIA_INTENT_GATE_TTL_MS) {
+      mediaIntentGateByRunId.delete(runId);
+    }
+  }
+  for (const [sessionKey, record] of mediaIntentGateBySessionKey.entries()) {
+    if (!record?.updatedAt || now - record.updatedAt > MEDIA_INTENT_GATE_TTL_MS) {
+      mediaIntentGateBySessionKey.delete(sessionKey);
+    }
+  }
+}
+
+function resolveMediaIntentGate(event, ctx) {
+  pruneMediaIntentGateCache();
+  const runId = getRunId(event, ctx);
+  if (runId && mediaIntentGateByRunId.has(runId)) return mediaIntentGateByRunId.get(runId);
+  const sessionKey = getSessionKey(event, ctx);
+  if (sessionKey && mediaIntentGateBySessionKey.has(sessionKey)) return mediaIntentGateBySessionKey.get(sessionKey);
+  return undefined;
+}
+
+function normalizeHostApiOrigin() {
+  const origin = normalizeOptionalString(process.env.CLAWX_HOST_API_ORIGIN);
+  return origin ? origin.replace(/\/+$/, '') : undefined;
+}
+
+async function requestMediaIntentPlanFromHost(event) {
+  const prompt = extractLatestUserRequestText(event).trim();
+  if (!prompt) {
+    return {
+      ok: false,
+      reason: 'missing_prompt',
+      promptChars: 0,
+    };
+  }
+
+  const origin = normalizeHostApiOrigin();
+  const token = normalizeOptionalString(process.env.CLAWX_HOST_API_TOKEN);
+  if (!origin || !token || typeof fetch !== 'function') {
+    return {
+      ok: false,
+      reason: !origin ? 'missing_host_api_origin' : !token ? 'missing_host_api_token' : 'fetch_unavailable',
+      promptChars: prompt.length,
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MEDIA_INTENT_GATE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${origin}/api/media/intent-plan`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prompt,
+        requestedMode: 'chat',
+        recentMessages: buildRecentMessagesForMediaIntent(event),
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: `host_api_http_${response.status}`,
+        promptChars: prompt.length,
+      };
+    }
+    const payload = await response.json();
+    if (!payload || payload.success === false || !payload.plan) {
+      return {
+        ok: false,
+        reason: 'host_api_missing_plan',
+        promptChars: prompt.length,
+      };
+    }
+    return {
+      ok: true,
+      plan: payload.plan,
+      promptChars: prompt.length,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.name === 'AbortError' ? 'host_api_timeout' : 'host_api_exception',
+      promptChars: prompt.length,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function buildMediaIntentGate(event, ctx) {
+  const result = await requestMediaIntentPlanFromHost(event);
+  const plan = result.ok ? result.plan : undefined;
+  const allowedMediaTools = allowedMediaToolsForPlan(plan);
+  const gate = rememberMediaIntentGate(event, ctx, {
+    source: result.ok ? 'host-planner' : 'fallback',
+    reason: result.ok ? (plan?.reason || 'host_planner') : result.reason,
+    promptChars: result.promptChars,
+    plan: summarizeMediaIntentPlan(plan),
+    allowedMediaTools,
+    currentTurnMediaRequest: Boolean(plan?.currentTurnMediaRequest),
+    authorized: allowedMediaTools.length > 0,
+  });
+  logDiagnostic('media-intent-gate', {
+    eventId: eventId(event, ctx),
+    promptChars: gate.promptChars,
+    source: gate.source,
+    action: gate.plan?.action,
+    intentKind: gate.plan?.intentKind,
+    currentTurnMediaRequest: gate.currentTurnMediaRequest,
+    authorized: gate.authorized,
+    allowedMediaTools: gate.allowedMediaTools,
+    reason: gate.reason,
+  });
+  return gate;
+}
+
+function normalizeToolName(event) {
+  return normalizeOptionalString(event?.toolName)
+    ?? normalizeOptionalString(event?.name)
+    ?? normalizeOptionalString(event?.tool?.name)
+    ?? '';
+}
+
+function normalizeToolParams(event) {
+  if (isPlainRecord(event?.params)) return event.params;
+  if (isPlainRecord(event?.input)) return event.input;
+  if (isPlainRecord(event?.args)) return event.args;
+  return {};
+}
+
+function normalizeToolAction(params) {
+  const raw = normalizeOptionalString(params?.action)
+    ?? normalizeOptionalString(params?.mode)
+    ?? normalizeOptionalString(params?.operation);
+  return raw ? raw.toLowerCase() : '';
+}
+
+function isSafeMediaToolReadAction(params) {
+  const action = normalizeToolAction(params);
+  return Boolean(action && SAFE_MEDIA_TOOL_ACTIONS.has(action));
+}
+
+function shouldBlockMediaToolCall(event, ctx) {
+  const toolName = normalizeToolName(event);
+  if (!MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) {
+    return { block: false, toolName };
+  }
+  const params = normalizeToolParams(event);
+  if (isSafeMediaToolReadAction(params)) {
+    return {
+      block: false,
+      toolName,
+      reason: 'safe_media_tool_read_action',
+    };
+  }
+  const gate = resolveMediaIntentGate(event, ctx);
+  const allowed = Boolean(gate?.allowedMediaTools?.includes(toolName));
+  return {
+    block: !allowed,
+    toolName,
+    gate,
+    reason: allowed ? 'authorized_current_media_task' : (gate?.reason || 'missing_media_intent_gate'),
+  };
+}
+
+function buildMediaToolBlockReason(decision) {
+  if (decision.toolName === 'video_generate') {
+    return '当前用户消息没有授权生成视频，已阻止 video_generate 执行。';
+  }
+  return '当前用户消息没有授权生成图片，已阻止 image_generate 执行。';
 }
 
 function isArtifactRequest(text) {
@@ -984,12 +1252,12 @@ function buildRevision(analysis) {
   };
 }
 
-function getRunId(event) {
-  return typeof event?.runId === 'string' && event.runId.trim() ? event.runId : undefined;
+function getRunId(event, ctx) {
+  return normalizeOptionalString(event?.runId) ?? normalizeOptionalString(ctx?.runId);
 }
 
-function getSessionKey(event) {
-  return typeof event?.sessionKey === 'string' && event.sessionKey.trim() ? event.sessionKey : undefined;
+function getSessionKey(event, ctx) {
+  return normalizeOptionalString(event?.sessionKey) ?? normalizeOptionalString(ctx?.sessionKey);
 }
 
 function resolveAgentEventEmitter(api) {
@@ -1251,12 +1519,25 @@ function registerToolResultMiddleware(api) {
   });
 }
 
+function registerLifecycleHook(api, name, handler, options) {
+  if (typeof api.on === 'function') {
+    api.on(name, handler, options);
+    return true;
+  }
+  if (typeof api.registerHook === 'function') {
+    api.registerHook(name, handler, options);
+    return true;
+  }
+  return false;
+}
+
 function registerArtifactGuard(api) {
   registerToolResultMiddleware(api);
-  if (typeof api.registerHook === 'function') {
-    api.registerHook('before_prompt_build', (event) => {
+  if (typeof api.registerHook === 'function' || typeof api.on === 'function') {
+    registerLifecycleHook(api, 'before_prompt_build', async (event, ctx) => {
+      await buildMediaIntentGate(event, ctx);
       logDiagnostic('prompt-context', {
-        eventId: eventId(event),
+        eventId: eventId(event, ctx),
         injected: true,
         contextChars: PROMPT_CONTEXT.length,
         hasChineseRule: true,
@@ -1267,12 +1548,38 @@ function registerArtifactGuard(api) {
       };
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
-      description: 'Ensure UClaw artifact delivery and Chinese language rules are present even before workspace context is ready.',
+      description: 'Ensure UClaw artifact delivery, media-intent gating, and Chinese language rules are present before workspace context is ready.',
+      timeoutMs: MEDIA_INTENT_GATE_TIMEOUT_MS + 2_000,
     });
-    api.registerHook('before_agent_finalize', (event) => {
+    registerLifecycleHook(api, 'before_tool_call', (event, ctx) => {
+      const decision = shouldBlockMediaToolCall(event, ctx);
+      if (!decision.toolName || !MEDIA_SIDE_EFFECT_TOOLS.has(decision.toolName)) return;
+      logDiagnostic('media-tool-gate', {
+        eventId: eventId(event, ctx),
+        toolName: decision.toolName,
+        blocked: decision.block,
+        reason: decision.reason,
+        gateSource: decision.gate?.source,
+        gateAction: decision.gate?.plan?.action,
+        gateIntentKind: decision.gate?.plan?.intentKind,
+        gateAuthorized: decision.gate?.authorized,
+      });
+      if (!decision.block) return;
+      const blockReason = buildMediaToolBlockReason(decision);
+      return {
+        block: true,
+        blockReason,
+        reason: blockReason,
+      };
+    }, {
+      name: MEDIA_INTENT_TOOL_GATE_HOOK_ID,
+      description: 'Block image/video generation tools unless the current turn has structured media intent authorization.',
+      priority: 100,
+    });
+    registerLifecycleHook(api, 'before_agent_finalize', (event, ctx) => {
       const analysis = analyzeArtifactFinal(event);
       logDiagnostic('finalize-check', {
-        eventId: eventId(event),
+        eventId: eventId(event, ctx),
         userTextChars: analysis.userText.length,
         finalTextChars: analysis.finalText.length,
         heartbeatPoll: analysis.heartbeatPoll,

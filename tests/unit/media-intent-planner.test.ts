@@ -132,10 +132,32 @@ describe('planMediaIntent', () => {
       source: 'fallback',
       intentKind: 'current_media_task',
       currentTurnMediaRequest: true,
-      reason: 'local_fast_path_explicit_image_mode',
+      reason: 'local_fast_path_image_mode_generate',
       prompt: '画一张城市夜景',
     }));
     expect(plan.compositeTasks).toBeUndefined();
+  });
+
+  it('keeps plain chat in image mode on chat without calling the LLM planner', async () => {
+    const { planMediaIntent, isCurrentTurnMediaSideEffectAuthorized } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: 'hi',
+      requestedMode: 'image',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      intentKind: 'ordinary_chat',
+      currentTurnMediaRequest: false,
+      reason: 'local_non_media_plain_conversation',
+      selectedImageSource: 'none',
+      prompt: 'hi',
+    }));
+    expect(isCurrentTurnMediaSideEffectAuthorized(plan)).toBe(false);
   });
 
   it('keeps ambiguous media side effects on chat when planner omits current-turn authorization', async () => {
@@ -172,7 +194,7 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('keeps future sourcing preferences on chat even when the planner proposes image generation', async () => {
+  it('keeps future sourcing preferences on chat through the planner contract', async () => {
     proxyAwareFetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -180,10 +202,10 @@ describe('planMediaIntent', () => {
           {
             message: {
               content: JSON.stringify({
-                action: 'image_generate',
+                action: 'chat',
                 intent_kind: 'preference_or_memory_update',
                 current_turn_media_request: false,
-                confidence: 0.9,
+                confidence: 0.95,
                 selected_image_source: 'none',
                 prompt: '以后生成作品的时候，如果需要图片就从网上获取，如果需要公开数据就从网上获取。保存在记忆体里',
                 reason: '用户是在设置后续生成作品的素材来源偏好，而不是要求当前回合生成图片。',
@@ -206,8 +228,57 @@ describe('planMediaIntent', () => {
       source: 'planner',
       intentKind: 'preference_or_memory_update',
       currentTurnMediaRequest: false,
+      reason: '用户是在设置后续生成作品的素材来源偏好，而不是要求当前回合生成图片。',
       selectedImageSource: 'none',
     }));
+  });
+
+  it('keeps media model and capability questions on chat locally', async () => {
+    const { planMediaIntent, isCurrentTurnMediaSideEffectAuthorized } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '我问你的是你用的生图模型是什么？',
+      requestedMode: 'chat',
+    });
+
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      intentKind: 'current_non_media_task',
+      currentTurnMediaRequest: false,
+      reason: 'local_non_media_media_meta_question',
+      selectedImageSource: 'none',
+    }));
+    expect(isCurrentTurnMediaSideEffectAuthorized(plan)).toBe(false);
+  });
+
+  it('keeps image-mode capability lookup continuations on chat locally', async () => {
+    const { planMediaIntent, isCurrentTurnMediaSideEffectAuthorized } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '好的 你查一下吧',
+      requestedMode: 'image',
+      recentMessages: [
+        {
+          role: 'user',
+          text: '你用的生图模型是什么',
+        },
+        {
+          role: 'assistant',
+          text: '如果你要精确到模型 ID，我需要查一下当前 UClaw/OpenClaw 的生图配置或可用模型列表。',
+        },
+      ],
+    });
+
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      intentKind: 'current_non_media_task',
+      currentTurnMediaRequest: false,
+      reason: 'local_non_media_meta_lookup_continuation',
+      selectedImageSource: 'none',
+    }));
+    expect(isCurrentTurnMediaSideEffectAuthorized(plan)).toBe(false);
   });
 
   it('routes explicit image-mode edits locally to the candidate image', async () => {
@@ -230,7 +301,7 @@ describe('planMediaIntent', () => {
     expect(plan).toEqual(expect.objectContaining({
       action: 'image_edit',
       source: 'fallback',
-      reason: 'local_fast_path_explicit_image_mode',
+      reason: 'local_fast_path_image_mode_edit',
       selectedImageSource: 'candidate',
       selectedImageIndex: 0,
       prompt: '这个图片上能不能加一条狗？',

@@ -158,6 +158,34 @@ function optionValue<T>(value: T | undefined, options: T[], fallback: T): T {
   return value !== undefined && options.includes(value) ? value : fallback;
 }
 
+function dimensionArea(value: string): number {
+  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
+  if (!match) return 0;
+  return Number(match[1]) * Number(match[2]);
+}
+
+function strongestSizeOption(options: string[] | undefined, fallback: string): string {
+  const candidates = (options ?? []).filter(Boolean);
+  if (candidates.length === 0) return fallback;
+  return candidates.reduce((best, current) => (
+    dimensionArea(current) > dimensionArea(best) ? current : best
+  ), candidates[0]!);
+}
+
+function strongestQualityOption(options: string[] | undefined, fallback: string): string {
+  const rank: Record<string, number> = { low: 1, medium: 2, high: 3 };
+  const candidates = (options ?? []).filter(Boolean);
+  if (candidates.length === 0) return fallback;
+  return candidates.reduce((best, current) => (
+    (rank[current] ?? 0) > (rank[best] ?? 0) ? current : best
+  ), candidates[0]!);
+}
+
+function strongestDurationOption(options: number[] | undefined, fallback: number): number {
+  const candidates = (options ?? []).filter((value) => Number.isFinite(value) && value > 0);
+  return candidates.length > 0 ? Math.max(...candidates) : fallback;
+}
+
 function formatImageSizeLabel(value: string): string {
   switch (value) {
     case '1024x1024':
@@ -397,8 +425,10 @@ export function ChatInput({
   const defaultImageOptions = useMemo<ChatImageSendOptions>(() => {
     const configuredDefault = imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel);
     const model = configuredDefault ?? firstEnabled(imageModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.models[0];
-    const fallbackSize = model?.defaultSize ?? clientModelOptions.image.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize;
-    const fallbackQuality = model?.defaultQuality ?? clientModelOptions.image.defaultQuality ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality;
+    const configuredFallbackSize = model?.defaultSize ?? clientModelOptions.image.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize;
+    const configuredFallbackQuality = model?.defaultQuality ?? clientModelOptions.image.defaultQuality ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality;
+    const fallbackSize = strongestSizeOption(model?.sizes, configuredFallbackSize);
+    const fallbackQuality = strongestQualityOption(model?.qualities, configuredFallbackQuality);
     return {
       model: model?.id ?? clientModelOptions.image.defaultModel,
       size: optionValue(fallbackSize, model?.sizes ?? [], fallbackSize),
@@ -413,10 +443,12 @@ export function ChatInput({
   const defaultVideoOptions = useMemo<ChatVideoSendOptions>(() => {
     const configuredDefault = videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel);
     const model = configuredDefault ?? firstEnabled(videoModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.models[0];
-    const fallbackSize = model?.defaultSize ?? clientModelOptions.video.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultSize;
-    const fallbackDuration = model?.defaultDurationSeconds
+    const configuredFallbackSize = model?.defaultSize ?? clientModelOptions.video.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultSize;
+    const configuredFallbackDuration = model?.defaultDurationSeconds
       ?? clientModelOptions.video.defaultDurationSeconds
       ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultDurationSeconds;
+    const fallbackSize = strongestSizeOption(model?.sizes, configuredFallbackSize);
+    const fallbackDuration = strongestDurationOption(model?.durations, configuredFallbackDuration);
     return {
       model: model?.id ?? clientModelOptions.video.defaultModel,
       size: optionValue(fallbackSize, model?.sizes ?? [], fallbackSize),

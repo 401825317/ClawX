@@ -6,6 +6,7 @@ import {
 } from './openclaw-video-generation';
 import { basename } from 'node:path';
 import type {
+  ImageGenerationJobPayload,
   MediaGenerationInputImageRef,
   VideoGenerationJobPayload,
   MediaGenerationWorkerRequest,
@@ -245,17 +246,35 @@ async function runVideoPayload(payload: VideoGenerationJobPayload): Promise<unkn
   };
 }
 
+async function runImagePayload(payload: ImageGenerationJobPayload): Promise<unknown> {
+  const startedAt = Date.now();
+  logWorkerEvent('image_start', {
+    sessionKey: payload.sessionKey,
+    promptChars: payload.prompt.length,
+    model: payload.model,
+    size: payload.size,
+    quality: payload.quality,
+    inputImages: summarizeInputImagesForLog(payload.inputImages),
+  });
+  const result = await generateImageForChatSession({
+    sessionKey: payload.sessionKey,
+    prompt: payload.prompt,
+    model: payload.model,
+    size: payload.size,
+    quality: payload.quality,
+    inputImages: payload.inputImages,
+  }, { skipManagedRelayPreparation: true });
+  logWorkerEvent('image_done', {
+    sessionKey: payload.sessionKey,
+    durationMs: Date.now() - startedAt,
+  });
+  return result;
+}
+
 async function handleRun(message: MediaGenerationWorkerRequest): Promise<void> {
   try {
     const result = message.payload.kind === 'image'
-      ? await generateImageForChatSession({
-        sessionKey: message.payload.sessionKey,
-        prompt: message.payload.prompt,
-        model: message.payload.model,
-        size: message.payload.size,
-        quality: message.payload.quality,
-        inputImages: message.payload.inputImages,
-      }, { skipManagedRelayPreparation: true })
+      ? await runImagePayload(message.payload)
       : await runVideoPayload(message.payload);
 
     parentPort.postMessage({

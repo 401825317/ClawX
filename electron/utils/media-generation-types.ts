@@ -59,6 +59,18 @@ export type MediaGenerationJobPayload = ImageGenerationJobPayload | VideoGenerat
 
 export type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
+export type MediaGenerationProgressEvent = {
+  id: string;
+  source: 'job' | 'worker' | 'runtime' | 'plugin';
+  event: string;
+  label: string;
+  status: 'pending' | 'running' | 'completed' | 'error';
+  timestampMs: number;
+  detail?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+};
+
 export type MediaGenerationJobOutput = {
   path?: string;
   url?: string;
@@ -106,6 +118,7 @@ export type MediaGenerationJobSnapshot = {
   maxActiveJobs?: number;
   queueWaitMs?: number;
   runDurationMs?: number;
+  progressEvents?: MediaGenerationProgressEvent[];
   error?: string;
   result?: MediaGenerationJobResult | unknown;
 };

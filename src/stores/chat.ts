@@ -598,14 +598,15 @@ function resolveDefaultChatVideoOptions(hasSourceImage = false): ChatVideoSendOp
 }
 
 function resolveChatImageOptions(prompt: string, plan: MediaIntentPlan, overrides?: ChatImageSendOptions): ChatImageSendOptions {
+  void plan;
   const base = { ...resolveDefaultChatImageOptions(), ...overrides };
   const options = useClientConfigStore.getState().modelOptions.image;
   const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
   const sizes = model?.sizes ?? [];
   const qualities = model?.qualities ?? [];
   const strongest = resolveDefaultChatImageOptions();
-  const requestedSize = parseImageSizeHint(prompt, sizes, strongest.size) ?? plan.imageSize;
-  const requestedQuality = parseImageQualityHint(prompt, qualities, strongest.quality) ?? plan.imageQuality;
+  const requestedSize = parseImageSizeHint(prompt, sizes, strongest.size);
+  const requestedQuality = parseImageQualityHint(prompt, qualities, strongest.quality);
   return {
     model: model?.id ?? base.model,
     size: normalizeOptionValue(requestedSize, sizes, base.size),
@@ -619,14 +620,15 @@ function resolveChatVideoOptions(
   hasSourceImage: boolean,
   overrides?: ChatVideoSendOptions,
 ): ChatVideoSendOptions {
+  void plan;
   const base = { ...resolveDefaultChatVideoOptions(hasSourceImage), ...overrides };
   const options = useClientConfigStore.getState().modelOptions.video;
   const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
   const sizes = model?.sizes ?? [];
   const durations = model?.durations ?? [];
   const strongest = resolveDefaultChatVideoOptions(hasSourceImage);
-  const requestedSize = parseVideoSizeHint(prompt, sizes, strongest.size) ?? plan.videoSize;
-  const requestedDuration = parseVideoDurationHint(prompt, durations, strongest.durationSeconds) ?? plan.videoDurationSeconds;
+  const requestedSize = parseVideoSizeHint(prompt, sizes, strongest.size);
+  const requestedDuration = parseVideoDurationHint(prompt, durations, strongest.durationSeconds);
   return {
     model: model?.id ?? base.model,
     size: normalizeOptionValue(requestedSize, sizes, base.size),
@@ -888,6 +890,17 @@ const _pendingRuntimeIntentBySession = new Map<string, PendingRuntimeIntent>();
 const _runtimeArtifactVerificationInFlight = new Set<string>();
 
 type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+type MediaGenerationProgressEvent = {
+  id: string;
+  source: 'job' | 'worker' | 'runtime' | 'plugin';
+  event: string;
+  label: string;
+  status: 'pending' | 'running' | 'completed' | 'error';
+  timestampMs: number;
+  detail?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+};
 type MediaGenerationJobSnapshot = {
   id: string;
   kind?: 'image' | 'video';
@@ -898,6 +911,7 @@ type MediaGenerationJobSnapshot = {
   maxActiveJobs?: number;
   queueWaitMs?: number;
   runDurationMs?: number;
+  progressEvents?: MediaGenerationProgressEvent[];
   error?: string;
   result?: unknown;
 };
@@ -911,8 +925,56 @@ type MediaGenerationSendResponse = {
 const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
 const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
 const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
+const _mediaRuntimeProgressSignatureByRun = new Map<string, Map<string, string>>();
 
-async function waitForMediaGenerationJob(jobId: string): Promise<MediaGenerationJobSnapshot> {
+function mediaProgressSignature(progress: MediaGenerationProgressEvent): string {
+  return JSON.stringify({
+    id: progress.id,
+    event: progress.event,
+    status: progress.status,
+    detail: progress.detail,
+    durationMs: progress.durationMs,
+    timestampMs: progress.timestampMs,
+  });
+}
+
+function changedMediaProgressEvents(runId: string, job: MediaGenerationJobSnapshot | undefined): MediaGenerationProgressEvent[] {
+  if (!job?.progressEvents?.length) return [];
+  const signatures = _mediaRuntimeProgressSignatureByRun.get(runId) ?? new Map<string, string>();
+  const changed: MediaGenerationProgressEvent[] = [];
+  for (const progress of job.progressEvents) {
+    const key = `${job.id}:${progress.id}`;
+    const signature = mediaProgressSignature(progress);
+    if (signatures.get(key) === signature) continue;
+    signatures.set(key, signature);
+    changed.push(progress);
+  }
+  _mediaRuntimeProgressSignatureByRun.set(runId, signatures);
+  return changed;
+}
+
+function shouldDisplayMediaProgress(progress: MediaGenerationProgressEvent): boolean {
+  if (progress.status === 'error') return true;
+  if (progress.source === 'worker') return true;
+  if (progress.source !== 'job') return false;
+  if (progress.event !== 'queue_completed') return false;
+  const metadata = progress.metadata ?? {};
+  const queueWaitMs = typeof metadata.queueWaitMs === 'number' && Number.isFinite(metadata.queueWaitMs)
+    ? metadata.queueWaitMs
+    : progress.durationMs;
+  const activeJobs = typeof metadata.activeJobs === 'number' && Number.isFinite(metadata.activeJobs)
+    ? metadata.activeJobs
+    : undefined;
+  const maxActiveJobs = typeof metadata.maxActiveJobs === 'number' && Number.isFinite(metadata.maxActiveJobs)
+    ? metadata.maxActiveJobs
+    : undefined;
+  return (queueWaitMs ?? 0) >= 1000 || (activeJobs != null && maxActiveJobs != null && activeJobs >= maxActiveJobs);
+}
+
+async function waitForMediaGenerationJob(
+  jobId: string,
+  options?: { onProgress?: (job: MediaGenerationJobSnapshot) => void },
+): Promise<MediaGenerationJobSnapshot> {
   const startedAt = Date.now();
   for (;;) {
     const response = await hostApiFetch<{ success: boolean; error?: string; job?: MediaGenerationJobSnapshot }>(
@@ -924,6 +986,7 @@ async function waitForMediaGenerationJob(jobId: string): Promise<MediaGeneration
     if (!response.job) {
       throw new Error('Media generation job response missing job');
     }
+    options?.onProgress?.(response.job);
     if (response.job.status === 'succeeded') {
       return response.job;
     }
@@ -1117,6 +1180,41 @@ function buildMediaMetadataVerificationEvents(params: {
   });
 }
 
+function buildMediaAvailabilityVerificationEvents(params: {
+  runId: string;
+  sessionKey: string;
+  ts: number;
+  artifacts: ChatRuntimeArtifact[];
+  kind: 'image' | 'video';
+}): ChatRuntimeEvent[] {
+  return params.artifacts.flatMap((artifact): ChatRuntimeEvent[] => {
+    const filePath = artifact.filePath?.trim();
+    const url = artifact.url?.trim();
+    if (!filePath && !url) return [];
+    const isLocal = Boolean(filePath);
+    return [buildRuntimeArtifactVerificationEvent({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts: params.ts,
+      producer: 'media',
+    }, {
+      artifact,
+      status: 'passed',
+      kind: 'artifact.availability',
+      required: true,
+      severity: 'info',
+      detail: isLocal
+        ? (params.kind === 'image'
+            ? '图片生成 job 已保存本地产物，后续文件详情验证会继续补充。'
+            : '视频生成 job 已保存本地产物，后续文件详情验证会继续补充。')
+        : (params.kind === 'image'
+            ? '图片生成 job 已返回远程或签名图片地址，本地文件验证不适用于该产物。'
+            : '视频生成 job 已返回远程或签名播放地址，本地文件验证不适用于该产物。'),
+      evidence: filePath ? `filePath=${filePath}` : `url=${url}`,
+    })];
+  });
+}
+
 function gateDecisionAllowsTerminalIdle(decision: string | undefined): boolean {
   return decision === 'deliverable'
     || decision === 'blocked_needs_user'
@@ -1141,6 +1239,50 @@ function applyMediaRuntimeFailure(params: {
         error: params.error,
       }),
     ),
+  }));
+}
+
+function buildMediaRuntimeProgressEvents(params: {
+  runId: string;
+  sessionKey: string;
+  job: MediaGenerationJobSnapshot | undefined;
+}): ChatRuntimeEvent[] {
+  const changedEvents = changedMediaProgressEvents(params.runId, params.job)
+    .filter(shouldDisplayMediaProgress);
+  if (changedEvents.length === 0) return [];
+  const allProgressEvents = params.job?.progressEvents ?? [];
+  return changedEvents.map((progress, fallbackIndex) => {
+    const originalIndex = allProgressEvents.findIndex((item) => item.id === progress.id);
+    const order = 10 + (originalIndex >= 0 ? originalIndex : fallbackIndex);
+    return {
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      producer: 'media',
+      ts: progress.timestampMs || Date.now(),
+      type: 'run.step.updated',
+      step: {
+        id: `media.${params.job?.id ?? 'job'}.${progress.id}`,
+        title: progress.label,
+        status: progress.status,
+        detail: progress.detail,
+        durationMs: progress.durationMs,
+        kind: `media.${progress.source}.${progress.event}`,
+        order,
+        parentId: 'uclaw.execute',
+      },
+    } satisfies ChatRuntimeEvent;
+  });
+}
+
+function applyMediaRuntimeProgress(params: {
+  runId: string;
+  sessionKey: string;
+  job: MediaGenerationJobSnapshot | undefined;
+}): void {
+  const events = buildMediaRuntimeProgressEvents(params);
+  if (events.length === 0) return;
+  useChatStore.setState((state) => ({
+    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
   }));
 }
 
@@ -1177,7 +1319,17 @@ function applyMediaRuntimeSuccess(params: {
       artifacts,
       kind: params.kind,
     });
-    let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, [...artifactEvents, ...metadataEvents]);
+    const availabilityEvents = buildMediaAvailabilityVerificationEvents({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts,
+      artifacts,
+      kind: params.kind,
+    });
+    let runtimeRuns = applyRuntimeContractEvents(
+      state.runtimeRuns,
+      [...artifactEvents, ...availabilityEvents, ...metadataEvents],
+    );
     runtimeRuns = applyRuntimeContractEvents(
       runtimeRuns,
       buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
@@ -3875,6 +4027,7 @@ function pickFilePathFromInput(input: unknown): string | null {
  */
 function isBaselineRealUserMessage(message: RawMessage | undefined): boolean {
   if (!message || message.role !== 'user') return false;
+  if (isInternalMessage(message)) return false;
   const content = message.content;
   if (!Array.isArray(content)) return true;
   const blocks = content as Array<{ type?: string }>;
@@ -4189,6 +4342,7 @@ function suppressPrematureAssistantFinals(messages: RawMessage[], lastUserMessag
 
 function isRealUserBoundaryMessage(msg: RawMessage): boolean {
   if (msg.role !== 'user') return false;
+  if (isInternalMessage(msg)) return false;
   if (!Array.isArray(msg.content)) return true;
   const blocks = msg.content as Array<{ type?: string }>;
   return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');
@@ -5041,6 +5195,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
       const isRealUserBoundary = (msg: RawMessage): boolean => {
         if (msg.role !== 'user') return false;
+        if (isInternalMessage(msg)) return false;
         if (!Array.isArray(msg.content)) return true;
         const blocks = msg.content as Array<{ type?: string }>;
         return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');
@@ -5917,8 +6072,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           throw new Error(result.error || 'Failed to generate image');
         }
         let completedJob = result.job;
+        applyMediaRuntimeProgress({
+          runId: mediaRunId,
+          sessionKey: currentSessionKey,
+          job: completedJob,
+        });
         if (result.jobId) {
-          completedJob = await waitForMediaGenerationJob(result.jobId);
+          completedJob = await waitForMediaGenerationJob(result.jobId, {
+            onProgress: (job) => applyMediaRuntimeProgress({
+              runId: mediaRunId,
+              sessionKey: currentSessionKey,
+              job,
+            }),
+          });
         }
         const { decision, artifacts } = applyMediaRuntimeSuccess({
           runId: mediaRunId,
@@ -6054,8 +6220,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           throw new Error(result.error || 'Failed to generate video');
         }
         let completedJob = result.job;
+        applyMediaRuntimeProgress({
+          runId: mediaRunId,
+          sessionKey: currentSessionKey,
+          job: completedJob,
+        });
         if (result.jobId) {
-          completedJob = await waitForMediaGenerationJob(result.jobId);
+          completedJob = await waitForMediaGenerationJob(result.jobId, {
+            onProgress: (job) => applyMediaRuntimeProgress({
+              runId: mediaRunId,
+              sessionKey: currentSessionKey,
+              job,
+            }),
+          });
         }
         const { decision, artifacts } = applyMediaRuntimeSuccess({
           runId: mediaRunId,

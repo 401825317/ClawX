@@ -85,6 +85,19 @@ export type MediaIntentPlan = {
   compositeTasks?: MediaIntentCompositeTask[];
 };
 
+export function isMediaSideEffectAction(action: MediaIntentAction | undefined): boolean {
+  return action === 'image_generate'
+    || action === 'image_edit'
+    || action === 'video_generate'
+    || action === 'desktop_screenshot';
+}
+
+export function isCurrentTurnMediaSideEffectAuthorized(plan: Pick<MediaIntentPlan, 'action' | 'intentKind' | 'currentTurnMediaRequest'>): boolean {
+  return isMediaSideEffectAction(plan.action)
+    && plan.intentKind === 'current_media_task'
+    && plan.currentTurnMediaRequest === true;
+}
+
 type MediaIntentPlannerParams = {
   prompt: string;
   requestedMode?: 'chat' | 'image' | 'video';
@@ -306,6 +319,19 @@ function fallbackPlan(reason: string): MediaIntentPlan {
     confidence: 1,
     reason,
     selectedImageSource: 'none',
+  };
+}
+
+function localChatPlan(reason: string, prompt: string, intentKind: MediaIntentKind = 'ordinary_chat'): MediaIntentPlan {
+  return {
+    action: 'chat',
+    source: 'fallback',
+    intentKind,
+    currentTurnMediaRequest: false,
+    confidence: 1,
+    reason,
+    selectedImageSource: 'none',
+    prompt: prompt.trim(),
   };
 }
 
@@ -539,12 +565,6 @@ function detectCompositeTasks(params: {
   return containsCompositeSeparator(prompt) ? tasks : [];
 }
 
-function isPreferenceOrFutureRulePrompt(prompt: string): boolean {
-  return /(?:以后|之后|以后.*如果|之后.*如果|默认|每次|记住|偏好|保存在记忆|素材来源|from now on|remember|preference|always)/i.test(prompt)
-    && /(?:如果|需要|来源|获取|搜索|找|素材|记住|偏好|保存在记忆|默认|以后|之后|when|if|source|remember|preference)/i.test(prompt)
-    && !/(?:现在|马上|立刻|这次|本次|直接).*(?:生成|生图|出图|视频|修图|改图|做)/i.test(prompt);
-}
-
 function isImageLookupPrompt(prompt: string): boolean {
   return /(?:搜索|搜一下|找几张|找一些|参考图|参考图片|素材图|网上找|网上获取|search|find).*(?:图|图片|照片|image|picture|photo)/i.test(prompt)
     && !/(?:生成|生图|出图|画|做(?:一张)?(?:海报|图片|插画)|generate|create|draw|paint)/i.test(prompt);
@@ -563,8 +583,95 @@ function isImageEditPrompt(prompt: string): boolean {
     || (promptReferencesExistingImage(prompt) && /(?:改|修|换|加|去|删|调整|优化|编辑|变成|edit|modify|remove|replace|add)/i.test(prompt));
 }
 
+function isImageRevisionFeedbackPrompt(prompt: string): boolean {
+  return /(?:不喜欢|不行|不对|不好看|不够|太(?:丑|差|暗|亮|大|小|普通)|换成|改成|变成|再.{0,12}一点|加(?:上|一个)?|去掉|删掉|移除|重新(?:做|生成|来)|重做|换一(?:张|版)|美化|优化|调整|redo|regenerate|change|replace|make (?:it )?(?:more|less)|add|remove)/i.test(prompt);
+}
+
 function isVideoGenerationPrompt(prompt: string): boolean {
   return /(?:生视频|生成(?:一段|一个|个)?视频|做(?:一段|一个|个)?视频|视频生成|图生视频|动起来|动画|animate|video generation|generate (?:a )?video|create (?:a )?video)/i.test(prompt);
+}
+
+function isMediaMetaQuestionPrompt(prompt: string): boolean {
+  const mentionsMedia = /(?:图片|图像|照片|生图|修图|视频|媒体|image|picture|photo|video|media)/i.test(prompt);
+  const mentionsConfiguration = /(?:模型|配置|参数|能力|功能|支持|入口|模式|设置|选项|默认|当前|用的|provider|model|config|setting|option|capabilit|support)/i.test(prompt);
+  const asksOrLooksUp = /(?:什么|啥|哪个|哪些|怎么|如何|为什么|是否|能不能|可不可以|查|看|当前|现在|默认|用的|what|which|how|why|support|lookup|check)/i.test(prompt);
+  return mentionsMedia && mentionsConfiguration && asksOrLooksUp;
+}
+
+function isPlainConversationalPrompt(prompt: string): boolean {
+  const normalized = prompt.trim();
+  if (!normalized || normalized.length > 32) return false;
+  return /^(?:hi|hello|hey|yo|你好|您好|哈喽|嗨|在吗|你在吗|早上好|中午好|晚上好|晚安|谢谢|谢了|thanks|thank you)[\s。！!？?~～,.，]*$/i.test(normalized);
+}
+
+function isLookupOrResearchPrompt(prompt: string): boolean {
+  return /(?:查一下|查下|帮我查|你查一下|搜一下|搜索一下|找一下|帮我看|看一下|看看|lookup|check|search|find out)/i.test(prompt);
+}
+
+function isGeneralQuestionPrompt(prompt: string): boolean {
+  const normalized = prompt.trim();
+  return /[?？]\s*$/.test(normalized)
+    || /^(?:什么|啥|哪个|哪些|怎么|如何|为什么|为啥|谁|哪里|哪儿|是否|能不能|可不可以|what|which|how|why|who|where|can|could|is|are)\b/i.test(normalized);
+}
+
+function isPotentialCurrentMediaSideEffectPrompt(prompt: string): boolean {
+  return isVisualQuestionPrompt(prompt)
+    || isImageEditPrompt(prompt)
+    || isImageRevisionFeedbackPrompt(prompt)
+    || isVideoGenerationPrompt(prompt)
+    || (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt));
+}
+
+function recentContextLooksLikeMediaMetaLookup(messages: MediaIntentRecentMessage[] | undefined): boolean {
+  const recentText = (messages ?? [])
+    .slice(-4)
+    .map((message) => message.text?.trim() || '')
+    .filter(Boolean)
+    .join('\n');
+  if (!recentText) return false;
+  return isMediaMetaQuestionPrompt(recentText)
+    || (
+      /(?:图片|图像|照片|生图|修图|视频|媒体|image|picture|photo|video|media)/i.test(recentText)
+      && /(?:模型|配置|参数|能力|功能|支持|入口|模式|设置|选项|默认|当前|用的|provider|model|config|setting|option|capabilit|support)/i.test(recentText)
+      && /(?:查|看|确认|列表|当前|默认|精确|lookup|check|inspect|confirm)/i.test(recentText)
+    );
+}
+
+function isMetaLookupContinuationPrompt(prompt: string): boolean {
+  return /^(?:(?:好|好的|嗯|可以|行|对|是|ok|okay|yes)[\s，,]*)?(?:查|查一下|查下|你查一下|帮我查一下|那你查一下|继续查|看一下|看看)(?:吧|一下|下)?[\s。！!？?~～,.，]*$/i.test(prompt.trim())
+    || /^(?:好|好的|嗯|可以|行|对|是|ok|okay|yes)(?:吧|一下|下)?[\s。！!？?~～,.，]*$/i.test(prompt.trim());
+}
+
+function localNonMediaChatPlan(params: {
+  prompt: string;
+  requestedMode: 'chat' | 'image' | 'video';
+  recentMessages?: MediaIntentRecentMessage[];
+}): MediaIntentPlan | null {
+  const prompt = params.prompt.trim();
+  if (!prompt) return null;
+
+  if (isMediaMetaQuestionPrompt(prompt)) {
+    return localChatPlan('local_non_media_media_meta_question', prompt, 'current_non_media_task');
+  }
+  if (isPlainConversationalPrompt(prompt)) {
+    return localChatPlan('local_non_media_plain_conversation', prompt, 'ordinary_chat');
+  }
+  if (isMetaLookupContinuationPrompt(prompt) && recentContextLooksLikeMediaMetaLookup(params.recentMessages)) {
+    return localChatPlan('local_non_media_meta_lookup_continuation', prompt, 'current_non_media_task');
+  }
+
+  const potentialMediaSideEffect = isPotentialCurrentMediaSideEffectPrompt(prompt);
+  if (!potentialMediaSideEffect && isImageLookupPrompt(prompt)) {
+    return localChatPlan('local_non_media_image_lookup_request', prompt, 'current_non_media_task');
+  }
+  if (!potentialMediaSideEffect && isLookupOrResearchPrompt(prompt)) {
+    return localChatPlan('local_non_media_lookup_or_research', prompt, 'current_non_media_task');
+  }
+  if (params.requestedMode !== 'chat' && !potentialMediaSideEffect && isGeneralQuestionPrompt(prompt)) {
+    return localChatPlan('local_non_media_question_in_media_mode', prompt, 'ordinary_chat');
+  }
+
+  return null;
 }
 
 function localSelectedImageForPrompt(params: {
@@ -600,43 +707,70 @@ function localFastPathPlan(params: {
 }): MediaIntentPlan | null {
   const prompt = params.prompt.trim();
   if (!prompt) return null;
-  if (isPreferenceOrFutureRulePrompt(prompt)) return null;
 
   if (params.requestedMode === 'image') {
-    const imageSelection = localSelectedImageForPrompt({
-      prompt,
-      explicitImages: params.explicitImages,
-      candidateImages: params.candidateImages,
-      allowImplicitExplicitImage: true,
-    });
-    if (imageSelection.sourceImages?.length) {
+    const visualQuestion = isVisualQuestionPrompt(prompt);
+    const editPrompt = isImageEditPrompt(prompt);
+    const revisionFeedback = isImageRevisionFeedbackPrompt(prompt);
+    const imageSelection = visualQuestion || revisionFeedback
+      ? selectPreferredImage({
+        selectedImageSource: params.explicitImages.length > 0 ? 'explicit' : 'candidate',
+        selectedImageIndex: 0,
+        explicitImages: params.explicitImages,
+        candidateImages: params.candidateImages,
+      })
+      : localSelectedImageForPrompt({
+        prompt,
+        explicitImages: params.explicitImages,
+        candidateImages: params.candidateImages,
+        allowImplicitExplicitImage: true,
+      });
+    const hasSourceImage = Boolean(imageSelection.sourceImages?.length);
+    if (visualQuestion && hasSourceImage) {
       return {
-        action: 'image_edit',
+        action: 'vision_chat',
         source: 'fallback',
         intentKind: 'current_media_task',
         currentTurnMediaRequest: true,
         confidence: 1,
-        reason: 'local_fast_path_explicit_image_mode',
+        reason: 'local_fast_path_image_mode_visual_question',
         selectedImageSource: imageSelection.selectedImageSource,
         selectedImageIndex: imageSelection.selectedImageIndex,
         sourceImages: imageSelection.sourceImages,
         prompt,
       };
     }
-    if (isImageEditPrompt(prompt)) {
-      return clarificationPlan('local_fast_path_image_edit_missing_input_image');
+    if (editPrompt || (hasSourceImage && revisionFeedback)) {
+      if (!hasSourceImage) {
+        return clarificationPlan('local_fast_path_image_edit_missing_input_image');
+      }
+      return {
+        action: 'image_edit',
+        source: 'fallback',
+        intentKind: 'current_media_task',
+        currentTurnMediaRequest: true,
+        confidence: 1,
+        reason: 'local_fast_path_image_mode_edit',
+        selectedImageSource: imageSelection.selectedImageSource,
+        selectedImageIndex: imageSelection.selectedImageIndex,
+        sourceImages: imageSelection.sourceImages,
+        prompt,
+      };
     }
-    return {
-      action: 'image_generate',
-      source: 'fallback',
-      intentKind: 'current_media_task',
-      currentTurnMediaRequest: true,
-      confidence: 1,
-      reason: 'local_fast_path_explicit_image_mode',
-      selectedImageSource: 'none',
-      sourceImages: [],
-      prompt,
-    };
+    if (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt)) {
+      return {
+        action: 'image_generate',
+        source: 'fallback',
+        intentKind: 'current_media_task',
+        currentTurnMediaRequest: true,
+        confidence: 1,
+        reason: 'local_fast_path_image_mode_generate',
+        selectedImageSource: 'none',
+        sourceImages: [],
+        prompt,
+      };
+    }
+    return null;
   }
 
   if (params.requestedMode === 'video') {
@@ -648,13 +782,14 @@ function localFastPathPlan(params: {
     });
     const hasSourceImage = Boolean(imageSelection.sourceImages?.length);
     const shouldEditFirst = hasSourceImage && isImageEditPrompt(prompt);
+    if (!isVideoGenerationPrompt(prompt)) return null;
     return {
       action: 'video_generate',
       source: 'fallback',
       intentKind: 'current_media_task',
       currentTurnMediaRequest: true,
       confidence: 1,
-      reason: 'local_fast_path_explicit_video_mode',
+      reason: 'local_fast_path_video_mode_generate',
       selectedImageSource: imageSelection.selectedImageSource,
       selectedImageIndex: imageSelection.selectedImageIndex,
       sourceImages: imageSelection.sourceImages,
@@ -791,13 +926,9 @@ function normalizePlannerDecision(params: {
     prompt,
   );
 
-  const isMediaSideEffectAction = action === 'image_generate'
-    || action === 'image_edit'
-    || action === 'video_generate'
-    || action === 'desktop_screenshot';
   const plannerAuthorizesCurrentMedia = intentKind === 'current_media_task'
     && currentTurnMediaRequest === true;
-  if (isMediaSideEffectAction && !plannerAuthorizesCurrentMedia) {
+  if (isMediaSideEffectAction(action) && !plannerAuthorizesCurrentMedia) {
     return {
       action: 'chat',
       source: 'planner',
@@ -1019,6 +1150,19 @@ export async function planMediaIntent(
       plan: summarizePlanForLog(plan),
     });
     return plan;
+  }
+
+  const localNonMediaPlan = localNonMediaChatPlan({
+    prompt,
+    requestedMode,
+    recentMessages: params.recentMessages,
+  });
+  if (localNonMediaPlan) {
+    logger.info('[media-intent-planner] local_non_media', {
+      durationMs: Date.now() - startedAt,
+      plan: summarizePlanForLog(localNonMediaPlan),
+    });
+    return localNonMediaPlan;
   }
 
   const localPlan = localFastPathPlan({

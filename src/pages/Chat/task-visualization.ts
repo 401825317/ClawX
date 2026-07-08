@@ -14,21 +14,59 @@ import { appendToolErrorHint, normalizeToolErrorMessage } from '@/lib/tool-error
 
 export type TaskStepStatus = 'running' | 'completed' | 'error' | 'blocked' | 'failed' | 'aborted';
 
+export type RuntimePlanStep = NonNullable<ChatRuntimeRunState['planSteps']>[number];
+
 export interface TaskStep {
   id: string;
   label: string;
   status: TaskStepStatus;
   kind: 'thinking' | 'tool' | 'system' | 'message';
   detail?: string;
+  durationMs?: number;
   depth: number;
   parentId?: string;
   /** Extracted URL for web_fetch tool, used to render a clickable link icon. */
   url?: string;
 }
 
+const RUNTIME_SCAFFOLD_PLAN_STEP_IDS = new Set([
+  'uclaw.objective',
+  'uclaw.execute',
+  'uclaw.verify',
+  'uclaw.deliver',
+]);
+
+const RUNTIME_SCAFFOLD_PLAN_STEP_KINDS = new Set([
+  'objective',
+  'execution',
+  'verification',
+  'delivery',
+]);
+
 function isFilteredExecutionGraphTool(name: string | undefined | null): boolean {
   const normalized = typeof name === 'string' ? name.trim().toLowerCase() : '';
   return normalized === 'process';
+}
+
+function runtimeStepRequiresArtifact(step: RuntimePlanStep): boolean {
+  return step.requiresArtifact === true
+    || step.requiredArtifact === true
+    || step.artifactRequired === true
+    || step.outputArtifactRequired === true;
+}
+
+function isRuntimeScaffoldPlanStep(step: RuntimePlanStep): boolean {
+  const kind = typeof step.kind === 'string' ? step.kind.trim().toLowerCase() : '';
+  return RUNTIME_SCAFFOLD_PLAN_STEP_IDS.has(step.id)
+    && (kind.length === 0 || RUNTIME_SCAFFOLD_PLAN_STEP_KINDS.has(kind));
+}
+
+export function isVisibleRuntimePlanStep(step: RuntimePlanStep): boolean {
+  const kind = typeof step.kind === 'string' ? step.kind.trim().toLowerCase() : '';
+  if (kind === 'composite' || kind === 'composite-task' || kind.startsWith('media.')) return true;
+  if (runtimeStepRequiresArtifact(step)) return true;
+  if (step.status === 'blocked' || step.status === 'error') return true;
+  return !isRuntimeScaffoldPlanStep(step);
 }
 
 /**
@@ -443,6 +481,25 @@ function getToolSummaryDetail(tool: ToolStatus): string | undefined {
   return normalizeText(tool.summary);
 }
 
+function formatDuration(durationMs: number | undefined): string | undefined {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return undefined;
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+  if (durationMs < 10_000) return `${(durationMs / 1000).toFixed(1)}s`;
+  return `${Math.round(durationMs / 1000)}s`;
+}
+
+function runElapsedMs(runState: ChatRuntimeRunState): number | undefined {
+  const startedAt = typeof runState.startedAt === 'number' ? runState.startedAt : undefined;
+  if (startedAt == null) return undefined;
+  const endAt = typeof runState.endedAt === 'number'
+    ? runState.endedAt
+    : typeof runState.lastEventAt === 'number'
+      ? runState.lastEventAt
+      : Date.now();
+  const elapsed = endAt - startedAt;
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
+}
+
 function runtimeStepStatus(status: string | undefined): TaskStepStatus {
   if (status === 'completed' || status === 'passed' || status === 'skipped') return 'completed';
   if (status === 'blocked') return 'blocked';
@@ -541,11 +598,31 @@ function checkpointStatus(checkpoint: NonNullable<ChatRuntimeRunState['checkpoin
   return 'completed';
 }
 
+function sanitizeRuntimePlanSummary(summary: string | undefined): string | undefined {
+  const text = normalizeText(summary);
+  if (!text) return undefined;
+  if (text === 'UClaw 已接管本轮任务。' || text === 'UClaw 已接管本轮任务执行。') return undefined;
+  if (text === 'UClaw 已接管组合任务，将按顺序执行所有子任务并逐项交付产物。') {
+    return '按顺序执行所有子任务并逐项交付产物。';
+  }
+  return text;
+}
+
+function runtimePlanDetail(objective: string | undefined, summary: string | undefined): string | undefined {
+  const lines = [
+    normalizeText(objective),
+    sanitizeRuntimePlanSummary(summary),
+  ].filter((line): line is string => typeof line === 'string' && line.length > 0);
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
 export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | undefined): TaskStep[] {
   if (!runState) return [];
 
   const steps: TaskStep[] = [];
   const stepIndexById = new Map<string, number>();
+  const toolStartedAt = new Map<string, number>();
+  const elapsedMs = runElapsedMs(runState);
   const upsertStep = (step: TaskStep): void => {
     const existingIndex = stepIndexById.get(step.id);
     if (existingIndex == null) {
@@ -558,28 +635,53 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
       ...existing,
       ...step,
       detail: step.detail ?? existing.detail,
+      durationMs: step.durationMs ?? existing.durationMs,
       url: step.url ?? existing.url,
     };
   };
 
   for (const event of runState.events) {
     switch (event.type) {
+      case 'tool.started':
+        toolStartedAt.set(event.toolCallId, typeof event.ts === 'number' ? event.ts : Date.now());
+        if (isFilteredExecutionGraphTool(event.name)) {
+          break;
+        }
+        {
+          const input = event.args as Record<string, unknown> | undefined;
+          const url = event.name === 'web_fetch' && typeof input?.url === 'string' ? input.url : undefined;
+          upsertStep({
+            id: event.toolCallId,
+            label: event.name,
+            status: 'running',
+            kind: 'tool',
+            detail: runtimeDetail(event.args),
+            depth: 1,
+            url,
+          });
+        }
+        break;
       case 'run.plan.updated': {
+        const visiblePlanSteps = event.steps.filter(isVisibleRuntimePlanStep);
+        if (visiblePlanSteps.length === 0) {
+          break;
+        }
         upsertStep({
           id: 'run-plan',
-          label: 'Plan',
-          status: event.steps.some((step) => step.status === 'running') ? 'running' : 'completed',
+          label: '计划',
+          status: visiblePlanSteps.some((step) => step.status === 'running') ? 'running' : 'completed',
           kind: 'system',
-          detail: [event.objective, event.summary].filter(Boolean).join('\n') || undefined,
+          detail: runtimePlanDetail(event.objective, event.summary),
           depth: 1,
         });
-        for (const planStep of event.steps) {
+        for (const planStep of visiblePlanSteps) {
           upsertStep({
             id: `plan-step:${planStep.id}`,
             label: planStep.title,
             status: runtimeStepStatus(planStep.status),
             kind: 'system',
             detail: planStep.detail,
+            durationMs: planStep.durationMs,
             depth: planStep.parentId ? 2 : 1,
             parentId: planStep.parentId ? `plan-step:${planStep.parentId}` : 'run-plan',
           });
@@ -587,31 +689,18 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         break;
       }
       case 'run.step.updated': {
+        if (!isVisibleRuntimePlanStep(event.step)) {
+          break;
+        }
         upsertStep({
           id: `plan-step:${event.step.id}`,
           label: event.step.title,
           status: runtimeStepStatus(event.step.status),
           kind: 'system',
           detail: event.step.detail,
+          durationMs: event.step.durationMs,
           depth: event.step.parentId ? 2 : 1,
           parentId: event.step.parentId ? `plan-step:${event.step.parentId}` : 'run-plan',
-        });
-        break;
-      }
-      case 'tool.started': {
-        if (isFilteredExecutionGraphTool(event.name)) {
-          break;
-        }
-        const input = event.args as Record<string, unknown> | undefined;
-        const url = event.name === 'web_fetch' && typeof input?.url === 'string' ? input.url : undefined;
-        upsertStep({
-          id: event.toolCallId,
-          label: event.name,
-          status: 'running',
-          kind: 'tool',
-          detail: runtimeDetail(event.args),
-          depth: 1,
-          url,
         });
         break;
       }
@@ -633,12 +722,18 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         if (isFilteredExecutionGraphTool(event.name)) {
           break;
         }
+        const startedAt = toolStartedAt.get(event.toolCallId);
+        const completedAt = typeof event.ts === 'number' ? event.ts : Date.now();
+        const inferredDurationMs = startedAt != null && completedAt >= startedAt
+          ? completedAt - startedAt
+          : undefined;
         upsertStep({
           id: event.toolCallId,
           label: event.name,
           status: event.isError ? 'error' : 'completed',
           kind: 'tool',
           detail: event.isError ? getToolErrorDetail(event.result) : runtimeDetail(event.result),
+          durationMs: event.durationMs ?? inferredDurationMs,
           depth: 1,
         });
         break;
@@ -722,6 +817,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           status: event.status === 'failed' || event.status === 'error' ? 'error' : event.phase === 'end' ? 'completed' : 'running',
           kind: 'message',
           detail: runtimeDetail(event.output),
+          durationMs: event.durationMs,
           depth: 1,
         });
         break;
@@ -755,7 +851,26 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
     }
   }
 
-  return attachTopology(steps);
+  const shouldShowElapsed = elapsedMs !== undefined
+    && steps.length > 0
+    && (runState.status !== 'running' || elapsedMs >= 1000);
+  const elapsedLabel = formatDuration(elapsedMs);
+  const visibleSteps = shouldShowElapsed
+    ? [
+      {
+        id: 'run-duration',
+        label: '整体耗时',
+        status: runState.status === 'running' ? 'running' : runtimeStepStatus(runState.status),
+        kind: 'system' as const,
+        detail: elapsedLabel ? `耗时：${elapsedLabel}` : undefined,
+        durationMs: elapsedMs,
+        depth: 1,
+      },
+      ...steps,
+    ]
+    : steps;
+
+  return attachTopology(visibleSteps);
 }
 
 export function deriveTaskSteps({
@@ -869,6 +984,7 @@ export function deriveTaskSteps({
       status: tool.status,
       kind: 'tool',
       detail: getToolSummaryDetail(tool),
+      durationMs: tool.durationMs,
       depth: 1,
     });
   });

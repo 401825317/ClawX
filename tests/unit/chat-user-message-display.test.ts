@@ -79,4 +79,15 @@ describe('user message display cleanup', () => {
     expect(extractText(candidate)).toBe(original);
     expect(matchesOptimisticUserMessage(candidate, optimistic, 1_700_000_000_000)).toBe(true);
   });
+
+  it('keeps queued user text while stripping OpenClaw restart continuation prompts', () => {
+    const content = [
+      '[Queued user message that arrived while the previous turn was still active]',
+      '随便生成个ppt',
+      '',
+      '[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response.',
+    ].join('\n');
+
+    expect(extractText({ role: 'user', content })).toBe('随便生成个ppt');
+  });
 });

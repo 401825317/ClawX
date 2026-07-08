@@ -49,6 +49,22 @@ const OPENCLAW_IMAGE_GENERATION_RUNTIME = 'openclaw/plugin-sdk/image-generation-
 const OPENCLAW_MEDIA_RUNTIME = 'openclaw/plugin-sdk/media-runtime';
 const OPENCLAW_IMAGE_GENERATION_CORE = 'openclaw/plugin-sdk/image-generation-core';
 
+function nowMs(): number {
+  return Date.now();
+}
+
+function durationSince(startedAt: number): number {
+  return Math.max(0, nowMs() - startedAt);
+}
+
+function toSafeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function logImageRuntimeEvent(event: string, details: Record<string, unknown>): void {
+  console.error(`[openclaw-image-runtime] ${event} ${JSON.stringify(details)}`);
+}
+
 let imageRuntimeModule: ImageGenerationRuntimeModule | null = null;
 let imageOpsModule: ImageOpsModule | null = null;
 let modelInputModule: ModelInputModule | null = null;
@@ -163,28 +179,71 @@ export async function generateImageInProcess(params: {
   }>;
   ignoredOverrides: unknown[];
 }> {
+  const totalStartedAt = nowMs();
   const { generateImage } = await getImageGenerationRuntime();
   const { getImageMetadata } = await getImageOps();
 
-  const result = await generateImage({
-    cfg: params.config,
-    agentDir: params.agentDir,
-    prompt: params.prompt,
-    modelOverride: params.model,
-    count: 1,
+  logImageRuntimeEvent('start', {
+    model: params.model,
     size: params.size ?? '1024x1024',
-    quality: params.quality,
-    inputImages: params.inputImages,
+    quality: params.quality ?? null,
+    inputImageCount: params.inputImages?.length ?? 0,
     timeoutMs: params.timeoutMs,
   });
 
+  let result: Awaited<ReturnType<ImageGenerationRuntimeModule['generateImage']>>;
+  const generateStartedAt = nowMs();
+  try {
+    result = await generateImage({
+      cfg: params.config,
+      agentDir: params.agentDir,
+      prompt: params.prompt,
+      modelOverride: params.model,
+      count: 1,
+      size: params.size ?? '1024x1024',
+      quality: params.quality,
+      inputImages: params.inputImages,
+      timeoutMs: params.timeoutMs,
+    });
+  } catch (error) {
+    logImageRuntimeEvent('failed', {
+      stage: 'generate',
+      durationMs: durationSince(generateStartedAt),
+      totalDurationMs: durationSince(totalStartedAt),
+      error: toSafeErrorMessage(error).slice(0, 240),
+    });
+    throw error;
+  }
+
+  logImageRuntimeEvent('provider_done', {
+    provider: result.provider,
+    model: result.model,
+    durationMs: durationSince(generateStartedAt),
+    outputImages: result.images.length,
+    outputBytes: result.images.map((image) => image.buffer.byteLength),
+  });
+
   const outputs = await Promise.all(result.images.map(async (image, index) => {
+    const saveStartedAt = nowMs();
     const saved = await saveGeneratedMediaBuffer(
       image.buffer,
       image.mimeType,
       image.fileName,
     );
+    const saveDurationMs = durationSince(saveStartedAt);
+    const metadataStartedAt = nowMs();
     const metadata = await getImageMetadata(image.buffer).catch(() => undefined);
+    const metadataDurationMs = durationSince(metadataStartedAt);
+    logImageRuntimeEvent('output_saved', {
+      outputIndex: index,
+      saveDurationMs,
+      metadataDurationMs,
+      bytes: saved.size,
+      mimeType: saved.contentType,
+      width: metadata?.width,
+      height: metadata?.height,
+      path: saved.path,
+    });
     return {
       path: saved.path,
       mimeType: saved.contentType,
@@ -195,6 +254,13 @@ export async function generateImageInProcess(params: {
       outputIndex: index,
     };
   }));
+
+  logImageRuntimeEvent('done', {
+    provider: result.provider,
+    model: result.model,
+    outputImages: outputs.length,
+    totalDurationMs: durationSince(totalStartedAt),
+  });
 
   return {
     ok: true,

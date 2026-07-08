@@ -34,6 +34,20 @@ describe('chat internal message filter', () => {
     expect(isInternalMessage({ role: 'user', content: '[OpenClaw heartbeat poll]' })).toBe(true);
   });
 
+  it('filters OpenClaw gateway restart continuation prompts', () => {
+    const content = '[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response.\n\nNote: The interrupted final reply was captured: "上次确实没完成重做，我现在直接补一版更像发布会风格的高级版。"';
+
+    expect(isInternalMessage({ role: 'user', content })).toBe(true);
+    expect(shouldDropMessageFromHistory({ role: 'user', content })).toBe(true);
+  });
+
+  it('filters heartbeat prompts wrapped in queued continuation envelopes', () => {
+    const content = '[Queued user message that arrived while the previous turn was still active]\n[OpenClaw heartbeat poll]\n\n[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response.';
+
+    expect(isInternalMessage({ role: 'user', content })).toBe(true);
+    expect(shouldDropMessageFromHistory({ role: 'user', content })).toBe(true);
+  });
+
   it('filters inter-session routing payloads', () => {
     expect(isInternalMessage({
       role: 'user',

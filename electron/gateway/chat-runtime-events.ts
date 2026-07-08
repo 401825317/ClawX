@@ -492,6 +492,7 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
     }
     if (phase === 'result' || phase === 'end') {
       const base = withBase('tool.completed', raw);
+      const meta = asRecord(data.meta);
       return base
         ? {
             ...base,
@@ -499,6 +500,7 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
             name,
             result: data.result,
             meta: data.meta,
+            durationMs: readNumber(data.durationMs) ?? readNumber(meta?.durationMs),
             isError: typeof data.isError === 'boolean' ? data.isError : undefined,
           }
         : null;

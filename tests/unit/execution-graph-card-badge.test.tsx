@@ -25,9 +25,8 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
-// Step rendered as a depth>1 child of a subagent run, exercising both the
-// depth-driven branch badge and the status pill that share the same span
-// styles in `ExecutionGraphCard`.
+// Step rendered as a depth>1 child of a subagent run. Branch depth should stay
+// visual in the graph line layout without adding a repeated text badge.
 const branchStep: TaskStep = {
   id: 'sub-exec-1',
   label: 'exec',
@@ -39,7 +38,7 @@ const branchStep: TaskStep = {
 };
 
 describe('ExecutionGraphCard branch badge', () => {
-  it('renders the localized branch label without intra-badge wrapping', () => {
+  it('does not render a repeated branch text badge for nested steps', () => {
     render(
       <ExecutionGraphCard
         agentLabel="main"
@@ -49,13 +48,7 @@ describe('ExecutionGraphCard branch badge', () => {
       />,
     );
 
-    const branchBadge = screen.getByText('分支');
-    expect(branchBadge.tagName.toLowerCase()).toBe('span');
-    // CJK strings can break between any two glyphs under flex shrink, which
-    // visually stacks "分" / "支" on two lines. Both classes together keep the
-    // pill on one row regardless of locale or container width.
-    expect(branchBadge.className).toContain('whitespace-nowrap');
-    expect(branchBadge.className).toContain('shrink-0');
+    expect(screen.queryByText('分支')).toBeNull();
   });
 
   it('applies the same wrap-safe classes to the visible status pill', () => {

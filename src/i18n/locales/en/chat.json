@@ -152,18 +152,35 @@
         "stepStatus": {
             "running": "Running",
             "completed": "Done",
-            "error": "Error"
+            "error": "Error",
+            "blocked": "Blocked",
+            "failed": "Failed",
+            "aborted": "Stopped"
         }
     },
     "executionGraph": {
-        "title": "Execution Graph",
+        "title": "Progress",
         "branchLabel": "branch",
         "thinkingLabel": "Thinking",
         "errorLabel": "Error",
         "imageGenerateLabel": "Image generation",
-        "agentRun": "{{agent}} execution",
+        "agentRun": "{{agent}} is working",
         "collapsedSummary": "{{toolCount}} tool calls · {{processCount}} process messages",
-        "collapseAction": "Collapse execution graph"
+        "collapseAction": "Collapse progress",
+        "detailsAction": "Run details",
+        "compact": {
+            "working": "Working…",
+            "generatingImage": "Generating image…",
+            "generatingVideo": "Generating video. This may take a little longer…",
+            "workingArtifact": "Creating artifacts…",
+            "done": "Task complete",
+            "imageDone": "Image generated",
+            "videoDone": "Video generated",
+            "artifactDone": "Artifacts ready",
+            "blocked": "Task needs attention",
+            "failed": "Task failed",
+            "aborted": "Task stopped"
+        }
     },
     "imageGeneration": {
         "generating": "Generating image, please wait…",

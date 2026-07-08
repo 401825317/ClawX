@@ -12,6 +12,7 @@ import { buildBaselineRunKey, getBaseline } from '@/stores/baseline-cache';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
 import { useArtifactPanel } from '@/stores/artifact-panel';
+import { useSettingsStore } from '@/stores/settings';
 import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -27,6 +28,7 @@ import {
   getPostTriggerSegmentMessages,
   getRunSegmentMessages,
   hasActiveStreamingReplyInRun,
+  isVisibleRuntimePlanStep,
   parseSubagentCompletionInfo,
   segmentHasFinalReply,
   type TaskStep,
@@ -70,6 +72,8 @@ type UserRunCard = {
   steps: TaskStep[];
   messageStepTexts: string[];
   streamingReplyText: string | null;
+  elapsedStartedAtMs: number | null;
+  elapsedCompletedMs: number | null;
   /**
    * Whether the trailing "Thinking..." indicator should be hidden for this
    * card. True only when the run's live stream is currently rendered AS a
@@ -93,6 +97,11 @@ type QuestionDirectoryItem = {
 const QUESTION_DIRECTORY_RENDER_LIMIT = 300;
 const CHILD_TRANSCRIPT_LOAD_LIMIT = 3;
 
+type Translate = (key: string, params?: Record<string, unknown> | string) => string;
+type RunCompactKind = 'image' | 'video' | 'artifact' | 'generic';
+
+const PROBLEM_STEP_STATUSES = new Set<TaskStep['status']>(['error', 'blocked', 'failed', 'aborted']);
+
 function getPrimaryMessageStepTexts(steps: TaskStep[]): string[] {
   return steps
     .filter((step) => step.kind === 'message' && step.parentId === 'agent-run' && !!step.detail)
@@ -105,6 +114,85 @@ function sanitizeGraphSteps(steps: TaskStep[]): TaskStep[] {
     if (step.kind === 'message' && step.detail && isInternalProcessNarration(step.detail)) return false;
     return true;
   });
+}
+
+function runCardHasProblem(card: UserRunCard): boolean {
+  return card.steps.some((step) => PROBLEM_STEP_STATUSES.has(step.status));
+}
+
+function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
+  const problemStep = card.steps.find((step) => PROBLEM_STEP_STATUSES.has(step.status));
+  if (problemStep) return problemStep.status;
+  return card.active ? 'running' : 'completed';
+}
+
+function taskStepSearchText(step: TaskStep): string {
+  return `${step.label}\n${step.detail ?? ''}`.toLowerCase();
+}
+
+function formatRunElapsedDuration(durationMs: number | null | undefined): string | null {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return null;
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes === 0 ? `${hours}h` : `${hours}h ${remainingMinutes}m`;
+}
+
+function getRunDurationStepElapsedMs(steps: TaskStep[]): number | null {
+  const durationStep = steps.find((step) => step.id === 'run-duration' && typeof step.durationMs === 'number');
+  return durationStep?.durationMs ?? null;
+}
+
+function getRunCardElapsedMs(card: UserRunCard, nowMs: number): number | null {
+  if (card.active && card.elapsedStartedAtMs != null) {
+    return Math.max(0, nowMs - card.elapsedStartedAtMs);
+  }
+  return card.elapsedCompletedMs ?? getRunDurationStepElapsedMs(card.steps);
+}
+
+function getCompletedRunElapsedMs(run: ChatRuntimeRunState | null, startedAtMs: number | null): number | null {
+  if (!run || startedAtMs == null) return null;
+  const endedAtMs = getRunLastEventMs(run);
+  if (endedAtMs == null || endedAtMs < startedAtMs) return null;
+  return endedAtMs - startedAtMs;
+}
+
+function inferRunCompactKind(card: UserRunCard, generatedFiles: GeneratedFile[]): RunCompactKind {
+  const stepText = card.steps.map(taskStepSearchText).join('\n');
+  if (/(video_generate|video generation|video|视频)/i.test(stepText)) return 'video';
+  if (/(image_generate|image_edit|image generation|image|图片|图像|修图)/i.test(stepText)) return 'image';
+  if (generatedFiles.length > 0 || /(artifact|file|ppt|excel|document|文件|产物|文档|表格|小程序)/i.test(stepText)) {
+    return 'artifact';
+  }
+  return 'generic';
+}
+
+function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile[], t: Translate, nowMs: number): string {
+  const status = getRunCompactStatus(card);
+  const withElapsed = (summary: string): string => {
+    const elapsed = formatRunElapsedDuration(getRunCardElapsedMs(card, nowMs));
+    return elapsed ? `${summary} · ${elapsed}` : summary;
+  };
+  if (status === 'blocked') return withElapsed(t('executionGraph.compact.blocked'));
+  if (status === 'failed' || status === 'error') return withElapsed(t('executionGraph.compact.failed'));
+  if (status === 'aborted') return withElapsed(t('executionGraph.compact.aborted'));
+
+  const kind = inferRunCompactKind(card, generatedFiles);
+  if (card.active) {
+    if (kind === 'image') return withElapsed(t('executionGraph.compact.generatingImage'));
+    if (kind === 'video') return withElapsed(t('executionGraph.compact.generatingVideo'));
+    if (kind === 'artifact') return withElapsed(t('executionGraph.compact.workingArtifact'));
+    return withElapsed(t('executionGraph.compact.working'));
+  }
+
+  if (kind === 'image') return withElapsed(t('executionGraph.compact.imageDone'));
+  if (kind === 'video') return withElapsed(t('executionGraph.compact.videoDone'));
+  if (kind === 'artifact') return withElapsed(t('executionGraph.compact.artifactDone'));
+  return withElapsed(t('executionGraph.compact.done'));
 }
 
 function buildQuestionDirectoryTitle(message: RawMessage, fallback: string): string {
@@ -171,17 +259,33 @@ function hasRunningRuntimeTool(run: ChatRuntimeRunState | null): boolean {
   return Array.from(toolStatuses.values()).some((status) => status === 'running');
 }
 
+function isFilteredRuntimeToolName(name: string | undefined | null): boolean {
+  const normalized = typeof name === 'string' ? name.trim().toLowerCase() : '';
+  return normalized === 'process';
+}
+
+function gateHasVisibleRuntimeWork(gate: NonNullable<ChatRuntimeRunState['gateResult']>): boolean {
+  return gate.artifactCount > 0
+    || gate.requiredVerificationCount > 0
+    || gate.blockingIssueCount > 0
+    || gate.warningIssueCount > 0
+    || gate.issues.length > 0
+    || gate.decision !== 'deliverable';
+}
+
 function hasRuntimeGraphActivity(run: ChatRuntimeRunState | null): boolean {
   return Boolean(run?.events.some((event) =>
-    event.type === 'tool.started'
-    || event.type === 'tool.updated'
-    || event.type === 'tool.completed'
+    (event.type === 'run.plan.updated' && event.steps.some(isVisibleRuntimePlanStep))
+    || (event.type === 'run.step.updated' && isVisibleRuntimePlanStep(event.step))
+    || (event.type === 'tool.started' && !isFilteredRuntimeToolName(event.name))
+    || (event.type === 'tool.updated' && !isFilteredRuntimeToolName(event.name))
+    || (event.type === 'tool.completed' && !isFilteredRuntimeToolName(event.name))
     || event.type === 'artifact.produced'
     || event.type === 'verification.completed'
     || event.type === 'gate.issue'
     || event.type === 'run.checkpoint'
-    || event.type === 'gate.evaluated'
-    || event.type === 'command.output'
+    || (event.type === 'gate.evaluated' && gateHasVisibleRuntimeWork(event.gate))
+    || (event.type === 'command.output' && !isFilteredRuntimeToolName(event.name))
     || event.type === 'patch.completed'
     || event.type === 'approval.updated',
   ));
@@ -428,6 +532,7 @@ export function Chat() {
   const sendMessage = useChatStore((s) => s.sendMessage);
   const abortRun = useChatStore((s) => s.abortRun);
   const clearError = useChatStore((s) => s.clearError);
+  const devModeUnlocked = useSettingsStore((s) => s.devModeUnlocked);
   const fetchAgents = useAgentsStore((s) => s.fetchAgents);
   const agents = useAgentsStore((s) => s.agents);
 
@@ -442,6 +547,7 @@ export function Chat() {
     ? getAgentAvatar(currentAgent.profile.avatarId).src
     : DEFAULT_AGENT_AVATAR_SRC;
   const [imageEditReference, setImageEditReference] = useState<ImageEditReference | null>(null);
+  const [runtimeNowMs, setRuntimeNowMs] = useState(() => Date.now());
   const panelOpen = useArtifactPanel((s) => s.open);
   const panelWidthPct = useArtifactPanel((s) => s.widthPct);
   const openChanges = useArtifactPanel((s) => s.openChanges);
@@ -881,6 +987,12 @@ export function Chat() {
     const segmentAgentId = currentAgentId;
     const segmentAgentLabel = agents.find((agent) => agent.id === segmentAgentId)?.name || segmentAgentId;
     const segmentSessionLabel = sessionLabels[currentSessionKey] || currentSessionKey;
+    const elapsedStartedAtMs = segmentRuntimeRun
+      ? (getRunFirstEventMs(segmentRuntimeRun) ?? getSegmentStartMs(message, lastUserMessageAt))
+      : getSegmentStartMs(message, lastUserMessageAt);
+    const elapsedCompletedMs = isLatestOpenRun
+      ? null
+      : getCompletedRunElapsedMs(segmentRuntimeRun, elapsedStartedAtMs);
 
     if (steps.length === 0) {
       if (isLatestOpenRun && streamingReplyText == null) {
@@ -889,6 +1001,9 @@ export function Chat() {
         // (blocked chat.send RPC, slow provider). Do not show an empty graph
         // that hides the reply behind "Thinking..." (#1048).
         if (historyReplyOffset >= 0 && !hasActiveStreamingReply) {
+          return [];
+        }
+        if (!hasToolActivity && !hasStreamTools && !hasStreamToolStatus) {
           return [];
         }
         return [{
@@ -901,6 +1016,8 @@ export function Chat() {
           steps: [],
           messageStepTexts: [],
           streamingReplyText: null,
+          elapsedStartedAtMs,
+          elapsedCompletedMs: null,
           suppressThinking: false,
         }];
       }
@@ -923,6 +1040,8 @@ export function Chat() {
         steps: cleanedSteps,
         messageStepTexts: getPrimaryMessageStepTexts(cleanedSteps),
         streamingReplyText: null,
+        elapsedStartedAtMs: null,
+        elapsedCompletedMs: elapsedCompletedMs ?? getRunDurationStepElapsedMs(cleanedSteps),
         suppressThinking: false,
       }];
     }
@@ -990,6 +1109,8 @@ export function Chat() {
       steps,
       messageStepTexts: getPrimaryMessageStepTexts(steps),
       streamingReplyText,
+      elapsedStartedAtMs,
+      elapsedCompletedMs: cardActive ? null : (elapsedCompletedMs ?? getRunDurationStepElapsedMs(steps)),
       suppressThinking,
     }];
     });
@@ -1007,8 +1128,18 @@ export function Chat() {
       foldedNarrationIndices,
       userRunCardsByTriggerIndex,
     };
-  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns, lastUserMessageAt]);
+  }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, hasStreamTools, hasStreamToolStatus, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns, lastUserMessageAt]);
   const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
+
+  useEffect(() => {
+    if (!hasActiveExecutionGraph) return;
+    setRuntimeNowMs(Date.now());
+    const timer = window.setInterval(() => {
+      setRuntimeNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveExecutionGraph]);
+
   const foldedProcessMessageIndices = useMemo(() => {
     const indices = new Set<number>();
     for (const card of userRunCards) {
@@ -1128,13 +1259,6 @@ export function Chat() {
     if (sending) return undefined;
     return lastUserMessageAt ?? 0;
   }, [sending, lastUserMessageAt]);
-
-  const autoCollapsedRunKeys = useMemo(() => {
-    // Keep the execution process expanded after completion. Users can still
-    // collapse a run manually; we just no longer replace finished runs with
-    // the one-line "tool calls / process messages" summary by default.
-    return new Set<string>();
-  }, []);
 
   useEffect(() => {
     if (userRunCards.length === 0) return;
@@ -1287,29 +1411,36 @@ export function Chat() {
                             ? `msg-${triggerMsg.id}`
                             : `${currentSessionKey}:trigger-${card.triggerIndex}`;
                           const userOverride = graphExpandedOverrides[runKey];
-                          // Always use the controlled expanded prop instead of
-                          // relying on ExecutionGraphCard's uncontrolled state.
-                          // Uncontrolled state is lost on remount (key changes
-                          // when loadHistory replaces message ids), causing
-                          // spurious collapse.  The controlled prop survives
-                          // remounts because it's computed fresh each render.
-                          const expanded = userOverride != null
-                            ? userOverride
-                            : !autoCollapsedRunKeys.has(runKey);
                           const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
+                          const compactStatus = getRunCompactStatus(card);
+                          const hasProblem = runCardHasProblem(card);
+                          const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
+                          const detailsEnabled = card.active || devModeUnlocked || hasProblem;
+                          const shouldShowRunStatus = detailsEnabled || generatedFiles.length > 0 || hasElapsedSummary;
+                          if (!shouldShowRunStatus && generatedFiles.length === 0) return null;
+                          // Keep the run surface compact by default. User toggles
+                          // persist across history refreshes through this controlled
+                          // prop; developer diagnostics remain one click away.
+                          const expanded = detailsEnabled ? (userOverride ?? false) : false;
+                          const compactSummary = buildRunCompactSummary(card, generatedFiles, t, runtimeNowMs);
                           return (
                             <div key={`run-${currentSessionKey}:${card.triggerIndex}`} className="space-y-3">
-                              <ExecutionGraphCard
-                                key={`graph-${currentSessionKey}:${card.triggerIndex}`}
-                                agentLabel={card.agentLabel}
-                                steps={card.steps}
-                                active={card.active}
-                                suppressThinking={card.suppressThinking}
-                                expanded={expanded}
-                                onExpandedChange={(next) =>
-                                  setGraphExpandedOverrides((prev) => ({ ...prev, [runKey]: next }))
-                                }
-                              />
+                              {shouldShowRunStatus && (
+                                <ExecutionGraphCard
+                                  key={`graph-${currentSessionKey}:${card.triggerIndex}`}
+                                  agentLabel={card.agentLabel}
+                                  steps={card.steps}
+                                  active={card.active}
+                                  compactSummary={compactSummary}
+                                  compactStatus={compactStatus}
+                                  detailsEnabled={detailsEnabled}
+                                  suppressThinking={card.suppressThinking}
+                                  expanded={expanded}
+                                  onExpandedChange={(next) =>
+                                    setGraphExpandedOverrides((prev) => ({ ...prev, [runKey]: next }))
+                                  }
+                                />
+                              )}
                               {generatedFiles.length > 0 && (
                                 <GeneratedFilesPanel
                                   files={generatedFiles}
@@ -1380,11 +1511,11 @@ export function Chat() {
                     <ActivityIndicator phase="tool_processing" />
                   )}
 
-                  {pendingImageGeneration && (
+                  {pendingImageGeneration && !hasActiveExecutionGraph && (
                     <ImageGeneratingIndicator />
                   )}
 
-                  {pendingVideoGeneration && (
+                  {pendingVideoGeneration && !hasActiveExecutionGraph && (
                     <VideoGeneratingIndicator />
                   )}
 

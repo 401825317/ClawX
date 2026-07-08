@@ -77,6 +77,23 @@ function uniqueImageFileName(index, mimeType) {
   return `uclaw-image-${index + 1}-${compactTimestamp()}-${randomUUID().slice(0, 8)}.${imageFileExtensionForMimeType(mimeType)}`;
 }
 
+function nowMs() {
+  return Date.now();
+}
+
+function durationSince(startedAt) {
+  return Math.max(0, nowMs() - startedAt);
+}
+
+function sanitizeErrorMessage(error) {
+  if (error instanceof Error) return error.message;
+  return String(error || 'unknown error');
+}
+
+function logImageTiming(event, details = {}) {
+  console.error(`[clawx-openai-image] ${event} ${JSON.stringify(details)}`);
+}
+
 function normalizeMimeType(mimeType) {
   return String(mimeType || '').split(';')[0].trim().toLowerCase();
 }
@@ -166,31 +183,69 @@ function parseDataUrlImage(dataUrl) {
   };
 }
 
-async function fetchImageUrl(url) {
+async function fetchImageUrl(url, context = {}) {
+  const startedAt = nowMs();
   const trimmed = String(url || '').trim();
   if (!trimmed) return null;
   const dataImage = parseDataUrlImage(trimmed);
-  if (dataImage) return dataImage;
+  if (dataImage) {
+    logImageTiming('image_data_url_decoded', {
+      requestId: context.requestId,
+      index: context.index,
+      durationMs: durationSince(startedAt),
+      bytes: dataImage.buffer.byteLength,
+      mimeType: dataImage.mimeType,
+    });
+    return dataImage;
+  }
   if (!/^https?:\/\//iu.test(trimmed)) {
     throw new Error(`UClaw OpenAI image response returned unsupported image URL: ${trimmed.slice(0, 80)}`);
   }
-  const response = await undiciFetch(trimmed, {
-    method: 'GET',
-    dispatcher: imageFetchDispatcher,
+  const parsedUrl = new URL(trimmed);
+  logImageTiming('image_url_fetch_start', {
+    requestId: context.requestId,
+    index: context.index,
+    host: parsedUrl.host,
+    path: parsedUrl.pathname,
   });
-  if (!response.ok) {
-    throw new Error(`UClaw OpenAI image URL fetch failed: HTTP ${response.status}`);
+  try {
+    const response = await undiciFetch(trimmed, {
+      method: 'GET',
+      dispatcher: imageFetchDispatcher,
+    });
+    if (!response.ok) {
+      throw new Error(`UClaw OpenAI image URL fetch failed: HTTP ${response.status}`);
+    }
+    const contentType = normalizeMimeType(response.headers.get('content-type')) || DEFAULT_MIME_TYPE;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    logImageTiming('image_url_fetch_done', {
+      requestId: context.requestId,
+      index: context.index,
+      status: response.status,
+      durationMs: durationSince(startedAt),
+      bytes: buffer.byteLength,
+      mimeType: contentType,
+    });
+    return {
+      buffer,
+      mimeType: contentType,
+    };
+  } catch (error) {
+    logImageTiming('image_url_fetch_failed', {
+      requestId: context.requestId,
+      index: context.index,
+      durationMs: durationSince(startedAt),
+      error: sanitizeErrorMessage(error).slice(0, 240),
+    });
+    throw error;
   }
-  const contentType = normalizeMimeType(response.headers.get('content-type')) || DEFAULT_MIME_TYPE;
-  return {
-    buffer: Buffer.from(await response.arrayBuffer()),
-    mimeType: contentType,
-  };
 }
 
-async function parseImagesResponse(payload) {
+async function parseImagesResponse(payload, context = {}) {
+  const startedAt = nowMs();
   const data = Array.isArray(payload?.data) ? payload.data : [];
   const images = await Promise.all(data.map(async (entry, index) => {
+    const itemStartedAt = nowMs();
     const base64 = typeof entry?.b64_json === 'string' ? entry.b64_json.trim() : '';
     const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
     const fetched = base64
@@ -200,8 +255,16 @@ async function parseImagesResponse(payload) {
           ? entry.mime_type.trim()
           : DEFAULT_MIME_TYPE,
       }
-      : await fetchImageUrl(url);
+      : await fetchImageUrl(url, { requestId: context.requestId, index });
     if (!fetched) return null;
+    logImageTiming('image_payload_decoded', {
+      requestId: context.requestId,
+      index,
+      source: base64 ? 'b64_json' : 'url',
+      durationMs: durationSince(itemStartedAt),
+      bytes: fetched.buffer.byteLength,
+      mimeType: fetched.mimeType,
+    });
     const image = {
       buffer: fetched.buffer,
       mimeType: fetched.mimeType,
@@ -212,7 +275,14 @@ async function parseImagesResponse(payload) {
     }
     return image;
   }));
-  return images.filter(Boolean);
+  const parsedImages = images.filter(Boolean);
+  logImageTiming('images_parsed', {
+    requestId: context.requestId,
+    responseItems: data.length,
+    outputImages: parsedImages.length,
+    durationMs: durationSince(startedAt),
+  });
+  return parsedImages;
 }
 
 async function readJsonResponse(response, failureLabel) {
@@ -339,6 +409,8 @@ function buildProvider() {
     },
     isConfigured: ({ cfg }) => Boolean(String(cfg?.models?.providers?.[PROVIDER_ID]?.apiKey || '').trim()),
     async generateImage(req) {
+      const requestId = randomUUID().slice(0, 8);
+      const startedAt = nowMs();
       const inputImages = req.inputImages ?? [];
       if (inputImages.length > MAX_INPUT_IMAGES) {
         throw new Error(`UClaw OpenAI image editing supports up to ${MAX_INPUT_IMAGES} reference images.`);
@@ -356,7 +428,21 @@ function buildProvider() {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), resolveTimeoutMs(req));
       try {
-        console.info(`[clawx-openai-image] route mode=${mode} inputImageCount=${inputImages.length} model=${model} path=${upstreamPath}`);
+        const requestBody = mode === 'edit'
+          ? editMultipart.body
+          : JSON.stringify(buildGenerateBody(req, model, count));
+        logImageTiming('request_start', {
+          requestId,
+          mode,
+          inputImageCount: inputImages.length,
+          model,
+          path: upstreamPath,
+          count,
+          size: req.size ?? DEFAULT_SIZE,
+          quality: req.quality || null,
+          requestBodyBytes: Buffer.byteLength(requestBody),
+        });
+        const requestStartedAt = nowMs();
         const response = await undiciFetch(upstreamUrl, {
           method: 'POST',
           headers: mode === 'edit'
@@ -368,17 +454,41 @@ function buildProvider() {
               Authorization: `Bearer ${apiKey}`,
               'Content-Type': 'application/json',
             },
-          body: mode === 'edit'
-            ? editMultipart.body
-            : JSON.stringify(buildGenerateBody(req, model, count)),
+          body: requestBody,
           signal: controller.signal,
           dispatcher: imageFetchDispatcher,
         });
+        logImageTiming('response_headers', {
+          requestId,
+          status: response.status,
+          durationMs: durationSince(requestStartedAt),
+        });
+        const parseStartedAt = nowMs();
         const payload = await readJsonResponse(
           response,
           mode === 'edit' ? 'UClaw OpenAI image edit failed' : 'UClaw OpenAI image generation failed',
         );
-        return { images: await parseImagesResponse(payload) };
+        logImageTiming('response_json_parsed', {
+          requestId,
+          durationMs: durationSince(parseStartedAt),
+          responseItems: Array.isArray(payload?.data) ? payload.data.length : 0,
+        });
+        const images = await parseImagesResponse(payload, { requestId });
+        logImageTiming('request_done', {
+          requestId,
+          mode,
+          totalDurationMs: durationSince(startedAt),
+          outputImages: images.length,
+        });
+        return { images };
+      } catch (error) {
+        logImageTiming('request_failed', {
+          requestId,
+          mode,
+          totalDurationMs: durationSince(startedAt),
+          error: sanitizeErrorMessage(error).slice(0, 240),
+        });
+        throw error;
       } finally {
         clearTimeout(timeout);
       }

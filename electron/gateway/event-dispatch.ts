@@ -100,6 +100,7 @@ function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatR
       toolCallId: event.toolCallId,
       name: event.name,
       isError: event.type === 'tool.completed' ? event.isError : undefined,
+      durationMs: event.type === 'tool.completed' ? event.durationMs : undefined,
     });
     return;
   }

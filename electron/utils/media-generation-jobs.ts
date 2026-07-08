@@ -8,6 +8,7 @@ import { logger } from './logger';
 import type {
   MediaGenerationKind,
   MediaGenerationJobPayload,
+  MediaGenerationProgressEvent,
   MediaGenerationJobSnapshot,
   MediaGenerationWorkerRequest,
   MediaGenerationWorkerResponse,
@@ -29,6 +30,7 @@ const MAX_JOB_HISTORY = 50;
 const MAX_WORKER_OUTPUT_CHARS = 4096;
 const MAX_WORKER_LOG_CHARS = 1024;
 const MAX_JOB_ERROR_CHARS = 12_000;
+const MAX_JOB_PROGRESS_EVENTS = 80;
 const USER_FACING_UPSTREAM_MEDIA_ERROR = '上游渠道报错，生成失败了，请稍后重试。';
 const MEDIA_GENERATION_CONCURRENCY: Record<MediaGenerationKind, number> = {
   image: 5,
@@ -77,7 +79,404 @@ function cloneSnapshot(job: InternalMediaGenerationJob): MediaGenerationJobSnaps
     runDurationMs: startedAt
       ? Math.max(0, (completedAt ?? Date.now()) - startedAt)
       : undefined,
+    progressEvents: [...(job.progressEvents ?? [])],
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function formatDurationMs(ms: unknown): string | undefined {
+  const durationMs = readNumber(ms);
+  if (durationMs == null) return undefined;
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+  if (durationMs < 10_000) return `${(durationMs / 1000).toFixed(1)}s`;
+  return `${Math.round(durationMs / 1000)}s`;
+}
+
+function formatByteSize(bytes: unknown): string | undefined {
+  const size = readNumber(bytes);
+  if (size == null || size < 0) return undefined;
+  if (size < 1024) return `${Math.round(size)}B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)}KB`;
+  return `${(size / 1024 / 1024).toFixed(1)}MB`;
+}
+
+function compactDetail(lines: Array<string | undefined>): string | undefined {
+  const detail = lines.filter((line): line is string => Boolean(line && line.trim())).join('\n');
+  return detail || undefined;
+}
+
+function buildProgressEvent(input: Omit<MediaGenerationProgressEvent, 'timestampMs'> & {
+  timestampMs?: number;
+}): MediaGenerationProgressEvent {
+  return {
+    ...input,
+    timestampMs: input.timestampMs ?? Date.now(),
+  };
+}
+
+function upsertProgressEvent(job: InternalMediaGenerationJob, event: MediaGenerationProgressEvent): void {
+  const current = job.progressEvents ?? [];
+  const existingIndex = current.findIndex((item) => item.id === event.id);
+  const next = existingIndex >= 0
+    ? current.map((item, index) => (index === existingIndex ? { ...item, ...event } : item))
+    : [...current, event];
+  job.progressEvents = next.slice(-MAX_JOB_PROGRESS_EVENTS);
+  job.updatedAt = Date.now();
+}
+
+function recordJobProgress(job: InternalMediaGenerationJob, event: Omit<MediaGenerationProgressEvent, 'source' | 'timestampMs'> & {
+  timestampMs?: number;
+}): void {
+  upsertProgressEvent(job, buildProgressEvent({
+    source: 'job',
+    ...event,
+  }));
+}
+
+function stringifyMetadata(details: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+  for (const key of keys) {
+    const value = details[key];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      metadata[key] = value;
+    }
+  }
+  return metadata;
+}
+
+function progressForStructuredWorkerEvent(
+  job: InternalMediaGenerationJob,
+  source: 'worker' | 'runtime' | 'plugin',
+  eventName: string,
+  details: Record<string, unknown>,
+): MediaGenerationProgressEvent | null {
+  const requestId = readString(details.requestId) ?? job.id;
+  const index = readNumber(details.index) ?? readNumber(details.outputIndex) ?? 0;
+  const durationMs = readNumber(details.durationMs) ?? readNumber(details.totalDurationMs);
+  const durationText = formatDurationMs(durationMs);
+  const bytesText = formatByteSize(details.bytes);
+  const model = readString(details.model);
+  const size = readString(details.size);
+  const quality = readString(details.quality);
+  const statusCode = readNumber(details.status);
+  const host = readString(details.host);
+
+  if (source === 'worker') {
+    switch (eventName) {
+      case 'image_start':
+        return buildProgressEvent({
+          id: 'worker:image',
+          source,
+          event: eventName,
+          label: '图片生成执行',
+          status: 'running',
+          detail: compactDetail([
+            model ? `模型：${model}` : undefined,
+            size ? `尺寸：${size}` : undefined,
+            quality ? `质量：${quality}` : undefined,
+            `参考图：${readNumber(details.inputImageCount) ?? 0} 张`,
+          ]),
+          metadata: stringifyMetadata(details, ['model', 'size', 'quality', 'promptChars']),
+        });
+      case 'image_done':
+        return buildProgressEvent({
+          id: 'worker:image',
+          source,
+          event: eventName,
+          label: '图片生成执行',
+          status: 'completed',
+          detail: compactDetail([durationText ? `总耗时：${durationText}` : undefined]),
+          durationMs,
+        });
+      case 'video_start':
+      case 'pipeline_video_start':
+        return buildProgressEvent({
+          id: eventName === 'video_start' ? 'worker:video' : 'worker:pipeline-video',
+          source,
+          event: eventName,
+          label: eventName === 'video_start' ? '视频生成执行' : '生成视频阶段',
+          status: 'running',
+          detail: compactDetail([
+            size ? `尺寸：${size}` : undefined,
+            readNumber(details.durationSeconds) ? `时长：${details.durationSeconds}s` : undefined,
+          ]),
+          metadata: stringifyMetadata(details, ['size', 'durationSeconds', 'promptChars']),
+        });
+      case 'video_done':
+      case 'pipeline_video_done':
+        return buildProgressEvent({
+          id: eventName === 'video_done' ? 'worker:video' : 'worker:pipeline-video',
+          source,
+          event: eventName,
+          label: eventName === 'video_done' ? '视频生成执行' : '生成视频阶段',
+          status: 'completed',
+          detail: compactDetail([
+            durationText ? `阶段耗时：${durationText}` : undefined,
+            formatDurationMs(details.totalDurationMs) ? `总耗时：${formatDurationMs(details.totalDurationMs)}` : undefined,
+          ]),
+          durationMs,
+        });
+      case 'pipeline_start':
+        return buildProgressEvent({
+          id: 'worker:pipeline',
+          source,
+          event: eventName,
+          label: '图像到视频流水线',
+          status: 'running',
+          detail: compactDetail([
+            readString(details.mode) ? `模式：${readString(details.mode)}` : undefined,
+            size ? `尺寸：${size}` : undefined,
+            readNumber(details.durationSeconds) ? `时长：${details.durationSeconds}s` : undefined,
+          ]),
+          metadata: stringifyMetadata(details, ['mode', 'size', 'durationSeconds']),
+        });
+      case 'pipeline_image_edit_start':
+        return buildProgressEvent({
+          id: 'worker:pipeline-image-edit',
+          source,
+          event: eventName,
+          label: '先修图',
+          status: 'running',
+          detail: compactDetail([readNumber(details.promptChars) ? `提示词：${details.promptChars} 字符` : undefined]),
+          metadata: stringifyMetadata(details, ['promptChars']),
+        });
+      case 'pipeline_image_edit_done':
+        return buildProgressEvent({
+          id: 'worker:pipeline-image-edit',
+          source,
+          event: eventName,
+          label: '先修图',
+          status: 'completed',
+          detail: compactDetail([durationText ? `阶段耗时：${durationText}` : undefined]),
+          durationMs,
+        });
+      default:
+        return null;
+    }
+  }
+
+  if (source === 'runtime') {
+    switch (eventName) {
+      case 'start':
+        return buildProgressEvent({
+          id: 'runtime:image',
+          source,
+          event: eventName,
+          label: '图片运行时',
+          status: 'running',
+          detail: compactDetail([
+            model ? `模型：${model}` : undefined,
+            size ? `尺寸：${size}` : undefined,
+            quality ? `质量：${quality}` : undefined,
+          ]),
+          metadata: stringifyMetadata(details, ['model', 'size', 'quality', 'timeoutMs']),
+        });
+      case 'provider_done':
+        return buildProgressEvent({
+          id: 'runtime:provider',
+          source,
+          event: eventName,
+          label: '图片提供方返回',
+          status: 'completed',
+          detail: compactDetail([
+            durationText ? `耗时：${durationText}` : undefined,
+            readNumber(details.outputImages) ? `输出：${details.outputImages} 张` : undefined,
+          ]),
+          durationMs,
+          metadata: stringifyMetadata(details, ['provider', 'model', 'outputImages']),
+        });
+      case 'output_saved':
+        return buildProgressEvent({
+          id: `runtime:save:${index}`,
+          source,
+          event: eventName,
+          label: '保存本地产物',
+          status: 'completed',
+          detail: compactDetail([
+            formatDurationMs(details.saveDurationMs) ? `保存：${formatDurationMs(details.saveDurationMs)}` : undefined,
+            formatDurationMs(details.metadataDurationMs) ? `元数据：${formatDurationMs(details.metadataDurationMs)}` : undefined,
+            bytesText ? `大小：${bytesText}` : undefined,
+            readNumber(details.width) && readNumber(details.height) ? `分辨率：${details.width}x${details.height}` : undefined,
+            readString(details.path) ? `路径：${readString(details.path)}` : undefined,
+          ]),
+          durationMs: readNumber(details.saveDurationMs),
+          metadata: stringifyMetadata(details, ['outputIndex', 'bytes', 'mimeType', 'width', 'height']),
+        });
+      case 'done':
+        return buildProgressEvent({
+          id: 'runtime:image',
+          source,
+          event: eventName,
+          label: '图片运行时',
+          status: 'completed',
+          detail: compactDetail([
+            formatDurationMs(details.totalDurationMs) ? `总耗时：${formatDurationMs(details.totalDurationMs)}` : undefined,
+            readNumber(details.outputImages) ? `输出：${details.outputImages} 张` : undefined,
+          ]),
+          durationMs: readNumber(details.totalDurationMs),
+          metadata: stringifyMetadata(details, ['provider', 'model', 'outputImages']),
+        });
+      case 'failed':
+        return buildProgressEvent({
+          id: 'runtime:image',
+          source,
+          event: eventName,
+          label: '图片运行时',
+          status: 'error',
+          detail: compactDetail([
+            durationText ? `耗时：${durationText}` : undefined,
+            readString(details.error) ? `错误：${readString(details.error)}` : undefined,
+          ]),
+          durationMs,
+        });
+      default:
+        return null;
+    }
+  }
+
+  switch (eventName) {
+    case 'request_start':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:request`,
+        source,
+        event: eventName,
+        label: '请求图片后台',
+        status: 'running',
+        detail: compactDetail([
+          model ? `模型：${model}` : undefined,
+          size ? `尺寸：${size}` : undefined,
+          quality ? `质量：${quality}` : undefined,
+          readString(details.mode) ? `模式：${readString(details.mode)}` : undefined,
+        ]),
+        metadata: stringifyMetadata(details, ['mode', 'model', 'size', 'quality', 'count', 'inputImageCount']),
+      });
+    case 'response_headers':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:headers`,
+        source,
+        event: eventName,
+        label: '后台开始响应',
+        status: statusCode && statusCode >= 400 ? 'error' : 'completed',
+        detail: compactDetail([
+          statusCode ? `HTTP：${statusCode}` : undefined,
+          durationText ? `耗时：${durationText}` : undefined,
+        ]),
+        durationMs,
+        metadata: stringifyMetadata(details, ['status']),
+      });
+    case 'response_json_parsed':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:json`,
+        source,
+        event: eventName,
+        label: '解析后台响应',
+        status: 'completed',
+        detail: compactDetail([
+          durationText ? `耗时：${durationText}` : undefined,
+          readNumber(details.responseItems) ? `响应项：${details.responseItems}` : undefined,
+        ]),
+        durationMs,
+        metadata: stringifyMetadata(details, ['responseItems']),
+      });
+    case 'image_url_fetch_start':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:download:${index}`,
+        source,
+        event: eventName,
+        label: '下载生成图片',
+        status: 'running',
+        detail: compactDetail([host ? `Host：${host}` : undefined]),
+        metadata: host ? { host } : undefined,
+      });
+    case 'image_url_fetch_done':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:download:${index}`,
+        source,
+        event: eventName,
+        label: '下载生成图片',
+        status: 'completed',
+        detail: compactDetail([
+          durationText ? `耗时：${durationText}` : undefined,
+          bytesText ? `大小：${bytesText}` : undefined,
+          statusCode ? `HTTP：${statusCode}` : undefined,
+        ]),
+        durationMs,
+        metadata: stringifyMetadata(details, ['status', 'bytes', 'mimeType']),
+      });
+    case 'image_url_fetch_failed':
+    case 'request_failed':
+      return buildProgressEvent({
+        id: eventName === 'request_failed' ? `plugin:${requestId}:request` : `plugin:${requestId}:download:${index}`,
+        source,
+        event: eventName,
+        label: eventName === 'request_failed' ? '请求图片后台' : '下载生成图片',
+        status: 'error',
+        detail: compactDetail([
+          durationText ? `耗时：${durationText}` : undefined,
+          readString(details.error) ? `错误：${readString(details.error)}` : undefined,
+        ]),
+        durationMs,
+      });
+    case 'image_payload_decoded':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:decode:${index}`,
+        source,
+        event: eventName,
+        label: '解码图片数据',
+        status: 'completed',
+        detail: compactDetail([
+          durationText ? `耗时：${durationText}` : undefined,
+          bytesText ? `大小：${bytesText}` : undefined,
+          readString(details.source) ? `来源：${readString(details.source)}` : undefined,
+        ]),
+        durationMs,
+        metadata: stringifyMetadata(details, ['source', 'bytes', 'mimeType']),
+      });
+    case 'images_parsed':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:images`,
+        source,
+        event: eventName,
+        label: '整理图片响应',
+        status: 'completed',
+        detail: compactDetail([
+          durationText ? `耗时：${durationText}` : undefined,
+          readNumber(details.outputImages) ? `输出：${details.outputImages} 张` : undefined,
+        ]),
+        durationMs,
+        metadata: stringifyMetadata(details, ['responseItems', 'outputImages']),
+      });
+    case 'request_done':
+      return buildProgressEvent({
+        id: `plugin:${requestId}:request`,
+        source,
+        event: eventName,
+        label: '请求图片后台',
+        status: 'completed',
+        detail: compactDetail([
+          formatDurationMs(details.totalDurationMs) ? `总耗时：${formatDurationMs(details.totalDurationMs)}` : undefined,
+          readNumber(details.outputImages) ? `输出：${details.outputImages} 张` : undefined,
+        ]),
+        durationMs: readNumber(details.totalDurationMs),
+        metadata: stringifyMetadata(details, ['mode', 'outputImages']),
+      });
+    default:
+      return null;
+  }
 }
 
 function compactJobHistory(): void {
@@ -105,6 +504,19 @@ function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
   job.updatedAt = now;
   job.completedAt = now;
   job.error = normalizeUserFacingMediaGenerationError(error);
+  recordJobProgress(job, {
+    id: 'job:failed',
+    event: 'failed',
+    label: job.kind === 'image' ? '图片任务失败' : '视频任务失败',
+    status: 'error',
+    timestampMs: now,
+    detail: job.error,
+    durationMs: job.startedAt ? now - job.startedAt : undefined,
+    metadata: {
+      queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+      runDurationMs: job.startedAt ? now - job.startedAt : undefined,
+    },
+  });
 }
 
 function chunkToText(data: unknown): string {
@@ -171,6 +583,47 @@ function createBoundedOutputCapture(maxChars: number) {
 
 function formatWorkerLogChunk(data: unknown): string {
   return truncateText(normalizeCapturedText(chunkToText(data)), MAX_WORKER_LOG_CHARS);
+}
+
+function parseStructuredWorkerLogLine(line: string): {
+  source: 'worker' | 'runtime' | 'plugin';
+  eventName: string;
+  details: Record<string, unknown>;
+} | null {
+  const normalized = line.trim();
+  const match = normalized.match(/^\[(media-generation-worker|openclaw-image-runtime|clawx-openai-image)\]\s+([a-z0-9_]+)\s+(\{.*\})$/iu);
+  if (!match) return null;
+  const source = match[1] === 'media-generation-worker'
+    ? 'worker'
+    : match[1] === 'openclaw-image-runtime'
+      ? 'runtime'
+      : 'plugin';
+  try {
+    const details = JSON.parse(match[3] ?? '{}');
+    const record = asRecord(details);
+    if (!record) return null;
+    return {
+      source,
+      eventName: match[2] ?? 'unknown',
+      details: record,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function recordStructuredWorkerProgress(job: InternalMediaGenerationJob, data: unknown): void {
+  const text = chunkToText(data);
+  if (!text.trim()) return;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const parsed = parseStructuredWorkerLogLine(line);
+    if (!parsed) continue;
+    const progress = progressForStructuredWorkerEvent(job, parsed.source, parsed.eventName, parsed.details);
+    if (progress) {
+      upsertProgressEvent(job, progress);
+    }
+  }
 }
 
 function appendWorkerOutputToError(
@@ -241,6 +694,32 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
   job.status = 'running';
   job.startedAt = now;
   job.updatedAt = now;
+  recordJobProgress(job, {
+    id: 'job:queued',
+    event: 'queue_completed',
+    label: '队列等待',
+    status: 'completed',
+    timestampMs: now,
+    detail: `等待：${formatDurationMs(now - job.createdAt) ?? '0ms'}，并发：${activeJobIds[job.kind].size}/${MEDIA_GENERATION_CONCURRENCY[job.kind]}`,
+    durationMs: now - job.createdAt,
+    metadata: {
+      queueWaitMs: now - job.createdAt,
+      activeJobs: activeJobIds[job.kind].size,
+      maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[job.kind],
+    },
+  });
+  recordJobProgress(job, {
+    id: 'job:started',
+    event: 'started',
+    label: job.kind === 'image' ? '开始图片任务' : '开始视频任务',
+    status: 'running',
+    timestampMs: now,
+    detail: `并发：${activeJobIds[job.kind].size}/${MEDIA_GENERATION_CONCURRENCY[job.kind]}`,
+    metadata: {
+      activeJobs: activeJobIds[job.kind].size,
+      maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[job.kind],
+    },
+  });
   logger.info('[media-generation] job_started', {
     jobId: job.id,
     kind: job.kind,
@@ -307,6 +786,20 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
         job.status = 'succeeded';
         job.updatedAt = completedAt;
         job.completedAt = completedAt;
+        recordJobProgress(job, {
+          id: 'job:started',
+          event: 'completed',
+          label: job.kind === 'image' ? '图片任务执行完成' : '视频任务执行完成',
+          status: 'completed',
+          timestampMs: completedAt,
+          detail: `执行：${formatDurationMs(job.startedAt ? completedAt - job.startedAt : undefined) ?? '0ms'}，产物：${getOutputLocations(job.result).length}`,
+          durationMs: job.startedAt ? completedAt - job.startedAt : undefined,
+          metadata: {
+            queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+            runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
+            outputs: getOutputLocations(job.result).length,
+          },
+        });
         logger.info('[media-generation] job_succeeded', {
           jobId: job.id,
           kind: job.kind,
@@ -362,6 +855,7 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
 
     child.stderr?.on('data', (data) => {
       workerOutput.stderr.append(data);
+      recordStructuredWorkerProgress(job, data);
       const line = formatWorkerLogChunk(data);
       if (line) {
         logger.warn(`[media-generation-worker] ${line}`);
@@ -404,6 +898,20 @@ export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): M
     createdAt: now,
     updatedAt: now,
     payload,
+    progressEvents: [{
+      id: 'job:queued',
+      source: 'job',
+      event: 'queued',
+      label: '队列等待',
+      status: 'running',
+      timestampMs: now,
+      detail: `排队位置：${queues[payload.kind].length + 1}，并发：${activeJobIds[payload.kind].size}/${MEDIA_GENERATION_CONCURRENCY[payload.kind]}`,
+      metadata: {
+        queuePosition: queues[payload.kind].length + 1,
+        activeJobs: activeJobIds[payload.kind].size,
+        maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[payload.kind],
+      },
+    }],
   };
   jobs.set(job.id, job);
   queues[payload.kind].push(job.id);

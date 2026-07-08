@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Link, MessageSquare, Wrench, XCircle } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Link, Loader2, MessageSquare, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import type { TaskStep } from './task-visualization';
@@ -8,6 +8,9 @@ interface ExecutionGraphCardProps {
   agentLabel: string;
   steps: TaskStep[];
   active: boolean;
+  compactSummary?: string;
+  compactStatus?: TaskStep['status'];
+  detailsEnabled?: boolean;
   /** Hide the trailing "Thinking ..." indicator even when active. */
   suppressThinking?: boolean;
   /**
@@ -79,6 +82,13 @@ function summarizeStepDetail(step: TaskStep): string | undefined {
   return summarizePreviewLine(detail);
 }
 
+function formatDuration(durationMs?: number): string | null {
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return null;
+  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+  if (durationMs < 10_000) return `${(durationMs / 1000).toFixed(1)}s`;
+  return `${Math.round(durationMs / 1000)}s`;
+}
+
 function AnimatedDots({ className }: { className?: string }) {
   return (
     <span className={cn('flex items-center gap-0.5 leading-none text-muted-foreground', className)} aria-hidden="true">
@@ -93,6 +103,15 @@ function GraphStatusIcon({ status }: { status: TaskStep['status'] }) {
   if (status === 'completed') return <CheckCircle2 className="h-4 w-4" />;
   if (status === 'error') return <XCircle className="h-4 w-4" />;
   return <CircleDashed className="h-4 w-4" />;
+}
+
+function CompactStatusIcon({ status }: { status: TaskStep['status'] }) {
+  if (status === 'running') return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+  if (status === 'completed') return <CheckCircle2 className="h-3.5 w-3.5" />;
+  if (status === 'error' || status === 'failed' || status === 'blocked' || status === 'aborted') {
+    return <XCircle className="h-3.5 w-3.5" />;
+  }
+  return <CircleDashed className="h-3.5 w-3.5" />;
 }
 
 function StepDetailCard({ step }: { step: TaskStep }) {
@@ -116,6 +135,7 @@ function StepDetailCard({ step }: { step: TaskStep }) {
   const showRunningDots = (isTool || isThinking) && step.status === 'running';
   const hideStatusText = (isTool || isSystem) && step.status === 'completed';
   const detailPreview = summarizeStepDetail(step);
+  const duration = formatDuration(step.durationMs);
   const canExpand = hasDetail;
     const displayLabel = isThinking ? t('executionGraph.thinkingLabel') : (isTool ? displayToolLabel : step.label);
 
@@ -161,6 +181,11 @@ function StepDetailCard({ step }: { step: TaskStep }) {
                   {detailPreview}
                 </p>
               )}
+              {duration && (
+                <span className="shrink-0 whitespace-nowrap rounded-full bg-black/5 px-2 py-0.5 text-2xs font-medium text-muted-foreground dark:bg-white/10">
+                  {duration}
+                </span>
+              )}
               {!hideStatusText && !showRunningDots && (
                 <span className="shrink-0 whitespace-nowrap rounded-full bg-black/5 px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground dark:bg-white/10">
                   {t(`taskPanel.stepStatus.${step.status}`)}
@@ -168,11 +193,6 @@ function StepDetailCard({ step }: { step: TaskStep }) {
               )}
               {showRunningDots && (
                 <AnimatedDots className="text-sm" />
-              )}
-              {step.depth > 1 && (
-                <span className="shrink-0 whitespace-nowrap rounded-full bg-black/5 px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground dark:bg-white/10">
-                  {t('executionGraph.branchLabel')}
-                </span>
               )}
             </div>
           )}
@@ -231,21 +251,23 @@ export function ExecutionGraphCard({
   agentLabel,
   steps,
   active,
+  compactSummary,
+  compactStatus,
+  detailsEnabled = true,
   suppressThinking = false,
   expanded: controlledExpanded,
   onExpandedChange,
 }: ExecutionGraphCardProps) {
   const { t } = useTranslation('chat');
 
-  // Active runs should stay expanded by default so the user can follow the
-  // execution live. Once the run completes, the default state returns to
-  // collapsed. Explicit user toggles remain controlled by the parent override.
-  const [uncontrolledExpanded, setUncontrolledExpanded] = useState(active);
+  // Keep the default surface compact. The full graph is a diagnostic detail,
+  // not the normal chat experience.
+  const [uncontrolledExpanded, setUncontrolledExpanded] = useState(false);
   const [prevActive, setPrevActive] = useState(active);
   if (prevActive !== active) {
     setPrevActive(active);
-    if (controlledExpanded == null && uncontrolledExpanded !== active) {
-      setUncontrolledExpanded(active);
+    if (controlledExpanded == null && uncontrolledExpanded) {
+      setUncontrolledExpanded(false);
     }
   }
 
@@ -259,8 +281,41 @@ export function ExecutionGraphCard({
   const toolCount = steps.filter((step) => step.kind === 'tool').length;
   const processCount = steps.length - toolCount;
   const shouldShowTrailingThinking = active && !suppressThinking;
+  const collapsedSummary = compactSummary || t('executionGraph.collapsedSummary', { toolCount, processCount });
+  const collapsedStatus = compactStatus || (active ? 'running' : 'completed');
+  const canExpandDetails = detailsEnabled && steps.length > 0;
+  const showDetailsAction = Boolean(compactSummary) && canExpandDetails;
 
-  if (!expanded) {
+  if (!expanded || !canExpandDetails) {
+    const collapsedContent = (
+      <>
+        <span className="shrink-0 text-muted-foreground">
+          <CompactStatusIcon status={collapsedStatus} />
+        </span>
+        <span className="min-w-0 flex-1 truncate">
+          {collapsedSummary}
+        </span>
+        {showDetailsAction && (
+          <span className="shrink-0 whitespace-nowrap rounded-full bg-black/5 px-2 py-0.5 text-2xs font-medium text-muted-foreground opacity-80 transition-opacity group-hover:opacity-100 dark:bg-white/10">
+            {t('executionGraph.detailsAction')}
+          </span>
+        )}
+        {canExpandDetails && (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5" />
+        )}
+      </>
+    );
+    if (!canExpandDetails) {
+      return (
+        <div
+          data-testid="chat-execution-graph"
+          data-collapsed="true"
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground"
+        >
+          {collapsedContent}
+        </div>
+      );
+    }
     return (
       <button
         type="button"
@@ -269,10 +324,7 @@ export function ExecutionGraphCard({
         onClick={() => setExpanded(true)}
         className="group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-black/5 hover:text-muted-foreground dark:hover:bg-white/5"
       >
-        <ChevronRight className="h-3.5 w-3.5 shrink-0 transition-transform group-hover:translate-x-0.5" />
-        <span className="truncate">
-          {t('executionGraph.collapsedSummary', { toolCount, processCount })}
-        </span>
+        {collapsedContent}
       </button>
     );
   }

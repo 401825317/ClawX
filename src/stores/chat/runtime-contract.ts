@@ -199,6 +199,10 @@ function approvalFailed(event: ChatRuntimeEvent): event is Extract<ChatRuntimeEv
     || event.status === 'error';
 }
 
+function isMediaObservationStep(step: ChatRuntimePlanStep): boolean {
+  return typeof step.kind === 'string' && step.kind.trim().toLowerCase().startsWith('media.');
+}
+
 export function buildRuntimeCompletionGateReport(
   run: ChatRuntimeRunState | undefined,
   pendingVerifications: ChatRuntimeVerification[] = [],
@@ -276,6 +280,7 @@ export function buildRuntimeCompletionGateReport(
 
   for (const [index, step] of steps.entries()) {
     if (isBuiltInGateStep(step.id)) continue;
+    if (isMediaObservationStep(step)) continue;
     if (step.status === 'error' || step.status === 'blocked') {
       issues.push({
         id: gateIssueId(run?.runId, 'step.failed', step.id, index),

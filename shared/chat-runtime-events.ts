@@ -26,6 +26,7 @@ export type ChatRuntimePlanStep = {
   title: string;
   status?: ChatRuntimeStepStatus;
   detail?: string;
+  durationMs?: number;
   kind?: string;
   order?: number;
   parentId?: string;
@@ -176,6 +177,7 @@ export type ChatRuntimeEvent =
       name: string;
       result?: unknown;
       meta?: unknown;
+      durationMs?: number;
       isError?: boolean;
     })
   | (ChatRuntimeEventBase & {

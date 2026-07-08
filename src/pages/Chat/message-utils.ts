@@ -30,6 +30,17 @@ function stripInboundMediaVisionEnvelope(text: string): string {
   return result.replace(/\n\s*Description:\s*\n[\s\S]*$/i, '').trim();
 }
 
+const QUEUED_USER_MESSAGE_MARKER = '[Queued user message that arrived while the previous turn was still active]';
+const GATEWAY_RESTART_CONTINUATION_RE = /\n{0,2}\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\.(?:\n\nNote:\s+The interrupted final reply was captured:\s+"[^"]*")?/giu;
+
+export function stripOpenClawRuntimeContinuationPrompt(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(GATEWAY_RESTART_CONTINUATION_RE, '')
+    .replace(new RegExp(`^\\s*${escapeRegExp(QUEUED_USER_MESSAGE_MARKER)}\\s*\\n?`, 'u'), '')
+    .trim();
+}
+
 export function stripCompositeExecutionContractEnvelope(text: string): string {
   if (!text) return text;
   return text
@@ -45,6 +56,10 @@ export function stripCompositeExecutionContractEnvelope(text: string): string {
 function cleanUserText(text: string): string {
   return stripInboundMediaVisionEnvelope(
     stripCompositeExecutionContractEnvelope(text)
+    // Remove OpenClaw internal recovery prompts that can be appended to
+    // queued user messages after a Gateway restart.
+    .replace(GATEWAY_RESTART_CONTINUATION_RE, '')
+    .replace(new RegExp(`^\\s*${escapeRegExp(QUEUED_USER_MESSAGE_MARKER)}\\s*\\n?`, 'u'), '')
     // Remove [media attached: path (mime) | path] references
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     // Remove [message_id: uuid]
@@ -229,6 +244,11 @@ export function isOpenClawRuntimeEventPrompt(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (/^Continue the OpenClaw runtime event\.?\s*$/i.test(trimmed)) return true;
+  const withoutGatewayRestartPrompt = stripOpenClawRuntimeContinuationPrompt(trimmed);
+  if (withoutGatewayRestartPrompt !== trimmed) {
+    return !withoutGatewayRestartPrompt
+      || /^\[OpenClaw heartbeat poll\]\s*$/i.test(withoutGatewayRestartPrompt);
+  }
   // Some transcripts store the prompt as the only line in a longer envelope.
   return trimmed.split(/\n+/).some((line) => /^Continue the OpenClaw runtime event\.?\s*$/i.test(line.trim()));
 }

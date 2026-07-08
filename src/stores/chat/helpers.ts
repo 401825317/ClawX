@@ -1772,6 +1772,7 @@ function queueBlockedRunEvent(runId: string, event: Record<string, unknown>): vo
 
 function isRealUserBoundaryMessage(msg: RawMessage): boolean {
   if (msg.role !== 'user') return false;
+  if (isInternalMessage(msg)) return false;
   if (!Array.isArray(msg.content)) return true;
   const blocks = msg.content as ContentBlock[];
   return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');

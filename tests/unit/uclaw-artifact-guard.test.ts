@@ -9,7 +9,7 @@ async function loadGuard() {
   );
 }
 
-type HookHandler = (event: unknown) => unknown;
+type HookHandler = (event: unknown, ctx?: unknown) => unknown;
 type ToolResultMiddleware = (event: unknown, ctx: unknown) => unknown | Promise<unknown>;
 
 const RAW_SEVEN_ARTIFACT_PROMPT = '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个';
@@ -23,6 +23,9 @@ function createHookRegistry(
   const toolResultMiddlewares: Array<{ handler: ToolResultMiddleware; options?: unknown }> = [];
   pluginModule.default.register({
     ...apiExtras,
+    on(name: string, handler: HookHandler) {
+      hooks.set(name, handler);
+    },
     registerHook(name: string, handler: HookHandler) {
       hooks.set(name, handler);
     },
@@ -73,13 +76,142 @@ describe('uclaw-artifact-guard', () => {
     const promptHook = hooks.get('before_prompt_build');
 
     expect(promptHook).toBeTypeOf('function');
-    const result = promptHook!({ runId: 'run-prompt-context' }) as { appendSystemContext?: string };
+    const result = await promptHook!({ runId: 'run-prompt-context' }) as { appendSystemContext?: string };
 
     expect(result.appendSystemContext).toContain('简体中文');
     expect(result.appendSystemContext).toContain('真实本地产物');
     expect(result.appendSystemContext).toContain('MEDIA:<absolute-path>');
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('prompt-context'));
     expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('做个电站维保'));
+  });
+
+  it('blocks image generation tools when the current turn is not authorized as media intent', async () => {
+    vi.stubEnv('CLAWX_HOST_API_ORIGIN', 'http://127.0.0.1:13210');
+    vi.stubEnv('CLAWX_HOST_API_TOKEN', 'host-token');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        plan: {
+          action: 'chat',
+          source: 'fallback',
+          intentKind: 'current_non_media_task',
+          currentTurnMediaRequest: false,
+          confidence: 1,
+          reason: 'local_fast_path_media_capability_inquiry',
+        },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    const promptHook = hooks.get('before_prompt_build');
+    const toolHook = hooks.get('before_tool_call');
+
+    expect(promptHook).toBeTypeOf('function');
+    expect(toolHook).toBeTypeOf('function');
+
+    await promptHook!({
+      runId: 'run-media-question',
+      sessionKey: 'session-media-question',
+      prompt: '我问你的是你用的生图模型是什么？',
+      messages: [
+        { role: 'user', content: '我问你的是你用的生图模型是什么？' },
+      ],
+    }, {
+      runId: 'run-media-question',
+      sessionKey: 'session-media-question',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:13210/api/media/intent-plan',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer host-token',
+          'Content-Type': 'application/json',
+        }),
+      }),
+    );
+    const requestBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+    expect(requestBody).toEqual(expect.objectContaining({
+      prompt: '我问你的是你用的生图模型是什么？',
+      requestedMode: 'chat',
+    }));
+
+    const result = toolHook!({
+      runId: 'run-media-question',
+      sessionKey: 'session-media-question',
+      toolName: 'image_generate',
+      params: { action: 'generate', prompt: '生成一张说明图' },
+    }, {
+      runId: 'run-media-question',
+      sessionKey: 'session-media-question',
+    }) as { block?: boolean; blockReason?: string };
+
+    expect(result).toEqual(expect.objectContaining({
+      block: true,
+      blockReason: expect.stringContaining('没有授权生成图片'),
+    }));
+  });
+
+  it('allows image generation tools only when planner authorizes a current media task', async () => {
+    vi.stubEnv('CLAWX_HOST_API_ORIGIN', 'http://127.0.0.1:13210');
+    vi.stubEnv('CLAWX_HOST_API_TOKEN', 'host-token');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        plan: {
+          action: 'image_generate',
+          source: 'fallback',
+          intentKind: 'current_media_task',
+          currentTurnMediaRequest: true,
+          confidence: 1,
+          reason: 'local_fast_path_image_generate',
+        },
+      }),
+    }));
+
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    await hooks.get('before_prompt_build')!({
+      runId: 'run-image-task',
+      sessionKey: 'session-image-task',
+      prompt: '画一张城市夜景',
+    }, {
+      runId: 'run-image-task',
+      sessionKey: 'session-image-task',
+    });
+
+    const result = hooks.get('before_tool_call')!({
+      runId: 'run-image-task',
+      sessionKey: 'session-image-task',
+      toolName: 'image_generate',
+      params: { action: 'generate', prompt: '画一张城市夜景' },
+    }, {
+      runId: 'run-image-task',
+      sessionKey: 'session-image-task',
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  it('allows read-only media tool actions without current-turn generation authorization', async () => {
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    const result = hooks.get('before_tool_call')!({
+      runId: 'run-media-status',
+      sessionKey: 'session-media-status',
+      toolName: 'image_generate',
+      params: { action: 'status' },
+    }, {
+      runId: 'run-media-status',
+      sessionKey: 'session-media-status',
+    });
+
+    expect(result).toBeUndefined();
   });
 
   it('registers an OpenClaw tool-result middleware as an execution event producer', async () => {
