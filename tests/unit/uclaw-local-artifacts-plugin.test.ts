@@ -92,7 +92,7 @@ describe('uclaw-local-artifacts plugin', () => {
     }, undefined, undefined, { cwd });
     const textPath = String(text.details?.filePath);
     expect(readFileSync(textPath, 'utf8')).toContain('推广文案');
-    expect(text.content[0].text).toContain(`MEDIA:${textPath}`);
+    expect(JSON.parse(text.content[0].text).media).toBe(`MEDIA:${textPath}`);
 
     const html = await toolByName(tools, 'create_html_app_file').execute('html', {
       title: '灵感收集小程序',
@@ -101,7 +101,7 @@ describe('uclaw-local-artifacts plugin', () => {
     const htmlContent = readFileSync(htmlPath, 'utf8');
     expect(htmlContent).toContain('<!doctype html>');
     expect(htmlContent).toContain('localStorage');
-    expect(html.content[0].text).toContain(`MEDIA:${htmlPath}`);
+    expect(JSON.parse(html.content[0].text).media).toBe(`MEDIA:${htmlPath}`);
   });
 
   it('normalizes ClawX brand text in local artifact names and content', async () => {
