@@ -3,6 +3,10 @@ import { render, screen } from '@testing-library/react';
 import { Chat } from '@/pages/Chat';
 
 vi.mock('react-i18next', () => ({
+  initReactI18next: {
+    type: '3rdParty',
+    init: vi.fn(),
+  },
   useTranslation: () => ({
     t: (_key: string, defaultValue?: string) => defaultValue ?? '',
   }),

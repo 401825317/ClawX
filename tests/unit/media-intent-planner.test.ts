@@ -85,42 +85,22 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('does not route a single PPT artifact request through the composite fast path', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'chat',
-                intent_kind: 'current_non_media_task',
-                current_turn_media_request: false,
-                confidence: 0.92,
-                selected_image_source: 'none',
-                prompt: '做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划',
-                reason: '这是单个 PPT 文件产物请求，应交给默认聊天 agent 使用文件工具执行，不是多产物组合任务。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('keeps a single PPT artifact request on the local chat path', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划',
       requestedMode: 'chat',
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'chat',
-      source: 'planner',
-      intentKind: 'current_non_media_task',
+      source: 'fallback',
       currentTurnMediaRequest: false,
       selectedImageSource: 'none',
-      reason: '这是单个 PPT 文件产物请求，应交给默认聊天 agent 使用文件工具执行，不是多产物组合任务。',
+      reason: 'local_no_media_planning_signal',
     }));
     expect(plan.compositeTasks).toBeUndefined();
   });
@@ -283,75 +263,40 @@ describe('planMediaIntent', () => {
     expect(isCurrentTurnMediaSideEffectAuthorized(plan)).toBe(false);
   });
 
-  it('keeps ambiguous media side effects on chat when planner omits current-turn authorization', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'image_generate',
-                confidence: 0.9,
-                selected_image_source: 'none',
-                prompt: '画一张城市夜景。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('keeps ambiguous media side effects on chat locally without remote planning', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '给我一个城市夜景视觉素材',
       requestedMode: 'chat',
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'chat',
-      source: 'planner',
-      reason: 'planner_missing_current_media_authorization',
+      source: 'fallback',
+      reason: 'local_no_media_planning_signal',
+      currentTurnMediaRequest: false,
       selectedImageSource: 'none',
     }));
   });
 
-  it('keeps future sourcing preferences on chat through the planner contract', async () => {
-    proxyAwareFetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                action: 'chat',
-                intent_kind: 'preference_or_memory_update',
-                current_turn_media_request: false,
-                confidence: 0.95,
-                selected_image_source: 'none',
-                prompt: '以后生成作品的时候，如果需要图片就从网上获取，如果需要公开数据就从网上获取。保存在记忆体里',
-                reason: '用户是在设置后续生成作品的素材来源偏好，而不是要求当前回合生成图片。',
-              }),
-            },
-          },
-        ],
-      }),
-    });
-
+  it('keeps future sourcing preferences on chat without remote media planning', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '以后生成作品的时候，如果需要图片就从网上获取，如果需要公开数据就从网上获取。保存在记忆体里',
       requestedMode: 'chat',
     });
 
-    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'chat',
-      source: 'planner',
-      intentKind: 'preference_or_memory_update',
+      source: 'fallback',
       currentTurnMediaRequest: false,
-      reason: '用户是在设置后续生成作品的素材来源偏好，而不是要求当前回合生成图片。',
+      reason: 'local_no_media_planning_signal',
       selectedImageSource: 'none',
     }));
   });
@@ -562,7 +507,7 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('falls back to chat instead of guessing a media route when planner credentials are unavailable', async () => {
+  it('keeps ordinary chat local before checking planner credentials', async () => {
     getProviderSecretMock.mockResolvedValueOnce(null);
 
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
@@ -571,11 +516,14 @@ describe('planMediaIntent', () => {
       requestedMode: 'chat',
     });
 
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
     expect(proxyAwareFetchMock).not.toHaveBeenCalled();
     expect(plan).toEqual(expect.objectContaining({
       action: 'chat',
       source: 'fallback',
-      reason: 'planner_api_key_unavailable',
+      reason: 'local_no_media_planning_signal',
+      currentTurnMediaRequest: false,
+      selectedImageSource: 'none',
     }));
   });
 

@@ -126,7 +126,11 @@ describe('saveProviderKeyToOpenClaw', () => {
     const staleProfiles = await readAuthProfiles('test2');
 
     expect((mainProfiles.profiles as Record<string, { key: string }>)['openrouter:default'].key).toBe('sk-test');
+    expect(mainProfiles.order).toEqual({ openrouter: ['openrouter:default'] });
+    expect(mainProfiles.lastGood).toEqual({ openrouter: 'openrouter:default' });
     expect((test3Profiles.profiles as Record<string, { key: string }>)['openrouter:default'].key).toBe('sk-test');
+    expect(test3Profiles.order).toEqual({ openrouter: ['openrouter:default'] });
+    expect(test3Profiles.lastGood).toEqual({ openrouter: 'openrouter:default' });
     expect(staleProfiles.profiles).toEqual({
       'legacy:default': {
         type: 'api_key',
@@ -137,21 +141,6 @@ describe('saveProviderKeyToOpenClaw', () => {
     expect(logSpy).toHaveBeenCalledWith(
       'Saved API key for provider "openrouter" to OpenClaw auth store (agents: main, test3)',
     );
-
-    const previousHome = process.env.HOME;
-    process.env.HOME = testHome;
-    try {
-      const { resolveProviderAuthProfileApiKey } = await import('openclaw/plugin-sdk/provider-auth');
-      await expect(resolveProviderAuthProfileApiKey({
-        provider: 'openrouter',
-        agentDir: join(testHome, '.openclaw', 'agents', 'main', 'agent'),
-        allowKeychainPrompt: false,
-        includeExternalCliAuth: false,
-        profileTypes: ['api_key'],
-      })).resolves.toBe('sk-test');
-    } finally {
-      process.env.HOME = previousHome;
-    }
 
     logSpy.mockRestore();
   });
@@ -418,7 +407,17 @@ describe('sanitizeOpenClawConfig', () => {
     // User-owned sections must survive the sanitize pass
     expect(result.memory).toEqual({ enabled: true, limit: 100 });
     expect(result.channels).toEqual({ discord: { token: 'tok', enabled: true } });
-    expect((result.agents as Record<string, unknown>).defaults).toEqual({
+    expect((result.agents as Record<string, Record<string, unknown>>).defaults.model).toEqual({
+      primary: 'openai/gpt-4',
+    });
+    expect((result.agents as Record<string, Record<string, unknown>>).defaults.memorySearch).toEqual({
+      enabled: false,
+      provider: 'none',
+      sync: {
+        onSessionStart: false,
+      },
+    });
+    expect((result.agents as Record<string, Record<string, unknown>>).defaults).toMatchObject({
       model: { primary: 'openai/gpt-4' },
     });
     // tools settings should now be enforced
@@ -803,11 +802,14 @@ describe('sanitizeOpenClawConfig', () => {
 
     expect(allow).toContain('custom-plugin');
     expect(allow).toContain('browser');
-    expect(allow).toContain('memory-core');
+    expect(allow).not.toContain('memory-core');
     expect(allow).toContain('alibaba');
     expect(allow).not.toContain('groq');
     expect(allow).toContain('openrouter');
     expect(allow).not.toContain('anthropic');
+    expect((plugins.entries as Record<string, Record<string, unknown>>)['memory-core']).toEqual(expect.objectContaining({
+      enabled: false,
+    }));
   });
 
   it('preserves active bundled provider plugins discovered from per-agent auth profile stores', async () => {

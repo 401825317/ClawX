@@ -48,9 +48,25 @@ vi.mock('electron', () => ({
   },
 }));
 
-vi.mock('@electron/utils/paths', () => ({
-  getOpenClawConfigDir: () => testOpenClawConfigDir,
-  getOpenClawDir: () => testOpenClawRuntimeDir,
+vi.mock('@electron/utils/paths', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@electron/utils/paths')>();
+  return {
+    ...actual,
+    getOpenClawAgentsDir: () => join(testOpenClawConfigDir, 'agents'),
+    getOpenClawConfigDir: () => testOpenClawConfigDir,
+    getOpenClawConfigPath: () => join(testOpenClawConfigDir, 'openclaw.json'),
+    getOpenClawDir: () => testOpenClawRuntimeDir,
+    getOpenClawExtensionsDir: () => join(testOpenClawConfigDir, 'extensions'),
+    getOpenClawResolvedDir: () => testOpenClawRuntimeDir,
+  };
+});
+
+vi.mock('@electron/utils/openclaw-image-generation', () => ({
+  ensureManagedOpenAiImageRelay: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('@electron/utils/openclaw-video-generation', () => ({
+  ensureManagedOpenAiVideoRelay: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('fs', async () => {

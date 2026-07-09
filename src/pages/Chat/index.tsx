@@ -345,6 +345,27 @@ function hasUserFacingMediaAttachments(msg: RawMessage): boolean {
   ));
 }
 
+function hasRenderableChatMessageContent(
+  msg: RawMessage,
+  options: { suppressAssistantText: boolean; suppressToolCards: boolean },
+): boolean {
+  const role = normalizeMessageRole(msg.role);
+  if (role === 'toolresult' || role === 'tool_result') return false;
+  const hasText = !(options.suppressAssistantText && role === 'assistant')
+    && extractText(msg).trim().length > 0;
+  const hasImages = extractImages(msg).length > 0;
+  const hasAttachments = (msg._attachedFiles?.length ?? 0) > 0;
+  return hasText || hasImages || hasAttachments;
+}
+
+function defaultRunSurfaceState(): RunSurfaceState {
+  return {
+    shouldShowTranscript: false,
+    shouldShowRunStatus: false,
+    shouldRenderExecutionGraph: false,
+  };
+}
+
 function generatedFileToTarget(file: GeneratedFile): FilePreviewTarget {
   return {
     filePath: file.filePath,
@@ -1441,6 +1462,11 @@ export function Chat() {
   const hasVisibleActiveExecutionGraph = userRunCards.some((card) => (
     card.active && Boolean(runSurfaceStates.get(card.triggerIndex)?.shouldRenderExecutionGraph)
   ));
+  const hasVisibleActiveRunTranscriptLiveText = userRunCards.some((card) => (
+    card.active
+    && !!card.liveText
+    && Boolean(runSurfaceStates.get(card.triggerIndex)?.shouldShowTranscript)
+  ));
 
   useEffect(() => {
     if (!hasVisibleActiveExecutionGraph) return;
@@ -1650,6 +1676,22 @@ export function Chat() {
                     if (suppressToolCards && isToolOnlyAssistant && !(msg._attachedFiles?.length)) {
                       return null;
                     }
+                    const runCardsForMessage = userRunCardsByTriggerIndex.get(idx) ?? [];
+                    const hasVisibleRunSurface = runCardsForMessage.some((card) => {
+                      const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
+                      const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
+                      const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
+                      const surfaceState = runSurfaceStates.get(card.triggerIndex) ?? defaultRunSurfaceState();
+                      return surfaceState.shouldShowTranscript
+                        || surfaceState.shouldRenderExecutionGraph
+                        || (generatedFiles.length > 0 && !hasCompositeResultReply);
+                    });
+                    if (!hasVisibleRunSurface && !hasRenderableChatMessageContent(msg, {
+                      suppressAssistantText: isFoldedNarration,
+                      suppressToolCards,
+                    })) {
+                      return null;
+                    }
                     return (
                     <div
                       key={msg.id || `msg-${idx}`}
@@ -1667,7 +1709,7 @@ export function Chat() {
                         onOpenFile={handleOpenAttachedFile}
                         onUseImageAsReference={handleUseImageAsReference}
                       />
-                      {(userRunCardsByTriggerIndex.get(idx) ?? []).map((card) => {
+                      {runCardsForMessage.map((card) => {
                           const triggerMsg = messages[card.triggerIndex];
                           const runKey = triggerMsg?.id
                             ? `msg-${triggerMsg.id}`
@@ -1680,13 +1722,9 @@ export function Chat() {
                           // The graph stays secondary by default, but it still
                           // needs to be inspectable in normal chat mode.
                           const detailsEnabled = true;
-                          const surfaceState = runSurfaceStates.get(card.triggerIndex) ?? {
-                            shouldShowTranscript: false,
-                            shouldShowRunStatus: false,
-                            shouldRenderExecutionGraph: false,
-                          };
-                          const { shouldShowTranscript, shouldShowRunStatus, shouldRenderExecutionGraph } = surfaceState;
-                          if (!shouldShowRunStatus && !shouldShowTranscript && generatedFiles.length === 0) return null;
+                          const surfaceState = runSurfaceStates.get(card.triggerIndex) ?? defaultRunSurfaceState();
+                          const { shouldShowTranscript, shouldRenderExecutionGraph } = surfaceState;
+                          if (!shouldShowTranscript && !shouldRenderExecutionGraph && generatedFiles.length === 0) return null;
                           // Keep the run surface compact by default. User toggles
                           // persist across history refreshes through this controlled
                           // prop; developer diagnostics remain one click away.
@@ -1743,9 +1781,12 @@ export function Chat() {
                   {/* Streaming message — render when reply text is separated from graph,
                       OR when there's streaming content without an active graph */}
                   {shouldRenderStreaming && (
-                    streamingReplyText != null
-                    || !hasVisibleActiveExecutionGraph
-                    || (hasStreamText && streamTools.length === 0 && !hasRunningStreamToolStatus && !hasRunningRuntimeToolStatus)
+                    !hasVisibleActiveRunTranscriptLiveText
+                    && (
+                      streamingReplyText != null
+                      || !hasVisibleActiveExecutionGraph
+                      || (hasStreamText && streamTools.length === 0 && !hasRunningStreamToolStatus && !hasRunningRuntimeToolStatus)
+                    )
                   ) && (
                     <ChatMessage
                         suppressToolCards={hasVisibleActiveExecutionGraph || graphFoldedProcessMessageIndices.size > 0}

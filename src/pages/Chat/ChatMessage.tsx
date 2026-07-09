@@ -19,7 +19,7 @@ import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
 import { createAuthenticatedHostApiUrl } from '@/lib/host-api';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
-import { extractText, extractImages, extractToolUse, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
+import { extractText, extractImages, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
 import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
 
 interface ChatMessageProps {
@@ -368,7 +368,6 @@ export const ChatMessage = memo(function ChatMessage({
   message,
   textOverride,
   assistantAvatarSrc,
-  suppressToolCards = false,
   suppressProcessAttachments = false,
   suppressAssistantText = false,
   isStreaming = false,
@@ -389,8 +388,6 @@ export const ChatMessage = memo(function ChatMessage({
   const hasText = !hideAssistantText && text.trim().length > 0;
   const images = extractImages(message);
   const resolvableContentImages = images.filter((img) => imageSrc(img) != null);
-  const tools = extractToolUse(message);
-  const visibleTools = suppressToolCards ? [] : tools;
   const [validatedPaths, setValidatedPaths] = useState<Record<string, boolean>>({});
   const rawAttachedFiles = dedupeAttachedFiles(message._attachedFiles || []);
   const textPreviewFiles = isUser ? [] : extractPreviewDocumentPaths(textOverride ?? rawTextForPreviewExtraction(message));
@@ -462,7 +459,7 @@ export const ChatMessage = memo(function ChatMessage({
     if (!kind || !file.filePath) return true;
     return validatedPaths[file.filePath] === true;
   });
-  const attachedFiles = suppressProcessAttachments && (hasText || resolvableContentImages.length > 0 || visibleTools.length > 0)
+  const attachedFiles = suppressProcessAttachments && (hasText || resolvableContentImages.length > 0)
     ? processVisibleAttachments
     : existingDerivedAttachedFiles;
   const imageCopyTarget = resolvePrimaryImageCopyTarget(resolvableContentImages, attachedFiles);
@@ -473,7 +470,7 @@ export const ChatMessage = memo(function ChatMessage({
   if (isToolResult) return null;
 
   const hasStreamingToolStatus = isStreaming && streamingTools.length > 0;
-  if (!hasText && resolvableContentImages.length === 0 && visibleTools.length === 0 && attachedFiles.length === 0 && !hasStreamingToolStatus) return null;
+  if (!hasText && resolvableContentImages.length === 0 && attachedFiles.length === 0 && !hasStreamingToolStatus) return null;
 
   return (
     <div

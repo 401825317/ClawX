@@ -40,6 +40,14 @@ vi.mock('@/lib/host-events', () => ({
   subscribeHostEvent: (...args: unknown[]) => subscribeHostEventMock(...args),
 }));
 
+vi.mock('@/stores/cron', () => ({
+  useCronStore: {
+    getState: () => ({
+      fetchJobs: vi.fn(async () => {}),
+    }),
+  },
+}));
+
 vi.unmock('@/stores/chat');
 vi.unmock('@/stores/gateway');
 vi.unmock('@/stores/managed-auth');
@@ -167,8 +175,9 @@ describe('gateway store event wiring', () => {
       result: { summary: 'done' },
       isError: false,
     });
-    await flushAsyncImports();
-    await flushAsyncImports();
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().runtimeRuns['run-1']?.lastEventAt).toBe(1773281731500);
+    });
 
     expect(loadHistory).not.toHaveBeenCalled();
     expect(useChatStore.getState().sending).toBe(true);
@@ -176,7 +185,6 @@ describe('gateway store event wiring', () => {
     expect(useChatStore.getState().pendingFinal).toBe(true);
     expect(useChatStore.getState().lastUserMessageAt).toBe(1773281731000);
     expect(useChatStore.getState().streamingTools).toEqual([]);
-    expect(useChatStore.getState().runtimeRuns['run-1']?.lastEventAt).toBe(1773281731500);
     expect(useChatStore.getState().runtimeRuns['run-1']?.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'tool.completed', toolCallId: 'call-1', name: 'read' }),
     ]));

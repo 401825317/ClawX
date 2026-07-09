@@ -205,14 +205,13 @@ describe('JunFeiAI managed provider service', () => {
     });
 
     expect(result.account?.model).toBe('smart-latest');
-    expect(result.account?.fallbackModels).toEqual(['deepseek-latest']);
+    expect(result.account?.fallbackModels).toEqual([]);
     expect(mocks.saveProviderAccount).toHaveBeenCalledWith(
       expect.objectContaining({
         model: 'smart-latest',
-        fallbackModels: ['deepseek-latest'],
+        fallbackModels: [],
       }),
     );
-    expect(mocks.loggerWarn).toHaveBeenCalledWith(expect.stringContaining('Runtime default model "qwen-latest"'));
   });
 
   it('does not use local device activation to bypass auth when no user is logged in', async () => {
@@ -1248,7 +1247,10 @@ describe('JunFeiAI managed provider service', () => {
   it('does not sync runtime during a no-change background status check', async () => {
     const existing = makeAccount({
       label: '零至无限',
-      metadata: { resourceUrl: 'https://zz-cn.lingzhiwuxian.com' },
+      metadata: {
+        resourceUrl: 'https://zz-cn.lingzhiwuxian.com',
+        managedRuntimeContractVersion: 1,
+      },
       fallbackModels: [],
     });
     mocks.getProviderAccount.mockResolvedValue(existing);

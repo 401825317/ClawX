@@ -29,56 +29,54 @@ describe('UClaw tool routing context', () => {
   ];
 
   it('does not advertise the legacy computer-use plugin as a reliable desktop path', () => {
-    expect(toolsContext).toContain('The legacy `uclaw-computer-use` plugin is not part of the reliable execution surface');
-    expect(toolsContext).toContain('do not mention enabling that plugin as the recovery path');
-    expect(toolsContext).toContain('Do not assume `computer_*` tools exist');
+    expect(toolsContext).toContain('不使用、恢复或建议安装旧的 `uclaw-computer-use`');
+    expect(toolsContext).toContain('不要凭空调用未列出的 `computer`、`desktop`、`screen` 等工具');
     expect(toolsContext).not.toContain('UClaw has native computer-use tools');
     expect(toolsContext).not.toContain('switch to UClaw desktop computer-use tools');
     expect(browserAutomationShim).not.toContain('switch to available desktop `computer_*` tools');
   });
 
   it('routes WeChat and native desktop actions through connector-or-block semantics', () => {
-    expect(toolsContext).toContain('For requests such as "打开微信并给某个群发消息"');
-    expect(toolsContext).toContain('reliable path is a listed structured channel connector');
-    expect(toolsContext).toContain('If that connector is absent or the target cannot be resolved');
-    expect(toolsContext).toContain('State the blocker');
-    expect(toolsContext).toContain('drafted only');
-    expect(toolsContext).toContain('actually sent/posted/submitted');
-    expect(toolsContext).toContain('Shell commands are not a substitute for reliable desktop UI automation of native chat apps');
+    expect(toolsContext).toContain('`browser` 只控制其托管网页，不等于原生桌面控制');
+    expect(toolsContext).toContain('也不能假装操作微信、QQ、系统弹窗或用户已有浏览器窗口');
+    expect(toolsContext).toContain('原生应用、外部消息、发布、购买、删除、支付等副作用');
+    expect(toolsContext).toContain('当前明确列出且已连接的可靠工具执行');
+    expect(toolsContext).toContain('未尝试 / 被阻断 / 仅生成草稿');
+    expect(toolsContext).toContain('不能声称已发送或已完成');
+    expect(browserAutomationShim).toContain('Do not use the `browser` tool for native desktop apps');
+    expect(artifactGuard).toContain('不要使用 shell/盲键鼠/UI 脚本假装完成微信或桌面操作');
   });
 
   it('directs temporary screenshots into OpenClaw-managed media roots', () => {
-    expect(toolsContext).toContain('save it under an OpenClaw media/workspace directory');
-    expect(toolsContext).toContain('~/.openclaw/media/outbound/');
-    expect(toolsContext).toContain('not directly under `/tmp/*.png`');
-    expect(toolsContext).toContain('Local media tools reject bare system-temp image paths');
+    expect(toolsContext).toContain('MEDIA:<absolute-path>');
+    expect(artifactGuard).toContain('OpenClaw media/workspace 目录');
+    expect(artifactGuard).toContain('~/.openclaw/media/outbound/');
+    expect(artifactGuard).toContain('不要写入裸 `/tmp/*.png`');
     expect(artifactGuard).toContain('rewriteTmpScreenshotMediaPaths');
     expect(artifactGuard).toContain('exec-screenshot-path-rewrite');
   });
 
   it('keeps ordinary public web research on web tools before browser or shell fallbacks', () => {
-    expect(toolsContext).toContain('For public search, research, URL reading, current information');
-    expect(toolsContext).toContain('prefer `web_search` first');
-    expect(toolsContext).toContain('Use `web_fetch` for known URLs');
-    expect(toolsContext).toContain('Avoid shell/Python HTTP scraping for ordinary searches');
-    expect(toolsContext).toContain('Use `exec` with `curl`/`wttr.in` only as a last fallback');
+    expect(toolsContext).toContain('公网检索优先 `web_search`');
+    expect(toolsContext).toContain('已知 URL 优先 `web_fetch`');
+    expect(toolsContext).toContain('登录态或交互网页才用 `browser`');
+    expect(toolsContext).toContain('可恢复错误先自行换路径或重试一次');
   });
 
   it('keeps web_search out of private logged-in state without inventing desktop fallback', () => {
-    expect(toolsContext).toContain('Do not use `web_search` to discover or verify state inside already-open/logged-in/private systems');
-    expect(toolsContext).toContain('Those states are not public web facts');
-    expect(toolsContext).toContain('Use `browser` only for managed logged-in tabs');
-    expect(toolsContext).toContain('or a listed structured connector for the relevant channel/app');
-    expect(toolsContext).toContain('If neither exists, report the missing capability');
+    expect(toolsContext).toContain('登录态或交互网页才用 `browser`');
+    expect(toolsContext).toContain('`browser` 只控制其托管网页');
+    expect(toolsContext).toContain('原生应用、外部消息、发布、购买、删除、支付等副作用');
+    expect(toolsContext).toContain('否则说明 `未尝试 / 被阻断 / 仅生成草稿`');
   });
 
   it('prevents local action and artifact tasks from ending with unexecuted promises', () => {
     expect(agentsContext).toContain('**本地动作完成规则**');
     expect(agentsContext).toContain('如果下一步明确，继续调用合适的工具，而不是发送最终回复');
-    expect(toolsContext).toContain('### Local Actions');
-    expect(toolsContext).toContain('do not end with a future-tense promise');
-    expect(toolsContext).toContain('Only send the final reply after that state is verified');
-    expect(toolsContext).toContain('Native desktop app operations and external chat-message sending require a reliable listed connector');
+    expect(toolsContext).toContain('### 回复与执行');
+    expect(toolsContext).toContain('用户要求执行时先做事');
+    expect(toolsContext).toContain('本地动作遵循 `观察 -> 执行 -> 验证 -> 交付`');
+    expect(toolsContext).toContain('只有工具证据足够时才能声称已完成');
     expect(artifactGuard).toContain('before_agent_finalize');
     expect(artifactGuard).toContain('before_prompt_build');
     expect(artifactGuard).toContain('真实本地产物');
@@ -108,14 +106,14 @@ describe('UClaw tool routing context', () => {
     expect(agentsContext).toContain('**语言规则（强制）**');
     expect(agentsContext).toContain('默认所有面向用户的自然语言回复都必须使用简体中文');
     expect(agentsContext).toContain('禁止用英文写状态、计划、总结、道歉、解释、问题或最终回复');
-    expect(toolsContext).toContain('解释工具可用性、缺失工具、重试、失败、进度或最终结果时，默认必须使用简体中文');
+    expect(toolsContext).toContain('默认使用简体中文');
   });
 
-  it('keeps weather useful when explicit user location is missing', () => {
-    expect(toolsContext).toContain('If the user asks for weather without naming a city');
-    expect(toolsContext).toContain('if `nodes` returns an empty list, do not stop there');
-    expect(toolsContext).toContain('try IP-based weather lookup with `web_fetch`');
-    expect(toolsContext).toContain('Ask the user for a city only after location metadata, connected node location, and IP/web fallback');
+  it('keeps current public lookup tasks useful through web tool routing', () => {
+    expect(toolsContext).toContain('公网检索优先 `web_search`');
+    expect(toolsContext).toContain('已知 URL 优先 `web_fetch`');
+    expect(toolsContext).toContain('读取、分析、搜索、写文件、启动服务等任务使用当前列出的结构化工具');
+    expect(toolsContext).toContain('可恢复错误先自行换路径或重试一次');
   });
 
   it('does not surface the one-window LLM idle retry as a user-visible run error', () => {

@@ -235,7 +235,7 @@ describe('ensureClawXDefaultIdentity', () => {
 });
 
 describe('ensureClawXContext', () => {
-  it('does not create or merge workspace context unless explicitly enabled', async () => {
+  it('creates default workspace context files before merging UClaw instructions', async () => {
     const openclawDir = join(testHome, '.openclaw');
     const defaultWorkspace = join(openclawDir, 'workspace');
     await mkdir(defaultWorkspace, { recursive: true });
@@ -251,8 +251,8 @@ describe('ensureClawXContext', () => {
 
     await ensureClawXContext();
 
-    await expect(access(join(defaultWorkspace, 'AGENTS.md'))).rejects.toThrow();
-    await expect(access(join(defaultWorkspace, 'TOOLS.md'))).rejects.toThrow();
+    await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw 环境');
+    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('不使用、恢复或建议安装旧的 `uclaw-computer-use`');
   });
 
   it('seeds missing default workspace context files before merging ClawX instructions', async () => {
@@ -273,7 +273,7 @@ describe('ensureClawXContext', () => {
     await ensureClawXContext();
 
     await expect(readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8')).resolves.toContain('## UClaw 环境');
-    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('legacy `uclaw-computer-use` plugin is not part of the reliable execution surface');
+    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('不使用、恢复或建议安装旧的 `uclaw-computer-use`');
   });
 
   it('does not wait for missing files in non-default agent workspaces', async () => {
@@ -305,7 +305,7 @@ describe('ensureClawXContext', () => {
     const agentsContent = await readFile(join(defaultWorkspace, 'AGENTS.md'), 'utf-8');
     expect(agentsContent).toContain('## UClaw 环境');
     expect(agentsContent).toContain('默认所有面向用户的自然语言回复都必须使用简体中文');
-    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('## UClaw 工具说明');
+    await expect(readFile(join(defaultWorkspace, 'TOOLS.md'), 'utf-8')).resolves.toContain('## UClaw 执行契约');
     await expect(access(join(agentWorkspace, 'AGENTS.md'))).rejects.toThrow();
     await expect(access(join(agentWorkspace, 'TOOLS.md'))).rejects.toThrow();
   });

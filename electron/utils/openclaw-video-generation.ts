@@ -572,10 +572,7 @@ export async function generateVideoForChatSession(params: {
   const config = await readOpenClawConfig();
   const current = await getVideoGenerationSettingsSnapshot();
   const inputImages = normalizeInputImageRefs(params.inputImages);
-  const requestedModel = params.model?.trim();
-  const configuredModel = requestedModel
-    ? `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${normalizeClawXOpenAiVideoModelId(requestedModel)}`
-    : `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${selectClawXOpenAiVideoModelIdForInput(inputImages.length)}`;
+  const configuredModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${selectClawXOpenAiVideoModelIdForInput(inputImages.length)}`;
   const providerKey = parseProviderFromVideoModelRef(configuredModel);
   const directApiKey = providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     ? await resolveVideoRelayApiKey(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, agentId)

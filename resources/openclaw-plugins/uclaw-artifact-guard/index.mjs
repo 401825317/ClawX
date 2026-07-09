@@ -1041,6 +1041,13 @@ function stripArtifactRef(value) {
     .trim();
 }
 
+function artifactRefDedupeKey(value) {
+  return stripArtifactRef(value)
+    .replace(/\\\\/gu, '\\')
+    .replace(/\\/gu, '/')
+    .toLowerCase();
+}
+
 function isUrlRef(value) {
   return /^https?:\/\//iu.test(value);
 }
@@ -1354,7 +1361,7 @@ function collectStructuredArtifactRefsForTranscript(text) {
     const normalizedRef = stripArtifactRef(ref);
     if (!normalizedRef) return false;
     if (inferArtifactKind(normalizedRef) === 'file') return false;
-    const key = normalizedRef.toLowerCase();
+    const key = artifactRefDedupeKey(normalizedRef);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

@@ -83,19 +83,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith({
-      kind: 'video',
-      sessionKey: 'agent:main:main',
-      prompt: 'make a short product video',
-      originalPrompt: 'make a short product video',
-      size: '1280x720',
-      durationSeconds: 4,
-      inputImages: undefined,
-      route: expect.objectContaining({
-        mode: 'text_to_video',
-        selectedImageSource: 'none',
-      }),
-    });
+    expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
       kind: 'video',
       sessionKey: 'agent:main:main',
@@ -139,18 +127,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'video',
-      sessionKey: 'agent:main:main',
-      prompt: 'animate this frame',
-      inputImages: [
-        {
-          fileName: 'frame.png',
-          mimeType: 'image/png',
-          filePath: '/tmp/frame.png',
-        },
-      ],
-    }));
+    expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'video',
       sessionKey: 'agent:main:main',

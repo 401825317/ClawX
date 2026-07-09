@@ -15,7 +15,7 @@ export async function hydrateGatewayHistoryFromTranscript(
     return gatewayMessages;
   }
 
-  const transcriptMessages = await loadSessionTranscriptFallback(sessionKey, limit);
+  const transcriptMessages = await loadSessionTranscriptFallback(sessionKey, limit, { includeFamily: true });
   let merged = mergeGatewayHistoryWithTranscript(gatewayMessages, transcriptMessages);
 
   if (gatewayHistoryNeedsTranscriptHydration(merged) && localMessages?.length) {

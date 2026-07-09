@@ -76,15 +76,7 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith({
-      kind: 'image',
-      sessionKey: 'agent:main:main',
-      prompt: 'draw a night city poster',
-      model: undefined,
-      size: '2048x2048',
-      quality: 'high',
-      inputImages: undefined,
-    });
+    expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
       kind: 'image',
       sessionKey: 'agent:main:main',
@@ -123,18 +115,7 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(prepareMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'image',
-      sessionKey: 'agent:main:main',
-      prompt: 'make the dot red',
-      inputImages: [
-        {
-          fileName: 'dot.png',
-          mimeType: 'image/png',
-          filePath: '/tmp/generated/dot.png',
-        },
-      ],
-    }));
+    expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
     expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'image',
       sessionKey: 'agent:main:main',

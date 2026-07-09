@@ -2,9 +2,23 @@ import http from 'node:http';
 import { Buffer } from 'node:buffer';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const repoRoot = process.cwd();
+
+vi.mock('undici', () => ({
+  Agent: class TestAgent {
+    options: Record<string, unknown>;
+
+    constructor(options: Record<string, unknown>) {
+      this.options = options;
+    }
+  },
+  fetch: (url: string | URL, init?: RequestInit & { dispatcher?: unknown }) => {
+    const { dispatcher: _dispatcher, ...fetchInit } = init ?? {};
+    return fetch(url, fetchInit);
+  },
+}));
 
 describe('ClawX OpenAI image plugin request shape', () => {
   it('does not force deprecated OpenAI Images response_format', async () => {

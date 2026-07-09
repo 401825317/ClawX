@@ -38,7 +38,9 @@ const {
 const ORIGINAL_PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, 'platform');
 
 function normalizeTestPath(input: unknown): string {
-  return String(input).replace(/\\/g, '/');
+  return String(input)
+    .replace(/\\/g, '/')
+    .replace(/^[A-Za-z]:(?=\/(?:home|mock|bundle|app)\b)/, '');
 }
 
 function dependencyPathSegment(dependencyName: string): string {
@@ -332,12 +334,12 @@ describe('plugin installer diagnostics', () => {
 
     expect(result).toEqual({ installed: true });
     expect(mockCpSync).toHaveBeenCalledWith(
-      sourceDir,
+      expect.stringMatching(/[\\/]mock[\\/]app[\\/]resources[\\/]openclaw-plugins[\\/]uclaw-local-artifacts$/),
       expect.stringMatching(/[\\/]\.openclaw[\\/]extensions[\\/]uclaw-local-artifacts$/),
       { recursive: true, dereference: true },
     );
     expect(mockLoggerInfo).toHaveBeenCalledWith(
-      `Installed UClaw Local Artifacts plugin from bundled mirror: ${sourceDir}`,
+      expect.stringMatching(/Installed UClaw Local Artifacts plugin from bundled mirror: .*[\\/]uclaw-local-artifacts$/),
     );
   });
 
@@ -383,7 +385,7 @@ describe('plugin installer diagnostics', () => {
       }
       for (const depName of runtimeDeps) {
         const depSegment = dependencyPathSegment(depName);
-        if (filePath === `${process.cwd()}/node_modules/${depSegment}`) {
+        if (filePath === `${normalizeTestPath(process.cwd())}/node_modules/${depSegment}`) {
           return true;
         }
         if (

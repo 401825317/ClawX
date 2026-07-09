@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 async function loadGuard() {
@@ -157,8 +157,10 @@ describe('uclaw-artifact-guard', () => {
       },
     }) as { params?: { command?: string } };
 
+    const managedDir = join(resolve('/tmp/uclaw-test-openclaw'), 'media', 'outbound');
+    const outputPath = join(managedDir, 'uclaw_desktop_check2.png');
     expect(result.params?.command).toBe(
-      'mkdir -p /tmp/uclaw-test-openclaw/media/outbound && screencapture -x /tmp/uclaw-test-openclaw/media/outbound/uclaw_desktop_check2.png && file /tmp/uclaw-test-openclaw/media/outbound/uclaw_desktop_check2.png',
+      `mkdir -p ${managedDir} && screencapture -x ${outputPath} && file ${outputPath}`,
     );
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('exec-screenshot-path-rewrite'));
   });

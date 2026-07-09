@@ -822,7 +822,7 @@ function localFastPathPlan(params: {
 
   if (params.requestedMode === 'image') {
     const visualQuestion = isVisualQuestionPrompt(prompt)
-      || (params.explicitImages.length > 0 && isVisualQuestionCuePrompt(prompt));
+      || ((params.explicitImages.length > 0 || params.candidateImages.length > 0) && isVisualQuestionCuePrompt(prompt));
     const editPrompt = isImageEditPrompt(prompt);
     const revisionFeedback = isImageRevisionFeedbackPrompt(prompt);
     const imageSelection = visualQuestion || revisionFeedback
@@ -914,7 +914,10 @@ function localFastPathPlan(params: {
   }
 
   if (
-    (isVisualQuestionPrompt(prompt) || (params.explicitImages.length > 0 && isVisualQuestionCuePrompt(prompt)))
+    (
+      isVisualQuestionPrompt(prompt)
+      || ((params.explicitImages.length > 0 || params.candidateImages.length > 0) && isVisualQuestionCuePrompt(prompt))
+    )
     && (params.explicitImages.length > 0 || params.candidateImages.length > 0)
   ) {
     const imageSelection = selectPreferredImage({
