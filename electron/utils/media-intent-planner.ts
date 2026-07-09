@@ -462,15 +462,20 @@ function detectCompositeTasks(params: {
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
 }): MediaIntentCompositeTask[] {
-  if (params.requestedMode !== 'chat') return [];
   const prompt = params.prompt.trim();
   if (!prompt) return [];
 
   const normalized = prompt.toLowerCase();
-  const imageSelection = selectPreferredImage({
-    selectedImageSource: params.explicitImages.length > 0 ? 'explicit' : 'candidate',
+  const explicitImageSelection = selectImage({
+    selectedImageSource: 'explicit',
     selectedImageIndex: 0,
     explicitImages: params.explicitImages,
+    candidateImages: [],
+  });
+  const candidateImageSelection = selectImage({
+    selectedImageSource: 'candidate',
+    selectedImageIndex: 0,
+    explicitImages: [],
     candidateImages: params.candidateImages,
   });
   const specs: Array<{
@@ -540,7 +545,7 @@ function detectCompositeTasks(params: {
       kind: spec.kind,
       title: spec.title,
       prompt: spec.prompt,
-      imageSelection: spec.needsImage ? imageSelection : undefined,
+      imageSelection: spec.needsImage ? explicitImageSelection : undefined,
       fallback: spec.needsImage
         ? '没有显式输入图时，优先使用本轮前序图片生成子任务的结果；仍不可用时标记该子任务待补输入，并继续执行其他子任务。'
         : undefined,
@@ -558,6 +563,12 @@ function detectCompositeTasks(params: {
     }
     if (dependency) {
       task.dependsOn = [dependency.id];
+      continue;
+    }
+    if (candidateImageSelection.sourceImages?.length && promptReferencesExistingImage(prompt)) {
+      task.selectedImageSource = candidateImageSelection.selectedImageSource;
+      task.selectedImageIndex = candidateImageSelection.selectedImageIndex;
+      task.sourceImages = candidateImageSelection.sourceImages;
     }
   }
 

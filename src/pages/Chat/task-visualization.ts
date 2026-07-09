@@ -21,6 +21,7 @@ export interface TaskStep {
   label: string;
   status: TaskStepStatus;
   kind: 'thinking' | 'tool' | 'system' | 'message';
+  runtimeKind?: string;
   detail?: string;
   durationMs?: number;
   depth: number;
@@ -680,6 +681,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
             label: planStep.title,
             status: runtimeStepStatus(planStep.status),
             kind: 'system',
+            runtimeKind: typeof planStep.kind === 'string' ? planStep.kind : undefined,
             detail: planStep.detail,
             durationMs: planStep.durationMs,
             depth: planStep.parentId ? 2 : 1,
@@ -697,6 +699,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           label: event.step.title,
           status: runtimeStepStatus(event.step.status),
           kind: 'system',
+          runtimeKind: typeof event.step.kind === 'string' ? event.step.kind : undefined,
           detail: event.step.detail,
           durationMs: event.step.durationMs,
           depth: event.step.parentId ? 2 : 1,

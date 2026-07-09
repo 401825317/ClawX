@@ -29,7 +29,6 @@ import {
 import {
   enqueueMediaGenerationJob,
   getMediaGenerationJob,
-  prepareMediaGenerationJob,
 } from '../../utils/media-generation-jobs';
 import {
   planMediaIntent,
@@ -46,6 +45,10 @@ import {
   getVideoPromptLengthError,
   MAX_VIDEO_GENERATION_PROMPT_CHARS,
 } from '../../utils/video-generation-prompt-limits';
+import {
+  createLocalArtifact,
+  type LocalArtifactCreateRequest,
+} from '../../utils/local-artifact-runtime';
 
 function normalizeMediaInputImageRefs(
   images: Array<{
@@ -125,6 +128,17 @@ export async function handleMediaRoutes(
   url: URL,
   _ctx: HostApiContext,
 ): Promise<boolean> {
+  if (url.pathname === '/api/local-artifacts/create' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<LocalArtifactCreateRequest>(req);
+      const artifact = await createLocalArtifact(body);
+      sendJson(res, 200, { success: true, artifact });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/media/intent-plan' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{
@@ -286,6 +300,7 @@ export async function handleMediaRoutes(
           filePath?: string;
         }>;
         userMessageTimestampMs?: number;
+        suppressConversationAppend?: boolean;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -323,8 +338,8 @@ export async function handleMediaRoutes(
         ...(originalPrompt ? { originalPrompt } : {}),
         ...(userInputImages ? { userInputImages } : {}),
         ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
+        ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
       };
-      await prepareMediaGenerationJob(payload);
       const job = enqueueMediaGenerationJob(payload);
       sendJson(res, 202, { success: true, jobId: job.id, job });
     } catch (error) {
@@ -449,6 +464,7 @@ export async function handleMediaRoutes(
           filePath?: string;
         }>;
         route?: unknown;
+        suppressConversationAppend?: boolean;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -522,8 +538,8 @@ export async function handleMediaRoutes(
         ...(userInputImages ? { userInputImages } : {}),
         ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
         route,
+        ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
       };
-      await prepareMediaGenerationJob(payload);
       const job = enqueueMediaGenerationJob(payload);
       logger.info('[video-generation-route] chat_send_enqueued', {
         jobId: job.id,

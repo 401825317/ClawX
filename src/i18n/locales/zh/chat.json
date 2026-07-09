@@ -170,10 +170,12 @@
         "detailsAction": "运行详情",
         "compact": {
             "working": "正在处理…",
+            "workingComposite": "正在处理 {{completedCount}}/{{totalCount}} 项任务…",
             "generatingImage": "正在生成图片…",
             "generatingVideo": "正在生成视频，可能需要久一点…",
             "workingArtifact": "正在制作产物…",
             "done": "任务已完成",
+            "compositeDone": "{{totalCount}} 项任务已完成",
             "imageDone": "图片已生成",
             "videoDone": "视频已生成",
             "artifactDone": "产物已生成",

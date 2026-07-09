@@ -543,12 +543,20 @@ export async function ensureManagedOpenAiImageRelay(): Promise<void> {
   const model = current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
   const managedModelRef = toManagedOpenAiImageModelRef(model);
   const timeoutMs = resolveChatImageTimeoutMs(current.config.timeoutMs);
+  const relayState = readOpenAiCompatibleImageRelayState(config as Record<string, unknown>);
+  const relayModel = resolveOpenAiImageRelayModelId(current.config, config as Record<string, unknown>);
+  const relayAlreadyConfigured = relayState.enabled
+    && relayState.providerKey === CLAWX_OPENAI_IMAGE_PROVIDER_KEY
+    && relayState.baseUrl.trim() === current.openAiRelay.baseUrl.trim()
+    && relayModel === model;
 
-  await applyOpenAiImageRelaySettings({
-    enabled: true,
-    baseUrl: current.openAiRelay.baseUrl,
-    model,
-  });
+  if (!relayAlreadyConfigured) {
+    await applyOpenAiImageRelaySettings({
+      enabled: true,
+      baseUrl: current.openAiRelay.baseUrl,
+      model,
+    });
+  }
 
   const currentModel = await resolveImageGenerationPrimaryFromConfig(config.agents?.defaults?.imageGenerationModel);
   if (!isManagedOpenAiImageModelRef(currentModel) || currentModel !== managedModelRef || current.config.timeoutMs !== timeoutMs) {
@@ -580,10 +588,11 @@ export async function generateImageForChatSession(params: {
   }
 
   const config = await readOpenClawConfig();
-  const current = await getImageGenerationSettingsSnapshot();
+  const requestedModel = params.model?.trim();
+  const current = requestedModel ? null : await getImageGenerationSettingsSnapshot();
   const configuredModel = toManagedOpenAiImageModelRef(
-    params.model?.trim() || current.config.primary || current.openAiRelay.model,
-    current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
+    requestedModel || current?.config.primary || current?.openAiRelay.model,
+    current?.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
   );
   const inputImageRefs = normalizeInputImageRefs(params.inputImages);
   const loadedInputImages = await loadInputImages(inputImageRefs);
@@ -593,7 +602,7 @@ export async function generateImageForChatSession(params: {
     agentDir: expandOpenClawPath(agent.agentDir),
     prompt: params.prompt.trim(),
     model: configuredModel,
-    timeoutMs: resolveChatImageTimeoutMs(current.config.timeoutMs),
+    timeoutMs: current ? resolveChatImageTimeoutMs(current.config.timeoutMs) : IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS,
     size: params.size?.trim() || DEFAULT_TEST_IMAGE_SIZE,
     quality: params.quality,
     inputImages: loadedInputImages,

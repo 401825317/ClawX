@@ -170,10 +170,12 @@
         "detailsAction": "Run details",
         "compact": {
             "working": "Working…",
+            "workingComposite": "Working on {{completedCount}}/{{totalCount}} tasks…",
             "generatingImage": "Generating image…",
             "generatingVideo": "Generating video. This may take a little longer…",
             "workingArtifact": "Creating artifacts…",
             "done": "Task complete",
+            "compositeDone": "{{totalCount}} tasks complete",
             "imageDone": "Image generated",
             "videoDone": "Video generated",
             "artifactDone": "Artifacts ready",

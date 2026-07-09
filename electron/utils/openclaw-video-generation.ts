@@ -519,20 +519,33 @@ export async function ensureManagedOpenAiVideoRelay(): Promise<void> {
   const config = await readOpenClawConfig();
   const current = await getVideoGenerationSettingsSnapshot();
   const model = current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
-
-  await applyOpenAiVideoRelaySettings({
-    enabled: true,
-    baseUrl: current.openAiRelay.baseUrl,
-    model,
-    timeoutMs: current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
-  });
-
+  const timeoutMs = current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
+  const modelIds = orderedClawXOpenAiVideoModelIds(model);
+  const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0] ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
+  const relayState = readOpenAiCompatibleVideoRelayState(config as Record<string, unknown>);
   const currentConfig = parseVideoGenerationModelConfig(config.agents?.defaults?.videoGenerationModel);
-  if (!currentConfig.primary) {
+  const relayAlreadyConfigured = relayState.enabled
+    && relayState.providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+    && relayState.baseUrl.trim() === current.openAiRelay.baseUrl.trim()
+    && currentConfig.primary === primaryModel
+    && currentConfig.timeoutMs === timeoutMs
+    && currentConfig.fallbacks.length === 0;
+
+  if (!relayAlreadyConfigured) {
+    await applyOpenAiVideoRelaySettings({
+      enabled: true,
+      baseUrl: current.openAiRelay.baseUrl,
+      model,
+      timeoutMs,
+    });
+    return;
+  }
+
+  if (currentConfig.primary !== primaryModel || currentConfig.timeoutMs !== timeoutMs || currentConfig.fallbacks.length > 0) {
     await setVideoGenerationConfig({
-      primary: `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${model}`,
+      primary: primaryModel,
       fallbacks: [],
-      timeoutMs: current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+      timeoutMs,
     });
   }
 }

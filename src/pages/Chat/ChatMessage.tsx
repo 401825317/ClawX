@@ -63,6 +63,16 @@ function isRemoteHttpUrl(filePath: string | undefined): boolean {
   return !!trimmed && /^https?:\/\//i.test(trimmed);
 }
 
+function attachmentOpenTarget(file: AttachedFileMeta): string | undefined {
+  return file.filePath?.trim() || file.gatewayUrl?.trim() || undefined;
+}
+
+function isCompositeResultMessage(message: RawMessage): boolean {
+  return message.role === 'assistant'
+    && typeof message.id === 'string'
+    && message.id.startsWith('composite-result:');
+}
+
 function isChatPreviewDocument(file: AttachedFileMeta): boolean {
   const name = file.fileName.toLowerCase();
   const mime = file.mimeType.toLowerCase();
@@ -363,6 +373,7 @@ export const ChatMessage = memo(function ChatMessage({
   onUseImageAsReference,
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
+  const isCompositeResult = isCompositeResultMessage(message);
   const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
   const isToolResult = role === 'toolresult' || role === 'tool_result';
   const text = textOverride ?? extractText(message);
@@ -604,8 +615,22 @@ export const ChatMessage = memo(function ChatMessage({
           </div>
         )}
 
+        {/* Composite result attachments — compact Codex-style manifest. */}
+        {!isUser && isCompositeResult && attachedFiles.length > 0 && (
+          <CompositeArtifactGrid
+            files={attachedFiles}
+            onOpenFile={onOpenFile}
+            onPreviewImage={(file, src) => setLightboxImg({
+              src,
+              fileName: file.fileName,
+              filePath: file.filePath,
+              mimeType: file.mimeType,
+            })}
+          />
+        )}
+
         {/* File attachments — assistant messages (below text) */}
-        {!isUser && attachedFiles.length > 0 && (
+        {!isUser && !isCompositeResult && attachedFiles.length > 0 && (
           <div className="flex flex-wrap items-start gap-2">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
@@ -722,6 +747,161 @@ function ToolStatusBar({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function artifactTypeLabel(file: AttachedFileMeta): string {
+  const mime = file.mimeType.toLowerCase();
+  const name = file.fileName.toLowerCase();
+  if (mime.startsWith('image/')) return '图片';
+  if (mime.startsWith('video/')) return '视频';
+  if (name.endsWith('.ppt') || name.endsWith('.pptx')) return 'PPT';
+  if (name.endsWith('.xls') || name.endsWith('.xlsx')) return 'Excel';
+  if (name.endsWith('.html') || name.endsWith('.htm')) return '小程序';
+  if (name.endsWith('.md') || name.endsWith('.markdown') || mime === 'text/markdown') return '文案';
+  return '文件';
+}
+
+function openAttachment(file: AttachedFileMeta, onOpenFile?: (file: AttachedFileMeta) => void): void {
+  const target = attachmentOpenTarget(file);
+  if (!target) return;
+  if (onOpenFile && file.filePath) {
+    onOpenFile(file);
+    return;
+  }
+  if (isRemoteHttpUrl(target)) {
+    void invokeIpc('shell:openExternal', target);
+  } else {
+    void invokeIpc('shell:openPath', target);
+  }
+}
+
+function useResolvedMediaSrc(target: string | undefined): string | null {
+  const key = target ?? '';
+  const immediate = immediateMediaSrcFromFilePath(target);
+  const [resolved, setResolved] = useState<{ key: string; src: string | null }>(() => ({
+    key,
+    src: immediate,
+  }));
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.resolve(immediate ?? mediaSrcFromFilePath(target))
+      .then((src) => {
+        if (!cancelled) setResolved({ key, src });
+      })
+      .catch(() => {
+        if (!cancelled) setResolved({ key, src: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, immediate, target]);
+
+  return resolved.key === key ? resolved.src : immediate;
+}
+
+function CompactImageArtifact({
+  file,
+  onPreview,
+}: {
+  file: AttachedFileMeta;
+  onPreview: (src: string) => void;
+}) {
+  const src = useResolvedMediaSrc(attachmentOpenTarget(file));
+
+  if (!src) {
+    return (
+      <div className="flex h-14 w-16 shrink-0 items-center justify-center rounded-md bg-black/5 dark:bg-white/10">
+        <FileIcon mimeType={file.mimeType} className="h-4 w-4 text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="h-14 w-16 shrink-0 overflow-hidden rounded-md bg-black/5 dark:bg-white/10"
+      onClick={() => onPreview(src)}
+      title={file.fileName}
+    >
+      <img src={src} alt="" className="h-full w-full object-cover" />
+    </button>
+  );
+}
+
+function CompositeArtifactGrid({
+  files,
+  onOpenFile,
+  onPreviewImage,
+}: {
+  files: AttachedFileMeta[];
+  onOpenFile?: (file: AttachedFileMeta) => void;
+  onPreviewImage: (file: AttachedFileMeta, src: string) => void;
+}) {
+  const visibleFiles = dedupeAttachedFiles(files).filter((file) => attachmentOpenTarget(file));
+  if (visibleFiles.length === 0) return null;
+
+  return (
+    <div className="w-full max-w-2xl rounded-xl border border-black/10 bg-black/[0.025] p-3 dark:border-white/10 dark:bg-white/[0.035]">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-foreground/80">
+        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+        <span>产物清单</span>
+        <span className="text-muted-foreground">{visibleFiles.length} 个</span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {visibleFiles.map((file, index) => {
+          const isImage = file.mimeType.startsWith('image/');
+          const isVideo = file.mimeType.startsWith('video/');
+          const target = attachmentOpenTarget(file);
+          return (
+            <div
+              key={`${target}-${index}`}
+              className="group/artifact flex min-w-0 items-center gap-3 rounded-lg border border-black/8 bg-background/70 p-2 transition-colors hover:bg-black/[0.04] dark:border-white/10 dark:bg-white/[0.035] dark:hover:bg-white/[0.06]"
+            >
+              {isImage ? (
+                <CompactImageArtifact
+                  file={file}
+                  onPreview={(src) => onPreviewImage(file, src)}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="flex h-14 w-16 shrink-0 items-center justify-center rounded-md bg-black/5 text-muted-foreground transition-colors hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
+                  onClick={() => openAttachment(file, onOpenFile)}
+                  title={target}
+                >
+                  <FileIcon mimeType={file.mimeType} className="h-5 w-5" />
+                </button>
+              )}
+              <button
+                type="button"
+                className="min-w-0 flex-1 text-left"
+                onClick={() => {
+                  if (!isImage) openAttachment(file, onOpenFile);
+                }}
+                title={target}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground dark:bg-white/10">
+                    {artifactTypeLabel(file)}
+                  </span>
+                  {isVideo && (
+                    <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground dark:bg-white/10">
+                      可播放
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 truncate text-xs font-medium text-foreground">{file.fileName}</p>
+                <p className="mt-0.5 truncate text-2xs text-muted-foreground">
+                  {file.fileSize > 0 ? formatFileSize(file.fileSize) : (isVideo ? '视频链接' : '已生成')}
+                </p>
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -898,13 +1078,14 @@ function FileIcon({ mimeType, className }: { mimeType: string; className?: strin
 
 function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
   const handleOpen = useCallback(() => {
-    if (!file.filePath) return;
-    if (onOpen) {
+    const target = attachmentOpenTarget(file);
+    if (!target) return;
+    if (onOpen && file.filePath) {
       onOpen(file);
-    } else if (isRemoteHttpUrl(file.filePath)) {
-      invokeIpc('shell:openExternal', file.filePath);
+    } else if (isRemoteHttpUrl(target)) {
+      void invokeIpc('shell:openExternal', target);
     } else {
-      invokeIpc('shell:openPath', file.filePath);
+      void invokeIpc('shell:openPath', target);
     }
   }, [file, onOpen]);
 
@@ -912,10 +1093,10 @@ function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: At
     <div 
       className={cn(
         "flex items-center gap-3 rounded-xl border border-black/10 dark:border-white/10 px-3 py-2.5 bg-black/5 dark:bg-white/5 max-w-[220px]",
-        file.filePath && "cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+        attachmentOpenTarget(file) && "cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
       )}
       onClick={handleOpen}
-      title={file.filePath ? "Open file" : undefined}
+      title={attachmentOpenTarget(file) ? "Open file" : undefined}
     >
       <FileIcon mimeType={file.mimeType} className="h-5 w-5 shrink-0 text-muted-foreground" />
       <div className="min-w-0 overflow-hidden">
@@ -959,37 +1140,18 @@ function immediateMediaSrcFromFilePath(filePath: string | undefined): string | n
 }
 
 function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
-  const [src, setSrc] = useState<string | null>(() => immediateMediaSrcFromFilePath(file.filePath));
-
-  useEffect(() => {
-    let cancelled = false;
-    const immediate = immediateMediaSrcFromFilePath(file.filePath);
-    setSrc(immediate);
-    if (immediate) {
-      return () => {
-        cancelled = true;
-      };
-    }
-    void mediaSrcFromFilePath(file.filePath)
-      .then((resolved) => {
-        if (!cancelled) setSrc(resolved);
-      })
-      .catch(() => {
-        if (!cancelled) setSrc(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [file.filePath]);
+  const mediaTarget = attachmentOpenTarget(file);
+  const src = useResolvedMediaSrc(mediaTarget);
 
   const handleOpen = useCallback(() => {
-    if (!file.filePath) return;
-    if (onOpen) {
+    const target = attachmentOpenTarget(file);
+    if (!target) return;
+    if (onOpen && file.filePath) {
       onOpen(file);
-    } else if (isRemoteHttpUrl(file.filePath)) {
-      invokeIpc('shell:openExternal', file.filePath);
+    } else if (isRemoteHttpUrl(target)) {
+      void invokeIpc('shell:openExternal', target);
     } else {
-      invokeIpc('shell:openPath', file.filePath);
+      void invokeIpc('shell:openPath', target);
     }
   }, [file, onOpen]);
 

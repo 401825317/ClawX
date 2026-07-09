@@ -98,7 +98,7 @@ const QUESTION_DIRECTORY_RENDER_LIMIT = 300;
 const CHILD_TRANSCRIPT_LOAD_LIMIT = 3;
 
 type Translate = (key: string, params?: Record<string, unknown> | string) => string;
-type RunCompactKind = 'image' | 'video' | 'artifact' | 'generic';
+type RunCompactKind = 'composite' | 'image' | 'video' | 'artifact' | 'generic';
 
 const PROBLEM_STEP_STATUSES = new Set<TaskStep['status']>(['error', 'blocked', 'failed', 'aborted']);
 
@@ -128,6 +128,27 @@ function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
 
 function taskStepSearchText(step: TaskStep): string {
   return `${step.label}\n${step.detail ?? ''}`.toLowerCase();
+}
+
+function isCompositeCompactStep(step: TaskStep): boolean {
+  if (step.id === 'plan-step:uclaw.composite') return false;
+  const runtimeKind = typeof step.runtimeKind === 'string' ? step.runtimeKind.trim().toLowerCase() : '';
+  if (runtimeKind) return runtimeKind === 'composite-task';
+  return step.id.startsWith('plan-step:uclaw.composite.');
+}
+
+function getCompositeCompactProgress(steps: TaskStep[]): { total: number; completed: number } | null {
+  const taskStepsById = new Map<string, TaskStep>();
+  for (const step of steps) {
+    if (!isCompositeCompactStep(step)) continue;
+    taskStepsById.set(step.id, step);
+  }
+  if (taskStepsById.size === 0) return null;
+  const taskSteps = [...taskStepsById.values()];
+  return {
+    total: taskSteps.length,
+    completed: taskSteps.filter((step) => step.status === 'completed').length,
+  };
 }
 
 function formatRunElapsedDuration(durationMs: number | null | undefined): string | null {
@@ -163,6 +184,7 @@ function getCompletedRunElapsedMs(run: ChatRuntimeRunState | null, startedAtMs: 
 
 function inferRunCompactKind(card: UserRunCard, generatedFiles: GeneratedFile[]): RunCompactKind {
   const stepText = card.steps.map(taskStepSearchText).join('\n');
+  if (getCompositeCompactProgress(card.steps)) return 'composite';
   if (/(video_generate|video generation|video|视频)/i.test(stepText)) return 'video';
   if (/(image_generate|image_edit|image generation|image|图片|图像|修图)/i.test(stepText)) return 'image';
   if (generatedFiles.length > 0 || /(artifact|file|ppt|excel|document|文件|产物|文档|表格|小程序)/i.test(stepText)) {
@@ -182,13 +204,25 @@ function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile
   if (status === 'aborted') return withElapsed(t('executionGraph.compact.aborted'));
 
   const kind = inferRunCompactKind(card, generatedFiles);
+  const compositeProgress = kind === 'composite' ? getCompositeCompactProgress(card.steps) : null;
   if (card.active) {
+    if (kind === 'composite') {
+      return withElapsed(t('executionGraph.compact.workingComposite', {
+        completedCount: compositeProgress?.completed ?? 0,
+        totalCount: compositeProgress?.total ?? generatedFiles.length,
+      }));
+    }
     if (kind === 'image') return withElapsed(t('executionGraph.compact.generatingImage'));
     if (kind === 'video') return withElapsed(t('executionGraph.compact.generatingVideo'));
     if (kind === 'artifact') return withElapsed(t('executionGraph.compact.workingArtifact'));
     return withElapsed(t('executionGraph.compact.working'));
   }
 
+  if (kind === 'composite') {
+    return withElapsed(t('executionGraph.compact.compositeDone', {
+      totalCount: compositeProgress?.total ?? generatedFiles.length,
+    }));
+  }
   if (kind === 'image') return withElapsed(t('executionGraph.compact.imageDone'));
   if (kind === 'video') return withElapsed(t('executionGraph.compact.videoDone'));
   if (kind === 'artifact') return withElapsed(t('executionGraph.compact.artifactDone'));
@@ -448,6 +482,16 @@ function mergeRuntimeRunsForSegment(
   };
 }
 
+function canMergeRuntimeRunIntoActiveSegment(
+  run: ChatRuntimeRunState,
+  sessionKey: string,
+  activeRunId: string | null,
+): boolean {
+  if (activeRunId && run.runId === activeRunId) return true;
+  if (!run.sessionKey) return false;
+  return run.sessionKey === sessionKey;
+}
+
 function getRuntimeRunForSegment(
   runtimeRuns: Record<string, ChatRuntimeRunState>,
   sessionKey: string,
@@ -464,8 +508,7 @@ function getRuntimeRunForSegment(
     const startBoundaryMs = activeRunStartMs ?? segmentStartMs;
     const sameTurnRuns = Object.values(runtimeRuns).filter((run) => {
       if (run.runId.startsWith('history:')) return false;
-      if (run.sessionKey && run.sessionKey !== sessionKey) return false;
-      if (run.runId === activeRunId) return true;
+      if (!canMergeRuntimeRunIntoActiveSegment(run, sessionKey, activeRunId)) return false;
       if (startBoundaryMs == null) return false;
       const firstEventMs = getRunFirstEventMs(run);
       if (firstEventMs == null) return false;
@@ -739,8 +782,7 @@ export function Chat() {
       latestRealUserMessage?.index ?? 0,
       Object.values(runtimeRuns).filter((run) => {
         if (run.runId.startsWith('history:')) return false;
-        if (run.sessionKey && run.sessionKey !== currentSessionKey) return false;
-        if (run.runId === activeRunId) return true;
+        if (!canMergeRuntimeRunIntoActiveSegment(run, currentSessionKey, activeRunId)) return false;
         const activeRun = runtimeRuns[activeRunId];
         const activeStartMs = activeRun ? getRunFirstEventMs(activeRun) : null;
         const firstEventMs = getRunFirstEventMs(run);
@@ -1415,8 +1457,8 @@ export function Chat() {
                           const compactStatus = getRunCompactStatus(card);
                           const hasProblem = runCardHasProblem(card);
                           const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
-                          const detailsEnabled = card.active || devModeUnlocked || hasProblem;
-                          const shouldShowRunStatus = detailsEnabled || generatedFiles.length > 0 || hasElapsedSummary;
+                          const detailsEnabled = devModeUnlocked;
+                          const shouldShowRunStatus = card.active || hasProblem || generatedFiles.length > 0 || hasElapsedSummary;
                           if (!shouldShowRunStatus && generatedFiles.length === 0) return null;
                           // Keep the run surface compact by default. User toggles
                           // persist across history refreshes through this controlled

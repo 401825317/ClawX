@@ -117,6 +117,58 @@ describe('planMediaIntent', () => {
     }));
   });
 
+  it('prefers the current composite image output over historical candidate images for sample-pack edits', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+      requestedMode: 'chat',
+      candidateImages: [
+        {
+          fileName: 'old-result.png',
+          mimeType: 'image/png',
+          filePath: '/tmp/old-result.png',
+        },
+      ],
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan.compositeTasks?.[4]).toEqual(expect.objectContaining({
+      kind: 'image_edit',
+      selectedImageSource: 'none',
+      dependsOn: ['task-1-image_generate'],
+      fallback: expect.stringContaining('本轮前序图片生成子任务'),
+    }));
+    expect(plan.compositeTasks?.[4].sourceImages).toBeUndefined();
+  });
+
+  it('keeps composite sample packs from being swallowed by an image/video mode hint', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+      requestedMode: 'video',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      reason: 'composite_intent_local',
+    }));
+    expect(plan.compositeTasks?.map((task) => task.kind)).toEqual([
+      'image_generate',
+      'presentation',
+      'spreadsheet',
+      'video_generate',
+      'image_edit',
+      'mini_program',
+      'copywriting',
+    ]);
+  });
+
   it('routes explicit image mode locally without calling the LLM planner', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({

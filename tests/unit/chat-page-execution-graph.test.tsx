@@ -45,6 +45,12 @@ vi.mock('react-i18next', () => ({
       if (key === 'executionGraph.collapsedSummary') {
         return `collapsed ${String(params?.toolCount ?? '')} ${String(params?.processCount ?? '')}`.trim();
       }
+      if (key === 'executionGraph.compact.compositeDone') {
+        return `${String(params?.totalCount ?? '')} tasks completed`;
+      }
+      if (key === 'executionGraph.compact.workingComposite') {
+        return `${String(params?.completedCount ?? '')}/${String(params?.totalCount ?? '')} tasks running`;
+      }
       if (key === 'executionGraph.agentRun') {
         return `Main execution`;
       }
@@ -119,12 +125,18 @@ vi.mock('@/pages/Chat/ChatMessage', () => ({
   },
 }));
 
+async function setChatDevMode(value: boolean): Promise<void> {
+  const { useSettingsStore } = await import('@/stores/settings');
+  useSettingsStore.setState({ devModeUnlocked: value });
+}
+
 describe('Chat execution graph lifecycle', () => {
   beforeEach(async () => {
     vi.resetModules();
     hostApiFetchMock.mockReset();
     hostApiFetchMock.mockResolvedValue({ success: true, messages: [] });
     agentsState.fetchAgents.mockReset();
+    await setChatDevMode(false);
 
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
@@ -177,20 +189,20 @@ describe('Chat execution graph lifecycle', () => {
     });
   });
 
-  it('keeps the execution graph expanded while the reply is still streaming and shows only the reply suffix in the bubble', async () => {
+  it('keeps the execution graph compact while the reply is still streaming and shows only the reply suffix in the bubble', async () => {
     const { Chat } = await import('@/pages/Chat/index');
 
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'false');
+      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
     });
 
     expect(screen.getByText('Here is the summary.')).toBeInTheDocument();
     expect(screen.queryByText('Checked X. Here is the summary.')).not.toBeInTheDocument();
   });
 
-  it('keeps runtime tool status inside the execution graph while a tool is running', async () => {
+  it('keeps runtime tool status out of the standalone stream bar while a tool is running', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -246,14 +258,15 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'false');
-      expect(screen.getByText('read')).toBeInTheDocument();
+      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
     });
 
+    expect(screen.queryByText('read')).not.toBeInTheDocument();
     expect(screen.queryByTestId('chat-streaming-tool-status-bar')).not.toBeInTheDocument();
   });
 
   it('aggregates same-turn continuation runs into the latest execution graph', async () => {
+    await setChatDevMode(true);
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -350,6 +363,89 @@ describe('Chat execution graph lifecycle', () => {
     expect(screen.getByText('生成视频')).toBeInTheDocument();
   });
 
+  it('does not merge a session-less sibling run into the active execution graph', async () => {
+    await setChatDevMode(true);
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          timestamp: 1773281731,
+          content: '帮我生成一个图片',
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: true,
+      activeRunId: 'run-active-image',
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      runtimeRuns: {
+        'run-active-image': {
+          runId: 'run-active-image',
+          sessionKey: 'agent:main:main',
+          status: 'running',
+          startedAt: 1773281731000,
+          lastEventAt: 1773281731500,
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'tool.started',
+              runId: 'run-active-image',
+              sessionKey: 'agent:main:main',
+              ts: 1773281731500,
+              toolCallId: 'image-1',
+              name: 'image_generate',
+              args: { prompt: 'demo image' },
+            },
+          ],
+        },
+        'run-sessionless-sibling': {
+          runId: 'run-sessionless-sibling',
+          status: 'running',
+          startedAt: 1773281731800,
+          lastEventAt: 1773281731800,
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'tool.started',
+              runId: 'run-sessionless-sibling',
+              ts: 1773281731800,
+              toolCallId: 'other-1',
+              name: 'foreign_tool',
+              args: { prompt: 'other task' },
+            },
+          ],
+        },
+      },
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      pendingToolImages: [],
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+
+    expect(await screen.findByText('image_generate')).toBeInTheDocument();
+    expect(screen.queryByText('foreign_tool')).not.toBeInTheDocument();
+  });
+
   it('renders the execution graph immediately for an active run before any stream content arrives', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
@@ -383,11 +479,10 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'false');
+      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
     });
 
-    expect(screen.getByTestId('chat-execution-step-thinking-trailing')).toBeInTheDocument();
-    expect(screen.getAllByText('Thinking').length).toBeGreaterThan(0);
+    expect(screen.queryByTestId('chat-execution-step-thinking-trailing')).not.toBeInTheDocument();
   });
 
   it('renders generated file cards with line stats for edit tools', async () => {
@@ -776,6 +871,132 @@ describe('Chat execution graph lifecycle', () => {
     expect(await screen.findByText('package.json')).toBeInTheDocument();
     expect(screen.getAllByTestId('chat-execution-graph')).toHaveLength(1);
     expect(screen.getByText('The package metadata was read.')).toBeInTheDocument();
+  });
+
+  it('counts only structured composite task steps in the compact summary', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    const sessionKey = 'agent:main:main';
+    const runId = `history:${sessionKey}:turn-composite`;
+    const compositeSteps = [
+      '生成图片',
+      '制作 PPT',
+      '制作 Excel',
+      '生成视频',
+      '根据图片修图',
+      '制作小程序',
+      '撰写文案',
+    ].map((title, index) => ({
+      id: `uclaw.composite.task-${index + 1}`,
+      title,
+      status: 'completed' as const,
+      detail: `子任务 ${index + 1} 已完成`,
+      kind: 'composite-task',
+      parentId: 'uclaw.composite',
+      order: index + 2,
+      requiresArtifact: true,
+    }));
+
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          id: 'turn-composite',
+          timestamp: 1773281731,
+          content: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+        },
+        {
+          role: 'assistant',
+          id: 'reply-composite',
+          content: [{ type: 'text', text: '7 个示例产物已完成。' }],
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {
+        [runId]: {
+          runId,
+          sessionKey,
+          status: 'completed',
+          startedAt: 1773281731000,
+          lastEventAt: 1773281735000,
+          assistantText: '',
+          thinkingText: '',
+          events: [
+            {
+              type: 'run.plan.updated',
+              runId,
+              sessionKey,
+              ts: 1773281731000,
+              objective: '生成一组示例产物',
+              steps: [
+                {
+                  id: 'uclaw.composite',
+                  title: '执行组合任务',
+                  status: 'completed',
+                  detail: '按合同顺序执行所有子任务。',
+                  kind: 'composite',
+                  order: 1,
+                },
+                ...compositeSteps,
+              ],
+            },
+            ...Array.from({ length: 5 }, (_, index) => ({
+              type: 'artifact.produced' as const,
+              runId,
+              sessionKey,
+              ts: 1773281732000 + index,
+              artifact: {
+                id: `extra-artifact-${index + 1}`,
+                title: `子任务验证记录 ${index + 1}`,
+                kind: 'file',
+                filePath: `/tmp/extra-${index + 1}.txt`,
+                summary: '这只是过程记录，不是 composite 子任务。',
+              },
+            })),
+            {
+              type: 'gate.evaluated',
+              runId,
+              sessionKey,
+              ts: 1773281735000,
+              gate: {
+                id: 'gate-composite',
+                decision: 'deliverable',
+                summary: '所有子任务产物已通过门禁。',
+                artifactCount: 7,
+                requiredVerificationCount: 7,
+                passedRequiredVerificationCount: 7,
+                blockingIssueCount: 0,
+                warningIssueCount: 0,
+                verificationCoverage: 1,
+                issues: [],
+              },
+            },
+          ],
+        },
+      },
+      sessions: [{ key: sessionKey }],
+      currentSessionKey: sessionKey,
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    expect(await screen.findByText(/7 tasks completed/)).toBeInTheDocument();
+    expect(screen.queryByText(/12 tasks completed/)).not.toBeInTheDocument();
   });
 
   it('shows a scroll-to-latest button when the chat is scrolled away from the bottom', async () => {

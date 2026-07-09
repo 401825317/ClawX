@@ -477,6 +477,7 @@ export function buildRuntimeArtifactEventsFromAttachedFiles(
   base: RuntimeContractBase & {
     toolCallId?: string;
     itemId?: string;
+    stepId?: string;
     verificationDetail?: string;
   },
   files: AttachedFileMeta[],
@@ -503,6 +504,7 @@ export function buildRuntimeArtifactEventsFromAttachedFiles(
       url: gatewayUrl ?? previewUrl,
       mimeType: normalizeText(file.mimeType),
       sizeBytes: file.fileSize > 0 ? file.fileSize : undefined,
+      stepId: normalizeText(base.stepId),
       sourceToolCallId: normalizeText(base.toolCallId),
     };
 

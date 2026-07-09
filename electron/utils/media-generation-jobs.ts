@@ -662,6 +662,10 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
     throw new Error('Media generation completed without output paths');
   }
 
+  if (job.payload.suppressConversationAppend === true) {
+    return;
+  }
+
   const inputPaths = (job.payload.inputImages ?? []).map((image) => image.filePath);
   const userInputPaths = (job.payload.userInputImages ?? job.payload.inputImages ?? []).map((image) => image.filePath);
   if (job.payload.kind === 'image') {
@@ -729,6 +733,33 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
     queuedJobs: queues[job.kind].length,
     maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[job.kind],
   });
+
+  const prepareStartedAt = Date.now();
+  recordJobProgress(job, {
+    id: 'job:prepare',
+    event: 'prepare_started',
+    label: '媒体运行时准备',
+    status: 'running',
+    timestampMs: prepareStartedAt,
+    detail: job.kind === 'image' ? '同步图片生成运行时配置。' : '同步视频生成运行时配置。',
+  });
+  try {
+    await prepareMediaGenerationJob(job.payload);
+    const preparedAt = Date.now();
+    recordJobProgress(job, {
+      id: 'job:prepare',
+      event: 'prepare_completed',
+      label: '媒体运行时准备',
+      status: 'completed',
+      timestampMs: preparedAt,
+      detail: `耗时：${formatDurationMs(preparedAt - prepareStartedAt) ?? '0ms'}`,
+      durationMs: preparedAt - prepareStartedAt,
+    });
+  } catch (error) {
+    markJobFailed(job, error instanceof Error ? error.message : String(error));
+    activeJobIds[job.kind].delete(job.id);
+    return;
+  }
 
   const wrapperPath = getMediaWorkerWrapperPath();
   const entryPath = getMediaWorkerEntryPath();

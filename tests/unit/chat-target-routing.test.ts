@@ -1465,7 +1465,7 @@ describe('chat target routing', () => {
     ]));
   });
 
-  it('routes a no-attachment multi-deliverable sample pack through normal chat instead of asking for one mode', async () => {
+  it('routes a no-attachment multi-deliverable sample pack through the composite artifact runner', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
     useChatStore.setState({
@@ -1490,12 +1490,75 @@ describe('chat target routing', () => {
       loading: false,
       thinkingLevel: null,
     });
-    hostApiFetchMock.mockImplementation(async (url: string) => {
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
       if (url.toString().startsWith('/api/sessions/transcript?')) {
         return { messages: [] };
       }
-      if (url === '/api/chat/send') {
-        return { success: true, result: { runId: 'run-text' } };
+      if (url === '/api/media/image-generation/chat-send') {
+        const body = init?.body ? JSON.parse(init.body) as { inputImages?: unknown[] } : {};
+        const edited = (body.inputImages?.length ?? 0) > 0;
+        return {
+          success: true,
+          job: {
+            id: edited ? 'job-image-edit' : 'job-image',
+            kind: 'image',
+            sessionKey: 'agent:main:main',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                path: edited ? '/tmp/uclaw-edit.png' : '/tmp/uclaw-image.png',
+                fileName: edited ? 'uclaw-edit.png' : 'uclaw-image.png',
+                mimeType: 'image/png',
+                size: 1024,
+                width: 1024,
+                height: 1024,
+              }],
+            },
+          },
+        };
+      }
+      if (url === '/api/media/video-generation/chat-send') {
+        return {
+          success: true,
+          job: {
+            id: 'job-video',
+            kind: 'video',
+            sessionKey: 'agent:main:main',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                path: '/tmp/uclaw-video.mp4',
+                fileName: 'uclaw-video.mp4',
+                mimeType: 'video/mp4',
+                size: 2048,
+                durationSeconds: 15,
+              }],
+            },
+          },
+        };
+      }
+      if (url === '/api/local-artifacts/create') {
+        const body = init?.body ? JSON.parse(init.body) as { kind?: string; title?: string } : {};
+        const ext = body.kind === 'presentation' ? 'pptx' : body.kind === 'spreadsheet' ? 'xlsx' : body.kind === 'mini_program' ? 'html' : 'md';
+        const mimeType = ext === 'pptx'
+          ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+          : ext === 'xlsx'
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : ext === 'html'
+              ? 'text/html'
+              : 'text/markdown';
+        return {
+          success: true,
+          artifact: {
+            kind: body.kind === 'mini_program' ? 'webpage' : body.kind,
+            title: body.title || body.kind || 'artifact',
+            fileName: `uclaw-${body.kind}.${ext}`,
+            filePath: `/tmp/uclaw-${body.kind}.${ext}`,
+            fileSize: 512,
+            mimeType,
+            media: `MEDIA:/tmp/uclaw-${body.kind}.${ext}`,
+          },
+        };
       }
       if (url !== '/api/media/intent-plan') {
         return { success: true, result: {} };
@@ -1533,28 +1596,19 @@ describe('chat target routing', () => {
     await useChatStore.getState().sendMessage(prompt);
 
     const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
-    expect(sendCall).toBeTruthy();
-    const payload = JSON.parse((sendCall?.[1] as { body: string }).body) as {
-      sessionKey: string;
-      message: string;
-    };
-    expect(payload.sessionKey).toBe('agent:main:main');
-    expect(payload.message).toContain('【UClaw composite execution contract】');
-    expect(payload.message).toContain('不要询问用户先做哪个');
-    expect(payload.message).toContain('不能用“我一次只能执行一种类型”来结束');
-    expect(payload.message).toContain('生成图片');
-    expect(payload.message).toContain('制作 PPT');
-    expect(payload.message).toContain('制作 Excel');
-    expect(payload.message).toContain('生成视频');
-    expect(payload.message).toContain('根据图片修图');
-    expect(payload.message).toContain('制作小程序');
-    expect(payload.message).toContain('撰写文案');
-    expect(payload.message).toContain('依赖：task-1-image_generate');
-    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
-    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/video-generation/chat-send')).toBe(false);
+    expect(sendCall).toBeFalsy();
+    const imageCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/image-generation/chat-send');
+    const videoCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/video-generation/chat-send');
+    expect(imageCalls).toHaveLength(2);
+    expect(videoCalls).toHaveLength(1);
+    for (const call of [...imageCalls, ...videoCalls]) {
+      const payload = JSON.parse((call[1] as { body: string }).body) as { suppressConversationAppend?: boolean };
+      expect(payload.suppressConversationAppend).toBe(true);
+    }
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/local-artifacts/create')).toHaveLength(4);
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
 
-    const run = useChatStore.getState().runtimeRuns['run-text'];
+    const run = Object.values(useChatStore.getState().runtimeRuns)[0];
     const compositeSteps = run?.planSteps.filter((step) => step.kind === 'composite-task') ?? [];
     expect(compositeSteps).toHaveLength(7);
     expect(compositeSteps.map((step) => step.title)).toEqual([
@@ -1567,6 +1621,8 @@ describe('chat target routing', () => {
       '撰写文案',
     ]);
     expect(compositeSteps.every((step) => step.requiresArtifact === true)).toBe(true);
+    expect(run?.artifacts).toHaveLength(7);
+    expect(run?.gateResult?.decision).toBe('deliverable');
   });
 
   it('keeps automation planning requests with illustration wording on the normal chat path', async () => {

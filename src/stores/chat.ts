@@ -922,6 +922,30 @@ type MediaGenerationSendResponse = {
   job?: MediaGenerationJobSnapshot;
 };
 
+type LocalArtifactCreateResponse = {
+  success: boolean;
+  error?: string;
+  artifact?: {
+    kind: string;
+    title: string;
+    fileName: string;
+    filePath: string;
+    fileSize: number;
+    mimeType: string;
+    media: string;
+  };
+};
+
+type CompositeTaskRunStatus = 'completed' | 'failed' | 'blocked';
+
+type CompositeTaskRunResult = {
+  task: MediaIntentCompositeTask;
+  stepId: string;
+  status: CompositeTaskRunStatus;
+  files: AttachedFileMeta[];
+  error?: string;
+};
+
 const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
 const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
 const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
@@ -1091,7 +1115,7 @@ function appendMediaGenerationResultMessage(params: {
 function isOptimisticMediaResultMessage(message: RawMessage): boolean {
   return message.role === 'assistant'
     && typeof message.id === 'string'
-    && message.id.startsWith('media-result:')
+    && (message.id.startsWith('media-result:') || message.id.startsWith('composite-result:'))
     && (message._attachedFiles?.length ?? 0) > 0;
 }
 
@@ -1291,6 +1315,9 @@ function applyMediaRuntimeSuccess(params: {
   sessionKey: string;
   job: MediaGenerationJobSnapshot | undefined;
   kind: 'image' | 'video';
+  stepId?: string;
+  sourceToolCallId?: string;
+  completeRun?: boolean;
 }): { decision?: string; artifacts: ChatRuntimeArtifact[] } {
   const ts = Date.now();
   const attachedFiles = attachedFilesFromMediaGenerationJob(params.job, params.kind);
@@ -1302,7 +1329,8 @@ function applyMediaRuntimeSuccess(params: {
       sessionKey: params.sessionKey,
       ts,
       producer: 'media',
-      toolCallId: params.job?.id,
+      toolCallId: params.sourceToolCallId ?? params.job?.id,
+      stepId: params.stepId,
       verificationDetail: params.kind === 'image'
         ? '图片生成 job 已返回产物输出。'
         : '视频生成 job 已返回产物输出。',
@@ -1330,19 +1358,484 @@ function applyMediaRuntimeSuccess(params: {
       state.runtimeRuns,
       [...artifactEvents, ...availabilityEvents, ...metadataEvents],
     );
-    runtimeRuns = applyRuntimeContractEvents(
-      runtimeRuns,
-      buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
-        runId: params.runId,
-        sessionKey: params.sessionKey,
-        ts,
-        status: 'completed',
-      }),
-    );
+    if (params.completeRun !== false) {
+      runtimeRuns = applyRuntimeContractEvents(
+        runtimeRuns,
+        buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
+          runId: params.runId,
+          sessionKey: params.sessionKey,
+          ts,
+          status: 'completed',
+        }),
+      );
+    }
     decision = runtimeRuns[params.runId]?.gateResult?.decision;
     return { runtimeRuns };
   });
   return { decision, artifacts };
+}
+
+function compositeTaskStepId(task: MediaIntentCompositeTask, index: number): string {
+  return `uclaw.composite.${sanitizeCompositeTaskId(task.id, index)}`;
+}
+
+function buildCompositeStepEvent(params: {
+  runId: string;
+  sessionKey: string;
+  task?: MediaIntentCompositeTask;
+  stepId: string;
+  title: string;
+  status: 'pending' | 'running' | 'completed' | 'error' | 'blocked' | 'skipped';
+  detail?: string;
+  order?: number;
+  parentId?: string;
+  requiresArtifact?: boolean;
+}): ChatRuntimeEvent {
+  return {
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    producer: 'renderer',
+    ts: Date.now(),
+    type: 'run.step.updated',
+    step: {
+      id: params.stepId,
+      title: params.title,
+      status: params.status,
+      detail: params.detail,
+      kind: params.task ? 'composite-task' : 'composite',
+      parentId: params.parentId,
+      order: params.order,
+      requiresArtifact: params.requiresArtifact,
+    },
+  };
+}
+
+function compositeInputImagesFromFiles(files: AttachedFileMeta[]): Array<{ fileName?: string; mimeType?: string; filePath: string }> {
+  return files
+    .filter((file) => file.filePath && file.mimeType.startsWith('image/'))
+    .map((file) => ({
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      filePath: file.filePath!,
+    }));
+}
+
+function attachedFilesFromCompositeTaskImages(task: MediaIntentCompositeTask): AttachedFileMeta[] {
+  return (task.sourceImages ?? [])
+    .filter((image) => image.filePath?.trim())
+    .map((image) => ({
+      fileName: image.fileName || image.filePath.split(/[\\/]/u).pop() || 'image',
+      mimeType: image.mimeType || 'image/png',
+      fileSize: 0,
+      preview: null,
+      filePath: image.filePath,
+      source: 'message-ref',
+    }));
+}
+
+function firstProducedImageFile(results: CompositeTaskRunResult[]): AttachedFileMeta | undefined {
+  return results
+    .flatMap((result) => result.files)
+    .find((file) => file.filePath && file.mimeType.startsWith('image/'));
+}
+
+function localArtifactRequestForCompositeTask(task: MediaIntentCompositeTask): Record<string, unknown> {
+  if (task.kind === 'presentation') {
+    return {
+      kind: 'presentation',
+      title: 'AI 工作流效率提升',
+      slides: [
+        { title: 'AI 工作流效率提升', subtitle: '未来城市里的个人效率工作台' },
+        { title: '目标', bullets: ['把重复任务交给自动化', '让图片、表格、文案和应用快速成稿'] },
+        { title: '组合任务执行', bullets: ['拆成可追踪子任务', '每项产出独立文件或媒体', '交付前做基础验证'] },
+        { title: '体验收益', bullets: ['减少反问', '缩短等待感', '交付物清单更清楚'] },
+        { title: '下一步', bullets: ['接入团队素材', '沉淀默认模板', '按真实反馈持续优化'] },
+      ],
+    };
+  }
+  if (task.kind === 'spreadsheet') {
+    return {
+      kind: 'spreadsheet',
+      title: '月度预算表',
+      sheets: [{
+        name: '月度预算',
+        headers: ['分类', '预算', '实际', '差额'],
+        rows: [
+          ['房租', 4200, 4200, { formula: 'B2-C2', value: 0 }],
+          ['餐饮', 2200, 1980, { formula: 'B3-C3', value: 220 }],
+          ['交通', 600, 520, { formula: 'B4-C4', value: 80 }],
+          ['学习', 800, 640, { formula: 'B5-C5', value: 160 }],
+          ['合计', { formula: 'SUM(B2:B5)', value: 7800 }, { formula: 'SUM(C2:C5)', value: 7340 }, { formula: 'SUM(D2:D5)', value: 460 }],
+        ],
+      }],
+    };
+  }
+  if (task.kind === 'mini_program') {
+    return {
+      kind: 'mini_program',
+      title: '灵感收集 Todo 小工具',
+    };
+  }
+  return {
+    kind: 'copywriting',
+    title: '未来效率工作台宣传文案',
+    content: '未来城市里的个人效率工作台，把创意、数据和执行串成一条清晰工作流。它能自动拆解任务、生成多种产物，并在交付前完成基础验证，让灵感更快变成可以分享和使用的结果。',
+    sections: [
+      { title: '卖点', bullets: ['多类型产物一次交付', '默认参数自动选择', '完成前基础验证'] },
+      { title: '适用场景', bullets: ['方案初稿', '营销素材包', '团队效率演示'] },
+    ],
+  };
+}
+
+function attachedFileFromLocalArtifact(artifact: NonNullable<LocalArtifactCreateResponse['artifact']>): AttachedFileMeta {
+  return {
+    fileName: artifact.fileName,
+    mimeType: artifact.mimeType,
+    fileSize: artifact.fileSize,
+    preview: null,
+    filePath: artifact.filePath,
+    source: 'tool-result',
+  };
+}
+
+function buildCompositeDeliveryMessage(results: CompositeTaskRunResult[]): string {
+  const completed = results.filter((result) => result.status === 'completed');
+  const blocked = results.filter((result) => result.status !== 'completed');
+  const lines = [
+    '好，我给你做了一套随机示例包，主题统一成“未来城市里的个人效率工作台”。',
+    '',
+    `已完成 ${completed.length} 项：`,
+    ...completed.map((result) => `- ${result.task.title || compositeTaskKindLabel(result.task.kind)}`),
+  ];
+  if (blocked.length > 0) {
+    lines.push('', '需要补充处理：');
+    lines.push(...blocked.map((result) =>
+      `- ${result.task.title || compositeTaskKindLabel(result.task.kind)}：${result.error || '缺少可用输入或执行失败。'}`,
+    ));
+  }
+  lines.push('', '下面是统一产物清单；我也做了基础验证，已生成的本地文件和媒体都可以打开或预览。');
+  return lines.join('\n');
+}
+
+async function createCompositeLocalArtifact(params: {
+  runId: string;
+  sessionKey: string;
+  stepId: string;
+  task: MediaIntentCompositeTask;
+}): Promise<AttachedFileMeta[]> {
+  const response = await hostApiFetch<LocalArtifactCreateResponse>(
+    '/api/local-artifacts/create',
+    {
+      method: 'POST',
+      body: JSON.stringify(localArtifactRequestForCompositeTask(params.task)),
+    },
+  );
+  if (response.success === false || !response.artifact) {
+    throw new Error(response.error || '本地产物创建失败');
+  }
+
+  const file = attachedFileFromLocalArtifact(response.artifact);
+  const ts = Date.now();
+  const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    ts,
+    producer: 'renderer',
+    toolCallId: params.stepId,
+    stepId: params.stepId,
+    verificationDetail: '组合任务本地产物已生成并进入 UClaw 产物跟踪。',
+  }, [file]);
+  const artifacts = artifactEvents
+    .filter((event): event is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
+      event.type === 'artifact.produced')
+    .map((event) => event.artifact);
+  const availabilityEvents = artifacts.map((artifact) => buildRuntimeArtifactVerificationEvent({
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    ts,
+    producer: 'renderer',
+  }, {
+    artifact,
+    status: 'passed',
+    kind: 'artifact.availability',
+    required: true,
+    severity: 'info',
+    detail: '本地产物文件已创建并返回文件大小。',
+    evidence: `filePath=${file.filePath}; sizeBytes=${file.fileSize}`,
+  }));
+  useChatStore.setState((state) => ({
+    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, [...artifactEvents, ...availabilityEvents]),
+  }));
+  return [file];
+}
+
+async function runCompositeLocalTasks(params: {
+  set: ChatSet;
+  get: ChatGet;
+  sessionKey: string;
+  prompt: string;
+  nowMs: number;
+  tasks: MediaIntentCompositeTask[];
+  imageOptions?: ChatImageSendOptions;
+  videoOptions?: ChatVideoSendOptions;
+}): Promise<void> {
+  const runId = buildTimestampHistoricalRunId(params.sessionKey, params.nowMs);
+  params.set((state) => ({
+    runtimeRuns: applyRuntimeContractEvents(
+      state.runtimeRuns,
+      buildRuntimeStartEventsForRun(state.runtimeRuns, {
+        runId,
+        sessionKey: params.sessionKey,
+        objective: params.prompt,
+        mode: 'chat',
+        compositeTasks: params.tasks,
+        ts: Date.now(),
+      }),
+    ),
+  }));
+  commitSessionRunState(params.set, params.get, params.sessionKey, {
+    activeRunId: runId,
+    pendingFinal: true,
+  });
+
+  const results: Array<CompositeTaskRunResult | undefined> = [];
+  const allFiles: AttachedFileMeta[] = [];
+  const orderedResults = (): CompositeTaskRunResult[] =>
+    results.filter((result): result is CompositeTaskRunResult => Boolean(result));
+  const emit = (events: ChatRuntimeEvent[]) => {
+    if (events.length === 0) return;
+    params.set((state) => ({
+      runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
+    }));
+  };
+
+  const runTask = async (index: number, task: MediaIntentCompositeTask): Promise<void> => {
+    const stepId = compositeTaskStepId(task, index);
+    emit([buildCompositeStepEvent({
+      runId,
+      sessionKey: params.sessionKey,
+      task,
+      stepId,
+      title: task.title || `子任务 ${index + 1}`,
+      status: 'running',
+      detail: task.prompt,
+      parentId: 'uclaw.composite',
+      order: 2 + index,
+      requiresArtifact: task.requiresArtifact !== false,
+    })]);
+
+    try {
+      let files: AttachedFileMeta[] = [];
+      if (task.kind === 'image_generate' || task.kind === 'image_edit') {
+        const explicitSourceFiles = attachedFilesFromCompositeTaskImages(task);
+        const fallbackSourceFile = task.kind === 'image_edit' ? firstProducedImageFile(orderedResults()) : undefined;
+        const inputImages = task.kind === 'image_edit'
+          ? compositeInputImagesFromFiles(explicitSourceFiles.length > 0 ? explicitSourceFiles : (fallbackSourceFile ? [fallbackSourceFile] : []))
+          : [];
+        if (task.kind === 'image_edit' && inputImages.length === 0) {
+          throw new Error('缺少可用于修图的图片输入。');
+        }
+        const effectiveImageOptions = resolveChatImageOptions(task.prompt, { action: task.kind, source: 'fallback', prompt: task.prompt }, params.imageOptions);
+        const response = await hostApiFetch<MediaGenerationSendResponse>(
+          '/api/media/image-generation/chat-send',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              sessionKey: params.sessionKey,
+              originalPrompt: params.prompt,
+              prompt: task.prompt,
+              model: effectiveImageOptions.model,
+              size: effectiveImageOptions.size,
+              quality: effectiveImageOptions.quality,
+              inputImages,
+              userMessageTimestampMs: params.nowMs,
+              suppressConversationAppend: true,
+            }),
+          },
+        );
+        if (response.success === false) throw new Error(response.error || '图片任务启动失败');
+        let completedJob = response.job;
+        applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job: completedJob });
+        if (response.jobId) {
+          completedJob = await waitForMediaGenerationJob(response.jobId, {
+            onProgress: (job) => applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job }),
+          });
+        }
+        applyMediaRuntimeSuccess({
+          runId,
+          sessionKey: params.sessionKey,
+          job: completedJob,
+          kind: 'image',
+          stepId,
+          sourceToolCallId: stepId,
+          completeRun: false,
+        });
+        files = attachedFilesFromMediaGenerationJob(completedJob, 'image');
+      } else if (task.kind === 'video_generate') {
+        const effectiveVideoOptions = resolveChatVideoOptions(task.prompt, { action: 'video_generate', source: 'fallback', prompt: task.prompt }, false, params.videoOptions);
+        const response = await hostApiFetch<MediaGenerationSendResponse>(
+          '/api/media/video-generation/chat-send',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              sessionKey: params.sessionKey,
+              originalPrompt: params.prompt,
+              prompt: task.prompt,
+              model: effectiveVideoOptions.model,
+              size: effectiveVideoOptions.size,
+              durationSeconds: effectiveVideoOptions.durationSeconds,
+              userMessageTimestampMs: params.nowMs,
+              route: {
+                mode: 'text_to_video',
+                source: 'router',
+                confidence: 1,
+                selectedImageSource: 'none',
+                videoPrompt: task.prompt,
+              },
+              suppressConversationAppend: true,
+            }),
+          },
+        );
+        if (response.success === false) throw new Error(response.error || '视频任务启动失败');
+        let completedJob = response.job;
+        applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job: completedJob });
+        if (response.jobId) {
+          completedJob = await waitForMediaGenerationJob(response.jobId, {
+            onProgress: (job) => applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job }),
+          });
+        }
+        applyMediaRuntimeSuccess({
+          runId,
+          sessionKey: params.sessionKey,
+          job: completedJob,
+          kind: 'video',
+          stepId,
+          sourceToolCallId: stepId,
+          completeRun: false,
+        });
+        files = attachedFilesFromMediaGenerationJob(completedJob, 'video');
+      } else {
+        files = await createCompositeLocalArtifact({
+          runId,
+          sessionKey: params.sessionKey,
+          stepId,
+          task,
+        });
+      }
+
+      allFiles.push(...files);
+      results[index] = { task, stepId, status: 'completed', files };
+      emit([buildCompositeStepEvent({
+        runId,
+        sessionKey: params.sessionKey,
+        task,
+        stepId,
+        title: task.title || `子任务 ${index + 1}`,
+        status: 'completed',
+        detail: files.map((file) => file.filePath || file.gatewayUrl || file.fileName).filter(Boolean).join('\n'),
+        parentId: 'uclaw.composite',
+        order: 2 + index,
+        requiresArtifact: task.requiresArtifact !== false,
+      })]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      results[index] = { task, stepId, status: 'failed', files: [], error: message };
+      emit([
+        buildCompositeStepEvent({
+          runId,
+          sessionKey: params.sessionKey,
+          task,
+          stepId,
+          title: task.title || `子任务 ${index + 1}`,
+          status: 'error',
+          detail: message,
+          parentId: 'uclaw.composite',
+          order: 2 + index,
+          requiresArtifact: task.requiresArtifact !== false,
+        }),
+        buildRuntimeCheckpointEvent({
+          runId,
+          sessionKey: params.sessionKey,
+          ts: Date.now(),
+          producer: 'renderer',
+          id: `checkpoint:${runId}:${stepId}:failed`,
+          summary: `${task.title || `子任务 ${index + 1}`} 执行失败。`,
+          reason: message,
+          recoverable: true,
+        }),
+      ]);
+    }
+  };
+
+  const taskPromises = new Map<string, Promise<void>>();
+  for (const [index, task] of params.tasks.entries()) {
+    const promise = (async () => {
+      for (const dependencyId of task.dependsOn ?? []) {
+        await taskPromises.get(dependencyId);
+      }
+      await runTask(index, task);
+    })();
+    taskPromises.set(task.id, promise);
+  }
+  await Promise.all(taskPromises.values());
+
+  const completedResults = orderedResults();
+  const finalMessage: RawMessage = {
+    role: 'assistant',
+    content: buildCompositeDeliveryMessage(completedResults),
+    timestamp: Date.now() / 1000,
+    id: `composite-result:${runId}`,
+    _attachedFiles: dedupeAttachedFiles(allFiles),
+  };
+  appendLocalMessageForSession(params.set, params.get, params.sessionKey, finalMessage);
+
+  params.set((state) => {
+    let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, [
+      buildCompositeStepEvent({
+        runId,
+        sessionKey: params.sessionKey,
+        stepId: 'uclaw.composite',
+        title: '执行组合任务',
+        status: completedResults.some((result) => result.status !== 'completed') ? 'blocked' : 'completed',
+        detail: `${completedResults.filter((result) => result.status === 'completed').length}/${params.tasks.length} 个子任务已完成。`,
+        order: 1,
+      }),
+    ]);
+    runtimeRuns = applyRuntimeContractEvents(
+      runtimeRuns,
+      buildRuntimeCompletionGateEvents(runtimeRuns[runId], {
+        runId,
+        sessionKey: params.sessionKey,
+        ts: Date.now(),
+        status: 'completed',
+      }),
+    );
+    return { runtimeRuns };
+  });
+
+  const hasFailures = completedResults.some((result) => result.status !== 'completed');
+  commitSessionRunState(params.set, params.get, params.sessionKey, {
+    sending: false,
+    pendingImageGenerationLocal: false,
+    pendingVideoGenerationLocal: false,
+    activeRunId: null,
+    streamingText: '',
+    streamingMessage: null,
+    streamingTools: [],
+    pendingFinal: false,
+    lastUserMessageAt: null,
+    pendingToolImages: [],
+  });
+  if (hasFailures && params.get().currentSessionKey === params.sessionKey) {
+    params.set({ runError: null });
+  }
+  markSessionRunIdle(params.sessionKey);
+  clearPendingRuntimeIntent(params.sessionKey);
+  if (params.get().currentSessionKey === params.sessionKey) {
+    void params.get().loadHistory(true);
+  } else {
+    markSessionNeedsTerminalHistoryRefresh(params.sessionKey);
+  }
 }
 
 function getActiveCompletionGateDecision(state: Pick<ChatState, 'activeRunId' | 'runtimeRuns'>): string | undefined {
@@ -2089,7 +2582,10 @@ function appendLocalMessageForSession(
   message: RawMessage,
 ): void {
   if (get().currentSessionKey === sessionKey) {
-    set((state) => ({ messages: [...state.messages, message] }));
+    const state = get();
+    const nextMessages = [...state.messages, message];
+    set({ messages: nextMessages });
+    cacheSessionHistory(sessionKey, nextMessages, state.thinkingLevel ?? null);
     return;
   }
 
@@ -5893,6 +6389,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingImageGenerationLocal: effectiveMode === 'image',
       pendingVideoGenerationLocal: effectiveMode === 'video',
     });
+
+    if (compositeTasks) {
+      try {
+        await runCompositeLocalTasks({
+          set,
+          get,
+          sessionKey: currentSessionKey,
+          prompt: trimmed,
+          nowMs,
+          tasks: compositeTasks,
+          imageOptions,
+          videoOptions,
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (get().currentSessionKey === currentSessionKey) {
+          set({ error: errorMessage });
+        }
+        commitSessionRunState(set, get, currentSessionKey, {
+          sending: false,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+          activeRunId: null,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+        });
+        markSessionRunIdle(currentSessionKey);
+        clearPendingRuntimeIntent(currentSessionKey);
+      }
+      return;
+    }
 
     if (effectiveMode === 'image' || effectiveMode === 'video') {
       try {

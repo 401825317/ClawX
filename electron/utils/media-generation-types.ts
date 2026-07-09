@@ -39,6 +39,7 @@ export type ImageGenerationJobPayload = {
   inputImages?: MediaGenerationInputImageRef[];
   userInputImages?: MediaGenerationInputImageRef[];
   userMessageTimestampMs?: number;
+  suppressConversationAppend?: boolean;
 };
 
 export type VideoGenerationJobPayload = {
@@ -53,6 +54,7 @@ export type VideoGenerationJobPayload = {
   userInputImages?: MediaGenerationInputImageRef[];
   userMessageTimestampMs?: number;
   route?: VideoGenerationRouteDecision;
+  suppressConversationAppend?: boolean;
 };
 
 export type MediaGenerationJobPayload = ImageGenerationJobPayload | VideoGenerationJobPayload;
