@@ -13,7 +13,7 @@ import { createMenu } from './menu';
 import { registerZoomShortcuts } from './zoom-shortcuts';
 
 import { appUpdater, registerUpdateHandlers } from './updater';
-import { logger } from '../utils/logger';
+import { disableConsoleOutput, isProcessOutputError, logger } from '../utils/logger';
 import { warmupNetworkOptimization } from '../utils/uv-env';
 import { initTelemetry } from '../utils/telemetry';
 
@@ -814,10 +814,25 @@ if (gotTheLock) {
   // Best-effort Gateway cleanup on unexpected crashes.
   // These handlers attempt to terminate the Gateway child process within a
   // short timeout before force-exiting, preventing orphaned processes.
+  let emergencyCleanupStarted = false;
+  let processOutputFailureHandled = false;
   const emergencyGatewayCleanup = (reason: string, error: unknown): void => {
+    if (isProcessOutputError(error)) {
+      disableConsoleOutput();
+      if (!processOutputFailureHandled) {
+        processOutputFailureHandled = true;
+        logger.warn('Process console output became unavailable; continuing with file-only logging');
+      }
+      return;
+    }
+    if (emergencyCleanupStarted) return;
+    emergencyCleanupStarted = true;
     logger.error(`${reason}:`, error);
     try {
-      void gatewayManager?.stop().catch(() => { /* ignore */ });
+      void gatewayManager?.stop({
+        reason: 'main-process-emergency',
+        source: 'main-process-fatal-handler',
+      }).catch(() => { /* ignore */ });
     } catch {
       // ignore — stop() may not be callable if state is corrupted
     }

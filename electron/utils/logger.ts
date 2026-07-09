@@ -51,9 +51,43 @@ let writeBuffer: string[] = [];
 let flushTimer: NodeJS.Timeout | null = null;
 /** Whether a flush is currently in progress. */
 let flushing = false;
+let consoleOutputEnabled = true;
 
 const FLUSH_INTERVAL_MS = 500;
 const FLUSH_SIZE_THRESHOLD = 20;
+
+function readErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code.toUpperCase() : undefined;
+}
+
+export function isProcessOutputError(error: unknown): boolean {
+  const code = readErrorCode(error);
+  if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END') {
+    return true;
+  }
+  const details = error instanceof Error
+    ? `${error.message}\n${error.stack ?? ''}`
+    : String(error);
+  if (code === 'EIO') {
+    return /(?:console|stdout|stderr|afterWriteDispatched|stream_base_commons|Socket\._write)/i.test(details);
+  }
+  return /(?:broken pipe|stream is destroyed|write after end)/i.test(details);
+}
+
+export function disableConsoleOutput(): void {
+  consoleOutputEnabled = false;
+}
+
+function handleProcessOutputError(error: unknown): void {
+  if (isProcessOutputError(error)) {
+    disableConsoleOutput();
+  }
+}
+
+process.stdout?.on('error', handleProcessOutputError);
+process.stderr?.on('error', handleProcessOutputError);
 
 async function flushBuffer(): Promise<void> {
   if (flushing || writeBuffer.length === 0 || !logFilePath) return;
@@ -108,7 +142,7 @@ export function initLogger(): void {
     const sessionHeader = `\n${'='.repeat(80)}\n[${new Date().toISOString()}] === UClaw Session Start (v${app.getVersion()}) ===\n${'='.repeat(80)}\n`;
     appendFileSync(logFilePath, sessionHeader);
   } catch (error) {
-    console.error('Failed to initialize logger:', error);
+    safeConsoleWrite('error', formatMessage('ERROR', 'Failed to initialize logger:', error));
   }
 }
 
@@ -175,37 +209,51 @@ function writeLog(formatted: string): void {
   }
 }
 
+function safeConsoleWrite(level: 'debug' | 'info' | 'warn' | 'error', formatted: string): void {
+  if (!consoleOutputEnabled) return;
+  try {
+    if (level === 'debug') console.debug(formatted);
+    else if (level === 'info') console.info(formatted);
+    else if (level === 'warn') console.warn(formatted);
+    else console.error(formatted);
+  } catch {
+    // Console output is diagnostic only. A detached terminal must never crash
+    // the Electron main process or recursively trigger its fatal handler.
+    disableConsoleOutput();
+  }
+}
+
 // ── Public log methods ───────────────────────────────────────────
 
 export function debug(message: string, ...args: unknown[]): void {
   if (currentLevel <= LogLevel.DEBUG) {
     const formatted = formatMessage('DEBUG', message, ...args);
-    console.debug(formatted);
     writeLog(formatted);
+    safeConsoleWrite('debug', formatted);
   }
 }
 
 export function info(message: string, ...args: unknown[]): void {
   if (currentLevel <= LogLevel.INFO) {
     const formatted = formatMessage('INFO', message, ...args);
-    console.info(formatted);
     writeLog(formatted);
+    safeConsoleWrite('info', formatted);
   }
 }
 
 export function warn(message: string, ...args: unknown[]): void {
   if (currentLevel <= LogLevel.WARN) {
     const formatted = formatMessage('WARN', message, ...args);
-    console.warn(formatted);
     writeLog(formatted);
+    safeConsoleWrite('warn', formatted);
   }
 }
 
 export function error(message: string, ...args: unknown[]): void {
   if (currentLevel <= LogLevel.ERROR) {
     const formatted = formatMessage('ERROR', message, ...args);
-    console.error(formatted);
     writeLog(formatted);
+    safeConsoleWrite('error', formatted);
   }
 }
 
@@ -303,4 +351,6 @@ export const logger = {
   getRecentLogs,
   readLogFile,
   listLogFiles,
+  disableConsoleOutput,
+  isProcessOutputError,
 };

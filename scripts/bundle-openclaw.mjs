@@ -21,6 +21,7 @@ import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './opencl
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
+import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
@@ -1092,6 +1093,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (promptCacheKeyPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
+  }
+
+  // --- Final model request contract diagnostics patch ---
+  // Log only non-sensitive request shape metadata at the guarded fetch entry
+  // so packaged diagnostics can confirm the contract that actually left the SDK.
+  const modelRequestContractPatch = patchOpenClawModelRequestContractRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (modelRequestContractPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${modelRequestContractPatch.patchedFiles} final model request contract runtime file(s)`;
   }
 
   // --- Raw tool signal diagnostics patch ---

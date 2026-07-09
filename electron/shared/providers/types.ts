@@ -186,6 +186,7 @@ export interface ProviderAccount {
     customModels?: string[];
     managedDefaultModel?: string;
     managedAllowedModels?: string[];
+    managedRuntimeContractVersion?: number;
   };
   createdAt: string;
   updatedAt: string;

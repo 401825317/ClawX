@@ -6,11 +6,16 @@ taskType: runtime-bridge
 intent: Give the desktop client a durable execution-layer contract for objective, plan, step progress, produced artifacts, verification results, and recoverable checkpoints so agent work can be shown and audited as product state instead of inferred from chat text.
 touchedAreas:
   - harness/specs/tasks/uclaw-agent-runtime-contract.md
+  - electron/utils/openclaw-auth.ts
   - shared/chat-runtime-events.ts
   - electron/gateway/chat-runtime-events.ts
   - electron/gateway/event-dispatch.ts
   - resources/openclaw-plugins/uclaw-artifact-guard/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
+  - resources/openclaw-plugins/uclaw-artifact-guard/package.json
+  - scripts/openclaw-model-request-contract-patch.mjs
+  - scripts/patch-browser-hint.mjs
+  - scripts/bundle-openclaw.mjs
   - src/pages/Chat/ChatInput.tsx
   - src/stores/chat/types.ts
   - src/stores/chat/runtime-graph.ts
@@ -31,6 +36,9 @@ expectedUserBehavior:
   - Step progress updates replace prior state by stable identifiers instead of creating duplicate timeline noise.
   - Produced artifacts, verification results, and checkpoints can be surfaced as execution facts before the final assistant reply.
   - Ordinary chat can render a compact runtime-owned progress transcript without exposing the raw execution graph by default.
+  - Heartbeat work runs in an isolated lightweight session and never reuses the interactive chat transcript.
+  - Internal heartbeat, restart-continuation, and runtime-plumbing messages are removed before prompt construction and future transcript writes.
+  - Safe diagnostics can prove the final provider request contract without recording prompts, credentials, tool schemas, or media payloads.
   - Existing tool lifecycle events, assistant deltas, and legacy Gateway notifications continue to work.
 requiredProfiles:
   - fast
@@ -61,6 +69,9 @@ acceptance:
   - Default chat can auto-route image/video intent without requiring mode selection, while still applying the strongest allowed image/video parameters by default.
   - The active execution graph projects the new contract events into visible steps without exposing sensitive prompt or body text in diagnostics.
   - Runtime tool events can also project into a durable user-facing progress transcript for ordinary chat surfaces.
+  - Managed OpenClaw config enables heartbeat isolatedSession, lightContext, and skipWhenBusy without changing chat, image, or video model routing.
+  - Internal prompt-history sanitization blocks pure runtime messages while preserving real user text from mixed queued/restart envelopes.
+  - The final guarded model fetch logs only request-shape metadata, including reasoning effort, tool count, tool choice, prompt-cache-key presence, and top-level keys.
   - Renderer does not add direct Gateway HTTP calls or direct page/component IPC calls.
 docs:
   required: false

@@ -218,7 +218,7 @@ describe('Chat run progress transcript', () => {
     });
   });
 
-  it('renders the compact transcript first and keeps the execution graph as a collapsed secondary entry', async () => {
+  it('renders the compact transcript as the default surface without exposing the execution graph', async () => {
     const { Chat } = await import('@/pages/Chat/index');
 
     render(<Chat />);
@@ -229,10 +229,10 @@ describe('Chat run progress transcript', () => {
 
     expect(screen.getByText('我先尝试打开 QQMusic。')).toBeInTheDocument();
     expect(screen.getByText('已运行')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
+    expect(screen.queryByTestId('chat-execution-graph')).not.toBeInTheDocument();
   });
 
-  it('surfaces live streaming commentary in the transcript while keeping the graph collapsed', async () => {
+  it('surfaces live streaming commentary in the transcript without exposing the execution graph', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -305,7 +305,7 @@ describe('Chat run progress transcript', () => {
     });
 
     expect(screen.getByText('我先读一下文件，马上给你结论。')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
+    expect(screen.queryByTestId('chat-execution-graph')).not.toBeInTheDocument();
     expect(screen.queryByTestId('mock-streaming-message')).not.toBeInTheDocument();
   });
 });

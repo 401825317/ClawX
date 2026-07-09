@@ -702,6 +702,18 @@ function isPotentialCurrentMediaSideEffectPrompt(prompt: string): boolean {
     || (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt));
 }
 
+function needsRemoteMediaPlanner(params: {
+  prompt: string;
+  requestedMode: 'chat' | 'image' | 'video';
+  explicitImages: MediaGenerationInputImageRef[];
+  candidateImages: MediaGenerationInputImageRef[];
+}): boolean {
+  if (params.requestedMode !== 'chat') return true;
+  if (params.explicitImages.length > 0) return true;
+  if (params.candidateImages.length > 0 && canUseCandidateImagesForPrompt(params.prompt)) return true;
+  return isPotentialCurrentMediaSideEffectPrompt(params.prompt);
+}
+
 function recentContextLooksLikeMediaMetaLookup(messages: MediaIntentRecentMessage[] | undefined): boolean {
   const recentText = (messages ?? [])
     .slice(-4)
@@ -1327,6 +1339,20 @@ export async function planMediaIntent(
       plan: summarizePlanForLog(localPlan),
     });
     return localPlan;
+  }
+
+  if (!needsRemoteMediaPlanner({
+    prompt,
+    requestedMode,
+    explicitImages,
+    candidateImages,
+  })) {
+    const plan = localChatPlan('local_no_media_planning_signal', prompt, 'ordinary_chat');
+    logger.info('[media-intent-planner] local_chat', {
+      durationMs: Date.now() - startedAt,
+      plan: summarizePlanForLog(plan),
+    });
+    return plan;
   }
 
   try {

@@ -2076,12 +2076,25 @@ function normalizeProviderModelEntries(
     const contextWindow = normalizeJunFeiAIModelContextWindow(model.contextWindow)
       ?? normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
       ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
+    const reasoning = typeof model.reasoning === 'boolean'
+      ? model.reasoning
+      : registryModel?.reasoning;
+    const input = Array.isArray(model.input) && model.input.length > 0
+      ? model.input
+      : registryModel?.input;
+    const registryCompat = isPlainRecord(registryModel?.compat) ? registryModel.compat : {};
+    const modelCompat = isPlainRecord(model.compat) ? model.compat : {};
 
     return {
       ...model,
+      ...(registryModel?.name ? { name: registryModel.name } : {}),
+      cost: normalizePiAiModelCost(model.cost ?? registryModel?.cost),
       contextWindow,
+      ...(typeof reasoning === 'boolean' ? { reasoning } : {}),
+      ...(Array.isArray(input) && input.length > 0 ? { input } : {}),
       compat: {
-        ...(isPlainRecord(model.compat) ? model.compat : {}),
+        ...registryCompat,
+        ...modelCompat,
         ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
       },
     };
@@ -2812,6 +2825,77 @@ function ensureWebFetchSsrfPolicyInConfig(config: Record<string, unknown>): bool
 }
 
 /**
+ * Keep OpenClaw's background heartbeat work out of interactive chat sessions.
+ *
+ * `isolatedSession` gives heartbeat runs their own disposable transcript,
+ * while `lightContext` limits bootstrap context to HEARTBEAT.md.  The busy
+ * guard prevents background maintenance from competing with active agent work.
+ */
+function ensureManagedHeartbeatIsolationInConfig(config: Record<string, unknown>): boolean {
+  const agents = (
+    config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+      ? { ...(config.agents as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const defaults = (
+    agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+      ? { ...(agents.defaults as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const heartbeat = (
+    defaults.heartbeat && typeof defaults.heartbeat === 'object' && !Array.isArray(defaults.heartbeat)
+      ? { ...(defaults.heartbeat as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  let changed = false;
+  if (heartbeat.isolatedSession !== true) {
+    heartbeat.isolatedSession = true;
+    changed = true;
+  }
+  if (heartbeat.lightContext !== true) {
+    heartbeat.lightContext = true;
+    changed = true;
+  }
+  if (heartbeat.skipWhenBusy !== true) {
+    heartbeat.skipWhenBusy = true;
+    changed = true;
+  }
+  if (!changed) return false;
+
+  defaults.heartbeat = heartbeat;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
+/** Keep every tool available while sending only a small, locally selected set
+ * of schemas on each model call. Directory selection does not use embeddings. */
+function ensureManagedToolDirectoryInConfig(config: Record<string, unknown>): boolean {
+  const tools = (
+    config.tools && typeof config.tools === 'object' && !Array.isArray(config.tools)
+      ? { ...(config.tools as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const current = (
+    tools.toolSearch && typeof tools.toolSearch === 'object' && !Array.isArray(tools.toolSearch)
+      ? tools.toolSearch as Record<string, unknown>
+      : {}
+  );
+  const desired = {
+    ...current,
+    enabled: true,
+    mode: 'directory',
+    searchDefaultLimit: 8,
+    maxSearchLimit: 12,
+  };
+  if (JSON.stringify(current) === JSON.stringify(desired)) return false;
+  tools.toolSearch = desired;
+  config.tools = tools;
+  return true;
+}
+
+/**
  * Ensure browser automation is enabled in ~/.openclaw/openclaw.json.
  */
 export async function syncBrowserConfigToOpenClaw(): Promise<void> {
@@ -2899,9 +2983,9 @@ export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
 }
 
 /**
- * Batch-apply gateway token, browser config, and session idle minutes in a
- * single config lock + read + write cycle.  Replaces three separate
- * withConfigLock calls during pre-launch sync.
+ * Batch-apply gateway token, browser config, heartbeat isolation, and session
+ * idle minutes in a single config lock + read + write cycle. Replaces three
+ * separate withConfigLock calls during pre-launch sync.
  */
 export async function batchSyncConfigFields(token: string): Promise<void> {
   const DEFAULT_IDLE_MINUTES = 10_080; // 7 days
@@ -2973,6 +3057,12 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     }
     // ── web_search provider (key-free default) ──
     if (ensureFreeWebSearchProviderInConfig(config)) {
+      modified = true;
+    }
+    if (ensureManagedHeartbeatIsolationInConfig(config)) {
+      modified = true;
+    }
+    if (ensureManagedToolDirectoryInConfig(config)) {
       modified = true;
     }
 
@@ -3284,6 +3374,16 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     if (ensureClawXMemoryFeaturesDisabled(config)) {
       modified = true;
       console.log('[sanitize] Disabled ClawX memory embedding features (memorySearch/provider, memory slot, and memory plugins)');
+    }
+
+    if (ensureManagedHeartbeatIsolationInConfig(config)) {
+      modified = true;
+      console.log('[sanitize] Isolated heartbeat runs from interactive transcripts and full chat context');
+    }
+
+    if (ensureManagedToolDirectoryInConfig(config)) {
+      modified = true;
+      console.log('[sanitize] Enabled the local tool-schema directory (no embeddings)');
     }
 
     // ── plugins section ──────────────────────────────────────────────

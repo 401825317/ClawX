@@ -45,6 +45,9 @@ const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
 const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
 const INTERNAL_SENTINEL_RE = /^\s*(?:HEARTBEAT_OK|NO_REPLY)\s*$/iu;
 const GATEWAY_RESTART_CONTINUATION_RE = /\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\./iu;
+const GATEWAY_RESTART_CONTINUATION_BLOCK_RE = /\n{0,2}\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\.(?:\n\nNote:\s+The interrupted final reply was captured:\s+"[^"]*")?/giu;
+const GATEWAY_RESTART_CAPTURED_REPLY_NOTE_RE = /^\s*Note:\s+The interrupted final reply was captured:\s+"[^"]*"\s*$/giu;
+const QUEUED_USER_MESSAGE_MARKER_RE = /^\s*\[Queued user message that arrived while the previous turn was still active\]\s*\n?/iu;
 const RUNTIME_EVENT_CONTINUATION_RE = /^Continue the OpenClaw runtime event\.?\s*$/iu;
 const MEDIA_KEYWORD_RE = /(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|动起来|截图|截屏|image|photo|picture|poster|illustration|cover|video|animate|screenshot)/iu;
 const MEDIA_INFO_OR_CAPABILITY_RE = /(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why).{0,36}(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|poster|video|screenshot)|(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|poster|video|screenshot).{0,36}(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why)/iu;
@@ -809,6 +812,120 @@ function classifyInternalTranscriptMessage(message) {
 
 function isInternalTranscriptMessage(message) {
   return Boolean(classifyInternalTranscriptMessage(message));
+}
+
+function stripGatewayRestartContinuationText(value) {
+  const original = String(value ?? '');
+  const cleaned = original
+    .replace(GATEWAY_RESTART_CONTINUATION_BLOCK_RE, '')
+    .replace(GATEWAY_RESTART_CAPTURED_REPLY_NOTE_RE, '')
+    .replace(QUEUED_USER_MESSAGE_MARKER_RE, '')
+    .trim();
+  return {
+    text: cleaned,
+    changed: cleaned !== original.trim(),
+  };
+}
+
+function rewriteMessageText(message, transform) {
+  if (!isPlainRecord(message)) return message;
+  let changed = false;
+  const next = { ...message };
+
+  if (typeof message.text === 'string') {
+    const rewritten = transform(message.text);
+    if (rewritten !== message.text) {
+      next.text = rewritten;
+      changed = true;
+    }
+  }
+
+  if (typeof message.content === 'string') {
+    const rewritten = transform(message.content);
+    if (rewritten !== message.content) {
+      next.content = rewritten;
+      changed = true;
+    }
+  } else if (Array.isArray(message.content)) {
+    const content = [];
+    for (const part of message.content) {
+      if (typeof part === 'string') {
+        const rewritten = transform(part);
+        if (rewritten !== part) changed = true;
+        if (rewritten) content.push(rewritten);
+        continue;
+      }
+      if (!isPlainRecord(part)) {
+        content.push(part);
+        continue;
+      }
+      let nextPart = part;
+      if (typeof part.text === 'string') {
+        const rewritten = transform(part.text);
+        if (rewritten !== part.text) {
+          nextPart = { ...nextPart, text: rewritten };
+          changed = true;
+        }
+      }
+      if (typeof part.content === 'string') {
+        const rewritten = transform(part.content);
+        if (rewritten !== part.content) {
+          nextPart = { ...nextPart, content: rewritten };
+          changed = true;
+        }
+      }
+      const textOnlyPart = ['text', 'input_text', 'output_text'].includes(String(nextPart.type ?? '').toLowerCase());
+      const textValues = [nextPart.text, nextPart.content].filter((value) => typeof value === 'string');
+      if (textOnlyPart && textValues.length > 0 && textValues.every((value) => !value.trim())) continue;
+      content.push(nextPart);
+    }
+    if (changed) next.content = content;
+  }
+
+  return changed ? next : message;
+}
+
+function sanitizeInternalTranscriptMessage(message) {
+  if (!isPlainRecord(message)) return { action: 'keep', message };
+  const role = String(message.role ?? '').toLowerCase();
+  const originalText = extractMessageText(message).trim();
+  if (!originalText) return { action: 'keep', message };
+
+  resetRegex(GATEWAY_RESTART_CONTINUATION_RE);
+  if ((role === 'user' || role === 'system') && GATEWAY_RESTART_CONTINUATION_RE.test(originalText)) {
+    const rewritten = rewriteMessageText(message, (value) => stripGatewayRestartContinuationText(value).text);
+    if (extractMessageText(rewritten).trim()) {
+      return { action: 'rewrite', message: rewritten, reason: 'gateway_restart_continuation_suffix' };
+    }
+    return { action: 'block', message, reason: 'gateway_restart_continuation' };
+  }
+
+  const reason = classifyInternalTranscriptMessage(message);
+  if (reason) return { action: 'block', message, reason };
+  return { action: 'keep', message };
+}
+
+function sanitizePromptHistoryMessages(event) {
+  const result = { blocked: 0, rewritten: 0, reasons: {} };
+  const visited = new Set();
+  for (const messages of extractMessageLists(event)) {
+    if (visited.has(messages)) continue;
+    visited.add(messages);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const decision = sanitizeInternalTranscriptMessage(messages[index]);
+      if (decision.action === 'keep') continue;
+      const reason = decision.reason ?? 'internal_runtime_message';
+      result.reasons[reason] = (result.reasons[reason] ?? 0) + 1;
+      if (decision.action === 'block') {
+        messages.splice(index, 1);
+        result.blocked += 1;
+      } else {
+        messages[index] = decision.message;
+        result.rewritten += 1;
+      }
+    }
+  }
+  return result;
 }
 
 function inferRequestedArtifactKind(text) {
@@ -2289,20 +2406,28 @@ function registerArtifactGuard(api) {
   registerToolResultMiddleware(api);
   if (typeof api.registerHook === 'function' || typeof api.on === 'function') {
     registerLifecycleHook(api, 'before_message_write', (event, ctx) => {
-      const reason = classifyInternalTranscriptMessage(event?.message);
-      if (!reason) return undefined;
-      logDiagnostic('internal-transcript-block', {
+      const decision = sanitizeInternalTranscriptMessage(event?.message);
+      if (decision.action === 'keep') return undefined;
+      logDiagnostic(`internal-transcript-${decision.action}`, {
         eventId: eventId(event, ctx),
         role: event?.message?.role,
-        reason,
+        reason: decision.reason,
       });
-      return { block: true };
+      if (decision.action === 'block') return { block: true };
+      return { message: decision.message };
     }, {
       name: `${PLUGIN_ID}:internal-transcript-isolation`,
       description: 'Keep OpenClaw heartbeat, restart continuation, and runtime plumbing messages out of persisted transcripts.',
       priority: 1000,
     });
     registerLifecycleHook(api, 'before_prompt_build', async (event, ctx) => {
+      const historySanitization = sanitizePromptHistoryMessages(event);
+      if (historySanitization.blocked > 0 || historySanitization.rewritten > 0) {
+        logDiagnostic('internal-prompt-history-sanitize', {
+          eventId: eventId(event, ctx),
+          ...historySanitization,
+        });
+      }
       const gate = await buildMediaIntentGate(event, ctx);
       const promptContext = buildPromptContextForEvent(event, gate);
       logDiagnostic('prompt-context', {
@@ -2423,7 +2548,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.4',
+  version: '0.1.5',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -2447,5 +2572,7 @@ export const __test = {
   buildLocalMediaIntentPlan,
   isInternalTranscriptMessage,
   classifyInternalTranscriptMessage,
+  sanitizeInternalTranscriptMessage,
+  sanitizePromptHistoryMessages,
   PROMPT_CONTEXT,
 };

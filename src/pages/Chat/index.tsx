@@ -1408,7 +1408,13 @@ export function Chat() {
       );
       const hasTextFirstSurface = shouldShowTranscript || card.streamingReplyText != null;
       const shouldExposeActiveGenericProcess = card.active && hasVisibleProcessActivity && !shouldShowTranscript;
+      const hasCanonicalProgressTranscript = hasRuntimeProgressEntries || !!card.liveText;
+      const shouldHideExecutionGraphBehindTranscript = shouldShowTranscript
+        && hasCanonicalProgressTranscript
+        && !devModeUnlocked
+        && !hasProblem;
       const shouldRenderExecutionGraph = hasExecutionGraphDetails
+        && !shouldHideExecutionGraphBehindTranscript
         && (
           devModeUnlocked
           || hasProblem

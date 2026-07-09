@@ -45,6 +45,7 @@ export interface ProviderConfig {
     customModels?: string[];
     managedDefaultModel?: string;
     managedAllowedModels?: string[];
+    managedRuntimeContractVersion?: number;
   };
   enabled: boolean;
   createdAt: string;

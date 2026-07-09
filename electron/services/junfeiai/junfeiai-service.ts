@@ -23,6 +23,7 @@ import {
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_NAME,
+  JUNFEIAI_RUNTIME_CONTRACT_VERSION,
 } from '../../utils/junfeiai-distribution';
 import {
   getJunFeiAIDevicePayload,
@@ -749,7 +750,7 @@ function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunF
   const serviceDisplayName = normalizeJunFeiAIProviderDisplayName(bootstrap.service?.displayName);
   const serviceName = normalizeJunFeiAIProviderDisplayName(bootstrap.service?.name);
   const runtimeProviderName = normalizeJunFeiAIProviderDisplayName(bootstrap.runtime?.providerName);
-  return {
+  const normalized = {
     ...bootstrap,
     service: {
       ...(bootstrap.service ?? {}),
@@ -760,6 +761,20 @@ function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunF
       ...(bootstrap.runtime ?? {}),
       ...(runtimeProviderName ? { providerName: runtimeProviderName } : {}),
       ...(providerBaseUrl ? { baseUrl: normalizeBaseUrl(providerBaseUrl) } : {}),
+    },
+  };
+  const clientDefault = normalizeClientTextModelId(normalized.client?.modelOptions?.text?.defaultModel);
+  const allowedClientModels = getClientAllowedTextModels(normalized);
+  if (!clientDefault || !allowedClientModels.includes(clientDefault)) {
+    return normalized;
+  }
+  return {
+    ...normalized,
+    runtime: {
+      ...(normalized.runtime ?? {}),
+      defaultModel: clientDefault,
+      fallbackModels: normalizeFallbackModels(normalized.runtime?.fallbackModels)
+        .filter((model) => allowedClientModels.includes(model) && model !== clientDefault),
     },
   };
 }
@@ -822,9 +837,6 @@ function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string
   const clientDefault = normalizeClientTextModelId(bootstrap.client?.modelOptions?.text?.defaultModel);
   const allowedClientModels = getClientAllowedTextModels(bootstrap);
   if (clientDefault && allowedClientModels.includes(clientDefault)) {
-    if (runtimeDefault && runtimeDefault !== clientDefault && !allowedClientModels.includes(runtimeDefault)) {
-      logger.warn(`[junfeiai] Runtime default model "${runtimeDefault}" is not exposed by client model options; using "${clientDefault}".`);
-    }
     return clientDefault;
   }
   if (runtimeDefault) {
@@ -855,6 +867,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     metadata: {
       resourceUrl: bootstrap.service?.apiOrigin || getJunFeiAIOrigin(),
       ...modelMetadata,
+      managedRuntimeContractVersion: JUNFEIAI_RUNTIME_CONTRACT_VERSION,
     },
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -1456,7 +1469,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     logger.warn('[junfeiai] Failed to self-heal managed text model refs:', error);
   }
   const providerChanged = accountChanged(existing, account);
-  if (accountChanged(existing, account)) {
+  if (providerChanged) {
     await saveProviderAccount(account);
   }
 
