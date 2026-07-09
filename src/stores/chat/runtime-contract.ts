@@ -203,6 +203,25 @@ function isMediaObservationStep(step: ChatRuntimePlanStep): boolean {
   return typeof step.kind === 'string' && step.kind.trim().toLowerCase().startsWith('media.');
 }
 
+const ACTIONABLE_OBJECTIVE_RE = /(?:打开|启动|播放|发送|查找|搜索|运行|执行|尝试|点开|操作|打开.*并|帮我.*(?:打开|启动|播放|发送|查找|搜索|运行|执行)|open|launch|play|send|search|find|run|execute|click|operate)/iu;
+
+function runNeedsConcreteAttempt(run: ChatRuntimeRunState | undefined): boolean {
+  const objective = normalizeText(run?.objective);
+  if (!objective) return false;
+  return ACTIONABLE_OBJECTIVE_RE.test(objective);
+}
+
+function runHasConcreteExecutionEvidence(run: ChatRuntimeRunState | undefined): boolean {
+  return (run?.events ?? []).some((event) =>
+    event.type === 'tool.started'
+    || event.type === 'tool.completed'
+    || event.type === 'command.output'
+    || event.type === 'patch.completed'
+    || event.type === 'artifact.produced'
+    || event.type === 'approval.updated',
+  );
+}
+
 export function buildRuntimeCompletionGateReport(
   run: ChatRuntimeRunState | undefined,
   pendingVerifications: ChatRuntimeVerification[] = [],
@@ -231,6 +250,19 @@ export function buildRuntimeCompletionGateReport(
       targetId: run?.runId,
       recoverable: true,
       suggestedRecovery: '继续执行实际生成步骤，并在最终回复前落地 artifact.produced 与 verification.completed。',
+    });
+  }
+
+  if (runNeedsConcreteAttempt(run) && !runHasConcreteExecutionEvidence(run) && artifacts.length === 0) {
+    issues.push({
+      id: gateIssueId(run?.runId, 'execution.unattempted', run?.objective ?? run?.runId ?? 'objective'),
+      code: 'execution.unattempted',
+      severity: 'blocking',
+      title: '当前回复还没有进入实际执行',
+      detail: '用户请求已经明确要求执行动作，但本轮运行里没有看到实际工具调用、命令执行、文件修改或产物落地。',
+      targetId: run?.runId,
+      recoverable: true,
+      suggestedRecovery: '不要只停在能力说明或下一步建议，先沿当前可行路径执行一轮，再交付结果。',
     });
   }
 
@@ -380,6 +412,7 @@ export function buildRuntimeCompletionGateReport(
 
   const reasons = [
     missingRequiredArtifactCount > 0 ? '任务需要产物但没有产生产物' : undefined,
+    uniqueIssues.some((issue) => issue.code === 'execution.unattempted') ? '任务还没有进入实际执行' : undefined,
     missingVerificationCount > 0 ? `${missingVerificationCount} 个产物缺少验证结果` : undefined,
     blockedVerificationCount > 0 ? `${blockedVerificationCount} 个产物验证未通过` : undefined,
     failedStepCount > 0 ? `${failedStepCount} 个执行步骤失败或阻塞` : undefined,

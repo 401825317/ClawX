@@ -121,6 +121,19 @@ export type ChatRuntimeGateEvaluation = {
   issues: ChatRuntimeGateIssue[];
 };
 
+export type ChatRuntimeProgressEntryKind = 'commentary' | 'action' | 'status';
+export type ChatRuntimeProgressEntryStatus = 'running' | 'completed' | 'blocked' | 'error';
+
+export type ChatRuntimeProgressEntry = {
+  id: string;
+  kind: ChatRuntimeProgressEntryKind;
+  text: string;
+  status?: ChatRuntimeProgressEntryStatus;
+  command?: string;
+  detail?: string;
+  dedupeKey?: string;
+};
+
 export type ChatRuntimeEvent =
   | (ChatRuntimeEventBase & {
       type: 'run.started';
@@ -158,6 +171,10 @@ export type ChatRuntimeEvent =
       type: 'thinking.delta';
       text?: string;
       delta?: string;
+    })
+  | (ChatRuntimeEventBase & {
+      type: 'progress.update';
+      entry: ChatRuntimeProgressEntry;
     })
   | (ChatRuntimeEventBase & {
       type: 'tool.started';

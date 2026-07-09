@@ -725,17 +725,25 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         if (isFilteredExecutionGraphTool(event.name)) {
           break;
         }
+        const existingIndex = stepIndexById.get(event.toolCallId);
+        const previousDetail = existingIndex != null ? steps[existingIndex]?.detail : undefined;
         const startedAt = toolStartedAt.get(event.toolCallId);
         const completedAt = typeof event.ts === 'number' ? event.ts : Date.now();
         const inferredDurationMs = startedAt != null && completedAt >= startedAt
           ? completedAt - startedAt
           : undefined;
+        const normalizedToolName = event.name.trim().toLowerCase();
+        const nextDetail = event.isError
+          ? getToolErrorDetail(event.result)
+          : normalizedToolName === 'exec'
+            ? previousDetail ?? runtimeDetail(event.result)
+            : runtimeDetail(event.result) ?? previousDetail;
         upsertStep({
           id: event.toolCallId,
           label: event.name,
           status: event.isError ? 'error' : 'completed',
           kind: 'tool',
-          detail: event.isError ? getToolErrorDetail(event.result) : runtimeDetail(event.result),
+          detail: nextDetail,
           durationMs: event.durationMs ?? inferredDurationMs,
           depth: 1,
         });

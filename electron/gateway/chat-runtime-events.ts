@@ -4,6 +4,7 @@ import type {
   ChatRuntimeGateEvaluation,
   ChatRuntimeGateIssue,
   ChatRuntimeIssueSeverity,
+  ChatRuntimeProgressEntry,
   ChatRuntimeVerificationKind,
 } from '../../shared/chat-runtime-events';
 import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../shared/chat-runtime-events';
@@ -141,6 +142,27 @@ function normalizePlanStep(value: unknown, index: number): NonNullable<Extract<C
   if (typeof artifactRequired === 'boolean') step.artifactRequired = artifactRequired;
   if (typeof outputArtifactRequired === 'boolean') step.outputArtifactRequired = outputArtifactRequired;
   return step;
+}
+
+function normalizeProgressEntry(value: unknown): ChatRuntimeProgressEntry | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const text = readString(record.text) ?? readString(record.message) ?? readString(record.summary);
+  if (!text) return null;
+  const kind = readString(record.kind);
+  if (kind !== 'commentary' && kind !== 'action' && kind !== 'status') return null;
+  const status = readString(record.status);
+  return {
+    id: readString(record.id) ?? `progress:${kind}:${text}`,
+    kind,
+    text,
+    status: status === 'running' || status === 'completed' || status === 'blocked' || status === 'error'
+      ? status
+      : undefined,
+    command: readString(record.command),
+    detail: readString(record.detail),
+    dedupeKey: readString(record.dedupeKey),
+  };
 }
 
 function normalizeArtifact(value: unknown): Extract<ChatRuntimeEvent, { type: 'artifact.produced' }>['artifact'] | null {
@@ -472,6 +494,17 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
           ...base,
           text: readString(data.text),
           delta: readString(data.delta),
+        }
+      : null;
+  }
+
+  if (stream === 'progress' || stream === 'progress.update') {
+    const base = withBase('progress.update', raw);
+    const entry = normalizeProgressEntry(data.entry ?? data);
+    return base && entry
+      ? {
+          ...base,
+          entry,
         }
       : null;
   }

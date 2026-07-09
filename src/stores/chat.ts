@@ -57,6 +57,7 @@ import {
   type ToolStatus,
 } from './chat/types';
 import { applyRuntimeEventToRuns, extractToolCompletedFiles, shouldFilterRuntimeExecutionGraphEvent } from './chat/runtime-graph';
+import { buildRuntimeProgressEvents } from './chat/runtime-progress';
 import {
   buildRuntimeArtifactEventsFromAttachedFiles,
   buildRuntimeArtifactVerificationEvent,
@@ -2721,7 +2722,16 @@ function applyRuntimeContractEvents(
   events: ChatRuntimeEvent[],
 ): ChatState['runtimeRuns'] {
   if (events.length === 0) return currentRuns;
-  return events.reduce((runs, event) => applyRuntimeEventToRuns(runs, event), currentRuns);
+  let nextRuns = currentRuns;
+  for (const event of events) {
+    nextRuns = applyRuntimeEventToRuns(nextRuns, event);
+    if (event.type === 'progress.update') continue;
+    const progressEvents = buildRuntimeProgressEvents(nextRuns[event.runId], event);
+    for (const progressEvent of progressEvents) {
+      nextRuns = applyRuntimeEventToRuns(nextRuns, progressEvent);
+    }
+  }
+  return nextRuns;
 }
 
 function buildRuntimeStartEventsForRun(
@@ -8351,7 +8361,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    let runtimeRuns = applyRuntimeEventToRuns(initialState.runtimeRuns, eventForSession);
+    let runtimeRuns = applyRuntimeContractEvents(initialState.runtimeRuns, [eventForSession]);
     if (eventForSession.type === 'run.started') {
       runtimeRuns = applyRuntimeContractEvents(
         runtimeRuns,

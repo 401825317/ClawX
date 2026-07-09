@@ -177,9 +177,83 @@ describe('gateway store event wiring', () => {
     expect(useChatStore.getState().lastUserMessageAt).toBe(1773281731000);
     expect(useChatStore.getState().streamingTools).toEqual([]);
     expect(useChatStore.getState().runtimeRuns['run-1']?.lastEventAt).toBe(1773281731500);
-    expect(useChatStore.getState().runtimeRuns['run-1']?.events).toEqual([
+    expect(useChatStore.getState().runtimeRuns['run-1']?.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'tool.completed', toolCallId: 'call-1', name: 'read' }),
+    ]));
+  });
+
+  it('synthesizes durable progress transcript entries from runtime tool events', async () => {
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useManagedAuthStore } = await importRealManagedAuthStore();
+    const readyAuthStatus = {
+      managed: true,
+      hasAuthToken: true,
+      hasRelayToken: true,
+      authValid: true,
+    };
+    useManagedAuthStore.setState({
+      status: readyAuthStatus,
+      initialized: true,
+      loading: false,
+      verifying: false,
+      error: null,
+      refreshStatus: vi.fn(async () => readyAuthStatus),
+    });
+
+    const { useChatStore } = await importRealChatStore();
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-progress',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'tool.started',
+      runId: 'run-progress',
+      sessionKey: 'agent:main:main',
+      ts: 1773281731100,
+      toolCallId: 'call-open',
+      name: 'exec',
+      args: { command: 'open -a "QQMusic"' },
+    });
+    handlers.get('chat:runtime-event')?.({
+      type: 'tool.completed',
+      runId: 'run-progress',
+      sessionKey: 'agent:main:main',
+      ts: 1773281732100,
+      toolCallId: 'call-open',
+      name: 'exec',
+      result: { ok: true },
+      isError: false,
+    });
+    await flushAsyncImports();
+    await flushAsyncImports();
+
+    const progressEntries = useChatStore.getState().runtimeRuns['run-progress']?.progressEntries ?? [];
+    expect(progressEntries).toEqual([
+      expect.objectContaining({
+        id: 'progress:tool:call-open:commentary',
+        kind: 'commentary',
+        text: '我先尝试打开 QQMusic。',
+      }),
+      expect.objectContaining({
+        id: 'progress:tool:call-open',
+        kind: 'action',
+        text: '已运行',
+        status: 'completed',
+      }),
     ]);
+    expect(progressEntries[1]?.command).toContain('QQMusic');
   });
 
   it('stores gate issue and evaluation events without clearing the active send', async () => {
@@ -406,17 +480,17 @@ describe('gateway store event wiring', () => {
     await flushAsyncImports();
 
     expect(useChatStore.getState().currentSessionKey).toBe('agent:main:b');
-    expect(useChatStore.getState().runtimeRuns['run-a']?.events).toEqual([
+    expect(useChatStore.getState().runtimeRuns['run-a']?.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'tool.started', toolCallId: 'call-read', name: 'read' }),
-    ]);
+    ]));
 
     useChatStore.getState().switchSession('agent:main:a');
 
     expect(useChatStore.getState().activeRunId).toBe('run-a');
     expect(useChatStore.getState().sending).toBe(true);
-    expect(useChatStore.getState().runtimeRuns['run-a']?.events).toEqual([
+    expect(useChatStore.getState().runtimeRuns['run-a']?.events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'tool.started', toolCallId: 'call-read', name: 'read' }),
-    ]);
+    ]));
   });
 
   it('does not apply a session-less final chat event to the foreground task when runId belongs to another session', async () => {

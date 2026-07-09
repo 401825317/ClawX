@@ -14,10 +14,13 @@ touchedAreas:
   - src/pages/Chat/ChatInput.tsx
   - src/stores/chat/types.ts
   - src/stores/chat/runtime-graph.ts
+  - src/stores/chat/runtime-progress.ts
   - src/stores/chat/runtime-contract.ts
   - src/stores/chat.ts
+  - src/pages/Chat/RunProgressCard.tsx
   - src/pages/Chat/task-visualization.ts
   - tests/unit/uclaw-artifact-guard.test.ts
+  - tests/unit/chat-page-execution-graph.test.tsx
   - tests/unit/gateway-event-dispatch.test.ts
   - tests/unit/gateway-events.test.ts
   - tests/unit/task-visualization.test.ts
@@ -27,6 +30,7 @@ expectedUserBehavior:
   - Agent runs can expose a structured objective and plan in the active execution graph.
   - Step progress updates replace prior state by stable identifiers instead of creating duplicate timeline noise.
   - Produced artifacts, verification results, and checkpoints can be surfaced as execution facts before the final assistant reply.
+  - Ordinary chat can render a compact runtime-owned progress transcript without exposing the raw execution graph by default.
   - Existing tool lifecycle events, assistant deltas, and legacy Gateway notifications continue to work.
 requiredProfiles:
   - fast
@@ -56,6 +60,7 @@ acceptance:
   - Completed/error/aborted runs pass through a completion gate that records artifact verification, failed steps, unfinished steps, and blocking checkpoints before clearing active run state.
   - Default chat can auto-route image/video intent without requiring mode selection, while still applying the strongest allowed image/video parameters by default.
   - The active execution graph projects the new contract events into visible steps without exposing sensitive prompt or body text in diagnostics.
+  - Runtime tool events can also project into a durable user-facing progress transcript for ordinary chat surfaces.
   - Renderer does not add direct Gateway HTTP calls or direct page/component IPC calls.
 docs:
   required: false

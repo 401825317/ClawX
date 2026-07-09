@@ -83,7 +83,7 @@ function logChatMessageDiagnostic(payload: unknown): void {
 
 function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatRuntimeEvent>): void {
   if (!event) return;
-  if (event.type === 'assistant.delta' || event.type === 'thinking.delta') return;
+  if (event.type === 'assistant.delta' || event.type === 'thinking.delta' || event.type === 'progress.update') return;
 
   const base = {
     type: event.type,

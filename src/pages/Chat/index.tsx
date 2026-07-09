@@ -19,6 +19,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput, type ImageEditReference } from './ChatInput';
 import { ExecutionGraphCard } from './ExecutionGraphCard';
+import { RunProgressCard, shouldUseRunProgressTranscript } from './RunProgressCard';
 import { ChatToolbar } from './ChatToolbar';
 import { extractImages, extractText, extractThinking, extractToolUse, isInternalAssistantReplyText, isInternalProcessNarration, normalizeMessageRole, stripProcessMessagePrefix } from './message-utils';
 import {
@@ -69,6 +70,7 @@ type UserRunCard = {
   agentLabel: string;
   sessionLabel: string;
   segmentEnd: number;
+  runtimeRun: ChatRuntimeRunState | null;
   steps: TaskStep[];
   messageStepTexts: string[];
   streamingReplyText: string | null;
@@ -288,6 +290,17 @@ function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile
   if (kind === 'video') return withElapsed(t('executionGraph.compact.videoDone'));
   if (kind === 'artifact') return withElapsed(t('executionGraph.compact.artifactDone'));
   return withElapsed(t('executionGraph.compact.done'));
+}
+
+function buildRunTranscriptSummary(card: UserRunCard, nowMs: number): string {
+  const elapsed = formatRunElapsedDuration(getRunCardElapsedMs(card, nowMs));
+  const status = getRunCompactStatus(card);
+  if (status === 'running') return elapsed ? `已处理 ${elapsed}` : '处理中';
+  if (status === 'completed') return elapsed ? `已处理 ${elapsed}` : '处理完成';
+  if (status === 'blocked') return elapsed ? `任务需要补充处理 · ${elapsed}` : '任务需要补充处理';
+  if (status === 'failed' || status === 'error') return elapsed ? `任务执行失败 · ${elapsed}` : '任务执行失败';
+  if (status === 'aborted') return elapsed ? `任务已停止 · ${elapsed}` : '任务已停止';
+  return elapsed ? `已处理 ${elapsed}` : '处理中';
 }
 
 function buildQuestionDirectoryTitle(message: RawMessage, fallback: string): string {
@@ -539,6 +552,10 @@ function mergeRuntimeRunsForSegment(
     gateResult: [...sortedRuns].reverse().find((run) => run.gateResult)?.gateResult,
     assistantText: sortedRuns.map((run) => run.assistantText).filter(Boolean).join('\n\n'),
     thinkingText: sortedRuns.map((run) => run.thinkingText).filter(Boolean).join('\n\n'),
+    progressEntries: sortedRuns.flatMap((run) => run.progressEntries ?? []).reduce(
+      (items, entry) => upsertById(items, entry),
+      [] as NonNullable<ChatRuntimeRunState['progressEntries']>,
+    ),
     events,
   };
 }
@@ -1116,6 +1133,7 @@ export function Chat() {
           agentLabel: segmentAgentLabel,
           sessionLabel: segmentSessionLabel,
           segmentEnd: nextUserIndex === -1 ? messages.length - 1 : nextUserIndex - 1,
+          runtimeRun: segmentRuntimeRun,
           steps: [],
           messageStepTexts: [],
           streamingReplyText: null,
@@ -1140,6 +1158,7 @@ export function Chat() {
         agentLabel: cached.agentLabel,
         sessionLabel: cached.sessionLabel,
         segmentEnd: nextUserIndex === -1 ? messages.length - 1 : nextUserIndex - 1,
+        runtimeRun: segmentRuntimeRun,
         steps: cleanedSteps,
         messageStepTexts: getPrimaryMessageStepTexts(cleanedSteps),
         streamingReplyText: null,
@@ -1209,6 +1228,7 @@ export function Chat() {
       agentLabel: segmentAgentLabel,
       sessionLabel: segmentSessionLabel,
       segmentEnd: nextUserIndex === -1 ? messages.length - 1 : nextUserIndex - 1,
+      runtimeRun: segmentRuntimeRun,
       steps,
       messageStepTexts: getPrimaryMessageStepTexts(steps),
       streamingReplyText,
@@ -1358,6 +1378,29 @@ export function Chat() {
     return all;
   }, [filesByRun]);
 
+  const transcriptRunKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const card of userRunCards) {
+      const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
+      if (!shouldUseRunProgressTranscript(card.steps, generatedFiles.length, card.runtimeRun?.progressEntries)) continue;
+      keys.add(`${currentSessionKey}:${card.triggerIndex}`);
+    }
+    return keys;
+  }, [currentSessionKey, filesByRun, userRunCards]);
+
+  const transcriptFoldedMessageIndices = useMemo(() => {
+    const indices = new Set<number>();
+    for (const card of userRunCards) {
+      if (!transcriptRunKeys.has(`${currentSessionKey}:${card.triggerIndex}`)) continue;
+      for (let index = card.triggerIndex + 1; index <= card.segmentEnd; index += 1) {
+        if (index === card.replyIndex) continue;
+        if (messages[index]?.role !== 'assistant') continue;
+        indices.add(index);
+      }
+    }
+    return indices;
+  }, [currentSessionKey, messages, transcriptRunKeys, userRunCards]);
+
   const refreshSignal = useMemo(() => {
     if (sending) return undefined;
     return lastUserMessageAt ?? 0;
@@ -1481,9 +1524,10 @@ export function Chat() {
                   )}
                   {messages.map((msg, idx) => {
                     if (isInternalMessage(msg) && !hasUserFacingMediaAttachments(msg)) return null;
-                    const isFoldedNarration = foldedNarrationIndices.has(idx);
+                    const isTranscriptFolded = transcriptFoldedMessageIndices.has(idx);
+                    const isFoldedNarration = foldedNarrationIndices.has(idx) || isTranscriptFolded;
                     if (isFoldedNarration && !hasUserFacingMediaAttachments(msg)) return null;
-                    const suppressToolCards = foldedProcessMessageIndices.has(idx);
+                    const suppressToolCards = foldedProcessMessageIndices.has(idx) || isTranscriptFolded;
                     const isToolOnlyAssistant = normalizeMessageRole(msg.role) === 'assistant'
                       && extractToolUse(msg).length > 0
                       && extractText(msg).trim().length === 0
@@ -1522,17 +1566,34 @@ export function Chat() {
                           const hasProblem = runCardHasUserFacingProblem(card, generatedFiles);
                           const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
                           const detailsEnabled = devModeUnlocked;
+                          const shouldShowTranscript = shouldUseRunProgressTranscript(
+                            card.steps,
+                            generatedFiles.length,
+                            card.runtimeRun?.progressEntries,
+                          );
                           const shouldShowRunStatus = hasUserFacingActivity
                             && (card.active || hasProblem || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary)));
-                          if (!shouldShowRunStatus && generatedFiles.length === 0) return null;
+                          const hideExecutionGraphByDefault = shouldShowTranscript
+                            && generatedFiles.length === 0
+                            && !detailsEnabled;
+                          if (!shouldShowRunStatus && !shouldShowTranscript && generatedFiles.length === 0) return null;
                           // Keep the run surface compact by default. User toggles
                           // persist across history refreshes through this controlled
                           // prop; developer diagnostics remain one click away.
                           const expanded = detailsEnabled ? (userOverride ?? false) : false;
                           const compactSummary = buildRunCompactSummary(card, generatedFiles, t, runtimeNowMs);
+                          const transcriptSummary = buildRunTranscriptSummary(card, runtimeNowMs);
                           return (
                             <div key={`run-${currentSessionKey}:${card.triggerIndex}`} className="space-y-3">
-                              {shouldShowRunStatus && (
+                              {shouldShowTranscript && (
+                                <RunProgressCard
+                                  summary={transcriptSummary}
+                                  status={compactStatus}
+                                  steps={card.steps}
+                                  progressEntries={card.runtimeRun?.progressEntries}
+                                />
+                              )}
+                              {shouldShowRunStatus && !hideExecutionGraphByDefault && (
                                 <ExecutionGraphCard
                                   key={`graph-${currentSessionKey}:${card.triggerIndex}`}
                                   agentLabel={card.agentLabel}
@@ -1869,7 +1930,7 @@ function ActivityIndicator({ phase }: { phase: 'tool_processing' }) {
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>Processing tool results…</span>
+          <span>正在整理执行结果…</span>
         </div>
       </div>
     </div>

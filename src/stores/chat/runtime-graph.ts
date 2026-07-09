@@ -42,6 +42,7 @@ function cloneRunState(runId: string, event: ChatRuntimeEvent): ChatRuntimeRunSt
     gateResult: undefined,
     assistantText: '',
     thinkingText: '',
+    progressEntries: [],
     events: [],
   };
 }
@@ -99,6 +100,10 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
   }
   if (left.type === 'thinking.delta') {
     return right.type === left.type && right.text === left.text && right.delta === left.delta;
+  }
+  if (left.type === 'progress.update') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.entry) === stableRuntimeFingerprint(left.entry);
   }
   if (left.type === 'run.started') return right.type === left.type;
   if (left.type === 'run.plan.updated') {
@@ -240,6 +245,9 @@ export function applyRuntimeEventToRuns(
       }
       break;
     }
+    case 'progress.update':
+      nextRun.progressEntries = upsertById(nextRun.progressEntries ?? [], event.entry);
+      break;
     default:
       break;
   }

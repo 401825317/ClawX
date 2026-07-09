@@ -5,6 +5,7 @@ import type {
   ChatRuntimeGateEvaluation,
   ChatRuntimeGateIssue,
   ChatRuntimePlanStep,
+  ChatRuntimeProgressEntry,
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
 
@@ -130,6 +131,7 @@ export interface ChatRuntimeRunState {
   gateResult?: ChatRuntimeGateEvaluation;
   assistantText: string;
   thinkingText: string;
+  progressEntries?: ChatRuntimeProgressEntry[];
   events: ChatRuntimeEvent[];
 }
 
