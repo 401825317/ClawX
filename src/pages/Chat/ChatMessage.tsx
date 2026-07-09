@@ -19,7 +19,7 @@ import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
 import { createAuthenticatedHostApiUrl } from '@/lib/host-api';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
 import type { RawMessage, AttachedFileMeta, CompositeArtifactManifest } from '@/stores/chat';
-import { extractText, extractImages, extractToolUse, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
+import { extractText, extractImages, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
 import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
 
 interface ChatMessageProps {
@@ -110,21 +110,27 @@ function isDirectoryAttachment(file: AttachedFileMeta): boolean {
   return file.mimeType === DIRECTORY_MIME_TYPE;
 }
 
-function getAttachedFileDedupeKey(file: AttachedFileMeta): string {
+function getAttachedFileDedupeKeys(file: AttachedFileMeta): string[] {
+  const keys: string[] = [];
   const filePath = file.filePath?.trim();
-  if (filePath) return `path:${filePath}`;
+  if (filePath) {
+    keys.push(isRemoteHttpUrl(filePath) ? `url:${filePath}` : `path:${filePath}`);
+  }
   const gatewayUrl = file.gatewayUrl?.trim();
-  if (gatewayUrl) return `gateway:${gatewayUrl}`;
-  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`;
+  if (gatewayUrl) keys.push(`url:${gatewayUrl}`);
+  if (keys.length === 0) {
+    keys.push(`meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`);
+  }
+  return keys;
 }
 
 function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
   const seen = new Set<string>();
   const next: AttachedFileMeta[] = [];
   for (const file of files) {
-    const key = getAttachedFileDedupeKey(file);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const keys = getAttachedFileDedupeKeys(file);
+    if (keys.some((key) => seen.has(key))) continue;
+    keys.forEach((key) => seen.add(key));
     next.push(file);
   }
   return next;

@@ -4162,15 +4162,18 @@ function looksLikeRemoteMediaUrl(filePath: string): boolean {
   return /^https?:\/\//i.test(filePath.trim());
 }
 
-function fileNameFromMediaRef(filePath: string): string {
+function fileNameFromMediaRef(filePath: string, mimeType: string): string {
   if (looksLikeRemoteMediaUrl(filePath)) {
     try {
-      const parsed = new URL(filePath);
-      const remoteName = parsed.pathname.split('/').filter(Boolean).pop();
-      if (remoteName) return remoteName;
+      const remoteName = decodeURIComponent(new URL(filePath).pathname.split('/').filter(Boolean).pop() || '');
+      if (remoteName.includes('.')) return remoteName;
     } catch {
-      // Fall through to path-style parsing below.
+      // Fall through to a stable MIME-based name.
     }
+    if (mimeType.startsWith('video/')) return 'video.mp4';
+    if (mimeType.startsWith('audio/')) return 'audio.mp3';
+    if (mimeType.startsWith('image/')) return 'image';
+    return 'remote-file';
   }
   return filePath.split(/[\\/]/).pop()?.split(/[?#]/)[0] || 'file';
 }
@@ -4346,11 +4349,24 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
 /**
  * Build an AttachedFileMeta entry for a file ref, using cache if available.
  */
-function makeAttachedFile(ref: { filePath: string; mimeType: string }): AttachedFileMeta {
+function makeAttachedFile(
+  ref: { filePath: string; mimeType: string },
+  source: AttachedFileMeta['source'] = 'message-ref',
+): AttachedFileMeta {
+  if (looksLikeRemoteMediaUrl(ref.filePath)) {
+    return {
+      fileName: fileNameFromMediaRef(ref.filePath, ref.mimeType),
+      mimeType: ref.mimeType,
+      fileSize: 0,
+      preview: null,
+      gatewayUrl: ref.filePath,
+      source,
+    };
+  }
   const cached = _imageCache.get(ref.filePath);
-  if (cached) return { ...cached, filePath: ref.filePath };
-  const fileName = fileNameFromMediaRef(ref.filePath);
-  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath };
+  if (cached) return { ...cached, filePath: ref.filePath, source };
+  const fileName = fileNameFromMediaRef(ref.filePath, ref.mimeType);
+  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source };
 }
 
 /**
@@ -4605,12 +4621,8 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     );
     const files: AttachedFileMeta[] = allRefs
       .filter(ref => !existingPaths.has(ref.filePath))
-      .map(ref => {
-        const cached = _imageCache.get(ref.filePath);
-        if (cached) return { ...cached, filePath: ref.filePath, source: 'message-ref' as const };
-        const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
-        return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source: 'message-ref' as const };
-      });
+      .filter(ref => !looksLikeRemoteMediaUrl(ref.filePath) || !existingGatewayUrls.has(ref.filePath))
+      .map(ref => makeAttachedFile(ref, 'message-ref'));
     const dedupedGatewayMedia = gatewayMediaFiles.filter(
       file => file.gatewayUrl && !existingGatewayUrls.has(file.gatewayUrl),
     );
@@ -5995,15 +6007,18 @@ function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
   const seen = new Set<string>();
   const next: AttachedFileMeta[] = [];
   for (const file of files) {
+    const keys: string[] = [];
     const filePath = file.filePath?.trim();
+    if (filePath) {
+      keys.push(looksLikeRemoteMediaUrl(filePath) ? `url:${filePath}` : `path:${filePath}`);
+    }
     const gatewayUrl = file.gatewayUrl?.trim();
-    const key = filePath
-      ? `path:${filePath}`
-      : gatewayUrl
-        ? `gateway:${gatewayUrl}`
-        : `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview || ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (gatewayUrl) keys.push(`url:${gatewayUrl}`);
+    if (keys.length === 0) {
+      keys.push(`meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview || ''}`);
+    }
+    if (keys.some((key) => seen.has(key))) continue;
+    keys.forEach((key) => seen.add(key));
     next.push(file);
   }
   return next;

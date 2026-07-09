@@ -482,21 +482,27 @@ function withAttachedFileSource(
   return file.source ? file : { ...file, source };
 }
 
-function getAttachedFileDedupeKey(file: AttachedFileMeta): string {
+function getAttachedFileDedupeKeys(file: AttachedFileMeta): string[] {
+  const keys: string[] = [];
   const filePath = file.filePath?.trim();
-  if (filePath) return `path:${filePath}`;
+  if (filePath) {
+    keys.push(/^https?:\/\//i.test(filePath) ? `url:${filePath}` : `path:${filePath}`);
+  }
   const gatewayUrl = file.gatewayUrl?.trim();
-  if (gatewayUrl) return `gateway:${gatewayUrl}`;
-  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`;
+  if (gatewayUrl) keys.push(`url:${gatewayUrl}`);
+  if (keys.length === 0) {
+    keys.push(`meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`);
+  }
+  return keys;
 }
 
 function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
   const seen = new Set<string>();
   const next: AttachedFileMeta[] = [];
   for (const file of files) {
-    const key = getAttachedFileDedupeKey(file);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const keys = getAttachedFileDedupeKeys(file);
+    if (keys.some((key) => seen.has(key))) continue;
+    keys.forEach((key) => seen.add(key));
     next.push(file);
   }
   return next;
@@ -622,6 +628,26 @@ function mimeFromTaggedMediaRef(filePath: string): string {
   const mimeType = mimeFromExtension(filePath);
   if (mimeType !== 'application/octet-stream') return mimeType;
   return /^https?:\/\//i.test(filePath.trim()) ? 'video/mp4' : mimeType;
+}
+
+function isRemoteMediaUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function fileNameFromMediaRef(value: string, mimeType: string): string {
+  if (isRemoteMediaUrl(value)) {
+    try {
+      const remoteName = decodeURIComponent(new URL(value).pathname.split('/').filter(Boolean).pop() || '');
+      if (remoteName.includes('.')) return remoteName;
+    } catch {
+      // Fall through to a stable MIME-based name.
+    }
+    if (mimeType.startsWith('video/')) return 'video.mp4';
+    if (mimeType.startsWith('audio/')) return 'audio.mp3';
+    if (mimeType.startsWith('image/')) return 'image';
+    return 'remote-file';
+  }
+  return value.split(/[\\/]/u).pop()?.split(/[?#]/u)[0] || 'file';
 }
 
 /** Extract local file paths declared in tool call arguments. */
@@ -961,9 +987,19 @@ function makeAttachedFile(
   ref: { filePath: string; mimeType: string },
   source: AttachedFileMeta['source'] = 'message-ref',
 ): AttachedFileMeta {
+  if (isRemoteMediaUrl(ref.filePath)) {
+    return {
+      fileName: fileNameFromMediaRef(ref.filePath, ref.mimeType),
+      mimeType: ref.mimeType,
+      fileSize: 0,
+      preview: null,
+      gatewayUrl: ref.filePath,
+      source,
+    };
+  }
   const cached = _imageCache.get(ref.filePath);
   if (cached) return { ...cached, filePath: ref.filePath, source };
-  const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
+  const fileName = fileNameFromMediaRef(ref.filePath, ref.mimeType);
   return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source };
 }
 
@@ -1234,12 +1270,8 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     );
     const files: AttachedFileMeta[] = allRefs
       .filter(ref => !existingPaths.has(ref.filePath))
-      .map(ref => {
-      const cached = _imageCache.get(ref.filePath);
-      if (cached) return { ...cached, filePath: ref.filePath, source: 'message-ref' };
-      const fileName = ref.filePath.split(/[\\/]/).pop() || 'file';
-      return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source: 'message-ref' };
-    });
+      .filter(ref => !isRemoteMediaUrl(ref.filePath) || !existingGatewayUrls.has(ref.filePath))
+      .map(ref => makeAttachedFile(ref, 'message-ref'));
     const dedupedGatewayMedia = gatewayMediaFiles.filter(
       file => file.gatewayUrl && !existingGatewayUrls.has(file.gatewayUrl),
     );
