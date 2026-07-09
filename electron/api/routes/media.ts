@@ -28,12 +28,13 @@ import {
   type VideoGenerationModelConfig,
 } from '../../utils/openclaw-video-generation';
 import {
-  cancelMediaGenerationJob,
+  cancelMediaGenerationJobWithResult,
   cancelMediaGenerationJobsForRun,
   cancelMediaGenerationJobsForSession,
-  enqueueMediaGenerationJob,
+  enqueueMediaGenerationJobWithResult,
   getMediaGenerationJob,
   getMediaGenerationJobsForSession,
+  retryMediaGenerationJobDelivery,
 } from '../../utils/media-generation-jobs';
 import {
   planMediaIntent,
@@ -214,20 +215,35 @@ export async function handleMediaRoutes(
     }
 
     if (runId && action === 'cancel' && req.method === 'POST') {
-      const run = await compositeRunCoordinator.cancel(runId);
-      sendJson(res, run ? 200 : 404, run
-        ? { success: true, run }
-        : { success: false, error: 'Composite run not found' });
+      const result = await compositeRunCoordinator.cancel(runId);
+      sendJson(res, result.outcome === 'not_found' ? 404 : 200, {
+        success: result.outcome !== 'not_found',
+        ...result,
+        ...(result.outcome === 'not_found' ? { error: 'Composite run not found' } : {}),
+      });
       return true;
     }
 
     if (runId && action === 'retry' && req.method === 'POST') {
       try {
         const body = await parseJsonBody<CompositeRunRetryRequest>(req);
-        const run = await compositeRunCoordinator.retry(runId, body);
-        sendJson(res, run ? 202 : 404, run
-          ? { success: true, run }
-          : { success: false, error: 'Composite run not found' });
+        const result = await compositeRunCoordinator.retry(runId, body);
+        const statusCode = result.outcome === 'retry_started'
+          ? 202
+          : result.outcome === 'not_found'
+            ? 404
+            : 409;
+        sendJson(res, statusCode, {
+          success: result.outcome === 'retry_started',
+          ...result,
+          ...(result.outcome === 'not_found'
+            ? { error: 'Composite run not found' }
+            : result.outcome === 'no_match'
+              ? { error: 'No retryable composite tasks matched the request' }
+              : result.outcome === 'not_retryable'
+                ? { error: 'Composite run is not retryable' }
+                : {}),
+        });
       } catch (error) {
         sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
       }
@@ -419,12 +435,55 @@ export async function handleMediaRoutes(
         return true;
       }
       rememberCancelledLocalRun(runId);
-      const cancelledJobIds = jobId
-        ? (cancelMediaGenerationJob(jobId) ? [jobId] : [])
-        : runId
-          ? cancelMediaGenerationJobsForRun(runId, sessionKey || undefined)
-          : cancelMediaGenerationJobsForSession(sessionKey);
-      sendJson(res, 200, { success: true, cancelledJobIds });
+      if (jobId) {
+        const result = cancelMediaGenerationJobWithResult(jobId);
+        sendJson(res, result.outcome === 'not_found' ? 404 : 200, {
+          success: result.outcome !== 'not_found',
+          ...result,
+          cancelledJobIds: result.outcome === 'cancelled' ? [jobId] : [],
+          ...(result.outcome === 'not_found' ? { error: 'Media generation job not found' } : {}),
+        });
+        return true;
+      }
+      const cancelledJobIds = runId
+        ? cancelMediaGenerationJobsForRun(runId, sessionKey || undefined)
+        : cancelMediaGenerationJobsForSession(sessionKey);
+      sendJson(res, 200, {
+        success: true,
+        outcome: cancelledJobIds.length > 0 ? 'cancelled' : 'no_match',
+        cancelledJobIds,
+      });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/media/generation-jobs/retry' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ jobId?: string }>(req);
+      const jobId = body.jobId?.trim() || '';
+      if (!jobId) {
+        sendJson(res, 400, { success: false, outcome: 'no_match', error: 'jobId is required' });
+        return true;
+      }
+      const result = retryMediaGenerationJobDelivery(jobId);
+      const statusCode = result.outcome === 'retry_started'
+        ? 202
+        : result.outcome === 'already_in_progress'
+          ? 200
+          : result.outcome === 'not_found'
+            ? 404
+            : 409;
+      sendJson(res, statusCode, {
+        success: result.outcome === 'retry_started' || result.outcome === 'already_in_progress',
+        ...result,
+        ...(result.outcome === 'not_found'
+          ? { error: 'Media generation job not found' }
+          : result.outcome === 'not_retryable'
+            ? { error: 'Only failed standalone conversation delivery can be retried' }
+            : {}),
+      });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -542,6 +601,7 @@ export async function handleMediaRoutes(
         userMessageTimestampMs?: number;
         suppressConversationAppend?: boolean;
         runId?: string;
+        clientRequestId?: string;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -567,10 +627,17 @@ export async function handleMediaRoutes(
       const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
         ? Math.floor(body.userMessageTimestampMs)
         : undefined;
+      const runId = body.runId?.trim();
+      const clientRequestId = body.clientRequestId?.trim()
+        || (body.suppressConversationAppend !== true ? runId : undefined)
+        || (body.suppressConversationAppend !== true && userMessageTimestampMs !== undefined
+          ? `standalone:image:${sessionKey}:${userMessageTimestampMs}`
+          : undefined);
 
       const payload = {
         kind: 'image' as const,
         sessionKey,
+        ...(clientRequestId ? { clientRequestId } : {}),
         prompt,
         model: body.model?.trim(),
         size: body.size?.trim(),
@@ -580,10 +647,15 @@ export async function handleMediaRoutes(
         ...(userInputImages ? { userInputImages } : {}),
         ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
         ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
-        ...(body.runId?.trim() ? { runId: body.runId.trim() } : {}),
+        ...(runId ? { runId } : {}),
       };
-      const job = enqueueMediaGenerationJob(payload);
-      sendJson(res, 202, { success: true, jobId: job.id, job });
+      const enqueued = enqueueMediaGenerationJobWithResult(payload);
+      sendJson(res, enqueued.idempotent ? 200 : 202, {
+        success: true,
+        jobId: enqueued.job.id,
+        job: enqueued.job,
+        idempotent: enqueued.idempotent,
+      });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -708,6 +780,7 @@ export async function handleMediaRoutes(
         route?: unknown;
         suppressConversationAppend?: boolean;
         runId?: string;
+        clientRequestId?: string;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -725,6 +798,12 @@ export async function handleMediaRoutes(
       const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
         ? Math.floor(body.userMessageTimestampMs)
         : undefined;
+      const runId = body.runId?.trim();
+      const clientRequestId = body.clientRequestId?.trim()
+        || (body.suppressConversationAppend !== true ? runId : undefined)
+        || (body.suppressConversationAppend !== true && userMessageTimestampMs !== undefined
+          ? `standalone:video:${sessionKey}:${userMessageTimestampMs}`
+          : undefined);
       logger.info('[video-generation-route] chat_send_received', {
         sessionKey,
         promptChars: countVideoPromptCharacters(prompt),
@@ -770,6 +849,7 @@ export async function handleMediaRoutes(
       const payload = {
         kind: 'video' as const,
         sessionKey,
+        ...(clientRequestId ? { clientRequestId } : {}),
         prompt: finalVideoPrompt,
         originalPrompt,
         ...(body.model?.trim() ? { model: body.model.trim() } : {}),
@@ -782,9 +862,10 @@ export async function handleMediaRoutes(
         ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
         route,
         ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
-        ...(body.runId?.trim() ? { runId: body.runId.trim() } : {}),
+        ...(runId ? { runId } : {}),
       };
-      const job = enqueueMediaGenerationJob(payload);
+      const enqueued = enqueueMediaGenerationJobWithResult(payload);
+      const job = enqueued.job;
       logger.info('[video-generation-route] chat_send_enqueued', {
         jobId: job.id,
         sessionKey,
@@ -792,7 +873,12 @@ export async function handleMediaRoutes(
         status: job.status,
       });
 
-      sendJson(res, 202, { success: true, jobId: job.id, job });
+      sendJson(res, enqueued.idempotent ? 200 : 202, {
+        success: true,
+        jobId: job.id,
+        job,
+        idempotent: enqueued.idempotent,
+      });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

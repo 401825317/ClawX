@@ -162,11 +162,51 @@ function buildTranscriptLookup(transcriptMessages: RawMessage[]): Map<string, Ra
 
 function isTranscriptOwnedResult(message: RawMessage): boolean {
   if (message.role !== 'assistant') return false;
-  if (message.syntheticLocalArtifactConversation !== true) return false;
   return message.localArtifactResultKind != null
     || message.compositeArtifactManifest != null
     || message.mediaGenerationSnapshot != null
-    || (message._attachedFiles?.length ?? 0) > 0;
+    || message.id?.startsWith('composite-result:') === true
+    || message.id?.startsWith('media-result:') === true
+    || (message.syntheticLocalArtifactConversation === true
+      && (message._attachedFiles?.length ?? 0) > 0);
+}
+
+function collectTranscriptOwnedConversationMessages(
+  transcriptMessages: RawMessage[],
+  consumedTranscriptMessages: Set<RawMessage>,
+): RawMessage[] {
+  const indexes = new Set<number>();
+  for (let index = 0; index < transcriptMessages.length; index += 1) {
+    const message = transcriptMessages[index]!;
+    if (!isTranscriptOwnedResult(message)) continue;
+    if (!consumedTranscriptMessages.has(message)) indexes.add(index);
+    const previous = transcriptMessages[index - 1];
+    if (
+      previous?.role === 'user'
+      && previous.syntheticLocalArtifactConversation === true
+      && !consumedTranscriptMessages.has(previous)
+    ) {
+      indexes.add(index - 1);
+    }
+  }
+  return [...indexes]
+    .sort((left, right) => left - right)
+    .map((index) => transcriptMessages[index]!);
+}
+
+function dedupeTranscriptMessages(messages: RawMessage[]): RawMessage[] {
+  const seen = new Set<string>();
+  return messages.filter((message) => {
+    const key = message.id
+      ? `id:${message.id}`
+      : message.idempotencyKey
+        ? `idem:${message.idempotencyKey}`
+        : null;
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function timestampMs(message: RawMessage): number {
@@ -199,6 +239,9 @@ export function mergeGatewayHistoryWithTranscript(
   if (transcriptMessages.length === 0) {
     return gatewayMessages;
   }
+  if (gatewayMessages.length === 0) {
+    return dedupeTranscriptMessages(transcriptMessages);
+  }
 
   const lookup = buildTranscriptLookup(transcriptMessages);
   const consumedTranscriptMessages = new Set<RawMessage>();
@@ -218,8 +261,10 @@ export function mergeGatewayHistoryWithTranscript(
 
   const knownPrimaryKeys = new Set(mergedGatewayMessages.map(messageMatchKey));
   const knownRoleTimestampKeys = new Set(mergedGatewayMessages.map(messageRoleTimestampKey));
-  const transcriptOnlyResults = transcriptMessages.filter((message) => {
-    if (consumedTranscriptMessages.has(message) || !isTranscriptOwnedResult(message)) return false;
+  const transcriptOnlyResults = collectTranscriptOwnedConversationMessages(
+    transcriptMessages,
+    consumedTranscriptMessages,
+  ).filter((message) => {
     if (knownPrimaryKeys.has(messageMatchKey(message))) return false;
     return !knownRoleTimestampKeys.has(messageRoleTimestampKey(message));
   });

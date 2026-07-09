@@ -976,7 +976,7 @@ function isUseDefaultSettingsExecutionPrompt(
   prompt: string,
   requestedMode: 'chat' | 'image' | 'video',
 ): boolean {
-  const usesDefaults = /(?:用|使用|按|采用).{0,16}默认(?:模型|尺寸|大小|参数|配置|设置)?(?:\s*[\/、和与]\s*默认?(?:模型|尺寸|大小|参数|配置|设置)?)?|(?:use|using|with)\s+(?:the\s+)?defaults?/iu.test(prompt);
+  const usesDefaults = /(?:用|使用|按|采用).{0,16}默认(?:模型|尺寸|大小|参数|配置|设置)?|(?:use|using|with)\s+(?:the\s+)?defaults?/iu.test(prompt);
   const executesNow = /(?:生成|生图|出图|画|制作|创建|做视频|生视频|generate|create|make)/iu.test(prompt);
   const futureOnly = /(?:以后|下次|每次|今后|从今以后|将来|未来|from now on|next time|in the future)/iu.test(prompt);
   const hasMediaTarget = isImageGenerationPrompt(prompt) || isVideoGenerationPrompt(prompt);
@@ -1067,7 +1067,10 @@ function localNonMediaChatPlan(params: {
   if (isCapabilityOrKnowledgeOnlyPrompt(prompt)) {
     return localChatPlan('local_non_media_capability_or_knowledge_question', prompt, 'current_non_media_task');
   }
-  if (isMediaMetaQuestionPrompt(prompt)) {
+  if (
+    isMediaMetaQuestionPrompt(prompt)
+    && !isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
+  ) {
     return localChatPlan('local_non_media_media_meta_question', prompt, 'current_non_media_task');
   }
   if (isNegatedMediaGenerationPrompt(prompt) || isMediaPromptDraftingPrompt(prompt)) {
@@ -1203,7 +1206,10 @@ function localFastPathPlan(params: {
     if (
       (
         (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt))
-        || isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
+        || (
+          isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
+          && !isVideoGenerationPrompt(prompt)
+        )
       )
       && !isNegatedCompositeTaskPrompt(prompt, 'image_generate')
     ) {
@@ -1233,7 +1239,10 @@ function localFastPathPlan(params: {
     const shouldEditFirst = hasSourceImage && isImageEditPrompt(prompt);
     if (
       !isVideoGenerationPrompt(prompt)
-      && !isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
+      && !(
+        isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
+        && !isImageGenerationPrompt(prompt)
+      )
     ) return null;
     return {
       action: 'video_generate',

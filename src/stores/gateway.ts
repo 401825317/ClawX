@@ -230,7 +230,7 @@ function handleGatewayChatMessage(data: unknown): void {
     const payload = ('message' in chatData && typeof chatData.message === 'object')
       ? chatData.message as Record<string, unknown>
       : chatData;
-    const normalizedPayload = {
+    const normalizedPayload: Record<string, unknown> = {
       ...payload,
       ...(payload.sessionKey == null && chatData.sessionKey != null
         ? { sessionKey: chatData.sessionKey }

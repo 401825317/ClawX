@@ -1454,6 +1454,23 @@ function getRuntimeRunFirstEventMs(run: ChatState['runtimeRuns'][string] | undef
   return Math.min(startedAt, firstEventAt);
 }
 
+const ACTIVE_TURN_BOUNDARY_SKEW_MS = 5_000;
+
+function runtimeRunStartedBeforeActiveTurn(
+  state: Pick<ChatState, 'activeRunId' | 'lastUserMessageAt' | 'runtimeRuns'>,
+  runId: string,
+): boolean {
+  if (state.activeRunId === runId) return false;
+  const activeRunStartMs = state.activeRunId
+    ? getRuntimeRunFirstEventMs(state.runtimeRuns[state.activeRunId])
+    : null;
+  const boundaryMs = activeRunStartMs ?? optionalToMs(state.lastUserMessageAt);
+  const candidateRunStartMs = getRuntimeRunFirstEventMs(state.runtimeRuns[runId]);
+  return boundaryMs != null
+    && candidateRunStartMs != null
+    && candidateRunStartMs < boundaryMs - ACTIVE_TURN_BOUNDARY_SKEW_MS;
+}
+
 function runtimeEventBelongsToActiveTurn(
   state: Pick<ChatState, 'currentSessionKey' | 'sending' | 'activeRunId' | 'pendingFinal' | 'lastUserMessageAt' | 'runtimeRuns'>,
   event: ChatRuntimeEvent,
@@ -1462,6 +1479,7 @@ function runtimeEventBelongsToActiveTurn(
   if (!eventSessionKey || eventSessionKey !== state.currentSessionKey) return false;
   if (!state.sending && state.activeRunId == null && !state.pendingFinal) return false;
   if (state.activeRunId && event.runId === state.activeRunId) return true;
+  if (runtimeRunStartedBeforeActiveTurn(state, event.runId)) return false;
 
   const activeRunStartMs = state.activeRunId
     ? getRuntimeRunFirstEventMs(state.runtimeRuns[state.activeRunId])
@@ -1473,7 +1491,7 @@ function runtimeEventBelongsToActiveTurn(
   const eventMs = getRuntimeEventTimestampMs(event)
     ?? getRuntimeRunFirstEventMs(state.runtimeRuns[event.runId]);
   if (eventMs == null) return false;
-  return eventMs >= boundaryMs - 5_000;
+  return eventMs >= boundaryMs - ACTIVE_TURN_BOUNDARY_SKEW_MS;
 }
 
 // Timer for fallback history polling during active sends.
@@ -1571,6 +1589,7 @@ type QueuedChatSend = {
   mode: ChatSendMode;
   imageOptions?: ChatImageSendOptions;
   videoOptions?: ChatVideoSendOptions;
+  compositeClientRequestId?: string;
   enqueuedAt: number;
 };
 const MAX_QUEUED_SENDS_PER_SESSION = 20;
@@ -1578,6 +1597,7 @@ const _queuedChatSendsBySession = new Map<string, QueuedChatSend[]>();
 const _queuedChatSendFlushScheduled = new Set<string>();
 const _sessionsCancelling = new Set<string>();
 const _lastAttemptedChatSendBySession = new Map<string, QueuedChatSend>();
+const _pendingCompositeClientRequestIdBySession = new Map<string, string>();
 
 type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 type MediaGenerationProgressEvent = {
@@ -1845,6 +1865,8 @@ async function resumeStandaloneMediaJobsForSession(
 
 const COMPOSITE_RUN_POLL_INTERVAL_MS = 500;
 const _observedCompositeRunIds = new Set<string>();
+const _compositeRunObservers = new Map<string, Promise<CompositeRunRecord>>();
+const _compositeRecoveryScans = new Map<string, Promise<void>>();
 
 function compositeRunAttachedFiles(run: CompositeRunRecord): AttachedFileMeta[] {
   return dedupeAttachedFiles(run.artifacts.map((artifact) => ({
@@ -1908,22 +1930,41 @@ async function waitForCompositeRun(params: {
   sessionKey: string;
   isCancelled?: () => boolean;
 }): Promise<CompositeRunRecord> {
-  _observedCompositeRunIds.add(params.runId);
-  try {
-    for (;;) {
-      if (params.isCancelled?.()) throw new LocalRunCancelledError();
-      const response = await hostApiFetch<CompositeRunApiResponse>(
-        `/api/composite-runs/${encodeURIComponent(params.runId)}`,
-      );
-      if (!response.success || !response.run) {
-        throw new Error(response.error || 'Composite run not found');
+  const existingObserver = _compositeRunObservers.get(params.runId);
+  if (existingObserver) return await existingObserver;
+
+  const observer = (async (): Promise<CompositeRunRecord> => {
+    _observedCompositeRunIds.add(params.runId);
+    try {
+      for (;;) {
+        if (
+          params.isCancelled?.()
+          || wasLocallyAbortedRun(params.runId)
+          || _sessionsCancelling.has(params.sessionKey)
+        ) {
+          throw new LocalRunCancelledError();
+        }
+        const response = await hostApiFetch<CompositeRunApiResponse>(
+          `/api/composite-runs/${encodeURIComponent(params.runId)}`,
+        );
+        if (!response.success || !response.run) {
+          throw new Error(response.error || 'Composite run not found');
+        }
+        applyCompositeRunSnapshot(params.set, params.get, response.run);
+        if (compositeRunTerminalForRenderer(response.run)) return response.run;
+        await sleep(COMPOSITE_RUN_POLL_INTERVAL_MS);
       }
-      applyCompositeRunSnapshot(params.set, params.get, response.run);
-      if (compositeRunTerminalForRenderer(response.run)) return response.run;
-      await sleep(COMPOSITE_RUN_POLL_INTERVAL_MS);
+    } finally {
+      _observedCompositeRunIds.delete(params.runId);
     }
+  })();
+  _compositeRunObservers.set(params.runId, observer);
+  try {
+    return await observer;
   } finally {
-    _observedCompositeRunIds.delete(params.runId);
+    if (_compositeRunObservers.get(params.runId) === observer) {
+      _compositeRunObservers.delete(params.runId);
+    }
   }
 }
 
@@ -1937,7 +1978,7 @@ function settleCompositeRunLifecycle(
   const runError = deliveryFailed
     ? (run.delivery.error || i18n.t('chat:runtimeDelivery.historySyncFailedDetail'))
     : (run.delivery.status === 'succeeded' ? null : taskFailure?.error || null);
-  commitSessionRunState(set, get, run.sessionKey, {
+  const settledActiveRun = commitSessionRunStateIfActiveRun(set, get, run.sessionKey, run.runId, {
     sending: false,
     pendingImageGenerationLocal: false,
     pendingVideoGenerationLocal: false,
@@ -1949,6 +1990,7 @@ function settleCompositeRunLifecycle(
     lastUserMessageAt: null,
     pendingToolImages: [],
   });
+  if (!settledActiveRun) return;
   if (get().currentSessionKey === run.sessionKey) {
     set({ runError });
   }
@@ -1974,13 +2016,13 @@ async function startCompositeRunInMain(params: {
   imageOptions?: ChatImageSendOptions;
   videoOptions?: ChatVideoSendOptions;
   sendGeneration: number;
+  clientRequestId: string;
 }): Promise<void> {
   assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  const clientRequestId = `composite:${params.sessionKey}:${params.nowMs}:${params.sendGeneration}`;
   const response = await hostApiFetch<CompositeRunApiResponse>('/api/composite-runs', {
     method: 'POST',
     body: JSON.stringify({
-      clientRequestId,
+      clientRequestId: params.clientRequestId,
       sessionKey: params.sessionKey,
       prompt: params.prompt,
       requestedMode: 'chat',
@@ -2017,44 +2059,63 @@ async function resumeCompositeRunsForSession(
   get: ChatGet,
   sessionKey: string,
 ): Promise<void> {
-  if (_sessionsCancelling.has(sessionKey)) return;
-  let response: CompositeRunApiResponse;
-  try {
-    response = await hostApiFetch<CompositeRunApiResponse>(
-      `/api/composite-runs?sessionKey=${encodeURIComponent(sessionKey)}&activeOnly=true`,
-    );
-  } catch (error) {
-    console.warn('[composite-run] failed to discover active runs:', error);
-    return;
-  }
-  const runs = (response.runs ?? []).filter((run) => !_observedCompositeRunIds.has(run.runId));
-  for (const run of runs) {
-    applyCompositeRunSnapshot(set, get, run);
-    commitSessionRunState(set, get, sessionKey, {
-      sending: true,
-      activeRunId: run.runId,
-      pendingFinal: true,
-    });
-    void waitForCompositeRun({
-      set,
-      get,
-      runId: run.runId,
-      sessionKey,
-      isCancelled: () => wasLocallyAbortedRun(run.runId) || _sessionsCancelling.has(sessionKey),
-    }).then((completed) => {
-      if (!wasLocallyAbortedRun(run.runId)) settleCompositeRunLifecycle(set, get, completed);
-    }).catch((error) => {
-      if (isLocalRunCancelledError(error) || wasLocallyAbortedRun(run.runId)) return;
-      commitSessionRunState(set, get, sessionKey, {
-        sending: false,
-        activeRunId: null,
-        pendingFinal: false,
-      });
-      if (get().currentSessionKey === sessionKey) {
-        set({ runError: error instanceof Error ? error.message : String(error) });
+  const existingScan = _compositeRecoveryScans.get(sessionKey);
+  if (existingScan) return await existingScan;
+
+  const scan = (async (): Promise<void> => {
+    if (_sessionsCancelling.has(sessionKey)) return;
+    let response: CompositeRunApiResponse;
+    try {
+      response = await hostApiFetch<CompositeRunApiResponse>(
+        `/api/composite-runs?sessionKey=${encodeURIComponent(sessionKey)}&activeOnly=true`,
+      );
+    } catch (error) {
+      console.warn('[composite-run] failed to discover active runs:', error);
+      return;
+    }
+    const runs = (response.runs ?? []).filter((run) => !_observedCompositeRunIds.has(run.runId));
+    for (const run of runs) {
+      applyCompositeRunSnapshot(set, get, run);
+      const sessionState = get().currentSessionKey === sessionKey
+        ? get()
+        : _sessionRunStateCache.get(sessionKey);
+      if (sessionState?.activeRunId == null || sessionState.activeRunId === run.runId) {
+        commitSessionRunState(set, get, sessionKey, {
+          sending: true,
+          activeRunId: run.runId,
+          pendingFinal: true,
+        });
       }
-      markSessionRunIdle(sessionKey);
-    });
+      void waitForCompositeRun({
+        set,
+        get,
+        runId: run.runId,
+        sessionKey,
+        isCancelled: () => wasLocallyAbortedRun(run.runId) || _sessionsCancelling.has(sessionKey),
+      }).then((completed) => {
+        if (!wasLocallyAbortedRun(run.runId)) settleCompositeRunLifecycle(set, get, completed);
+      }).catch((error) => {
+        if (isLocalRunCancelledError(error) || wasLocallyAbortedRun(run.runId)) return;
+        const clearedActiveRun = commitSessionRunStateIfActiveRun(set, get, sessionKey, run.runId, {
+          sending: false,
+          activeRunId: null,
+          pendingFinal: false,
+        });
+        if (!clearedActiveRun) return;
+        if (get().currentSessionKey === sessionKey) {
+          set({ runError: error instanceof Error ? error.message : String(error) });
+        }
+        markSessionRunIdle(sessionKey);
+      });
+    }
+  })();
+  _compositeRecoveryScans.set(sessionKey, scan);
+  try {
+    await scan;
+  } finally {
+    if (_compositeRecoveryScans.get(sessionKey) === scan) {
+      _compositeRecoveryScans.delete(sessionKey);
+    }
   }
 }
 
@@ -3263,6 +3324,7 @@ function hasQueuedChatSends(sessionKey: string): boolean {
 function clearQueuedChatSends(sessionKey: string): void {
   _queuedChatSendsBySession.delete(sessionKey);
   _queuedChatSendFlushScheduled.delete(sessionKey);
+  _pendingCompositeClientRequestIdBySession.delete(sessionKey);
 }
 
 function currentSessionCanFlushQueuedSend(sessionKey: string): boolean {
@@ -3289,6 +3351,9 @@ function scheduleQueuedChatSendFlush(sessionKey: string): void {
       _queuedChatSendsBySession.set(sessionKey, queue);
     } else {
       _queuedChatSendsBySession.delete(sessionKey);
+    }
+    if (next.compositeClientRequestId) {
+      _pendingCompositeClientRequestIdBySession.set(sessionKey, next.compositeClientRequestId);
     }
     void useChatStore.getState().sendMessage(
       next.text,
@@ -3336,6 +3401,31 @@ function commitSessionRunState(
     sessionKey,
     mergeSessionRunStatePatch(getCachedSessionRunState(sessionKey), patch),
   );
+}
+
+function commitSessionRunStateIfActiveRun(
+  set: ChatSet,
+  get: ChatGet,
+  sessionKey: string,
+  expectedRunId: string,
+  patch: Partial<SessionRunState>,
+): boolean {
+  if (get().currentSessionKey === sessionKey) {
+    let committed = false;
+    set((state) => {
+      if (state.currentSessionKey !== sessionKey || state.activeRunId !== expectedRunId) {
+        return {};
+      }
+      committed = true;
+      return patch;
+    });
+    return committed;
+  }
+
+  const cached = _sessionRunStateCache.get(sessionKey);
+  if (!cached || cached.activeRunId !== expectedRunId) return false;
+  captureSessionRunState(sessionKey, mergeSessionRunStatePatch(cached, patch));
+  return true;
 }
 
 function appendLocalMessageForSession(
@@ -3485,6 +3575,7 @@ function cloneSessionRunState(state: SessionRunState): SessionRunState {
 
 function updateCachedSessionRunStateFromRuntimeEvent(
   event: ChatRuntimeEvent,
+  runtimeRuns: ChatState['runtimeRuns'],
   holdForAsyncTask = false,
 ): void {
   const sessionKey = event.sessionKey;
@@ -3494,8 +3585,14 @@ function updateCachedSessionRunStateFromRuntimeEvent(
 
   const next = cloneSessionRunState(cached);
   const matchesCachedRun = next.activeRunId != null && event.runId === next.activeRunId;
+  const cachedTurnStartMs = optionalToMs(next.lastUserMessageAt);
+  const eventRunStartMs = getRuntimeRunFirstEventMs(runtimeRuns[event.runId]);
+  const eventRunPredatesCachedTurn = cachedTurnStartMs != null
+    && eventRunStartMs != null
+    && eventRunStartMs < cachedTurnStartMs - ACTIVE_TURN_BOUNDARY_SKEW_MS;
   const isCurrentUntrackedSend = next.activeRunId == null
     && next.sending
+    && !eventRunPredatesCachedTurn
     && (
       typeof event.ts !== 'number'
       || next.lastUserMessageAt == null
@@ -7205,7 +7302,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             rawMessages = fallbackMessages.length > 0
               ? fallbackMessages
               : await loadLocalHistoryFallback(currentSessionKey, HISTORY_PAGE_SIZE);
-          } else if (rawMessages.length > 0) {
+          } else {
             rawMessages = await hydrateGatewayHistoryFromTranscript(
               currentSessionKey,
               rawMessages,
@@ -7392,6 +7489,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
       ?? get().currentSessionKey;
+    const retriedCompositeClientRequestId = _pendingCompositeClientRequestIdBySession.get(targetSessionKey);
+    _pendingCompositeClientRequestIdBySession.delete(targetSessionKey);
 
     if (!attachments?.length && isInternalMessage({ role: 'user', content: trimmed })) {
       console.info('[sendMessage] Dropping internal user message before gateway send', {
@@ -7411,6 +7510,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         mode,
         imageOptions,
         videoOptions,
+        compositeClientRequestId: retriedCompositeClientRequestId,
       });
       return;
     }
@@ -7438,6 +7538,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         mode,
         imageOptions,
         videoOptions,
+        compositeClientRequestId: retriedCompositeClientRequestId,
       });
       return;
     }
@@ -7454,6 +7555,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       mode,
       imageOptions: imageOptions ? { ...imageOptions } : undefined,
       videoOptions: videoOptions ? { ...videoOptions } : undefined,
+      compositeClientRequestId: retriedCompositeClientRequestId,
       enqueuedAt: Date.now(),
     });
 
@@ -7583,6 +7685,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     if (compositeTasks) {
+      const compositeClientRequestId = retriedCompositeClientRequestId
+        ?? `composite:${currentSessionKey}:${crypto.randomUUID()}`;
+      const attemptedSend = _lastAttemptedChatSendBySession.get(currentSessionKey);
+      if (attemptedSend) {
+        _lastAttemptedChatSendBySession.set(currentSessionKey, {
+          ...attemptedSend,
+          compositeClientRequestId,
+        });
+      }
       try {
         await startCompositeRunInMain({
           set,
@@ -7594,6 +7705,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           imageOptions,
           videoOptions,
           sendGeneration,
+          clientRequestId: compositeClientRequestId,
         });
         clearSendGenerationIfCurrent();
       } catch (error) {
@@ -8424,6 +8536,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ runError: i18n.t('chat:runError.retryUnavailable') });
       return;
     }
+    if (previous.compositeClientRequestId) {
+      _pendingCompositeClientRequestIdBySession.set(sessionKey, previous.compositeClientRequestId);
+    }
     set({ error: null, runError: null });
     await get().sendMessage(
       previous.text,
@@ -9243,6 +9358,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!matchesCurrentSession && !matchesActiveRun) {
       updateCachedSessionRunStateFromRuntimeEvent(
         eventForSession,
+        runtimeRuns,
         runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]),
       );
       set(nextPatch);
@@ -9309,6 +9425,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const terminalIsForCurrentUntrackedSend = latestState.activeRunId == null
         && matchesCurrentSession
         && latestState.sending
+        && !runtimeRunStartedBeforeActiveTurn(latestState, eventForSession.runId)
         && (
           typeof eventForSession.ts !== 'number'
           || latestState.lastUserMessageAt == null
