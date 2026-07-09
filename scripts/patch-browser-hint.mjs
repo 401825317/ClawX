@@ -12,6 +12,8 @@ import { patchInstalledOpenClawModelRequestContractRuntime } from './openclaw-mo
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
+import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchInstalledOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 
 const ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_BROWSER_PATCH === '1';
 const ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH === '1';
@@ -25,6 +27,8 @@ try {
   }
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
+  patchInstalledOpenClawToolDirectoryI18nRuntime();
+  patchInstalledOpenClawStreamingRuntime();
   patchInstalledOpenClawModelRequestContractRuntime();
   patchInstalledOpenClawRawToolSignalRuntime();
 } catch (error) {

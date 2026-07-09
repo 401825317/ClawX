@@ -14,6 +14,8 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - resources/openclaw-plugins/uclaw-artifact-guard/package.json
   - scripts/openclaw-model-request-contract-patch.mjs
+  - scripts/openclaw-streaming-runtime-patch.mjs
+  - scripts/openclaw-tool-directory-i18n-patch.mjs
   - scripts/patch-browser-hint.mjs
   - scripts/bundle-openclaw.mjs
   - src/pages/Chat/ChatInput.tsx
@@ -39,6 +41,8 @@ expectedUserBehavior:
   - Heartbeat work runs in an isolated lightweight session and never reuses the interactive chat transcript.
   - Internal heartbeat, restart-continuation, and runtime-plumbing messages are removed before prompt construction and future transcript writes.
   - Safe diagnostics can prove the final provider request contract without recording prompts, credentials, tool schemas, or media payloads.
+  - Chinese engineering and read-only prompts discover the same relevant tool families as equivalent English prompts.
+  - Visible assistant deltas remain genuinely streamed with a responsive UI cadence instead of arriving in large bursts.
   - Existing tool lifecycle events, assistant deltas, and legacy Gateway notifications continue to work.
 requiredProfiles:
   - fast
@@ -72,6 +76,7 @@ acceptance:
   - Managed OpenClaw config enables heartbeat isolatedSession, lightContext, and skipWhenBusy without changing chat, image, or video model routing.
   - Internal prompt-history sanitization blocks pure runtime messages while preserving real user text from mixed queued/restart envelopes.
   - The final guarded model fetch logs only request-shape metadata, including reasoning effort, tool count, tool choice, prompt-cache-key presence, and top-level keys.
+  - Dev and packaged OpenClaw runtimes apply the CJK tool-directory and streaming cadence patches idempotently.
   - Renderer does not add direct Gateway HTTP calls or direct page/component IPC calls.
 docs:
   required: false

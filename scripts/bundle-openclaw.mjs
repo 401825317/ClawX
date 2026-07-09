@@ -25,6 +25,8 @@ import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-reque
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
+import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1093,6 +1095,26 @@ function patchBundledRuntime(outputDir) {
   });
   if (promptCacheKeyPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
+  }
+
+  // --- Tool directory CJK intent scoring patch ---
+  // Keep Chinese engineering/read-only/media requests on the same structured
+  // tool discovery path as equivalent English requests.
+  const toolDirectoryI18nPatch = patchOpenClawToolDirectoryI18nRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (toolDirectoryI18nPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${toolDirectoryI18nPatch.patchedFiles} tool directory intent runtime file(s)`;
+  }
+
+  // --- Visible stream smoothing and chat delta cadence patch ---
+  // Preserve true provider streaming while avoiding large burst-only text
+  // updates and the old 150 ms UI throttle.
+  const streamingRuntimePatch = patchOpenClawStreamingRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (streamingRuntimePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${streamingRuntimePatch.patchedFiles} streaming runtime file(s)`;
   }
 
   // --- Final model request contract diagnostics patch ---
