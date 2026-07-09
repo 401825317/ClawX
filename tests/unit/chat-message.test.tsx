@@ -88,6 +88,46 @@ describe('ChatMessage attachment dedupe', () => {
     expect(screen.queryByTestId('chat-image-preview-card')).not.toBeInTheDocument();
   });
 
+  it('renders persisted composite history replies as a compact artifact manifest', () => {
+    const message: RawMessage = {
+      role: 'assistant',
+      content: [
+        '好，我给你做了一套随机示例包，主题统一成“未来城市里的个人效率工作台”。',
+        '',
+        '下面是统一产物清单；我也做了基础验证，已生成的本地文件和媒体都可以打开或预览。',
+        '',
+        'MEDIA:/tmp/future-workbench.png',
+        'MEDIA:/tmp/AI_工作流效率提升.pptx',
+      ].join('\n'),
+      _attachedFiles: [
+        {
+          fileName: 'future-workbench.png',
+          mimeType: 'image/png',
+          fileSize: 2048,
+          preview: null,
+          filePath: '/tmp/future-workbench.png',
+          source: 'message-ref',
+        },
+        {
+          fileName: 'AI_工作流效率提升.pptx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          fileSize: 4096,
+          preview: null,
+          filePath: '/tmp/AI_工作流效率提升.pptx',
+          source: 'message-ref',
+        },
+      ],
+    };
+
+    render(<ChatMessage message={message} />);
+
+    expect(screen.getByText('产物清单')).toBeInTheDocument();
+    expect(screen.getByText('2 个')).toBeInTheDocument();
+    expect(screen.getByText('future-workbench.png')).toBeInTheDocument();
+    expect(screen.getByText('AI_工作流效率提升.pptx')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-image-preview-card')).not.toBeInTheDocument();
+  });
+
   it('keeps attachment-only assistant replies visible even when process attachments are suppressed', () => {
     const message: RawMessage = {
       role: 'assistant',

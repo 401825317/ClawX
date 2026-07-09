@@ -49,6 +49,7 @@ import {
   createLocalArtifact,
   type LocalArtifactCreateRequest,
 } from '../../utils/local-artifact-runtime';
+import { appendCompositeArtifactConversation } from '../../utils/chat-session-image-message';
 
 function normalizeMediaInputImageRefs(
   images: Array<{
@@ -133,6 +134,49 @@ export async function handleMediaRoutes(
       const body = await parseJsonBody<LocalArtifactCreateRequest>(req);
       const artifact = await createLocalArtifact(body);
       sendJson(res, 200, { success: true, artifact });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/local-artifacts/append-conversation' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{
+        sessionKey?: string;
+        prompt?: string;
+        summaryText?: string;
+        outputPaths?: string[];
+        inputPaths?: string[];
+        userMessageTimestampMs?: number;
+      }>(req);
+      const sessionKey = body.sessionKey?.trim() || '';
+      const prompt = body.prompt?.trim() || '';
+      const summaryText = body.summaryText?.trim() || '';
+      if (!sessionKey) {
+        sendJson(res, 400, { success: false, error: 'sessionKey is required' });
+        return true;
+      }
+      if (!prompt) {
+        sendJson(res, 400, { success: false, error: 'prompt is required' });
+        return true;
+      }
+      if (!summaryText) {
+        sendJson(res, 400, { success: false, error: 'summaryText is required' });
+        return true;
+      }
+      const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
+        ? Math.floor(body.userMessageTimestampMs)
+        : undefined;
+      await appendCompositeArtifactConversation({
+        sessionKey,
+        prompt,
+        summaryText,
+        outputPaths: Array.isArray(body.outputPaths) ? body.outputPaths : undefined,
+        inputPaths: Array.isArray(body.inputPaths) ? body.inputPaths : undefined,
+        ...(userMessageTimestampMs !== undefined ? { userTimestampMs: userMessageTimestampMs } : {}),
+      });
+      sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

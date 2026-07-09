@@ -936,6 +936,11 @@ type LocalArtifactCreateResponse = {
   };
 };
 
+type LocalArtifactAppendConversationResponse = {
+  success: boolean;
+  error?: string;
+};
+
 type CompositeTaskRunStatus = 'completed' | 'failed' | 'blocked';
 
 type CompositeTaskRunResult = {
@@ -1517,6 +1522,43 @@ function buildCompositeDeliveryMessage(results: CompositeTaskRunResult[]): strin
   return lines.join('\n');
 }
 
+function compositeOutputPathsFromFiles(files: AttachedFileMeta[]): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const file of files) {
+    const target = file.filePath?.trim() || file.gatewayUrl?.trim() || '';
+    if (!target || seen.has(target)) continue;
+    seen.add(target);
+    paths.push(target);
+  }
+  return paths;
+}
+
+async function persistCompositeConversation(params: {
+  sessionKey: string;
+  prompt: string;
+  summaryText: string;
+  files: AttachedFileMeta[];
+  userMessageTimestampMs: number;
+}): Promise<void> {
+  const response = await hostApiFetch<LocalArtifactAppendConversationResponse>(
+    '/api/local-artifacts/append-conversation',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        sessionKey: params.sessionKey,
+        prompt: params.prompt,
+        summaryText: params.summaryText,
+        outputPaths: compositeOutputPathsFromFiles(params.files),
+        userMessageTimestampMs: params.userMessageTimestampMs,
+      }),
+    },
+  );
+  if (response.success === false) {
+    throw new Error(response.error || '复合任务结果写入历史失败');
+  }
+}
+
 async function createCompositeLocalArtifact(params: {
   runId: string;
   sessionKey: string;
@@ -1780,14 +1822,30 @@ async function runCompositeLocalTasks(params: {
   await Promise.all(taskPromises.values());
 
   const completedResults = orderedResults();
+  const finalContent = buildCompositeDeliveryMessage(completedResults);
+  const finalAttachedFiles = dedupeAttachedFiles(allFiles);
   const finalMessage: RawMessage = {
     role: 'assistant',
-    content: buildCompositeDeliveryMessage(completedResults),
+    content: finalContent,
     timestamp: Date.now() / 1000,
     id: `composite-result:${runId}`,
-    _attachedFiles: dedupeAttachedFiles(allFiles),
+    _attachedFiles: finalAttachedFiles,
   };
   appendLocalMessageForSession(params.set, params.get, params.sessionKey, finalMessage);
+
+  let persistedConversation = false;
+  try {
+    await persistCompositeConversation({
+      sessionKey: params.sessionKey,
+      prompt: params.prompt,
+      summaryText: finalContent,
+      files: finalAttachedFiles,
+      userMessageTimestampMs: params.nowMs,
+    });
+    persistedConversation = true;
+  } catch (error) {
+    console.warn('[chat.composite] failed to persist composite conversation:', error);
+  }
 
   params.set((state) => {
     let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, [
@@ -1831,9 +1889,9 @@ async function runCompositeLocalTasks(params: {
   }
   markSessionRunIdle(params.sessionKey);
   clearPendingRuntimeIntent(params.sessionKey);
-  if (params.get().currentSessionKey === params.sessionKey) {
+  if (persistedConversation && params.get().currentSessionKey === params.sessionKey) {
     void params.get().loadHistory(true);
-  } else {
+  } else if (persistedConversation) {
     markSessionNeedsTerminalHistoryRefresh(params.sessionKey);
   }
 }

@@ -68,9 +68,12 @@ function attachmentOpenTarget(file: AttachedFileMeta): string | undefined {
 }
 
 function isCompositeResultMessage(message: RawMessage): boolean {
-  return message.role === 'assistant'
-    && typeof message.id === 'string'
-    && message.id.startsWith('composite-result:');
+  if (message.role !== 'assistant') return false;
+  if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
+  const text = extractText(message);
+  return (message._attachedFiles?.length ?? 0) > 0
+    && /随机示例包/.test(text)
+    && /(?:统一)?产物清单/.test(text);
 }
 
 function isChatPreviewDocument(file: AttachedFileMeta): boolean {

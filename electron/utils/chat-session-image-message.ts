@@ -179,23 +179,22 @@ function buildMessageEntry(params: {
   });
 }
 
-export async function appendImageGenerationConversation(params: {
+async function appendConversationEntries(params: {
   sessionKey: string;
   prompt: string;
-  outputPaths: string[];
+  assistantText: string;
   inputPaths?: string[];
-  summaryText?: string;
   userTimestampMs?: number;
 }): Promise<void> {
   const sessionKey = params.sessionKey.trim();
   const prompt = params.prompt.trim();
-  const outputPaths = params.outputPaths.map((value) => value.trim()).filter(Boolean);
   const inputPaths = (params.inputPaths ?? []).map((value) => value.trim()).filter(Boolean);
+  const assistantText = params.assistantText.trim();
   if (!sessionKey || !prompt) {
     throw new Error('sessionKey and prompt are required');
   }
-  if (outputPaths.length === 0) {
-    throw new Error('outputPaths cannot be empty');
+  if (!assistantText) {
+    throw new Error('assistantText is required');
   }
 
   const agentId = parseAgentIdFromSessionKey(sessionKey);
@@ -224,7 +223,6 @@ export async function appendImageGenerationConversation(params: {
   const userMessageId = randomUUID();
   const assistantMessageId = randomUUID();
   const userText = buildUserText(prompt, inputPaths);
-  const assistantText = buildAssistantText(params.summaryText, outputPaths);
 
   const nextLines = [
     buildMessageEntry({
@@ -264,4 +262,43 @@ export async function appendImageGenerationConversation(params: {
   await fsP.mkdir(sessionsDir, { recursive: true });
   upsertSessionRecord(sessionsJson, sessionKey, nextRecord);
   await fsP.writeFile(sessionsJsonPath, JSON.stringify(sessionsJson, null, 2), 'utf8');
+}
+
+export async function appendImageGenerationConversation(params: {
+  sessionKey: string;
+  prompt: string;
+  outputPaths: string[];
+  inputPaths?: string[];
+  summaryText?: string;
+  userTimestampMs?: number;
+}): Promise<void> {
+  const outputPaths = params.outputPaths.map((value) => value.trim()).filter(Boolean);
+  if (outputPaths.length === 0) {
+    throw new Error('outputPaths cannot be empty');
+  }
+  await appendConversationEntries({
+    sessionKey: params.sessionKey,
+    prompt: params.prompt,
+    assistantText: buildAssistantText(params.summaryText, outputPaths),
+    inputPaths: params.inputPaths,
+    userTimestampMs: params.userTimestampMs,
+  });
+}
+
+export async function appendCompositeArtifactConversation(params: {
+  sessionKey: string;
+  prompt: string;
+  summaryText: string;
+  outputPaths?: string[];
+  inputPaths?: string[];
+  userTimestampMs?: number;
+}): Promise<void> {
+  const outputPaths = (params.outputPaths ?? []).map((value) => value.trim()).filter(Boolean);
+  await appendConversationEntries({
+    sessionKey: params.sessionKey,
+    prompt: params.prompt,
+    assistantText: buildAssistantText(params.summaryText, outputPaths),
+    inputPaths: params.inputPaths,
+    userTimestampMs: params.userTimestampMs,
+  });
 }

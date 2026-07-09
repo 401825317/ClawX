@@ -1363,7 +1363,7 @@ describe('chat target routing', () => {
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
   });
 
-  it('routes composite media plans through normal chat with an execution contract and runtime plan steps', async () => {
+  it('routes composite media plans through the local composite runner with runtime plan steps', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
     useChatStore.setState({
@@ -1388,12 +1388,32 @@ describe('chat target routing', () => {
       loading: false,
       thinkingLevel: null,
     });
-    hostApiFetchMock.mockImplementation(async (url: string) => {
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
       if (url.toString().startsWith('/api/sessions/transcript?')) {
         return { messages: [] };
       }
-      if (url === '/api/chat/send') {
-        return { success: true, result: { runId: 'run-text' } };
+      if (url === '/api/media/image-generation/chat-send') {
+        const body = init?.body ? JSON.parse(init.body) as { inputImages?: unknown[] } : {};
+        const edited = (body.inputImages?.length ?? 0) > 0;
+        return {
+          success: true,
+          job: {
+            id: edited ? 'job-edit-poster' : 'job-poster',
+            kind: 'image',
+            sessionKey: 'agent:main:main',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                path: edited ? '/tmp/edit-poster.png' : '/tmp/poster.png',
+                fileName: edited ? 'edit-poster.png' : 'poster.png',
+                mimeType: 'image/png',
+                size: 1024,
+                width: 1024,
+                height: 1024,
+              }],
+            },
+          },
+        };
       }
       if (url !== '/api/media/intent-plan') {
         return { success: true, result: {} };
@@ -1418,6 +1438,7 @@ describe('chat target routing', () => {
               kind: 'image_edit',
               title: '调整主视觉色调',
               prompt: '把刚生成的主视觉调整为蓝色调。',
+              dependsOn: ['poster'],
             },
           ],
         },
@@ -1427,31 +1448,26 @@ describe('chat target routing', () => {
     await useChatStore.getState().sendMessage('生成一张活动主视觉，再改成蓝色调');
 
     const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
-    expect(sendCall).toBeTruthy();
-    const payload = JSON.parse((sendCall?.[1] as { body: string }).body) as {
-      sessionKey: string;
-      message: string;
-    };
-    expect(payload.sessionKey).toBe('agent:main:main');
-    expect(payload.message).toContain('【UClaw composite execution contract】');
-    expect(payload.message).toContain('自动确定一个简洁主题/标题');
-    expect(payload.message).toContain('不要询问用户先做哪个');
-    expect(payload.message).toContain('每个子任务都必须产生自己的可交付产物');
-    expect(payload.message).toContain('可以使用本轮前序子任务刚生成的图片');
-    expect(payload.message).toContain('生成活动主视觉');
-    expect(payload.message).toContain('调整主视觉色调');
-    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/image-generation/chat-send')).toBe(false);
+    expect(sendCall).toBeFalsy();
+    const imageCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/image-generation/chat-send');
+    expect(imageCalls).toHaveLength(2);
+    for (const call of imageCalls) {
+      const payload = JSON.parse((call[1] as { body: string }).body) as { suppressConversationAppend?: boolean };
+      expect(payload.suppressConversationAppend).toBe(true);
+    }
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/video-generation/chat-send')).toBe(false);
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/local-artifacts/append-conversation')).toBe(true);
 
-    const run = useChatStore.getState().runtimeRuns['run-text'];
+    const run = Object.values(useChatStore.getState().runtimeRuns)[0];
     expect(run?.planSteps).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'uclaw.composite', kind: 'composite', status: 'running' }),
+      expect.objectContaining({ id: 'uclaw.composite', kind: 'composite', status: 'completed' }),
       expect.objectContaining({
         id: 'uclaw.composite.poster',
         kind: 'composite-task',
         parentId: 'uclaw.composite',
         title: '生成活动主视觉',
+        status: 'completed',
         requiresArtifact: true,
       }),
       expect.objectContaining({
@@ -1459,7 +1475,7 @@ describe('chat target routing', () => {
         kind: 'composite-task',
         parentId: 'uclaw.composite',
         title: '调整主视觉色调',
-        detail: expect.stringContaining('刚生成图片'),
+        status: 'completed',
         requiresArtifact: true,
       }),
     ]));
@@ -1606,6 +1622,24 @@ describe('chat target routing', () => {
       expect(payload.suppressConversationAppend).toBe(true);
     }
     expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/local-artifacts/create')).toHaveLength(4);
+    const appendConversationCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/local-artifacts/append-conversation');
+    expect(appendConversationCall).toBeTruthy();
+    const appendPayload = JSON.parse((appendConversationCall?.[1] as { body: string }).body) as {
+      prompt?: string;
+      summaryText?: string;
+      outputPaths?: string[];
+    };
+    expect(appendPayload.prompt).toBe(prompt);
+    expect(appendPayload.summaryText).toContain('统一产物清单');
+    expect(appendPayload.outputPaths).toEqual(expect.arrayContaining([
+      '/tmp/uclaw-image.png',
+      '/tmp/uclaw-presentation.pptx',
+      '/tmp/uclaw-spreadsheet.xlsx',
+      '/tmp/uclaw-video.mp4',
+      '/tmp/uclaw-edit.png',
+      '/tmp/uclaw-mini_program.html',
+      '/tmp/uclaw-copywriting.md',
+    ]));
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
 
     const run = Object.values(useChatStore.getState().runtimeRuns)[0];
