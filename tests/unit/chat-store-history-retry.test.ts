@@ -45,6 +45,19 @@ describe('useChatStore startup history retry', () => {
     const { resetChatHistoryMaxCharsCache, resolveChatHistoryMaxChars } = await import('@/stores/chat/history-rpc-params');
     resetChatHistoryMaxCharsCache();
     await resolveChatHistoryMaxChars();
+    const { useProviderStore } = await import('@/stores/providers');
+    useProviderStore.setState({
+      defaultAccountId: null,
+      accounts: [],
+    });
+    const { useManagedAuthStore } = await import('@/stores/managed-auth');
+    useManagedAuthStore.setState({
+      status: null,
+      loading: false,
+      verifying: false,
+      initialized: true,
+      error: null,
+    });
   });
 
   afterEach(() => {
@@ -1789,6 +1802,174 @@ describe('useChatStore startup history retry', () => {
     expect(useChatStore.getState().runError).toContain('context became too large');
     expect(useChatStore.getState().runError).not.toContain('API key');
     expect(useChatStore.getState().sending).toBe(false);
+  });
+
+  it('restores persisted composite history from the canonical manifest instead of inflating task count by artifact count', async () => {
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            {
+              id: 'user-composite',
+              role: 'user',
+              content: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+              timestamp: 1783600000,
+            },
+            {
+              id: 'composite-result:run-restore',
+              role: 'assistant',
+              localArtifactResultKind: 'composite',
+              content: [
+                '好，我给你做了一套随机示例包。',
+                '',
+                '已完成 7 项：',
+                '- 生成图片',
+                '- 制作 PPT',
+                '- 制作 Excel',
+                '- 生成视频',
+                '- 根据图片修图',
+                '- 制作小程序',
+                '- 撰写文案',
+                '',
+                '下面是统一产物清单；我也做了基础验证，已生成的本地文件和媒体都可以打开或预览。',
+              ].join('\n'),
+              _attachedFiles: [
+                { fileName: 'uclaw-image.png', mimeType: 'image/png', fileSize: 1024, preview: null, filePath: '/tmp/uclaw-image.png', source: 'tool-result' },
+                { fileName: 'uclaw-image-cover.png', mimeType: 'image/png', fileSize: 1024, preview: null, filePath: '/tmp/uclaw-image-cover.png', source: 'tool-result' },
+                { fileName: 'uclaw-presentation.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', fileSize: 2048, preview: null, filePath: '/tmp/uclaw-presentation.pptx', source: 'tool-result' },
+                { fileName: 'uclaw-presentation.pdf', mimeType: 'application/pdf', fileSize: 2048, preview: null, filePath: '/tmp/uclaw-presentation.pdf', source: 'tool-result' },
+                { fileName: 'uclaw-spreadsheet.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fileSize: 2048, preview: null, filePath: '/tmp/uclaw-spreadsheet.xlsx', source: 'tool-result' },
+                { fileName: 'uclaw-spreadsheet-preview.csv', mimeType: 'text/csv', fileSize: 512, preview: null, filePath: '/tmp/uclaw-spreadsheet-preview.csv', source: 'tool-result' },
+                { fileName: 'uclaw-video.mp4', mimeType: 'video/mp4', fileSize: 4096, preview: null, filePath: '/tmp/uclaw-video.mp4', source: 'tool-result' },
+                { fileName: 'uclaw-edit.png', mimeType: 'image/png', fileSize: 1024, preview: null, filePath: '/tmp/uclaw-edit.png', source: 'tool-result' },
+                { fileName: 'uclaw-edit-before.png', mimeType: 'image/png', fileSize: 1024, preview: null, filePath: '/tmp/uclaw-edit-before.png', source: 'tool-result' },
+                { fileName: 'uclaw-mini-program.html', mimeType: 'text/html', fileSize: 1024, preview: null, filePath: '/tmp/uclaw-mini-program.html', source: 'tool-result' },
+                { fileName: 'uclaw-mini-program-readme.md', mimeType: 'text/markdown', fileSize: 512, preview: null, filePath: '/tmp/uclaw-mini-program-readme.md', source: 'tool-result' },
+                { fileName: 'uclaw-copywriting.md', mimeType: 'text/markdown', fileSize: 512, preview: null, filePath: '/tmp/uclaw-copywriting.md', source: 'tool-result' },
+              ],
+              timestamp: 1783600100,
+            },
+          ],
+        };
+      }
+      return { messages: [] };
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      runtimeRuns: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const runs = Object.values(useChatStore.getState().runtimeRuns);
+    const run = runs.find((candidate) => candidate.objective?.includes('每个事儿'));
+    expect(run).toBeTruthy();
+    expect(run?.artifacts).toHaveLength(12);
+    expect(run?.planSteps?.find((step) => step.id === 'uclaw.composite')).toEqual(expect.objectContaining({
+      kind: 'composite',
+      status: 'completed',
+    }));
+    expect(run?.planSteps?.filter((step) => step.kind === 'composite-task')).toHaveLength(7);
+    expect(run?.planSteps?.filter((step) => step.kind === 'composite-task').map((step) => step.title)).toEqual([
+      '生成图片',
+      '制作 PPT',
+      '制作 Excel',
+      '生成视频',
+      '根据图片修图',
+      '制作小程序',
+      '撰写文案',
+    ]);
+    expect(run?.gateResult?.decision).toBe('deliverable');
+  });
+
+  it('drops superseded split artifact replies when the same turn already has a unified composite manifest', async () => {
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            {
+              id: 'user-composite-clean',
+              role: 'user',
+              content: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+              timestamp: 1783601000,
+            },
+            {
+              id: 'assistant-video-only',
+              role: 'assistant',
+              content: '视频已生成。\n\nMEDIA:/tmp/uclaw-video.mp4',
+              timestamp: 1783601030,
+            },
+            {
+              id: 'composite-result:run-clean',
+              role: 'assistant',
+              localArtifactResultKind: 'composite',
+              content: [
+                '好，我给你做了一套随机示例包。',
+                '',
+                '已完成 2 项：',
+                '- 生成视频',
+                '- 制作 PPT',
+                '',
+                '下面是统一产物清单；我也做了基础验证，已生成的本地文件和媒体都可以打开或预览。',
+              ].join('\n'),
+              _attachedFiles: [
+                { fileName: 'uclaw-video.mp4', mimeType: 'video/mp4', fileSize: 4096, preview: null, filePath: '/tmp/uclaw-video.mp4', source: 'tool-result' },
+                { fileName: 'uclaw-presentation.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', fileSize: 2048, preview: null, filePath: '/tmp/uclaw-presentation.pptx', source: 'tool-result' },
+              ],
+              timestamp: 1783601100,
+            },
+          ],
+        };
+      }
+      return { messages: [] };
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      runtimeRuns: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    expect(useChatStore.getState().messages.map((message) => message.id)).toEqual([
+      'user-composite-clean',
+      'composite-result:run-clean',
+    ]);
   });
 
   it('does not treat prior-turn assistant history as progress for a new send', async () => {

@@ -145,13 +145,25 @@ export async function handleMediaRoutes(
       const body = await parseJsonBody<{
         sessionKey?: string;
         prompt?: string;
+        runId?: string;
         summaryText?: string;
+        files?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          fileSize?: number;
+          width?: number;
+          height?: number;
+          filePath?: string;
+          gatewayUrl?: string;
+          source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
+        }>;
         outputPaths?: string[];
         inputPaths?: string[];
         userMessageTimestampMs?: number;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
+      const runId = body.runId?.trim() || '';
       const summaryText = body.summaryText?.trim() || '';
       if (!sessionKey) {
         sendJson(res, 400, { success: false, error: 'sessionKey is required' });
@@ -172,6 +184,8 @@ export async function handleMediaRoutes(
         sessionKey,
         prompt,
         summaryText,
+        ...(runId ? { runId } : {}),
+        files: Array.isArray(body.files) ? body.files : undefined,
         outputPaths: Array.isArray(body.outputPaths) ? body.outputPaths : undefined,
         inputPaths: Array.isArray(body.inputPaths) ? body.inputPaths : undefined,
         ...(userMessageTimestampMs !== undefined ? { userTimestampMs: userMessageTimestampMs } : {}),

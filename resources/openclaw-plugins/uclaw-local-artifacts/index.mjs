@@ -27,6 +27,7 @@ const MIME = {
   txt: 'text/plain',
   html: 'text/html',
 };
+const BASE_HTML_APP_CSS = '[hidden]{display:none!important}';
 
 function xml(value) {
   return String(value ?? '')
@@ -159,6 +160,23 @@ function artifactResult(filePath, mimeType, kind, title, openAfterCreate = false
       text: JSON.stringify(payload),
     }],
     details: payload,
+  };
+}
+
+function toolErrorResult(message, details = {}) {
+  const payload = {
+    ok: false,
+    status: 'error',
+    error: message,
+    ...details,
+  };
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify(payload),
+    }],
+    details: payload,
+    isError: true,
   };
 }
 
@@ -608,11 +626,13 @@ function defaultHtmlApp(params) {
 
 function renderHtmlApp(params) {
   const rawHtml = typeof params?.html === 'string' ? params.html.trim() : '';
-  if (/<!doctype html|<html[\s>]/iu.test(rawHtml)) {
+  const rawIsFullDocument = /<!doctype html|<html[\s>]/iu.test(rawHtml);
+  const hasStructuredParts = Boolean(cleanText(params?.body) || cleanText(params?.css) || cleanText(params?.js));
+  if (rawIsFullDocument && (!hasStructuredParts || validateHtmlAppContent(rawHtml).ok)) {
     return rawHtml.endsWith('\n') ? rawHtml : `${rawHtml}\n`;
   }
   const title = cleanText(params?.title) || 'UClaw 小程序';
-  const body = rawHtml || cleanText(params?.body) || '<main id="app"></main>';
+  const body = (rawIsFullDocument ? '' : rawHtml) || cleanText(params?.body) || '<main id="app"></main>';
   const css = typeof params?.css === 'string' ? params.css : '';
   const js = typeof params?.js === 'string' ? params.js : '';
   if (!rawHtml && !css && !js) return defaultHtmlApp(params);
@@ -622,7 +642,8 @@ function renderHtmlApp(params) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${xml(title)}</title>
-  <style>${css}</style>
+  <style>${BASE_HTML_APP_CSS}
+${css}</style>
 </head>
 <body>
 ${body}
@@ -630,6 +651,44 @@ ${body}
 </body>
 </html>
 `;
+}
+
+function htmlBodyInner(html) {
+  return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/iu)?.[1] ?? '';
+}
+
+function stripHtmlForText(html) {
+  return cleanText(String(html ?? '')
+    .replace(/<script\b[\s\S]*?<\/script>/giu, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/giu, ' ')
+    .replace(/<[^>]+>/gu, ' '));
+}
+
+function validateHtmlAppContent(html) {
+  const source = String(html ?? '');
+  const body = htmlBodyInner(source);
+  const visibleBodyText = stripHtmlForText(body || source);
+  const hasDocument = /<!doctype html|<html[\s>]/iu.test(source);
+  const hasBody = /<body\b[\s\S]*<\/body>/iu.test(source);
+  const hasScript = /<script\b[^>]*>[\s\S]{20,}<\/script>/iu.test(source);
+  const hasInteractiveMarkup = /<(?:form|input|button|select|textarea|canvas|svg|ul|ol|main|section|article)\b/iu.test(body);
+  const hasMountPoint = /<[^>]+\b(?:id|class)=["'][^"']{2,}["'][^>]*>/iu.test(body);
+  const hasVisibleOrInteractiveBody = visibleBodyText.length >= 8 || hasInteractiveMarkup || (hasMountPoint && hasScript);
+  const size = Buffer.byteLength(source, 'utf8');
+  if (!hasDocument) {
+    return { ok: false, reason: 'HTML 产物缺少完整文档结构。', evidence: `sizeBytes=${size}; hasDocument=false` };
+  }
+  if (!hasBody || !hasVisibleOrInteractiveBody) {
+    return {
+      ok: false,
+      reason: 'HTML 产物 body 为空或缺少可交互内容。',
+      evidence: `sizeBytes=${size}; hasBody=${hasBody}; visibleChars=${visibleBodyText.length}; hasInteractiveMarkup=${hasInteractiveMarkup}; hasScript=${hasScript}`,
+    };
+  }
+  if (size < 400) {
+    return { ok: false, reason: 'HTML 产物内容过短，疑似空壳页面。', evidence: `sizeBytes=${size}` };
+  }
+  return { ok: true, evidence: `sizeBytes=${size}; visibleChars=${visibleBodyText.length}; hasScript=${hasScript}` };
 }
 
 const slideSchema = Type.Object({
@@ -751,7 +810,23 @@ function createTools() {
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const safeParams = normalizeBrandValue(params);
         const filePath = await uniqueOutputPath(ctx, safeParams, 'html', 'UClaw_HTML_App');
-        await writeFile(filePath, renderHtmlApp(safeParams), 'utf8');
+        const html = renderHtmlApp(safeParams);
+        const validation = validateHtmlAppContent(html);
+        if (!validation.ok) {
+          return toolErrorResult(validation.reason, {
+            kind: 'webpage',
+            title: cleanText(safeParams?.title),
+            verification: {
+              status: 'blocked',
+              kind: 'artifact.content',
+              required: true,
+              severity: 'blocking',
+              detail: validation.reason,
+              evidence: validation.evidence,
+            },
+          });
+        }
+        await writeFile(filePath, html, 'utf8');
         return artifactResult(filePath, MIME.html, 'webpage', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
       },
     },
@@ -778,5 +853,6 @@ export const __test = {
   createXlsxBuffer,
   renderTextContent,
   renderHtmlApp,
+  validateHtmlAppContent,
   uniqueOutputPath,
 };

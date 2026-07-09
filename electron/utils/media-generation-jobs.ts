@@ -8,6 +8,7 @@ import { logger } from './logger';
 import type {
   MediaGenerationKind,
   MediaGenerationJobPayload,
+  MediaGenerationJobOutput,
   MediaGenerationProgressEvent,
   MediaGenerationJobSnapshot,
   MediaGenerationWorkerRequest,
@@ -656,11 +657,50 @@ function getOutputLocations(result: unknown): string[] {
     .filter(Boolean);
 }
 
+function getOutputFiles(result: unknown): Array<{
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  width?: number;
+  height?: number;
+  filePath?: string;
+  gatewayUrl?: string;
+  source?: 'tool-result';
+}> {
+  const outputs = typeof result === 'object' && result !== null && Array.isArray((result as { outputs?: unknown }).outputs)
+    ? (result as { outputs: unknown[] }).outputs
+    : [];
+  return outputs.flatMap((output) => {
+    if (!output || typeof output !== 'object') return [];
+    const record = output as MediaGenerationJobOutput;
+    const filePath = typeof record.path === 'string' && record.path.trim() ? record.path.trim() : undefined;
+    const gatewayUrl = typeof record.url === 'string' && record.url.trim() ? record.url.trim() : undefined;
+    if (!filePath && !gatewayUrl) return [];
+    return [{
+      ...(typeof record.fileName === 'string' && record.fileName.trim() ? { fileName: record.fileName.trim() } : {}),
+      ...(typeof record.mimeType === 'string' && record.mimeType.trim() ? { mimeType: record.mimeType.trim() } : {}),
+      ...(typeof record.size === 'number' && Number.isFinite(record.size) && record.size > 0
+        ? { fileSize: Math.floor(record.size) }
+        : {}),
+      ...(typeof record.width === 'number' && Number.isFinite(record.width) && record.width > 0
+        ? { width: Math.floor(record.width) }
+        : {}),
+      ...(typeof record.height === 'number' && Number.isFinite(record.height) && record.height > 0
+        ? { height: Math.floor(record.height) }
+        : {}),
+      ...(filePath ? { filePath } : {}),
+      ...(gatewayUrl ? { gatewayUrl } : {}),
+      source: 'tool-result' as const,
+    }];
+  });
+}
+
 async function appendCompletedConversation(job: InternalMediaGenerationJob): Promise<void> {
   const outputPaths = getOutputLocations(job.result);
   if (outputPaths.length === 0) {
     throw new Error('Media generation completed without output paths');
   }
+  const outputFiles = getOutputFiles(job.result);
 
   if (job.payload.suppressConversationAppend === true) {
     return;
@@ -673,9 +713,12 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
       sessionKey: job.payload.sessionKey,
       prompt: job.payload.originalPrompt || job.payload.prompt,
       outputPaths,
+      outputFiles,
       inputPaths: userInputPaths,
       summaryText: inputPaths.length > 0 ? '图片已修改。' : '图片已生成。',
       userTimestampMs: job.payload.userMessageTimestampMs,
+      assistantMessageId: `media-result:${job.id}`,
+      assistantResultKind: 'image',
     });
     return;
   }
@@ -684,11 +727,14 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
     sessionKey: job.payload.sessionKey,
     prompt: job.payload.originalPrompt || job.payload.prompt,
     outputPaths,
+    outputFiles,
     inputPaths: userInputPaths,
     summaryText: job.payload.route?.mode === 'edit_image_then_video'
       ? '已先修改参考图并生成视频。'
       : (inputPaths.length > 0 ? '已基于参考图生成视频。' : '视频已生成。'),
     userTimestampMs: job.payload.userMessageTimestampMs,
+    assistantMessageId: `media-result:${job.id}`,
+    assistantResultKind: 'video',
   });
 }
 

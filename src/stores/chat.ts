@@ -12,7 +12,7 @@ import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
-import type { ChatRuntimeArtifact, ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import type { ChatRuntimeArtifact, ChatRuntimeEvent, ChatRuntimePlanStep } from '../../shared/chat-runtime-events';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -64,11 +64,12 @@ import {
   buildRuntimeCompletionGateEvents,
   buildRuntimeStartContractEvents,
 } from './chat/runtime-contract';
-import { enrichWithToolCallAttachments, shouldDropMessageFromHistory } from './chat/helpers';
 import {
-  isGeneratingStatusNarration,
-  isInternalAssistantReplyText,
-  isOpenClawRuntimeEventPrompt,
+  enrichWithToolCallAttachments,
+  isInternalMessage as isHistoryInternalMessage,
+  shouldDropMessageFromHistory,
+} from './chat/helpers';
+import {
   stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 
@@ -707,6 +708,193 @@ function inferHistoricalRunMode(artifactFiles: AttachedFileMeta[]): ChatSendMode
   return 'chat';
 }
 
+function looksLikeCompositeArtifactHistory(objective: string, artifactFiles: AttachedFileMeta[]): boolean {
+  if (artifactFiles.length <= 1) return false;
+  return artifactFiles.length >= 3
+    || /(?:每个|各(?:来|做|生成)|生图|修图|图片|视频|ppt|powerpoint|excel|表格|小程序|文案|以及|并且|同时|顺便|然后|另外|还有|和|与|\band\b|\bthen\b|\balso\b)/i.test(objective);
+}
+
+type HistoricalCompositeTaskSummary = {
+  title: string;
+  status: 'completed' | 'blocked';
+  detail?: string;
+};
+
+function isCompositeResultHistoryMessage(message: RawMessage): boolean {
+  if (message.role !== 'assistant') return false;
+  if (message.localArtifactResultKind === 'composite') return true;
+  if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
+  const text = getMessageText(message.content);
+  return (message._attachedFiles?.length ?? 0) > 0
+    && /随机示例包/.test(text)
+    && /(?:统一)?产物清单/.test(text);
+}
+
+function extractMessageArtifactFiles(message: RawMessage): AttachedFileMeta[] {
+  const files: AttachedFileMeta[] = [...(message._attachedFiles ?? [])];
+  const text = getMessageText(message.content);
+  if (!text) return dedupeAttachedFiles(files);
+
+  const mediaRefs = extractMediaRefs(text);
+  const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
+  for (const ref of mediaRefs) {
+    files.push({ ...makeAttachedFile(ref), source: 'message-ref' });
+  }
+  for (const ref of extractRawFilePaths(text)) {
+    if (mediaRefPaths.has(ref.filePath)) continue;
+    files.push({ ...makeAttachedFile(ref), source: 'message-ref' });
+  }
+  return dedupeAttachedFiles(files);
+}
+
+function parseHistoricalCompositeTasks(message: RawMessage): HistoricalCompositeTaskSummary[] {
+  if (!isCompositeResultHistoryMessage(message)) return [];
+
+  const lines = getMessageText(message.content)
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tasks: HistoricalCompositeTaskSummary[] = [];
+  let section: 'completed' | 'blocked' | null = null;
+
+  for (const line of lines) {
+    if (/^已完成\s+\d+\s+项[:：]?$/u.test(line)) {
+      section = 'completed';
+      continue;
+    }
+    if (/^需要补充处理[:：]?$/u.test(line)) {
+      section = 'blocked';
+      continue;
+    }
+    if (!line.startsWith('-')) {
+      if (/^(?:下面是|我也做了基础验证)/u.test(line)) {
+        section = null;
+      }
+      continue;
+    }
+    if (!section) continue;
+
+    const body = line.replace(/^-\s*/u, '').trim();
+    if (!body) continue;
+    if (section === 'completed') {
+      tasks.push({ title: body, status: 'completed' });
+      continue;
+    }
+
+    const [title, detail] = body.split(/[:：]/u, 2);
+    tasks.push({
+      title: title.trim(),
+      status: 'blocked',
+      detail: detail?.trim() || '需要补充处理。',
+    });
+  }
+
+  return tasks;
+}
+
+function historicalCompositeTaskTitle(file: AttachedFileMeta, index: number): string {
+  const mimeType = file.mimeType || '';
+  const fileName = file.fileName || file.filePath?.split(/[\\/]/).pop() || '';
+  const lowerName = fileName.toLowerCase();
+  if (mimeType.startsWith('image/')) return '图片产物';
+  if (mimeType.startsWith('video/')) return '视频产物';
+  if (mimeType.includes('presentation') || /\.pptx?$/i.test(lowerName)) return 'PPT 产物';
+  if (mimeType.includes('spreadsheet') || /\.xlsx?$/i.test(lowerName)) return 'Excel 产物';
+  if (mimeType.includes('html') || /\.html?$/i.test(lowerName)) return '小程序/网页产物';
+  if (mimeType.includes('markdown') || mimeType.startsWith('text/') || /\.md$/i.test(lowerName)) return '文案产物';
+  return `产物 ${index + 1}`;
+}
+
+function buildHistoricalCompositePlanEvent(params: {
+  runId: string;
+  sessionKey: string;
+  objective: string;
+  artifactFiles: AttachedFileMeta[];
+  taskSummaries?: HistoricalCompositeTaskSummary[];
+  ts: number;
+}): ChatRuntimeEvent {
+  const taskSummaries = params.taskSummaries && params.taskSummaries.length > 0
+    ? params.taskSummaries
+    : params.artifactFiles.map((file, index): HistoricalCompositeTaskSummary => ({
+      title: historicalCompositeTaskTitle(file, index),
+      status: 'completed',
+    }));
+  const steps: ChatRuntimePlanStep[] = [
+    {
+      id: 'uclaw.composite',
+      title: '执行组合任务',
+      status: 'completed',
+      detail: `${taskSummaries.length} 个历史子任务已从统一产物清单恢复。`,
+      kind: 'composite',
+      order: 1,
+    },
+    ...taskSummaries.map((task, index): ChatRuntimePlanStep => ({
+      id: `uclaw.composite.history.${sanitizeCompositeTaskId(task.title, index)}`,
+      title: task.title,
+      status: task.status,
+      detail: task.detail || '已从历史统一交付结果恢复。',
+      kind: 'composite-task',
+      order: 2 + index,
+      parentId: 'uclaw.composite',
+      requiresArtifact: false,
+    })),
+  ];
+  return {
+    contractVersion: 1,
+    producer: 'history',
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    ts: params.ts,
+    type: 'run.plan.updated',
+    objective: params.objective,
+    summary: '从历史产物恢复组合任务摘要。',
+    steps,
+  };
+}
+
+function collapseSupersededCompositeHistoryReplies(messages: RawMessage[]): RawMessage[] {
+  const result: RawMessage[] = [];
+  let segmentStart = 0;
+
+  const pushCollapsedSegment = (segment: RawMessage[]) => {
+    if (segment.length === 0) return;
+    const compositeIndex = (() => {
+      for (let index = segment.length - 1; index >= 0; index -= 1) {
+        if (isCompositeResultHistoryMessage(segment[index]!)) return index;
+      }
+      return -1;
+    })();
+    if (compositeIndex < 0) {
+      result.push(...segment);
+      return;
+    }
+
+    const canonicalArtifacts = extractMessageArtifactFiles(segment[compositeIndex]!);
+    const canonicalKeys = new Set(canonicalArtifacts.map(attachedFileKey));
+    if (canonicalKeys.size === 0) {
+      result.push(...segment);
+      return;
+    }
+
+    result.push(...segment.filter((message, index) => {
+      if (index >= compositeIndex) return true;
+      if (message.role !== 'assistant') return true;
+      const artifacts = extractMessageArtifactFiles(message);
+      if (artifacts.length === 0) return true;
+      return !artifacts.every((artifact) => canonicalKeys.has(attachedFileKey(artifact)));
+    }));
+  };
+
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index > segmentStart && isRealUserBoundaryMessage(messages[index]!)) {
+      pushCollapsedSegment(messages.slice(segmentStart, index));
+      segmentStart = index;
+    }
+  }
+  pushCollapsedSegment(messages.slice(segmentStart));
+  return result;
+}
+
 function applyHistoricalRuntimeRunsFromMessages(
   runtimeRuns: ChatState['runtimeRuns'],
   sessionKey: string,
@@ -721,10 +909,14 @@ function applyHistoricalRuntimeRunsFromMessages(
     ));
     const segmentEnd = nextUserIndex === -1 ? messages.length : nextUserIndex;
     const segment = messages.slice(index + 1, segmentEnd);
-    const artifactFiles = segment
-      .filter((message) => message.role === 'assistant' && (message._attachedFiles?.length ?? 0) > 0)
-      .flatMap((message) => message._attachedFiles ?? []);
+    const compositeResultMessage = [...segment].reverse().find((message) => isCompositeResultHistoryMessage(message)) ?? null;
+    const artifactFiles = compositeResultMessage
+      ? extractMessageArtifactFiles(compositeResultMessage)
+      : segment
+        .filter((message) => message.role === 'assistant')
+        .flatMap((message) => extractMessageArtifactFiles(message));
     if (artifactFiles.length === 0) continue;
+    const uniqueArtifactFiles = dedupeAttachedFiles(artifactFiles);
 
     const runId = buildHistoricalRunIds(sessionKey, trigger, index)
       .find((candidateRunId) => nextRuns[candidateRunId])
@@ -734,7 +926,12 @@ function applyHistoricalRuntimeRunsFromMessages(
 
     const objective = getMessageText(trigger.content).trim();
     const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
-    const mode = inferHistoricalRunMode(artifactFiles);
+    const historicalCompositeTasks = compositeResultMessage
+      ? parseHistoricalCompositeTasks(compositeResultMessage)
+      : [];
+    const restoreCompositePlan = historicalCompositeTasks.length > 0
+      || looksLikeCompositeArtifactHistory(objective, uniqueArtifactFiles);
+    const mode = restoreCompositePlan ? 'chat' : inferHistoricalRunMode(uniqueArtifactFiles);
     const startEvents = buildRuntimeStartContractEvents(existing, {
       runId,
       sessionKey,
@@ -748,10 +945,39 @@ function applyHistoricalRuntimeRunsFromMessages(
       ts,
       producer: 'history',
       verificationDetail: '从历史消息产物卡片恢复的产物。',
-    }, artifactFiles);
+    }, uniqueArtifactFiles);
+    const restoredArtifacts = artifactEvents
+      .filter((event): event is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
+        event.type === 'artifact.produced')
+      .map((event) => event.artifact);
+    const historicalAvailabilityEvents = restoredArtifacts.map((artifact) => buildRuntimeArtifactVerificationEvent({
+      runId,
+      sessionKey,
+      ts,
+      producer: 'history',
+    }, {
+      artifact,
+      status: 'passed',
+      kind: 'artifact.availability',
+      required: true,
+      severity: 'info',
+      detail: '从历史消息恢复的产物引用已进入交付清单。',
+      evidence: artifact.filePath ?? artifact.url,
+    }));
     nextRuns = applyRuntimeContractEvents(nextRuns, [
       ...startEvents,
+      ...(restoreCompositePlan
+        ? [buildHistoricalCompositePlanEvent({
+          runId,
+          sessionKey,
+          objective,
+          artifactFiles: uniqueArtifactFiles,
+          taskSummaries: historicalCompositeTasks,
+          ts,
+        })]
+        : []),
       ...artifactEvents,
+      ...historicalAvailabilityEvents,
       {
         contractVersion: 1,
         producer: 'history',
@@ -888,6 +1114,18 @@ type PendingRuntimeIntent = {
 };
 const _pendingRuntimeIntentBySession = new Map<string, PendingRuntimeIntent>();
 const _runtimeArtifactVerificationInFlight = new Set<string>();
+type QueuedChatSend = {
+  text: string;
+  attachments?: ChatSendAttachment[];
+  targetAgentId?: string | null;
+  mode: ChatSendMode;
+  imageOptions?: ChatImageSendOptions;
+  videoOptions?: ChatVideoSendOptions;
+  enqueuedAt: number;
+};
+const MAX_QUEUED_SENDS_PER_SESSION = 20;
+const _queuedChatSendsBySession = new Map<string, QueuedChatSend[]>();
+const _queuedChatSendFlushScheduled = new Set<string>();
 
 type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 type MediaGenerationProgressEvent = {
@@ -933,12 +1171,36 @@ type LocalArtifactCreateResponse = {
     fileSize: number;
     mimeType: string;
     media: string;
+    planning?: {
+      mode?: string;
+      prompt?: string;
+      summary?: string;
+    };
+    verification?: {
+      status?: 'passed' | 'failed' | 'blocked' | 'skipped';
+      kind?: string;
+      required?: boolean;
+      severity?: 'info' | 'warning' | 'blocking';
+      detail?: string;
+      evidence?: string;
+    };
   };
 };
 
 type LocalArtifactAppendConversationResponse = {
   success: boolean;
   error?: string;
+};
+
+type LocalArtifactConversationFile = {
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  width?: number;
+  height?: number;
+  filePath?: string;
+  gatewayUrl?: string;
+  source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
 };
 
 type CompositeTaskRunStatus = 'completed' | 'failed' | 'blocked';
@@ -1169,8 +1431,14 @@ function buildMediaMetadataVerificationEvents(params: {
     if (!output) return [];
     const width = readPositiveNumber(output.width);
     const height = readPositiveNumber(output.height);
+    const rawDurationSeconds = typeof output.durationSeconds === 'number' && Number.isFinite(output.durationSeconds)
+      ? output.durationSeconds
+      : undefined;
     const durationSeconds = readPositiveNumber(output.durationSeconds);
     const metadata = mediaOutputRecord(output.metadata);
+    const hasInvalidVideoDuration = params.kind === 'video'
+      && rawDurationSeconds !== undefined
+      && rawDurationSeconds <= 0;
     const hasExpectedMetadata = params.kind === 'image'
       ? Boolean(width || height || metadata)
       : Boolean(width || height || durationSeconds || metadata);
@@ -1179,6 +1447,9 @@ function buildMediaMetadataVerificationEvents(params: {
       durationSeconds ? `${durationSeconds}s` : undefined,
       metadata ? 'metadata present' : undefined,
     ].filter(Boolean).join('; ');
+    const status = hasInvalidVideoDuration
+      ? 'blocked'
+      : (hasExpectedMetadata ? 'passed' : 'skipped');
     return [{
       contractVersion: 1,
       producer: 'media',
@@ -1189,12 +1460,14 @@ function buildMediaMetadataVerificationEvents(params: {
       toolCallId: params.job?.id,
       verification: {
         id: `verification:${artifact.id}:media.metadata`,
-        status: hasExpectedMetadata ? 'passed' : 'skipped',
+        status,
         kind: 'media.metadata',
-        required: false,
-        severity: hasExpectedMetadata ? 'info' : 'warning',
+        required: hasInvalidVideoDuration ? true : false,
+        severity: hasInvalidVideoDuration ? 'blocking' : (hasExpectedMetadata ? 'info' : 'warning'),
         title: params.kind === 'image' ? '图片元数据' : '视频元数据',
-        detail: details || '生成结果未返回可展示的媒体元数据。',
+        detail: hasInvalidVideoDuration
+          ? '视频生成结果返回的时长为 0 秒，暂不满足可播放交付条件。'
+          : (details || '生成结果未返回可展示的媒体元数据。'),
         artifactId: artifact.id,
         targetId: artifact.id,
         evidence: JSON.stringify({
@@ -1444,51 +1717,56 @@ function firstProducedImageFile(results: CompositeTaskRunResult[]): AttachedFile
     .find((file) => file.filePath && file.mimeType.startsWith('image/'));
 }
 
+function latestProducedImageFile(
+  results: CompositeTaskRunResult[],
+  dependencyIds?: Set<string>,
+): AttachedFileMeta | undefined {
+  for (let resultIndex = results.length - 1; resultIndex >= 0; resultIndex -= 1) {
+    const result = results[resultIndex];
+    if (!result || (dependencyIds && !dependencyIds.has(result.task.id))) continue;
+    for (let fileIndex = result.files.length - 1; fileIndex >= 0; fileIndex -= 1) {
+      const file = result.files[fileIndex];
+      if (file.filePath && file.mimeType.startsWith('image/')) return file;
+    }
+  }
+  return undefined;
+}
+
+function compositeVideoRequiresImageInput(
+  task: MediaIntentCompositeTask,
+  dependencyTasks: MediaIntentCompositeTask[],
+): boolean {
+  if ((task.sourceImages ?? []).some((image) => image.filePath?.trim())) return true;
+  if (dependencyTasks.some((dependency) => dependency.kind === 'image_edit')) return true;
+  return /(?:图生视频|基于.{0,24}(?:图|图片|照片)|用.{0,24}(?:图|图片|照片)|这张|这幅|这个图|刚生成|刚才生成|改后|编辑后|修图后|动起来|动画|animate|image[- ]?to[- ]?video)/i.test(task.prompt);
+}
+
 function localArtifactRequestForCompositeTask(task: MediaIntentCompositeTask): Record<string, unknown> {
   if (task.kind === 'presentation') {
     return {
       kind: 'presentation',
-      title: 'AI 工作流效率提升',
-      slides: [
-        { title: 'AI 工作流效率提升', subtitle: '未来城市里的个人效率工作台' },
-        { title: '目标', bullets: ['把重复任务交给自动化', '让图片、表格、文案和应用快速成稿'] },
-        { title: '组合任务执行', bullets: ['拆成可追踪子任务', '每项产出独立文件或媒体', '交付前做基础验证'] },
-        { title: '体验收益', bullets: ['减少反问', '缩短等待感', '交付物清单更清楚'] },
-        { title: '下一步', bullets: ['接入团队素材', '沉淀默认模板', '按真实反馈持续优化'] },
-      ],
+      title: task.title || 'PPT',
+      sourcePrompt: task.prompt,
     };
   }
   if (task.kind === 'spreadsheet') {
     return {
       kind: 'spreadsheet',
-      title: '月度预算表',
-      sheets: [{
-        name: '月度预算',
-        headers: ['分类', '预算', '实际', '差额'],
-        rows: [
-          ['房租', 4200, 4200, { formula: 'B2-C2', value: 0 }],
-          ['餐饮', 2200, 1980, { formula: 'B3-C3', value: 220 }],
-          ['交通', 600, 520, { formula: 'B4-C4', value: 80 }],
-          ['学习', 800, 640, { formula: 'B5-C5', value: 160 }],
-          ['合计', { formula: 'SUM(B2:B5)', value: 7800 }, { formula: 'SUM(C2:C5)', value: 7340 }, { formula: 'SUM(D2:D5)', value: 460 }],
-        ],
-      }],
+      title: task.title || 'Excel',
+      sourcePrompt: task.prompt,
     };
   }
   if (task.kind === 'mini_program') {
     return {
       kind: 'mini_program',
-      title: '灵感收集 Todo 小工具',
+      title: task.title || '小程序',
+      sourcePrompt: task.prompt,
     };
   }
   return {
     kind: 'copywriting',
-    title: '未来效率工作台宣传文案',
-    content: '未来城市里的个人效率工作台，把创意、数据和执行串成一条清晰工作流。它能自动拆解任务、生成多种产物，并在交付前完成基础验证，让灵感更快变成可以分享和使用的结果。',
-    sections: [
-      { title: '卖点', bullets: ['多类型产物一次交付', '默认参数自动选择', '完成前基础验证'] },
-      { title: '适用场景', bullets: ['方案初稿', '营销素材包', '团队效率演示'] },
-    ],
+    title: task.title || '文案',
+    sourcePrompt: task.prompt,
   };
 }
 
@@ -1534,7 +1812,28 @@ function compositeOutputPathsFromFiles(files: AttachedFileMeta[]): string[] {
   return paths;
 }
 
+function serializeConversationFiles(files: AttachedFileMeta[]): LocalArtifactConversationFile[] {
+  const serialized: LocalArtifactConversationFile[] = [];
+  for (const file of files) {
+    const filePath = file.filePath?.trim();
+    const gatewayUrl = file.gatewayUrl?.trim();
+    if (!filePath && !gatewayUrl) continue;
+    serialized.push({
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      fileSize: file.fileSize,
+      width: file.width,
+      height: file.height,
+      ...(filePath ? { filePath } : {}),
+      ...(gatewayUrl ? { gatewayUrl } : {}),
+      source: file.source ?? 'tool-result',
+    });
+  }
+  return serialized;
+}
+
 async function persistCompositeConversation(params: {
+  runId: string;
   sessionKey: string;
   prompt: string;
   summaryText: string;
@@ -1546,9 +1845,11 @@ async function persistCompositeConversation(params: {
     {
       method: 'POST',
       body: JSON.stringify({
+        runId: params.runId,
         sessionKey: params.sessionKey,
         prompt: params.prompt,
         summaryText: params.summaryText,
+        files: serializeConversationFiles(params.files),
         outputPaths: compositeOutputPathsFromFiles(params.files),
         userMessageTimestampMs: params.userMessageTimestampMs,
       }),
@@ -1605,8 +1906,29 @@ async function createCompositeLocalArtifact(params: {
     detail: '本地产物文件已创建并返回文件大小。',
     evidence: `filePath=${file.filePath}; sizeBytes=${file.fileSize}`,
   }));
+  const contentVerificationEvents = artifacts.flatMap((artifact) => {
+    const verification = response.artifact?.verification;
+    if (!verification) return [];
+    return [buildRuntimeArtifactVerificationEvent({
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts,
+      producer: 'renderer',
+    }, {
+      artifact,
+      status: verification.status ?? 'blocked',
+      kind: verification.kind || 'artifact.content',
+      required: verification.required ?? true,
+      severity: verification.severity ?? (verification.status === 'passed' ? 'info' : 'blocking'),
+      detail: verification.detail,
+      evidence: [
+        response.artifact?.planning?.summary,
+        verification.evidence,
+      ].filter((item): item is string => Boolean(item)).join('\n'),
+    })];
+  });
   useChatStore.setState((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, [...artifactEvents, ...availabilityEvents]),
+    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, [...artifactEvents, ...availabilityEvents, ...contentVerificationEvents]),
   }));
   return [file];
 }
@@ -1642,6 +1964,7 @@ async function runCompositeLocalTasks(params: {
 
   const results: Array<CompositeTaskRunResult | undefined> = [];
   const allFiles: AttachedFileMeta[] = [];
+  const taskById = new Map(params.tasks.map((task) => [task.id, task]));
   const orderedResults = (): CompositeTaskRunResult[] =>
     results.filter((result): result is CompositeTaskRunResult => Boolean(result));
   const emit = (events: ChatRuntimeEvent[]) => {
@@ -1714,7 +2037,30 @@ async function runCompositeLocalTasks(params: {
         });
         files = attachedFilesFromMediaGenerationJob(completedJob, 'image');
       } else if (task.kind === 'video_generate') {
-        const effectiveVideoOptions = resolveChatVideoOptions(task.prompt, { action: 'video_generate', source: 'fallback', prompt: task.prompt }, false, params.videoOptions);
+        const explicitSourceFiles = attachedFilesFromCompositeTaskImages(task);
+        const dependencies = (task.dependsOn ?? [])
+          .map((dependencyId) => taskById.get(dependencyId))
+          .filter((dependency): dependency is MediaIntentCompositeTask => Boolean(dependency));
+        const dependencyIds = new Set(dependencies.map((dependency) => dependency.id));
+        const dependencySourceFile = dependencyIds.size > 0
+          ? latestProducedImageFile(orderedResults(), dependencyIds)
+          : undefined;
+        const fallbackSourceFile = latestProducedImageFile(orderedResults());
+        const inputImages = compositeInputImagesFromFiles(
+          explicitSourceFiles.length > 0
+            ? explicitSourceFiles
+            : (dependencySourceFile ? [dependencySourceFile] : (dependencyIds.size === 0 && fallbackSourceFile ? [fallbackSourceFile] : [])),
+        );
+        if (inputImages.length === 0 && compositeVideoRequiresImageInput(task, dependencies)) {
+          throw new Error('缺少可用于图生视频的图片输入。');
+        }
+        const videoMode = inputImages.length > 0 ? 'image_to_video' : 'text_to_video';
+        const effectiveVideoOptions = resolveChatVideoOptions(
+          task.prompt,
+          { action: 'video_generate', source: 'fallback', prompt: task.prompt, videoMode },
+          inputImages.length > 0,
+          params.videoOptions,
+        );
         const response = await hostApiFetch<MediaGenerationSendResponse>(
           '/api/media/video-generation/chat-send',
           {
@@ -1726,13 +2072,16 @@ async function runCompositeLocalTasks(params: {
               model: effectiveVideoOptions.model,
               size: effectiveVideoOptions.size,
               durationSeconds: effectiveVideoOptions.durationSeconds,
+              inputImages,
               userMessageTimestampMs: params.nowMs,
               route: {
-                mode: 'text_to_video',
+                mode: videoMode,
                 source: 'router',
                 confidence: 1,
-                selectedImageSource: 'none',
+                selectedImageSource: task.selectedImageSource ?? 'none',
+                selectedImageIndex: task.selectedImageIndex,
                 videoPrompt: task.prompt,
+                sourceImages: inputImages,
               },
               suppressConversationAppend: true,
             }),
@@ -1836,6 +2185,7 @@ async function runCompositeLocalTasks(params: {
   let persistedConversation = false;
   try {
     await persistCompositeConversation({
+      runId,
       sessionKey: params.sessionKey,
       prompt: params.prompt,
       summaryText: finalContent,
@@ -2181,7 +2531,7 @@ async function loadLocalHistoryFallback(
 ): Promise<RawMessage[]> {
   const fallbackPromise = isCronSessionKey(sessionKey)
     ? loadCronFallbackMessages(sessionKey, limit)
-    : loadSessionTranscriptFallback(sessionKey, limit, { includeFamily: true });
+    : loadSessionTranscriptFallback(sessionKey, limit);
   const timeoutMs = options.timeoutMs ?? CHAT_HISTORY_DISK_FALLBACK_TIMEOUT_MS;
   if (timeoutMs <= 0) {
     return [];
@@ -2594,6 +2944,72 @@ function clearActiveSendGeneration(sessionKey: string): void {
 function markSessionRunIdle(sessionKey: string): void {
   clearActiveSendGeneration(sessionKey);
   captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
+  scheduleQueuedChatSendFlush(sessionKey);
+}
+
+function cloneQueuedAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
+  return attachments?.map((attachment) => ({ ...attachment }));
+}
+
+function enqueueChatSendForSession(
+  sessionKey: string,
+  item: Omit<QueuedChatSend, 'enqueuedAt'>,
+): void {
+  const queue = _queuedChatSendsBySession.get(sessionKey) ?? [];
+  queue.push({
+    ...item,
+    attachments: cloneQueuedAttachments(item.attachments),
+    imageOptions: item.imageOptions ? { ...item.imageOptions } : undefined,
+    videoOptions: item.videoOptions ? { ...item.videoOptions } : undefined,
+    enqueuedAt: Date.now(),
+  });
+  while (queue.length > MAX_QUEUED_SENDS_PER_SESSION) queue.shift();
+  _queuedChatSendsBySession.set(sessionKey, queue);
+}
+
+function hasQueuedChatSends(sessionKey: string): boolean {
+  return (_queuedChatSendsBySession.get(sessionKey)?.length ?? 0) > 0;
+}
+
+function clearQueuedChatSends(sessionKey: string): void {
+  _queuedChatSendsBySession.delete(sessionKey);
+  _queuedChatSendFlushScheduled.delete(sessionKey);
+}
+
+function currentSessionCanFlushQueuedSend(sessionKey: string): boolean {
+  const state = useChatStore.getState();
+  return state.currentSessionKey === sessionKey
+    && !state.sending
+    && state.activeRunId == null
+    && !state.pendingFinal;
+}
+
+function scheduleQueuedChatSendFlush(sessionKey: string): void {
+  if (!hasQueuedChatSends(sessionKey) || _queuedChatSendFlushScheduled.has(sessionKey)) return;
+  _queuedChatSendFlushScheduled.add(sessionKey);
+  queueMicrotask(() => {
+    _queuedChatSendFlushScheduled.delete(sessionKey);
+    if (!currentSessionCanFlushQueuedSend(sessionKey)) return;
+    const queue = _queuedChatSendsBySession.get(sessionKey) ?? [];
+    const next = queue?.shift();
+    if (!next) {
+      _queuedChatSendsBySession.delete(sessionKey);
+      return;
+    }
+    if (queue.length > 0) {
+      _queuedChatSendsBySession.set(sessionKey, queue);
+    } else {
+      _queuedChatSendsBySession.delete(sessionKey);
+    }
+    void useChatStore.getState().sendMessage(
+      next.text,
+      cloneQueuedAttachments(next.attachments),
+      next.targetAgentId,
+      next.mode,
+      next.imageOptions ? { ...next.imageOptions } : undefined,
+      next.videoOptions ? { ...next.videoOptions } : undefined,
+    );
+  });
 }
 
 function mergeSessionRunStatePatch(
@@ -3215,13 +3631,6 @@ function getMessageText(content: unknown): string {
   return '';
 }
 
-function getMessageTextForFilter(msg: { content?: unknown; text?: unknown }): string {
-  const fromContent = getMessageText(msg.content);
-  if (fromContent.trim()) return fromContent;
-  if (typeof msg.text === 'string') return msg.text;
-  return '';
-}
-
 function getMessageStopReason(message: RawMessage | unknown): string | null {
   if (!message || typeof message !== 'object') return null;
   const msg = message as Record<string, unknown>;
@@ -3380,7 +3789,7 @@ function trimPathTerminators(filePath: string): string {
 function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
   const refs: Array<{ filePath: string; mimeType: string }> = [];
   const seen = new Set<string>();
-  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
+  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|html?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
   // Tagged media references (MEDIA:/path, media:~/path, MEDIA:C:\path, ...). The agent
   // runtime uses this prefix as an explicit "this is an artifact" marker,
   // so we want them recognised even though the leading colon would
@@ -4477,77 +4886,7 @@ function isToolResultRole(role: unknown): boolean {
 
 /** True for internal plumbing messages that should never be shown in the UI. */
 function isInternalMessage(msg: { role?: unknown; content?: unknown; idempotencyKey?: unknown; model?: unknown; text?: unknown }): boolean {
-  if (msg.role === 'system') return true;
-  const text = getMessageTextForFilter(msg);
-  if (msg.role === 'assistant') {
-    if (isInternalAssistantReplyText(text)) return true;
-    if (isGeneratingStatusNarration(text)) return true;
-    // OpenClaw's gateway writes a fallback `assistant-media` transcript
-    // message when its `createManagedOutgoingImageBlocks` pipeline fails
-    // ("could not be prepared" warning in stderr). The fallback has:
-    //   - model: 'gateway-injected'
-    //   - idempotencyKey: '<runId>:assistant-media'
-    //   - content: text-only `MEDIA:<staging path>` (NOT an image-url block)
-    // The staging path lives in `~/.openclaw/media/outbound/` which has a
-    // 120s TTL  - the file is gone by the time the user reads the chat.
-    // The original `MEDIA:/tmp/...` path is already on the previous
-    // assistant message (the agent's actual reply), so the fallback is
-    // pure duplicate noise. Hide it in the UI so it neither shows a
-    // broken card nor competes with the real reply for layout space.
-    const idempotencyKey = typeof msg.idempotencyKey === 'string' ? msg.idempotencyKey : '';
-    const isGatewayInjectedFallback = msg.model === 'gateway-injected'
-      && idempotencyKey.endsWith(':assistant-media');
-    if (isGatewayInjectedFallback) {
-      const hasImageUrlBlock = Array.isArray(msg.content)
-        && (msg.content as ContentBlock[]).some(
-          (block) => block.type === 'image' && typeof block.url === 'string' && !!block.url,
-        );
-      // Real gateway-media bubbles (with an image-url block) ARE the
-      // canonical render  - keep them. Only hide the text-only fallback.
-      if (!hasImageUrlBlock) return true;
-    }
-    if (!text.trim() && Array.isArray(msg.content)) {
-      const blocks = msg.content as ContentBlock[];
-      const hasThinking = blocks.some((block) => block.type === 'thinking' && block.thinking?.trim());
-      const hasVisibleText = blocks.some((block) => block.type === 'text' && block.text?.trim());
-      if (hasThinking && !hasVisibleText) return true;
-    }
-  }
-  if (msg.role === 'user' && /^\[OpenClaw heartbeat poll\]\s*$/i.test(text.trim())) return true;
-  // Runtime system injections: these arrive as user or assistant-role messages
-  // but are internal plumbing (exec results, async-command notices, time pings, etc.)
-  if ((msg.role === 'user' || msg.role === 'assistant') && isRuntimeSystemInjection(text)) return true;
-  return false;
-}
-
-/**
- * Detect runtime-injected system messages that should be hidden from the chat UI.
- * These are injected by the OpenClaw runtime as user-role messages and include:
- *   - "System (untrusted): ..."  - exec results, tool output, etc.
- *   - "An async command you ran earlier has completed"  - async completion notices
- *   - "Current time: ..." followed by nothing else  - periodic heartbeat time pings
- *   - "Handle the result internally. Do not relay it to the user"  - internal directives
- */
-function isRuntimeSystemInjection(text: string): boolean {
-  if (!text) return false;
-  const normalized = text.trim();
-  if (/^\s*System\s*\(untrusted\)\s*:/i.test(normalized)) return true;
-  if (
-    /An async command you ran earlier has completed/i.test(normalized)
-    && /Do not relay it to the user unless explicitly requested/i.test(normalized)
-  ) {
-    return true;
-  }
-  if (/^\[Inter-session message\]/i.test(normalized)) return true;
-  if (isOpenClawRuntimeEventPrompt(normalized)) return true;
-
-  if (
-    /^\s*Current time\s*:/i.test(normalized)
-    && /^\s*Current time\s*:[^\n]*\/\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\s*$/i.test(normalized)
-  ) {
-    return true;
-  }
-  return false;
+  return isHistoryInternalMessage(msg);
 }
 
 // ── Write tool_use baseline capture ─────────────────────────────
@@ -4894,6 +5233,71 @@ function suppressPrematureAssistantFinals(messages: RawMessage[], lastUserMessag
   });
 }
 
+function normalizeAssistantReplyForDedupe(message: RawMessage): string {
+  if (!isTextOnlyAssistantFinal(message)) return '';
+  if (isInternalMessage(message)) return '';
+  return getMessageText(message.content)
+    .replace(/\bMEDIA:\s*\S+/giu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function areRedundantAssistantReplies(left: RawMessage, right: RawMessage): boolean {
+  const leftText = normalizeAssistantReplyForDedupe(left);
+  const rightText = normalizeAssistantReplyForDedupe(right);
+  if (!leftText || !rightText) return false;
+  if (leftText === rightText) return true;
+  const shorter = leftText.length <= rightText.length ? leftText : rightText;
+  const longer = leftText.length > rightText.length ? leftText : rightText;
+  return shorter.length >= 16 && longer.startsWith(shorter);
+}
+
+function mergeRedundantAssistantReplies(left: RawMessage, right: RawMessage): RawMessage {
+  const leftText = normalizeAssistantReplyForDedupe(left);
+  const rightText = normalizeAssistantReplyForDedupe(right);
+  const keepRight = rightText.length >= leftText.length;
+  const base = keepRight ? right : left;
+  const attachedFiles = dedupeAttachedFiles([
+    ...(left._attachedFiles ?? []),
+    ...(right._attachedFiles ?? []),
+  ]);
+  return attachedFiles.length > 0 ? { ...base, _attachedFiles: attachedFiles } : base;
+}
+
+function dedupeRedundantAssistantReplies(messages: RawMessage[]): RawMessage[] {
+  const result: RawMessage[] = [];
+  let lastAssistantIndexInTurn = -1;
+
+  for (const message of messages) {
+    if (isRealUserBoundaryMessage(message)) {
+      result.push(message);
+      lastAssistantIndexInTurn = -1;
+      continue;
+    }
+
+    if (message.role !== 'assistant' || !isTextOnlyAssistantFinal(message)) {
+      result.push(message);
+      continue;
+    }
+
+    if (
+      lastAssistantIndexInTurn >= 0
+      && areRedundantAssistantReplies(result[lastAssistantIndexInTurn]!, message)
+    ) {
+      result[lastAssistantIndexInTurn] = mergeRedundantAssistantReplies(
+        result[lastAssistantIndexInTurn]!,
+        message,
+      );
+      continue;
+    }
+
+    result.push(message);
+    lastAssistantIndexInTurn = result.length - 1;
+  }
+
+  return result;
+}
+
 function isRealUserBoundaryMessage(msg: RawMessage): boolean {
   if (msg.role !== 'user') return false;
   if (isInternalMessage(msg)) return false;
@@ -5068,6 +5472,108 @@ function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
     next.push(file);
   }
   return next;
+}
+
+function hashStringForLocalMessageId(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+function attachedFileKey(file: AttachedFileMeta): string {
+  const filePath = file.filePath?.trim();
+  if (filePath) return `path:${filePath}`;
+  const gatewayUrl = file.gatewayUrl?.trim();
+  if (gatewayUrl) return `gateway:${gatewayUrl}`;
+  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview || ''}`;
+}
+
+function collectAssistantArtifactsForFallback(segmentMessages: RawMessage[]): AttachedFileMeta[] {
+  const files: AttachedFileMeta[] = [];
+
+  for (const message of segmentMessages) {
+    if (message.role !== 'assistant') continue;
+    if (isTerminalAssistantErrorMessage(message) || isFailedAssistantTurnMessage(message)) continue;
+    files.push(...(message._attachedFiles ?? []));
+
+    const text = getMessageText(message.content);
+    if (!text) continue;
+
+    const mediaRefs = extractMediaRefs(text);
+    const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
+    for (const ref of mediaRefs) {
+      files.push({ ...makeAttachedFile(ref), source: 'message-ref' });
+    }
+    for (const ref of extractRawFilePaths(text)) {
+      if (mediaRefPaths.has(ref.filePath)) continue;
+      files.push({ ...makeAttachedFile(ref), source: 'message-ref' });
+    }
+  }
+
+  return dedupeAttachedFiles(files).filter((file) => (
+    Boolean(file.filePath?.trim())
+    || Boolean(file.gatewayUrl?.trim())
+    || Boolean(file.preview)
+  ));
+}
+
+function artifactKindLabel(file: AttachedFileMeta): string {
+  const mimeType = file.mimeType.toLowerCase();
+  if (mimeType.startsWith('image/')) return '图片';
+  if (mimeType.startsWith('video/')) return '视频';
+  if (mimeType.includes('presentation') || /\.pptx?$/iu.test(file.fileName)) return 'PPT';
+  if (mimeType.includes('spreadsheet') || mimeType.includes('excel') || /\.xlsx?$/iu.test(file.fileName)) return 'Excel';
+  if (mimeType.includes('html') || /\.html?$/iu.test(file.fileName)) return '网页';
+  if (mimeType.includes('pdf') || /\.pdf$/iu.test(file.fileName)) return 'PDF';
+  if (mimeType.includes('word') || /\.docx?$/iu.test(file.fileName)) return '文档';
+  return '文件';
+}
+
+function buildArtifactFallbackAssistantMessage(segmentMessages: RawMessage[]): RawMessage | null {
+  const attachedFiles = collectAssistantArtifactsForFallback(segmentMessages);
+  if (attachedFiles.length === 0) return null;
+
+  const latestTimestamp = segmentMessages.reduce((latest, message) => {
+    if (message.timestamp == null) return latest;
+    return Math.max(latest, toMs(message.timestamp));
+  }, 0);
+  const timestamp = latestTimestamp > 0 ? latestTimestamp + 1 : Date.now();
+  const digest = hashStringForLocalMessageId(attachedFiles.map(attachedFileKey).join('|'));
+  const fileLines = attachedFiles.map((file, index) => (
+    `${index + 1}. ${artifactKindLabel(file)}：${file.fileName || '已生成文件'}`
+  ));
+
+  return {
+    role: 'assistant',
+    id: `local-artifact-fallback:${timestamp}:${digest}`,
+    timestamp,
+    content: [
+      '文件已生成，但最终文字回复没有成功送达。我先把已落地的产物交付给你。',
+      '',
+      ...fileLines,
+    ].join('\n'),
+    _attachedFiles: attachedFiles,
+  };
+}
+
+function dropTerminalAssistantErrorsFromLatestSegment(messages: RawMessage[]): RawMessage[] {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (isRealUserBoundaryMessage(messages[index])) {
+      latestUserIndex = index;
+      break;
+    }
+  }
+  if (latestUserIndex < 0) return messages;
+
+  return messages.filter((message, index) => {
+    if (index <= latestUserIndex) return true;
+    if (message.role !== 'assistant') return true;
+    return !(isTerminalAssistantErrorMessage(message) || isFailedAssistantTurnMessage(message));
+  });
 }
 
 function runtimeToolEventToStatus(event: ChatRuntimeEvent): ToolStatus | null {
@@ -5366,6 +5872,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearBaselines();
     set((s) => buildSessionSwitchPatch(s, key));
     deferSessionSwitchHistoryLoad(get);
+    scheduleQueuedChatSendFlush(key);
   },
 
   // ── Delete session ──
@@ -5381,6 +5888,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearCachedSessionHistory(key);
     clearCachedSessionRunState(key);
     clearActiveSendGeneration(key);
+    clearQueuedChatSends(key);
     clearSessionLabelHydrationTracking(key);
     clearPendingOptimisticUserMessages(key);
     // Hard-delete the session's JSONL transcript on disk.
@@ -5719,7 +6227,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = messagesWithToolAttachments.filter((msg) => !shouldDropMessageFromHistory(msg));
       // Restore file attachments for user/assistant messages (from cache + text patterns)
-      const enrichedMessages = enrichWithCachedImages(filteredMessages);
+      const enrichedMessages = dedupeRedundantAssistantReplies(enrichWithCachedImages(filteredMessages));
 
       // Preserve optimistic user messages independently from sending state.
       // Gateway phase=end can clear sending before chat.history has persisted
@@ -5739,6 +6247,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       finalMessages = dropRedundantOptimisticUserMessages(currentSessionKey, finalMessages);
       finalMessages = preserveOptimisticMediaResultMessages(get().messages, finalMessages);
       finalMessages = preserveExistingAttachmentPreviews(get().messages, finalMessages);
+      finalMessages = collapseSupersededCompositeHistoryReplies(finalMessages);
+      finalMessages = dedupeRedundantAssistantReplies(finalMessages);
 
       const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
       const userMsTs = lastUserMessageAt != null ? toMs(lastUserMessageAt) : 0;
@@ -5786,12 +6296,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const normalizedTerminalAssistantErrorMessage = latestTerminalAssistantErrorMessage
         ? normalizeChatRunErrorMessage(latestTerminalAssistantErrorMessage)
         : null;
+      const terminalArtifactFallbackMessage = latestTerminalAssistantErrorMessage && !historyErrorIsTransient
+        ? buildArtifactFallbackAssistantMessage(
+            isSendingNow && lastUserMessageAt != null
+              ? getOpenRunSegmentFromHistory(finalMessages, lastUserMessageAt)
+              : postUserSegmentMessages(finalMessages),
+          )
+        : null;
+      if (terminalArtifactFallbackMessage) {
+        finalMessages = [
+          ...dropTerminalAssistantErrorsFromLatestSegment(finalMessages),
+          terminalArtifactFallbackMessage,
+        ];
+      }
 
       set((state) => ({
         messages: finalMessages,
         thinkingLevel,
         loading: false,
-        runError: historyErrorIsTransient ? null : normalizedTerminalAssistantErrorMessage,
+        runError: historyErrorIsTransient || terminalArtifactFallbackMessage
+          ? null
+          : normalizedTerminalAssistantErrorMessage,
         runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, finalMessages),
       }));
       cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
@@ -6259,7 +6784,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = messagesWithToolAttachments.filter((msg) => !shouldDropMessageFromHistory(msg));
-      const enrichedMessages = enrichWithCachedImages(filteredMessages);
+      const enrichedMessages = dedupeRedundantAssistantReplies(enrichWithCachedImages(filteredMessages));
       set((state) => ({
         messages: enrichedMessages,
         loadingMoreHistory: false,
@@ -6316,8 +6841,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
       ?? get().currentSessionKey;
 
-    // Guard against double-submit before React re-renders with sending=true.
-    if (get().sending && targetSessionKey === get().currentSessionKey) {
+    // Same-session sends must stay ordered. The renderer owns a single active
+    // run slot, so queue follow-up turns instead of dropping them or racing the
+    // current run state.
+    const currentState = get();
+    const targetSessionBusy = targetSessionKey === currentState.currentSessionKey
+      && (currentState.sending || currentState.activeRunId != null || currentState.pendingFinal);
+    if (targetSessionBusy) {
+      enqueueChatSendForSession(targetSessionKey, {
+        text,
+        attachments,
+        targetAgentId,
+        mode,
+        imageOptions,
+        videoOptions,
+      });
       return;
     }
 
@@ -6350,14 +6888,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         stagedPath: file.stagedPath,
         preview: file.preview,
       }));
-    let candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
-    if (candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
-      candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
-    }
-    rememberPendingRuntimeIntent(currentSessionKey, {
-      objective: trimmed,
-      mode,
-    });
 
     // Add user message optimistically before planner/tool routing so the UI
     // acknowledges the submitted intent immediately.
@@ -6389,6 +6919,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingFinal: false,
       lastUserMessageAt: nowMs,
     }));
+
+    let candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
+    if (candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
+      candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
+    }
+    rememberPendingRuntimeIntent(currentSessionKey, {
+      objective: trimmed,
+      mode,
+    });
 
     const { sessionLabels, messages } = get();
     const isFirstMessage = !messages.slice(0, -1).some((m) => m.role === 'user');

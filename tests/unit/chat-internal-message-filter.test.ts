@@ -55,6 +55,19 @@ describe('chat internal message filter', () => {
     })).toBe(true);
   });
 
+  it('filters synthetic local-artifact user rows written by append-conversation', () => {
+    expect(isInternalMessage({
+      role: 'user',
+      content: '生图，PPT，Excel',
+      syntheticLocalArtifactConversation: true,
+    })).toBe(true);
+    expect(shouldDropMessageFromHistory({
+      role: 'user',
+      content: '生图，PPT，Excel',
+      syntheticLocalArtifactConversation: true,
+    })).toBe(true);
+  });
+
   it('filters OpenClaw runtime continuation prompts', () => {
     expect(isInternalMessage({ role: 'user', content: 'Continue the OpenClaw runtime event.' })).toBe(true);
   });
@@ -71,6 +84,21 @@ describe('chat internal message filter', () => {
     expect(isInternalMessage({
       role: 'assistant',
       content: '生成中，稍等 👨‍🚀',
+    })).toBe(true);
+  });
+
+  it('filters gateway injected text-only assistant-media fallback rows', () => {
+    expect(isInternalMessage({
+      role: 'assistant',
+      model: 'gateway-injected',
+      idempotencyKey: 'run-123:assistant-media',
+      content: 'MEDIA:/tmp/outbound-fallback.png',
+    })).toBe(true);
+    expect(shouldDropMessageFromHistory({
+      role: 'assistant',
+      model: 'gateway-injected',
+      idempotencyKey: 'run-123:assistant-media',
+      content: 'MEDIA:/tmp/outbound-fallback.png',
     })).toBe(true);
   });
 

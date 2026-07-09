@@ -442,6 +442,190 @@ describe('chat target routing', () => {
     expect('queuedSends' in useChatStore.getState()).toBe(false);
   });
 
+  it('queues same-session follow-up sends until the active run is idle', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }, { key: 'agent:research:desk' }],
+      messages: [{ role: 'user', content: 'first message' }],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: true,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: 'run-first',
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: true,
+      lastUserMessageAt: Date.now(),
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('second message should wait');
+
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+
+    useChatStore.setState({
+      sending: false,
+      activeRunId: null,
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+    });
+    useChatStore.getState().switchSession('agent:research:desk');
+    useChatStore.getState().switchSession('agent:main:main');
+
+    await vi.waitFor(() => {
+      expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(true);
+    });
+
+    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
+    const sendPayload = JSON.parse((sendCall?.[1] as { body: string } | undefined)?.body ?? '{}');
+    expect(sendPayload).toMatchObject({
+      sessionKey: 'agent:main:main',
+      message: 'second message should wait',
+      deliver: false,
+    });
+  });
+
+  it('deduplicates progressive duplicate assistant replies loaded from history', async () => {
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/chat/history') {
+        return {
+          success: true,
+          result: {
+            messages: [
+              { role: 'user', content: '你觉得这张图美嘛？', timestamp: 1000 },
+              { role: 'assistant', content: '这张图整体是美的，主要优点是光影和构图', timestamp: 1001, id: 'assistant-short' },
+              { role: 'assistant', content: '这张图整体是美的，主要优点是光影和构图都比较稳定，主体也清楚。', timestamp: 1002, id: 'assistant-full' },
+              { role: 'assistant', content: '这张图整体是美的，主要优点是光影和构图都比较稳定，主体也清楚。', timestamp: 1003, id: 'assistant-full-echo' },
+            ],
+          },
+        };
+      }
+      if (url === '/api/files/thumbnails') return {};
+      return { success: true, result: {} };
+    });
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const assistantMessages = useChatStore.getState().messages.filter((message) => message.role === 'assistant');
+    expect(assistantMessages).toHaveLength(1);
+    expect(assistantMessages[0]?.id).toBe('assistant-full-echo');
+    expect(assistantMessages[0]?.content).toBe('这张图整体是美的，主要优点是光影和构图都比较稳定，主体也清楚。');
+  });
+
+  it('delivers generated artifacts when terminal assistant text fails after files are produced', async () => {
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+      if (url === '/api/chat/history') {
+        return {
+          success: true,
+          result: {
+            messages: [
+              { role: 'user', content: '做一个 Excel 和一个 PPT', timestamp: 1000 },
+              {
+                role: 'assistant',
+                content: 'Excel 和 PPT 已生成。\nMEDIA:/tmp/uclaw-budget.xlsx\nMEDIA:/tmp/uclaw-plan.pptx',
+                timestamp: 1001,
+                id: 'assistant-artifacts',
+              },
+              {
+                role: 'assistant',
+                content: '[assistant turn failed] HTTP 429: rate limited',
+                timestamp: 1002,
+                id: 'assistant-error',
+                stopReason: 'error',
+                errorMessage: 'HTTP 429: rate limited',
+              },
+            ],
+          },
+        };
+      }
+      if (url === '/api/files/thumbnails') {
+        const body = JSON.parse(init?.body || '{}') as { paths?: Array<{ filePath?: string }> };
+        return Object.fromEntries((body.paths ?? []).map((entry) => [
+          entry.filePath ?? '',
+          { preview: null, fileSize: 1024, filePath: entry.filePath },
+        ]));
+      }
+      return { success: true, result: {} };
+    });
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const state = useChatStore.getState();
+    const lastMessage = state.messages.at(-1);
+    expect(state.runError).toBeNull();
+    expect(state.sending).toBe(false);
+    expect(state.messages.some((message) => message.id === 'assistant-error')).toBe(false);
+    expect(lastMessage).toMatchObject({
+      role: 'assistant',
+      content: expect.stringContaining('文件已生成，但最终文字回复没有成功送达'),
+      _attachedFiles: [
+        expect.objectContaining({ fileName: 'uclaw-budget.xlsx' }),
+        expect.objectContaining({ fileName: 'uclaw-plan.pptx' }),
+      ],
+    });
+  });
+
   it('does not let a completed background media job clear the foreground session run state', async () => {
     const { useChatStore } = await import('@/stores/chat');
     const mediaJobPoll = deferred<{
@@ -878,6 +1062,87 @@ describe('chat target routing', () => {
     expect(useChatStore.getState().activeRunId).toBeNull();
     expect(useChatStore.getState().pendingFinal).toBe(false);
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/files/thumbnails')).toBe(false);
+  });
+
+  it('blocks video generation delivery when provider metadata reports a zero-second video', async () => {
+    const signedVideoUrl = 'content?u=aHR0cHM6Ly92aWRnZW4ueC5haS96ZXJvLm1wNA&exp=1783612254&sig=test-signature';
+    hostApiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/media/intent-plan') {
+        return { success: true, plan: { action: 'video_generate', source: 'planner', confidence: 0.9 } };
+      }
+      if (url === '/api/media/video-generation/chat-send') {
+        return { success: true, jobId: 'job-video-zero', job: { id: 'job-video-zero', kind: 'video', status: 'queued' } };
+      }
+      if (url === '/api/media/generation-jobs/job-video-zero') {
+        return {
+          success: true,
+          job: {
+            id: 'job-video-zero',
+            kind: 'video',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                url: signedVideoUrl,
+                mimeType: 'video/mp4',
+                durationSeconds: 0,
+              }],
+            },
+          },
+        };
+      }
+      return { success: true, result: {} };
+    });
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage(
+      '生成一个短视频',
+      undefined,
+      undefined,
+      'video',
+      undefined,
+      { size: '1280x720', durationSeconds: 4 },
+    );
+
+    const run = Object.values(useChatStore.getState().runtimeRuns)
+      .find((item) => item.artifacts?.some((artifact) => artifact.url === signedVideoUrl));
+    const artifactId = run?.artifacts?.[0]?.id;
+    expect(run?.gateResult).toEqual(expect.objectContaining({
+      decision: 'continue_required',
+      blockingIssueCount: 1,
+    }));
+    expect(run?.verifications).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        artifactId,
+        kind: 'media.metadata',
+        required: true,
+        status: 'blocked',
+        detail: expect.stringContaining('0 秒'),
+      }),
+    ]));
   });
 
   it('reuses the latest assistant image for edit-like image-mode sends without explicit attachments', async () => {
@@ -1481,6 +1746,139 @@ describe('chat target routing', () => {
     ]));
   });
 
+  it('feeds the latest dependent edited image into composite video generation', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+      if (url.toString().startsWith('/api/sessions/transcript?')) {
+        return { messages: [] };
+      }
+      if (url === '/api/media/image-generation/chat-send') {
+        const body = init?.body ? JSON.parse(init.body) as { inputImages?: unknown[] } : {};
+        const edited = (body.inputImages?.length ?? 0) > 0;
+        return {
+          success: true,
+          job: {
+            id: edited ? 'job-edited-image' : 'job-generated-image',
+            kind: 'image',
+            sessionKey: 'agent:main:main',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                path: edited ? '/tmp/edited-image.png' : '/tmp/generated-image.png',
+                fileName: edited ? 'edited-image.png' : 'generated-image.png',
+                mimeType: 'image/png',
+                size: 1024,
+                width: 1024,
+                height: 1024,
+              }],
+            },
+          },
+        };
+      }
+      if (url === '/api/media/video-generation/chat-send') {
+        return {
+          success: true,
+          job: {
+            id: 'job-video-from-edit',
+            kind: 'video',
+            sessionKey: 'agent:main:main',
+            status: 'succeeded',
+            result: {
+              outputs: [{
+                path: '/tmp/video-from-edit.mp4',
+                fileName: 'video-from-edit.mp4',
+                mimeType: 'video/mp4',
+                size: 4096,
+                durationSeconds: 15,
+              }],
+            },
+          },
+        };
+      }
+      if (url !== '/api/media/intent-plan') {
+        return { success: true, result: {} };
+      }
+      return {
+        success: true,
+        plan: {
+          action: 'chat',
+          source: 'fallback',
+          confidence: 1,
+          reason: 'composite_intent_local',
+          selectedImageSource: 'none',
+          compositeTasks: [
+            {
+              id: 'task-1-image_generate',
+              kind: 'image_generate',
+              title: '生成图片',
+              prompt: '生成一张未来城市工作台概念图。',
+            },
+            {
+              id: 'task-2-image_edit',
+              kind: 'image_edit',
+              title: '图片改风格',
+              prompt: '把刚生成的图片改成赛博朋克风。',
+              dependsOn: ['task-1-image_generate'],
+            },
+            {
+              id: 'task-3-video_generate',
+              kind: 'video_generate',
+              title: '基于改图生成视频',
+              prompt: '基于改后的图生成 15 秒视频。',
+              dependsOn: ['task-2-image_edit'],
+            },
+          ],
+        },
+      };
+    });
+
+    await useChatStore.getState().sendMessage('生成一张图，然后把这张图改成赛博朋克风，再基于改后的图生成 15 秒视频');
+
+    const imageCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/image-generation/chat-send');
+    const videoCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/video-generation/chat-send');
+    expect(imageCalls).toHaveLength(2);
+    expect(videoCall).toBeTruthy();
+    const payload = JSON.parse((videoCall?.[1] as { body: string }).body) as {
+      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      route?: {
+        mode?: string;
+        sourceImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
+      };
+    };
+    expect(payload.inputImages).toEqual([
+      {
+        fileName: 'edited-image.png',
+        mimeType: 'image/png',
+        filePath: '/tmp/edited-image.png',
+      },
+    ]);
+    expect(payload.route?.mode).toBe('image_to_video');
+    expect(payload.route?.sourceImages).toEqual(payload.inputImages);
+  });
+
   it('routes a no-attachment multi-deliverable sample pack through the composite artifact runner', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
@@ -1625,12 +2023,36 @@ describe('chat target routing', () => {
     const appendConversationCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/local-artifacts/append-conversation');
     expect(appendConversationCall).toBeTruthy();
     const appendPayload = JSON.parse((appendConversationCall?.[1] as { body: string }).body) as {
+      runId?: string;
       prompt?: string;
       summaryText?: string;
+      files?: Array<{
+        fileName?: string;
+        mimeType?: string;
+        filePath?: string;
+        gatewayUrl?: string;
+        source?: string;
+      }>;
       outputPaths?: string[];
     };
+    expect(appendPayload.runId).toContain('history:agent:main:main:');
     expect(appendPayload.prompt).toBe(prompt);
     expect(appendPayload.summaryText).toContain('统一产物清单');
+    expect(appendPayload.files).toHaveLength(7);
+    expect(appendPayload.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        fileName: 'uclaw-image.png',
+        mimeType: 'image/png',
+        filePath: '/tmp/uclaw-image.png',
+        source: 'tool-result',
+      }),
+      expect.objectContaining({
+        fileName: 'uclaw-video.mp4',
+        mimeType: 'video/mp4',
+        filePath: '/tmp/uclaw-video.mp4',
+        source: 'tool-result',
+      }),
+    ]));
     expect(appendPayload.outputPaths).toEqual(expect.arrayContaining([
       '/tmp/uclaw-image.png',
       '/tmp/uclaw-presentation.pptx',

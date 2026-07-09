@@ -37,6 +37,8 @@ export interface RawMessage {
   content: unknown; // string | ContentBlock[]
   timestamp?: number;
   id?: string;
+  idempotencyKey?: string;
+  model?: string;
   toolCallId?: string;
   toolName?: string;
   details?: unknown;
@@ -45,6 +47,8 @@ export interface RawMessage {
   stop_reason?: string;
   errorMessage?: string;
   error_message?: string;
+  syntheticLocalArtifactConversation?: boolean;
+  localArtifactResultKind?: 'image' | 'video' | 'composite';
   /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
   _attachedFiles?: AttachedFileMeta[];
 }

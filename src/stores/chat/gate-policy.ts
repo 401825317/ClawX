@@ -4,6 +4,7 @@ import type {
   ChatRuntimeGateIssue,
   ChatRuntimePlanStep,
 } from '../../../shared/chat-runtime-events';
+import { isArtifactCapabilityQuestion } from '../../../shared/artifact-intent';
 import type { ChatRuntimeRunState } from './types';
 
 export type CompletionGateReport = {
@@ -25,6 +26,7 @@ export type CompletionGateReport = {
 };
 
 const ARTIFACT_OBJECTIVE_RE = /(?:生成|创建|制作|导出|输出|保存|下载|写一份|做一份|做个|图片|图像|海报|视频|PPT|pptx?|Word|docx?|Excel|xlsx?|PDF|pdf|文档|报告|表格|网页|HTML|html|代码文件|压缩包|截图|create|make|generate|export|produce|save|download|image|video|document|report|presentation|spreadsheet|file|archive|screenshot)/iu;
+const EXECUTE_STEP_ARTIFACT_RE = /(?:图片|视频|产物|文件|文档|报告|导出|生成)/iu;
 
 export type ArtifactRequiredPlanStep = ChatRuntimePlanStep & {
   requiresArtifact?: boolean;
@@ -57,11 +59,6 @@ export function gateIssueId(runId: string | undefined, code: string, target: str
 
 export function runRequiresArtifact(run: ChatRuntimeRunState | undefined): boolean {
   if (!run) return false;
-  if (artifactRequiredPlanSteps(run).length > 0) return true;
-  if ((run.artifacts ?? []).length > 0) return false;
-  if ((run.planSteps ?? []).some((step) => step.id === 'uclaw.execute' && /图片|视频|产物|文件|文档|报告|导出|生成/iu.test(`${step.title}\n${step.detail ?? ''}`))) {
-    return true;
-  }
   const objective = `${run.objective ?? ''}\n${run.events
     .filter((event) => event.type === 'run.started' || event.type === 'run.plan.updated')
     .map((event) => {
@@ -69,6 +66,17 @@ export function runRequiresArtifact(run: ChatRuntimeRunState | undefined): boole
       return `${event.objective ?? ''}\n${event.summary ?? ''}`;
     })
     .join('\n')}`;
+  if (isArtifactCapabilityQuestion(objective)) return false;
+  if (artifactRequiredPlanSteps(run).length > 0) return true;
+  if ((run.artifacts ?? []).length > 0) return false;
+  if ((run.planSteps ?? []).some((step) => {
+    const stepText = `${step.title}\n${step.detail ?? ''}`;
+    return step.id === 'uclaw.execute'
+      && EXECUTE_STEP_ARTIFACT_RE.test(stepText)
+      && !isArtifactCapabilityQuestion(stepText);
+  })) {
+    return true;
+  }
   return ARTIFACT_OBJECTIVE_RE.test(objective);
 }
 

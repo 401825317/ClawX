@@ -8,6 +8,17 @@ const SAFE_SESSION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 type SessionsJson = Record<string, unknown>;
 type SessionRecord = Record<string, unknown>;
+type PersistedArtifactResultKind = 'image' | 'video' | 'composite';
+type PersistedConversationFile = {
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  width?: number;
+  height?: number;
+  filePath?: string;
+  gatewayUrl?: string;
+  source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
+};
 
 function parseAgentIdFromSessionKey(sessionKey: string): string {
   if (!sessionKey.startsWith('agent:')) {
@@ -146,6 +157,142 @@ function buildAssistantText(summaryText: string | undefined, outputPaths: string
   return lines.join('\n\n');
 }
 
+function dedupePersistedConversationFiles(files: PersistedConversationFile[]): PersistedConversationFile[] {
+  const seen = new Set<string>();
+  const next: PersistedConversationFile[] = [];
+  for (const file of files) {
+    const filePath = file.filePath?.trim();
+    const gatewayUrl = file.gatewayUrl?.trim();
+    const key = filePath
+      ? `path:${filePath}`
+      : gatewayUrl
+        ? `gateway:${gatewayUrl}`
+        : `meta:${file.fileName ?? ''}|${file.mimeType ?? ''}|${file.fileSize ?? 0}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    next.push({
+      ...file,
+      ...(filePath ? { filePath } : {}),
+      ...(gatewayUrl ? { gatewayUrl } : {}),
+    });
+  }
+  return next;
+}
+
+function isRemoteHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function basenameFromPathOrUrl(value: string, fallback: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  if (isRemoteHttpUrl(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      return parsed.pathname.split('/').filter(Boolean).pop()?.split(/[?#]/u)[0] || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return trimmed.split(/[\\/]/u).pop()?.split(/[?#]/u)[0] || fallback;
+}
+
+function extensionFromPathOrUrl(value: string): string {
+  const base = basenameFromPathOrUrl(value, '').toLowerCase();
+  const index = base.lastIndexOf('.');
+  return index >= 0 ? base.slice(index) : '';
+}
+
+function mimeFromPathOrUrl(value: string): string {
+  switch (extensionFromPathOrUrl(value)) {
+    case '.png': return 'image/png';
+    case '.jpg':
+    case '.jpeg': return 'image/jpeg';
+    case '.gif': return 'image/gif';
+    case '.webp': return 'image/webp';
+    case '.svg': return 'image/svg+xml';
+    case '.bmp': return 'image/bmp';
+    case '.avif': return 'image/avif';
+    case '.mp4': return 'video/mp4';
+    case '.mov': return 'video/quicktime';
+    case '.webm': return 'video/webm';
+    case '.mkv': return 'video/x-matroska';
+    case '.avi': return 'video/x-msvideo';
+    case '.ppt': return 'application/vnd.ms-powerpoint';
+    case '.pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    case '.xls': return 'application/vnd.ms-excel';
+    case '.xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    case '.doc': return 'application/msword';
+    case '.docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case '.pdf': return 'application/pdf';
+    case '.html':
+    case '.htm': return 'text/html';
+    case '.md': return 'text/markdown';
+    case '.csv': return 'text/csv';
+    case '.txt': return 'text/plain';
+    default: return 'application/octet-stream';
+  }
+}
+
+async function statFileSize(filePath: string): Promise<number> {
+  try {
+    const stat = await fsP.stat(filePath);
+    return Number.isFinite(stat.size) && stat.size > 0 ? stat.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function buildAssistantAttachedFiles(params: {
+  files?: PersistedConversationFile[];
+  outputPaths?: string[];
+}): Promise<PersistedConversationFile[]> {
+  const normalizedFromFiles = (params.files ?? [])
+    .map((file) => {
+      const filePath = file.filePath?.trim();
+      const gatewayUrl = file.gatewayUrl?.trim();
+      const target = filePath || gatewayUrl || '';
+      if (!target) return null;
+      return {
+        fileName: file.fileName?.trim() || basenameFromPathOrUrl(target, 'artifact'),
+        mimeType: file.mimeType?.trim() || mimeFromPathOrUrl(target),
+        fileSize: typeof file.fileSize === 'number' && Number.isFinite(file.fileSize) && file.fileSize > 0
+          ? Math.floor(file.fileSize)
+          : undefined,
+        width: typeof file.width === 'number' && Number.isFinite(file.width) && file.width > 0
+          ? Math.floor(file.width)
+          : undefined,
+        height: typeof file.height === 'number' && Number.isFinite(file.height) && file.height > 0
+          ? Math.floor(file.height)
+          : undefined,
+        ...(filePath ? { filePath } : {}),
+        ...(gatewayUrl ? { gatewayUrl } : {}),
+        source: file.source ?? 'tool-result',
+      } satisfies PersistedConversationFile;
+    })
+    .filter((file): file is PersistedConversationFile => file != null);
+  const fallbackFiles = (params.outputPaths ?? [])
+    .map((value, index) => value.trim())
+    .filter(Boolean)
+    .map((target, index) => ({
+      fileName: basenameFromPathOrUrl(target, `artifact-${index + 1}`),
+      mimeType: mimeFromPathOrUrl(target),
+      ...(isRemoteHttpUrl(target) ? { gatewayUrl: target } : { filePath: target }),
+      source: 'tool-result' as const,
+    }));
+  const deduped = dedupePersistedConversationFiles([...normalizedFromFiles, ...fallbackFiles]);
+  return await Promise.all(deduped.map(async (file) => {
+    const filePath = file.filePath?.trim();
+    const fileSize = typeof file.fileSize === 'number' && Number.isFinite(file.fileSize) && file.fileSize > 0
+      ? Math.floor(file.fileSize)
+      : (filePath ? await statFileSize(filePath) : 0);
+    return {
+      ...file,
+      fileSize,
+    };
+  }));
+}
+
 function buildUserText(prompt: string, inputPaths: string[]): string {
   const lines = [prompt];
   for (const inputPath of inputPaths) {
@@ -164,6 +311,10 @@ function buildMessageEntry(params: {
   content: string;
   timestampMs: number;
   idempotencySuffix: 'user' | 'assistant';
+  syntheticLocalArtifactConversation?: boolean;
+  messageId?: string;
+  attachedFiles?: PersistedConversationFile[];
+  localArtifactResultKind?: PersistedArtifactResultKind;
 }): string {
   return JSON.stringify({
     type: 'message',
@@ -172,9 +323,27 @@ function buildMessageEntry(params: {
     timestamp: new Date(params.timestampMs).toISOString(),
     message: {
       role: params.role,
+      ...(params.messageId ? { id: params.messageId } : {}),
       content: params.content,
       timestamp: params.timestampMs,
       idempotencyKey: `${params.id}:${params.idempotencySuffix}`,
+      ...(params.attachedFiles?.length ? {
+        _attachedFiles: params.attachedFiles.map((file) => ({
+          fileName: file.fileName ?? 'artifact',
+          mimeType: file.mimeType ?? 'application/octet-stream',
+          fileSize: typeof file.fileSize === 'number' && Number.isFinite(file.fileSize) && file.fileSize > 0
+            ? Math.floor(file.fileSize)
+            : 0,
+          preview: null,
+          ...(typeof file.width === 'number' ? { width: file.width } : {}),
+          ...(typeof file.height === 'number' ? { height: file.height } : {}),
+          ...(file.filePath ? { filePath: file.filePath } : {}),
+          ...(file.gatewayUrl ? { gatewayUrl: file.gatewayUrl } : {}),
+          source: file.source ?? 'tool-result',
+        })),
+      } : {}),
+      ...(params.localArtifactResultKind ? { localArtifactResultKind: params.localArtifactResultKind } : {}),
+      ...(params.syntheticLocalArtifactConversation ? { syntheticLocalArtifactConversation: true } : {}),
     },
   });
 }
@@ -183,6 +352,10 @@ async function appendConversationEntries(params: {
   sessionKey: string;
   prompt: string;
   assistantText: string;
+  assistantMessageId?: string;
+  assistantResultKind?: PersistedArtifactResultKind;
+  assistantFiles?: PersistedConversationFile[];
+  outputPaths?: string[];
   inputPaths?: string[];
   userTimestampMs?: number;
 }): Promise<void> {
@@ -221,8 +394,12 @@ async function appendConversationEntries(params: {
     : nowMs;
   const assistantTimestampMs = Math.max(nowMs, userTimestampMs + 1);
   const userMessageId = randomUUID();
-  const assistantMessageId = randomUUID();
+  const assistantMessageId = params.assistantMessageId?.trim() || randomUUID();
   const userText = buildUserText(prompt, inputPaths);
+  const assistantFiles = await buildAssistantAttachedFiles({
+    files: params.assistantFiles,
+    outputPaths: params.outputPaths,
+  });
 
   const nextLines = [
     buildMessageEntry({
@@ -232,6 +409,8 @@ async function appendConversationEntries(params: {
       content: userText,
       timestampMs: userTimestampMs,
       idempotencySuffix: 'user',
+      syntheticLocalArtifactConversation: true,
+      messageId: userMessageId,
     }),
     buildMessageEntry({
       id: assistantMessageId,
@@ -240,6 +419,9 @@ async function appendConversationEntries(params: {
       content: assistantText,
       timestampMs: assistantTimestampMs,
       idempotencySuffix: 'assistant',
+      messageId: assistantMessageId,
+      attachedFiles: assistantFiles,
+      localArtifactResultKind: params.assistantResultKind,
     }),
   ].join('\n');
   await fsP.appendFile(transcriptPath, `${nextLines}\n`, 'utf8');
@@ -268,9 +450,12 @@ export async function appendImageGenerationConversation(params: {
   sessionKey: string;
   prompt: string;
   outputPaths: string[];
+  outputFiles?: PersistedConversationFile[];
   inputPaths?: string[];
   summaryText?: string;
   userTimestampMs?: number;
+  assistantMessageId?: string;
+  assistantResultKind?: PersistedArtifactResultKind;
 }): Promise<void> {
   const outputPaths = params.outputPaths.map((value) => value.trim()).filter(Boolean);
   if (outputPaths.length === 0) {
@@ -280,6 +465,10 @@ export async function appendImageGenerationConversation(params: {
     sessionKey: params.sessionKey,
     prompt: params.prompt,
     assistantText: buildAssistantText(params.summaryText, outputPaths),
+    assistantMessageId: params.assistantMessageId,
+    assistantResultKind: params.assistantResultKind,
+    assistantFiles: params.outputFiles,
+    outputPaths,
     inputPaths: params.inputPaths,
     userTimestampMs: params.userTimestampMs,
   });
@@ -289,6 +478,8 @@ export async function appendCompositeArtifactConversation(params: {
   sessionKey: string;
   prompt: string;
   summaryText: string;
+  runId?: string;
+  files?: PersistedConversationFile[];
   outputPaths?: string[];
   inputPaths?: string[];
   userTimestampMs?: number;
@@ -298,6 +489,10 @@ export async function appendCompositeArtifactConversation(params: {
     sessionKey: params.sessionKey,
     prompt: params.prompt,
     assistantText: buildAssistantText(params.summaryText, outputPaths),
+    assistantMessageId: params.runId?.trim() ? `composite-result:${params.runId.trim()}` : undefined,
+    assistantResultKind: 'composite',
+    assistantFiles: params.files,
+    outputPaths,
     inputPaths: params.inputPaths,
     userTimestampMs: params.userTimestampMs,
   });

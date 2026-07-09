@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../../shared/chat-timeouts';
+import { isArtifactCapabilityQuestion } from '../../../shared/artifact-intent';
 import { PORTS } from '../../utils/config';
 import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-device-pairing';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
@@ -45,7 +46,7 @@ function buildChatSendDiagnostic(message: string, options: { media: boolean; med
   return {
     messageChars: Array.from(normalized).length,
     containsCjk: CJK_RE.test(normalized),
-    artifactIntent: ARTIFACT_INTENT_RE.test(normalized),
+    artifactIntent: ARTIFACT_INTENT_RE.test(normalized) && !isArtifactCapabilityQuestion(normalized),
     media: options.media,
     mediaCount: options.mediaCount ?? 0,
     deliver: options.deliver ?? false,

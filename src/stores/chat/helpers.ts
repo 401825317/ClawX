@@ -1435,12 +1435,30 @@ function messageHasToolUse(msg: { role?: unknown; content?: unknown; tool_calls?
 }
 
 /** True for internal plumbing messages that should never be shown in the UI. */
-function isInternalMessage(msg: { role?: unknown; content?: unknown; text?: unknown }): boolean {
+function isInternalMessage(msg: {
+  role?: unknown;
+  content?: unknown;
+  text?: unknown;
+  model?: unknown;
+  idempotencyKey?: unknown;
+  syntheticLocalArtifactConversation?: unknown;
+}): boolean {
   if (msg.role === 'system') return true;
+  if (msg.role === 'user' && msg.syntheticLocalArtifactConversation === true) return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
     if (isInternalAssistantReplyText(text)) return true;
     if (isGeneratingStatusNarration(text)) return true;
+    const idempotencyKey = typeof msg.idempotencyKey === 'string' ? msg.idempotencyKey : '';
+    const isGatewayInjectedFallback = msg.model === 'gateway-injected'
+      && idempotencyKey.endsWith(':assistant-media');
+    if (isGatewayInjectedFallback) {
+      const hasImageUrlBlock = Array.isArray(msg.content)
+        && (msg.content as ContentBlock[]).some(
+          (block) => block.type === 'image' && typeof block.url === 'string' && !!block.url,
+        );
+      if (!hasImageUrlBlock) return true;
+    }
     if (!text.trim() && Array.isArray(msg.content)) {
       const blocks = msg.content as ContentBlock[];
       const hasThinking = blocks.some((block) => block.type === 'thinking' && block.thinking?.trim());

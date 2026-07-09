@@ -141,11 +141,54 @@ describe('uclaw-local-artifacts plugin', () => {
     const html = await toolByName(tools, 'create_html_app_file').execute('html', {
       filename: 'ClawX小程序.html',
       title: 'ClawX 小程序',
-      html: '<!doctype html><html><body><h1>ClawX 小程序</h1></body></html>',
+      html: '<!doctype html><html><head><meta charset="utf-8"><title>ClawX 小程序</title><style>body{font-family:sans-serif}.panel{display:grid;gap:12px}</style></head><body><main class="panel"><h1>ClawX 小程序</h1><form id="form"><input id="input" placeholder="输入内容"><button type="submit">添加</button></form><ul id="list"></ul></main><script>const form=document.getElementById("form");const input=document.getElementById("input");const list=document.getElementById("list");form.onsubmit=(event)=>{event.preventDefault();const li=document.createElement("li");li.textContent=input.value||"ClawX 示例";list.appendChild(li);input.value=""};</script></body></html>',
     }, undefined, undefined, { cwd });
     const htmlPath = String(html.details?.filePath);
     expect(basename(htmlPath)).toContain('UClaw');
     expect(readFileSync(htmlPath, 'utf8')).not.toMatch(/clawx/iu);
+  });
+
+  it('composes structured HTML parts when a shell document is provided', async () => {
+    const plugin = await loadPlugin();
+    const tools = plugin.__test.createTools() as Array<{ name: string }>;
+    const cwd = mkdtempSync(join(tmpdir(), 'uclaw-local-artifacts-html-parts-'));
+
+    const result = await toolByName(tools, 'create_html_app_file').execute('html', {
+      title: '活动报名页面',
+      html: '<!doctype html><html><head><title>空壳</title></head><body></body></html>',
+      body: '<main><form id="signupForm"><input id="nameInput"><button type="submit">提交报名</button></form><p id="success" hidden>报名成功</p></main>',
+      css: '.success-state{display:grid}',
+      js: 'document.getElementById("signupForm").onsubmit = (event) => { event.preventDefault(); document.getElementById("success").hidden = false; };',
+    }, undefined, undefined, { cwd });
+
+    expect(result.details?.ok).toBe(true);
+    const htmlPath = String(result.details?.filePath);
+    const html = readFileSync(htmlPath, 'utf8');
+    expect(html).toContain('id="signupForm"');
+    expect(html).toContain('[hidden]{display:none!important}');
+    expect(html).toContain('.success-state{display:grid}');
+    expect(html).toContain('onsubmit');
+    expect(html).not.toContain('<body></body>');
+  });
+
+  it('does not report success for empty shell HTML app output', async () => {
+    const plugin = await loadPlugin();
+    const tools = plugin.__test.createTools() as Array<{ name: string }>;
+    const cwd = mkdtempSync(join(tmpdir(), 'uclaw-local-artifacts-empty-html-'));
+
+    const result = await toolByName(tools, 'create_html_app_file').execute('html', {
+      title: '空壳页面',
+      html: '<!doctype html><html><head><title>空壳页面</title></head><body></body></html>',
+    }, undefined, undefined, { cwd });
+
+    expect(result.details?.ok).toBe(false);
+    expect(result.details?.status).toBe('error');
+    expect(result.details?.verification).toEqual(expect.objectContaining({
+      status: 'blocked',
+      kind: 'artifact.content',
+      severity: 'blocking',
+    }));
+    expect(result.content[0].text).toContain('HTML 产物 body 为空');
   });
 
   it('falls back to the OpenClaw workspace when tool context has no cwd', async () => {

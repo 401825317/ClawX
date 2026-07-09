@@ -85,6 +85,46 @@ describe('planMediaIntent', () => {
     }));
   });
 
+  it('does not route a single PPT artifact request through the composite fast path', async () => {
+    proxyAwareFetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: 'chat',
+                intent_kind: 'current_non_media_task',
+                current_turn_media_request: false,
+                confidence: 0.92,
+                selected_image_source: 'none',
+                prompt: '做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划',
+                reason: '这是单个 PPT 文件产物请求，应交给默认聊天 agent 使用文件工具执行，不是多产物组合任务。',
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划',
+      requestedMode: 'chat',
+    });
+
+    expect(proxyAwareFetchMock).toHaveBeenCalledTimes(1);
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'planner',
+      intentKind: 'current_non_media_task',
+      currentTurnMediaRequest: false,
+      selectedImageSource: 'none',
+      reason: '这是单个 PPT 文件产物请求，应交给默认聊天 agent 使用文件工具执行，不是多产物组合任务。',
+    }));
+    expect(plan.compositeTasks).toBeUndefined();
+  });
+
   it('keeps image-edit in a composite sample pack even without an input image', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
@@ -141,6 +181,37 @@ describe('planMediaIntent', () => {
       fallback: expect.stringContaining('本轮前序图片生成子任务'),
     }));
     expect(plan.compositeTasks?.[4].sourceImages).toBeUndefined();
+  });
+
+  it('chains composite image generation, image edit, and image-to-video dependencies in order', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '生成一张图，然后把这张图改成赛博朋克风，再基于改后的图生成 15 秒视频',
+      requestedMode: 'chat',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      reason: 'composite_intent_local',
+    }));
+    expect(plan.compositeTasks?.map((task) => task.kind)).toEqual([
+      'image_generate',
+      'image_edit',
+      'video_generate',
+    ]);
+    expect(plan.compositeTasks?.[1]).toEqual(expect.objectContaining({
+      kind: 'image_edit',
+      dependsOn: ['task-1-image_generate'],
+    }));
+    expect(plan.compositeTasks?.[2]).toEqual(expect.objectContaining({
+      kind: 'video_generate',
+      dependsOn: ['task-2-image_edit'],
+      fallback: expect.stringContaining('前序图片生成或修图子任务'),
+    }));
   });
 
   it('keeps composite sample packs from being swallowed by an image/video mode hint', async () => {
@@ -331,6 +402,81 @@ describe('planMediaIntent', () => {
       selectedImageSource: 'none',
     }));
     expect(isCurrentTurnMediaSideEffectAuthorized(plan)).toBe(false);
+  });
+
+  it.each([
+    {
+      prompt: '先别生成图片，帮我写 3 条适合生图的提示词',
+      requestedMode: 'chat' as const,
+      reason: 'local_non_media_media_reference_instruction',
+      intentKind: 'current_non_media_task',
+    },
+    {
+      prompt: '解释一下图片模式和普通聊天有什么区别',
+      requestedMode: 'image' as const,
+      reason: 'local_non_media_media_meta_question',
+      intentKind: 'current_non_media_task',
+    },
+    {
+      prompt: '我现在不生成视频，只想知道默认视频参数是什么',
+      requestedMode: 'video' as const,
+      reason: 'local_non_media_media_meta_question',
+      intentKind: 'current_non_media_task',
+    },
+    {
+      prompt: '以后我说做海报时，默认先找参考图，但这次别生成',
+      requestedMode: 'chat' as const,
+      reason: 'local_non_media_media_reference_instruction',
+      intentKind: 'preference_or_memory_update',
+    },
+    {
+      prompt: '图片模式里帮我写一段朋友圈文案',
+      requestedMode: 'image' as const,
+      reason: 'local_non_media_text_request_in_media_mode',
+      intentKind: 'ordinary_chat',
+    },
+  ])('keeps mode-hint non-media prompt on chat: $prompt', async ({ prompt, requestedMode, reason, intentKind }) => {
+    const { planMediaIntent, isCurrentTurnMediaSideEffectAuthorized } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt,
+      requestedMode,
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      intentKind,
+      currentTurnMediaRequest: false,
+      reason,
+      selectedImageSource: 'none',
+      prompt,
+    }));
+    expect(isCurrentTurnMediaSideEffectAuthorized(plan)).toBe(false);
+  });
+
+  it('does not suppress an explicit redirected media request after a negated one', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '不要生成图片，只生成视频',
+      requestedMode: 'chat',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'video_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      reason: 'local_fast_path_video_generate',
+      selectedImageSource: 'none',
+      videoMode: 'text_to_video',
+      prompt: '不要生成图片，只生成视频',
+    }));
   });
 
   it('routes explicit image-mode edits locally to the candidate image', async () => {

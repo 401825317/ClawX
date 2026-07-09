@@ -91,13 +91,12 @@ describe('ChatMessage attachment dedupe', () => {
   it('renders persisted composite history replies as a compact artifact manifest', () => {
     const message: RawMessage = {
       role: 'assistant',
+      id: 'composite-result:run-persisted',
+      localArtifactResultKind: 'composite',
       content: [
         '好，我给你做了一套随机示例包，主题统一成“未来城市里的个人效率工作台”。',
         '',
         '下面是统一产物清单；我也做了基础验证，已生成的本地文件和媒体都可以打开或预览。',
-        '',
-        'MEDIA:/tmp/future-workbench.png',
-        'MEDIA:/tmp/AI_工作流效率提升.pptx',
       ].join('\n'),
       _attachedFiles: [
         {
@@ -126,6 +125,7 @@ describe('ChatMessage attachment dedupe', () => {
     expect(screen.getByText('future-workbench.png')).toBeInTheDocument();
     expect(screen.getByText('AI_工作流效率提升.pptx')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-image-preview-card')).not.toBeInTheDocument();
+    expect(screen.queryByText(/MEDIA:/)).not.toBeInTheDocument();
   });
 
   it('keeps attachment-only assistant replies visible even when process attachments are suppressed', () => {

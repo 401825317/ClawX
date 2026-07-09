@@ -97,10 +97,20 @@ type QuestionDirectoryItem = {
 const QUESTION_DIRECTORY_RENDER_LIMIT = 300;
 const CHILD_TRANSCRIPT_LOAD_LIMIT = 3;
 
-type Translate = (key: string, params?: Record<string, unknown> | string) => string;
+type Translate = (key: string, params?: Record<string, unknown>) => string;
 type RunCompactKind = 'composite' | 'image' | 'video' | 'artifact' | 'generic';
 
 const PROBLEM_STEP_STATUSES = new Set<TaskStep['status']>(['error', 'blocked', 'failed', 'aborted']);
+const USER_FACING_RUNTIME_TOOLS = new Set([
+  'create_docx_file',
+  'create_html_app_file',
+  'create_pptx_file',
+  'create_text_file',
+  'create_xlsx_file',
+  'image_edit',
+  'image_generate',
+  'video_generate',
+]);
 
 function getPrimaryMessageStepTexts(steps: TaskStep[]): string[] {
   return steps
@@ -120,10 +130,61 @@ function runCardHasProblem(card: UserRunCard): boolean {
   return card.steps.some((step) => PROBLEM_STEP_STATUSES.has(step.status));
 }
 
+function normalizeRunToken(value: string | undefined | null): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function taskStepLooksLikeUserFacingArtifact(step: TaskStep): boolean {
+  if (step.id.startsWith('artifact:')) return true;
+  if (step.id.startsWith('verification:') && step.parentId?.startsWith('artifact:')) return true;
+
+  const runtimeKind = normalizeRunToken(step.runtimeKind);
+  if (runtimeKind === 'composite' || runtimeKind === 'composite-task' || runtimeKind.startsWith('media.')) {
+    return true;
+  }
+
+  if (step.kind === 'tool' && USER_FACING_RUNTIME_TOOLS.has(normalizeRunToken(step.label))) {
+    return true;
+  }
+
+  return false;
+}
+
+function problemStepLooksUserFacing(step: TaskStep): boolean {
+  if (taskStepLooksLikeUserFacingArtifact(step)) return true;
+  const searchText = taskStepSearchText(step);
+  return /\b(image_generate|image_edit|video_generate|create_(?:docx|html_app|pptx|text|xlsx)_file)\b/i.test(searchText)
+    || /(artifact|media|pptx?|xlsx?|docx?|html?|video|image|产物|媒体|图片|图像|修图|视频|文档|表格|小程序)/i.test(searchText);
+}
+
+function runCardHasUserFacingActivity(card: UserRunCard, generatedFiles: GeneratedFile[]): boolean {
+  if (generatedFiles.length > 0) return true;
+  if (getCompositeCompactProgress(card.steps)) return true;
+  return card.steps.some(taskStepLooksLikeUserFacingArtifact);
+}
+
+function runCardHasUserFacingProblem(card: UserRunCard, generatedFiles: GeneratedFile[]): boolean {
+  if (!runCardHasProblem(card)) return false;
+  if (runCardHasUserFacingActivity(card, generatedFiles)) return true;
+  return card.steps.some((step) =>
+    PROBLEM_STEP_STATUSES.has(step.status) && problemStepLooksUserFacing(step),
+  );
+}
+
 function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
   const problemStep = card.steps.find((step) => PROBLEM_STEP_STATUSES.has(step.status));
   if (problemStep) return problemStep.status;
   return card.active ? 'running' : 'completed';
+}
+
+function isCompositeResultReplyMessage(message: RawMessage): boolean {
+  if (message.role !== 'assistant') return false;
+  if (message.localArtifactResultKind === 'composite') return true;
+  if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
+  const text = extractText(message);
+  return (message._attachedFiles?.length ?? 0) > 0
+    && /随机示例包/.test(text)
+    && /(?:统一)?产物清单/.test(text);
 }
 
 function taskStepSearchText(step: TaskStep): string {
@@ -1454,11 +1515,15 @@ export function Chat() {
                             : `${currentSessionKey}:trigger-${card.triggerIndex}`;
                           const userOverride = graphExpandedOverrides[runKey];
                           const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
+                          const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd);
+                          const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
                           const compactStatus = getRunCompactStatus(card);
-                          const hasProblem = runCardHasProblem(card);
+                          const hasUserFacingActivity = runCardHasUserFacingActivity(card, generatedFiles);
+                          const hasProblem = runCardHasUserFacingProblem(card, generatedFiles);
                           const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
                           const detailsEnabled = devModeUnlocked;
-                          const shouldShowRunStatus = card.active || hasProblem || generatedFiles.length > 0 || hasElapsedSummary;
+                          const shouldShowRunStatus = hasUserFacingActivity
+                            && (card.active || hasProblem || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary)));
                           if (!shouldShowRunStatus && generatedFiles.length === 0) return null;
                           // Keep the run surface compact by default. User toggles
                           // persist across history refreshes through this controlled
@@ -1483,7 +1548,7 @@ export function Chat() {
                                   }
                                 />
                               )}
-                              {generatedFiles.length > 0 && (
+                              {generatedFiles.length > 0 && !hasCompositeResultReply && (
                                 <GeneratedFilesPanel
                                   files={generatedFiles}
                                   onOpen={(file) => {

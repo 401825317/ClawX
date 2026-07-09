@@ -424,6 +424,16 @@ function taskPrompt(prompt: string, fallback: string): string {
   return prompt.trim() || fallback;
 }
 
+function isNegatedCompositeTaskPrompt(prompt: string, kind: MediaIntentCompositeTaskKind): boolean {
+  if (kind === 'image_generate') {
+    return /(?:先)?(?:别|不要|不用|无需|不想|不是要|不是让你|暂时不|现在不).{0,18}(?:生图|生成(?:一张|几张|个|些)?(?:图|图片|照片|海报|插画|头像|壁纸|主视觉)|出图|画(?:一张|个|幅|图)?|做(?:一张)?(?:海报|插画|图片|主视觉)|generate.{0,12}(?:image|picture|poster|illustration)|create.{0,12}(?:image|picture|poster|illustration)|draw|paint)/i.test(prompt);
+  }
+  if (kind === 'video_generate') {
+    return /(?:先)?(?:别|不要|不用|无需|不想|不是要|不是让你|暂时不|现在不).{0,18}(?:生视频|生成(?:一段|一个|个)?视频|做(?:一段|一个|个)?视频|视频生成|图生视频|generate.{0,12}video|create.{0,12}video)/i.test(prompt);
+  }
+  return false;
+}
+
 function buildCompositeTask(params: {
   index: number;
   kind: MediaIntentCompositeTaskKind;
@@ -488,7 +498,7 @@ function detectCompositeTasks(params: {
     {
       kind: 'image_edit',
       title: '根据图片修图',
-      pattern: /(?:根据|基于|用|把|将|给)?(?:这张|这幅|这个图|图片|照片|image|picture|photo).*(?:修图|改图|精修|调整|优化|编辑|换背景|去背景|抠图|加上|去掉|edit|retouch|modify)|(?:修图|改图|精修|edit image|image edit|retouch)/i,
+      pattern: /(?:根据|基于|用|把|将|给)?(?:这张|这幅|这个图|图片|照片|image|picture|photo).*(?:修图|改图|精修|调整|优化|编辑|改成|换成|变成|换背景|去背景|抠图|加上|去掉|edit|retouch|modify)|(?:修图|改图|精修|edit image|image edit|retouch)/i,
       needsImage: true,
       prompt: taskPrompt(prompt, '根据图片修图'),
     },
@@ -513,7 +523,7 @@ function detectCompositeTasks(params: {
     {
       kind: 'video_generate',
       title: '生成视频',
-      pattern: /(?:生视频|生成(?:一段|个)?视频|做(?:一段|个)?视频|视频生成|图生视频|动画|动起来|video generation|generate (?:a )?video|create (?:a )?video)/i,
+      pattern: /(?:生视频|生成(?:[^，,、。；;\n]{0,16})?视频|做(?:[^，,、。；;\n]{0,16})?视频|视频生成|图生视频|基于[^，,、。；;\n]{0,24}(?:图|图片|照片)[^，,、。；;\n]{0,24}(?:生成|做)[^，,、。；;\n]{0,16}视频|动画|动起来|video generation|generate (?:a )?video|create (?:a )?video)/i,
       prompt: taskPrompt(prompt, '生成视频'),
     },
     {
@@ -532,6 +542,7 @@ function detectCompositeTasks(params: {
 
   const matches = specs
     .map((spec, specIndex) => {
+      if (isNegatedCompositeTaskPrompt(prompt, spec.kind)) return null;
       const match = normalized.match(spec.pattern);
       return match
         ? { spec, specIndex, matchIndex: match.index ?? Number.MAX_SAFE_INTEGER }
@@ -572,6 +583,32 @@ function detectCompositeTasks(params: {
     }
   }
 
+  for (const [index, task] of tasks.entries()) {
+    if (task.kind !== 'video_generate' || task.sourceImages?.length) continue;
+
+    let dependency: MediaIntentCompositeTask | undefined;
+    for (let candidateIndex = index - 1; candidateIndex >= 0; candidateIndex -= 1) {
+      const candidate = tasks[candidateIndex];
+      if (candidate?.kind === 'image_edit' || candidate?.kind === 'image_generate') {
+        dependency = candidate;
+        break;
+      }
+    }
+
+    if (dependency) {
+      task.dependsOn = Array.from(new Set([...(task.dependsOn ?? []), dependency.id]));
+      task.fallback = task.fallback
+        || '没有显式输入图时，优先使用本轮前序图片生成或修图子任务的结果作为视频输入；仍不可用时按文本生成视频。';
+      continue;
+    }
+
+    if (candidateImageSelection.sourceImages?.length && promptReferencesExistingImage(prompt)) {
+      task.selectedImageSource = candidateImageSelection.selectedImageSource;
+      task.selectedImageIndex = candidateImageSelection.selectedImageIndex;
+      task.sourceImages = candidateImageSelection.sourceImages;
+    }
+  }
+
   if (tasks.length < 2) return [];
   return containsCompositeSeparator(prompt) ? tasks : [];
 }
@@ -605,8 +642,29 @@ function isVideoGenerationPrompt(prompt: string): boolean {
 function isMediaMetaQuestionPrompt(prompt: string): boolean {
   const mentionsMedia = /(?:图片|图像|照片|生图|修图|视频|媒体|image|picture|photo|video|media)/i.test(prompt);
   const mentionsConfiguration = /(?:模型|配置|参数|能力|功能|支持|入口|模式|设置|选项|默认|当前|用的|provider|model|config|setting|option|capabilit|support)/i.test(prompt);
-  const asksOrLooksUp = /(?:什么|啥|哪个|哪些|怎么|如何|为什么|是否|能不能|可不可以|查|看|当前|现在|默认|用的|what|which|how|why|support|lookup|check)/i.test(prompt);
+  const asksOrLooksUp = /(?:什么|啥|哪个|哪些|怎么|如何|为什么|区别|解释|说明|是否|能不能|可不可以|查|看|当前|现在|默认|用的|what|which|how|why|support|lookup|check|explain|difference)/i.test(prompt);
   return mentionsMedia && mentionsConfiguration && asksOrLooksUp;
+}
+
+function isNegatedMediaGenerationPrompt(prompt: string): boolean {
+  const negatesGeneration = /(?:先)?(?:别|不要|不用|无需|不想|不是要|不是让你|暂时不|现在不|no|not|without).{0,18}(?:生成|生图|出图|画|做(?:一张)?(?:海报|图片|视频)|生视频|图生视频|generate|create|draw|paint|video)/i.test(prompt);
+  const redirectsToGeneration = /(?:而是|改为|换成|只生成|只要生成|直接生成).{0,18}(?:生成|生图|出图|画|做(?:一张)?(?:海报|图片|视频)|生视频|图生视频|generate|create|draw|paint|video)?/i.test(prompt);
+  return negatesGeneration && !redirectsToGeneration;
+}
+
+function isMediaPromptDraftingPrompt(prompt: string): boolean {
+  const referencesMediaCreation = /(?:生图|生成(?:图|图片|照片|海报)|出图|画图|视频|生视频|图生视频|image|picture|poster|video)/i.test(prompt);
+  const asksForText = /(?:提示词|prompt|分镜|脚本|文案|朋友圈文案|标题|说明|解释|怎么写|写(?:一段|几个|几条)?|改写|润色|copy|caption|script)/i.test(prompt);
+  return referencesMediaCreation && asksForText;
+}
+
+function isTextOnlyRequestInMediaMode(prompt: string): boolean {
+  return /(?:文案|朋友圈|标题|脚本|提示词|prompt|解释|区别|说明|参数|怎么写|写(?:一段|几个|几条)?|copy|caption|script|explain)/i.test(prompt)
+    && !/(?:并(?:生成|生图|出图|做视频)|同时(?:生成|生图|出图|做视频)|顺便(?:生成|生图|出图|做视频))/i.test(prompt);
+}
+
+function isPreferenceOrMemoryPrompt(prompt: string): boolean {
+  return /(?:以后|下次|默认|记住|记一下|保存在记忆|偏好|以后我说|以后如果|from now on|remember|preference|default)/i.test(prompt);
 }
 
 function isPlainConversationalPrompt(prompt: string): boolean {
@@ -664,6 +722,13 @@ function localNonMediaChatPlan(params: {
   if (isMediaMetaQuestionPrompt(prompt)) {
     return localChatPlan('local_non_media_media_meta_question', prompt, 'current_non_media_task');
   }
+  if (isNegatedMediaGenerationPrompt(prompt) || isMediaPromptDraftingPrompt(prompt)) {
+    return localChatPlan(
+      'local_non_media_media_reference_instruction',
+      prompt,
+      isPreferenceOrMemoryPrompt(prompt) ? 'preference_or_memory_update' : 'current_non_media_task',
+    );
+  }
   if (isPlainConversationalPrompt(prompt)) {
     return localChatPlan('local_non_media_plain_conversation', prompt, 'ordinary_chat');
   }
@@ -680,6 +745,9 @@ function localNonMediaChatPlan(params: {
   }
   if (params.requestedMode !== 'chat' && !potentialMediaSideEffect && isGeneralQuestionPrompt(prompt)) {
     return localChatPlan('local_non_media_question_in_media_mode', prompt, 'ordinary_chat');
+  }
+  if (params.requestedMode !== 'chat' && !potentialMediaSideEffect && isTextOnlyRequestInMediaMode(prompt)) {
+    return localChatPlan('local_non_media_text_request_in_media_mode', prompt, 'ordinary_chat');
   }
 
   return null;
@@ -768,7 +836,7 @@ function localFastPathPlan(params: {
         prompt,
       };
     }
-    if (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt)) {
+    if (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt) && !isNegatedCompositeTaskPrompt(prompt, 'image_generate')) {
       return {
         action: 'image_generate',
         source: 'fallback',
@@ -858,7 +926,7 @@ function localFastPathPlan(params: {
     };
   }
 
-  if (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt)) {
+  if (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt) && !isNegatedCompositeTaskPrompt(prompt, 'image_generate')) {
     return {
       action: 'image_generate',
       source: 'fallback',

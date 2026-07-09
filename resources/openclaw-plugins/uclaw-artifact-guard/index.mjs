@@ -31,11 +31,15 @@ const mediaIntentGateBySessionKey = new Map();
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|video|html|script|zip))/iu;
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
+const ARTIFACT_CAPABILITY_TARGET_RE = /(?:文件(?:类)?产物|文件|文档|报告|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|小程序|代码文件|压缩包|zip|产物|artifact|file|document|report|presentation|slides?|spreadsheet|image|video|webpage|mini[-\s]?app)/iu;
+const ARTIFACT_CAPABILITY_QUESTION_RE = /(?:能做哪些|可以做哪些|支持哪些|支持生成哪些|能生成哪些|能创建哪些|能产出哪些|可以生成哪些|可以创建哪些|能(?:做|生成|创建|产出|导出|输出|制作)(?:什么|哪些|哪类|哪种)|可以(?:做|生成|创建|产出|导出|输出|制作)(?:什么|哪些|哪类|哪种)|支持(?:什么|哪些|哪类|哪种)|有哪些(?:能力|功能|文件|产物|类型|格式)|有什么(?:能力|功能)|能力(?:范围|列表|介绍)|(?:能|可以)做吗|能不能做|支不支持|what can you|which .{0,40} can|can you|support(?:ed)?|capabilit)/iu;
+const ARTIFACT_CREATE_COMMAND_RE = /(?:(?:帮我|给我|替我|直接).{0,20}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出)|(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|(?:create|make|generate|build|produce|export|write)\s+(?:a|an|one|some|the)\b)/iu;
 const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|不行|不对|太差|太简陋|占位|模板感|不够.{0,12}(?:高级|好看|精致|正式|苹果|产品|宣传)|重新(?:做|制作|生成|来|搞)|重做|再做|再来|换一版|改一版|美化|优化|润色|升级|高级一点|好看一点|精致一点|重新直接制作|make it better|too ugly|ugly|not good|redo|remake|regenerate|make another|improve|polish)/iu;
 const ARTIFACT_REVISION_NEGATION_RE = /(?:不要|别|不用|先别|无需|不需要|do not|don't|no need).{0,12}(?:重做|重新|修改|改|美化|优化|生成|制作|redo|remake|regenerate|improve|polish)/iu;
 const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
 const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
-const PROMISE_ONLY_RE = /(?:^(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在会)|(?:接下来|下一步|随后|稍后).{0,12}(?:我)?(?:会|将)|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish))/iu;
+const PROMISE_ONLY_RE = /(?:(?:^|[。！？!?；;\n\r]\s*)(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在|继续|直接|随后|稍后)|(?:接下来|下一步|随后|稍后|现在|马上|继续).{0,12}(?:我)?(?:会|将|来|准备|可以|马上|先|继续|直接)?|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成|校验|验证|测试|检查)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|修(?:复|掉|正|改)?|修改|调整|补(?:做|齐|上)|校验|验证|测试|检查|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish|fix|repair|validate|verify|test|continue))/iu;
+const ARTIFACT_REPAIR_PROMISE_CUE_RE = /(?:发现.{0,80}(?:问题|不对|不符合|未通过|失败|bug|错误)|实际.{0,40}(?:生成|只有|多了|少了|不符合)|(?:多了|少了|额外).{0,30}(?:页|项|个|张|条)|首屏可见|验证未通过|校验未通过|测试未通过|不符合(?:交互|预期|要求)|空页|页数不(?:对|符)|公式(?:缺失|错误)|交互(?:异常|错误)|bug|错误)/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
 const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm';
 const ARTIFACT_EVIDENCE_RE = new RegExp(`(?:MEDIA:\\s*(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+|(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|https?://[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|(?:filePath|outputPath|output_path|mediaUrl|media_url|url)["']?\\s*:\\s*["'][^"']+|(?:^|[\\s"'\`])out["']?\\s*:\\s*["'][^"']+)`, 'iu');
@@ -494,7 +498,16 @@ function buildMediaToolBlockReason(decision) {
   return '当前用户消息没有授权生成图片，已阻止 image_generate 执行。';
 }
 
+function isArtifactCapabilityQuestion(text) {
+  const value = String(text ?? '').replace(/\s+/gu, ' ').trim();
+  if (!value) return false;
+  return ARTIFACT_CAPABILITY_TARGET_RE.test(value)
+    && ARTIFACT_CAPABILITY_QUESTION_RE.test(value)
+    && !ARTIFACT_CREATE_COMMAND_RE.test(value);
+}
+
 function isArtifactRequest(text) {
+  if (isArtifactCapabilityQuestion(text)) return false;
   return ARTIFACT_REQUEST_RE.test(text) || PAGE_ARTIFACT_RE.test(text);
 }
 
@@ -1098,7 +1111,9 @@ function analyzeArtifactFinal(event) {
   const artifactRequest = isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest;
   const desktopActionRequest = isDesktopActionRequest(activeUserText);
   const artifacts = buildArtifactEvidence(eventAfterLatestUser, finalText);
+  const finalArtifacts = buildArtifactEvidence({ cwd: event?.cwd }, finalText);
   const artifactEvidence = artifacts.length > 0 || hasArtifactEvidence(eventAfterLatestUser, finalText);
+  const finalArtifactEvidence = finalArtifacts.length > 0 || hasArtifactEvidence({ cwd: event?.cwd }, finalText);
   const desktopActionEvidence = hasDesktopActionEvidence(event, finalText);
   const requiredEffects = deriveRequiredEffects({
     activeUserText,
@@ -1120,6 +1135,8 @@ function analyzeArtifactFinal(event) {
   const missingDesktopActionEffects = missingRequiredEffects.filter((result) => result.effect.type === 'external_action');
   const verificationPassed = artifacts.some(({ verification }) => verification.status === 'passed');
   const verificationBlocked = artifacts.some(({ verification }) => verification.status === 'blocked' || verification.status === 'failed');
+  const finalVerificationPassed = finalArtifacts.some(({ verification }) => verification.status === 'passed');
+  const finalVerificationBlocked = finalArtifacts.some(({ verification }) => verification.status === 'blocked' || verification.status === 'failed');
   const passedArtifactCount = artifacts.filter(({ verification }) => verification.status === 'passed').length;
   const requiredArtifactCount = requiredEffects
     .filter((effect) => effect.type === 'create_artifact' || effect.type === 'create_artifact_revision')
@@ -1127,12 +1144,26 @@ function analyzeArtifactFinal(event) {
   const missingRequiredArtifactCount = missingArtifactEffects.length;
   const explicitBlocker = isExplicitBlocker(finalText);
   const promiseOnly = PROMISE_ONLY_RE.test(finalText);
+  const artifactRepairPromise = artifactRequest && promiseOnly && ARTIFACT_REPAIR_PROMISE_CUE_RE.test(finalText);
+  const unfinishedArtifactPromise = Boolean(
+    artifactRequest
+    && promiseOnly
+    && (!finalVerificationPassed || artifactRepairPromise),
+  );
+  const unresolvedFinalVerificationBlock = Boolean(
+    artifactRequest
+    && finalVerificationBlocked
+    && !finalVerificationPassed,
+  );
   const shouldReviseArtifact = Boolean(
     userText.trim()
-    && finalText.trim()
     && artifactRequest
     && !explicitBlocker
-    && missingArtifactEffects.length > 0,
+    && (
+      missingArtifactEffects.length > 0
+      || unfinishedArtifactPromise
+      || unresolvedFinalVerificationBlock
+    ),
   );
   const shouldReviseDesktopAction = Boolean(
     userText.trim()
@@ -1170,12 +1201,19 @@ function analyzeArtifactFinal(event) {
     passedArtifactCount,
     missingRequiredArtifactCount,
     artifacts,
+    finalArtifacts,
     artifactEvidence,
+    finalArtifactEvidence,
     desktopActionEvidence,
     verificationPassed,
     verificationBlocked,
+    finalVerificationPassed,
+    finalVerificationBlocked,
     explicitBlocker,
     promiseOnly,
+    artifactRepairPromise,
+    unfinishedArtifactPromise,
+    unresolvedFinalVerificationBlock,
     shouldReviseHeartbeat,
     shouldReviseArtifact,
     shouldReviseDesktopAction,
@@ -1598,11 +1636,18 @@ function registerArtifactGuard(api) {
         passedArtifactCount: analysis.passedArtifactCount,
         missingRequiredArtifactCount: analysis.missingRequiredArtifactCount,
         artifactEvidence: analysis.artifactEvidence,
+        finalArtifactEvidence: analysis.finalArtifactEvidence,
         artifactCount: analysis.artifacts.length,
+        finalArtifactCount: analysis.finalArtifacts.length,
         verificationPassed: analysis.verificationPassed,
         verificationBlocked: analysis.verificationBlocked,
+        finalVerificationPassed: analysis.finalVerificationPassed,
+        finalVerificationBlocked: analysis.finalVerificationBlocked,
         explicitBlocker: analysis.explicitBlocker,
         promiseOnly: analysis.promiseOnly,
+        artifactRepairPromise: analysis.artifactRepairPromise,
+        unfinishedArtifactPromise: analysis.unfinishedArtifactPromise,
+        unresolvedFinalVerificationBlock: analysis.unresolvedFinalVerificationBlock,
         desktopActionRequest: analysis.desktopActionRequest,
         desktopActionEvidence: analysis.desktopActionEvidence,
         shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
@@ -1621,7 +1666,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.0',
+  version: '0.1.2',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -1630,6 +1675,8 @@ export default {
 export const __test = {
   shouldReviseArtifactFinal,
   analyzeArtifactFinal,
+  isArtifactCapabilityQuestion,
+  isArtifactRequest,
   deriveRequiredEffects,
   evaluateRequiredEffects,
   buildRevision,

@@ -39,6 +39,10 @@ vi.mock('@/lib/host-api', () => ({
 }));
 
 vi.mock('react-i18next', () => ({
+  initReactI18next: {
+    type: '3rdParty',
+    init: () => undefined,
+  },
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown> | string) => {
       if (typeof params === 'string') return params;
@@ -997,6 +1001,62 @@ describe('Chat execution graph lifecycle', () => {
 
     expect(await screen.findByText(/7 tasks completed/)).toBeInTheDocument();
     expect(screen.queryByText(/12 tasks completed/)).not.toBeInTheDocument();
+  });
+
+  it('uses the composite reply bubble as the only completed delivery surface', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          id: 'turn-composite-finished',
+          timestamp: 1773282731,
+          content: '生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个',
+        },
+        {
+          role: 'assistant',
+          id: 'composite-result:run-finished',
+          timestamp: 1773282799,
+          content: [
+            '好，我给你做了一套随机示例包。',
+            '',
+            '已完成 2 项：',
+            '- 生成图片',
+            '- 制作 PPT',
+            '',
+            '下面是统一产物清单。',
+            '',
+            'MEDIA:/tmp/uclaw-image.png',
+            'MEDIA:/tmp/uclaw-presentation.pptx',
+          ].join('\n'),
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    expect(screen.queryByTestId('chat-execution-graph')).not.toBeInTheDocument();
+    expect(screen.getByText(/好，我给你做了一套随机示例包/)).toBeInTheDocument();
   });
 
   it('shows a scroll-to-latest button when the chat is scrolled away from the bottom', async () => {

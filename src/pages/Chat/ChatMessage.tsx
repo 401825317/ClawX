@@ -69,6 +69,7 @@ function attachmentOpenTarget(file: AttachedFileMeta): string | undefined {
 
 function isCompositeResultMessage(message: RawMessage): boolean {
   if (message.role !== 'assistant') return false;
+  if (message.localArtifactResultKind === 'composite') return true;
   if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
   const text = extractText(message);
   return (message._attachedFiles?.length ?? 0) > 0

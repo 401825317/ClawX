@@ -81,6 +81,45 @@ function messageMatchKey(message: RawMessage): string {
   return `rt:${message.role}|${message.timestamp ?? ''}`;
 }
 
+function cloneAttachedFilesFromTranscript(message: RawMessage): RawMessage['_attachedFiles'] | undefined {
+  return message._attachedFiles?.map((file) => ({ ...file }));
+}
+
+function mergeTranscriptMetadata(
+  gatewayMessage: RawMessage,
+  transcriptMessage: RawMessage,
+): RawMessage {
+  let changed = false;
+  const next: RawMessage = { ...gatewayMessage };
+
+  if (!next.id && transcriptMessage.id) {
+    next.id = transcriptMessage.id;
+    changed = true;
+  }
+  if (!next.idempotencyKey && transcriptMessage.idempotencyKey) {
+    next.idempotencyKey = transcriptMessage.idempotencyKey;
+    changed = true;
+  }
+  if (!next.model && transcriptMessage.model) {
+    next.model = transcriptMessage.model;
+    changed = true;
+  }
+  if (next.syntheticLocalArtifactConversation !== true && transcriptMessage.syntheticLocalArtifactConversation === true) {
+    next.syntheticLocalArtifactConversation = true;
+    changed = true;
+  }
+  if (!next.localArtifactResultKind && transcriptMessage.localArtifactResultKind) {
+    next.localArtifactResultKind = transcriptMessage.localArtifactResultKind;
+    changed = true;
+  }
+  if ((next._attachedFiles?.length ?? 0) === 0 && (transcriptMessage._attachedFiles?.length ?? 0) > 0) {
+    next._attachedFiles = cloneAttachedFilesFromTranscript(transcriptMessage);
+    changed = true;
+  }
+
+  return changed ? next : gatewayMessage;
+}
+
 function buildTranscriptLookup(transcriptMessages: RawMessage[]): Map<string, RawMessage> {
   const lookup = new Map<string, RawMessage>();
   for (const message of transcriptMessages) {
@@ -102,13 +141,15 @@ export function mergeGatewayHistoryWithTranscript(
   }
 
   const lookup = buildTranscriptLookup(transcriptMessages);
-  return gatewayMessages.map((message, index) => {
-    const transcriptMatch = lookup.get(messageMatchKey(message))
-      ?? transcriptMessages[index];
+  return gatewayMessages.map((message) => {
+    const transcriptMatch = lookup.get(messageMatchKey(message));
     if (!transcriptMatch) return message;
 
     const nextContent = replaceTruncatedContent(message.content, transcriptMatch.content);
-    if (nextContent === message.content) return message;
-    return { ...message, content: nextContent };
+    const mergedMetadata = mergeTranscriptMetadata(message, transcriptMatch);
+    if (nextContent === message.content && mergedMetadata === message) return message;
+    return nextContent === message.content
+      ? mergedMetadata
+      : { ...mergedMetadata, content: nextContent };
   });
 }

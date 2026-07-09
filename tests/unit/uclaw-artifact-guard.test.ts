@@ -278,6 +278,36 @@ describe('uclaw-artifact-guard', () => {
     });
   });
 
+  it('treats artifact capability questions as chat instead of artifact delivery requests', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const capabilityPrompts = [
+      '你现在能做哪些文件类产物？',
+      '普通聊天：你现在能做哪些文件类产物？',
+      'PPT/Excel/小程序你能做吗？',
+      '你支持生成哪些文件？',
+    ];
+
+    for (const prompt of capabilityPrompts) {
+      const event = {
+        runId: `run-artifact-capability-${capabilityPrompts.indexOf(prompt)}`,
+        messages: [
+          { role: 'user', content: prompt },
+          { role: 'assistant', content: '我可以做 PPT、Excel、Word/PDF 文档、网页/小程序、图片、视频和文案等文件类产物。' },
+        ],
+      };
+
+      expect(pluginModule.__test.isArtifactCapabilityQuestion(prompt)).toBe(true);
+      expect(pluginModule.__test.isArtifactRequest(prompt)).toBe(false);
+      expect(finalizeHook(event)).toBeUndefined();
+      expect(pluginModule.__test.analyzeArtifactFinal(event)).toMatchObject({
+        artifactRequest: false,
+        requiredEffects: [],
+        shouldRevise: false,
+      });
+    }
+  });
+
   it('classifies promise-only artifact replies as revision candidates', async () => {
     const pluginModule = await loadGuard();
 
@@ -493,6 +523,85 @@ describe('uclaw-artifact-guard', () => {
       ]);
       expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).toContain(newPpt);
       expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).not.toContain(oldPpt);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries D01-style repair promises even when an earlier artifact exists', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-d01-promise-only-'));
+    const deckPath = join(tempDir, 'AI-workflow-team-efficiency.pptx');
+    writeFileSync(deckPath, 'pptx');
+
+    try {
+      const event = {
+        runId: 'run-d01-promise-only',
+        messages: [
+          { role: 'user', content: '做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划' },
+          { role: 'assistant', content: `已生成初版。\n\nMEDIA:${deckPath}` },
+          { role: 'assistant', content: `刚才工具自动额外加了一页封面，实际生成了 9 页。\n\nMEDIA:${deckPath}\n\n我直接重做一个严格 8 页版本并重新校验。` },
+        ],
+      };
+
+      const result = finalizeHook(event) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+      expect(result?.action).toBe('revise');
+      expect(result?.reason).toContain('artifact delivery');
+
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+      expect(analysis).toMatchObject({
+        artifactRequest: true,
+        artifactEvidence: true,
+        verificationPassed: true,
+        finalArtifactEvidence: true,
+        finalVerificationPassed: true,
+        promiseOnly: true,
+        artifactRepairPromise: true,
+        unfinishedArtifactPromise: true,
+        shouldRevise: true,
+      });
+      expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).toContain(deckPath);
+      expect(analysis.finalArtifacts.map(({ artifact }) => artifact.filePath)).toContain(deckPath);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries F03-style validator repair promises after a web artifact bug is detected', async () => {
+    const pluginModule = await loadGuard();
+    const finalizeHook = registerFinalizeHook(pluginModule);
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-f03-validator-promise-'));
+    const htmlPath = join(tempDir, 'activity-signup.html');
+    writeFileSync(htmlPath, '<!doctype html><html><body><section class="success-state">报名成功</section></body></html>');
+
+    try {
+      const event = {
+        runId: 'run-f03-validator-promise',
+        messages: [
+          { role: 'user', content: '做一个活动报名页面，包含表单校验和报名成功状态，单文件 HTML，必须保存成真实本地文件，做完后自己检查主要交互。' },
+          { role: 'assistant', content: `已生成并开始自测。\n\nMEDIA:${htmlPath}` },
+          { role: 'assistant', content: '浏览器校验发现报名成功状态首屏可见，不符合交互预期。我先修掉再继续测。' },
+        ],
+      };
+
+      const result = finalizeHook(event) as { action?: string; retry?: { instruction?: string }; reason?: string } | undefined;
+      expect(result?.action).toBe('revise');
+      expect(result?.reason).toContain('artifact delivery');
+
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+      expect(analysis).toMatchObject({
+        artifactRequest: true,
+        artifactEvidence: true,
+        verificationPassed: true,
+        finalArtifactEvidence: false,
+        finalVerificationPassed: false,
+        promiseOnly: true,
+        unfinishedArtifactPromise: true,
+        shouldRevise: true,
+      });
+      expect(analysis.artifacts.map(({ artifact }) => artifact.filePath)).toContain(htmlPath);
+      expect(analysis.finalArtifacts).toEqual([]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
