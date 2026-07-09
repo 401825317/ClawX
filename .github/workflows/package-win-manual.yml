@@ -7,6 +7,14 @@ on:
         description: 'Git ref to build (branch, tag, or SHA). Leave empty for current default ref.'
         required: false
         default: ''
+      package_type:
+        description: 'Windows package type'
+        required: true
+        default: 'usb_zip'
+        type: choice
+        options:
+          - usb_zip
+          - installer
 
 permissions:
   contents: read
@@ -51,18 +59,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Download uv binaries for Windows
-        run: pnpm run uv:download:win
+      - name: Read app version
+        shell: bash
+        run: echo "APP_VERSION=$(node -p \"require('./package.json').version\")" >> "$GITHUB_ENV"
 
-      - name: Download agent-browser binaries for Windows
-        run: pnpm run agent-browser:download:win
+      - name: Build Windows USB ZIP
+        if: ${{ inputs.package_type == 'usb_zip' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm run package:win:usb
 
-      - name: Build Windows package (no publish)
+      - name: Build Windows installer
+        if: ${{ inputs.package_type == 'installer' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm run package:win
 
+      - name: Upload Windows USB ZIP
+        if: ${{ inputs.package_type == 'usb_zip' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: UClaw-${{ env.APP_VERSION }}-win-x64-usb
+          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload Windows Installer (x64)
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-x64
@@ -71,6 +94,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows Installer (arm64)
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-arm64
@@ -79,6 +103,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows Blockmap Files
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-blockmap
@@ -87,6 +112,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows Update Manifests
+        if: ${{ inputs.package_type == 'installer' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-update-manifests
