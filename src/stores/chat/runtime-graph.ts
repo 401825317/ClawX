@@ -283,15 +283,32 @@ function collectRuntimeResultTexts(result: unknown): string[] {
   return texts;
 }
 
+function isTranscriptCompactionResult(value: unknown, depth = 0): boolean {
+  if (depth > 3) return false;
+  const record = asRecord(value);
+  if (!record) return false;
+  if (record.summarizedForModel === true || record.summaryKind === 'tool_result_transcript_compaction') {
+    return true;
+  }
+  return ['details', 'meta', 'result'].some((key) => isTranscriptCompactionResult(record[key], depth + 1));
+}
+
+const RAW_PATH_PRODUCER_TOOLS = /(?:write|create|edit|patch|save|export|generate|image|video|artifact|presentation|spreadsheet|document|ppt|excel|word|pdf)/iu;
+const EXPLICIT_OUTPUT_CUE_RE = /(?:已(?:生成|创建|导出|保存|写入|制作)|产物(?:路径|文件)?|输出(?:到|文件|路径)|保存(?:到|为)|写入(?:到)?|(?:saved|wrote|written|created|generated|exported)\b)/iu;
+
 export function extractToolCompletedFiles(event: ChatRuntimeEvent): AttachedFileMeta[] {
   if (event.type !== 'tool.completed') return [];
+  if (isTranscriptCompactionResult(event.result) || isTranscriptCompactionResult(event.meta)) return [];
 
   const files: AttachedFileMeta[] = extractImagesAsAttachedFiles(event.result)
     .filter((file) => !file.mimeType.startsWith('image/'))
     .map((file) => (file.source ? file : { ...file, source: 'tool-result' as const }));
 
   const seenPaths = new Set(files.map((file) => file.filePath).filter(Boolean));
-  for (const text of collectRuntimeResultTexts(event.result)) {
+  const resultTexts = collectRuntimeResultTexts(event.result);
+  const allowRawPaths = RAW_PATH_PRODUCER_TOOLS.test(event.name)
+    || resultTexts.some((text) => EXPLICIT_OUTPUT_CUE_RE.test(text));
+  for (const text of resultTexts) {
     const mediaRefs = extractMediaRefs(text);
     const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
     for (const ref of mediaRefs) {
@@ -300,6 +317,7 @@ export function extractToolCompletedFiles(event: ChatRuntimeEvent): AttachedFile
       seenPaths.add(ref.filePath);
       files.push(file);
     }
+    if (!allowRawPaths) continue;
     for (const ref of extractRawFilePaths(text)) {
       if (ref.mimeType.startsWith('image/')) continue;
       if (mediaRefPaths.has(ref.filePath) || seenPaths.has(ref.filePath)) continue;

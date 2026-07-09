@@ -88,6 +88,13 @@ function buildGatewayEventDedupeKey(event: Record<string, unknown>): string | nu
   const sessionKey = event.sessionKey != null ? String(event.sessionKey) : '';
   const seq = event.seq != null ? String(event.seq) : '';
   const state = event.state != null ? String(event.state) : '';
+  if (state === 'final' && !seq) {
+    const message = event.message && typeof event.message === 'object'
+      ? event.message as Record<string, unknown>
+      : null;
+    const messageId = message?.id != null ? String(message.id) : '';
+    return ['final-nosq', runId, sessionKey, messageId || stableGatewayEventFingerprint(message ?? event)].join('|');
+  }
   if (state === 'delta' && !seq) {
     return ['delta-nosq', runId, sessionKey, stableGatewayEventFingerprint(event.message ?? event)].join('|');
   }
@@ -183,18 +190,19 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
   }
 
   import('./chat')
-    .then(({ useChatStore, syncCachedSessionRunIdle }) => {
+    .then(({ useChatStore }) => {
       const state = useChatStore.getState();
       state.handleRuntimeEvent(event);
+      const nextState = useChatStore.getState();
 
       const shouldRefreshSessions = resolvedSessionKey != null && (
-        resolvedSessionKey !== state.currentSessionKey
-        || !state.sessions.some((session) => session.key === resolvedSessionKey)
+        resolvedSessionKey !== nextState.currentSessionKey
+        || !nextState.sessions.some((session) => session.key === resolvedSessionKey)
       );
 
       if (event.type === 'run.started') {
         if (shouldRefreshSessions) {
-          maybeLoadSessions(state, true);
+          maybeLoadSessions(nextState, true);
         }
         return;
       }
@@ -204,16 +212,13 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
       }
 
       if (shouldRefreshSessions) {
-        maybeLoadSessions(state, true);
+        maybeLoadSessions(nextState, true);
       }
 
-      const matchesCurrentSession = resolvedSessionKey != null && resolvedSessionKey === state.currentSessionKey;
-      const matchesActiveRun = state.activeRunId != null && event.runId === state.activeRunId;
+      const matchesCurrentSession = resolvedSessionKey != null && resolvedSessionKey === nextState.currentSessionKey;
+      const matchesActiveRun = nextState.activeRunId != null && event.runId === nextState.activeRunId;
       if (matchesCurrentSession || matchesActiveRun) {
-        maybeLoadHistory(state, true);
-      }
-      if (resolvedSessionKey && !matchesCurrentSession) {
-        syncCachedSessionRunIdle(resolvedSessionKey);
+        maybeLoadHistory(nextState, true);
       }
     })
     .catch(() => {});
@@ -225,17 +230,27 @@ function handleGatewayChatMessage(data: unknown): void {
     const payload = ('message' in chatData && typeof chatData.message === 'object')
       ? chatData.message as Record<string, unknown>
       : chatData;
+    const normalizedPayload = {
+      ...payload,
+      ...(payload.sessionKey == null && chatData.sessionKey != null
+        ? { sessionKey: chatData.sessionKey }
+        : {}),
+      ...(payload.runId == null && chatData.runId != null
+        ? { runId: chatData.runId }
+        : {}),
+    };
 
-    if (payload.state) {
-      if (!shouldProcessGatewayEvent(payload)) return;
-      useChatStore.getState().handleChatEvent(payload);
+    if (normalizedPayload.state) {
+      if (!shouldProcessGatewayEvent(normalizedPayload)) return;
+      useChatStore.getState().handleChatEvent(normalizedPayload);
       return;
     }
 
     const normalized = {
       state: 'final',
-      message: payload,
-      runId: chatData.runId ?? payload.runId,
+      message: normalizedPayload,
+      runId: normalizedPayload.runId,
+      sessionKey: normalizedPayload.sessionKey,
     };
     if (!shouldProcessGatewayEvent(normalized)) return;
     useChatStore.getState().handleChatEvent(normalized);

@@ -28,8 +28,43 @@
         "openFolder": "打开文件夹",
         "viewAll": "查看文件变更"
     },
+    "artifactManifest": {
+        "title": "产物清单",
+        "count": "{{count}} 个",
+        "completed": "已完成",
+        "failed": "失败",
+        "blocked": "待补充",
+        "noArtifact": "未生成产物",
+        "playable": "可播放",
+        "generated": "已生成",
+        "videoLink": "视频链接",
+        "types": { "image": "图片", "video": "视频", "presentation": "PPT", "spreadsheet": "Excel", "miniProgram": "小程序", "copywriting": "文案", "file": "文件" }
+    },
+    "runtimeProgress": {
+        "executing": "正在执行",
+        "failed": "执行失败",
+        "visited": "已访问相关页面",
+        "read": "已读取相关内容",
+        "edited": "已修改相关内容",
+        "ran": "已运行"
+    },
+    "runtimeDelivery": {
+        "compositeStart": "我先把这组需求拆开，能并行的同时处理，有依赖的按顺序完成。",
+        "taskRunning": "正在{{task}}",
+        "taskCompleted": "{{task}}已完成",
+        "taskFailed": "{{task}}未完成",
+        "compositeSummary": "已完成 {{completedCount}}/{{totalCount}} 项，产物已整理如下。",
+        "incompleteHeading": "未完成：",
+        "missingInputOrFailed": "缺少可用输入或执行失败。",
+        "verificationComplete": "基础验证已完成：本地文件已检查内容和可用性，媒体产物已检查文件或元数据证据。",
+        "historySyncFailed": "产物已生成，但会话历史同步失败；当前结果仍可使用。",
+        "historySyncFailedDetail": "产物已生成，但会话历史同步失败。请先保留当前结果，再重试同步。"
+    },
     "runError": {
-        "title": "模型调用失败"
+        "title": "模型调用失败",
+        "retry": "重试本轮",
+        "emptyFinal": "任务已经结束，但模型没有交付可见结果。请重试本轮。",
+        "retryUnavailable": "找不到可重试的原始指令，请重新发送。"
     },
     "artifactPanel": {
         "tabs": {
@@ -227,7 +262,8 @@
         "folderAttachment": "文件夹",
         "skillPreviewTooltip": "预览 SKILL.md",
         "skillPreviewNotFound": "找不到该技能。请打开技能列表以刷新。",
-        "busyHint": "当前任务仍在运行。OpenClaw 已接受的消息会等待当前工作完成后继续处理。"
+        "busyHint": "当前任务仍在运行。OpenClaw 已接受的消息会等待当前工作完成后继续处理。",
+        "queueLimitReached": "当前会话已有 {{count}} 条待执行指令，请等待前序任务完成。"
     },
     "historyBuckets": {
         "today": "今天",

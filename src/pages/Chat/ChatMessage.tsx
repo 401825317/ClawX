@@ -18,8 +18,8 @@ import { cn } from '@/lib/utils';
 import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
 import { createAuthenticatedHostApiUrl } from '@/lib/host-api';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
-import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
-import { extractText, extractImages, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
+import type { RawMessage, AttachedFileMeta, CompositeArtifactManifest } from '@/stores/chat';
+import { extractText, extractImages, extractToolUse, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
 import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
 
 interface ChatMessageProps {
@@ -617,9 +617,12 @@ export const ChatMessage = memo(function ChatMessage({
         )}
 
         {/* Composite result attachments — compact Codex-style manifest. */}
-        {!isUser && isCompositeResult && attachedFiles.length > 0 && (
+        {!isUser && isCompositeResult && (
+          attachedFiles.length > 0 || (message.compositeArtifactManifest?.tasks.length ?? 0) > 0
+        ) && (
           <CompositeArtifactGrid
             files={attachedFiles}
+            manifest={message.compositeArtifactManifest}
             onOpenFile={onOpenFile}
             onPreviewImage={(file, src) => setLightboxImg({
               src,
@@ -752,16 +755,16 @@ function ToolStatusBar({
   );
 }
 
-function artifactTypeLabel(file: AttachedFileMeta): string {
+function artifactTypeLabel(file: AttachedFileMeta, t: (key: string) => string): string {
   const mime = file.mimeType.toLowerCase();
   const name = file.fileName.toLowerCase();
-  if (mime.startsWith('image/')) return '图片';
-  if (mime.startsWith('video/')) return '视频';
-  if (name.endsWith('.ppt') || name.endsWith('.pptx')) return 'PPT';
-  if (name.endsWith('.xls') || name.endsWith('.xlsx')) return 'Excel';
-  if (name.endsWith('.html') || name.endsWith('.htm')) return '小程序';
-  if (name.endsWith('.md') || name.endsWith('.markdown') || mime === 'text/markdown') return '文案';
-  return '文件';
+  if (mime.startsWith('image/')) return t('artifactManifest.types.image');
+  if (mime.startsWith('video/')) return t('artifactManifest.types.video');
+  if (name.endsWith('.ppt') || name.endsWith('.pptx')) return t('artifactManifest.types.presentation');
+  if (name.endsWith('.xls') || name.endsWith('.xlsx')) return t('artifactManifest.types.spreadsheet');
+  if (name.endsWith('.html') || name.endsWith('.htm')) return t('artifactManifest.types.miniProgram');
+  if (name.endsWith('.md') || name.endsWith('.markdown') || mime === 'text/markdown') return t('artifactManifest.types.copywriting');
+  return t('artifactManifest.types.file');
 }
 
 function openAttachment(file: AttachedFileMeta, onOpenFile?: (file: AttachedFileMeta) => void): void {
@@ -834,32 +837,111 @@ function CompactImageArtifact({
 
 function CompositeArtifactGrid({
   files,
+  manifest,
   onOpenFile,
   onPreviewImage,
 }: {
   files: AttachedFileMeta[];
+  manifest?: CompositeArtifactManifest;
   onOpenFile?: (file: AttachedFileMeta) => void;
   onPreviewImage: (file: AttachedFileMeta, src: string) => void;
 }) {
+  const { t } = useTranslation('chat');
   const visibleFiles = dedupeAttachedFiles(files).filter((file) => attachmentOpenTarget(file));
-  if (visibleFiles.length === 0) return null;
+  const manifestTasks = manifest?.tasks ?? [];
+  const referencedTargets = new Set<string>();
+  const rows: Array<{
+    id: string;
+    title: string;
+    status: 'completed' | 'failed' | 'blocked';
+    detail?: string;
+    file?: AttachedFileMeta;
+  }> = manifestTasks.flatMap((task) => {
+    const refs = new Set(task.artifactRefs.map((ref) => ref.trim()).filter(Boolean));
+    const taskFiles = visibleFiles.filter((file) => {
+      const target = attachmentOpenTarget(file);
+      const matches = Boolean(
+        (target && refs.has(target))
+        || refs.has(file.fileName)
+        || (file.filePath && refs.has(file.filePath))
+        || (file.gatewayUrl && refs.has(file.gatewayUrl)),
+      );
+      if (matches && target) referencedTargets.add(target);
+      return matches;
+    });
+    if (taskFiles.length === 0) {
+      return [{ id: task.id, title: task.title, status: task.status, detail: task.detail }];
+    }
+    return taskFiles.map((file, index) => ({
+      id: `${task.id}:${index}`,
+      title: task.title,
+      status: task.status,
+      detail: task.detail,
+      file,
+    }));
+  });
+  for (const [index, file] of visibleFiles.entries()) {
+    const target = attachmentOpenTarget(file);
+    if (target && referencedTargets.has(target)) continue;
+    rows.push({
+      id: `artifact:${index}:${target ?? file.fileName}`,
+      title: artifactTypeLabel(file, t),
+      status: 'completed',
+      file,
+    });
+  }
+  if (rows.length === 0) return null;
+  const hasProblems = rows.some((row) => row.status !== 'completed');
+  const statusLabel = (status: 'completed' | 'failed' | 'blocked') => t(`artifactManifest.${status}`);
 
   return (
-    <div className="w-full max-w-2xl rounded-xl border border-black/10 bg-black/[0.025] p-3 dark:border-white/10 dark:bg-white/[0.035]">
-      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-foreground/80">
-        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-        <span>产物清单</span>
-        <span className="text-muted-foreground">{visibleFiles.length} 个</span>
+    <div className="w-full max-w-2xl space-y-2">
+      <div className="flex items-center gap-2 text-xs font-medium text-foreground/80">
+        {hasProblems
+          ? <AlertCircle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+          : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />}
+        <span>{t('artifactManifest.title')}</span>
+        <span className="text-muted-foreground">{t('artifactManifest.count', { count: manifestTasks.length || rows.length })}</span>
       </div>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {visibleFiles.map((file, index) => {
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="list">
+        {rows.map((row) => {
+          const file = row.file;
+          if (!file) {
+            const completedWithoutFile = row.status === 'completed';
+            return (
+              <div
+                key={row.id}
+                className={cn(
+                  'flex min-w-0 items-start gap-2 rounded-lg border p-3',
+                  completedWithoutFile
+                    ? 'border-emerald-500/15 bg-emerald-500/[0.035]'
+                    : 'border-amber-500/20 bg-amber-500/[0.04]',
+                )}
+                role="listitem"
+              >
+                {completedWithoutFile
+                  ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  : <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />}
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-medium text-foreground">{row.title}</p>
+                  <p className="mt-0.5 text-2xs text-muted-foreground">
+                    {statusLabel(row.status)}
+                    {(row.detail || !completedWithoutFile) && (
+                      <> · {row.detail || t('artifactManifest.noArtifact')}</>
+                    )}
+                  </p>
+                </div>
+              </div>
+            );
+          }
           const isImage = file.mimeType.startsWith('image/');
           const isVideo = file.mimeType.startsWith('video/');
           const target = attachmentOpenTarget(file);
           return (
             <div
-              key={`${target}-${index}`}
+              key={row.id}
               className="group/artifact flex min-w-0 items-center gap-3 rounded-lg border border-black/8 bg-background/70 p-2 transition-colors hover:bg-black/[0.04] dark:border-white/10 dark:bg-white/[0.035] dark:hover:bg-white/[0.06]"
+              role="listitem"
             >
               {isImage ? (
                 <CompactImageArtifact
@@ -886,17 +968,21 @@ function CompositeArtifactGrid({
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground dark:bg-white/10">
-                    {artifactTypeLabel(file)}
+                    {artifactTypeLabel(file, t)}
                   </span>
                   {isVideo && (
                     <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground dark:bg-white/10">
-                      可播放
+                      {t('artifactManifest.playable')}
                     </span>
                   )}
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{statusLabel(row.status)}</span>
                 </div>
-                <p className="mt-1 truncate text-xs font-medium text-foreground">{file.fileName}</p>
+                <p className="mt-1 truncate text-xs font-medium text-foreground">{row.title}</p>
+                <p className="mt-0.5 truncate text-2xs text-foreground/70">{file.fileName}</p>
                 <p className="mt-0.5 truncate text-2xs text-muted-foreground">
-                  {file.fileSize > 0 ? formatFileSize(file.fileSize) : (isVideo ? '视频链接' : '已生成')}
+                  {file.fileSize > 0
+                    ? formatFileSize(file.fileSize)
+                    : (isVideo ? t('artifactManifest.videoLink') : t('artifactManifest.generated'))}
                 </p>
               </button>
             </div>

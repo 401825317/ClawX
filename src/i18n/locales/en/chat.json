@@ -28,8 +28,43 @@
         "openFolder": "Open folder",
         "viewAll": "View all changes"
     },
+    "artifactManifest": {
+        "title": "Deliverables",
+        "count": "{{count}} items",
+        "completed": "Completed",
+        "failed": "Failed",
+        "blocked": "Needs input",
+        "noArtifact": "No deliverable generated",
+        "playable": "Playable",
+        "generated": "Generated",
+        "videoLink": "Video link",
+        "types": { "image": "Image", "video": "Video", "presentation": "PPT", "spreadsheet": "Excel", "miniProgram": "Mini app", "copywriting": "Copy", "file": "File" }
+    },
+    "runtimeProgress": {
+        "executing": "Running",
+        "failed": "Execution failed",
+        "visited": "Visited page",
+        "read": "Read content",
+        "edited": "Updated content",
+        "ran": "Ran tool"
+    },
+    "runtimeDelivery": {
+        "compositeStart": "I will split this request into tasks, run independent work in parallel, and preserve required dependencies.",
+        "taskRunning": "Working on {{task}}",
+        "taskCompleted": "{{task}} completed",
+        "taskFailed": "{{task}} not completed",
+        "compositeSummary": "Completed {{completedCount}}/{{totalCount}} tasks. The deliverables are listed below.",
+        "incompleteHeading": "Not completed:",
+        "missingInputOrFailed": "Required input was unavailable or execution failed.",
+        "verificationComplete": "Basic verification is complete: local files were checked for content and availability, and media has file or metadata evidence.",
+        "historySyncFailed": "The deliverables were generated, but conversation history could not be synchronized. The current results are still usable.",
+        "historySyncFailedDetail": "The deliverables were generated, but conversation history could not be synchronized. Keep the current results and retry synchronization."
+    },
     "runError": {
-        "title": "Model call failed"
+        "title": "Model call failed",
+        "retry": "Retry this run",
+        "emptyFinal": "The task ended without a visible result. Please retry this run.",
+        "retryUnavailable": "The original request is unavailable. Please send it again."
     },
     "artifactPanel": {
         "tabs": {
@@ -227,7 +262,8 @@
         "folderAttachment": "Folder",
         "skillPreviewTooltip": "Preview SKILL.md",
         "skillPreviewNotFound": "Could not find this skill. Open the skill picker to refresh the list.",
-        "busyHint": "Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish."
+        "busyHint": "Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish.",
+        "queueLimitReached": "This conversation already has {{count}} queued instructions. Wait for the earlier tasks to finish."
     },
     "historyBuckets": {
         "today": "Today",

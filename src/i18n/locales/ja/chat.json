@@ -28,8 +28,43 @@
         "openFolder": "フォルダーを開く",
         "viewAll": "ファイル変更を見る"
     },
+    "artifactManifest": {
+        "title": "成果物一覧",
+        "count": "{{count}} 件",
+        "completed": "完了",
+        "failed": "失敗",
+        "blocked": "入力待ち",
+        "noArtifact": "成果物は生成されませんでした",
+        "playable": "再生可能",
+        "generated": "生成済み",
+        "videoLink": "動画リンク",
+        "types": { "image": "画像", "video": "動画", "presentation": "PPT", "spreadsheet": "Excel", "miniProgram": "ミニアプリ", "copywriting": "文章", "file": "ファイル" }
+    },
+    "runtimeProgress": {
+        "executing": "実行中",
+        "failed": "実行に失敗しました",
+        "visited": "ページを確認しました",
+        "read": "内容を読み取りました",
+        "edited": "内容を更新しました",
+        "ran": "ツールを実行しました"
+    },
+    "runtimeDelivery": {
+        "compositeStart": "この依頼を複数のタスクに分け、独立した作業は並列で、依存関係のある作業は順番に進めます。",
+        "taskRunning": "{{task}}を処理中",
+        "taskCompleted": "{{task}}が完了しました",
+        "taskFailed": "{{task}}は完了していません",
+        "compositeSummary": "{{totalCount}} 件中 {{completedCount}} 件が完了しました。成果物は以下の通りです。",
+        "incompleteHeading": "未完了：",
+        "missingInputOrFailed": "必要な入力がないか、実行に失敗しました。",
+        "verificationComplete": "基本検証が完了しました。ローカルファイルの内容と可用性、メディアのファイルまたはメタデータ証拠を確認しました。",
+        "historySyncFailed": "成果物は生成されましたが、会話履歴を同期できませんでした。現在の結果は引き続き利用できます。",
+        "historySyncFailedDetail": "成果物は生成されましたが、会話履歴を同期できませんでした。現在の結果を保持してから同期を再試行してください。"
+    },
     "runError": {
-        "title": "モデル呼び出しに失敗しました"
+        "title": "モデル呼び出しに失敗しました",
+        "retry": "この実行を再試行",
+        "emptyFinal": "タスクは終了しましたが、表示できる結果がありません。この実行を再試行してください。",
+        "retryUnavailable": "再試行する元の指示が見つかりません。もう一度送信してください。"
     },
     "artifactPanel": {
         "tabs": {
@@ -227,7 +262,8 @@
         "folderAttachment": "フォルダ",
         "skillPreviewTooltip": "SKILL.md をプレビュー",
         "skillPreviewNotFound": "この Skill が見つかりません。Skill ピッカーを開いて一覧を更新してください。",
-        "busyHint": "現在のタスクはまだ実行中です。OpenClaw が受け付けたメッセージは、現在の作業が完了してから処理されます。"
+        "busyHint": "現在のタスクはまだ実行中です。OpenClaw が受け付けたメッセージは、現在の作業が完了してから処理されます。",
+        "queueLimitReached": "この会話にはすでに {{count}} 件の指示が待機中です。先行タスクの完了をお待ちください。"
     },
     "historyBuckets": {
         "today": "今日",

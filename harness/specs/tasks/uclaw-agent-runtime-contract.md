@@ -6,8 +6,17 @@ taskType: runtime-bridge
 intent: Give the desktop client a durable execution-layer contract for objective, plan, step progress, produced artifacts, verification results, and recoverable checkpoints so agent work can be shown and audited as product state instead of inferred from chat text.
 touchedAreas:
   - harness/specs/tasks/uclaw-agent-runtime-contract.md
+  - electron/api/routes/media.ts
+  - electron/utils/composite-run-coordinator.ts
   - electron/utils/openclaw-auth.ts
+  - electron/utils/chat-session-image-message.ts
+  - electron/utils/local-artifact-planner.ts
+  - electron/utils/local-artifact-runtime.ts
+  - electron/utils/media-generation-jobs.ts
+  - electron/utils/media-generation-types.ts
+  - electron/utils/media-intent-planner.ts
   - shared/chat-runtime-events.ts
+  - shared/composite-run.ts
   - electron/gateway/chat-runtime-events.ts
   - electron/gateway/event-dispatch.ts
   - resources/openclaw-plugins/uclaw-artifact-guard/openclaw.plugin.json
@@ -19,11 +28,19 @@ touchedAreas:
   - scripts/patch-browser-hint.mjs
   - scripts/bundle-openclaw.mjs
   - src/pages/Chat/ChatInput.tsx
+  - src/pages/Chat/ChatMessage.tsx
+  - src/i18n/locales/en/chat.json
+  - src/i18n/locales/ja/chat.json
+  - src/i18n/locales/ru/chat.json
+  - src/i18n/locales/zh/chat.json
   - src/stores/chat/types.ts
+  - src/stores/chat/helpers.ts
   - src/stores/chat/runtime-graph.ts
   - src/stores/chat/runtime-progress.ts
   - src/stores/chat/runtime-contract.ts
+  - src/stores/chat/history-transcript-merge.ts
   - src/stores/chat.ts
+  - src/stores/gateway.ts
   - src/pages/Chat/RunProgressCard.tsx
   - src/pages/Chat/task-visualization.ts
   - tests/unit/uclaw-artifact-guard.test.ts
@@ -33,6 +50,7 @@ touchedAreas:
   - tests/unit/task-visualization.test.ts
   - tests/unit/chat-input.test.tsx
   - tests/unit/chat-target-routing.test.ts
+  - tests/unit/media-generation-jobs.test.ts
 expectedUserBehavior:
   - Agent runs can expose a structured objective and plan in the active execution graph.
   - Step progress updates replace prior state by stable identifiers instead of creating duplicate timeline noise.
@@ -43,6 +61,12 @@ expectedUserBehavior:
   - Safe diagnostics can prove the final provider request contract without recording prompts, credentials, tool schemas, or media payloads.
   - Chinese engineering and read-only prompts discover the same relevant tool families as equivalent English prompts.
   - Visible assistant deltas remain genuinely streamed with a responsive UI cadence instead of arriving in large bursts.
+  - Composite work uses task-specific prompts and creates media dependencies only when the user intent requires them.
+  - Live composite delivery and reopened history share one canonical artifact manifest and finalized runtime snapshot.
+  - Terminal state is monotonic across chat final, runtime end, async completion, and history reconciliation.
+  - User stop invalidates local planners, cancels queued/running media workers, and prevents stale UI or transcript delivery.
+  - Capability comparisons and other non-execution questions never acquire file/media side-effect authorization.
+  - Concurrent sessions cannot overwrite each other's transcript index or inject a follow-up into an already busy run.
   - Existing tool lifecycle events, assistant deltas, and legacy Gateway notifications continue to work.
 requiredProfiles:
   - fast
@@ -61,6 +85,17 @@ requiredTests:
   - pnpm run comms:replay
   - pnpm run comms:compare
 acceptance:
+  - Main owns a durable composite coordinator with idempotent create/get/list/cancel/retry APIs, atomic run snapshots, and an append-only active-run event journal.
+  - Composite DAG recovery blocks downstream tasks when a dependency fails, resumes pending local work, and never automatically duplicates an unconfirmed media generation after Main restart.
+  - Main-owned composite tasks reuse the existing local artifact planner/runtime and media queues while preserving standalone chat, image, and video routing.
+  - Composite final delivery persists one canonical manifest only after the Main-owned completion gate allows delivery, using a stable assistant message id for idempotency.
+  - Media cancellation resolves by job id, then composite run id, then session id so stopping one composite run cannot cancel unrelated standalone media work.
+  - Safe recoverable composite failures receive at most one automatic retry; exhausted or unsafe failures always produce a partial final manifest, while restart-uncertain media is never automatically resubmitted.
+  - Partial composite delivery keeps completed artifacts, marks unresolved tasks for user action, and ends the runtime with an error status instead of reporting the whole batch as completed.
+  - Partial delivery preserves explicit retry for recoverable tasks, including restart-uncertain media, without automatically resubmitting an unconfirmed generation.
+  - Composite delivery publishes completed/error run termination only after the canonical assistant transcript append succeeds; exhausted append failure emits a recoverable delivery checkpoint and never marks the run completed.
+  - Canonical transcript delivery retries transient append failures after 0.5, 1.5, and 4 seconds with the same assistant message id; only exhausted delivery becomes terminal failed and drops out of active-run reloads.
+  - Composite snapshot and journal files are private to the current OS user, active journals remain append-only, and terminal journals compact to one final snapshot before expiring after seven days.
   - Shared runtime event types include objective, plan, step, artifact, verification, and checkpoint events.
   - Main process normalizes Gateway plan/artifact/verification/checkpoint streams into the shared runtime event contract.
   - Chat runtime state aggregates the new contract events with stable upsert semantics.
@@ -77,6 +112,14 @@ acceptance:
   - Internal prompt-history sanitization blocks pure runtime messages while preserving real user text from mixed queued/restart envelopes.
   - The final guarded model fetch logs only request-shape metadata, including reasoning effort, tool count, tool choice, prompt-cache-key presence, and top-level keys.
   - Dev and packaged OpenClaw runtimes apply the CJK tool-directory and streaming cadence patches idempotently.
+  - Composite results persist structured task, artifact, verification, gate, and progress state instead of reconstructing success from localized summary text.
+  - Composite routing requires explicit execution intent, while single and multi-artifact execution requests use the same planner and verification contract.
+  - Async completion evidence can resolve accepted tasks by task id, child session key, or child session id without treating generic continuations as completion.
+  - Local media availability passes only after Main verifies a readable, non-empty output file.
+  - Chat run completion and artifact delivery completion remain separate lifecycle facts so delayed persistence cannot produce a false successful terminal state.
+  - Aborting a local run cancels queued/running media jobs and all later planner, worker, verification, and transcript results are ignored for that send generation.
+  - Session transcript/index persistence is serialized and atomically replaced for concurrent completions.
+  - Deliverable detection covers text, image, video, audio, file blocks, and attached artifact metadata.
   - Renderer does not add direct Gateway HTTP calls or direct page/component IPC calls.
 docs:
   required: false
@@ -90,5 +133,5 @@ This task is the execution-layer foundation for making UClaw behave like a relia
 
 - A full redesigned run details panel.
 - New approval policy UI.
-- Persistent run journal/replay storage.
+- A general-purpose run journal beyond the finalized snapshot stored with composite deliveries.
 - Agent completion eval harnesses beyond the existing communication regression checks.

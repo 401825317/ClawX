@@ -2065,10 +2065,25 @@ describe('chat target routing', () => {
         source?: string;
       }>;
       outputPaths?: string[];
+      manifest?: {
+        version?: number;
+        requestedTaskCount?: number;
+        tasks?: unknown[];
+        runtimeEvents?: Array<{ type?: string }>;
+      };
     };
     expect(appendPayload.runId).toContain('history:agent:main:main:');
     expect(appendPayload.prompt).toBe(prompt);
-    expect(appendPayload.summaryText).toContain('统一产物清单');
+    expect(appendPayload.summaryText).toContain('已完成 7/7 项');
+    expect(appendPayload.manifest).toEqual(expect.objectContaining({
+      version: 2,
+      requestedTaskCount: 7,
+    }));
+    expect(appendPayload.manifest?.tasks).toHaveLength(7);
+    expect(appendPayload.manifest?.runtimeEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'gate.evaluated' }),
+      expect.objectContaining({ type: 'run.ended' }),
+    ]));
     expect(appendPayload.files).toHaveLength(7);
     expect(appendPayload.files).toEqual(expect.arrayContaining([
       expect.objectContaining({

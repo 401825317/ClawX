@@ -7,7 +7,7 @@ import { getOpenClawConfigDir } from './paths';
 
 export type LocalArtifactKind = 'presentation' | 'spreadsheet' | 'mini_program' | 'copywriting';
 
-export type LocalArtifactPlanningMode = 'provided' | 'prompt-heuristic' | 'fallback-template';
+export type LocalArtifactPlanningMode = 'model' | 'provided' | 'prompt-heuristic' | 'fallback-template';
 
 export type LocalArtifactVerificationResult = {
   status: 'passed' | 'failed' | 'blocked' | 'skipped';
@@ -24,6 +24,8 @@ export type LocalArtifactCreateRequest = {
   filename?: string;
   sourcePrompt?: string;
   originalPrompt?: string;
+  planningMode?: LocalArtifactPlanningMode;
+  planningSummary?: string;
   slides?: Array<{ title?: string; subtitle?: string; body?: string; bullets?: string[] }>;
   sheets?: Array<{ name?: string; headers?: string[]; rows?: unknown[][] }>;
   content?: string;
@@ -59,6 +61,27 @@ const MIME = {
 
 const MIN_HTML_FILE_SIZE_BYTES = 512;
 const BASE_HTML_APP_CSS = '[hidden]{display:none!important}';
+const PLACEHOLDER_LINE_RE = /^(?:tbd|todo|lorem ipsum|待补充|待完善|内容待定|在此填写.*|请填写.*内容|示例(?:内容|文本|数据)|可继续编辑补充内容[。.！!]?|第\s*\d+\s*页|补充分析\s*\d+)$/iu;
+const GENERIC_TEMPLATE_LINE_RE = /(?:^围绕业务目标补充事实依据$|^明确执行动作和衡量指标$|^沉淀可复用检查清单$|^给出明确动作、负责人或判断标准$|^用可验证产物支撑最终结论$|要服务于「.+」这个核心目标|这份文案强调清晰目标、快速执行和可验证交付)/u;
+
+type PresentationSlide = {
+  title: string;
+  subtitle?: string;
+  body?: string;
+  bullets: string[];
+};
+
+type PresentationSlideRole = 'cover' | 'agenda' | 'section' | 'content';
+
+type SpreadsheetCellFormat = 'text' | 'integer' | 'decimal' | 'percent' | 'currency' | 'date';
+
+type NormalizedSheet = {
+  name: string;
+  headers: string[];
+  rows: unknown[][];
+  columnFormats: SpreadsheetCellFormat[];
+  columnWidths: number[];
+};
 
 function xml(value: unknown): string {
   return String(value ?? '')
@@ -73,20 +96,47 @@ function cleanText(value: unknown): string {
   return String(value ?? '').replace(/\s+/gu, ' ').trim();
 }
 
+function rawText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function normalizeParagraph(value: unknown): string {
   return cleanText(value).replace(/[。！？!?]\s*/gu, (match) => `${match.trim()} `).trim();
 }
 
 function hasOwnContent(request: LocalArtifactCreateRequest): boolean {
+  const hasSlides = (request.slides ?? []).some((slide) => (
+    Boolean(cleanText(slide.title) || cleanText(slide.subtitle) || cleanText(slide.body))
+    || (slide.bullets ?? []).some((bullet) => Boolean(cleanText(bullet)))
+  ));
+  const hasSheets = (request.sheets ?? []).some((sheet) => (
+    (sheet.headers ?? []).some((header) => Boolean(cleanText(header)))
+    || (sheet.rows ?? []).some((row) => row.some((cell) => Boolean(cleanText(spreadsheetCellValue(cell)))))
+  ));
+  const hasSections = (request.sections ?? []).some((section) => (
+    Boolean(cleanText(section.title))
+    || (section.paragraphs ?? []).some((paragraph) => Boolean(cleanText(paragraph)))
+    || (section.bullets ?? []).some((bullet) => Boolean(cleanText(bullet)))
+  ));
   return Boolean(
-    (Array.isArray(request.slides) && request.slides.length > 0)
-    || (Array.isArray(request.sheets) && request.sheets.length > 0)
+    hasSlides
+    || hasSheets
     || cleanText(request.content)
+    || hasSections
     || cleanText(request.html)
     || cleanText(request.body)
     || cleanText(request.css)
     || cleanText(request.js),
   );
+}
+
+function hasTaskContext(request: LocalArtifactCreateRequest): boolean {
+  return Boolean(sourcePrompt(request) || hasOwnContent(request));
+}
+
+function isPlaceholderLine(value: string): boolean {
+  const normalized = cleanText(value);
+  return PLACEHOLDER_LINE_RE.test(normalized) || GENERIC_TEMPLATE_LINE_RE.test(normalized);
 }
 
 function sourcePrompt(request: LocalArtifactCreateRequest): string {
@@ -265,13 +315,232 @@ function slideLayoutXml(): string {
 </p:sldLayout>`;
 }
 
-function textBox(id: number, name: string, x: number, y: number, cx: number, cy: number, text: string, size: number, bold = false): string {
-  const runs = cleanText(text)
-    .split(/\n+/u)
+type PresentationParagraph = {
+  text: string;
+  size: number;
+  color?: string;
+  bold?: boolean;
+  bullet?: boolean;
+  align?: 'l' | 'ctr' | 'r';
+  spaceAfter?: number;
+};
+
+function presentationShape(
+  id: number,
+  name: string,
+  x: number,
+  y: number,
+  cx: number,
+  cy: number,
+  fill: string,
+  line = fill,
+): string {
+  return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${xml(name)}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="${fill}"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="${line}"/></a:solidFill></a:ln></p:spPr></p:sp>`;
+}
+
+function presentationTextBox(
+  id: number,
+  name: string,
+  x: number,
+  y: number,
+  cx: number,
+  cy: number,
+  paragraphs: PresentationParagraph[],
+  options: {
+    fill?: string;
+    line?: string;
+    margin?: number;
+    vertical?: 't' | 'ctr' | 'b';
+  } = {},
+): string {
+  const margin = options.margin ?? 0;
+  const fill = options.fill
+    ? `<a:solidFill><a:srgbClr val="${options.fill}"/></a:solidFill>`
+    : '<a:noFill/>';
+  const line = options.line
+    ? `<a:ln w="9525"><a:solidFill><a:srgbClr val="${options.line}"/></a:solidFill></a:ln>`
+    : '<a:ln><a:noFill/></a:ln>';
+  const runs = paragraphs
+    .map((paragraph) => {
+      const text = cleanText(paragraph.text);
+      if (!text) return '';
+      const bullet = paragraph.bullet ? '<a:buChar char="•"/>' : '<a:buNone/>';
+      const marginLeft = paragraph.bullet ? 342900 : 0;
+      const indent = paragraph.bullet ? -228600 : 0;
+      const spacing = paragraph.spaceAfter
+        ? `<a:spcAft><a:spcPts val="${paragraph.spaceAfter}"/></a:spcAft>`
+        : '';
+      const color = paragraph.color ?? '172033';
+      return `<a:p><a:pPr marL="${marginLeft}" indent="${indent}" algn="${paragraph.align ?? 'l'}">${spacing}${bullet}</a:pPr><a:r><a:rPr lang="zh-CN" altLang="en-US" sz="${paragraph.size}"${paragraph.bold ? ' b="1"' : ''}><a:solidFill><a:srgbClr val="${color}"/></a:solidFill><a:latin typeface="Aptos"/><a:ea typeface="Microsoft YaHei"/></a:rPr><a:t xml:space="preserve">${xml(text)}</a:t></a:r><a:endParaRPr lang="zh-CN" sz="${paragraph.size}"/></a:p>`;
+    })
     .filter(Boolean)
-    .map((line) => `<a:p><a:r><a:rPr lang="zh-CN" sz="${size}"${bold ? ' b="1"' : ''}/><a:t>${xml(line)}</a:t></a:r></a:p>`)
     .join('');
-  return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${xml(name)}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr wrap="square"/><a:lstStyle/>${runs || '<a:p/>'}</p:txBody></p:sp>`;
+  return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="${xml(name)}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${x}" y="${y}"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>${fill}${line}</p:spPr><p:txBody><a:bodyPr wrap="square" lIns="${margin}" rIns="${margin}" tIns="${margin}" bIns="${margin}" anchor="${options.vertical ?? 't'}"><a:normAutofit/></a:bodyPr><a:lstStyle/>${runs || '<a:p/>'}</p:txBody></p:sp>`;
+}
+
+function presentationSlideRole(slide: PresentationSlide, index: number): PresentationSlideRole {
+  if (index === 0) return 'cover';
+  if (/^(?:目录|议程|内容概览|overview|agenda)$/iu.test(slide.title)) return 'agenda';
+  if (/^(?:第?[一二三四五六七八九十百\d]+[章节部分篇]|chapter\s+\d+|part\s+\d+|section\s+\d+)/iu.test(slide.title)) return 'section';
+  if (!slide.body && !slide.subtitle && slide.bullets.length <= 1) return 'section';
+  return 'content';
+}
+
+function estimatedPresentationLines(values: string[], charsPerLine: number): number {
+  return values.reduce((sum, value) => sum + Math.max(1, Math.ceil(cleanText(value).length / charsPerLine)), 0);
+}
+
+function presentationBodyFontSize(values: string[], charsPerLine = 34): number {
+  const lines = estimatedPresentationLines(values, charsPerLine);
+  if (lines > 24) return 1400;
+  if (lines > 18) return 1550;
+  if (lines > 12) return 1700;
+  return 1900;
+}
+
+function slideBackgroundXml(fill: string): string {
+  return `<p:bg><p:bgPr><a:solidFill><a:srgbClr val="${fill}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>`;
+}
+
+function presentationSlideXml(slide: PresentationSlide, index: number, slideCount: number, deckTitle: string): string {
+  const role = presentationSlideRole(slide, index);
+  const shapes: string[] = [];
+  let nextId = 2;
+  const addShape = (shape: string): void => { shapes.push(shape); };
+  const id = (): number => {
+    const value = nextId;
+    nextId += 1;
+    return value;
+  };
+  let background: string;
+
+  if (role === 'cover') {
+    background = '172033';
+    addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 0, 190500, 6858000, '14B8A6'));
+    addShape(presentationTextBox(id(), 'UClaw Cover Label', 914400, 640000, 4600000, 350000, [
+      { text: 'UCLAW PRESENTATION', size: 1200, color: '5EEAD4', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Cover Title', 914400, 1500000, 9300000, 1900000, [
+      { text: slide.title, size: slide.title.length > 24 ? 3600 : 4400, color: 'FFFFFF', bold: true },
+    ], { vertical: 'ctr' }));
+    const coverLead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
+    if (coverLead.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 914400, 3550000, 8500000, 900000, coverLead.map((text) => ({
+        text,
+        size: 1900,
+        color: 'CBD5E1',
+        spaceAfter: 600,
+      }))));
+    }
+    if (slide.bullets.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Cover Summary', 914400, 5000000, 9800000, 800000, slide.bullets.slice(0, 3).map((text) => ({
+        text,
+        size: 1400,
+        color: 'E2E8F0',
+        bullet: true,
+        spaceAfter: 400,
+      }))));
+    }
+    addShape(presentationTextBox(id(), 'UClaw Cover Footer', 914400, 6200000, 9800000, 250000, [
+      { text: `${new Date().getFullYear()} · 可编辑演示文稿`, size: 1000, color: '94A3B8' },
+    ]));
+  } else if (role === 'agenda') {
+    background = 'F7F9FC';
+    addShape(presentationShape(id(), 'UClaw Agenda Accent', 0, 0, 12192000, 145000, '0F766E'));
+    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 520000, 2400000, 300000, [
+      { text: '内容导航 / OUTLINE', size: 1100, color: '0F766E', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 850000, 10600000, 700000, [
+      { text: slide.title, size: 3000, color: '172033', bold: true },
+    ]));
+    const agendaItems = slide.bullets.length > 0
+      ? slide.bullets.slice(0, 8)
+      : [slide.body || slide.subtitle || '内容待补充'];
+    agendaItems.forEach((item, itemIndex) => {
+      const column = itemIndex % 2;
+      const row = Math.floor(itemIndex / 2);
+      const x = column === 0 ? 762000 : 6250000;
+      const y = 1850000 + row * 1030000;
+      addShape(presentationTextBox(id(), `UClaw Agenda Item ${itemIndex + 1}`, x, y, 5100000, 760000, [
+        { text: String(itemIndex + 1).padStart(2, '0'), size: 1200, color: 'D97706', bold: true, spaceAfter: 300 },
+        { text: item, size: 1700, color: '243247', bold: true },
+      ], { fill: 'FFFFFF', line: 'DCE4EE', margin: 170000, vertical: 'ctr' }));
+    });
+  } else if (role === 'section') {
+    background = '0F3D3A';
+    addShape(presentationShape(id(), 'UClaw Section Accent', 0, 0, 220000, 6858000, 'F59E0B'));
+    addShape(presentationTextBox(id(), 'UClaw Section Label', 914400, 1100000, 3600000, 360000, [
+      { text: `章节 ${String(index).padStart(2, '0')} / SECTION`, size: 1200, color: '99F6E4', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', 914400, 2050000, 9400000, 1500000, [
+      { text: slide.title, size: slide.title.length > 24 ? 3400 : 4200, color: 'FFFFFF', bold: true },
+    ], { vertical: 'ctr' }));
+    const summary = [slide.subtitle, slide.body, ...slide.bullets].map(cleanText).filter(Boolean);
+    if (summary.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Section Summary', 914400, 4150000, 8200000, 900000, summary.slice(0, 3).map((text) => ({
+        text,
+        size: 1750,
+        color: 'CCFBF1',
+        bullet: summary.length > 1,
+        spaceAfter: 500,
+      }))));
+    }
+  } else {
+    background = 'FFFFFF';
+    addShape(presentationShape(id(), 'UClaw Content Accent', 0, 0, 160000, 6858000, '0F766E'));
+    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 2800000, 260000, [
+      { text: `章节 ${String(index).padStart(2, '0')} / KEY POINT`, size: 1050, color: '0F766E', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
+      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
+    ]));
+    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
+    let contentY = 1850000;
+    if (lead.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Content Lead', 762000, contentY, 10600000, 760000, lead.map((text) => ({
+        text,
+        size: 1650,
+        color: '405166',
+        bold: lead.length === 1,
+        spaceAfter: 350,
+      })), { fill: 'EEF7F5', line: 'C8E7E1', margin: 180000, vertical: 'ctr' }));
+      contentY = 2820000;
+    }
+    const bullets = slide.bullets.length > 0 ? slide.bullets : (lead.length > 0 ? [] : ['内容待补充']);
+    if (bullets.length > 0) {
+      const useColumns = bullets.length > 5 || estimatedPresentationLines(bullets, 34) > 14;
+      const groups = useColumns
+        ? [bullets.slice(0, Math.ceil(bullets.length / 2)), bullets.slice(Math.ceil(bullets.length / 2))]
+        : [bullets];
+      const gap = 260000;
+      const width = useColumns ? Math.floor((10600000 - gap) / 2) : 10600000;
+      groups.filter((group) => group.length > 0).forEach((group, groupIndex) => {
+        const fontSize = presentationBodyFontSize(group, useColumns ? 23 : 40);
+        addShape(presentationTextBox(id(), `UClaw Content ${groupIndex + 1}`, 762000 + groupIndex * (width + gap), contentY, width, 5900000 - contentY, group.map((text) => ({
+          text,
+          size: fontSize,
+          color: '243247',
+          bullet: true,
+          spaceAfter: 650,
+        })), { fill: 'F7F9FC', line: 'E1E7EF', margin: 230000 }));
+      });
+    }
+  }
+
+  if (role !== 'cover') {
+    addShape(presentationTextBox(id(), 'UClaw Footer', 762000, 6350000, 10600000, 220000, [
+      { text: `${deckTitle}    ${String(index + 1).padStart(2, '0')} / ${String(slideCount).padStart(2, '0')}`, size: 900, color: role === 'section' ? '99B8B4' : '7A8798', align: 'r' },
+    ]));
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>${slideBackgroundXml(background)}<p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+    ${shapes.join('\n    ')}
+  </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>`;
 }
 
 function buildPlannedPresentation(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
@@ -573,7 +842,11 @@ function buildPlannedCopywriting(request: LocalArtifactCreateRequest): LocalArti
 
 function planLocalArtifactRequest(request: LocalArtifactCreateRequest): { request: LocalArtifactCreateRequest; mode: LocalArtifactPlanningMode; summary: string } {
   if (hasOwnContent(request)) {
-    return { request, mode: 'provided', summary: '使用调用方提供的结构化内容生成产物。' };
+    return {
+      request,
+      mode: request.planningMode ?? 'provided',
+      summary: cleanText(request.planningSummary) || '使用调用方提供的结构化内容生成产物。',
+    };
   }
   const prompt = sourcePrompt(request);
   if (!prompt) {
@@ -591,7 +864,7 @@ function planLocalArtifactRequest(request: LocalArtifactCreateRequest): { reques
   return { request: buildPlannedCopywriting(request), mode: 'prompt-heuristic', summary: '已根据 prompt 规划文案结构。' };
 }
 
-function normalizeSlides(request: LocalArtifactCreateRequest): Array<{ title: string; subtitle?: string; body?: string; bullets: string[] }> {
+function normalizeSlides(request: LocalArtifactCreateRequest): PresentationSlide[] {
   const title = cleanText(request.title) || 'AI 工作流效率提升';
   const inputSlides = Array.isArray(request.slides) ? request.slides : [];
   const slides = inputSlides.length > 0 ? inputSlides : [
@@ -611,6 +884,7 @@ function normalizeSlides(request: LocalArtifactCreateRequest): Array<{ title: st
 
 async function createPptxBuffer(request: LocalArtifactCreateRequest): Promise<Buffer> {
   const slides = normalizeSlides(request);
+  const deckTitle = cleanText(request.title) || slides[0]?.title || 'UClaw PPT';
   const zip = new JSZip();
   zip.file('[Content_Types].xml', presentationContentTypesXml(slides.length));
   zip.file('_rels/.rels', relsXml([
@@ -618,7 +892,7 @@ async function createPptxBuffer(request: LocalArtifactCreateRequest): Promise<Bu
     { id: 'rId2', type: 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties', target: 'docProps/core.xml' },
     { id: 'rId3', type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties', target: 'docProps/app.xml' },
   ]));
-  zip.file('docProps/core.xml', coreXml(cleanText(request.title) || slides[0]?.title || 'UClaw PPT'));
+  zip.file('docProps/core.xml', coreXml(deckTitle));
   zip.file('docProps/app.xml', presentationAppXml(slides.length));
   zip.file('ppt/presentation.xml', presentationXml(slides.length));
   zip.file('ppt/_rels/presentation.xml.rels', relsXml([
@@ -636,18 +910,7 @@ async function createPptxBuffer(request: LocalArtifactCreateRequest): Promise<Bu
   ]));
   zip.file('ppt/theme/theme1.xml', themeXml());
   slides.forEach((slide, index) => {
-    const body = slide.bullets.length > 0
-      ? slide.bullets.map((item) => `• ${item}`).join('\n')
-      : slide.body || slide.subtitle || '可继续编辑补充内容。';
-    const slideXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>
-    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
-    ${textBox(2, 'Title', 685800, 520000, 10800000, 950000, slide.title, index === 0 ? 4200 : 3200, true)}
-    ${textBox(3, 'Body', 914400, 1700000, 10300000, 4200000, body, 2100)}
-  </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
-</p:sld>`;
-    zip.file(`ppt/slides/slide${index + 1}.xml`, slideXml);
+    zip.file(`ppt/slides/slide${index + 1}.xml`, presentationSlideXml(slide, index, slides.length, deckTitle));
     zip.file(`ppt/slides/_rels/slide${index + 1}.xml.rels`, relsXml([
       { id: 'rId1', type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout', target: '../slideLayouts/slideLayout1.xml' },
     ]));
@@ -666,42 +929,154 @@ function columnName(index: number): string {
   return name;
 }
 
-function cellXml(rowIndex: number, columnIndex: number, value: unknown): string {
-  const ref = `${columnName(columnIndex)}${rowIndex + 1}`;
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return `<c r="${ref}"><v>${value}</v></c>`;
-  }
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const record = value as { formula?: unknown; value?: unknown };
-    if (typeof record.formula === 'string' && record.formula.trim()) {
-      const fallback = typeof record.value === 'number' && Number.isFinite(record.value) ? `<v>${record.value}</v>` : '';
-      return `<c r="${ref}"><f>${xml(record.formula)}</f>${fallback}</c>`;
-    }
-  }
-  return `<c r="${ref}" t="inlineStr"><is><t>${xml(value)}</t></is></c>`;
+function sanitizeSheetName(value: unknown, fallback: string): string {
+  return cleanText(value)
+    .replace(/[\\/*?:]/gu, ' ')
+    .replaceAll('[', ' ')
+    .replaceAll(']', ' ')
+    .trim()
+    .slice(0, 31) || fallback;
 }
 
-function normalizeSheets(request: LocalArtifactCreateRequest): Array<{ name: string; rows: unknown[][] }> {
-  if (Array.isArray(request.sheets) && request.sheets.length > 0) {
-    return request.sheets.map((sheet, index) => ({
-      name: sanitizeBaseName(sheet.name, `Sheet${index + 1}`).slice(0, 31),
-      rows: [
-        ...(Array.isArray(sheet.headers) && sheet.headers.length > 0 ? [sheet.headers] : []),
-        ...(Array.isArray(sheet.rows) ? sheet.rows : []),
-      ],
-    }));
+function uniqueSheetName(value: unknown, fallback: string, usedNames: Set<string>): string {
+  const base = sanitizeSheetName(value, fallback);
+  let candidate = base;
+  for (let suffix = 2; usedNames.has(candidate.toLowerCase()); suffix += 1) {
+    const suffixText = ` ${suffix}`;
+    candidate = `${base.slice(0, Math.max(1, 31 - suffixText.length))}${suffixText}`;
   }
-  return [{
-    name: '月度预算',
-    rows: [
-      ['分类', '预算', '实际', '差额'],
-      ['房租', 4200, 4200, { formula: 'B2-C2', value: 0 }],
-      ['餐饮', 2200, 1980, { formula: 'B3-C3', value: 220 }],
-      ['交通', 600, 520, { formula: 'B4-C4', value: 80 }],
-      ['学习', 800, 640, { formula: 'B5-C5', value: 160 }],
-      ['合计', { formula: 'SUM(B2:B5)', value: 7800 }, { formula: 'SUM(C2:C5)', value: 7340 }, { formula: 'SUM(D2:D5)', value: 460 }],
-    ],
-  }];
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function spreadsheetCellValue(value: unknown): unknown {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return (value as { value?: unknown }).value;
+  }
+  return value;
+}
+
+function spreadsheetColumnFormat(header: string, values: unknown[]): SpreadsheetCellFormat {
+  if (/日期|时间|开始|结束|date|time/iu.test(header)) return 'date';
+  if (/率|比例|占比|进度|完成度|percent|rate/iu.test(header)) return 'percent';
+  if (/金额|收入|支出|预算|实际|差额|价格|单价|客单价|成本|费用|薪资|销售额|总价|amount|revenue|cost|price|budget/iu.test(header)) return 'currency';
+  const numericValues = values
+    .map(spreadsheetCellValue)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (numericValues.length === 0) return 'text';
+  return numericValues.every(Number.isInteger) ? 'integer' : 'decimal';
+}
+
+function spreadsheetDisplayText(value: unknown): string {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as { formula?: unknown; value?: unknown };
+    if (record.value !== undefined) return cleanText(record.value);
+    if (record.formula !== undefined) return cleanText(record.formula);
+  }
+  return cleanText(value);
+}
+
+function spreadsheetTextWidth(value: string): number {
+  return [...value].reduce((width, character) => width + ((character.codePointAt(0) ?? 0) > 0xff ? 2 : 1), 0);
+}
+
+function spreadsheetColumnWidth(header: string, values: unknown[]): number {
+  const longest = Math.max(
+    spreadsheetTextWidth(header),
+    ...values.slice(0, 200).map((value) => spreadsheetTextWidth(spreadsheetDisplayText(value))),
+  );
+  return Math.min(42, Math.max(10, longest + 2));
+}
+
+function normalizeSheets(request: LocalArtifactCreateRequest): NormalizedSheet[] {
+  const inputSheets = Array.isArray(request.sheets) && request.sheets.length > 0
+    ? request.sheets
+    : [{
+        name: '月度预算',
+        headers: ['分类', '预算', '实际', '差额'],
+        rows: [
+          ['房租', 4200, 4200, { formula: 'B2-C2', value: 0 }],
+          ['餐饮', 2200, 1980, { formula: 'B3-C3', value: 220 }],
+          ['交通', 600, 520, { formula: 'B4-C4', value: 80 }],
+          ['学习', 800, 640, { formula: 'B5-C5', value: 160 }],
+          ['合计', { formula: 'SUM(B2:B5)', value: 7800 }, { formula: 'SUM(C2:C5)', value: 7340 }, { formula: 'SUM(D2:D5)', value: 460 }],
+        ],
+      }];
+  const usedNames = new Set<string>();
+  return inputSheets.map((sheet, index) => {
+    const headers = Array.isArray(sheet.headers) ? sheet.headers.map(cleanText) : [];
+    const rows = Array.isArray(sheet.rows)
+      ? sheet.rows.map((row) => (Array.isArray(row) ? row : [row]))
+      : [];
+    const columnCount = Math.max(headers.length, ...rows.map((row) => row.length), 1);
+    const columnValues = Array.from({ length: columnCount }, (_, columnIndex) => rows.map((row) => row[columnIndex]));
+    return {
+      name: uniqueSheetName(sheet.name, `Sheet${index + 1}`, usedNames),
+      headers,
+      rows,
+      columnFormats: columnValues.map((values, columnIndex) => spreadsheetColumnFormat(headers[columnIndex] ?? '', values)),
+      columnWidths: columnValues.map((values, columnIndex) => spreadsheetColumnWidth(headers[columnIndex] ?? '', values)),
+    };
+  });
+}
+
+function spreadsheetStyleId(format: SpreadsheetCellFormat, totalRow: boolean): number {
+  const base: Record<SpreadsheetCellFormat, number> = {
+    text: 2,
+    integer: 3,
+    decimal: 4,
+    percent: 5,
+    currency: 6,
+    date: 7,
+  };
+  return base[format] + (totalRow ? 6 : 0);
+}
+
+function excelDateSerial(value: string): number | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return undefined;
+  const timestamp = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(timestamp) ? Math.floor(timestamp / 86400000) + 25569 : undefined;
+}
+
+function spreadsheetCellXml(
+  rowIndex: number,
+  columnIndex: number,
+  value: unknown,
+  format: SpreadsheetCellFormat,
+  headerRow: boolean,
+  totalRow: boolean,
+): string {
+  const ref = `${columnName(columnIndex)}${rowIndex + 1}`;
+  const styleId = headerRow ? 1 : spreadsheetStyleId(format, totalRow);
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as { formula?: unknown; value?: unknown };
+    const formula = typeof record.formula === 'string'
+      ? record.formula.trim().replace(/^=+\s*/u, '')
+      : '';
+    if (formula) {
+      if (typeof record.value === 'number' && Number.isFinite(record.value)) {
+        return `<c r="${ref}" s="${styleId}"><f>${xml(formula)}</f><v>${record.value}</v></c>`;
+      }
+      if (typeof record.value === 'boolean') {
+        return `<c r="${ref}" s="${styleId}" t="b"><f>${xml(formula)}</f><v>${record.value ? 1 : 0}</v></c>`;
+      }
+      if (record.value !== undefined && record.value !== null) {
+        return `<c r="${ref}" s="${styleId}" t="str"><f>${xml(formula)}</f><v>${xml(record.value)}</v></c>`;
+      }
+      return `<c r="${ref}" s="${styleId}"><f>${xml(formula)}</f></c>`;
+    }
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return `<c r="${ref}" s="${styleId}"><v>${value}</v></c>`;
+  }
+  if (typeof value === 'boolean') {
+    return `<c r="${ref}" s="${styleId}" t="b"><v>${value ? 1 : 0}</v></c>`;
+  }
+  if (format === 'date' && typeof value === 'string') {
+    const serial = excelDateSerial(value);
+    if (serial !== undefined) return `<c r="${ref}" s="${styleId}"><v>${serial}</v></c>`;
+  }
+  return `<c r="${ref}" s="${styleId}" t="inlineStr"><is><t xml:space="preserve">${xml(value)}</t></is></c>`;
 }
 
 function xlsxContentTypesXml(sheetCount: number): string {
@@ -723,23 +1098,86 @@ ${worksheets}
 function workbookXml(sheets: Array<{ name: string }>): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <workbookPr date1904="0"/>
   <sheets>
 ${sheets.map((sheet, index) => `    <sheet name="${xml(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join('\n')}
   </sheets>
+  <calcPr calcId="191029" calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>
 </workbook>`;
 }
 
-function worksheetXml(rows: unknown[][]): string {
-  const rowXml = rows.map((row, rowIndex) => {
-    const cells = (Array.isArray(row) ? row : [row]).map((cell, columnIndex) => cellXml(rowIndex, columnIndex, cell)).join('');
-    return `    <row r="${rowIndex + 1}">${cells}</row>`;
+function worksheetXml(sheet: NormalizedSheet): string {
+  const hasHeader = sheet.headers.length > 0;
+  const rows = hasHeader ? [sheet.headers, ...sheet.rows] : sheet.rows;
+  const safeRows = rows.length > 0 ? rows : [['项目', '数值'], ['示例', 1]];
+  const columnCount = Math.max(...safeRows.map((row) => row.length), 1);
+  const rowXml = safeRows.map((row, rowIndex) => {
+    const headerRow = hasHeader && rowIndex === 0;
+    const totalRow = !headerRow && /^(?:合计|总计|小计|汇总|total)$/iu.test(cleanText(row[0]));
+    const cells = Array.from({ length: columnCount }, (_, columnIndex) => spreadsheetCellXml(
+      rowIndex,
+      columnIndex,
+      row[columnIndex] ?? '',
+      sheet.columnFormats[columnIndex] ?? 'text',
+      headerRow,
+      totalRow,
+    )).join('');
+    return `    <row r="${rowIndex + 1}" ht="${headerRow ? 24 : 20}" customHeight="1">${cells}</row>`;
   }).join('\n');
+  const endRef = `${columnName(columnCount - 1)}${safeRows.length}`;
+  const columns = Array.from({ length: columnCount }, (_, columnIndex) => {
+    const width = sheet.columnWidths[columnIndex] ?? 12;
+    return `    <col min="${columnIndex + 1}" max="${columnIndex + 1}" width="${width}" customWidth="1"/>`;
+  }).join('\n');
+  const frozenHeader = hasHeader
+    ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
+    : '<selection activeCell="A1" sqref="A1"/>';
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:${endRef}"/>
+  <sheetViews><sheetView workbookViewId="0">${frozenHeader}</sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="20"/>
+  <cols>
+${columns}
+  </cols>
   <sheetData>
 ${rowXml}
   </sheetData>
+  ${hasHeader ? `<autoFilter ref="A1:${endRef}"/>` : ''}
+  <pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" header="0.3" footer="0.3"/>
 </worksheet>`;
+}
+
+function spreadsheetStylesXml(): string {
+  const cellXf = (numFmtId: number, fontId: number, fillId: number, borderId: number, alignment: string): string => (
+    `<xf numFmtId="${numFmtId}" fontId="${fontId}" fillId="${fillId}" borderId="${borderId}" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"${numFmtId ? ' applyNumberFormat="1"' : ''}><alignment ${alignment}/></xf>`
+  );
+  const baseFormats: Array<[number, number, number, number, string]> = [
+    [0, 0, 0, 0, 'vertical="center"'],
+    [0, 1, 2, 1, 'horizontal="center" vertical="center" wrapText="1"'],
+    [0, 0, 0, 1, 'vertical="center" wrapText="1"'],
+    [3, 0, 0, 1, 'horizontal="right" vertical="center"'],
+    [166, 0, 0, 1, 'horizontal="right" vertical="center"'],
+    [164, 0, 0, 1, 'horizontal="right" vertical="center"'],
+    [165, 0, 0, 1, 'horizontal="right" vertical="center"'],
+    [167, 0, 0, 1, 'horizontal="center" vertical="center"'],
+  ];
+  const totalFormats = baseFormats.slice(2).map(([numFmtId, _fontId, _fillId, borderId, alignment]) => (
+    [numFmtId, 2, 3, borderId, alignment] as [number, number, number, number, string]
+  ));
+  const xfs = [...baseFormats, ...totalFormats]
+    .map(([numFmtId, fontId, fillId, borderId, alignment]) => cellXf(numFmtId, fontId, fillId, borderId, alignment))
+    .join('');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="4"><numFmt numFmtId="164" formatCode="0.0%"/><numFmt numFmtId="165" formatCode="¥#,##0.00;[Red]-¥#,##0.00"/><numFmt numFmtId="166" formatCode="#,##0.00;[Red]-#,##0.00"/><numFmt numFmtId="167" formatCode="yyyy-mm-dd"/></numFmts>
+  <fonts count="3"><font><sz val="11"/><color rgb="FF172033"/><name val="Microsoft YaHei"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font><font><b/><sz val="11"/><color rgb="FF172033"/><name val="Microsoft YaHei"/></font></fonts>
+  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F766E"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE6F4F1"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <borders count="2"><border/><border><left style="thin"><color rgb="FFD9E2EA"/></left><right style="thin"><color rgb="FFD9E2EA"/></right><top style="thin"><color rgb="FFD9E2EA"/></top><bottom style="thin"><color rgb="FFD9E2EA"/></bottom><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="14">${xfs}</cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
 }
 
 async function createXlsxBuffer(request: LocalArtifactCreateRequest): Promise<Buffer> {
@@ -754,36 +1192,71 @@ async function createXlsxBuffer(request: LocalArtifactCreateRequest): Promise<Bu
   zip.file('docProps/core.xml', coreXml(cleanText(request.title) || 'UClaw Excel'));
   zip.file('docProps/app.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>UClaw</Application></Properties>`);
   zip.file('xl/workbook.xml', workbookXml(sheets));
-  zip.file('xl/_rels/workbook.xml.rels', relsXml(sheets.map((_, index) => ({
-    id: `rId${index + 1}`,
-    type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet',
-    target: `worksheets/sheet${index + 1}.xml`,
-  }))));
-  zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Microsoft YaHei"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`);
+  zip.file('xl/_rels/workbook.xml.rels', relsXml([
+    ...sheets.map((_, index) => ({
+      id: `rId${index + 1}`,
+      type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet',
+      target: `worksheets/sheet${index + 1}.xml`,
+    })),
+    {
+      id: `rId${sheets.length + 1}`,
+      type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles',
+      target: 'styles.xml',
+    },
+  ]));
+  zip.file('xl/styles.xml', spreadsheetStylesXml());
   sheets.forEach((sheet, index) => {
-    zip.file(`xl/worksheets/sheet${index + 1}.xml`, worksheetXml(sheet.rows.length > 0 ? sheet.rows : [['项目', '数值'], ['示例', 1]]));
+    zip.file(`xl/worksheets/sheet${index + 1}.xml`, worksheetXml(sheet));
   });
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }
 
 function renderText(request: LocalArtifactCreateRequest): string {
   const title = cleanText(request.title) || '产品宣传文案';
-  const content = cleanText(request.content) || '未来城市里的个人效率工作台，把创意、数据和执行串成一条清晰工作流。它能自动拆解任务、生成多种产物，并在交付前完成基础验证，让灵感更快变成可以分享和使用的结果。';
-  const lines = [`# ${title}`, '', content, ''];
-  for (const section of request.sections ?? []) {
+  const content = cleanText(request.content);
+  const sections = (request.sections ?? []).filter((section) => (
+    cleanText(section.title)
+    || (section.paragraphs ?? []).some((paragraph) => Boolean(cleanText(paragraph)))
+    || (section.bullets ?? []).some((bullet) => Boolean(cleanText(bullet)))
+  ));
+  const lines = [`# ${title}`, ''];
+  if (content) {
+    if (sections.length === 0) lines.push('## 正文', '');
+    lines.push(content, '');
+  } else if (sections.length === 0) {
+    lines.push(
+      '## 核心主张',
+      '',
+      `${title}，从一个清晰目标开始，把真正重要的信息讲明白。`,
+      '',
+      '## 表达要点',
+      '',
+      '- 明确受众正在面对的问题',
+      '- 给出具体价值与行动理由',
+      '- 用一致语气完成收束',
+      '',
+    );
+  }
+  for (const section of sections) {
     const sectionTitle = cleanText(section.title);
     if (sectionTitle) lines.push(`## ${sectionTitle}`, '');
-    for (const paragraph of section.paragraphs ?? []) lines.push(cleanText(paragraph), '');
-    for (const bullet of section.bullets ?? []) lines.push(`- ${cleanText(bullet)}`);
+    for (const paragraph of section.paragraphs ?? []) {
+      const normalized = cleanText(paragraph);
+      if (normalized) lines.push(normalized, '');
+    }
+    for (const bullet of section.bullets ?? []) {
+      const normalized = cleanText(bullet);
+      if (normalized) lines.push(`- ${normalized}`);
+    }
     if ((section.bullets?.length ?? 0) > 0) lines.push('');
   }
   return lines.join('\n').replace(/\n{3,}/gu, '\n\n');
 }
 
 function renderHtml(request: LocalArtifactCreateRequest): string {
-  const rawHtml = cleanText(request.html);
+  const rawHtml = rawText(request.html);
   const rawIsFullDocument = /<!doctype html|<html[\s>]/iu.test(rawHtml);
-  const hasStructuredParts = Boolean(cleanText(request.body) || cleanText(request.css) || cleanText(request.js));
+  const hasStructuredParts = Boolean(rawText(request.body) || rawText(request.css) || rawText(request.js));
   const rawBody = rawIsFullDocument ? extractHtmlBody(rawHtml) : '';
   const rawBodyText = textFromMarkup(rawBody);
   const rawBodyElementCount = countBodyElements(rawBody);
@@ -792,9 +1265,9 @@ function renderHtml(request: LocalArtifactCreateRequest): string {
     && (rawBodyText.length >= 4 || rawBodyElementCount >= 2);
   if (rawHtml && (!rawIsFullDocument || !hasStructuredParts || rawFullDocumentHasBody)) return rawHtml;
   const title = cleanText(request.title) || '灵感收集 Todo';
-  const body = (rawIsFullDocument ? '' : rawHtml) || request.body || '<main><section class="panel"><h1>灵感收集 Todo</h1><form id="form"><input id="input" placeholder="写下一条任务或灵感" autocomplete="off"><button>添加</button></form><ul id="list"></ul></section></main>';
-  const css = request.css || 'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f7fb;color:#111827}main{min-height:100vh;display:grid;place-items:center;padding:24px}.panel{width:min(720px,100%);background:white;border:1px solid #e5e7eb;border-radius:8px;padding:24px;box-shadow:0 12px 32px rgba(15,23,42,.08)}h1{font-size:24px;margin:0 0 16px}form{display:flex;gap:8px}input{flex:1;border:1px solid #d1d5db;border-radius:6px;padding:10px 12px;font-size:15px}button{border:0;border-radius:6px;background:#2563eb;color:white;padding:10px 14px;font-size:15px}ul{list-style:none;margin:18px 0 0;padding:0;display:grid;gap:8px}li{display:flex;justify-content:space-between;align-items:center;border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px}li.done span{text-decoration:line-through;color:#6b7280}.remove{background:#f3f4f6;color:#374151}';
-  const js = request.js || 'const form=document.querySelector("#form");const input=document.querySelector("#input");const list=document.querySelector("#list");const seed=["整理今天的三个灵感","给项目写一个开场文案","检查本周预算"];function add(text){const li=document.createElement("li");li.innerHTML=`<span>${text}</span><button class="remove" type="button">完成</button>`;li.querySelector(".remove").onclick=()=>li.classList.toggle("done");list.appendChild(li)}seed.forEach(add);form.onsubmit=e=>{e.preventDefault();const text=input.value.trim();if(!text)return;add(text);input.value=""};';
+  const body = (rawIsFullDocument ? '' : rawHtml) || rawText(request.body) || '<main><section class="panel"><h1>灵感收集 Todo</h1><form id="form"><input id="input" placeholder="写下一条任务或灵感" autocomplete="off"><button>添加</button></form><ul id="list"></ul></section></main>';
+  const css = rawText(request.css) || 'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f7fb;color:#111827}main{min-height:100vh;display:grid;place-items:center;padding:24px}.panel{width:min(720px,100%);background:white;border:1px solid #e5e7eb;border-radius:8px;padding:24px;box-shadow:0 12px 32px rgba(15,23,42,.08)}h1{font-size:24px;margin:0 0 16px}form{display:flex;gap:8px}input{flex:1;border:1px solid #d1d5db;border-radius:6px;padding:10px 12px;font-size:15px}button{border:0;border-radius:6px;background:#2563eb;color:white;padding:10px 14px;font-size:15px}ul{list-style:none;margin:18px 0 0;padding:0;display:grid;gap:8px}li{display:flex;justify-content:space-between;align-items:center;border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px}li.done span{text-decoration:line-through;color:#6b7280}.remove{background:#f3f4f6;color:#374151}';
+  const js = rawText(request.js) || 'const form=document.querySelector("#form");const input=document.querySelector("#input");const list=document.querySelector("#list");const seed=["整理今天的三个灵感","给项目写一个开场文案","检查本周预算"];function add(text){const li=document.createElement("li");li.innerHTML=`<span>${text}</span><button class="remove" type="button">完成</button>`;li.querySelector(".remove").onclick=()=>li.classList.toggle("done");list.appendChild(li)}seed.forEach(add);form.onsubmit=e=>{e.preventDefault();const text=input.value.trim();if(!text)return;add(text);input.value=""};';
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -825,6 +1298,27 @@ function uniqueCount(values: string[]): number {
   return new Set(values.map((value) => value.trim()).filter(Boolean)).size;
 }
 
+function presentationShapesFromXml(xmlText: string): Array<{ name: string; texts: string[] }> {
+  return [...xmlText.matchAll(/<p:sp>[\s\S]*?<\/p:sp>/gu)].map((match) => {
+    const shapeXml = match[0];
+    const name = decodeXmlText(shapeXml.match(/<p:cNvPr\b[^>]*\bname="([^"]*)"/u)?.[1] ?? '');
+    const texts = [...shapeXml.matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/gu)]
+      .map((textMatch) => decodeXmlText(textMatch[1] ?? ''))
+      .map(cleanText)
+      .filter(Boolean);
+    return { name, texts };
+  });
+}
+
+function presentationRoleFromShapes(shapes: Array<{ name: string }>): PresentationSlideRole | undefined {
+  const names = shapes.map((shape) => shape.name);
+  if (names.some((name) => name === 'UClaw Cover Title')) return 'cover';
+  if (names.some((name) => name.startsWith('UClaw Agenda Item'))) return 'agenda';
+  if (names.some((name) => name === 'UClaw Section Accent')) return 'section';
+  if (names.some((name) => name === 'UClaw Content Accent')) return 'content';
+  return undefined;
+}
+
 async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifactCreateRequest): Promise<LocalArtifactVerificationResult> {
   try {
     const zip = await JSZip.loadAsync(buffer);
@@ -835,31 +1329,75 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
         const rightIndex = Number.parseInt(right.match(/slide(\d+)\.xml/u)?.[1] ?? '0', 10);
         return leftIndex - rightIndex;
       });
-    const slideTexts = await Promise.all(slideEntries.map(async (entry) => {
+    const slides = await Promise.all(slideEntries.map(async (entry) => {
       const xmlText = await zip.file(entry)?.async('string');
-      return [...(xmlText ?? '').matchAll(/<a:t>([\s\S]*?)<\/a:t>/gu)]
-        .map((match) => decodeXmlText(match[1] ?? ''))
-        .map(cleanText)
-        .filter(Boolean);
+      const shapes = presentationShapesFromXml(xmlText ?? '');
+      const role = presentationRoleFromShapes(shapes);
+      const titleShape = shapes.find((shape) => shape.name === 'UClaw Cover Title' || shape.name === 'UClaw Title');
+      const contentShapes = shapes.filter((shape) => (
+        shape.name === 'UClaw Cover Subtitle'
+        || shape.name === 'UClaw Cover Summary'
+        || shape.name === 'UClaw Section Summary'
+        || shape.name === 'UClaw Content Lead'
+        || /^UClaw Content \d+$/u.test(shape.name)
+        || shape.name.startsWith('UClaw Agenda Item')
+      ));
+      return {
+        role,
+        title: titleShape?.texts.join(' ') ?? '',
+        contentLines: contentShapes.flatMap((shape) => shape.texts).filter((text) => !/^\d{2}$/u.test(text)),
+      };
     }));
-    const titles = slideTexts.map((items, index) => items[0] || `第 ${index + 1} 页`);
-    const emptySlides = slideTexts.filter((items) => items.join('').length < 4).length;
+    const titles = slides.map((slide) => slide.title);
+    const contentLines = slides.flatMap((slide) => slide.contentLines);
+    const emptySlides = slides.filter((slide) => !slide.title || (slide.role !== 'cover' && slide.role !== 'section' && slide.contentLines.join('').length < 16)).length;
+    const placeholderLines = [...titles, ...contentLines].filter(isPlaceholderLine);
+    const overfullSlides = slides.filter((slide) => (
+      slide.contentLines.join('').length > 1800 || slide.contentLines.some((line) => line.length > 500)
+    )).length;
+    const substantiveLines = contentLines.filter((line) => line.length >= 8 && !isPlaceholderLine(line));
+    const repeatedContent = substantiveLines.length > 2 && uniqueCount(substantiveLines) / substantiveLines.length < 0.6;
     const expectedSlides = parseRequestedCount(sourcePrompt(request), '页');
     const countMatches = expectedSlides === undefined || expectedSlides === slideEntries.length;
     const hasMeaningfulTitles = titles.length > 0 && uniqueCount(titles) >= Math.min(titles.length, 3);
-    const passed = slideEntries.length > 0 && emptySlides === 0 && hasMeaningfulTitles && countMatches;
+    const coverCount = slides.filter((slide) => slide.role === 'cover').length;
+    const agendaCount = slides.filter((slide) => slide.role === 'agenda').length;
+    const sectionCount = slides.filter((slide) => slide.role === 'section').length;
+    const contentCount = slides.filter((slide) => slide.role === 'content').length;
+    const allSlidesHaveLayout = slides.every((slide) => Boolean(slide.role));
+    const hasHierarchy = slideEntries.length === 1
+      ? slides[0]?.contentLines.join('').length >= 16
+      : coverCount === 1 && contentCount + agendaCount > 0;
+    const passed = hasTaskContext(request)
+      && slideEntries.length > 0
+      && emptySlides === 0
+      && placeholderLines.length === 0
+      && overfullSlides === 0
+      && !repeatedContent
+      && hasMeaningfulTitles
+      && countMatches
+      && coverCount === 1
+      && allSlidesHaveLayout
+      && hasHierarchy;
     return {
       status: passed ? 'passed' : 'blocked',
       kind: 'artifact.content',
       required: true,
       severity: passed ? 'info' : 'blocking',
       detail: passed
-        ? `PPT 内容验证通过：已读回 ${slideEntries.length} 页，标题非空且未全部重复。`
-        : 'PPT 内容验证未通过：页数、空页或标题重复不满足要求。',
+        ? `PPT 成品验证通过：已读回 ${slideEntries.length} 页，封面、章节层次、内容密度和版式标记完整。`
+        : 'PPT 成品验证未通过：存在缺失版式、空泛内容、重复正文、文字过载或页数不匹配。',
       evidence: [
         `slides=${slideEntries.length}`,
         expectedSlides ? `expectedSlides=${expectedSlides}` : undefined,
         `emptySlides=${emptySlides}`,
+        `roles=cover:${coverCount},agenda:${agendaCount},section:${sectionCount},content:${contentCount}`,
+        `layoutComplete=${allSlidesHaveLayout}`,
+        `hierarchy=${hasHierarchy}`,
+        `placeholderLines=${placeholderLines.slice(0, 5).join(' / ') || 'none'}`,
+        `overfullSlides=${overfullSlides}`,
+        `repeatedContent=${repeatedContent}`,
+        `taskContext=${hasTaskContext(request)}`,
         `titles=${titles.slice(0, 8).join(' / ')}`,
       ].filter(Boolean).join('; '),
     };
@@ -879,42 +1417,145 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
   try {
     const zip = await JSZip.loadAsync(buffer);
     const workbookXmlText = await zip.file('xl/workbook.xml')?.async('string');
+    const workbookRelsText = await zip.file('xl/_rels/workbook.xml.rels')?.async('string');
+    const stylesText = await zip.file('xl/styles.xml')?.async('string');
     const sheetNames = [...(workbookXmlText ?? '').matchAll(/<sheet[^>]*name="([^"]+)"/gu)]
       .map((match) => decodeXmlText(match[1] ?? ''))
       .filter(Boolean);
-    const worksheetEntries = Object.keys(zip.files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/u.test(name));
+    const worksheetEntries = Object.keys(zip.files)
+      .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/u.test(name))
+      .sort((left, right) => Number.parseInt(left.match(/sheet(\d+)/u)?.[1] ?? '0', 10) - Number.parseInt(right.match(/sheet(\d+)/u)?.[1] ?? '0', 10));
     let formulaCount = 0;
     let rowCount = 0;
+    let dataRowCount = 0;
+    let numericStyleCellCount = 0;
+    let percentStyleCellCount = 0;
+    let currencyStyleCellCount = 0;
+    let dateStyleCellCount = 0;
     const formulaCells: string[] = [];
+    const invalidFormulas: string[] = [];
+    const placeholderCells: string[] = [];
+    const headersBySheet: string[][] = [];
+    let structuredSheetCount = 0;
     for (const entry of worksheetEntries) {
       const worksheetText = await zip.file(entry)?.async('string');
-      const formulas = [...(worksheetText ?? '').matchAll(/<c\b[^>]*\br="([^"]+)"[^>]*>[\s\S]*?<\/c>/gu)]
+      const xmlText = worksheetText ?? '';
+      const rows = [...xmlText.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/gu)];
+      const firstRowXml = rows[0]?.[1] ?? '';
+      const headerCells = [...firstRowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/gu)];
+      const headers = headerCells.map((match) => {
+        const cellText = match[2]?.match(/<t\b[^>]*>([\s\S]*?)<\/t>/u)?.[1] ?? '';
+        return cleanText(decodeXmlText(cellText));
+      });
+      headersBySheet.push(headers);
+      const uniqueHeaders = uniqueCount(headers);
+      const headerStyled = headerCells.length > 0 && headerCells.every((match) => /(?:^|\s)s="1"(?:\s|$)/u.test(match[1] ?? ''));
+      const hasFrozenHeader = /<pane\b[^>]*\bySplit="1"[^>]*\bstate="frozen"/u.test(xmlText);
+      const columnWidthCount = [...xmlText.matchAll(/<col\b[^>]*\bcustomWidth="1"/gu)].length;
+      const hasAutoFilter = /<autoFilter\b[^>]*\bref="A1:/u.test(xmlText);
+      if (headers.length >= 2
+        && headers.every(Boolean)
+        && uniqueHeaders === headers.length
+        && rows.length >= 2
+        && headerStyled
+        && hasFrozenHeader
+        && columnWidthCount >= headers.length
+        && hasAutoFilter) {
+        structuredSheetCount += 1;
+      }
+      const formulas = [...xmlText.matchAll(/<c\b[^>]*\br="([^"]+)"[^>]*>[\s\S]*?<\/c>/gu)]
         .map((match) => {
           const formula = match[0].match(/<f>([\s\S]*?)<\/f>/u)?.[1];
           return formula ? { ref: match[1] ?? '', formula } : null;
         })
         .filter((item): item is { ref: string; formula: string } => Boolean(item));
       formulaCount += formulas.length;
-      formulaCells.push(...formulas.map((item) => `${item.ref}=${decodeXmlText(item.formula)}`));
-      rowCount += [...(worksheetText ?? '').matchAll(/<row\b/gu)].length;
+      for (const item of formulas) {
+        const formula = decodeXmlText(item.formula).trim();
+        formulaCells.push(`${item.ref}=${formula}`);
+        const references = formula.includes('!')
+          ? []
+          : [...formula.matchAll(/\$?([A-Z]{1,3})\$?(\d+)/gu)];
+        const invalidReference = references.some((reference) => (
+          Number.parseInt(reference[2] ?? '0', 10) < 1
+        ));
+        if (!formula || /^=/u.test(formula) || /#(?:REF|NAME|VALUE|DIV\/0)!?/iu.test(formula) || invalidReference) {
+          invalidFormulas.push(`${item.ref}=${formula}`);
+        }
+      }
+      const textCells = [...xmlText.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/gu)]
+        .map((match) => cleanText(decodeXmlText(match[1] ?? '')))
+        .filter(Boolean);
+      placeholderCells.push(...textCells.filter(isPlaceholderLine));
+      numericStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:3|4|5|6|7|9|10|11|12|13)"/gu)].length;
+      percentStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:5|11)"/gu)].length;
+      currencyStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:6|12)"/gu)].length;
+      dateStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:7|13)"/gu)].length;
+      rowCount += rows.length;
+      dataRowCount += Math.max(0, rows.length - 1);
     }
     const prompt = sourcePrompt(request);
-    const expectsFormula = /公式|合计|差额|完成率|转化率|预计收入|预算|实际|率/u.test(prompt);
-    const passed = sheetNames.length > 0 && rowCount > sheetNames.length && (!expectsFormula || formulaCount > 0);
+    const requestHasFormula = (request.sheets ?? []).some((sheet) => (sheet.rows ?? []).some((row) => row.some((cell) => (
+      Boolean(cell && typeof cell === 'object' && !Array.isArray(cell) && cleanText((cell as { formula?: unknown }).formula))
+    ))));
+    const requestHasNumericValue = (request.sheets ?? []).some((sheet) => (sheet.rows ?? []).some((row) => row.some((cell) => {
+      const value = spreadsheetCellValue(cell);
+      return typeof value === 'number' && Number.isFinite(value);
+    })));
+    const allHeaders = headersBySheet.flat();
+    const expectsFormula = requestHasFormula || /公式|合计|差额|完成率|转化率|预计收入|预算|实际|率/u.test(prompt);
+    const expectsPercent = allHeaders.some((header) => /率|比例|占比|进度|完成度|percent|rate/iu.test(header));
+    const expectsCurrency = allHeaders.some((header) => /金额|收入|支出|预算|实际|差额|价格|单价|客单价|成本|费用|销售额|总价/iu.test(header));
+    const expectsDate = allHeaders.some((header) => /日期|时间|开始|结束|date|time/iu.test(header));
+    const expectsNumeric = requestHasNumericValue || requestHasFormula || expectsPercent || expectsCurrency;
+    const expectedRows = parseRequestedCount(prompt, '条');
+    const rowCountMatches = expectedRows === undefined || dataRowCount >= expectedRows;
+    const hasStylesRelationship = /relationships\/styles/iu.test(workbookRelsText ?? '');
+    const hasNumberFormats = /<numFmts\b[^>]*\bcount="4"/u.test(stylesText ?? '');
+    const hasAutomaticCalculation = /<calcPr\b[^>]*\bcalcMode="auto"[^>]*\bfullCalcOnLoad="1"/u.test(workbookXmlText ?? '');
+    const passed = hasTaskContext(request)
+      && sheetNames.length > 0
+      && worksheetEntries.length === sheetNames.length
+      && structuredSheetCount === sheetNames.length
+      && dataRowCount >= sheetNames.length
+      && rowCountMatches
+      && placeholderCells.length === 0
+      && invalidFormulas.length === 0
+      && (!expectsFormula || formulaCount > 0)
+      && (formulaCount === 0 || hasAutomaticCalculation)
+      && hasStylesRelationship
+      && hasNumberFormats
+      && (!expectsNumeric || numericStyleCellCount > 0)
+      && (!expectsPercent || percentStyleCellCount > 0)
+      && (!expectsCurrency || currencyStyleCellCount > 0)
+      && (!expectsDate || dateStyleCellCount > 0);
     return {
       status: passed ? 'passed' : 'blocked',
       kind: 'artifact.content',
       required: true,
       severity: passed ? 'info' : 'blocking',
       detail: passed
-        ? `Excel 内容验证通过：已读回 ${sheetNames.length} 个 sheet，${formulaCount} 个公式单元格。`
-        : 'Excel 内容验证未通过：sheet、数据行或公式不满足任务要求。',
+        ? `Excel 成品验证通过：${sheetNames.length} 个 sheet 均具备有效表头、列宽、冻结窗格、数值格式和可重算公式。`
+        : 'Excel 成品验证未通过：表头/数据、列宽冻结、数值格式、公式引用或任务内容不满足要求。',
       evidence: [
         `sheets=${sheetNames.join(' / ')}`,
         `rows=${rowCount}`,
+        `dataRows=${dataRowCount}`,
+        expectedRows ? `expectedRows>=${expectedRows}` : undefined,
+        `structuredSheets=${structuredSheetCount}/${sheetNames.length}`,
         `formulas=${formulaCount}`,
         formulaCells.length ? `formulaCells=${formulaCells.slice(0, 12).join(', ')}` : undefined,
+        `invalidFormulas=${invalidFormulas.slice(0, 6).join(', ') || 'none'}`,
         `expectsFormula=${expectsFormula}`,
+        `expectsNumeric=${expectsNumeric}`,
+        `numericStyles=${numericStyleCellCount}`,
+        `percentStyles=${percentStyleCellCount}`,
+        `currencyStyles=${currencyStyleCellCount}`,
+        `dateStyles=${dateStyleCellCount}`,
+        `stylesRelationship=${hasStylesRelationship}`,
+        `automaticCalculation=${hasAutomaticCalculation}`,
+        `placeholderCells=${placeholderCells.slice(0, 5).join(' / ') || 'none'}`,
+        `taskContext=${hasTaskContext(request)}`,
       ].filter(Boolean).join('; '),
     };
   } catch (error) {
@@ -952,9 +1593,44 @@ function textFromMarkup(markup: string): string {
 
 function extractInlineScriptText(html: string): string {
   return [...html.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/giu)]
-    .map((match) => cleanText(match[1] ?? ''))
+    .map((match) => rawText(match[1] ?? ''))
     .filter(Boolean)
-    .join(' ');
+    .join('\n');
+}
+
+function extractInlineCssText(html: string): string {
+  return [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/giu)]
+    .map((match) => rawText(match[1] ?? ''))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function inlineScriptSyntaxError(script: string): string | undefined {
+  if (!script) return 'empty script';
+  try {
+    Function(script);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+function missingScriptElementReferences(html: string, script: string): string[] {
+  const elementIds = new Set([...html.matchAll(/\bid\s*=\s*["']([^"']+)["']/giu)].map((match) => match[1] ?? ''));
+  const referencedIds = [
+    ...[...script.matchAll(/getElementById\(\s*["']([^"']+)["']\s*\)/gu)].map((match) => match[1] ?? ''),
+    ...[...script.matchAll(/querySelector(?:All)?\(\s*["']#([\w-]+)["']\s*\)/gu)].map((match) => match[1] ?? ''),
+  ].filter(Boolean);
+  return [...new Set(referencedIds.filter((id) => !elementIds.has(id)))];
+}
+
+function markupTextSegments(markup: string): string[] {
+  return markup
+    .replace(/<script\b[\s\S]*?<\/script>/giu, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/giu, ' ')
+    .split(/<[^>]+>/gu)
+    .map((segment) => cleanText(decodeXmlText(segment)))
+    .filter(Boolean);
 }
 
 function htmlAttributeValue(attrs: string, name: string): string | undefined {
@@ -1035,7 +1711,7 @@ function detectHiddenDisplayOverrides(html: string): string[] {
         classes: htmlClassList(attrs),
       };
     })
-    .filter((item): item is { tag: string; attrs: string; id?: string; classes: string[] } => Boolean(item));
+    .filter((item): item is { tag: string; attrs: string; id: string | undefined; classes: string[] } => item !== null);
   if (hiddenElements.length === 0) return [];
 
   const overrides: string[] = [];
@@ -1071,18 +1747,30 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
   const normalizedHtml = cleanText(html);
   const bodyMarkup = extractHtmlBody(html);
   const bodyText = textFromMarkup(bodyMarkup);
+  const bodyTextSegments = markupTextSegments(bodyMarkup);
   const bodyElementCount = countBodyElements(bodyMarkup);
   const inlineScriptText = extractInlineScriptText(html);
+  const inlineCssText = extractInlineCssText(html);
+  const scriptSyntaxError = inlineScriptSyntaxError(inlineScriptText);
+  const missingElementReferences = missingScriptElementReferences(html, inlineScriptText);
+  const placeholderSegments = bodyTextSegments.filter(isPlaceholderLine);
   const hiddenDisplayOverrides = detectHiddenDisplayOverrides(html);
   const fileSizeOk = fileSize >= MIN_HTML_FILE_SIZE_BYTES;
   const hasDocument = /<!doctype html|<html[\s>]/iu.test(html);
+  const hasViewport = /<meta\b[^>]*\bname=["']viewport["'][^>]*>/iu.test(html);
   const hasBody = /<body[\s>]/iu.test(html);
-  const hasMeaningfulBody = bodyMarkup.trim().length > 0 && (bodyText.length >= 4 || bodyElementCount >= 2);
+  const hasHeading = /<h1\b[^>]*>[\s\S]*?<\/h1>/iu.test(bodyMarkup);
+  const hasMeaningfulBody = bodyMarkup.trim().length > 0 && bodyText.length >= 12 && bodyElementCount >= 5;
   const hasScript = /<script[\s>]/iu.test(html);
-  const hasRunnableScript = inlineScriptText.length >= 20 || /\son[a-z]+\s*=/iu.test(html);
+  const hasRunnableScript = inlineScriptText.length >= 80 && !scriptSyntaxError && missingElementReferences.length === 0;
+  const hasInlineStyle = inlineCssText.length >= 120;
   const hasInput = /<input[\s>]/iu.test(html);
   const buttonCount = [...html.matchAll(/<button\b/giu)].length;
+  const controlCount = [...html.matchAll(/<(?:button|input|select|textarea)\b/giu)].length;
   const hasInteractiveControl = hasInput || buttonCount > 0 || /<(?:select|textarea)\b/iu.test(html);
+  const hasEventBinding = /addEventListener\s*\(|\.(?:onclick|onsubmit|oninput|onchange)\s*=|\son(?:click|submit|input|change)\s*=/iu.test(html);
+  const hasDomMutation = /\.(?:textContent|innerHTML|className|value)\s*=|\.(?:appendChild|append|prepend|remove|classList\.)/u.test(inlineScriptText);
+  const hasInteractiveBehavior = hasEventBinding && hasDomMutation;
   const hasPersistence = /localStorage|sessionStorage/iu.test(html);
   const expectsDelete = /删除|delete|移除|remove/iu.test(prompt);
   const expectsFilter = /筛选|filter|分类|全部|完成/iu.test(prompt);
@@ -1106,23 +1794,45 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
   const hasList = !expectsList || /<ul\b|List|列表|list/iu.test(html);
   const hiddenDisplaySafe = hiddenDisplayOverrides.length === 0;
   const missing = [
+    hasTaskContext(request) ? undefined : 'task context',
     fileSizeOk ? undefined : `fileSize<${MIN_HTML_FILE_SIZE_BYTES}`,
     hasDocument ? undefined : 'document',
+    hasViewport ? undefined : 'viewport',
     hasBody ? undefined : 'body',
+    hasHeading ? undefined : 'h1',
     hasMeaningfulBody ? undefined : 'meaningful body',
     hasScript ? undefined : 'script tag',
     hasRunnableScript ? undefined : 'runnable script',
+    hasInlineStyle ? undefined : 'inline style',
     hasInteractiveControl ? undefined : 'interactive control',
+    hasInteractiveBehavior ? undefined : 'interactive behavior',
     hiddenDisplaySafe ? undefined : 'hidden display override',
+    placeholderSegments.length === 0 ? undefined : 'placeholder content',
+    hasDelete ? undefined : 'delete behavior',
+    hasFilter ? undefined : 'filter behavior',
+    hasSearch ? undefined : 'search behavior',
+    hasTags ? undefined : 'tag behavior',
+    hasRequiredPersistence ? undefined : 'persistence',
+    hasValidation ? undefined : 'validation behavior',
+    hasSuccess ? undefined : 'success state',
+    hasCart ? undefined : 'cart behavior',
+    hasKanban ? undefined : 'kanban behavior',
+    hasList ? undefined : 'list behavior',
   ].filter(Boolean);
-  const passed = fileSizeOk
+  const passed = hasTaskContext(request)
+    && fileSizeOk
     && hasDocument
+    && hasViewport
     && hasBody
+    && hasHeading
     && hasMeaningfulBody
     && hasScript
     && hasRunnableScript
+    && hasInlineStyle
     && hasInteractiveControl
+    && hasInteractiveBehavior
     && hiddenDisplaySafe
+    && placeholderSegments.length === 0
     && hasDelete
     && hasFilter
     && hasSearch
@@ -1137,24 +1847,35 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
     status: passed ? 'passed' : 'blocked',
     kind: 'artifact.content',
     required: true,
-    severity: passed ? 'info' : 'blocking',
-    detail: passed
-      ? 'HTML 小程序内容验证通过：写出文件大小、body 内容、交互控件、脚本和初始隐藏状态均通过。'
+      severity: passed ? 'info' : 'blocking',
+      detail: passed
+      ? 'HTML 小程序成品验证通过：页面结构、初始内容、样式、脚本语法、DOM 引用和任务交互均通过。'
       : `HTML 小程序内容验证未通过：${missing.length ? missing.join('、') : '缺少指定交互能力'}。`,
     evidence: [
       `fileSize=${fileSize}`,
       `fileSizeOk=${fileSizeOk}`,
       `htmlChars=${normalizedHtml.length}`,
       `hasDocument=${hasDocument}`,
+      `hasViewport=${hasViewport}`,
       `hasBody=${hasBody}`,
       `bodyChars=${bodyText.length}`,
+      `bodySegments=${bodyTextSegments.length}`,
       `bodyElements=${bodyElementCount}`,
+      `hasHeading=${hasHeading}`,
       `hasMeaningfulBody=${hasMeaningfulBody}`,
       `hasScript=${hasScript}`,
       `inlineScriptChars=${inlineScriptText.length}`,
+      `scriptSyntax=${scriptSyntaxError ?? 'valid'}`,
+      `missingElementRefs=${missingElementReferences.join(', ') || 'none'}`,
       `hasRunnableScript=${hasRunnableScript}`,
+      `inlineCssChars=${inlineCssText.length}`,
+      `hasInlineStyle=${hasInlineStyle}`,
       `hasInput=${hasInput}`,
       `hasInteractiveControl=${hasInteractiveControl}`,
+      `controlCount=${controlCount}`,
+      `hasEventBinding=${hasEventBinding}`,
+      `hasDomMutation=${hasDomMutation}`,
+      `hasInteractiveBehavior=${hasInteractiveBehavior}`,
       `buttonCount=${buttonCount}`,
       `hiddenDisplaySafe=${hiddenDisplaySafe}`,
       `hiddenDisplayOverride=${hiddenDisplayOverrides.length ? hiddenDisplayOverrides.join(', ') : 'none'}`,
@@ -1168,23 +1889,59 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
       `hasCart=${hasCart}`,
       `hasKanban=${hasKanban}`,
       `hasList=${hasList}`,
+      `placeholderSegments=${placeholderSegments.join(' / ') || 'none'}`,
+      `taskContext=${hasTaskContext(request)}`,
     ].join('; '),
   };
 }
 
-function validateTextContent(text: string): LocalArtifactVerificationResult {
+function validateTextContent(text: string, request: LocalArtifactCreateRequest): LocalArtifactVerificationResult {
   const headingCount = [...text.matchAll(/^#{1,3}\s+/gmu)].length;
+  const sectionHeadingCount = [...text.matchAll(/^##\s+/gmu)].length;
   const bulletCount = [...text.matchAll(/^- /gmu)].length;
-  const passed = cleanText(text).length >= 80 && headingCount > 0;
+  const contentLines = text.split(/\r?\n/u)
+    .map((line) => cleanText(line.replace(/^#{1,3}\s+|^-\s+/u, '')))
+    .filter(Boolean);
+  const headingLines = text.split(/\r?\n/u)
+    .filter((line) => /^#{1,3}\s+/u.test(line))
+    .map((line) => cleanText(line.replace(/^#{1,3}\s+/u, '')));
+  const bodyLines = contentLines.filter((line) => !headingLines.includes(line));
+  const placeholderLines = contentLines.filter(isPlaceholderLine);
+  const substantiveLines = bodyLines.filter((line) => line.length >= 10 && !isPlaceholderLine(line));
+  const repeatedLines = substantiveLines.length > 2 && uniqueCount(substantiveLines) / substantiveLines.length < 0.65;
+  const bodyChars = cleanText(bodyLines.join(' ')).length;
+  const expectedItems = parseRequestedCount(sourcePrompt(request), '条');
+  const itemCountMatches = expectedItems === undefined || Math.max(bulletCount, substantiveLines.length) >= expectedItems;
+  const hasEnoughSubstance = substantiveLines.length >= 2 || bodyChars >= 160;
+  const passed = hasTaskContext(request)
+    && cleanText(text).length >= 80
+    && headingCount >= 2
+    && sectionHeadingCount >= 1
+    && hasEnoughSubstance
+    && placeholderLines.length === 0
+    && !repeatedLines
+    && itemCountMatches;
   return {
     status: passed ? 'passed' : 'blocked',
     kind: 'artifact.content',
     required: true,
     severity: passed ? 'info' : 'blocking',
     detail: passed
-      ? '文案内容验证通过：包含标题和足够正文内容。'
-      : '文案内容验证未通过：正文过短或缺少标题结构。',
-    evidence: `chars=${cleanText(text).length}; headings=${headingCount}; bullets=${bulletCount}`,
+      ? '文案成品验证通过：标题层级、正文密度、条目数量和非模板化内容均满足要求。'
+      : '文案成品验证未通过：结构不完整、正文过短、内容重复、条目不足或仍含占位模板。',
+    evidence: [
+      `chars=${cleanText(text).length}`,
+      `bodyChars=${bodyChars}`,
+      `headings=${headingCount}`,
+      `sectionHeadings=${sectionHeadingCount}`,
+      `bullets=${bulletCount}`,
+      `substantiveLines=${substantiveLines.length}`,
+      expectedItems ? `expectedItems=${expectedItems}` : undefined,
+      `itemCountMatches=${itemCountMatches}`,
+      `repeatedLines=${repeatedLines}`,
+      `placeholderLines=${placeholderLines.join(' / ') || 'none'}`,
+      `taskContext=${hasTaskContext(request)}`,
+    ].filter(Boolean).join('; '),
   };
 }
 
@@ -1229,6 +1986,6 @@ export async function createLocalArtifact(request: LocalArtifactCreateRequest): 
   const text = renderText({ ...effectiveRequest, title });
   await writeFile(filePath, text, 'utf8');
   const fileSize = statSync(filePath).size;
-  const verification = validateTextContent(text);
+  const verification = validateTextContent(text, effectiveRequest);
   return { kind: 'document', title, fileName: filePath.split(/[\\/]/u).pop() || 'copywriting.md', filePath, fileSize, mimeType: MIME.md, media: `MEDIA:${filePath}`, planning, verification };
 }

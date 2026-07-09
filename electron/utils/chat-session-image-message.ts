@@ -9,6 +9,23 @@ const SAFE_SESSION_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 type SessionsJson = Record<string, unknown>;
 type SessionRecord = Record<string, unknown>;
 type PersistedArtifactResultKind = 'image' | 'video' | 'composite';
+const sessionPersistenceMutexes = new Map<string, Promise<void>>();
+
+export type PersistedCompositeArtifactManifest = {
+  version: 1 | 2;
+  runId: string;
+  requestedTaskCount: number;
+  runStatus?: 'running' | 'completed' | 'error' | 'aborted';
+  runtimeEvents?: unknown[];
+  tasks: Array<{
+    id: string;
+    kind: string;
+    title: string;
+    status: 'completed' | 'failed' | 'blocked';
+    detail?: string;
+    artifactRefs: string[];
+  }>;
+};
 type PersistedConversationFile = {
   fileName?: string;
   mimeType?: string;
@@ -19,6 +36,28 @@ type PersistedConversationFile = {
   gatewayUrl?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
 };
+
+async function withSessionPersistenceMutex<T>(
+  sessionsJsonPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = sessionPersistenceMutexes.get(sessionsJsonPath) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  sessionPersistenceMutexes.set(sessionsJsonPath, current);
+
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (sessionPersistenceMutexes.get(sessionsJsonPath) === current) {
+      sessionPersistenceMutexes.delete(sessionsJsonPath);
+    }
+  }
+}
 
 function parseAgentIdFromSessionKey(sessionKey: string): string {
   if (!sessionKey.startsWith('agent:')) {
@@ -48,6 +87,18 @@ async function readSessionsJson(path: string): Promise<SessionsJson> {
       ? String((error as NodeJS.ErrnoException).code)
       : '';
     if (code === 'ENOENT') return {};
+    throw error;
+  }
+}
+
+async function writeSessionsJsonAtomic(path: string, sessionsJson: SessionsJson): Promise<void> {
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await fsP.mkdir(dirname(path), { recursive: true });
+  try {
+    await fsP.writeFile(temporaryPath, JSON.stringify(sessionsJson, null, 2), 'utf8');
+    await fsP.rename(temporaryPath, path);
+  } catch (error) {
+    await fsP.unlink(temporaryPath).catch(() => undefined);
     throw error;
   }
 }
@@ -91,26 +142,76 @@ function upsertSessionRecord(
   sessionsJson[sessionKey] = nextRecord;
 }
 
-async function readLastTranscriptMessageId(transcriptPath: string): Promise<string | null> {
+async function readTranscriptState(
+  transcriptPath: string,
+  assistantIdempotencyKey: string,
+  assistantMessageId: string,
+  userIdempotencyKey: string,
+  userMessageId: string,
+): Promise<{
+  lastMessageId: string | null;
+  hasMatchingAssistant: boolean;
+  hasMatchingUser: boolean;
+}> {
   try {
     const raw = await fsP.readFile(transcriptPath, 'utf8');
     const lines = raw.split(/\r?\n/).filter(Boolean);
+    let lastMessageId: string | null = null;
+    let hasMatchingAssistant = false;
+    let hasMatchingUser = false;
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       try {
-        const entry = JSON.parse(lines[index] || '') as { type?: unknown; id?: unknown };
-        if (entry.type === 'message' && typeof entry.id === 'string' && entry.id.trim()) {
-          return entry.id;
+        const entry = JSON.parse(lines[index] || '') as {
+          type?: unknown;
+          id?: unknown;
+          message?: unknown;
+        };
+        if (entry.type !== 'message') continue;
+
+        const entryId = typeof entry.id === 'string' ? entry.id.trim() : '';
+        if (!lastMessageId && entryId) {
+          lastMessageId = entryId;
+        }
+        const message = entry.message && typeof entry.message === 'object' && !Array.isArray(entry.message)
+          ? entry.message as Record<string, unknown>
+          : null;
+        const existingIdempotencyKey = typeof message?.idempotencyKey === 'string'
+          ? message.idempotencyKey.trim()
+          : '';
+        const existingMessageId = typeof message?.id === 'string' ? message.id.trim() : '';
+        if (
+          existingIdempotencyKey === assistantIdempotencyKey
+          || entryId === assistantMessageId
+          || existingMessageId === assistantMessageId
+        ) {
+          hasMatchingAssistant = true;
+        }
+        if (
+          existingIdempotencyKey === userIdempotencyKey
+          || entryId === userMessageId
+          || existingMessageId === userMessageId
+        ) {
+          hasMatchingUser = true;
+        }
+        if (lastMessageId && hasMatchingAssistant && hasMatchingUser) {
+          break;
         }
       } catch {
         continue;
       }
     }
-    return null;
+    return { lastMessageId, hasMatchingAssistant, hasMatchingUser };
   } catch (error) {
     const code = typeof error === 'object' && error !== null && 'code' in error
       ? String((error as NodeJS.ErrnoException).code)
       : '';
-    if (code === 'ENOENT') return null;
+    if (code === 'ENOENT') {
+      return {
+        lastMessageId: null,
+        hasMatchingAssistant: false,
+        hasMatchingUser: false,
+      };
+    }
     throw error;
   }
 }
@@ -143,18 +244,13 @@ async function ensureTranscriptHeader(
 }
 
 function buildAssistantText(summaryText: string | undefined, outputPaths: string[]): string {
-  const lines: string[] = [];
   const summary = summaryText?.trim();
-  if (summary) {
-    lines.push(summary);
-  }
-  for (const outputPath of outputPaths) {
-    const trimmed = outputPath.trim();
-    if (trimmed) {
-      lines.push(`MEDIA:${trimmed}`);
-    }
-  }
-  return lines.join('\n\n');
+  if (summary) return summary;
+  const hasVideo = outputPaths.some((outputPath) => mimeFromPathOrUrl(outputPath).startsWith('video/'));
+  const hasImage = outputPaths.some((outputPath) => mimeFromPathOrUrl(outputPath).startsWith('image/'));
+  if (hasVideo) return '视频已生成。';
+  if (hasImage) return '图片已生成。';
+  return '产物已生成。';
 }
 
 function dedupePersistedConversationFiles(files: PersistedConversationFile[]): PersistedConversationFile[] {
@@ -315,6 +411,8 @@ function buildMessageEntry(params: {
   messageId?: string;
   attachedFiles?: PersistedConversationFile[];
   localArtifactResultKind?: PersistedArtifactResultKind;
+  compositeArtifactManifest?: PersistedCompositeArtifactManifest;
+  mediaGenerationSnapshot?: unknown;
 }): string {
   return JSON.stringify({
     type: 'message',
@@ -326,7 +424,7 @@ function buildMessageEntry(params: {
       ...(params.messageId ? { id: params.messageId } : {}),
       content: params.content,
       timestamp: params.timestampMs,
-      idempotencyKey: `${params.id}:${params.idempotencySuffix}`,
+      idempotencyKey: buildMessageIdempotencyKey(params.id, params.idempotencySuffix),
       ...(params.attachedFiles?.length ? {
         _attachedFiles: params.attachedFiles.map((file) => ({
           fileName: file.fileName ?? 'artifact',
@@ -343,9 +441,19 @@ function buildMessageEntry(params: {
         })),
       } : {}),
       ...(params.localArtifactResultKind ? { localArtifactResultKind: params.localArtifactResultKind } : {}),
+      ...(params.compositeArtifactManifest ? { compositeArtifactManifest: params.compositeArtifactManifest } : {}),
+      ...(params.mediaGenerationSnapshot ? { mediaGenerationSnapshot: params.mediaGenerationSnapshot } : {}),
       ...(params.syntheticLocalArtifactConversation ? { syntheticLocalArtifactConversation: true } : {}),
     },
   });
+}
+
+function buildMessageIdempotencyKey(id: string, suffix: 'user' | 'assistant'): string {
+  return `${id}:${suffix}`;
+}
+
+function buildSyntheticUserMessageId(assistantMessageId: string): string {
+  return `local-artifact-user:${assistantMessageId}`;
 }
 
 async function appendConversationEntries(params: {
@@ -355,10 +463,19 @@ async function appendConversationEntries(params: {
   assistantMessageId?: string;
   assistantResultKind?: PersistedArtifactResultKind;
   assistantFiles?: PersistedConversationFile[];
+  compositeArtifactManifest?: PersistedCompositeArtifactManifest;
+  mediaGenerationSnapshot?: unknown;
   outputPaths?: string[];
   inputPaths?: string[];
   userTimestampMs?: number;
+  shouldAbort?: () => boolean;
 }): Promise<void> {
+  const throwIfAborted = () => {
+    if (params.shouldAbort?.()) {
+      throw new Error('Conversation delivery cancelled');
+    }
+  };
+  throwIfAborted();
   const sessionKey = params.sessionKey.trim();
   const prompt = params.prompt.trim();
   const inputPaths = (params.inputPaths ?? []).map((value) => value.trim()).filter(Boolean);
@@ -373,77 +490,108 @@ async function appendConversationEntries(params: {
   const agentId = parseAgentIdFromSessionKey(sessionKey);
   const sessionsDir = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions');
   const sessionsJsonPath = join(sessionsDir, 'sessions.json');
-  const sessionsJson = await readSessionsJson(sessionsJsonPath);
-  const existingRecord = findExistingSessionRecord(sessionsJson, sessionKey);
-  const resolution = resolveSessionTranscriptPath(sessionsJson, sessionsDir, sessionKey);
+  await withSessionPersistenceMutex(sessionsJsonPath, async () => {
+    throwIfAborted();
+    const sessionsJson = await readSessionsJson(sessionsJsonPath);
+    const existingRecord = findExistingSessionRecord(sessionsJson, sessionKey);
+    const resolution = resolveSessionTranscriptPath(sessionsJson, sessionsDir, sessionKey);
 
-  const existingSessionId = typeof existingRecord?.sessionId === 'string' && existingRecord.sessionId.trim()
-    ? existingRecord.sessionId.trim()
-    : (typeof existingRecord?.id === 'string' && existingRecord.id.trim() ? existingRecord.id.trim() : null);
-  const sessionId = existingSessionId || (resolution.ok ? resolution.baseId : randomUUID());
-  const transcriptPath = resolution.ok
-    ? resolution.resolvedSrcPath
-    : join(sessionsDir, `${sessionId}.jsonl`);
+    const existingSessionId = typeof existingRecord?.sessionId === 'string' && existingRecord.sessionId.trim()
+      ? existingRecord.sessionId.trim()
+      : (typeof existingRecord?.id === 'string' && existingRecord.id.trim() ? existingRecord.id.trim() : null);
+    const sessionId = existingSessionId || (resolution.ok ? resolution.baseId : randomUUID());
+    const transcriptPath = resolution.ok
+      ? resolution.resolvedSrcPath
+      : join(sessionsDir, `${sessionId}.jsonl`);
 
-  await ensureTranscriptHeader(transcriptPath, sessionId);
+    await ensureTranscriptHeader(transcriptPath, sessionId);
+    throwIfAborted();
 
-  const priorMessageId = await readLastTranscriptMessageId(transcriptPath);
-  const nowMs = Date.now();
-  const userTimestampMs = typeof params.userTimestampMs === 'number' && Number.isFinite(params.userTimestampMs)
-    ? Math.floor(params.userTimestampMs)
-    : nowMs;
-  const assistantTimestampMs = Math.max(nowMs, userTimestampMs + 1);
-  const userMessageId = randomUUID();
-  const assistantMessageId = params.assistantMessageId?.trim() || randomUUID();
-  const userText = buildUserText(prompt, inputPaths);
-  const assistantFiles = await buildAssistantAttachedFiles({
-    files: params.assistantFiles,
-    outputPaths: params.outputPaths,
+    const nowMs = Date.now();
+    const userTimestampMs = typeof params.userTimestampMs === 'number' && Number.isFinite(params.userTimestampMs)
+      ? Math.floor(params.userTimestampMs)
+      : nowMs;
+    const assistantTimestampMs = Math.max(nowMs, userTimestampMs + 1);
+    const assistantMessageId = params.assistantMessageId?.trim() || randomUUID();
+    const userMessageId = buildSyntheticUserMessageId(assistantMessageId);
+    const assistantIdempotencyKey = buildMessageIdempotencyKey(assistantMessageId, 'assistant');
+    const userIdempotencyKey = buildMessageIdempotencyKey(userMessageId, 'user');
+    const transcriptState = await readTranscriptState(
+      transcriptPath,
+      assistantIdempotencyKey,
+      assistantMessageId,
+      userIdempotencyKey,
+      userMessageId,
+    );
+    throwIfAborted();
+
+    if (!transcriptState.hasMatchingAssistant) {
+      const userText = buildUserText(prompt, inputPaths);
+      const assistantFiles = await buildAssistantAttachedFiles({
+        files: params.assistantFiles,
+        outputPaths: params.outputPaths,
+      });
+      throwIfAborted();
+      const nextLines: string[] = [];
+      if (!transcriptState.hasMatchingUser) {
+        nextLines.push(buildMessageEntry({
+          id: userMessageId,
+          parentId: transcriptState.lastMessageId,
+          role: 'user',
+          content: userText,
+          timestampMs: userTimestampMs,
+          idempotencySuffix: 'user',
+          syntheticLocalArtifactConversation: true,
+          messageId: userMessageId,
+        }));
+      }
+      nextLines.push(buildMessageEntry({
+          id: assistantMessageId,
+          parentId: userMessageId,
+          role: 'assistant',
+          content: assistantText,
+          timestampMs: assistantTimestampMs,
+          idempotencySuffix: 'assistant',
+          messageId: assistantMessageId,
+          attachedFiles: assistantFiles,
+          localArtifactResultKind: params.assistantResultKind,
+          compositeArtifactManifest: params.compositeArtifactManifest,
+          mediaGenerationSnapshot: params.mediaGenerationSnapshot,
+          syntheticLocalArtifactConversation: true,
+        }));
+      throwIfAborted();
+      await fsP.appendFile(transcriptPath, `${nextLines.join('\n')}\n`, 'utf8');
+    }
+
+    throwIfAborted();
+
+    const recordUpdates: SessionRecord = {
+      sessionId,
+      sessionStartedAt: typeof existingRecord?.sessionStartedAt === 'number'
+        ? existingRecord.sessionStartedAt
+        : nowMs,
+      lastInteractionAt: nowMs,
+      updatedAt: nowMs,
+      sessionFile: transcriptPath,
+      chatType: typeof existingRecord?.chatType === 'string' && existingRecord.chatType.trim()
+        ? existingRecord.chatType
+        : 'direct',
+      status: 'completed',
+    };
+
+    const latestSessionsJson = await readSessionsJson(sessionsJsonPath);
+    throwIfAborted();
+    const latestRecord = findExistingSessionRecord(latestSessionsJson, sessionKey);
+    if (existingRecord && !latestRecord) {
+      return;
+    }
+    upsertSessionRecord(latestSessionsJson, sessionKey, {
+      ...(latestRecord ?? existingRecord ?? {}),
+      ...recordUpdates,
+    });
+    throwIfAborted();
+    await writeSessionsJsonAtomic(sessionsJsonPath, latestSessionsJson);
   });
-
-  const nextLines = [
-    buildMessageEntry({
-      id: userMessageId,
-      parentId: priorMessageId,
-      role: 'user',
-      content: userText,
-      timestampMs: userTimestampMs,
-      idempotencySuffix: 'user',
-      syntheticLocalArtifactConversation: true,
-      messageId: userMessageId,
-    }),
-    buildMessageEntry({
-      id: assistantMessageId,
-      parentId: userMessageId,
-      role: 'assistant',
-      content: assistantText,
-      timestampMs: assistantTimestampMs,
-      idempotencySuffix: 'assistant',
-      messageId: assistantMessageId,
-      attachedFiles: assistantFiles,
-      localArtifactResultKind: params.assistantResultKind,
-    }),
-  ].join('\n');
-  await fsP.appendFile(transcriptPath, `${nextLines}\n`, 'utf8');
-
-  const nextRecord: SessionRecord = {
-    ...(existingRecord ?? {}),
-    sessionId,
-    sessionStartedAt: typeof existingRecord?.sessionStartedAt === 'number'
-      ? existingRecord.sessionStartedAt
-      : nowMs,
-    lastInteractionAt: nowMs,
-    updatedAt: nowMs,
-    sessionFile: transcriptPath,
-    chatType: typeof existingRecord?.chatType === 'string' && existingRecord.chatType.trim()
-      ? existingRecord.chatType
-      : 'direct',
-    status: 'completed',
-  };
-
-  await fsP.mkdir(sessionsDir, { recursive: true });
-  upsertSessionRecord(sessionsJson, sessionKey, nextRecord);
-  await fsP.writeFile(sessionsJsonPath, JSON.stringify(sessionsJson, null, 2), 'utf8');
 }
 
 export async function appendImageGenerationConversation(params: {
@@ -456,6 +604,8 @@ export async function appendImageGenerationConversation(params: {
   userTimestampMs?: number;
   assistantMessageId?: string;
   assistantResultKind?: PersistedArtifactResultKind;
+  shouldAbort?: () => boolean;
+  mediaGenerationSnapshot?: unknown;
 }): Promise<void> {
   const outputPaths = params.outputPaths.map((value) => value.trim()).filter(Boolean);
   if (outputPaths.length === 0) {
@@ -471,6 +621,8 @@ export async function appendImageGenerationConversation(params: {
     outputPaths,
     inputPaths: params.inputPaths,
     userTimestampMs: params.userTimestampMs,
+    shouldAbort: params.shouldAbort,
+    mediaGenerationSnapshot: params.mediaGenerationSnapshot,
   });
 }
 
@@ -483,17 +635,21 @@ export async function appendCompositeArtifactConversation(params: {
   outputPaths?: string[];
   inputPaths?: string[];
   userTimestampMs?: number;
+  manifest?: PersistedCompositeArtifactManifest;
+  shouldAbort?: () => boolean;
 }): Promise<void> {
   const outputPaths = (params.outputPaths ?? []).map((value) => value.trim()).filter(Boolean);
   await appendConversationEntries({
     sessionKey: params.sessionKey,
     prompt: params.prompt,
-    assistantText: buildAssistantText(params.summaryText, outputPaths),
+    assistantText: params.summaryText,
     assistantMessageId: params.runId?.trim() ? `composite-result:${params.runId.trim()}` : undefined,
     assistantResultKind: 'composite',
     assistantFiles: params.files,
     outputPaths,
     inputPaths: params.inputPaths,
     userTimestampMs: params.userTimestampMs,
+    compositeArtifactManifest: params.manifest,
+    shouldAbort: params.shouldAbort,
   });
 }

@@ -2179,7 +2179,7 @@ function buildNativeToolCommentary(toolName, command) {
   const label = String(toolName ?? '').trim().toLowerCase();
   if (label === 'exec') {
     if (!command) return '我先继续执行当前步骤。';
-    if (/\b(?:mdfind|find|lsregister|locate|rg|ls)\b/iu.test(command) && /(?:Applications|Desktop|Music|音乐|QQ|Netease|qq|netease)/iu.test(command)) {
+    if (/\b(?:mdfind|find|lsregister|locate|rg|ls)\b/iu.test(command) && /(?:\/Applications\b|\.app\b|kMDItemContentType\s*={1,2}\s*["']?com\.apple\.application)/iu.test(command)) {
       return '我先在本机查找相关应用和快捷方式。';
     }
     if (/\bopen\b/iu.test(command)) {
@@ -2555,7 +2555,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.5',
+  version: '0.1.6',
   register(api) {
     registerArtifactGuard(api);
   },

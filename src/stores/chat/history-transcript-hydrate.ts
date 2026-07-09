@@ -11,11 +11,11 @@ export async function hydrateGatewayHistoryFromTranscript(
   limit: number,
   localMessages?: RawMessage[],
 ): Promise<RawMessage[]> {
-  if (!gatewayHistoryNeedsTranscriptHydration(gatewayMessages)) {
-    return gatewayMessages;
-  }
-
-  const transcriptMessages = await loadSessionTranscriptFallback(sessionKey, limit, { includeFamily: true });
+  const transcriptMessages = await loadSessionTranscriptFallback(
+    sessionKey,
+    limit,
+    { includeFamily: true },
+  ).catch(() => []);
   let merged = mergeGatewayHistoryWithTranscript(gatewayMessages, transcriptMessages);
 
   if (gatewayHistoryNeedsTranscriptHydration(merged) && localMessages?.length) {

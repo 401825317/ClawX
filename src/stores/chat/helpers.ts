@@ -6,7 +6,16 @@ import {
   stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
-import type { AttachedFileMeta, ChatRuntimeRunState, ChatSession, ContentBlock, RawMessage, ToolStatus } from './types';
+import type {
+  AsyncTaskEvidence,
+  AsyncTaskLedgerEntry,
+  AttachedFileMeta,
+  ChatRuntimeRunState,
+  ChatSession,
+  ContentBlock,
+  RawMessage,
+  ToolStatus,
+} from './types';
 
 // Module-level timestamp tracking the last chat event received.
 // Used by the safety timeout to avoid false-positive "no response" errors
@@ -919,6 +928,24 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
         });
       }
     }
+    if (block.type === 'video' || block.type === 'audio' || block.type === 'file') {
+      const url = block.url || block.source?.url;
+      const filePath = block.filePath;
+      if (url || filePath) {
+        const defaultMime = block.type === 'video'
+          ? 'video/mp4'
+          : block.type === 'audio' ? 'audio/mpeg' : 'application/octet-stream';
+        const target = filePath || url || '';
+        files.push({
+          fileName: block.fileName || block.alt || target.split(/[\\/]/u).pop() || block.type,
+          mimeType: block.mimeType || block.source?.media_type || defaultMime,
+          fileSize: 0,
+          preview: null,
+          ...(filePath ? { filePath } : { gatewayUrl: url }),
+          source: url ? 'gateway-media' : 'message-ref',
+        });
+      }
+    }
     // Recurse into tool_result content blocks
     if ((block.type === 'tool_result' || block.type === 'toolResult') && block.content) {
       files.push(...extractImagesAsAttachedFiles(block.content));
@@ -1496,7 +1523,6 @@ function isInternalMessage(msg: {
   syntheticLocalArtifactConversation?: unknown;
 }): boolean {
   if (msg.role === 'system') return true;
-  if (msg.role === 'user' && msg.syntheticLocalArtifactConversation === true) return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
     if (isInternalAssistantReplyText(text)) return true;
@@ -1752,32 +1778,288 @@ function collectToolUpdates(message: unknown, eventState: string): ToolStatus[] 
   return updates;
 }
 
+const DELIVERABLE_CONTENT_BLOCK_TYPES = new Set(['image', 'video', 'audio', 'file']);
+
+function isValidAttachedFile(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const file = value as Record<string, unknown>;
+  return [file.fileName, file.filePath, file.gatewayUrl, file.preview]
+    .some((candidate) => typeof candidate === 'string' && candidate.trim().length > 0);
+}
+
 /**
- * True when an assistant message carries user-visible final output (text or
- * image). NOTE: `thinking` blocks are intentionally excluded — they are the
- * model's internal monologue and frequently precede tool calls in models like
- * MiniMax-M2.7 and gpt-5.5. Treating thinking as "final content" causes the
- * history-poll closer in applyLoadedMessages and the runtime final handler to
- * misclassify intermediate `[thinking, toolCall]` turns as completed replies,
- * which prematurely tears down the `sending` / `activeRunId` / `pendingFinal`
- * lifecycle flags and makes the Thinking… indicator vanish mid-tool-chain.
+ * True when a message carries a user-visible deliverable. Thinking and tool
+ * blocks are intentionally excluded because they are intermediate runtime
+ * state, not the final response.
  */
-function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
+function messageHasDeliverableContent(
+  message: RawMessage | undefined,
+  options: { includeText?: boolean } = {},
+): boolean {
   if (!message) return false;
-  if (typeof message.content === 'string' && message.content.trim()) return true;
+  const includeText = options.includeText !== false;
+  if ((message._attachedFiles as unknown[] | undefined)?.some(isValidAttachedFile)) return true;
+  if (includeText && typeof message.content === 'string' && message.content.trim()) return true;
 
   const content = message.content;
   if (Array.isArray(content)) {
     for (const block of content as ContentBlock[]) {
-      if (block.type === 'text' && block.text && block.text.trim()) return true;
-      if (block.type === 'image') return true;
+      if (includeText && block.type === 'text' && block.text?.trim()) return true;
+      if (DELIVERABLE_CONTENT_BLOCK_TYPES.has(block.type)) return true;
     }
   }
 
   const msg = message as unknown as Record<string, unknown>;
-  if (typeof msg.text === 'string' && msg.text.trim()) return true;
+  if (includeText && typeof msg.text === 'string' && msg.text.trim()) return true;
 
   return false;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function pickNonEmptyString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function normalizeAsyncTaskStatus(
+  value: unknown,
+  fallback: AsyncTaskEvidence['status'],
+): AsyncTaskEvidence['status'] {
+  const status = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (['error', 'failed', 'failure', 'aborted', 'cancelled', 'canceled'].includes(status)) return 'error';
+  if (['completed', 'complete', 'done', 'success', 'succeeded', 'finished'].includes(status)) return 'completed';
+  if (['pending', 'running', 'started', 'accepted', 'queued', 'waiting'].includes(status)) return 'pending';
+  return fallback;
+}
+
+function asyncTaskEvidenceFromRecord(
+  record: Record<string, unknown>,
+  fallbackRecord: Record<string, unknown> | null,
+  source: AsyncTaskEvidence['source'],
+  fallbackStatus: AsyncTaskEvidence['status'],
+  now: number,
+): AsyncTaskEvidence | null {
+  const taskId = pickNonEmptyString(record, ['taskId', 'task_id'])
+    ?? (fallbackRecord ? pickNonEmptyString(fallbackRecord, ['taskId', 'task_id']) : undefined);
+  const runId = pickNonEmptyString(record, ['runId', 'run_id'])
+    ?? (fallbackRecord ? pickNonEmptyString(fallbackRecord, ['runId', 'run_id']) : undefined);
+  const childSessionKey = pickNonEmptyString(record, ['childSessionKey', 'child_session_key', 'sessionKey', 'session_key'])
+    ?? (fallbackRecord ? pickNonEmptyString(fallbackRecord, ['childSessionKey', 'child_session_key']) : undefined);
+  const childSessionId = pickNonEmptyString(record, ['childSessionId', 'child_session_id', 'sessionId', 'session_id'])
+    ?? (fallbackRecord ? pickNonEmptyString(fallbackRecord, ['childSessionId', 'child_session_id']) : undefined);
+  if (!taskId && !runId && !childSessionKey && !childSessionId) return null;
+  const status = normalizeAsyncTaskStatus(
+    record.status ?? record.state ?? fallbackRecord?.status ?? fallbackRecord?.state,
+    fallbackStatus,
+  );
+  return {
+    id: taskId
+      ? `task:${taskId}`
+      : runId
+        ? `run:${runId}`
+        : childSessionKey
+          ? `child:${childSessionKey}`
+          : `child-id:${childSessionId}`,
+    ...(taskId ? { taskId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(childSessionKey ? { childSessionKey } : {}),
+    ...(childSessionId ? { childSessionId } : {}),
+    status,
+    source,
+    updatedAt: now,
+  };
+}
+
+function normalizeEvidenceMarker(value: unknown): string {
+  return typeof value === 'string'
+    ? value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+    : '';
+}
+
+/** Extracts async task state only from structured runtime/tool metadata. */
+function extractAsyncTaskEvidence(value: unknown): AsyncTaskEvidence[] {
+  const evidence = new Map<string, AsyncTaskEvidence>();
+  const visited = new Set<object>();
+  const now = Date.now();
+
+  const add = (entry: AsyncTaskEvidence | null): void => {
+    if (!entry) return;
+    const key = `${entry.id}|${entry.status}|${entry.source}`;
+    evidence.set(key, entry);
+  };
+
+  const visit = (current: unknown, parent: Record<string, unknown> | null, depth: number): void => {
+    if (depth > 7 || !current) return;
+    if (typeof current === 'string') {
+      const startedTaskId = current.match(/Background task started for (?:image|video) generation \(([0-9a-f-]{36})\)/iu)?.[1];
+      if (startedTaskId) {
+        add({
+          id: `task:${startedTaskId}`,
+          taskId: startedTaskId,
+          status: 'pending',
+          source: 'tool-result',
+          updatedAt: now,
+        });
+      }
+      const completedTaskId = current.match(/^\[Inter-session message\][\s\S]*?sourceSession=(?:image_generate|video_generate):([0-9a-f-]{36})/iu)?.[1];
+      if (completedTaskId) {
+        add({
+          id: `task:${completedTaskId}`,
+          taskId: completedTaskId,
+          status: 'completed',
+          source: 'continuation',
+          updatedAt: now,
+        });
+      }
+      return;
+    }
+    if (typeof current !== 'object') return;
+    if (visited.has(current as object)) return;
+    visited.add(current as object);
+    if (Array.isArray(current)) {
+      current.forEach((item) => visit(item, parent, depth + 1));
+      return;
+    }
+
+    const record = current as Record<string, unknown>;
+    const details = asRecord(record.details);
+    if (details) {
+      const nestedAsync = asRecord(details.async);
+      if (details.async === true || nestedAsync) {
+        add(asyncTaskEvidenceFromRecord(
+          nestedAsync ? { ...details, ...nestedAsync } : details,
+          record,
+          'tool-result',
+          'pending',
+          now,
+        ));
+      }
+    }
+
+    const marker = [record.type, record.event, record.eventType, record.kind]
+      .map(normalizeEvidenceMarker)
+      .find(Boolean) ?? '';
+    if (['task_completion', 'task_completed', 'task_complete'].includes(marker)) {
+      add(asyncTaskEvidenceFromRecord(record, parent, 'task-completion', 'completed', now));
+    }
+
+    for (const [key, child] of Object.entries(record)) {
+      const childMarker = normalizeEvidenceMarker(key);
+      if (['task_completion', 'task_completed', 'task_complete'].includes(childMarker)) {
+        const childRecord = asRecord(child);
+        add(asyncTaskEvidenceFromRecord(childRecord ?? record, record, 'task-completion', 'completed', now));
+      }
+      visit(child, record, depth + 1);
+    }
+  };
+
+  visit(value, null, 0);
+  return [...evidence.values()];
+}
+
+function asyncTaskEvidenceMatches(entry: AsyncTaskLedgerEntry, evidence: AsyncTaskEvidence): boolean {
+  const entryAliases = new Set([
+    entry.taskId,
+    entry.runId,
+    entry.childSessionKey,
+    entry.childSessionId,
+    entry.childSessionKey?.split(':').pop(),
+  ].filter((value): value is string => Boolean(value)));
+  return [
+    evidence.taskId,
+    evidence.runId,
+    evidence.childSessionKey,
+    evidence.childSessionId,
+    evidence.childSessionKey?.split(':').pop(),
+  ].some((value) => Boolean(value && entryAliases.has(value)));
+}
+
+function mergeAsyncTaskLedgerEntry(
+  previous: AsyncTaskLedgerEntry | undefined,
+  evidence: AsyncTaskEvidence,
+): AsyncTaskLedgerEntry {
+  if (!previous) return { ...evidence };
+  const status = previous.status !== 'pending' && evidence.status === 'pending'
+    ? previous.status
+    : evidence.status;
+  return {
+    ...previous,
+    ...evidence,
+    status,
+    updatedAt: Math.max(previous.updatedAt, evidence.updatedAt),
+  };
+}
+
+function createAsyncTaskRuntimeRun(
+  runId: string,
+  sessionKey: string | undefined,
+  updatedAt: number,
+): ChatRuntimeRunState {
+  return {
+    runId,
+    sessionKey,
+    status: 'running',
+    lastEventAt: updatedAt,
+    assistantText: '',
+    thinkingText: '',
+    events: [],
+  };
+}
+
+function applyAsyncTaskEvidenceToRuns(
+  currentRuns: Record<string, ChatRuntimeRunState>,
+  ownerRunId: string | null | undefined,
+  entries: AsyncTaskEvidence[],
+  sessionKey?: string,
+): Record<string, ChatRuntimeRunState> {
+  if (entries.length === 0) return currentRuns;
+  let nextRuns = currentRuns;
+
+  const updateRun = (runId: string, evidence: AsyncTaskEvidence): void => {
+    const existing = nextRuns[runId] ?? createAsyncTaskRuntimeRun(runId, sessionKey, evidence.updatedAt);
+    const ledger = { ...(existing.asyncTaskLedger ?? {}) };
+    const matchedKey = Object.entries(ledger)
+      .find(([, entry]) => asyncTaskEvidenceMatches(entry, evidence))?.[0];
+    const key = matchedKey ?? evidence.id;
+    ledger[key] = mergeAsyncTaskLedgerEntry(ledger[key], evidence);
+    nextRuns = {
+      ...nextRuns,
+      [runId]: {
+        ...existing,
+        sessionKey: existing.sessionKey ?? sessionKey,
+        lastEventAt: Math.max(existing.lastEventAt ?? 0, evidence.updatedAt),
+        asyncTaskLedger: ledger,
+      },
+    };
+  };
+
+  for (const evidence of entries) {
+    const matchingRunIds = Object.entries(nextRuns)
+      .filter(([, run]) => Object.values(run.asyncTaskLedger ?? {})
+        .some((entry) => asyncTaskEvidenceMatches(entry, evidence)))
+      .map(([runId]) => runId);
+    if (matchingRunIds.length > 0) {
+      matchingRunIds.forEach((runId) => updateRun(runId, evidence));
+      continue;
+    }
+    if (ownerRunId && (evidence.status === 'pending' || nextRuns[ownerRunId])) {
+      updateRun(ownerRunId, evidence);
+    }
+  }
+
+  return nextRuns;
+}
+
+function runtimeRunHasPendingAsyncTasks(run: ChatRuntimeRunState | undefined): boolean {
+  return Object.values(run?.asyncTaskLedger ?? {}).some((entry) => entry.status === 'pending');
 }
 
 /**
@@ -1901,7 +2183,10 @@ export {
   getToolCallFilePath,
   collectToolUpdates,
   upsertToolStatuses,
-  hasNonToolAssistantContent,
+  messageHasDeliverableContent,
+  extractAsyncTaskEvidence,
+  applyAsyncTaskEvidenceToRuns,
+  runtimeRunHasPendingAsyncTasks,
   hasPendingToolUse,
   hasAssistantAfterLastRealUser,
   hasAssistantProgressSinceSend,

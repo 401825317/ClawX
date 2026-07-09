@@ -5,7 +5,7 @@
  * are in the toolbar; messages render with markdown + streaming.
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, Loader2 } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, Loader2, RotateCcw } from 'lucide-react';
 import { useChatStore, type ChatRuntimeRunState, type RawMessage } from '@/stores/chat';
 import { buildStreamingAssistantMessageFromRuntimeRun, isInternalMessage } from '@/stores/chat/helpers';
 import { buildBaselineRunKey, getBaseline } from '@/stores/baseline-cache';
@@ -181,9 +181,24 @@ function runCardHasUserFacingProblem(card: UserRunCard, generatedFiles: Generate
 }
 
 function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
+  const runtimeStatus = card.runtimeRun?.status;
+  if (card.active) {
+    if (runtimeStatus === 'aborted') return 'aborted';
+    if (runtimeStatus === 'error') return 'error';
+    if (card.runtimeRun?.gateResult?.decision === 'blocked_needs_user') return 'blocked';
+    return 'running';
+  }
+  if (runtimeStatus === 'completed') {
+    const gateDecision = card.runtimeRun?.gateResult?.decision;
+    return gateDecision === 'blocked_needs_user' || gateDecision === 'continue_required'
+      ? 'blocked'
+      : 'completed';
+  }
+  if (runtimeStatus === 'aborted') return 'aborted';
+  if (runtimeStatus === 'error') return 'error';
   const problemStep = card.steps.find((step) => PROBLEM_STEP_STATUSES.has(step.status));
   if (problemStep) return problemStep.status;
-  return card.active ? 'running' : 'completed';
+  return 'completed';
 }
 
 function isCompositeResultReplyMessage(message: RawMessage): boolean {
@@ -253,11 +268,16 @@ function getCompletedRunElapsedMs(run: ChatRuntimeRunState | null, startedAtMs: 
 }
 
 function inferRunCompactKind(card: UserRunCard, generatedFiles: GeneratedFile[]): RunCompactKind {
-  const stepText = card.steps.map(taskStepSearchText).join('\n');
   if (getCompositeCompactProgress(card.steps)) return 'composite';
-  if (/(video_generate|video generation|video|视频)/i.test(stepText)) return 'video';
-  if (/(image_generate|image_edit|image generation|image|图片|图像|修图)/i.test(stepText)) return 'image';
-  if (generatedFiles.length > 0 || /(artifact|file|ppt|excel|document|文件|产物|文档|表格|小程序)/i.test(stepText)) {
+  const structuredStepText = card.steps
+    .map((step) => `${step.label}\n${step.runtimeKind ?? ''}`)
+    .join('\n');
+  const artifactKinds = (card.runtimeRun?.artifacts ?? [])
+    .map((artifact) => `${artifact.kind ?? ''}\n${artifact.mimeType ?? ''}`)
+    .join('\n');
+  if (/(?:video_generate|video generation|media\.video|video\/|^video$|视频任务)/im.test(`${structuredStepText}\n${artifactKinds}`)) return 'video';
+  if (/(?:image_generate|image_edit|image generation|media\.image|image\/|^image$|图片任务|修图任务)/im.test(`${structuredStepText}\n${artifactKinds}`)) return 'image';
+  if (generatedFiles.length > 0 || /(?:artifact|presentation|spreadsheet|document|pdf|产物任务|文档任务|表格任务|小程序任务)/i.test(`${structuredStepText}\n${artifactKinds}`)) {
     return 'artifact';
   }
   return 'generic';
@@ -680,6 +700,7 @@ export function Chat() {
   const runtimeRuns = useChatStore((s) => s.runtimeRuns ?? {});
   const sendMessage = useChatStore((s) => s.sendMessage);
   const abortRun = useChatStore((s) => s.abortRun);
+  const retryLastRun = useChatStore((s) => s.retryLastRun);
   const clearError = useChatStore((s) => s.clearError);
   const devModeUnlocked = useSettingsStore((s) => s.devModeUnlocked);
   const fetchAgents = useAgentsStore((s) => s.fetchAgents);
@@ -1093,36 +1114,14 @@ export function Chat() {
     // execution graph) once tool activity has happened and the CURRENT stream
     // chunk carries no tool_use block.
     //
-    // We use an optimistic promotion strategy because the distinguishing
-    // signal between "narration-before-next-tool" and "final reply" is not
-    // available during early deltas — both are text-only, both arrive after
-    // `hasToolActivity` has flipped true.  Any of these signals opens the
-    // promotion gate:
-    //   1. `pendingFinal`       — tool-result final just fired; next text is
-    //      (almost always) the final reply.
-    //   2. `allToolsCompleted`  — every client-tracked tool entry reached
-    //      `completed` state.
-    //   3. `hasToolActivity`    — at least one prior tool_use exists in the
-    //      segment, i.e. we're past the first tool round.
-    //   4. No tool activity yet — plain Q&A; any stream text is the reply.
-    //
-    // Demotion happens the moment a tool_use block appears in the streaming
-    // message (`streamTools.length > 0`) OR a tool transitions back to
-    // `running`.  When demoted, the stream re-renders inside the graph as a
-    // narration step.  A brief flicker when narration turns into the next
-    // tool round is inherent to optimistic promotion and is accepted.
-    //
-    // Earlier iterations tried restricting this gate to only
-    // `pendingFinal || allToolsCompleted` to protect the trailing
-    // "Thinking..." indicator.  That check is real, but belongs in the
-    // `suppressThinking` coupling below — not here.  With the coupling
-    // fixed, the three-signal gate gives the correct bubble placement for
-    // both narration and final reply.
-    const allToolsCompleted = streamingTools.length > 0 && !hasRunningStreamToolStatus;
-    const canPromoteStreamToBubble = pendingFinal
-      || allToolsCompleted
-      || hasToolActivity
-      || (!hasToolActivity && (hasStreamText || hasStreamImages));
+    // After a tool has run, text-only deltas are ambiguous until the runtime
+    // marks final delivery. Keep them in the process transcript so commentary
+    // cannot flash as a final reply and then jump back when another tool starts.
+    const runtimeReachedTerminal = segmentRuntimeRun?.status !== undefined
+      && segmentRuntimeRun.status !== 'running';
+    const canPromoteStreamToBubble = !hasToolActivity
+      ? (hasStreamText || hasStreamImages)
+      : (pendingFinal || runtimeReachedTerminal);
     const rawStreamingReplyCandidate = isLatestOpenRun
       && canPromoteStreamToBubble
       && (hasStreamText || hasStreamImages)
@@ -1429,13 +1428,7 @@ export function Chat() {
       );
       const hasTextFirstSurface = shouldShowTranscript || card.streamingReplyText != null;
       const shouldExposeActiveGenericProcess = card.active && hasVisibleProcessActivity && !shouldShowTranscript;
-      const hasCanonicalProgressTranscript = hasRuntimeProgressEntries || !!card.liveText;
-      const shouldHideExecutionGraphBehindTranscript = shouldShowTranscript
-        && hasCanonicalProgressTranscript
-        && !devModeUnlocked
-        && !hasProblem;
       const shouldRenderExecutionGraph = hasExecutionGraphDetails
-        && !shouldHideExecutionGraphBehindTranscript
         && (
           devModeUnlocked
           || hasProblem
@@ -1467,9 +1460,14 @@ export function Chat() {
     && !!card.liveText
     && Boolean(runSurfaceStates.get(card.triggerIndex)?.shouldShowTranscript)
   ));
+  const hasVisibleActiveRunSurface = userRunCards.some((card) => {
+    if (!card.active) return false;
+    const surface = runSurfaceStates.get(card.triggerIndex);
+    return Boolean(surface?.shouldRenderExecutionGraph || surface?.shouldShowTranscript || surface?.shouldShowRunStatus);
+  });
 
   useEffect(() => {
-    if (!hasVisibleActiveExecutionGraph) return;
+    if (!hasVisibleActiveRunSurface) return;
     const tick = () => {
       setRuntimeNowMs(Date.now());
     };
@@ -1479,7 +1477,7 @@ export function Chat() {
       window.clearTimeout(immediateTimer);
       window.clearInterval(timer);
     };
-  }, [hasVisibleActiveExecutionGraph]);
+  }, [hasVisibleActiveRunSurface]);
 
   const graphFoldedNarrationIndices = useMemo(() => {
     const indices = new Set<number>();
@@ -1883,6 +1881,15 @@ export function Chat() {
             <p className="mt-1 text-sm text-destructive/90 break-words">
               {runError}
             </p>
+            <button
+              type="button"
+              onClick={() => void retryLastRun()}
+              data-testid="chat-run-retry"
+              className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-destructive hover:underline"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              {t('runError.retry')}
+            </button>
           </div>
         </div>
       )}
@@ -1890,17 +1897,29 @@ export function Chat() {
       {/* Error bar */}
       {error && (
         <div className="px-4 py-2 bg-destructive/10 border-t border-destructive/20">
-          <div className="max-w-4xl mx-auto flex items-center justify-between">
+          <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
             <p className="text-sm text-destructive flex items-center gap-2">
               <AlertCircle className="h-4 w-4" />
               {error}
             </p>
-            <button
-              onClick={clearError}
-              className="text-xs text-destructive/60 hover:text-destructive underline"
-            >
-              {t('common:actions.dismiss')}
-            </button>
+            <div className="flex shrink-0 items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void retryLastRun()}
+                data-testid="chat-error-retry"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-destructive hover:underline"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {t('runError.retry')}
+              </button>
+              <button
+                type="button"
+                onClick={clearError}
+                className="text-xs text-destructive/60 hover:text-destructive underline"
+              >
+                {t('common:actions.dismiss')}
+              </button>
+            </div>
           </div>
         </div>
       )}

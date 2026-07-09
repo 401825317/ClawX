@@ -23,17 +23,25 @@ function truncateText(value: string, maxChars = 140): string {
   return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}...`;
 }
 
+function redactSensitivePreview(value: string): string {
+  return value
+    .replace(/(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s"']+/giu, '$1[REDACTED]')
+    .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|credential)\s*[:=]\s*)[^\s,;"']+/giu, '$1[REDACTED]')
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|signature|sig|secret|credential)=)[^&#\s]+/giu, '$1[REDACTED]')
+    .replace(/(--(?:api[_-]?key|token|password|secret)(?:=|\s+))[^\s"']+/giu, '$1[REDACTED]');
+}
+
 function summarizeShellCommand(command: string): string {
   const candidate = command
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .find((line) => !/^(?:set\s+-[A-Za-z]+|printf\b|echo\b|#|true$|false$)/u.test(line));
-  return truncateText(candidate || command, 160);
+  return truncateText(redactSensitivePreview(candidate || command), 160);
 }
 
 function summarizePathLike(value: string): string {
-  return truncateText(value, 140);
+  return truncateText(redactSensitivePreview(value), 140);
 }
 
 function commandFromRecord(record: Record<string, unknown>): string | undefined {
@@ -46,7 +54,7 @@ function commandFromRecord(record: Record<string, unknown>): string | undefined 
     ?? normalizeText(typeof record.filePath === 'string' ? record.filePath : undefined)
     ?? normalizeText(typeof record.url === 'string' ? record.url : undefined);
   if (path) {
-    if (/^https?:\/\//iu.test(path)) return truncateText(path, 160);
+    if (/^https?:\/\//iu.test(path)) return truncateText(redactSensitivePreview(path), 160);
     return summarizePathLike(path);
   }
 
@@ -79,7 +87,7 @@ function inferToolNarration(name: string, command: string | undefined): { key: s
   const label = name.trim().toLowerCase();
   if (label === 'exec') {
     if (!command) return { key: 'exec', text: '我先继续执行当前步骤。' };
-    if (/\b(?:mdfind|find|lsregister|locate|rg|ls)\b/iu.test(command) && /(?:Applications|Desktop|Music|音乐|QQ|Netease|qq|netease)/iu.test(command)) {
+    if (/\b(?:mdfind|find|lsregister|locate|rg|ls)\b/iu.test(command) && /(?:\/Applications\b|\.app\b|kMDItemContentType\s*={1,2}\s*["']?com\.apple\.application)/iu.test(command)) {
       return { key: 'search-local-app', text: '我先在本机查找相关应用和快捷方式。' };
     }
     if (/\bopen\b/iu.test(command)) {
@@ -169,7 +177,7 @@ function buildToolStatusDetail(event: Extract<ChatRuntimeEvent, { type: 'tool.co
   const detail = normalizeText(typeof record.error === 'string' ? record.error : undefined)
     ?? normalizeText(typeof record.message === 'string' ? record.message : undefined)
     ?? normalizeText(typeof record.detail === 'string' ? record.detail : undefined);
-  return detail ? truncateText(detail, 180) : undefined;
+  return detail ? truncateText(redactSensitivePreview(detail), 180) : undefined;
 }
 
 function commandOutputStatus(event: Extract<ChatRuntimeEvent, { type: 'command.output' }>): ChatRuntimeProgressEntry['status'] {
@@ -199,7 +207,6 @@ function buildProgressEntryEvent(
     producer: event.producer ?? 'renderer',
     runId: event.runId,
     sessionKey: event.sessionKey,
-    seq: event.seq,
     ts: event.ts,
     type: 'progress.update',
     entry,
@@ -278,7 +285,7 @@ export function buildRuntimeProgressEvents(
     return [buildProgressEntryEvent(event, {
       id: `progress:approval:${event.itemId ?? event.toolCallId ?? event.title ?? 'runtime'}`,
       kind: 'status',
-      text: truncateText(detail, 180),
+      text: truncateText(redactSensitivePreview(detail), 180),
       status: normalized as ChatRuntimeProgressEntry['status'],
       toolCallId: event.toolCallId,
       source: 'derived',

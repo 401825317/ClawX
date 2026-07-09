@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import i18n from '@/i18n';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { getManagedAuthStateKey, isManagedAuthLocallyReady, isManagedAuthReady } from '@/lib/managed-auth';
@@ -13,6 +14,12 @@ import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
 import type { ChatRuntimeArtifact, ChatRuntimeEvent, ChatRuntimePlanStep } from '../../shared/chat-runtime-events';
+import type {
+  CompositeRunApiResponse,
+  CompositeRunRecord,
+  CompositeRunTaskInput,
+  CompositeRunTaskKind,
+} from '../../shared/composite-run';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -66,9 +73,13 @@ import {
   buildRuntimeStartContractEvents,
 } from './chat/runtime-contract';
 import {
+  applyAsyncTaskEvidenceToRuns,
   buildStreamingAssistantMessageFromRuntimeRun,
   enrichWithToolCallAttachments,
+  extractAsyncTaskEvidence,
   isInternalMessage as isHistoryInternalMessage,
+  messageHasDeliverableContent,
+  runtimeRunHasPendingAsyncTasks,
   shouldDropMessageFromHistory,
 } from './chat/helpers';
 import {
@@ -83,6 +94,7 @@ import {
 export type {
   AttachedFileMeta,
   ChatSession,
+  CompositeArtifactManifest,
   ContentBlock,
   RawMessage,
   ToolStatus,
@@ -213,27 +225,8 @@ type MediaIntentImageRef = {
   filePath: string;
 };
 
-type MediaIntentCompositeTaskKind =
-  | 'image_generate'
-  | 'presentation'
-  | 'spreadsheet'
-  | 'video_generate'
-  | 'image_edit'
-  | 'mini_program'
-  | 'copywriting';
-
-type MediaIntentCompositeTask = {
-  id: string;
-  kind: MediaIntentCompositeTaskKind;
-  title: string;
-  prompt: string;
-  requiresArtifact?: boolean;
-  dependsOn?: string[];
-  fallback?: string;
-  selectedImageSource?: 'explicit' | 'candidate' | 'none';
-  selectedImageIndex?: number;
-  sourceImages?: MediaIntentImageRef[];
-};
+type MediaIntentCompositeTaskKind = CompositeRunTaskKind;
+type MediaIntentCompositeTask = CompositeRunTaskInput;
 
 type MediaIntentRecentMessage = {
   role: RawMessage['role'];
@@ -757,6 +750,15 @@ function extractMessageArtifactFiles(message: RawMessage): AttachedFileMeta[] {
 function parseHistoricalCompositeTasks(message: RawMessage): HistoricalCompositeTaskSummary[] {
   if (!isCompositeResultHistoryMessage(message)) return [];
 
+  const manifestTasks = message.compositeArtifactManifest?.tasks;
+  if (Array.isArray(manifestTasks) && manifestTasks.length > 0) {
+    return manifestTasks.map((task) => ({
+      title: task.title || task.kind || '产物任务',
+      status: task.status === 'completed' ? 'completed' : 'blocked',
+      ...(task.detail ? { detail: task.detail } : {}),
+    }));
+  }
+
   const lines = getMessageText(message.content)
     .split(/\r?\n/u)
     .map((line) => line.trim())
@@ -765,11 +767,11 @@ function parseHistoricalCompositeTasks(message: RawMessage): HistoricalComposite
   let section: 'completed' | 'blocked' | null = null;
 
   for (const line of lines) {
-    if (/^已完成\s+\d+\s+项[:：]?$/u.test(line)) {
+    if (/^已完成\s+\d+(?:\/\d+)?\s+项/u.test(line)) {
       section = 'completed';
       continue;
     }
-    if (/^需要补充处理[:：]?$/u.test(line)) {
+    if (/^(?:需要补充处理|未完成)[:：]?$/u.test(line)) {
       section = 'blocked';
       continue;
     }
@@ -820,12 +822,14 @@ function buildHistoricalCompositePlanEvent(params: {
   taskSummaries?: HistoricalCompositeTaskSummary[];
   ts: number;
 }): ChatRuntimeEvent {
-  const taskSummaries = params.taskSummaries && params.taskSummaries.length > 0
-    ? params.taskSummaries
-    : params.artifactFiles.map((file, index): HistoricalCompositeTaskSummary => ({
+  const inferredCompletedTasks = params.artifactFiles.map((file, index): HistoricalCompositeTaskSummary => ({
       title: historicalCompositeTaskTitle(file, index),
       status: 'completed',
     }));
+  const providedTasks = params.taskSummaries ?? [];
+  const taskSummaries = providedTasks.some((task) => task.status === 'completed')
+    ? providedTasks
+    : [...inferredCompletedTasks, ...providedTasks];
   const steps: ChatRuntimePlanStep[] = [
     {
       id: 'uclaw.composite',
@@ -990,7 +994,7 @@ function segmentLooksLikeBackgroundHeartbeatRun(sessionKey: string, segment: Raw
       sawHeartbeatActivity = true;
       continue;
     }
-    if (message.role === 'assistant' && hasNonToolAssistantContent(message)) {
+    if (message.role === 'assistant' && messageHasDeliverableContent(message)) {
       return false;
     }
   }
@@ -1012,7 +1016,7 @@ function shouldRetainAssistantHistorySummary(messages: RawMessage[], index: numb
   if (!message || message.role !== 'assistant') return false;
   if (!isInternalMessage(message)) return false;
   if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
-  if (!hasNonToolAssistantContent(message)) return false;
+  if (!messageHasDeliverableContent(message)) return false;
 
   const text = getMessageText(message.content).trim();
   if (!looksLikeHistoricalAssistantResultSummary(text)) return false;
@@ -1267,6 +1271,14 @@ function applyHistoricalRuntimeRunsFromMessages(
     const segment = messages.slice(index + 1, segmentEnd);
     if (segmentLooksLikeBackgroundHeartbeatRun(sessionKey, segment)) continue;
     const compositeResultMessage = [...segment].reverse().find((message) => isCompositeResultHistoryMessage(message)) ?? null;
+    const mediaResultMessage = [...segment].reverse().find((message) => (
+      (message.localArtifactResultKind === 'image' || message.localArtifactResultKind === 'video')
+      && message.mediaGenerationSnapshot
+    ));
+    const mediaGenerationSnapshot = mediaResultMessage?.mediaGenerationSnapshot
+      && typeof mediaResultMessage.mediaGenerationSnapshot === 'object'
+      ? mediaResultMessage.mediaGenerationSnapshot as MediaGenerationJobSnapshot
+      : undefined;
     const artifactFiles = compositeResultMessage
       ? extractMessageArtifactFiles(compositeResultMessage)
       : segment
@@ -1276,6 +1288,19 @@ function applyHistoricalRuntimeRunsFromMessages(
     const objective = getMessageText(trigger.content).trim();
     const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
     const runId = buildHistoricalRunId(sessionKey, trigger, index);
+    const historicalAsyncEvidence = segment.flatMap((message) => extractAsyncTaskEvidence(message));
+    const finalizedRuntimeEvents = compositeResultMessage?.compositeArtifactManifest?.runtimeEvents;
+    if (Array.isArray(finalizedRuntimeEvents) && finalizedRuntimeEvents.length > 0) {
+      const replayEvents = finalizedRuntimeEvents.map((event): ChatRuntimeEvent => ({
+        ...event,
+        runId,
+        sessionKey,
+        producer: 'history',
+      }));
+      nextRuns = applyRuntimeContractEvents(nextRuns, replayEvents);
+      nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
+      continue;
+    }
 
     if (uniqueArtifactFiles.length === 0) {
       const historicalToolEvents = buildHistoricalToolRuntimeEventsFromSegment({
@@ -1287,9 +1312,10 @@ function applyHistoricalRuntimeRunsFromMessages(
       });
       if (historicalToolEvents.length === 0) continue;
       nextRuns = applyRuntimeContractEvents(nextRuns, historicalToolEvents);
+      nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
       const toolRun = nextRuns[runId];
       const toolRunEnded = toolRun?.events.some((event) => event.type === 'run.ended') === true;
-      if (toolRunEnded) {
+      if (toolRunEnded && !runtimeRunHasPendingAsyncTasks(toolRun)) {
         const completedStatus: Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'] = toolRun?.status === 'error'
           ? 'error'
           : toolRun?.status === 'aborted'
@@ -1314,6 +1340,16 @@ function applyHistoricalRuntimeRunsFromMessages(
     const restoreCompositePlan = historicalCompositeTasks.length > 0
       || looksLikeCompositeArtifactHistory(objective, uniqueArtifactFiles);
     const mode = restoreCompositePlan ? 'chat' : inferHistoricalRunMode(uniqueArtifactFiles);
+    const historicalToolEvents = buildHistoricalToolRuntimeEventsFromSegment({
+      runId,
+      sessionKey,
+      objective,
+      segment,
+      ts,
+    }).filter((event) => event.type !== 'run.started' && event.type !== 'run.ended');
+    const historicalMediaProgressEvents = mediaGenerationSnapshot
+      ? buildMediaRuntimeProgressEvents({ runId, sessionKey, job: mediaGenerationSnapshot })
+      : [];
     const startEvents = buildRuntimeStartContractEvents(undefined, {
       runId,
       sessionKey,
@@ -1340,11 +1376,11 @@ function applyHistoricalRuntimeRunsFromMessages(
       producer: 'history',
     }, {
       artifact,
-      status: 'passed',
+      status: 'blocked',
       kind: 'artifact.availability',
       required: true,
-      severity: 'info',
-      detail: '从历史消息恢复的产物引用已进入交付清单。',
+      severity: 'warning',
+      detail: '已从历史消息恢复产物引用，正在重新检查文件或链接是否仍可用。',
       evidence: artifact.filePath ?? artifact.url,
     }));
     nextRuns = applyRuntimeContractEvents(nextRuns, [
@@ -1359,6 +1395,8 @@ function applyHistoricalRuntimeRunsFromMessages(
           ts,
         })]
         : []),
+      ...historicalToolEvents,
+      ...historicalMediaProgressEvents,
       ...artifactEvents,
       ...historicalAvailabilityEvents,
       {
@@ -1371,6 +1409,7 @@ function applyHistoricalRuntimeRunsFromMessages(
         status: 'completed',
       },
     ]);
+    nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
     nextRuns = applyRuntimeContractEvents(
       nextRuns,
       buildRuntimeCompletionGateEvents(nextRuns[runId], {
@@ -1489,6 +1528,28 @@ const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
 const _sessionRunStateCache = new Map<string, SessionRunState>();
 let _sendGenerationCounter = 0;
 const _activeSendGenerationBySession = new Map<string, number>();
+const LOCALLY_ABORTED_RUN_TTL_MS = 30 * 60 * 1000;
+const _locallyAbortedRunIds = new Map<string, number>();
+
+function rememberLocallyAbortedRun(runId: string | null): void {
+  if (!runId) return;
+  const now = Date.now();
+  _locallyAbortedRunIds.set(runId, now);
+  for (const [candidateRunId, abortedAt] of _locallyAbortedRunIds) {
+    if (now - abortedAt > LOCALLY_ABORTED_RUN_TTL_MS) {
+      _locallyAbortedRunIds.delete(candidateRunId);
+    }
+  }
+}
+
+function wasLocallyAbortedRun(runId: string | null | undefined): boolean {
+  if (!runId) return false;
+  const abortedAt = _locallyAbortedRunIds.get(runId);
+  if (abortedAt == null) return false;
+  if (Date.now() - abortedAt <= LOCALLY_ABORTED_RUN_TTL_MS) return true;
+  _locallyAbortedRunIds.delete(runId);
+  return false;
+}
 type PendingRuntimeIntent = {
   objective?: string;
   mode: ChatSendMode;
@@ -1497,6 +1558,12 @@ type PendingRuntimeIntent = {
 };
 const _pendingRuntimeIntentBySession = new Map<string, PendingRuntimeIntent>();
 const _runtimeArtifactVerificationInFlight = new Set<string>();
+type WithheldFinalDelivery = {
+  runId: string;
+  sessionKey: string;
+  message: RawMessage;
+};
+const _withheldFinalDeliveryByRun = new Map<string, WithheldFinalDelivery>();
 type QueuedChatSend = {
   text: string;
   attachments?: ChatSendAttachment[];
@@ -1509,8 +1576,10 @@ type QueuedChatSend = {
 const MAX_QUEUED_SENDS_PER_SESSION = 20;
 const _queuedChatSendsBySession = new Map<string, QueuedChatSend[]>();
 const _queuedChatSendFlushScheduled = new Set<string>();
+const _sessionsCancelling = new Set<string>();
+const _lastAttemptedChatSendBySession = new Map<string, QueuedChatSend>();
 
-type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 type MediaGenerationProgressEvent = {
   id: string;
   source: 'job' | 'worker' | 'runtime' | 'plugin';
@@ -1526,7 +1595,10 @@ type MediaGenerationJobSnapshot = {
   id: string;
   kind?: 'image' | 'video';
   sessionKey?: string;
+  runId?: string;
+  ownerKind?: 'standalone' | 'composite';
   status: MediaGenerationJobStatus;
+  createdAt?: number;
   queuePosition?: number;
   activeJobs?: number;
   maxActiveJobs?: number;
@@ -1534,6 +1606,10 @@ type MediaGenerationJobSnapshot = {
   runDurationMs?: number;
   progressEvents?: MediaGenerationProgressEvent[];
   error?: string;
+  deliveryStatus?: 'pending' | 'succeeded' | 'failed' | 'skipped';
+  deliveryError?: string;
+  recoverable?: boolean;
+  outputs?: Array<Record<string, unknown>>;
   result?: unknown;
 };
 type MediaGenerationSendResponse = {
@@ -1543,63 +1619,42 @@ type MediaGenerationSendResponse = {
   job?: MediaGenerationJobSnapshot;
 };
 
-type LocalArtifactCreateResponse = {
-  success: boolean;
-  error?: string;
-  artifact?: {
-    kind: string;
-    title: string;
-    fileName: string;
-    filePath: string;
-    fileSize: number;
-    mimeType: string;
-    media: string;
-    planning?: {
-      mode?: string;
-      prompt?: string;
-      summary?: string;
-    };
-    verification?: {
-      status?: 'passed' | 'failed' | 'blocked' | 'skipped';
-      kind?: string;
-      required?: boolean;
-      severity?: 'info' | 'warning' | 'blocking';
-      detail?: string;
-      evidence?: string;
-    };
-  };
-};
-
-type LocalArtifactAppendConversationResponse = {
-  success: boolean;
-  error?: string;
-};
-
-type LocalArtifactConversationFile = {
-  fileName?: string;
-  mimeType?: string;
-  fileSize?: number;
-  width?: number;
-  height?: number;
-  filePath?: string;
-  gatewayUrl?: string;
-  source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
-};
-
-type CompositeTaskRunStatus = 'completed' | 'failed' | 'blocked';
-
-type CompositeTaskRunResult = {
-  task: MediaIntentCompositeTask;
-  stepId: string;
-  status: CompositeTaskRunStatus;
-  files: AttachedFileMeta[];
-  error?: string;
-};
-
 const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
 const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
 const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
 const _mediaRuntimeProgressSignatureByRun = new Map<string, Map<string, string>>();
+const _observedMediaGenerationJobIds = new Set<string>();
+
+class LocalRunCancelledError extends Error {
+  constructor() {
+    super('Local run cancelled');
+    this.name = 'LocalRunCancelledError';
+  }
+}
+
+function isLocalRunCancelledError(error: unknown): error is LocalRunCancelledError {
+  return error instanceof LocalRunCancelledError;
+}
+
+function activeSendGenerationMatches(sessionKey: string, sendGeneration: number): boolean {
+  return _activeSendGenerationBySession.get(sessionKey) === sendGeneration;
+}
+
+function assertActiveSendGeneration(sessionKey: string, sendGeneration: number): void {
+  if (!activeSendGenerationMatches(sessionKey, sendGeneration)) {
+    throw new LocalRunCancelledError();
+  }
+}
+
+async function cancelMediaGenerationJobs(params: { jobId?: string; sessionKey?: string; runId?: string }): Promise<void> {
+  await hostApiFetch<{ success: boolean; error?: string; cancelledJobIds?: string[] }>(
+    '/api/media/generation-jobs/cancel',
+    {
+      method: 'POST',
+      body: JSON.stringify(params),
+    },
+  );
+}
 
 function mediaProgressSignature(progress: MediaGenerationProgressEvent): string {
   return JSON.stringify({
@@ -1647,13 +1702,30 @@ function shouldDisplayMediaProgress(progress: MediaGenerationProgressEvent): boo
 
 async function waitForMediaGenerationJob(
   jobId: string,
-  options?: { onProgress?: (job: MediaGenerationJobSnapshot) => void },
+  options?: {
+    onProgress?: (job: MediaGenerationJobSnapshot) => void;
+    isCancelled?: () => boolean;
+  },
 ): Promise<MediaGenerationJobSnapshot> {
   const startedAt = Date.now();
-  for (;;) {
+  _observedMediaGenerationJobIds.add(jobId);
+  try {
+    for (;;) {
+    if (options?.isCancelled?.()) {
+      void cancelMediaGenerationJobs({ jobId }).catch((error) => {
+        console.warn('[media-generation] failed to cancel stale job:', error);
+      });
+      throw new LocalRunCancelledError();
+    }
     const response = await hostApiFetch<{ success: boolean; error?: string; job?: MediaGenerationJobSnapshot }>(
       `/api/media/generation-jobs/${encodeURIComponent(jobId)}`,
     );
+    if (options?.isCancelled?.()) {
+      void cancelMediaGenerationJobs({ jobId }).catch((error) => {
+        console.warn('[media-generation] failed to cancel stale job:', error);
+      });
+      throw new LocalRunCancelledError();
+    }
     if (response.success === false) {
       throw new Error(response.error || 'Failed to check media generation job');
     }
@@ -1661,16 +1733,328 @@ async function waitForMediaGenerationJob(
       throw new Error('Media generation job response missing job');
     }
     options?.onProgress?.(response.job);
-    if (response.job.status === 'succeeded') {
+    if (response.job.status === 'succeeded' && response.job.deliveryStatus !== 'pending') {
       return response.job;
     }
     if (response.job.status === 'failed') {
       throw new Error(response.job.error || 'Media generation failed');
     }
+    if (response.job.status === 'cancelled') {
+      throw new LocalRunCancelledError();
+    }
     const pollInterval = Date.now() - startedAt < MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS
       ? MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS
       : MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS;
-    await sleep(pollInterval);
+      await sleep(pollInterval);
+    }
+  } finally {
+    _observedMediaGenerationJobIds.delete(jobId);
+  }
+}
+
+async function resumeStandaloneMediaJobsForSession(
+  set: ChatSet,
+  get: ChatGet,
+  sessionKey: string,
+): Promise<void> {
+  if (_sessionsCancelling.has(sessionKey)) return;
+  let response: { success: boolean; jobs?: MediaGenerationJobSnapshot[] };
+  try {
+    response = await hostApiFetch<{ success: boolean; jobs?: MediaGenerationJobSnapshot[] }>(
+      `/api/media/generation-jobs?sessionKey=${encodeURIComponent(sessionKey)}&activeOnly=true`,
+    );
+  } catch (error) {
+    console.warn('[media-generation] failed to discover resumable jobs:', error);
+    return;
+  }
+  const jobs = (response.jobs ?? []).filter((job) => (
+    job.ownerKind === 'standalone'
+    && Boolean(job.runId)
+    && !_observedMediaGenerationJobIds.has(job.id)
+  ));
+  for (const job of jobs) {
+    if (_observedMediaGenerationJobIds.has(job.id)) continue;
+    const runId = job.runId!;
+    const kind = job.kind === 'video' ? 'video' : 'image';
+    set((state) => ({
+      runtimeRuns: applyRuntimeContractEvents(
+        state.runtimeRuns,
+        buildRuntimeStartEventsForRun(state.runtimeRuns, {
+          runId,
+          sessionKey,
+          mode: kind,
+          ts: job.createdAt ?? Date.now(),
+        }),
+      ),
+    }));
+    commitSessionRunState(set, get, sessionKey, {
+      sending: true,
+      activeRunId: runId,
+      pendingFinal: true,
+      pendingImageGenerationLocal: kind === 'image',
+      pendingVideoGenerationLocal: kind === 'video',
+    });
+    applyMediaRuntimeProgress({ runId, sessionKey, job });
+
+    void waitForMediaGenerationJob(job.id, {
+      onProgress: (snapshot) => applyMediaRuntimeProgress({ runId, sessionKey, job: snapshot }),
+      isCancelled: () => wasLocallyAbortedRun(runId) || _sessionsCancelling.has(sessionKey),
+    }).then((completedJob) => {
+      if (wasLocallyAbortedRun(runId)) return;
+      const { decision, artifacts } = applyMediaRuntimeSuccess({
+        runId,
+        sessionKey,
+        job: completedJob,
+        kind,
+      });
+      if (artifacts.length > 0) scheduleRuntimeArtifactVerification(runId, sessionKey, artifacts);
+      if (completedJob.deliveryStatus === 'failed') {
+        appendMediaGenerationResultMessage({ set, get, sessionKey, job: completedJob, kind });
+      }
+      const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
+      commitSessionRunState(set, get, sessionKey, {
+        sending: !shouldIdle,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
+        activeRunId: shouldIdle ? null : runId,
+        pendingFinal: !shouldIdle,
+        lastUserMessageAt: shouldIdle ? null : get().lastUserMessageAt,
+      });
+      if (shouldIdle) markSessionRunIdle(sessionKey);
+      if (get().currentSessionKey === sessionKey) {
+        forceNextHistoryLoad(sessionKey);
+        void get().loadHistory(true);
+      } else {
+        markSessionNeedsTerminalHistoryRefresh(sessionKey);
+      }
+    }).catch((error) => {
+      if (isLocalRunCancelledError(error) || wasLocallyAbortedRun(runId)) return;
+      applyMediaRuntimeFailure({ runId, sessionKey, error: error instanceof Error ? error.message : String(error) });
+      commitSessionRunState(set, get, sessionKey, {
+        sending: false,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
+        activeRunId: null,
+        pendingFinal: false,
+        lastUserMessageAt: null,
+      });
+      markSessionRunIdle(sessionKey);
+    });
+  }
+}
+
+const COMPOSITE_RUN_POLL_INTERVAL_MS = 500;
+const _observedCompositeRunIds = new Set<string>();
+
+function compositeRunAttachedFiles(run: CompositeRunRecord): AttachedFileMeta[] {
+  return dedupeAttachedFiles(run.artifacts.map((artifact) => ({
+    fileName: artifact.title || artifact.filePath?.split(/[\\/]/u).pop() || 'artifact',
+    mimeType: artifact.mimeType || 'application/octet-stream',
+    fileSize: typeof artifact.sizeBytes === 'number' ? artifact.sizeBytes : 0,
+    preview: null,
+    filePath: artifact.filePath,
+    gatewayUrl: artifact.url,
+    source: 'tool-result' as const,
+  })).filter((file) => Boolean(file.filePath || file.gatewayUrl)));
+}
+
+function compositeRunDeliveryMessage(run: CompositeRunRecord): string {
+  const completed = run.tasks.filter((task) => task.status === 'completed');
+  const incomplete = run.tasks.filter((task) => task.status !== 'completed');
+  const lines = [i18n.t('chat:runtimeDelivery.compositeSummary', {
+    completedCount: completed.length,
+    totalCount: run.tasks.length,
+  })];
+  if (incomplete.length > 0) {
+    lines.push('', i18n.t('chat:runtimeDelivery.incompleteHeading'));
+    lines.push(...incomplete.map((task) => (
+      `- ${task.title}：${task.error || i18n.t('chat:runtimeDelivery.missingInputOrFailed')}`
+    )));
+  }
+  if (completed.length > 0) {
+    lines.push('', i18n.t('chat:runtimeDelivery.verificationComplete'));
+  }
+  return lines.join('\n');
+}
+
+function applyCompositeRunSnapshot(set: ChatSet, get: ChatGet, run: CompositeRunRecord): void {
+  set((state) => ({
+    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, run.runtimeEvents ?? []),
+  }));
+
+  if (run.delivery.status !== 'succeeded' || !run.manifest) return;
+  const messageId = run.delivery.assistantMessageId || `composite-result:${run.runId}`;
+  const finalMessage: RawMessage = {
+    role: 'assistant',
+    content: compositeRunDeliveryMessage(run),
+    timestamp: (run.delivery.persistedAt ?? run.updatedAt) / 1000,
+    id: messageId,
+    localArtifactResultKind: 'composite',
+    compositeArtifactManifest: run.manifest,
+    _attachedFiles: compositeRunAttachedFiles(run),
+  };
+  appendLocalMessageForSession(set, get, run.sessionKey, finalMessage);
+}
+
+function compositeRunTerminalForRenderer(run: CompositeRunRecord): boolean {
+  if (run.delivery.status === 'succeeded' || run.delivery.status === 'failed') return true;
+  return run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
+}
+
+async function waitForCompositeRun(params: {
+  set: ChatSet;
+  get: ChatGet;
+  runId: string;
+  sessionKey: string;
+  isCancelled?: () => boolean;
+}): Promise<CompositeRunRecord> {
+  _observedCompositeRunIds.add(params.runId);
+  try {
+    for (;;) {
+      if (params.isCancelled?.()) throw new LocalRunCancelledError();
+      const response = await hostApiFetch<CompositeRunApiResponse>(
+        `/api/composite-runs/${encodeURIComponent(params.runId)}`,
+      );
+      if (!response.success || !response.run) {
+        throw new Error(response.error || 'Composite run not found');
+      }
+      applyCompositeRunSnapshot(params.set, params.get, response.run);
+      if (compositeRunTerminalForRenderer(response.run)) return response.run;
+      await sleep(COMPOSITE_RUN_POLL_INTERVAL_MS);
+    }
+  } finally {
+    _observedCompositeRunIds.delete(params.runId);
+  }
+}
+
+function settleCompositeRunLifecycle(
+  set: ChatSet,
+  get: ChatGet,
+  run: CompositeRunRecord,
+): void {
+  const deliveryFailed = run.delivery.status === 'failed';
+  const taskFailure = run.tasks.find((task) => task.status === 'failed' || task.status === 'blocked');
+  const runError = deliveryFailed
+    ? (run.delivery.error || i18n.t('chat:runtimeDelivery.historySyncFailedDetail'))
+    : (run.delivery.status === 'succeeded' ? null : taskFailure?.error || null);
+  commitSessionRunState(set, get, run.sessionKey, {
+    sending: false,
+    pendingImageGenerationLocal: false,
+    pendingVideoGenerationLocal: false,
+    activeRunId: null,
+    streamingText: '',
+    streamingMessage: null,
+    streamingTools: [],
+    pendingFinal: false,
+    lastUserMessageAt: null,
+    pendingToolImages: [],
+  });
+  if (get().currentSessionKey === run.sessionKey) {
+    set({ runError });
+  }
+  markSessionRunIdle(run.sessionKey);
+  clearPendingRuntimeIntent(run.sessionKey);
+  if (run.delivery.status === 'succeeded') {
+    if (get().currentSessionKey === run.sessionKey) {
+      forceNextHistoryLoad(run.sessionKey);
+      void get().loadHistory(true);
+    } else {
+      markSessionNeedsTerminalHistoryRefresh(run.sessionKey);
+    }
+  }
+}
+
+async function startCompositeRunInMain(params: {
+  set: ChatSet;
+  get: ChatGet;
+  sessionKey: string;
+  prompt: string;
+  nowMs: number;
+  tasks: MediaIntentCompositeTask[];
+  imageOptions?: ChatImageSendOptions;
+  videoOptions?: ChatVideoSendOptions;
+  sendGeneration: number;
+}): Promise<void> {
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  const clientRequestId = `composite:${params.sessionKey}:${params.nowMs}:${params.sendGeneration}`;
+  const response = await hostApiFetch<CompositeRunApiResponse>('/api/composite-runs', {
+    method: 'POST',
+    body: JSON.stringify({
+      clientRequestId,
+      sessionKey: params.sessionKey,
+      prompt: params.prompt,
+      requestedMode: 'chat',
+      userMessageTimestampMs: params.nowMs,
+      tasks: params.tasks,
+      imageOptions: params.imageOptions,
+      videoOptions: params.videoOptions,
+    }),
+  });
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  if (!response.success || !response.run) {
+    throw new Error(response.error || 'Failed to start composite run');
+  }
+  const run = response.run;
+  applyCompositeRunSnapshot(params.set, params.get, run);
+  commitSessionRunState(params.set, params.get, params.sessionKey, {
+    sending: true,
+    activeRunId: run.runId,
+    pendingFinal: true,
+  });
+  const completed = await waitForCompositeRun({
+    set: params.set,
+    get: params.get,
+    runId: run.runId,
+    sessionKey: params.sessionKey,
+    isCancelled: () => !activeSendGenerationMatches(params.sessionKey, params.sendGeneration),
+  });
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  settleCompositeRunLifecycle(params.set, params.get, completed);
+}
+
+async function resumeCompositeRunsForSession(
+  set: ChatSet,
+  get: ChatGet,
+  sessionKey: string,
+): Promise<void> {
+  if (_sessionsCancelling.has(sessionKey)) return;
+  let response: CompositeRunApiResponse;
+  try {
+    response = await hostApiFetch<CompositeRunApiResponse>(
+      `/api/composite-runs?sessionKey=${encodeURIComponent(sessionKey)}&activeOnly=true`,
+    );
+  } catch (error) {
+    console.warn('[composite-run] failed to discover active runs:', error);
+    return;
+  }
+  const runs = (response.runs ?? []).filter((run) => !_observedCompositeRunIds.has(run.runId));
+  for (const run of runs) {
+    applyCompositeRunSnapshot(set, get, run);
+    commitSessionRunState(set, get, sessionKey, {
+      sending: true,
+      activeRunId: run.runId,
+      pendingFinal: true,
+    });
+    void waitForCompositeRun({
+      set,
+      get,
+      runId: run.runId,
+      sessionKey,
+      isCancelled: () => wasLocallyAbortedRun(run.runId) || _sessionsCancelling.has(sessionKey),
+    }).then((completed) => {
+      if (!wasLocallyAbortedRun(run.runId)) settleCompositeRunLifecycle(set, get, completed);
+    }).catch((error) => {
+      if (isLocalRunCancelledError(error) || wasLocallyAbortedRun(run.runId)) return;
+      commitSessionRunState(set, get, sessionKey, {
+        sending: false,
+        activeRunId: null,
+        pendingFinal: false,
+      });
+      if (get().currentSessionKey === sessionKey) {
+        set({ runError: error instanceof Error ? error.message : String(error) });
+      }
+      markSessionRunIdle(sessionKey);
+    });
   }
 }
 
@@ -1686,6 +2070,15 @@ function mediaResultOutputs(result: unknown): Record<string, unknown>[] {
   return outputs
     .map(mediaOutputRecord)
     .filter((output): output is Record<string, unknown> => output !== null);
+}
+
+function mediaJobOutputs(job: MediaGenerationJobSnapshot | undefined): Record<string, unknown>[] {
+  if (Array.isArray(job?.outputs) && job.outputs.length > 0) {
+    return job.outputs
+      .map(mediaOutputRecord)
+      .filter((output): output is Record<string, unknown> => output !== null);
+  }
+  return mediaResultOutputs(job?.result);
 }
 
 function readPositiveNumber(value: unknown): number | undefined {
@@ -1714,7 +2107,7 @@ function attachedFilesFromMediaGenerationJob(
 ): AttachedFileMeta[] {
   if (!job) return [];
   const files: AttachedFileMeta[] = [];
-  const outputs = mediaResultOutputs(job.result);
+  const outputs = mediaJobOutputs(job);
   for (const [index, output] of outputs.entries()) {
     const path = typeof output.path === 'string' && output.path.trim() ? output.path.trim() : undefined;
     const url = typeof output.url === 'string' && output.url.trim() ? output.url.trim() : undefined;
@@ -1808,7 +2201,7 @@ function buildMediaMetadataVerificationEvents(params: {
   kind: 'image' | 'video';
 }): ChatRuntimeEvent[] {
   if (!params.job || params.artifacts.length === 0) return [];
-  const outputs = mediaResultOutputs(params.job.result);
+  const outputs = mediaJobOutputs(params.job);
   return params.artifacts.flatMap((artifact, index): ChatRuntimeEvent[] => {
     const output = outputs[index];
     if (!output) return [];
@@ -1825,6 +2218,7 @@ function buildMediaMetadataVerificationEvents(params: {
     const hasExpectedMetadata = params.kind === 'image'
       ? Boolean(width || height || metadata)
       : Boolean(width || height || durationSeconds || metadata);
+    const remoteOnlyArtifact = !artifact.filePath && Boolean(artifact.url);
     const details = [
       width && height ? `${Math.round(width)}x${Math.round(height)}` : undefined,
       durationSeconds ? `${durationSeconds}s` : undefined,
@@ -1845,7 +2239,7 @@ function buildMediaMetadataVerificationEvents(params: {
         id: `verification:${artifact.id}:media.metadata`,
         status,
         kind: 'media.metadata',
-        required: hasInvalidVideoDuration ? true : false,
+        required: hasInvalidVideoDuration || remoteOnlyArtifact,
         severity: hasInvalidVideoDuration ? 'blocking' : (hasExpectedMetadata ? 'info' : 'warning'),
         title: params.kind === 'image' ? '图片元数据' : '视频元数据',
         detail: hasInvalidVideoDuration
@@ -1874,9 +2268,8 @@ function buildMediaAvailabilityVerificationEvents(params: {
 }): ChatRuntimeEvent[] {
   return params.artifacts.flatMap((artifact): ChatRuntimeEvent[] => {
     const filePath = artifact.filePath?.trim();
-    const url = artifact.url?.trim();
-    if (!filePath && !url) return [];
-    const isLocal = Boolean(filePath);
+    if (!filePath) return [];
+    const hasVerifiedLocalFile = typeof artifact.sizeBytes === 'number' && artifact.sizeBytes > 0;
     return [buildRuntimeArtifactVerificationEvent({
       runId: params.runId,
       sessionKey: params.sessionKey,
@@ -1884,18 +2277,16 @@ function buildMediaAvailabilityVerificationEvents(params: {
       producer: 'media',
     }, {
       artifact,
-      status: 'passed',
+      status: hasVerifiedLocalFile ? 'passed' : 'blocked',
       kind: 'artifact.availability',
       required: true,
-      severity: 'info',
-      detail: isLocal
+      severity: hasVerifiedLocalFile ? 'info' : 'blocking',
+      detail: hasVerifiedLocalFile
         ? (params.kind === 'image'
-            ? '图片生成 job 已保存本地产物，后续文件详情验证会继续补充。'
-            : '视频生成 job 已保存本地产物，后续文件详情验证会继续补充。')
-        : (params.kind === 'image'
-            ? '图片生成 job 已返回远程或签名图片地址，本地文件验证不适用于该产物。'
-            : '视频生成 job 已返回远程或签名播放地址，本地文件验证不适用于该产物。'),
-      evidence: filePath ? `filePath=${filePath}` : `url=${url}`,
+            ? '图片生成 job 已保存可读取的本地产物。'
+            : '视频生成 job 已保存可读取的本地产物。')
+        : '媒体生成返回了本地路径，但文件大小验证未通过。',
+      evidence: `filePath=${filePath}; sizeBytes=${artifact.sizeBytes ?? 0}`,
     })];
   });
 }
@@ -2036,599 +2427,6 @@ function applyMediaRuntimeSuccess(params: {
   return { decision, artifacts };
 }
 
-function compositeTaskStepId(task: MediaIntentCompositeTask, index: number): string {
-  return `uclaw.composite.${sanitizeCompositeTaskId(task.id, index)}`;
-}
-
-function buildCompositeStepEvent(params: {
-  runId: string;
-  sessionKey: string;
-  task?: MediaIntentCompositeTask;
-  stepId: string;
-  title: string;
-  status: 'pending' | 'running' | 'completed' | 'error' | 'blocked' | 'skipped';
-  detail?: string;
-  order?: number;
-  parentId?: string;
-  requiresArtifact?: boolean;
-}): ChatRuntimeEvent {
-  return {
-    runId: params.runId,
-    sessionKey: params.sessionKey,
-    producer: 'renderer',
-    ts: Date.now(),
-    type: 'run.step.updated',
-    step: {
-      id: params.stepId,
-      title: params.title,
-      status: params.status,
-      detail: params.detail,
-      kind: params.task ? 'composite-task' : 'composite',
-      parentId: params.parentId,
-      order: params.order,
-      requiresArtifact: params.requiresArtifact,
-    },
-  };
-}
-
-function compositeInputImagesFromFiles(files: AttachedFileMeta[]): Array<{ fileName?: string; mimeType?: string; filePath: string }> {
-  return files
-    .filter((file) => file.filePath && file.mimeType.startsWith('image/'))
-    .map((file) => ({
-      fileName: file.fileName,
-      mimeType: file.mimeType,
-      filePath: file.filePath!,
-    }));
-}
-
-function attachedFilesFromCompositeTaskImages(task: MediaIntentCompositeTask): AttachedFileMeta[] {
-  return (task.sourceImages ?? [])
-    .filter((image) => image.filePath?.trim())
-    .map((image) => ({
-      fileName: image.fileName || image.filePath.split(/[\\/]/u).pop() || 'image',
-      mimeType: image.mimeType || 'image/png',
-      fileSize: 0,
-      preview: null,
-      filePath: image.filePath,
-      source: 'message-ref',
-    }));
-}
-
-function firstProducedImageFile(results: CompositeTaskRunResult[]): AttachedFileMeta | undefined {
-  return results
-    .flatMap((result) => result.files)
-    .find((file) => file.filePath && file.mimeType.startsWith('image/'));
-}
-
-function latestProducedImageFile(
-  results: CompositeTaskRunResult[],
-  dependencyIds?: Set<string>,
-): AttachedFileMeta | undefined {
-  for (let resultIndex = results.length - 1; resultIndex >= 0; resultIndex -= 1) {
-    const result = results[resultIndex];
-    if (!result || (dependencyIds && !dependencyIds.has(result.task.id))) continue;
-    for (let fileIndex = result.files.length - 1; fileIndex >= 0; fileIndex -= 1) {
-      const file = result.files[fileIndex];
-      if (file.filePath && file.mimeType.startsWith('image/')) return file;
-    }
-  }
-  return undefined;
-}
-
-function compositeVideoRequiresImageInput(
-  task: MediaIntentCompositeTask,
-  dependencyTasks: MediaIntentCompositeTask[],
-): boolean {
-  if ((task.sourceImages ?? []).some((image) => image.filePath?.trim())) return true;
-  if (dependencyTasks.some((dependency) => dependency.kind === 'image_edit')) return true;
-  return /(?:图生视频|基于.{0,24}(?:图|图片|照片)|用.{0,24}(?:图|图片|照片)|这张|这幅|这个图|刚生成|刚才生成|改后|编辑后|修图后|动起来|动画|animate|image[- ]?to[- ]?video)/i.test(task.prompt);
-}
-
-function localArtifactRequestForCompositeTask(task: MediaIntentCompositeTask): Record<string, unknown> {
-  if (task.kind === 'presentation') {
-    return {
-      kind: 'presentation',
-      title: task.title || 'PPT',
-      sourcePrompt: task.prompt,
-    };
-  }
-  if (task.kind === 'spreadsheet') {
-    return {
-      kind: 'spreadsheet',
-      title: task.title || 'Excel',
-      sourcePrompt: task.prompt,
-    };
-  }
-  if (task.kind === 'mini_program') {
-    return {
-      kind: 'mini_program',
-      title: task.title || '小程序',
-      sourcePrompt: task.prompt,
-    };
-  }
-  return {
-    kind: 'copywriting',
-    title: task.title || '文案',
-    sourcePrompt: task.prompt,
-  };
-}
-
-function attachedFileFromLocalArtifact(artifact: NonNullable<LocalArtifactCreateResponse['artifact']>): AttachedFileMeta {
-  return {
-    fileName: artifact.fileName,
-    mimeType: artifact.mimeType,
-    fileSize: artifact.fileSize,
-    preview: null,
-    filePath: artifact.filePath,
-    source: 'tool-result',
-  };
-}
-
-function buildCompositeDeliveryMessage(results: CompositeTaskRunResult[]): string {
-  const completed = results.filter((result) => result.status === 'completed');
-  const blocked = results.filter((result) => result.status !== 'completed');
-  const lines = [
-    '好，我给你做了一套随机示例包，主题统一成“未来城市里的个人效率工作台”。',
-    '',
-    `已完成 ${completed.length} 项：`,
-    ...completed.map((result) => `- ${result.task.title || compositeTaskKindLabel(result.task.kind)}`),
-  ];
-  if (blocked.length > 0) {
-    lines.push('', '需要补充处理：');
-    lines.push(...blocked.map((result) =>
-      `- ${result.task.title || compositeTaskKindLabel(result.task.kind)}：${result.error || '缺少可用输入或执行失败。'}`,
-    ));
-  }
-  lines.push('', '下面是统一产物清单；我也做了基础验证，已生成的本地文件和媒体都可以打开或预览。');
-  return lines.join('\n');
-}
-
-function compositeOutputPathsFromFiles(files: AttachedFileMeta[]): string[] {
-  const seen = new Set<string>();
-  const paths: string[] = [];
-  for (const file of files) {
-    const target = file.filePath?.trim() || file.gatewayUrl?.trim() || '';
-    if (!target || seen.has(target)) continue;
-    seen.add(target);
-    paths.push(target);
-  }
-  return paths;
-}
-
-function serializeConversationFiles(files: AttachedFileMeta[]): LocalArtifactConversationFile[] {
-  const serialized: LocalArtifactConversationFile[] = [];
-  for (const file of files) {
-    const filePath = file.filePath?.trim();
-    const gatewayUrl = file.gatewayUrl?.trim();
-    if (!filePath && !gatewayUrl) continue;
-    serialized.push({
-      fileName: file.fileName,
-      mimeType: file.mimeType,
-      fileSize: file.fileSize,
-      width: file.width,
-      height: file.height,
-      ...(filePath ? { filePath } : {}),
-      ...(gatewayUrl ? { gatewayUrl } : {}),
-      source: file.source ?? 'tool-result',
-    });
-  }
-  return serialized;
-}
-
-async function persistCompositeConversation(params: {
-  runId: string;
-  sessionKey: string;
-  prompt: string;
-  summaryText: string;
-  files: AttachedFileMeta[];
-  userMessageTimestampMs: number;
-}): Promise<void> {
-  const response = await hostApiFetch<LocalArtifactAppendConversationResponse>(
-    '/api/local-artifacts/append-conversation',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        runId: params.runId,
-        sessionKey: params.sessionKey,
-        prompt: params.prompt,
-        summaryText: params.summaryText,
-        files: serializeConversationFiles(params.files),
-        outputPaths: compositeOutputPathsFromFiles(params.files),
-        userMessageTimestampMs: params.userMessageTimestampMs,
-      }),
-    },
-  );
-  if (response.success === false) {
-    throw new Error(response.error || '复合任务结果写入历史失败');
-  }
-}
-
-async function createCompositeLocalArtifact(params: {
-  runId: string;
-  sessionKey: string;
-  stepId: string;
-  task: MediaIntentCompositeTask;
-}): Promise<AttachedFileMeta[]> {
-  const response = await hostApiFetch<LocalArtifactCreateResponse>(
-    '/api/local-artifacts/create',
-    {
-      method: 'POST',
-      body: JSON.stringify(localArtifactRequestForCompositeTask(params.task)),
-    },
-  );
-  if (response.success === false || !response.artifact) {
-    throw new Error(response.error || '本地产物创建失败');
-  }
-
-  const file = attachedFileFromLocalArtifact(response.artifact);
-  const ts = Date.now();
-  const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
-    runId: params.runId,
-    sessionKey: params.sessionKey,
-    ts,
-    producer: 'renderer',
-    toolCallId: params.stepId,
-    stepId: params.stepId,
-    verificationDetail: '组合任务本地产物已生成并进入 UClaw 产物跟踪。',
-  }, [file]);
-  const artifacts = artifactEvents
-    .filter((event): event is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
-      event.type === 'artifact.produced')
-    .map((event) => event.artifact);
-  const availabilityEvents = artifacts.map((artifact) => buildRuntimeArtifactVerificationEvent({
-    runId: params.runId,
-    sessionKey: params.sessionKey,
-    ts,
-    producer: 'renderer',
-  }, {
-    artifact,
-    status: 'passed',
-    kind: 'artifact.availability',
-    required: true,
-    severity: 'info',
-    detail: '本地产物文件已创建并返回文件大小。',
-    evidence: `filePath=${file.filePath}; sizeBytes=${file.fileSize}`,
-  }));
-  const contentVerificationEvents = artifacts.flatMap((artifact) => {
-    const verification = response.artifact?.verification;
-    if (!verification) return [];
-    return [buildRuntimeArtifactVerificationEvent({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts,
-      producer: 'renderer',
-    }, {
-      artifact,
-      status: verification.status ?? 'blocked',
-      kind: verification.kind || 'artifact.content',
-      required: verification.required ?? true,
-      severity: verification.severity ?? (verification.status === 'passed' ? 'info' : 'blocking'),
-      detail: verification.detail,
-      evidence: [
-        response.artifact?.planning?.summary,
-        verification.evidence,
-      ].filter((item): item is string => Boolean(item)).join('\n'),
-    })];
-  });
-  useChatStore.setState((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, [...artifactEvents, ...availabilityEvents, ...contentVerificationEvents]),
-  }));
-  return [file];
-}
-
-async function runCompositeLocalTasks(params: {
-  set: ChatSet;
-  get: ChatGet;
-  sessionKey: string;
-  prompt: string;
-  nowMs: number;
-  tasks: MediaIntentCompositeTask[];
-  imageOptions?: ChatImageSendOptions;
-  videoOptions?: ChatVideoSendOptions;
-}): Promise<void> {
-  const runId = buildTimestampHistoricalRunId(params.sessionKey, params.nowMs);
-  params.set((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(
-      state.runtimeRuns,
-      buildRuntimeStartEventsForRun(state.runtimeRuns, {
-        runId,
-        sessionKey: params.sessionKey,
-        objective: params.prompt,
-        mode: 'chat',
-        compositeTasks: params.tasks,
-        ts: Date.now(),
-      }),
-    ),
-  }));
-  commitSessionRunState(params.set, params.get, params.sessionKey, {
-    activeRunId: runId,
-    pendingFinal: true,
-  });
-
-  const results: Array<CompositeTaskRunResult | undefined> = [];
-  const allFiles: AttachedFileMeta[] = [];
-  const taskById = new Map(params.tasks.map((task) => [task.id, task]));
-  const orderedResults = (): CompositeTaskRunResult[] =>
-    results.filter((result): result is CompositeTaskRunResult => Boolean(result));
-  const emit = (events: ChatRuntimeEvent[]) => {
-    if (events.length === 0) return;
-    params.set((state) => ({
-      runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
-    }));
-  };
-
-  const runTask = async (index: number, task: MediaIntentCompositeTask): Promise<void> => {
-    const stepId = compositeTaskStepId(task, index);
-    emit([buildCompositeStepEvent({
-      runId,
-      sessionKey: params.sessionKey,
-      task,
-      stepId,
-      title: task.title || `子任务 ${index + 1}`,
-      status: 'running',
-      detail: task.prompt,
-      parentId: 'uclaw.composite',
-      order: 2 + index,
-      requiresArtifact: task.requiresArtifact !== false,
-    })]);
-
-    try {
-      let files: AttachedFileMeta[] = [];
-      if (task.kind === 'image_generate' || task.kind === 'image_edit') {
-        const explicitSourceFiles = attachedFilesFromCompositeTaskImages(task);
-        const fallbackSourceFile = task.kind === 'image_edit' ? firstProducedImageFile(orderedResults()) : undefined;
-        const inputImages = task.kind === 'image_edit'
-          ? compositeInputImagesFromFiles(explicitSourceFiles.length > 0 ? explicitSourceFiles : (fallbackSourceFile ? [fallbackSourceFile] : []))
-          : [];
-        if (task.kind === 'image_edit' && inputImages.length === 0) {
-          throw new Error('缺少可用于修图的图片输入。');
-        }
-        const effectiveImageOptions = resolveChatImageOptions(task.prompt, { action: task.kind, source: 'fallback', prompt: task.prompt }, params.imageOptions);
-        const response = await hostApiFetch<MediaGenerationSendResponse>(
-          '/api/media/image-generation/chat-send',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionKey: params.sessionKey,
-              originalPrompt: params.prompt,
-              prompt: task.prompt,
-              model: effectiveImageOptions.model,
-              size: effectiveImageOptions.size,
-              quality: effectiveImageOptions.quality,
-              inputImages,
-              userMessageTimestampMs: params.nowMs,
-              suppressConversationAppend: true,
-            }),
-          },
-        );
-        if (response.success === false) throw new Error(response.error || '图片任务启动失败');
-        let completedJob = response.job;
-        applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job: completedJob });
-        if (response.jobId) {
-          completedJob = await waitForMediaGenerationJob(response.jobId, {
-            onProgress: (job) => applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job }),
-          });
-        }
-        applyMediaRuntimeSuccess({
-          runId,
-          sessionKey: params.sessionKey,
-          job: completedJob,
-          kind: 'image',
-          stepId,
-          sourceToolCallId: stepId,
-          completeRun: false,
-        });
-        files = attachedFilesFromMediaGenerationJob(completedJob, 'image');
-      } else if (task.kind === 'video_generate') {
-        const explicitSourceFiles = attachedFilesFromCompositeTaskImages(task);
-        const dependencies = (task.dependsOn ?? [])
-          .map((dependencyId) => taskById.get(dependencyId))
-          .filter((dependency): dependency is MediaIntentCompositeTask => Boolean(dependency));
-        const dependencyIds = new Set(dependencies.map((dependency) => dependency.id));
-        const dependencySourceFile = dependencyIds.size > 0
-          ? latestProducedImageFile(orderedResults(), dependencyIds)
-          : undefined;
-        const fallbackSourceFile = latestProducedImageFile(orderedResults());
-        const inputImages = compositeInputImagesFromFiles(
-          explicitSourceFiles.length > 0
-            ? explicitSourceFiles
-            : (dependencySourceFile ? [dependencySourceFile] : (dependencyIds.size === 0 && fallbackSourceFile ? [fallbackSourceFile] : [])),
-        );
-        if (inputImages.length === 0 && compositeVideoRequiresImageInput(task, dependencies)) {
-          throw new Error('缺少可用于图生视频的图片输入。');
-        }
-        const videoMode = inputImages.length > 0 ? 'image_to_video' : 'text_to_video';
-        const effectiveVideoOptions = resolveChatVideoOptions(
-          task.prompt,
-          { action: 'video_generate', source: 'fallback', prompt: task.prompt, videoMode },
-          inputImages.length > 0,
-          params.videoOptions,
-        );
-        const response = await hostApiFetch<MediaGenerationSendResponse>(
-          '/api/media/video-generation/chat-send',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionKey: params.sessionKey,
-              originalPrompt: params.prompt,
-              prompt: task.prompt,
-              model: effectiveVideoOptions.model,
-              size: effectiveVideoOptions.size,
-              durationSeconds: effectiveVideoOptions.durationSeconds,
-              inputImages,
-              userMessageTimestampMs: params.nowMs,
-              route: {
-                mode: videoMode,
-                source: 'router',
-                confidence: 1,
-                selectedImageSource: task.selectedImageSource ?? 'none',
-                selectedImageIndex: task.selectedImageIndex,
-                videoPrompt: task.prompt,
-                sourceImages: inputImages,
-              },
-              suppressConversationAppend: true,
-            }),
-          },
-        );
-        if (response.success === false) throw new Error(response.error || '视频任务启动失败');
-        let completedJob = response.job;
-        applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job: completedJob });
-        if (response.jobId) {
-          completedJob = await waitForMediaGenerationJob(response.jobId, {
-            onProgress: (job) => applyMediaRuntimeProgress({ runId, sessionKey: params.sessionKey, job }),
-          });
-        }
-        applyMediaRuntimeSuccess({
-          runId,
-          sessionKey: params.sessionKey,
-          job: completedJob,
-          kind: 'video',
-          stepId,
-          sourceToolCallId: stepId,
-          completeRun: false,
-        });
-        files = attachedFilesFromMediaGenerationJob(completedJob, 'video');
-      } else {
-        files = await createCompositeLocalArtifact({
-          runId,
-          sessionKey: params.sessionKey,
-          stepId,
-          task,
-        });
-      }
-
-      allFiles.push(...files);
-      results[index] = { task, stepId, status: 'completed', files };
-      emit([buildCompositeStepEvent({
-        runId,
-        sessionKey: params.sessionKey,
-        task,
-        stepId,
-        title: task.title || `子任务 ${index + 1}`,
-        status: 'completed',
-        detail: files.map((file) => file.filePath || file.gatewayUrl || file.fileName).filter(Boolean).join('\n'),
-        parentId: 'uclaw.composite',
-        order: 2 + index,
-        requiresArtifact: task.requiresArtifact !== false,
-      })]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      results[index] = { task, stepId, status: 'failed', files: [], error: message };
-      emit([
-        buildCompositeStepEvent({
-          runId,
-          sessionKey: params.sessionKey,
-          task,
-          stepId,
-          title: task.title || `子任务 ${index + 1}`,
-          status: 'error',
-          detail: message,
-          parentId: 'uclaw.composite',
-          order: 2 + index,
-          requiresArtifact: task.requiresArtifact !== false,
-        }),
-        buildRuntimeCheckpointEvent({
-          runId,
-          sessionKey: params.sessionKey,
-          ts: Date.now(),
-          producer: 'renderer',
-          id: `checkpoint:${runId}:${stepId}:failed`,
-          summary: `${task.title || `子任务 ${index + 1}`} 执行失败。`,
-          reason: message,
-          recoverable: true,
-        }),
-      ]);
-    }
-  };
-
-  const taskPromises = new Map<string, Promise<void>>();
-  for (const [index, task] of params.tasks.entries()) {
-    const promise = (async () => {
-      for (const dependencyId of task.dependsOn ?? []) {
-        await taskPromises.get(dependencyId);
-      }
-      await runTask(index, task);
-    })();
-    taskPromises.set(task.id, promise);
-  }
-  await Promise.all(taskPromises.values());
-
-  const completedResults = orderedResults();
-  const finalContent = buildCompositeDeliveryMessage(completedResults);
-  const finalAttachedFiles = dedupeAttachedFiles(allFiles);
-  const finalMessage: RawMessage = {
-    role: 'assistant',
-    content: finalContent,
-    timestamp: Date.now() / 1000,
-    id: `composite-result:${runId}`,
-    _attachedFiles: finalAttachedFiles,
-  };
-  appendLocalMessageForSession(params.set, params.get, params.sessionKey, finalMessage);
-
-  let persistedConversation = false;
-  try {
-    await persistCompositeConversation({
-      runId,
-      sessionKey: params.sessionKey,
-      prompt: params.prompt,
-      summaryText: finalContent,
-      files: finalAttachedFiles,
-      userMessageTimestampMs: params.nowMs,
-    });
-    persistedConversation = true;
-  } catch (error) {
-    console.warn('[chat.composite] failed to persist composite conversation:', error);
-  }
-
-  params.set((state) => {
-    let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, [
-      buildCompositeStepEvent({
-        runId,
-        sessionKey: params.sessionKey,
-        stepId: 'uclaw.composite',
-        title: '执行组合任务',
-        status: completedResults.some((result) => result.status !== 'completed') ? 'blocked' : 'completed',
-        detail: `${completedResults.filter((result) => result.status === 'completed').length}/${params.tasks.length} 个子任务已完成。`,
-        order: 1,
-      }),
-    ]);
-    runtimeRuns = applyRuntimeContractEvents(
-      runtimeRuns,
-      buildRuntimeCompletionGateEvents(runtimeRuns[runId], {
-        runId,
-        sessionKey: params.sessionKey,
-        ts: Date.now(),
-        status: 'completed',
-      }),
-    );
-    return { runtimeRuns };
-  });
-
-  const hasFailures = completedResults.some((result) => result.status !== 'completed');
-  commitSessionRunState(params.set, params.get, params.sessionKey, {
-    sending: false,
-    pendingImageGenerationLocal: false,
-    pendingVideoGenerationLocal: false,
-    activeRunId: null,
-    streamingText: '',
-    streamingMessage: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-  });
-  if (hasFailures && params.get().currentSessionKey === params.sessionKey) {
-    params.set({ runError: null });
-  }
-  markSessionRunIdle(params.sessionKey);
-  clearPendingRuntimeIntent(params.sessionKey);
-  if (persistedConversation && params.get().currentSessionKey === params.sessionKey) {
-    void params.get().loadHistory(true);
-  } else if (persistedConversation) {
-    markSessionNeedsTerminalHistoryRefresh(params.sessionKey);
-  }
-}
-
 function getActiveCompletionGateDecision(state: Pick<ChatState, 'activeRunId' | 'runtimeRuns'>): string | undefined {
   const runId = state.activeRunId;
   return runId ? state.runtimeRuns[runId]?.gateResult?.decision : undefined;
@@ -2655,7 +2453,13 @@ function applyHistoryCompletionGateForActiveRun(sessionKey: string): string | un
 }
 
 function shouldHoldActiveRunForCompletionGate(sessionKey: string): boolean {
-  const decision = applyHistoryCompletionGateForActiveRun(sessionKey);
+  const currentState = useChatStore.getState();
+  const activeRun = currentState.activeRunId
+    ? currentState.runtimeRuns[currentState.activeRunId]
+    : undefined;
+  const decision = runtimeRunHasPendingAsyncTasks(activeRun)
+    ? 'continue_required'
+    : applyHistoryCompletionGateForActiveRun(sessionKey);
   if (decision !== 'continue_required') return false;
   useChatStore.setState((state) => ({
     messages: suppressPrematureAssistantFinals(state.messages, state.lastUserMessageAt),
@@ -3116,6 +2920,78 @@ function applyRuntimeContractEvents(
   return nextRuns;
 }
 
+function reevaluateWithheldFinalDelivery(runId: string): void {
+  const withheld = _withheldFinalDeliveryByRun.get(runId);
+  if (!withheld || wasLocallyAbortedRun(runId)) {
+    _withheldFinalDeliveryByRun.delete(runId);
+    return;
+  }
+
+  let released = false;
+  let controlsActiveLifecycle = false;
+  useChatStore.setState((state) => {
+    const run = state.runtimeRuns[runId];
+    if (!run || runtimeRunHasPendingAsyncTasks(run)) return {};
+    const runtimeRuns = applyRuntimeContractEvents(
+      state.runtimeRuns,
+      buildRuntimeCompletionGateEvents(run, {
+        runId,
+        sessionKey: withheld.sessionKey,
+        ts: Date.now(),
+        status: 'completed',
+      }),
+    );
+    const decision = runtimeRuns[runId]?.gateResult?.decision;
+    if (!gateDecisionAllowsTerminalIdle(decision)) {
+      return { runtimeRuns };
+    }
+
+    released = true;
+    const isCurrentSession = state.currentSessionKey === withheld.sessionKey;
+    controlsActiveLifecycle = isCurrentSession
+      && (state.activeRunId === runId || (state.activeRunId == null && state.pendingFinal));
+    const alreadyExists = state.messages.some((message) => message.id === withheld.message.id);
+    return {
+      runtimeRuns,
+      ...(isCurrentSession && !alreadyExists
+        ? { messages: [...state.messages, withheld.message] }
+        : {}),
+      ...(controlsActiveLifecycle
+        ? {
+            sending: false,
+            activeRunId: null,
+            pendingFinal: false,
+            lastUserMessageAt: null,
+            streamingText: '',
+            streamingMessage: null,
+            streamingTools: [],
+            pendingToolImages: [],
+          }
+        : {}),
+    };
+  });
+
+  if (!released) return;
+  _withheldFinalDeliveryByRun.delete(runId);
+  clearPendingRuntimeIntent(withheld.sessionKey);
+  if (controlsActiveLifecycle) markSessionRunIdle(withheld.sessionKey);
+  if (useChatStore.getState().currentSessionKey === withheld.sessionKey) {
+    forceNextHistoryLoad(withheld.sessionKey);
+    void useChatStore.getState().loadHistory(true);
+  } else {
+    markSessionNeedsTerminalHistoryRefresh(withheld.sessionKey);
+  }
+}
+
+function scheduleWithheldFinalReevaluationForSession(sessionKey: string | null | undefined): void {
+  queueMicrotask(() => {
+    for (const withheld of _withheldFinalDeliveryByRun.values()) {
+      if (sessionKey && withheld.sessionKey !== sessionKey) continue;
+      reevaluateWithheldFinalDelivery(withheld.runId);
+    }
+  });
+}
+
 function buildRuntimeStartEventsForRun(
   runtimeRuns: ChatState['runtimeRuns'],
   params: {
@@ -3293,6 +3169,7 @@ function scheduleRuntimeArtifactVerification(
             return runtimeRuns;
           })(),
         }));
+        reevaluateWithheldFinalDelivery(runId);
       }
     })
     .catch((error) => {
@@ -3339,6 +3216,14 @@ function markSessionRunIdle(sessionKey: string): void {
   scheduleQueuedChatSendFlush(sessionKey);
 }
 
+function sessionExecutionIsBusy(state: ChatState, sessionKey: string): boolean {
+  if (_sessionsCancelling.has(sessionKey)) return true;
+  const runState = sessionKey === state.currentSessionKey
+    ? state
+    : _sessionRunStateCache.get(sessionKey);
+  return Boolean(runState?.sending || runState?.activeRunId != null || runState?.pendingFinal);
+}
+
 function cloneQueuedAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
   return attachments?.map((attachment) => ({ ...attachment }));
 }
@@ -3346,8 +3231,20 @@ function cloneQueuedAttachments(attachments: ChatSendAttachment[] | undefined): 
 function enqueueChatSendForSession(
   sessionKey: string,
   item: Omit<QueuedChatSend, 'enqueuedAt'>,
-): void {
+): boolean {
   const queue = _queuedChatSendsBySession.get(sessionKey) ?? [];
+  if (queue.length >= MAX_QUEUED_SENDS_PER_SESSION) {
+    console.warn('[chat.queue] queue limit reached; preserving existing queued turns', {
+      sessionKey,
+      queueLength: queue.length,
+    });
+    if (useChatStore.getState().currentSessionKey === sessionKey) {
+      useChatStore.setState({
+        error: i18n.t('chat:chatInput.queueLimitReached', { count: queue.length }),
+      });
+    }
+    return false;
+  }
   queue.push({
     ...item,
     attachments: cloneQueuedAttachments(item.attachments),
@@ -3355,8 +3252,8 @@ function enqueueChatSendForSession(
     videoOptions: item.videoOptions ? { ...item.videoOptions } : undefined,
     enqueuedAt: Date.now(),
   });
-  while (queue.length > MAX_QUEUED_SENDS_PER_SESSION) queue.shift();
   _queuedChatSendsBySession.set(sessionKey, queue);
+  return true;
 }
 
 function hasQueuedChatSends(sessionKey: string): boolean {
@@ -3586,7 +3483,10 @@ function cloneSessionRunState(state: SessionRunState): SessionRunState {
   };
 }
 
-function updateCachedSessionRunStateFromRuntimeEvent(event: ChatRuntimeEvent): void {
+function updateCachedSessionRunStateFromRuntimeEvent(
+  event: ChatRuntimeEvent,
+  holdForAsyncTask = false,
+): void {
   const sessionKey = event.sessionKey;
   if (!sessionKey) return;
   const cached = _sessionRunStateCache.get(sessionKey);
@@ -3612,6 +3512,13 @@ function updateCachedSessionRunStateFromRuntimeEvent(event: ChatRuntimeEvent): v
   }
 
   if (event.type === 'run.ended' && (matchesCachedRun || isCurrentUntrackedSend)) {
+    if (holdForAsyncTask) {
+      next.sending = true;
+      next.activeRunId = event.runId;
+      next.pendingFinal = true;
+      _sessionRunStateCache.set(sessionKey, next);
+      return;
+    }
     markSessionRunIdle(sessionKey);
     markSessionNeedsTerminalHistoryRefresh(sessionKey);
   }
@@ -3636,6 +3543,14 @@ function buildChatEventDedupeKey(eventState: string, event: Record<string, unkno
   const runId = event.runId != null ? String(event.runId) : '';
   const sessionKey = event.sessionKey != null ? String(event.sessionKey) : '';
   const seq = event.seq != null ? String(event.seq) : '';
+  if (eventState === 'final' && !seq) {
+    const message = event.message && typeof event.message === 'object'
+      ? event.message as Record<string, unknown>
+      : null;
+    const messageId = message?.id != null ? String(message.id) : '';
+    const fingerprint = hashStringForLocalMessageId(JSON.stringify(message ?? event));
+    return ['final-nosq', runId, sessionKey, messageId || fingerprint].join('|');
+  }
   // Some gateways emit multiple `delta` updates without a monotonically
   // increasing `seq`. Deduping those by just `runId + sessionKey + state`
   // collapses legitimate stream progression, so only seq-backed deltas are
@@ -4305,6 +4220,24 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
         });
       }
     }
+    if (block.type === 'video' || block.type === 'audio' || block.type === 'file') {
+      const url = block.url || block.source?.url;
+      const filePath = block.filePath;
+      if (url || filePath) {
+        const defaultMime = block.type === 'video'
+          ? 'video/mp4'
+          : block.type === 'audio' ? 'audio/mpeg' : 'application/octet-stream';
+        const target = filePath || url || '';
+        files.push({
+          fileName: block.fileName || block.alt || target.split(/[\\/]/u).pop() || block.type,
+          mimeType: block.mimeType || block.source?.media_type || defaultMime,
+          fileSize: 0,
+          preview: null,
+          ...(filePath ? { filePath } : { gatewayUrl: url }),
+          source: url ? 'gateway-media' : 'message-ref',
+        });
+      }
+    }
     // Recurse into tool_result content blocks
     if ((block.type === 'tool_result' || block.type === 'toolResult') && block.content) {
       files.push(...extractImagesAsAttachedFiles(block.content));
@@ -4866,6 +4799,7 @@ function alignRuntimeRunsWithBackendSessionTerminalState(
 
   const runningRun = findRunningRuntimeRunForSession(runtimeRuns, sessionKey, preferredRunId);
   if (!runningRun) return runtimeRuns;
+  if (runtimeRunHasPendingAsyncTasks(runningRun)) return runtimeRuns;
 
   const ts = session?.updatedAt ?? Date.now();
   let nextRuns = applyRuntimeContractEvents(runtimeRuns, [{
@@ -4894,6 +4828,12 @@ function reconcileCurrentSessionIdleFromBackend(
 ): void {
   const state = get();
   if (!state.sending && state.activeRunId == null && !state.pendingFinal) return;
+  const pendingAsyncRun = state.activeRunId
+    ? state.runtimeRuns[state.activeRunId]
+    : Object.values(state.runtimeRuns).find((run) => (
+        run.sessionKey === state.currentSessionKey && runtimeRunHasPendingAsyncTasks(run)
+      ));
+  if (runtimeRunHasPendingAsyncTasks(pendingAsyncRun)) return;
 
   const current = sessions.find((session) => session.key === state.currentSessionKey);
   if (!shouldTrustBackendSessionIdle(current, state.lastUserMessageAt)) return;
@@ -5633,25 +5573,6 @@ function messageHasImageContent(message: RawMessage | undefined): boolean {
   return Array.isArray(content) && (content as ContentBlock[]).some((block) => block.type === 'image');
 }
 
-function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
-  if (!message) return false;
-  if (typeof message.content === 'string' && message.content.trim()) return true;
-
-  const content = message.content;
-  if (Array.isArray(content)) {
-    for (const block of content as ContentBlock[]) {
-      if (block.type === 'text' && block.text && block.text.trim()) return true;
-      if (block.type === 'image') return true;
-    }
-  }
-  if (messageHasImageContent(message)) return true;
-
-  const msg = message as unknown as Record<string, unknown>;
-  if (typeof msg.text === 'string' && msg.text.trim()) return true;
-
-  return false;
-}
-
 /**
  * True when an assistant message is still waiting on a tool result, i.e. it
  * represents an intermediate tool-use turn rather than a finished reply.
@@ -5684,7 +5605,7 @@ function hasPendingToolUse(message: RawMessage | undefined): boolean {
 function isTextOnlyAssistantFinal(message: RawMessage): boolean {
   if (message.role !== 'assistant') return false;
   if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
-  if (!hasNonToolAssistantContent(message)) return false;
+  if (!messageHasDeliverableContent(message)) return false;
   return !messageHasImageContent(message);
 }
 
@@ -5786,7 +5707,7 @@ function segmentHasMeaningfulAssistantProgress(segment: RawMessage[]): boolean {
     if (msg.role !== 'assistant') return false;
     if (isTerminalAssistantErrorMessage(msg)) return true;
     if (hasPendingToolUse(msg) || isToolOnlyMessage(msg)) return true;
-    return hasNonToolAssistantContent(msg);
+    return messageHasDeliverableContent(msg);
   });
 }
 
@@ -5917,7 +5838,7 @@ function segmentHasOpenToolRun(segmentMessages: RawMessage[]): boolean {
     if (index <= lastToolUseOffset) return false;
     if (message.role !== 'assistant') return false;
     if (hasPendingToolUse(message)) return false;
-    if (hasNonToolAssistantContent(message)) return true;
+    if (messageHasDeliverableContent(message)) return true;
     return !isToolOnlyMessage(message);
   });
 }
@@ -5942,6 +5863,7 @@ function inferHistoricalOpenRunState(
   runtimeRuns: ChatState['runtimeRuns'],
   sessionKey: string,
   messages: RawMessage[],
+  options: { allowEmptySegment?: boolean } = {},
 ): { runId: string; lastUserMessageAt: number; segment: RawMessage[] } | null {
   const lastUserIndex = findLastRealUserBoundaryIndex(messages);
   if (lastUserIndex < 0) return null;
@@ -5950,20 +5872,20 @@ function inferHistoricalOpenRunState(
   if (!lastUser) return null;
 
   const segment = messages.slice(lastUserIndex + 1);
-  if (segment.length === 0) return null;
+  if (segment.length === 0 && !options.allowEmptySegment) return null;
   if (segmentLooksLikeBackgroundHeartbeatRun(sessionKey, segment)) return null;
 
   const hasConclusiveReply = segment.some((message) => {
     if (message.role !== 'assistant') return false;
     if (hasPendingToolUse(message)) return false;
-    return hasNonToolAssistantContent(message);
+    return messageHasDeliverableContent(message);
   });
   if (hasConclusiveReply) return null;
 
   const runId = buildHistoricalRunId(sessionKey, lastUser, lastUserIndex);
   const runtimeRun = runtimeRuns[runId];
   const runtimeStillRunning = runtimeRun?.sessionKey === sessionKey && runtimeRun.status === 'running';
-  if (!runtimeStillRunning && !segmentHasOpenToolRun(segment)) return null;
+  if (!runtimeStillRunning && segment.length > 0 && !segmentHasOpenToolRun(segment)) return null;
 
   return {
     runId,
@@ -6815,6 +6737,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const normalizedTerminalAssistantErrorMessage = latestTerminalAssistantErrorMessage
         ? normalizeChatRunErrorMessage(latestTerminalAssistantErrorMessage)
         : null;
+      const stateBeforeHistoryCommit = get();
+      const activeRuntimeRun = stateBeforeHistoryCommit.activeRunId
+        ? stateBeforeHistoryCommit.runtimeRuns[stateBeforeHistoryCommit.activeRunId]
+        : undefined;
+      const hasPendingAsyncTask = runtimeRunHasPendingAsyncTasks(activeRuntimeRun);
+      const hasConclusiveAssistantReply = openRunSegment.some((message) => (
+        message.role === 'assistant'
+        && !hasPendingToolUse(message)
+        && messageHasDeliverableContent(message)
+      ));
+      const backendSessionCanClose = backendSessionIdle
+        && !hasPendingAsyncTask
+        && (!isSendingNow || hasConclusiveAssistantReply || Boolean(latestTerminalAssistantErrorMessage));
       const terminalArtifactFallbackMessage = latestTerminalAssistantErrorMessage && !historyErrorIsTransient
         ? buildArtifactFallbackAssistantMessage(
             isSendingNow && lastUserMessageAt != null
@@ -6834,7 +6769,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         currentSessionKey,
         runtimeHistoryMessages,
       );
-      if (backendSessionIdle) {
+      if (backendSessionCanClose) {
         nextRuntimeRuns = alignRuntimeRunsWithBackendSessionTerminalState(
           nextRuntimeRuns,
           currentSessionKey,
@@ -6842,9 +6777,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
           get().activeRunId,
         );
       }
-      const inferredHistoricalOpenRun = !backendSessionIdle && !isSendingNow && !latestTerminalAssistantErrorMessage
-        ? inferHistoricalOpenRunState(nextRuntimeRuns, currentSessionKey, filteredMessages)
+      const inferredHistoricalOpenRun = !backendSessionCanClose && !isSendingNow && !latestTerminalAssistantErrorMessage
+        ? inferHistoricalOpenRunState(nextRuntimeRuns, currentSessionKey, filteredMessages, {
+            allowEmptySegment: currentSessionRow?.hasActiveRun === true,
+          })
         : null;
+      if (inferredHistoricalOpenRun && !nextRuntimeRuns[inferredHistoricalOpenRun.runId]) {
+        nextRuntimeRuns = applyRuntimeContractEvents(
+          nextRuntimeRuns,
+          buildRuntimeStartEventsForRun(nextRuntimeRuns, {
+            runId: inferredHistoricalOpenRun.runId,
+            sessionKey: currentSessionKey,
+            objective: getMessageText(findLastRealUserMessage(filteredMessages)?.content).trim(),
+            mode: 'chat',
+            ts: inferredHistoricalOpenRun.lastUserMessageAt,
+          }),
+        );
+      }
 
       set({
         messages: finalMessages,
@@ -6855,6 +6804,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : normalizedTerminalAssistantErrorMessage,
         runtimeRuns: nextRuntimeRuns,
       });
+      for (const run of Object.values(nextRuntimeRuns)) {
+        const artifacts = run.artifacts ?? [];
+        if (run.sessionKey !== currentSessionKey || artifacts.length === 0) continue;
+        const needsAvailabilityCheck = (run.verifications ?? []).some((verification) => (
+          verification.kind === 'artifact.availability'
+          && verification.status === 'blocked'
+          && verification.severity === 'warning'
+        ));
+        if (needsAvailabilityCheck) {
+          scheduleRuntimeArtifactVerification(run.runId, currentSessionKey, artifacts);
+        }
+      }
       cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
 
       // Seed a missing label from immutable history only. Once a label exists
@@ -6899,7 +6860,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   currentSessionKey,
                   runtimeHistoryMessages,
                 );
-                return backendSessionIdle
+                return backendSessionCanClose
                   ? alignRuntimeRunsWithBackendSessionTerminalState(
                       nextRuntimeRuns,
                       currentSessionKey,
@@ -6931,7 +6892,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return true;
       }
 
-      if (backendSessionIdle) {
+      if (backendSessionCanClose) {
         clearHistoryPoll();
         set({
           sending: false,
@@ -6972,7 +6933,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const hasFinalLikeAssistant = openRunSegment.some((msg) => {
           if (msg.role !== 'assistant') return false;
           if (hasPendingToolUse(msg)) return false;
-          return hasNonToolAssistantContent(msg);
+          return messageHasDeliverableContent(msg);
         });
         if (hasFinalLikeAssistant) {
           set({ pendingFinal: true });
@@ -6990,7 +6951,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const recentAssistant = [...openRunSegment].reverse().find((msg) => {
           if (msg.role !== 'assistant') return false;
           if (hasPendingToolUse(msg)) return false;
-          return hasNonToolAssistantContent(msg);
+          return messageHasDeliverableContent(msg);
         });
         if (recentAssistant) {
           if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
@@ -7019,7 +6980,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const hasConclusiveReply = openSegment.some((message) => {
           if (message.role !== 'assistant') return false;
           if (hasPendingToolUse(message)) return false;
-          return hasNonToolAssistantContent(message);
+          return messageHasDeliverableContent(message);
         });
         const hasDeliveredImageReply = openSegment.some((message) => message.role === 'assistant' && messageHasImageContent(message));
         if (hasDeliveredImageReply && !segmentHasOpenToolRun(openSegment)) {
@@ -7347,6 +7308,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (active === loadPromise) {
         _historyLoadInFlight.delete(currentSessionKey);
       }
+      if (get().currentSessionKey === currentSessionKey) {
+        void resumeCompositeRunsForSession(set, get, currentSessionKey);
+        void resumeStandaloneMediaJobsForSession(set, get, currentSessionKey);
+      }
     }
   },
 
@@ -7438,10 +7403,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Same-session sends must stay ordered. The renderer owns a single active
     // run slot, so queue follow-up turns instead of dropping them or racing the
     // current run state.
-    const currentState = get();
-    const targetSessionBusy = targetSessionKey === currentState.currentSessionKey
-      && (currentState.sending || currentState.activeRunId != null || currentState.pendingFinal);
-    if (targetSessionBusy) {
+    if (sessionExecutionIsBusy(get(), targetSessionKey)) {
       enqueueChatSendForSession(targetSessionKey, {
         text,
         attachments,
@@ -7466,10 +7428,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
 
+    // Auth/provider checks are asynchronous. Re-check the target session so a
+    // run that started while they were pending cannot absorb this turn.
+    if (sessionExecutionIsBusy(get(), targetSessionKey)) {
+      enqueueChatSendForSession(targetSessionKey, {
+        text,
+        attachments,
+        targetAgentId,
+        mode,
+        imageOptions,
+        videoOptions,
+      });
+      return;
+    }
+
     if (targetSessionKey !== get().currentSessionKey) {
       set((s) => buildSessionSwitchPatch(s, targetSessionKey));
       deferHistoryLoad(get, true);
     }
+
+    _lastAttemptedChatSendBySession.set(targetSessionKey, {
+      text,
+      attachments: cloneQueuedAttachments(attachments),
+      targetAgentId,
+      mode,
+      imageOptions: imageOptions ? { ...imageOptions } : undefined,
+      videoOptions: videoOptions ? { ...videoOptions } : undefined,
+      enqueuedAt: Date.now(),
+    });
 
     const currentSessionKey = targetSessionKey;
     const currentMessages = get().messages;
@@ -7513,6 +7499,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingFinal: false,
       lastUserMessageAt: nowMs,
     }));
+    const sendGeneration = ++_sendGenerationCounter;
+    _activeSendGenerationBySession.set(currentSessionKey, sendGeneration);
+    const sendGenerationIsCurrent = () => activeSendGenerationMatches(currentSessionKey, sendGeneration);
+    const clearSendGenerationIfCurrent = () => {
+      if (sendGenerationIsCurrent()) {
+        _activeSendGenerationBySession.delete(currentSessionKey);
+      }
+    };
 
     let candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
     if (mode === 'chat' && !shouldLoadFamilyImageReferences(trimmed, mode)) {
@@ -7521,6 +7515,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
       candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
     }
+    if (!sendGenerationIsCurrent()) return;
     rememberPendingRuntimeIntent(currentSessionKey, {
       objective: trimmed,
       mode,
@@ -7547,6 +7542,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         recentMessages: currentMessages,
       });
     } catch (error) {
+      if (!sendGenerationIsCurrent()) return;
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (get().currentSessionKey === currentSessionKey) {
         set({ error: errorMessage });
@@ -7556,8 +7552,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingImageGenerationLocal: false,
         pendingVideoGenerationLocal: false,
       });
+      clearSendGenerationIfCurrent();
       return;
     }
+    if (!sendGenerationIsCurrent()) return;
 
     let plannedSourceImages = planSourceImageInputs(mediaPlan);
     if (mediaPlan.action === 'image_edit' && plannedSourceImages.length === 0) {
@@ -7586,7 +7584,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (compositeTasks) {
       try {
-        await runCompositeLocalTasks({
+        await startCompositeRunInMain({
           set,
           get,
           sessionKey: currentSessionKey,
@@ -7595,8 +7593,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           tasks: compositeTasks,
           imageOptions,
           videoOptions,
+          sendGeneration,
         });
+        clearSendGenerationIfCurrent();
       } catch (error) {
+        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (get().currentSessionKey === currentSessionKey) {
           set({ error: errorMessage });
@@ -7615,6 +7616,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         markSessionRunIdle(currentSessionKey);
         clearPendingRuntimeIntent(currentSessionKey);
+        clearSendGenerationIfCurrent();
       }
       return;
     }
@@ -7628,6 +7630,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }));
         }
       } catch (error) {
+        if (!sendGenerationIsCurrent()) return;
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (get().currentSessionKey === currentSessionKey) {
           set({ error: errorMessage });
@@ -7637,14 +7640,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingImageGenerationLocal: false,
           pendingVideoGenerationLocal: false,
         });
+        clearSendGenerationIfCurrent();
         return;
       }
+      if (!sendGenerationIsCurrent()) return;
     }
 
     if (effectiveMode === 'chat' && mediaPlan.action !== 'desktop_screenshot' && mediaPlan.action !== 'clarify') {
       try {
         await ensureSessionManagedTextModelAllowed(get, currentSessionKey);
       } catch (error) {
+        if (!sendGenerationIsCurrent()) return;
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (get().currentSessionKey === currentSessionKey) {
           set({ error: errorMessage });
@@ -7652,12 +7658,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         commitSessionRunState(set, get, currentSessionKey, {
           sending: false,
         });
+        clearSendGenerationIfCurrent();
         return;
       }
+      if (!sendGenerationIsCurrent()) return;
     }
 
-    const sendGeneration = ++_sendGenerationCounter;
-    _activeSendGenerationBySession.set(currentSessionKey, sendGeneration);
     const imageReferenceInputs = mediaPlan.action === 'image_edit'
       ? plannedSourceImages
       : [];
@@ -7685,6 +7691,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingToolImages: [],
       });
       markSessionRunIdle(currentSessionKey);
+      clearSendGenerationIfCurrent();
       return;
     }
 
@@ -7697,6 +7704,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             body: JSON.stringify({}),
           },
         );
+        if (!sendGenerationIsCurrent()) return;
         if (result.success === false || !result.screenshot) {
           throw new Error(result.error || 'Failed to capture desktop screenshot');
         }
@@ -7729,7 +7737,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         markSessionRunIdle(currentSessionKey);
+        clearSendGenerationIfCurrent();
       } catch (error) {
+        if (!sendGenerationIsCurrent()) return;
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (get().currentSessionKey === currentSessionKey) {
           set({ error: errorMessage });
@@ -7747,6 +7757,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         markSessionRunIdle(currentSessionKey);
+        clearSendGenerationIfCurrent();
       }
       return;
     }
@@ -7774,6 +7785,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
+              runId: mediaRunId,
               originalPrompt: trimmed,
               prompt: mediaPlan.prompt?.trim() || trimmed,
               model: effectiveImageOptions.model,
@@ -7793,6 +7805,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }),
           },
         );
+        if (!sendGenerationIsCurrent() && result.jobId) {
+          void cancelMediaGenerationJobs({ jobId: result.jobId }).catch((error) => {
+            console.warn('[media-generation] failed to cancel stale image job:', error);
+          });
+        }
+        if (!sendGenerationIsCurrent()) return;
         if (result.success === false) {
           throw new Error(result.error || 'Failed to generate image');
         }
@@ -7809,8 +7827,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               sessionKey: currentSessionKey,
               job,
             }),
+            isCancelled: () => !sendGenerationIsCurrent(),
           });
         }
+        if (!sendGenerationIsCurrent()) return;
         const { decision, artifacts } = applyMediaRuntimeSuccess({
           runId: mediaRunId,
           sessionKey: currentSessionKey,
@@ -7848,7 +7868,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (shouldIdle) {
           markSessionRunIdle(currentSessionKey);
         }
+        clearSendGenerationIfCurrent();
       } catch (error) {
+        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
         const errorMessage = error instanceof Error ? error.message : String(error);
         applyMediaRuntimeFailure({
           runId: mediaRunId,
@@ -7873,6 +7895,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         markSessionRunIdle(currentSessionKey);
+        clearSendGenerationIfCurrent();
       }
       return;
     }
@@ -7915,6 +7938,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             method: 'POST',
             body: JSON.stringify({
               sessionKey: currentSessionKey,
+              runId: mediaRunId,
               originalPrompt: trimmed,
               prompt: effectiveVideoPrompt,
               model: effectiveVideoOptions.model,
@@ -7941,6 +7965,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }),
           },
         );
+        if (!sendGenerationIsCurrent() && result.jobId) {
+          void cancelMediaGenerationJobs({ jobId: result.jobId }).catch((error) => {
+            console.warn('[media-generation] failed to cancel stale video job:', error);
+          });
+        }
+        if (!sendGenerationIsCurrent()) return;
         if (result.success === false) {
           throw new Error(result.error || 'Failed to generate video');
         }
@@ -7957,8 +7987,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               sessionKey: currentSessionKey,
               job,
             }),
+            isCancelled: () => !sendGenerationIsCurrent(),
           });
         }
+        if (!sendGenerationIsCurrent()) return;
         const { decision, artifacts } = applyMediaRuntimeSuccess({
           runId: mediaRunId,
           sessionKey: currentSessionKey,
@@ -7996,7 +8028,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (shouldIdle) {
           markSessionRunIdle(currentSessionKey);
         }
+        clearSendGenerationIfCurrent();
       } catch (error) {
+        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
         const errorMessage = error instanceof Error ? error.message : String(error);
         applyMediaRuntimeFailure({
           runId: mediaRunId,
@@ -8021,6 +8055,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           pendingToolImages: [],
         });
         markSessionRunIdle(currentSessionKey);
+        clearSendGenerationIfCurrent();
       }
       return;
     }
@@ -8142,12 +8177,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       clearPendingRuntimeIntent(currentSessionKey);
     };
     setTimeout(checkStuck, 30_000);
-
-    const clearSendGenerationIfCurrent = () => {
-      if (_activeSendGenerationBySession.get(currentSessionKey) === sendGeneration) {
-        _activeSendGenerationBySession.delete(currentSessionKey);
-      }
-    };
 
     const applySendFailure = (errorMsg: string) => {
       const latest = get();
@@ -8302,6 +8331,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearHistoryPoll();
     clearErrorRecoveryTimer();
     const { currentSessionKey, activeRunId } = get();
+    _sessionsCancelling.add(currentSessionKey);
+    _activeSendGenerationBySession.delete(currentSessionKey);
+    rememberLocallyAbortedRun(activeRunId);
     set({
       runtimeRuns: activeRunId
         ? applyRuntimeContractEvents(
@@ -8328,6 +8360,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: false,
       pendingImageGenerationLocal: false,
       pendingVideoGenerationLocal: false,
+      activeRunId: null,
       streamingText: '',
       streamingMessage: null,
       pendingFinal: false,
@@ -8335,20 +8368,78 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pendingToolImages: [],
     });
     set({ streamingTools: [] });
-    markSessionRunIdle(currentSessionKey);
     clearPendingRuntimeIntent(currentSessionKey);
+
+    try {
+      if (activeRunId) {
+        await hostApiFetch<CompositeRunApiResponse>(
+          `/api/composite-runs/${encodeURIComponent(activeRunId)}/cancel`,
+          { method: 'POST', body: '{}' },
+        ).catch((err) => {
+          console.warn('[abortRun] Failed to cancel composite run:', err);
+        });
+      }
+      await cancelMediaGenerationJobs({ sessionKey: currentSessionKey, runId: activeRunId ?? undefined });
+    } catch (err) {
+      console.warn('[abortRun] Failed to cancel local media jobs:', err);
+    }
 
     try {
       await abortChatRunViaHostApi(currentSessionKey);
     } catch (err) {
       set({ error: String(err) });
+    } finally {
+      _sessionsCancelling.delete(currentSessionKey);
+      markSessionRunIdle(currentSessionKey);
     }
+  },
+
+  retryLastRun: async () => {
+    const sessionKey = get().currentSessionKey;
+    const previous: QueuedChatSend | undefined = _lastAttemptedChatSendBySession.get(sessionKey) ?? (() => {
+      const lastUserMessage = findLastRealUserMessage(get().messages);
+      if (!lastUserMessage) return undefined;
+      const text = getMessageText(lastUserMessage.content).trim();
+      const attachments = (lastUserMessage._attachedFiles ?? [])
+        .filter((file) => Boolean(file.filePath?.trim()))
+        .map((file): ChatSendAttachment => ({
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          fileSize: file.fileSize,
+          stagedPath: file.filePath!,
+          preview: file.preview,
+        }));
+      if (!text && attachments.length === 0) return undefined;
+      return {
+        text,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        targetAgentId: get().currentAgentId,
+        mode: 'chat' as const,
+        imageOptions: undefined,
+        videoOptions: undefined,
+        enqueuedAt: Date.now(),
+      };
+    })();
+    if (!previous) {
+      set({ runError: i18n.t('chat:runError.retryUnavailable') });
+      return;
+    }
+    set({ error: null, runError: null });
+    await get().sendMessage(
+      previous.text,
+      cloneQueuedAttachments(previous.attachments),
+      previous.targetAgentId,
+      previous.mode,
+      previous.imageOptions ? { ...previous.imageOptions } : undefined,
+      previous.videoOptions ? { ...previous.videoOptions } : undefined,
+    );
   },
 
   // ── Handle incoming chat events from Gateway ──
 
   handleChatEvent: (event: Record<string, unknown>) => {
     const runId = String(event.runId || '');
+    if (wasLocallyAbortedRun(runId)) return;
     const eventState = String(event.state || '');
     const rawEventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
     const initialState = get();
@@ -8359,11 +8450,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
       || eventState === 'aborted'
       || (event.message && typeof event.message === 'object'
         && getMessageStopReason(event.message as Record<string, unknown>) != null);
+    const asyncTaskEvidence = extractAsyncTaskEvidence(event.message ?? event);
+    if (asyncTaskEvidence.length > 0) {
+      const ownerRunId = runId || activeRunId;
+      set((state) => ({
+        runtimeRuns: applyAsyncTaskEvidenceToRuns(
+          state.runtimeRuns,
+          ownerRunId,
+          asyncTaskEvidence,
+          eventSessionKey ?? currentSessionKey,
+        ),
+      }));
+      scheduleWithheldFinalReevaluationForSession(eventSessionKey ?? currentSessionKey);
+    }
 
     // Only process events for the current session (when sessionKey is present)
     if (eventSessionKey != null && eventSessionKey !== currentSessionKey) {
       if (terminalEvent) {
-        markSessionRunIdle(eventSessionKey);
+        const ownerRunId = _sessionRunStateCache.get(eventSessionKey)?.activeRunId || runId;
+        const ownerRun = ownerRunId ? get().runtimeRuns[ownerRunId] : undefined;
+        if (!runtimeRunHasPendingAsyncTasks(ownerRun)) {
+          markSessionRunIdle(eventSessionKey);
+        }
         markSessionNeedsTerminalHistoryRefresh(eventSessionKey);
       }
       console.info('[handleChatEvent] Routed non-current chat event to session cache', {
@@ -8592,7 +8700,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // truly final reply (without a pending tool call) arrives.
           const pendingTool = hasPendingToolUse(normalizedFinalMessage);
           const toolOnly = isToolOnlyMessage(normalizedFinalMessage) || pendingTool;
-          const hasOutput = !pendingTool && hasNonToolAssistantContent(normalizedFinalMessage);
+          const hasOutput = !pendingTool && messageHasDeliverableContent(normalizedFinalMessage);
           // When the model ends its turn with only `thinking` blocks (no text,
           // no images, no tool calls), `hasOutput` is false and `toolOnly` is
           // false. This is a valid terminal state (the model decided not to
@@ -8605,6 +8713,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const msgId = normalizedFinalMessage.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
           let finalArtifactsToVerify: ChatRuntimeArtifact[] = [];
           let terminalGateDecision: string | undefined;
+          let withheldFinalMessage: RawMessage | undefined;
+          let emptyTerminalFailure: string | undefined;
           set((s) => {
             const nextTools = updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools;
             const streamingTools = clearLifecycle ? [] : nextTools;
@@ -8621,18 +8731,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // below + `enrichWithCachedImages` (which dereferences the
             // assistant-media bubble's `block.url`).
             const pendingImgs = s.pendingToolImages;
+            const currentRuntimeRun = runId ? s.runtimeRuns[runId] : undefined;
+            const knownArtifacts = currentRuntimeRun?.artifacts ?? [];
+            const hasSuccessfulExecutionEvidence = (currentRuntimeRun?.events ?? []).some((runtimeEvent) => (
+              (runtimeEvent.type === 'tool.completed' && runtimeEvent.isError !== true)
+              || (runtimeEvent.type === 'command.output'
+                && (typeof runtimeEvent.exitCode !== 'number' || runtimeEvent.exitCode === 0))
+              || runtimeEvent.type === 'patch.completed'
+              || runtimeEvent.type === 'artifact.produced'
+            ));
+            const synthesizedFinalText = isEmptyTerminalResponse
+              ? ((pendingImgs.length > 0 || knownArtifacts.length > 0)
+                  ? i18n.t('chat:executionGraph.compact.artifactDone')
+                  : (hasSuccessfulExecutionEvidence ? i18n.t('chat:executionGraph.compact.done') : ''))
+              : '';
+            emptyTerminalFailure = isEmptyTerminalResponse && !synthesizedFinalText
+              ? i18n.t('chat:runError.emptyFinal')
+              : undefined;
+            const effectiveFinalMessage = synthesizedFinalText
+              ? { ...normalizedFinalMessage, content: synthesizedFinalText }
+              : normalizedFinalMessage;
             const shouldAttachPendingFiles = pendingImgs.length > 0 && !pendingTool;
             const msgWithImages: RawMessage = shouldAttachPendingFiles
               ? {
-                ...normalizedFinalMessage,
-                role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'],
+                ...effectiveFinalMessage,
+                role: (effectiveFinalMessage.role || 'assistant') as RawMessage['role'],
                 id: msgId,
                 _attachedFiles: dedupeAttachedFiles([
-                  ...(normalizedFinalMessage._attachedFiles || []),
+                  ...(effectiveFinalMessage._attachedFiles || []),
                   ...pendingImgs,
                 ]),
               }
-              : { ...normalizedFinalMessage, role: (normalizedFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
+              : { ...effectiveFinalMessage, role: (effectiveFinalMessage.role || 'assistant') as RawMessage['role'], id: msgId };
             const clearPendingImages = pendingTool
               ? {}
               : { pendingToolImages: [] as AttachedFileMeta[] };
@@ -8649,31 +8779,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 runtimeEvent.type === 'artifact.produced')
               .map((runtimeEvent) => runtimeEvent.artifact);
             let runtimeRuns = applyRuntimeContractEvents(s.runtimeRuns, finalArtifactEvents);
+            const hasPendingAsyncTask = runId
+              ? runtimeRunHasPendingAsyncTasks(runtimeRuns[runId])
+              : false;
             if (runId && clearLifecycle && !toolOnly) {
               runtimeRuns = applyRuntimeContractEvents(
                 runtimeRuns,
-                buildRuntimeCompletionGateEvents(runtimeRuns[runId], {
-                  runId,
-                  sessionKey: eventSessionKey ?? currentSessionKey,
-                  ts: Date.now(),
-                  status: 'completed',
-                }),
+                [
+                  ...buildRuntimeCompletionGateEvents(runtimeRuns[runId], {
+                    runId,
+                    sessionKey: eventSessionKey ?? currentSessionKey,
+                    ts: Date.now(),
+                    status: emptyTerminalFailure ? 'error' : 'completed',
+                    ...(emptyTerminalFailure ? { error: emptyTerminalFailure } : {}),
+                  }),
+                  ...(emptyTerminalFailure ? [{
+                    runId,
+                    sessionKey: eventSessionKey ?? currentSessionKey,
+                    ts: Date.now(),
+                    type: 'run.ended' as const,
+                    status: 'error' as const,
+                    error: emptyTerminalFailure,
+                    stopReason: 'empty_final_delivery',
+                  }] : []),
+                ],
               );
               terminalGateDecision = runtimeRuns[runId]?.gateResult?.decision;
             }
             const shouldHoldForContinuation = clearLifecycle
               && !toolOnly
-              && terminalGateDecision === 'continue_required';
+              && (terminalGateDecision === 'continue_required' || hasPendingAsyncTask);
             const shouldClearTerminalLifecycle = clearLifecycle
               && !toolOnly
+              && !hasPendingAsyncTask
               && (!terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision));
             if (shouldHoldForContinuation) {
+              withheldFinalMessage = msgWithImages;
               return {
                 streamingText: '',
                 streamingMessage: null,
                 pendingFinal: true,
                 streamingTools,
                 runtimeRuns,
+                ...clearPendingImages,
+              };
+            }
+            if (emptyTerminalFailure) {
+              return {
+                streamingText: '',
+                streamingMessage: null,
+                sending: false,
+                activeRunId: null,
+                pendingFinal: false,
+                streamingTools: [],
+                runtimeRuns,
+                runError: emptyTerminalFailure,
                 ...clearPendingImages,
               };
             }
@@ -8718,6 +8878,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ...clearPendingImages,
             };
           });
+          if (runId && withheldFinalMessage) {
+            _withheldFinalDeliveryByRun.set(runId, {
+              runId,
+              sessionKey: eventSessionKey ?? currentSessionKey,
+              message: withheldFinalMessage,
+            });
+          } else if (runId) {
+            _withheldFinalDeliveryByRun.delete(runId);
+          }
           if (runId && finalArtifactsToVerify.length > 0) {
             scheduleRuntimeArtifactVerification(runId, eventSessionKey ?? currentSessionKey, finalArtifactsToVerify);
           }
@@ -8781,9 +8950,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }, 1500);
           }
         } else {
-          // No message in final event - reload history to get complete data
-          set({ streamingText: '', streamingMessage: null, pendingFinal: true });
-          get().loadHistory();
+          const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
+          const latestState = get();
+          const terminalRunId = runId || latestState.activeRunId;
+          const terminalRun = terminalRunId ? latestState.runtimeRuns[terminalRunId] : undefined;
+          const hasPendingAsyncTask = runtimeRunHasPendingAsyncTasks(terminalRun);
+          const backendAlreadyTerminal = Boolean(terminalRun && terminalRun.status !== 'running');
+          const lifecycleAlreadyIdle = !latestState.sending
+            && latestState.activeRunId == null
+            && !latestState.pendingFinal;
+          if (lifecycleAlreadyIdle || (backendAlreadyTerminal && !hasPendingAsyncTask)) {
+            set({
+              streamingText: '',
+              streamingMessage: null,
+              streamingTools: [],
+              sending: false,
+              activeRunId: null,
+              pendingFinal: false,
+              lastUserMessageAt: null,
+            });
+            markSessionRunIdle(sessionKeyAtFinal);
+            clearPendingRuntimeIntent(sessionKeyAtFinal);
+          } else {
+            set({ streamingText: '', streamingMessage: null, pendingFinal: true });
+          }
+          markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
+          [0, 500, 1500, 4000].forEach((delayMs) => {
+            setTimeout(() => {
+              if (get().currentSessionKey !== sessionKeyAtFinal) return;
+              forceNextHistoryLoad(sessionKeyAtFinal);
+              void get().loadHistory(true);
+            }, delayMs);
+          });
         }
         break;
       }
@@ -8932,6 +9130,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleRuntimeEvent: (event: ChatRuntimeEvent) => {
+    if (wasLocallyAbortedRun(event.runId)) return;
     const initialState = get();
     const { activeRunId, currentSessionKey } = initialState;
     const eventSessionKey = inferSessionKeyForRun(initialState, event.runId, event.sessionKey ?? null);
@@ -8950,6 +9149,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     let runtimeRuns = applyRuntimeContractEvents(initialState.runtimeRuns, [eventForSession]);
+    const asyncTaskEvidence = extractAsyncTaskEvidence(eventForSession);
+    if (asyncTaskEvidence.length > 0) {
+      runtimeRuns = applyAsyncTaskEvidenceToRuns(
+        runtimeRuns,
+        eventForSession.runId,
+        asyncTaskEvidence,
+        eventSessionKey ?? currentSessionKey,
+      );
+      scheduleWithheldFinalReevaluationForSession(eventSessionKey ?? currentSessionKey);
+    }
     if (eventForSession.type === 'run.started') {
       runtimeRuns = applyRuntimeContractEvents(
         runtimeRuns,
@@ -8998,6 +9207,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (eventForSession.type === 'run.ended') {
+      const hasPendingAsyncTask = runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]);
+      if (hasPendingAsyncTask) {
+        if (appliesToActiveUi) nextPatch.pendingFinal = true;
+      } else {
       runtimeRuns = applyRuntimeContractEvents(
         runtimeRuns,
         buildRuntimeCompletionGateEvents(runtimeRuns[eventForSession.runId], {
@@ -9017,6 +9230,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         clearPendingRuntimeIntent(eventSessionKey);
       }
+      }
     }
 
     // Always retain structured runtime events, even for inactive sessions.
@@ -9027,7 +9241,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // match the active run; otherwise they are stored but do not affect the
     // current composer/graph state.
     if (!matchesCurrentSession && !matchesActiveRun) {
-      updateCachedSessionRunStateFromRuntimeEvent(eventForSession);
+      updateCachedSessionRunStateFromRuntimeEvent(
+        eventForSession,
+        runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]),
+      );
       set(nextPatch);
       return;
     }
@@ -9035,7 +9252,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     _lastChatEventAt = Date.now();
 
     if (eventForSession.type === 'run.started') {
-      if (matchesCurrentSession && (activeRunId == null || matchesActiveRun)) {
+      const activeRunIsHistoricalPlaceholder = Boolean(activeRunId?.startsWith(`history:${currentSessionKey}:`));
+      if (matchesCurrentSession && (activeRunId == null || matchesActiveRun || activeRunIsHistoricalPlaceholder)) {
         nextPatch.activeRunId = eventForSession.runId;
         nextPatch.error = null;
         nextPatch.runError = null;
@@ -9103,12 +9321,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       if (shouldClearActiveRun) {
         const terminalGateDecision = runtimeRuns[eventForSession.runId]?.gateResult?.decision;
-        const shouldHoldForContinuation = terminalGateDecision === 'continue_required';
-        nextPatch.sending = shouldHoldForContinuation ? true : false;
-        nextPatch.activeRunId = shouldHoldForContinuation ? eventForSession.runId : null;
-        nextPatch.pendingFinal = shouldHoldForContinuation ? true : false;
-        nextPatch.lastUserMessageAt = shouldHoldForContinuation ? latestState.lastUserMessageAt : null;
-        nextPatch.streamingTools = shouldHoldForContinuation ? latestState.streamingTools : [];
+        const shouldHoldForContinuation = terminalGateDecision === 'continue_required'
+          || runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]);
+        const shouldAwaitFinalDelivery = eventForSession.status === 'completed' && !shouldHoldForContinuation;
+        const shouldKeepLifecycle = shouldHoldForContinuation || shouldAwaitFinalDelivery;
+        nextPatch.sending = shouldKeepLifecycle;
+        nextPatch.activeRunId = shouldKeepLifecycle ? eventForSession.runId : null;
+        nextPatch.pendingFinal = shouldKeepLifecycle;
+        nextPatch.lastUserMessageAt = shouldKeepLifecycle ? latestState.lastUserMessageAt : null;
+        nextPatch.streamingTools = shouldKeepLifecycle ? latestState.streamingTools : [];
         if (eventForSession.status === 'error' && eventForSession.error) {
           nextPatch.error = null;
           nextPatch.runError = normalizeChatRunErrorMessage(eventForSession.error);
@@ -9118,7 +9339,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           nextPatch.streamingText = '';
           nextPatch.pendingToolImages = [];
         }
-        if (!shouldHoldForContinuation) {
+        if (!shouldKeepLifecycle) {
           markSessionRunIdle(currentSessionKey);
           markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
           clearPendingRuntimeIntent(currentSessionKey);

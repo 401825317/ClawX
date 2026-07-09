@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../../shared/chat-timeouts';
-import { isArtifactCapabilityQuestion } from '../../../shared/artifact-intent';
+import { isArtifactCreationRequest } from '../../../shared/artifact-intent';
 import { PORTS } from '../../utils/config';
 import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-device-pairing';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
@@ -40,7 +40,6 @@ const chatAbortSettleUntil = new Map<string, number>();
 const chatAbortSessionVersions = new Map<string, number>();
 const inFlightChatSendByIdempotencyKey = new Map<string, Promise<{ runId?: string }>>();
 const CJK_RE = /[\u3400-\u9fff]/u;
-const ARTIFACT_INTENT_RE = /(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|打开|美化|优化|润色|改(?:一下|一版)?|排版|pptx?|PPT|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|文件|文档|报告|图片|图像|海报|网页|HTML|html|脚本|代码文件|压缩包|zip|create|make|generate|build|produce|export|write|presentation|slides?|document|spreadsheet|image|file)/iu;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -51,7 +50,7 @@ function buildChatSendDiagnostic(message: string, options: { media: boolean; med
   return {
     messageChars: Array.from(normalized).length,
     containsCjk: CJK_RE.test(normalized),
-    artifactIntent: ARTIFACT_INTENT_RE.test(normalized) && !isArtifactCapabilityQuestion(normalized),
+    artifactIntent: isArtifactCreationRequest(normalized),
     media: options.media,
     mediaCount: options.mediaCount ?? 0,
     deliver: options.deliver ?? false,

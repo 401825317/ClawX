@@ -357,7 +357,7 @@ export function buildRuntimeCompletionGateReport(
       issues.push({
         id: gateIssueId(run?.runId, 'tool.failed', event.toolCallId, index),
         code: 'tool.failed',
-        severity: 'blocking',
+        severity: 'warning',
         title: `${event.name} 工具执行失败`,
         detail: runtimeEventDetail(event.result) ?? runtimeEventDetail(event.meta),
         targetId: event.toolCallId,
@@ -371,7 +371,7 @@ export function buildRuntimeCompletionGateReport(
       issues.push({
         id: gateIssueId(run?.runId, 'command.failed', targetId, index),
         code: 'command.failed',
-        severity: 'blocking',
+        severity: 'warning',
         title: `${event.title || event.name || '命令'} 执行失败`,
         detail: runtimeEventDetail(event.output) ?? (typeof event.exitCode === 'number' ? `exitCode=${event.exitCode}` : undefined),
         targetId,
@@ -680,6 +680,7 @@ export function buildRuntimeCompletionGateEvents(
       runId: base.runId,
       status: base.status,
       error: base.error,
+      artifactCount: artifacts.length,
     });
     const terminalSummary = summarizeCompletionGateReport(terminalReport);
     events.push({

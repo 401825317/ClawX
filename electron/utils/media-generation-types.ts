@@ -31,6 +31,7 @@ export type VideoGenerationRouteDecision = {
 export type ImageGenerationJobPayload = {
   kind: 'image';
   sessionKey: string;
+  clientRequestId?: string;
   originalPrompt?: string;
   prompt: string;
   model?: string;
@@ -40,11 +41,13 @@ export type ImageGenerationJobPayload = {
   userInputImages?: MediaGenerationInputImageRef[];
   userMessageTimestampMs?: number;
   suppressConversationAppend?: boolean;
+  runId?: string;
 };
 
 export type VideoGenerationJobPayload = {
   kind: 'video';
   sessionKey: string;
+  clientRequestId?: string;
   prompt: string;
   originalPrompt?: string;
   model?: string;
@@ -55,11 +58,15 @@ export type VideoGenerationJobPayload = {
   userMessageTimestampMs?: number;
   route?: VideoGenerationRouteDecision;
   suppressConversationAppend?: boolean;
+  runId?: string;
 };
 
 export type MediaGenerationJobPayload = ImageGenerationJobPayload | VideoGenerationJobPayload;
 
-export type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+// Kept as the generation lifecycle for existing API consumers.
+export type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+
+export type MediaGenerationDeliveryStatus = 'pending' | 'succeeded' | 'failed' | 'skipped';
 
 export type MediaGenerationProgressEvent = {
   id: string;
@@ -92,6 +99,39 @@ export type MediaGenerationJobResult = {
   metadata?: Record<string, unknown>;
 };
 
+export type MediaGenerationRestartRecovery = {
+  previousStatus: 'queued' | 'running';
+  recoveredAt: number;
+  reason: 'main_process_restart';
+};
+
+export type MediaGenerationJobCancelOutcome =
+  | 'cancelled'
+  | 'already_cancelled'
+  | 'already_terminal'
+  | 'not_found';
+
+export type MediaGenerationJobCancelResult = {
+  outcome: MediaGenerationJobCancelOutcome;
+  job?: MediaGenerationJobSnapshot;
+};
+
+export type MediaGenerationJobDeliveryRetryOutcome =
+  | 'retry_started'
+  | 'already_in_progress'
+  | 'not_retryable'
+  | 'not_found';
+
+export type MediaGenerationJobDeliveryRetryResult = {
+  outcome: MediaGenerationJobDeliveryRetryOutcome;
+  job?: MediaGenerationJobSnapshot;
+};
+
+export type MediaGenerationJobEnqueueResult = {
+  job: MediaGenerationJobSnapshot;
+  idempotent: boolean;
+};
+
 export type MediaGenerationWorkerRequest = {
   type: 'run';
   jobId: string;
@@ -110,6 +150,9 @@ export type MediaGenerationJobSnapshot = {
   id: string;
   kind: MediaGenerationKind;
   sessionKey: string;
+  clientRequestId?: string;
+  runId?: string;
+  ownerKind?: 'standalone' | 'composite';
   status: MediaGenerationJobStatus;
   createdAt: number;
   updatedAt: number;
@@ -122,5 +165,10 @@ export type MediaGenerationJobSnapshot = {
   runDurationMs?: number;
   progressEvents?: MediaGenerationProgressEvent[];
   error?: string;
+  deliveryStatus?: MediaGenerationDeliveryStatus;
+  deliveryError?: string;
+  recoverable?: boolean;
+  restartRecovery?: MediaGenerationRestartRecovery;
+  outputs?: MediaGenerationJobOutput[];
   result?: MediaGenerationJobResult | unknown;
 };

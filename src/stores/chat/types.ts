@@ -32,6 +32,37 @@ export interface AttachedFileMeta {
   gatewayUrl?: string;
 }
 
+export interface CompositeArtifactManifest {
+  version: 1 | 2;
+  runId: string;
+  requestedTaskCount: number;
+  runStatus?: 'running' | 'completed' | 'error' | 'aborted';
+  runtimeEvents?: ChatRuntimeEvent[];
+  tasks: Array<{
+    id: string;
+    kind: string;
+    title: string;
+    status: 'completed' | 'failed' | 'blocked';
+    detail?: string;
+    artifactRefs: string[];
+  }>;
+}
+
+export type AsyncTaskLedgerStatus = 'pending' | 'completed' | 'error';
+
+export interface AsyncTaskLedgerEntry {
+  id: string;
+  taskId?: string;
+  runId?: string;
+  childSessionKey?: string;
+  childSessionId?: string;
+  status: AsyncTaskLedgerStatus;
+  source: 'tool-result' | 'task-completion' | 'continuation';
+  updatedAt: number;
+}
+
+export interface AsyncTaskEvidence extends AsyncTaskLedgerEntry {}
+
 /** Raw message from OpenClaw chat.history */
 export interface RawMessage {
   role: 'user' | 'assistant' | 'system' | 'toolresult';
@@ -50,13 +81,27 @@ export interface RawMessage {
   error_message?: string;
   syntheticLocalArtifactConversation?: boolean;
   localArtifactResultKind?: 'image' | 'video' | 'composite';
+  compositeArtifactManifest?: CompositeArtifactManifest;
+  mediaGenerationSnapshot?: unknown;
   /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
   _attachedFiles?: AttachedFileMeta[];
 }
 
 /** Content block inside a message */
 export interface ContentBlock {
-  type: 'text' | 'image' | 'thinking' | 'tool_use' | 'tool_result' | 'toolCall' | 'toolResult';
+  type:
+    | 'text'
+    | 'image'
+    | 'video'
+    | 'audio'
+    | 'file'
+    | 'thinking'
+    | 'tool_use'
+    | 'tool_result'
+    | 'toolCall'
+    | 'toolResult'
+    | 'task_completion'
+    | 'continuation';
   text?: string;
   thinking?: string;
   source?: { type: string; media_type?: string; data?: string; url?: string };
@@ -78,6 +123,8 @@ export interface ContentBlock {
   height?: number;
   /** Human-readable filename / alt text emitted by the Gateway. */
   alt?: string;
+  fileName?: string;
+  filePath?: string;
   id?: string;
   name?: string;
   input?: unknown;
@@ -132,6 +179,7 @@ export interface ChatRuntimeRunState {
   assistantText: string;
   thinkingText: string;
   progressEntries?: ChatRuntimeProgressEntry[];
+  asyncTaskLedger?: Record<string, AsyncTaskLedgerEntry>;
   events: ChatRuntimeEvent[];
 }
 
@@ -212,6 +260,7 @@ export interface ChatState {
     videoOptions?: ChatVideoSendOptions,
   ) => Promise<void>;
   abortRun: () => Promise<void>;
+  retryLastRun: () => Promise<void>;
   handleChatEvent: (event: Record<string, unknown>) => void;
   handleRuntimeEvent: (event: ChatRuntimeEvent) => void;
   refresh: () => Promise<void>;

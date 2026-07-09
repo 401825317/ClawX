@@ -4,7 +4,7 @@ import type {
   ChatRuntimeGateIssue,
   ChatRuntimePlanStep,
 } from '../../../shared/chat-runtime-events';
-import { isArtifactCapabilityQuestion } from '../../../shared/artifact-intent';
+import { isArtifactCapabilityQuestion, isArtifactCreationRequest } from '../../../shared/artifact-intent';
 import type { ChatRuntimeRunState } from './types';
 
 export type CompletionGateReport = {
@@ -25,7 +25,6 @@ export type CompletionGateReport = {
   issues: ChatRuntimeGateIssue[];
 };
 
-const ARTIFACT_OBJECTIVE_RE = /(?:生成|创建|制作|导出|输出|保存|下载|写一份|做一份|做个|图片|图像|海报|视频|PPT|pptx?|Word|docx?|Excel|xlsx?|PDF|pdf|文档|报告|表格|网页|HTML|html|代码文件|压缩包|截图|create|make|generate|export|produce|save|download|image|video|document|report|presentation|spreadsheet|file|archive|screenshot)/iu;
 const EXECUTE_STEP_ARTIFACT_RE = /(?:图片|视频|产物|文件|文档|报告|导出|生成)/iu;
 
 export type ArtifactRequiredPlanStep = ChatRuntimePlanStep & {
@@ -77,7 +76,7 @@ export function runRequiresArtifact(run: ChatRuntimeRunState | undefined): boole
   })) {
     return true;
   }
-  return ARTIFACT_OBJECTIVE_RE.test(objective);
+  return isArtifactCreationRequest(objective);
 }
 
 export function summarizeCompletionGateReport(report: CompletionGateReport): string | undefined {
@@ -108,6 +107,7 @@ export function buildTerminalGateReport(params: {
   runId: string;
   status: Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'];
   error?: string;
+  artifactCount?: number;
 }): CompletionGateReport {
   const issue: ChatRuntimeGateIssue = {
     id: gateIssueId(params.runId, params.status === 'aborted' ? 'run.aborted' : 'run.failed', params.runId),
@@ -119,7 +119,7 @@ export function buildTerminalGateReport(params: {
     recoverable: params.status === 'aborted',
   };
   return {
-    artifactCount: 0,
+    artifactCount: params.artifactCount ?? 0,
     missingRequiredArtifactCount: 0,
     missingVerificationCount: 0,
     blockedVerificationCount: 0,

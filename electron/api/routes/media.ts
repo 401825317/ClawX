@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { promises as fsP } from 'node:fs';
 import type { HostApiContext } from '../context';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
@@ -27,8 +28,12 @@ import {
   type VideoGenerationModelConfig,
 } from '../../utils/openclaw-video-generation';
 import {
+  cancelMediaGenerationJob,
+  cancelMediaGenerationJobsForRun,
+  cancelMediaGenerationJobsForSession,
   enqueueMediaGenerationJob,
   getMediaGenerationJob,
+  getMediaGenerationJobsForSession,
 } from '../../utils/media-generation-jobs';
 import {
   planMediaIntent,
@@ -49,7 +54,41 @@ import {
   createLocalArtifact,
   type LocalArtifactCreateRequest,
 } from '../../utils/local-artifact-runtime';
-import { appendCompositeArtifactConversation } from '../../utils/chat-session-image-message';
+import {
+  isLocalArtifactKind,
+  planLocalArtifactBatch,
+  type LocalArtifactPlanItem,
+} from '../../utils/local-artifact-planner';
+import {
+  appendCompositeArtifactConversation,
+  type PersistedCompositeArtifactManifest,
+} from '../../utils/chat-session-image-message';
+import {
+  compositeRunCoordinator,
+} from '../../utils/composite-run-coordinator';
+import type {
+  CompositeRunRetryRequest,
+  CompositeRunStartRequest,
+} from '../../../shared/composite-run';
+
+const CANCELLED_LOCAL_RUN_TTL_MS = 30 * 60 * 1000;
+const cancelledLocalRunIds = new Map<string, number>();
+
+function rememberCancelledLocalRun(runId: string): void {
+  if (!runId) return;
+  const now = Date.now();
+  cancelledLocalRunIds.set(runId, now);
+  for (const [candidateRunId, cancelledAt] of cancelledLocalRunIds) {
+    if (now - cancelledAt > CANCELLED_LOCAL_RUN_TTL_MS) {
+      cancelledLocalRunIds.delete(candidateRunId);
+    }
+  }
+}
+
+function localRunWasCancelled(runId: string): boolean {
+  const cancelledAt = cancelledLocalRunIds.get(runId);
+  return cancelledAt != null && Date.now() - cancelledAt <= CANCELLED_LOCAL_RUN_TTL_MS;
+}
 
 function normalizeMediaInputImageRefs(
   images: Array<{
@@ -127,12 +166,115 @@ export async function handleMediaRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  _ctx: HostApiContext,
+  ctx: HostApiContext,
 ): Promise<boolean> {
+  compositeRunCoordinator.setPublisher((event) => {
+    ctx.eventBus.emit('chat:runtime-event', event);
+    const mainWindow = ctx.mainWindow;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('chat:runtime-event', event);
+    }
+  });
+
+  if (url.pathname === '/api/composite-runs' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<CompositeRunStartRequest>(req);
+      const result = await compositeRunCoordinator.start(body);
+      sendJson(res, result.idempotent ? 200 : 202, result);
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/composite-runs' && req.method === 'GET') {
+    try {
+      const sessionKey = url.searchParams.get('sessionKey')?.trim() || undefined;
+      const activeOnly = url.searchParams.get('activeOnly') === 'true';
+      const runs = await compositeRunCoordinator.list(sessionKey, activeOnly);
+      sendJson(res, 200, { success: true, runs });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/composite-runs/')) {
+    const suffix = url.pathname.slice('/api/composite-runs/'.length);
+    const segments = suffix.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
+    const runId = segments[0]?.trim() || '';
+    const action = segments[1]?.trim() || '';
+
+    if (runId && !action && req.method === 'GET') {
+      const run = await compositeRunCoordinator.get(runId);
+      sendJson(res, run ? 200 : 404, run
+        ? { success: true, run }
+        : { success: false, error: 'Composite run not found' });
+      return true;
+    }
+
+    if (runId && action === 'cancel' && req.method === 'POST') {
+      const run = await compositeRunCoordinator.cancel(runId);
+      sendJson(res, run ? 200 : 404, run
+        ? { success: true, run }
+        : { success: false, error: 'Composite run not found' });
+      return true;
+    }
+
+    if (runId && action === 'retry' && req.method === 'POST') {
+      try {
+        const body = await parseJsonBody<CompositeRunRetryRequest>(req);
+        const run = await compositeRunCoordinator.retry(runId, body);
+        sendJson(res, run ? 202 : 404, run
+          ? { success: true, run }
+          : { success: false, error: 'Composite run not found' });
+      } catch (error) {
+        sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+      }
+      return true;
+    }
+  }
+
+  if (url.pathname === '/api/local-artifacts/plan-batch' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ items?: LocalArtifactPlanItem[]; runId?: string }>(req);
+      const runId = body.runId?.trim() || '';
+      if (runId && localRunWasCancelled(runId)) {
+        sendJson(res, 409, { success: false, error: 'Local artifact planning cancelled' });
+        return true;
+      }
+      const items = (Array.isArray(body.items) ? body.items : [])
+        .filter((item) => (
+          typeof item?.id === 'string'
+          && item.request
+          && isLocalArtifactKind(item.request.kind)
+        ));
+      const result = await planLocalArtifactBatch(items);
+      if (runId && localRunWasCancelled(runId)) {
+        sendJson(res, 409, { success: false, error: 'Local artifact planning cancelled' });
+        return true;
+      }
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/local-artifacts/create' && req.method === 'POST') {
     try {
-      const body = await parseJsonBody<LocalArtifactCreateRequest>(req);
+      const body = await parseJsonBody<LocalArtifactCreateRequest & { runId?: string }>(req);
+      const runId = body.runId?.trim() || '';
+      if (runId && localRunWasCancelled(runId)) {
+        sendJson(res, 409, { success: false, error: 'Local artifact creation cancelled' });
+        return true;
+      }
       const artifact = await createLocalArtifact(body);
+      if (runId && localRunWasCancelled(runId)) {
+        await fsP.rm(artifact.filePath, { force: true }).catch(() => undefined);
+        sendJson(res, 409, { success: false, error: 'Local artifact creation cancelled' });
+        return true;
+      }
       sendJson(res, 200, { success: true, artifact });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
@@ -160,6 +302,7 @@ export async function handleMediaRoutes(
         outputPaths?: string[];
         inputPaths?: string[];
         userMessageTimestampMs?: number;
+        manifest?: PersistedCompositeArtifactManifest;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -189,6 +332,8 @@ export async function handleMediaRoutes(
         outputPaths: Array.isArray(body.outputPaths) ? body.outputPaths : undefined,
         inputPaths: Array.isArray(body.inputPaths) ? body.inputPaths : undefined,
         ...(userMessageTimestampMs !== undefined ? { userTimestampMs: userMessageTimestampMs } : {}),
+        manifest: body.manifest,
+        shouldAbort: () => Boolean(runId && localRunWasCancelled(runId)),
       });
       sendJson(res, 200, { success: true });
     } catch (error) {
@@ -246,6 +391,43 @@ export async function handleMediaRoutes(
       return true;
     }
     sendJson(res, 200, { success: true, job });
+    return true;
+  }
+
+  if (url.pathname === '/api/media/generation-jobs' && req.method === 'GET') {
+    const sessionKey = url.searchParams.get('sessionKey')?.trim() || '';
+    if (!sessionKey) {
+      sendJson(res, 400, { success: false, error: 'sessionKey is required' });
+      return true;
+    }
+    const activeOnly = url.searchParams.get('activeOnly') !== 'false';
+    sendJson(res, 200, {
+      success: true,
+      jobs: getMediaGenerationJobsForSession(sessionKey, { activeOnly }),
+    });
+    return true;
+  }
+
+  if (url.pathname === '/api/media/generation-jobs/cancel' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ jobId?: string; sessionKey?: string; runId?: string }>(req);
+      const jobId = body.jobId?.trim() || '';
+      const sessionKey = body.sessionKey?.trim() || '';
+      const runId = body.runId?.trim() || '';
+      if (!jobId && !sessionKey && !runId) {
+        sendJson(res, 400, { success: false, error: 'jobId, sessionKey, or runId is required' });
+        return true;
+      }
+      rememberCancelledLocalRun(runId);
+      const cancelledJobIds = jobId
+        ? (cancelMediaGenerationJob(jobId) ? [jobId] : [])
+        : runId
+          ? cancelMediaGenerationJobsForRun(runId, sessionKey || undefined)
+          : cancelMediaGenerationJobsForSession(sessionKey);
+      sendJson(res, 200, { success: true, cancelledJobIds });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
     return true;
   }
 
@@ -359,6 +541,7 @@ export async function handleMediaRoutes(
         }>;
         userMessageTimestampMs?: number;
         suppressConversationAppend?: boolean;
+        runId?: string;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -397,6 +580,7 @@ export async function handleMediaRoutes(
         ...(userInputImages ? { userInputImages } : {}),
         ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
         ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
+        ...(body.runId?.trim() ? { runId: body.runId.trim() } : {}),
       };
       const job = enqueueMediaGenerationJob(payload);
       sendJson(res, 202, { success: true, jobId: job.id, job });
@@ -523,6 +707,7 @@ export async function handleMediaRoutes(
         }>;
         route?: unknown;
         suppressConversationAppend?: boolean;
+        runId?: string;
       }>(req);
       const sessionKey = body.sessionKey?.trim() || '';
       const prompt = body.prompt?.trim() || '';
@@ -597,6 +782,7 @@ export async function handleMediaRoutes(
         ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
         route,
         ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
+        ...(body.runId?.trim() ? { runId: body.runId.trim() } : {}),
       };
       const job = enqueueMediaGenerationJob(payload);
       logger.info('[video-generation-route] chat_send_enqueued', {

@@ -1,12 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'fs';
+import { existsSync, promises as fsP } from 'fs';
 import path from 'node:path';
 import { app, utilityProcess } from 'electron';
 import { appendImageGenerationConversation } from './chat-session-image-message';
 import { getElectronStoreUserDataEnvKey } from './electron-store-options';
 import { logger } from './logger';
+import {
+  getMediaGenerationJobJournalPath,
+  loadMediaGenerationJobJournal,
+  writeMediaGenerationJobJournal,
+  type MediaGenerationJournalEntry,
+} from './media-generation-job-journal';
 import type {
   MediaGenerationKind,
+  MediaGenerationJobCancelResult,
+  MediaGenerationJobDeliveryRetryResult,
+  MediaGenerationJobEnqueueResult,
   MediaGenerationJobPayload,
   MediaGenerationJobOutput,
   MediaGenerationProgressEvent,
@@ -20,14 +29,21 @@ import { getOpenClawDir } from './paths';
 
 type InternalMediaGenerationJob = MediaGenerationJobSnapshot & {
   payload: MediaGenerationJobPayload;
+  cancelRequested?: boolean;
+  worker?: ReturnType<typeof utilityProcess.fork>;
 };
 
 const jobs = new Map<string, InternalMediaGenerationJob>();
+const jobIdByClientRequest = new Map<string, string>();
+const activeDeliveryRetryJobIds = new Set<string>();
 const queues: Record<MediaGenerationKind, string[]> = {
   image: [],
   video: [],
 };
 const MAX_JOB_HISTORY = 50;
+const TERMINAL_JOB_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const JOURNAL_WRITE_DEBOUNCE_MS = 100;
+const JOURNAL_COMPACTION_INTERVAL_MS = 15 * 60 * 1000;
 const MAX_WORKER_OUTPUT_CHARS = 4096;
 const MAX_WORKER_LOG_CHARS = 1024;
 const MAX_JOB_ERROR_CHARS = 12_000;
@@ -37,11 +53,230 @@ const MEDIA_GENERATION_CONCURRENCY: Record<MediaGenerationKind, number> = {
   image: 5,
   video: 5,
 };
+const MEDIA_GENERATION_WATCHDOG_MS: Record<MediaGenerationKind, number> = {
+  image: 5 * 60 * 1000,
+  video: 20 * 60 * 1000,
+};
 
 const activeJobIds: Record<MediaGenerationKind, Set<string>> = {
   image: new Set<string>(),
   video: new Set<string>(),
 };
+
+let jobJournalLoaded = false;
+let jobJournalDirty = false;
+let jobJournalWriteTimer: ReturnType<typeof setTimeout> | undefined;
+let jobJournalCompactionTimer: ReturnType<typeof setInterval> | undefined;
+let jobJournalWriteChain = Promise.resolve();
+let jobJournalWritesInFlight = 0;
+let jobJournalClosing = false;
+let allowQuitAfterJournalFlush = false;
+
+function isTerminalJob(job: InternalMediaGenerationJob): boolean {
+  return job.status === 'succeeded' || job.status === 'failed' || job.status === 'cancelled';
+}
+
+function getJobJournalEntries(): MediaGenerationJournalEntry[] {
+  return [...jobs.values()].map((job) => ({
+    payload: job.payload,
+    snapshot: cloneSnapshot(job),
+  }));
+}
+
+function flushJobJournal(): Promise<void> {
+  if (!jobJournalLoaded) return jobJournalWriteChain;
+  if (jobJournalWriteTimer) {
+    clearTimeout(jobJournalWriteTimer);
+    jobJournalWriteTimer = undefined;
+  }
+  if (!jobJournalDirty) return jobJournalWriteChain;
+  jobJournalDirty = false;
+  const entries = getJobJournalEntries();
+  const filePath = getMediaGenerationJobJournalPath(app.getPath('userData'));
+  jobJournalWritesInFlight += 1;
+  jobJournalWriteChain = jobJournalWriteChain
+    .catch(() => undefined)
+    .then(() => writeMediaGenerationJobJournal(filePath, entries))
+    .catch((error) => {
+      logger.warn('[media-generation] unable to persist job journal', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    })
+    .finally(() => {
+      jobJournalWritesInFlight = Math.max(0, jobJournalWritesInFlight - 1);
+    });
+  return jobJournalWriteChain;
+}
+
+function scheduleJobJournalPersist(immediate = false): void {
+  if (!jobJournalLoaded || jobJournalClosing) return;
+  jobJournalDirty = true;
+  if (jobJournalWriteTimer && !immediate) return;
+  if (jobJournalWriteTimer) clearTimeout(jobJournalWriteTimer);
+  jobJournalWriteTimer = setTimeout(() => {
+    jobJournalWriteTimer = undefined;
+    void flushJobJournal();
+  }, immediate ? 0 : JOURNAL_WRITE_DEBOUNCE_MS);
+  jobJournalWriteTimer.unref?.();
+}
+
+function markInterruptedByRestart(job: InternalMediaGenerationJob, previousStatus: 'queued' | 'running'): void {
+  const recoveredAt = Date.now();
+  const message = previousStatus === 'running'
+    ? '应用主进程已重启，无法确认上一次媒体请求是否仍在提供方执行。为避免重复生成或扣费，本任务未自动续跑，请重试。'
+    : '应用主进程已重启，上一次排队任务没有自动续跑，以避免重复生成，请重试。';
+  job.status = 'failed';
+  job.updatedAt = recoveredAt;
+  job.completedAt = recoveredAt;
+  job.error = message;
+  job.deliveryStatus = 'skipped';
+  job.deliveryError = undefined;
+  job.recoverable = true;
+  job.restartRecovery = {
+    previousStatus,
+    recoveredAt,
+    reason: 'main_process_restart',
+  };
+  job.progressEvents = (job.progressEvents ?? []).map((event) => (
+    event.status === 'running'
+      ? {
+          ...event,
+          status: 'error' as const,
+          event: 'interrupted_by_restart',
+          detail: event.detail ? `${event.detail}\n${message}` : message,
+        }
+      : event
+  ));
+  recordJobProgress(job, {
+    id: 'job:restart-recovery',
+    event: 'interrupted_by_restart',
+    label: job.kind === 'image' ? '图片任务因应用重启中断' : '视频任务因应用重启中断',
+    status: 'error',
+    timestampMs: recoveredAt,
+    detail: message,
+  });
+}
+
+function restoreJournalEntry(entry: MediaGenerationJournalEntry): InternalMediaGenerationJob {
+  const job: InternalMediaGenerationJob = {
+    ...entry.snapshot,
+    ...(entry.snapshot.clientRequestId || entry.payload.clientRequestId
+      ? { clientRequestId: entry.snapshot.clientRequestId || entry.payload.clientRequestId }
+      : {}),
+    payload: entry.payload,
+    ...(entry.snapshot.outputs?.length
+      ? { result: { ok: true, outputs: entry.snapshot.outputs } }
+      : {}),
+  };
+  if (job.status === 'queued' || job.status === 'running') {
+    markInterruptedByRestart(job, job.status);
+  }
+  return job;
+}
+
+function resumeRecoveredStandaloneDelivery(job: InternalMediaGenerationJob): void {
+  const availableOutputs = job.outputs?.filter((output) => {
+    const localPath = typeof output.path === 'string' ? output.path.trim() : '';
+    if (localPath && existsSync(localPath)) return true;
+    const remoteUrl = typeof output.url === 'string' ? output.url.trim() : '';
+    return /^https?:\/\//iu.test(remoteUrl);
+  }) ?? [];
+  if (availableOutputs.length === 0) {
+    const now = Date.now();
+    job.status = 'failed';
+    job.updatedAt = now;
+    job.completedAt = now;
+    job.error = '应用重启后未找到可恢复的媒体产物，无法恢复交付，请重新生成。';
+    job.deliveryStatus = 'skipped';
+    job.deliveryError = undefined;
+    job.recoverable = true;
+    recordJobProgress(job, {
+      id: 'job:restart-recovery',
+      event: 'artifact_missing_after_restart',
+      label: '重启后未找到媒体产物',
+      status: 'error',
+      timestampMs: now,
+      detail: job.error,
+    });
+    return;
+  }
+  job.outputs = availableOutputs;
+  job.result = { ok: true, outputs: availableOutputs };
+  job.deliveryStatus = 'pending';
+  job.deliveryError = undefined;
+  job.recoverable = true;
+  recordJobProgress(job, {
+    id: 'job:delivery',
+    event: 'delivery_resumed_after_restart',
+    label: '恢复媒体结果到会话',
+    status: 'running',
+    timestampMs: Date.now(),
+    detail: '媒体文件已在本地找到，正在幂等恢复会话记录。',
+  });
+  setImmediate(() => void retryCompletedConversationDelivery(job));
+}
+
+function initializeJobJournal(): void {
+  if (jobJournalLoaded) return;
+  jobJournalLoaded = true;
+  const filePath = getMediaGenerationJobJournalPath(app.getPath('userData'));
+  try {
+    const entries = loadMediaGenerationJobJournal(filePath);
+    for (const entry of entries) {
+      const job = restoreJournalEntry(entry);
+      jobs.set(job.id, job);
+      if (job.clientRequestId && !jobIdByClientRequest.has(job.clientRequestId)) {
+        jobIdByClientRequest.set(job.clientRequestId, job.id);
+      }
+    }
+    const changedByCompaction = compactJobHistory();
+    const recoveredDeliveries = [...jobs.values()].filter((job) => (
+      job.ownerKind === 'standalone'
+      && job.status === 'succeeded'
+      && (job.deliveryStatus === 'pending' || job.deliveryStatus === 'failed')
+    ));
+    for (const job of recoveredDeliveries) resumeRecoveredStandaloneDelivery(job);
+    if (entries.some((entry) => entry.snapshot.status === 'queued' || entry.snapshot.status === 'running')
+      || recoveredDeliveries.length > 0
+      || changedByCompaction) {
+      scheduleJobJournalPersist(true);
+    }
+    logger.info('[media-generation] job journal loaded', {
+      jobs: jobs.size,
+      interrupted: [...jobs.values()].filter((job) => job.restartRecovery?.reason === 'main_process_restart').length,
+      deliveryRecoveries: recoveredDeliveries.length,
+    });
+  } catch (error) {
+    logger.warn('[media-generation] unable to load job journal', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  jobJournalCompactionTimer = setInterval(() => {
+    if (compactJobHistory()) scheduleJobJournalPersist(true);
+  }, JOURNAL_COMPACTION_INTERVAL_MS);
+  jobJournalCompactionTimer.unref?.();
+
+  if (typeof app.on === 'function') {
+    app.on('before-quit', (event) => {
+      if (
+        allowQuitAfterJournalFlush
+        || (!jobJournalDirty && !jobJournalWriteTimer && jobJournalWritesInFlight === 0)
+      ) return;
+      event.preventDefault();
+      jobJournalClosing = true;
+      jobJournalDirty = true;
+      void flushJobJournal().finally(() => {
+        allowQuitAfterJournalFlush = true;
+        app.quit();
+      });
+    });
+  }
+}
+
+function ensureJobJournalInitialized(): void {
+  if (!jobJournalLoaded) initializeJobJournal();
+}
 
 function resolveMainStaticScript(name: string): string {
   if (app.isPackaged) {
@@ -67,7 +302,12 @@ function getMediaWorkerEntryPath(): string {
 }
 
 function cloneSnapshot(job: InternalMediaGenerationJob): MediaGenerationJobSnapshot {
-  const { payload: _payload, ...snapshot } = job;
+  const {
+    payload: _payload,
+    cancelRequested: _cancelRequested,
+    worker: _worker,
+    ...snapshot
+  } = job;
   const queueIndex = job.status === 'queued' ? queues[job.kind].indexOf(job.id) : -1;
   const startedAt = typeof job.startedAt === 'number' ? job.startedAt : undefined;
   const completedAt = typeof job.completedAt === 'number' ? job.completedAt : undefined;
@@ -136,6 +376,7 @@ function upsertProgressEvent(job: InternalMediaGenerationJob, event: MediaGenera
     : [...current, event];
   job.progressEvents = next.slice(-MAX_JOB_PROGRESS_EVENTS);
   job.updatedAt = Date.now();
+  scheduleJobJournalPersist();
 }
 
 function recordJobProgress(job: InternalMediaGenerationJob, event: Omit<MediaGenerationProgressEvent, 'source' | 'timestampMs'> & {
@@ -480,15 +721,62 @@ function progressForStructuredWorkerEvent(
   }
 }
 
-function compactJobHistory(): void {
-  if (jobs.size <= MAX_JOB_HISTORY) return;
+function compactJobHistory(): boolean {
+  let changed = false;
+  const expirationCutoff = Date.now() - TERMINAL_JOB_RETENTION_MS;
+  for (const job of jobs.values()) {
+    if (isTerminalJob(job) && job.updatedAt < expirationCutoff) {
+      removeJobFromHistory(job);
+      changed = true;
+    }
+  }
+  if (jobs.size <= MAX_JOB_HISTORY) return changed;
   const removable = [...jobs.values()]
-    .filter((job) => job.status === 'succeeded' || job.status === 'failed')
+    .filter((job) => isTerminalJob(job) && job.recoverable !== true)
     .sort((a, b) => a.updatedAt - b.updatedAt);
   for (const job of removable) {
     if (jobs.size <= MAX_JOB_HISTORY) break;
-    jobs.delete(job.id);
+    removeJobFromHistory(job);
+    changed = true;
   }
+  return changed;
+}
+
+function removeJobFromHistory(job: InternalMediaGenerationJob): void {
+  jobs.delete(job.id);
+  activeDeliveryRetryJobIds.delete(job.id);
+  if (job.clientRequestId && jobIdByClientRequest.get(job.clientRequestId) === job.id) {
+    jobIdByClientRequest.delete(job.clientRequestId);
+  }
+}
+
+function markJobCancelled(job: InternalMediaGenerationJob): void {
+  if (job.status === 'cancelled') return;
+  const now = Date.now();
+  job.cancelRequested = true;
+  job.status = 'cancelled';
+  job.updatedAt = now;
+  job.completedAt = now;
+  job.error = undefined;
+  job.deliveryStatus = 'skipped';
+  job.deliveryError = undefined;
+  job.recoverable = false;
+  recordJobProgress(job, {
+    id: 'job:cancelled',
+    event: 'cancelled',
+    label: job.kind === 'image' ? '图片任务已停止' : '视频任务已停止',
+    status: 'completed',
+    timestampMs: now,
+    durationMs: job.startedAt ? now - job.startedAt : undefined,
+  });
+  logger.info('[media-generation] job_cancelled', {
+    jobId: job.id,
+    kind: job.kind,
+    sessionKey: job.sessionKey,
+    previousQueueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+    runDurationMs: job.startedAt ? now - job.startedAt : undefined,
+  });
+  scheduleJobJournalPersist(true);
 }
 
 function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
@@ -505,6 +793,9 @@ function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
   job.updatedAt = now;
   job.completedAt = now;
   job.error = normalizeUserFacingMediaGenerationError(error);
+  job.deliveryStatus = 'skipped';
+  job.deliveryError = undefined;
+  job.recoverable = false;
   recordJobProgress(job, {
     id: 'job:failed',
     event: 'failed',
@@ -518,6 +809,104 @@ function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
       runDurationMs: job.startedAt ? now - job.startedAt : undefined,
     },
   });
+  scheduleJobJournalPersist(true);
+}
+
+function markJobSucceeded(job: InternalMediaGenerationJob): void {
+  const completedAt = Date.now();
+  const outputCount = job.outputs?.length ?? 0;
+  job.status = 'succeeded';
+  job.updatedAt = completedAt;
+  job.completedAt = completedAt;
+  job.error = undefined;
+  recordJobProgress(job, {
+    id: 'job:started',
+    event: 'completed',
+    label: job.kind === 'image' ? '图片任务执行完成' : '视频任务执行完成',
+    status: 'completed',
+    timestampMs: completedAt,
+    detail: `执行：${formatDurationMs(job.startedAt ? completedAt - job.startedAt : undefined) ?? '0ms'}，产物：${outputCount}`,
+    durationMs: job.startedAt ? completedAt - job.startedAt : undefined,
+    metadata: {
+      queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+      runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
+      outputs: outputCount,
+    },
+  });
+  logger.info('[media-generation] job_succeeded', {
+    jobId: job.id,
+    kind: job.kind,
+    sessionKey: job.sessionKey,
+    queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
+    runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
+    outputs: outputCount,
+  });
+  scheduleJobJournalPersist(true);
+}
+
+function markDeliverySucceeded(job: InternalMediaGenerationJob): void {
+  if (job.cancelRequested || job.status === 'cancelled') return;
+  const now = Date.now();
+  job.updatedAt = now;
+  job.deliveryStatus = 'succeeded';
+  job.deliveryError = undefined;
+  job.recoverable = false;
+  recordJobProgress(job, {
+    id: 'job:delivery',
+    event: 'delivery_completed',
+    label: '写入会话历史',
+    status: 'completed',
+    timestampMs: now,
+  });
+  scheduleJobJournalPersist(true);
+}
+
+function markDeliveryFailed(job: InternalMediaGenerationJob, error: string): void {
+  const now = Date.now();
+  job.updatedAt = now;
+  const deliveryError = truncateText(error, MAX_JOB_ERROR_CHARS);
+  job.deliveryStatus = 'failed';
+  job.deliveryError = deliveryError;
+  job.recoverable = true;
+  recordJobProgress(job, {
+    id: 'job:delivery',
+    event: 'delivery_failed',
+    label: '产物已生成，历史同步待恢复',
+    status: 'error',
+    timestampMs: now,
+    detail: deliveryError,
+  });
+  logger.warn('[media-generation] delivery_failed', {
+    jobId: job.id,
+    kind: job.kind,
+    sessionKey: job.sessionKey,
+    error: deliveryError,
+  });
+  scheduleJobJournalPersist(true);
+}
+
+async function retryCompletedConversationDelivery(job: InternalMediaGenerationJob): Promise<void> {
+  if (activeDeliveryRetryJobIds.has(job.id)) return;
+  activeDeliveryRetryJobIds.add(job.id);
+  try {
+    for (const delayMs of [500, 1500, 4000]) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      if (
+        job.cancelRequested
+        || job.status !== 'succeeded'
+        || (job.deliveryStatus !== 'pending' && job.deliveryStatus !== 'failed')
+      ) return;
+      try {
+        await appendCompletedConversation(job);
+        markDeliverySucceeded(job);
+        return;
+      } catch (error) {
+        markDeliveryFailed(job, error instanceof Error ? error.message : String(error));
+      }
+    }
+  } finally {
+    activeDeliveryRetryJobIds.delete(job.id);
+  }
 }
 
 function chunkToText(data: unknown): string {
@@ -643,21 +1032,41 @@ function appendWorkerOutputToError(
 }
 
 function getOutputLocations(result: unknown): string[] {
-  const outputs = typeof result === 'object' && result !== null && Array.isArray((result as { outputs?: unknown }).outputs)
-    ? (result as { outputs: unknown[] }).outputs
-    : [];
-  return outputs
+  return getOutputs(result)
     .map((output) => {
-      if (!output || typeof output !== 'object') return '';
-      const record = output as { path?: unknown; url?: unknown };
-      return typeof record.path === 'string' && record.path.trim()
-        ? record.path.trim()
-        : (typeof record.url === 'string' && record.url.trim() ? record.url.trim() : '');
+      return typeof output.path === 'string' && output.path.trim()
+        ? output.path.trim()
+        : (typeof output.url === 'string' && output.url.trim() ? output.url.trim() : '');
     })
     .filter(Boolean);
 }
 
-function getOutputFiles(result: unknown): Array<{
+function getOutputs(result: unknown): MediaGenerationJobOutput[] {
+  const outputs = typeof result === 'object' && result !== null && Array.isArray((result as { outputs?: unknown }).outputs)
+    ? (result as { outputs: unknown[] }).outputs
+    : [];
+  return outputs
+    .filter((output): output is Record<string, unknown> => Boolean(output && typeof output === 'object'))
+    .map((output) => ({ ...output } as MediaGenerationJobOutput));
+}
+
+async function hydrateLocalOutputSizes(outputs: MediaGenerationJobOutput[]): Promise<MediaGenerationJobOutput[]> {
+  return await Promise.all(outputs.map(async (output) => {
+    if (typeof output.size === 'number' && Number.isFinite(output.size) && output.size > 0) {
+      return output;
+    }
+    const filePath = typeof output.path === 'string' && output.path.trim() ? output.path.trim() : '';
+    if (!filePath) return output;
+    try {
+      const stat = await fsP.stat(filePath);
+      return stat.isFile() && stat.size > 0 ? { ...output, size: stat.size } : output;
+    } catch {
+      return output;
+    }
+  }));
+}
+
+function getOutputFiles(result: unknown, hydratedOutputs?: MediaGenerationJobOutput[]): Array<{
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
@@ -667,12 +1076,7 @@ function getOutputFiles(result: unknown): Array<{
   gatewayUrl?: string;
   source?: 'tool-result';
 }> {
-  const outputs = typeof result === 'object' && result !== null && Array.isArray((result as { outputs?: unknown }).outputs)
-    ? (result as { outputs: unknown[] }).outputs
-    : [];
-  return outputs.flatMap((output) => {
-    if (!output || typeof output !== 'object') return [];
-    const record = output as MediaGenerationJobOutput;
+  return (hydratedOutputs ?? getOutputs(result)).flatMap((record) => {
     const filePath = typeof record.path === 'string' && record.path.trim() ? record.path.trim() : undefined;
     const gatewayUrl = typeof record.url === 'string' && record.url.trim() ? record.url.trim() : undefined;
     if (!filePath && !gatewayUrl) return [];
@@ -700,7 +1104,7 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
   if (outputPaths.length === 0) {
     throw new Error('Media generation completed without output paths');
   }
-  const outputFiles = getOutputFiles(job.result);
+  const outputFiles = getOutputFiles(job.result, job.outputs);
 
   if (job.payload.suppressConversationAppend === true) {
     return;
@@ -719,6 +1123,8 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
       userTimestampMs: job.payload.userMessageTimestampMs,
       assistantMessageId: `media-result:${job.id}`,
       assistantResultKind: 'image',
+      shouldAbort: () => job.cancelRequested === true || job.status === 'cancelled',
+      mediaGenerationSnapshot: cloneSnapshot(job),
     });
     return;
   }
@@ -735,10 +1141,13 @@ async function appendCompletedConversation(job: InternalMediaGenerationJob): Pro
     userTimestampMs: job.payload.userMessageTimestampMs,
     assistantMessageId: `media-result:${job.id}`,
     assistantResultKind: 'video',
+    shouldAbort: () => job.cancelRequested === true || job.status === 'cancelled',
+    mediaGenerationSnapshot: cloneSnapshot(job),
   });
 }
 
 async function runJob(job: InternalMediaGenerationJob): Promise<void> {
+  if (job.cancelRequested || job.status === 'cancelled') return;
   activeJobIds[job.kind].add(job.id);
   const now = Date.now();
   job.status = 'running';
@@ -779,6 +1188,7 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
     queuedJobs: queues[job.kind].length,
     maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[job.kind],
   });
+  scheduleJobJournalPersist(true);
 
   const prepareStartedAt = Date.now();
   recordJobProgress(job, {
@@ -791,6 +1201,10 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
   });
   try {
     await prepareMediaGenerationJob(job.payload);
+    if (job.cancelRequested) {
+      activeJobIds[job.kind].delete(job.id);
+      return;
+    }
     const preparedAt = Date.now();
     recordJobProgress(job, {
       id: 'job:prepare',
@@ -802,6 +1216,10 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
       durationMs: preparedAt - prepareStartedAt,
     });
   } catch (error) {
+    if (job.cancelRequested) {
+      activeJobIds[job.kind].delete(job.id);
+      return;
+    }
     markJobFailed(job, error instanceof Error ? error.message : String(error));
     activeJobIds[job.kind].delete(job.id);
     return;
@@ -836,15 +1254,25 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
       } as NodeJS.ProcessEnv,
       serviceName: 'UClaw Media Generation',
     });
+    job.worker = child;
 
     let settled = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
     const finish = async (response: MediaGenerationWorkerResponse): Promise<void> => {
       if (settled) return;
       settled = true;
+      if (watchdog) clearTimeout(watchdog);
       try {
         child.kill();
       } catch {
         // ignore
+      }
+      job.worker = undefined;
+
+      if (job.cancelRequested) {
+        markJobCancelled(job);
+        resolve();
+        return;
       }
 
       if (!response.success) {
@@ -856,42 +1284,70 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
         return;
       }
 
+      job.result = response.result;
+      job.outputs = await hydrateLocalOutputSizes(getOutputs(response.result));
+      if (job.cancelRequested || job.status === 'cancelled') {
+        markJobCancelled(job);
+        resolve();
+        return;
+      }
+      if (getOutputLocations(job.result).length === 0) {
+        markJobFailed(job, 'Media generation completed without output paths');
+        resolve();
+        return;
+      }
+      const missingLocalOutput = job.outputs.some((output) => (
+        typeof output.path === 'string'
+        && output.path.trim().length > 0
+        && !(typeof output.size === 'number' && Number.isFinite(output.size) && output.size > 0)
+      ));
+      if (missingLocalOutput) {
+        markJobFailed(job, 'Media generation returned a local output path that is not readable');
+        resolve();
+        return;
+      }
+
+      markJobSucceeded(job);
+      if (job.cancelRequested) {
+        markJobCancelled(job);
+        resolve();
+        return;
+      }
+      if (job.payload.suppressConversationAppend === true) {
+        job.deliveryStatus = 'skipped';
+        job.deliveryError = undefined;
+        job.recoverable = false;
+        scheduleJobJournalPersist(true);
+        resolve();
+        return;
+      }
+
+      recordJobProgress(job, {
+        id: 'job:delivery',
+        event: 'delivery_started',
+        label: '写入会话历史',
+        status: 'running',
+        timestampMs: Date.now(),
+      });
       try {
-        job.result = response.result;
         await appendCompletedConversation(job);
-        const completedAt = Date.now();
-        job.status = 'succeeded';
-        job.updatedAt = completedAt;
-        job.completedAt = completedAt;
-        recordJobProgress(job, {
-          id: 'job:started',
-          event: 'completed',
-          label: job.kind === 'image' ? '图片任务执行完成' : '视频任务执行完成',
-          status: 'completed',
-          timestampMs: completedAt,
-          detail: `执行：${formatDurationMs(job.startedAt ? completedAt - job.startedAt : undefined) ?? '0ms'}，产物：${getOutputLocations(job.result).length}`,
-          durationMs: job.startedAt ? completedAt - job.startedAt : undefined,
-          metadata: {
-            queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
-            runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
-            outputs: getOutputLocations(job.result).length,
-          },
-        });
-        logger.info('[media-generation] job_succeeded', {
-          jobId: job.id,
-          kind: job.kind,
-          sessionKey: job.sessionKey,
-          queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
-          runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
-          outputs: getOutputLocations(job.result).length,
-        });
+        markDeliverySucceeded(job);
       } catch (error) {
-        markJobFailed(job, error instanceof Error ? error.message : String(error));
+        markDeliveryFailed(job, error instanceof Error ? error.message : String(error));
+        void retryCompletedConversationDelivery(job);
       }
       resolve();
     };
 
     child.on('spawn', () => {
+      if (job.cancelRequested || job.status === 'cancelled') {
+        try {
+          child.kill();
+        } catch {
+          // ignore
+        }
+        return;
+      }
       child.postMessage({
         type: 'run',
         jobId: job.id,
@@ -908,6 +1364,14 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
 
     child.on('exit', (code: number | null) => {
       if (settled) return;
+      if (watchdog) clearTimeout(watchdog);
+      job.worker = undefined;
+      if (job.cancelRequested || job.status === 'cancelled') {
+        markJobCancelled(job);
+        settled = true;
+        resolve();
+        return;
+      }
       markJobFailed(job, appendWorkerOutputToError(
         `Media generation worker exited before completion (code=${code})`,
         workerOutput,
@@ -918,6 +1382,14 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
 
     child.on('error', (...args: unknown[]) => {
       if (settled) return;
+      if (watchdog) clearTimeout(watchdog);
+      job.worker = undefined;
+      if (job.cancelRequested || job.status === 'cancelled') {
+        markJobCancelled(job);
+        settled = true;
+        resolve();
+        return;
+      }
       markJobFailed(job, appendWorkerOutputToError(
         `Media generation worker error: ${args.map((arg) => arg instanceof Error ? arg.message : String(arg)).join(' ')}`,
         workerOutput,
@@ -938,6 +1410,15 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
         logger.warn(`[media-generation-worker] ${line}`);
       }
     });
+
+    watchdog = setTimeout(() => {
+      void finish({
+        type: 'result',
+        jobId: job.id,
+        success: false,
+        error: `${job.kind} generation worker exceeded ${MEDIA_GENERATION_WATCHDOG_MS[job.kind]}ms watchdog`,
+      });
+    }, MEDIA_GENERATION_WATCHDOG_MS[job.kind]);
   });
 
   activeJobIds[job.kind].delete(job.id);
@@ -959,22 +1440,42 @@ function pumpQueue(kind: MediaGenerationKind): void {
         markJobFailed(job, error instanceof Error ? error.message : String(error));
       })
       .finally(() => {
-        compactJobHistory();
+        if (compactJobHistory()) scheduleJobJournalPersist(true);
         setImmediate(() => pumpQueue(kind));
       });
   }
 }
 
-export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): MediaGenerationJobSnapshot {
+export function enqueueMediaGenerationJobWithResult(
+  payload: MediaGenerationJobPayload,
+): MediaGenerationJobEnqueueResult {
+  ensureJobJournalInitialized();
+  const clientRequestId = payload.clientRequestId?.trim();
+  if (clientRequestId) {
+    const existingJobId = jobIdByClientRequest.get(clientRequestId);
+    const existingJob = existingJobId ? jobs.get(existingJobId) : undefined;
+    if (existingJob) {
+      return { job: cloneSnapshot(existingJob), idempotent: true };
+    }
+    jobIdByClientRequest.delete(clientRequestId);
+  }
+  const normalizedPayload = {
+    ...payload,
+    ...(clientRequestId ? { clientRequestId } : {}),
+  } as MediaGenerationJobPayload;
   const now = Date.now();
   const job: InternalMediaGenerationJob = {
     id: randomUUID(),
-    kind: payload.kind,
-    sessionKey: payload.sessionKey,
+    kind: normalizedPayload.kind,
+    sessionKey: normalizedPayload.sessionKey,
+    ...(clientRequestId ? { clientRequestId } : {}),
+    ...(normalizedPayload.runId ? { runId: normalizedPayload.runId } : {}),
+    ownerKind: normalizedPayload.suppressConversationAppend === true ? 'composite' : 'standalone',
     status: 'queued',
+    deliveryStatus: 'pending',
     createdAt: now,
     updatedAt: now,
-    payload,
+    payload: normalizedPayload,
     progressEvents: [{
       id: 'job:queued',
       source: 'job',
@@ -982,31 +1483,148 @@ export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): M
       label: '队列等待',
       status: 'running',
       timestampMs: now,
-      detail: `排队位置：${queues[payload.kind].length + 1}，并发：${activeJobIds[payload.kind].size}/${MEDIA_GENERATION_CONCURRENCY[payload.kind]}`,
+      detail: `排队位置：${queues[normalizedPayload.kind].length + 1}，并发：${activeJobIds[normalizedPayload.kind].size}/${MEDIA_GENERATION_CONCURRENCY[normalizedPayload.kind]}`,
       metadata: {
-        queuePosition: queues[payload.kind].length + 1,
-        activeJobs: activeJobIds[payload.kind].size,
-        maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[payload.kind],
+        queuePosition: queues[normalizedPayload.kind].length + 1,
+        activeJobs: activeJobIds[normalizedPayload.kind].size,
+        maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[normalizedPayload.kind],
       },
     }],
   };
   jobs.set(job.id, job);
-  queues[payload.kind].push(job.id);
+  if (clientRequestId) jobIdByClientRequest.set(clientRequestId, job.id);
+  queues[normalizedPayload.kind].push(job.id);
   logger.info('[media-generation] job_enqueued', {
     jobId: job.id,
     kind: job.kind,
     sessionKey: job.sessionKey,
-    queuePosition: queues[payload.kind].length,
-    activeJobs: activeJobIds[payload.kind].size,
-    maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[payload.kind],
+    queuePosition: queues[normalizedPayload.kind].length,
+    activeJobs: activeJobIds[normalizedPayload.kind].size,
+    maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[normalizedPayload.kind],
   });
-  setImmediate(() => pumpQueue(payload.kind));
-  return cloneSnapshot(job);
+  scheduleJobJournalPersist(true);
+  setImmediate(() => pumpQueue(normalizedPayload.kind));
+  return { job: cloneSnapshot(job), idempotent: false };
+}
+
+export function enqueueMediaGenerationJob(payload: MediaGenerationJobPayload): MediaGenerationJobSnapshot {
+  return enqueueMediaGenerationJobWithResult(payload).job;
 }
 
 export function getMediaGenerationJob(jobId: string): MediaGenerationJobSnapshot | null {
+  ensureJobJournalInitialized();
   const job = jobs.get(jobId);
   return job ? cloneSnapshot(job) : null;
+}
+
+export function getMediaGenerationJobsForSession(
+  sessionKey: string,
+  options: { activeOnly?: boolean } = {},
+): MediaGenerationJobSnapshot[] {
+  ensureJobJournalInitialized();
+  return [...jobs.values()]
+    .filter((job) => job.sessionKey === sessionKey)
+    // The renderer uses activeOnly for recovery discovery, so actionable
+    // restart/delivery failures must remain visible even after becoming terminal.
+    .filter((job) => !options.activeOnly || (
+      job.status === 'queued'
+      || job.status === 'running'
+      || (job.status === 'succeeded' && job.deliveryStatus === 'pending')
+      || job.recoverable === true
+    ))
+    .sort((left, right) => left.createdAt - right.createdAt)
+    .map(cloneSnapshot);
+}
+
+export function cancelMediaGenerationJobWithResult(jobId: string): MediaGenerationJobCancelResult {
+  ensureJobJournalInitialized();
+  const job = jobs.get(jobId);
+  if (!job) return { outcome: 'not_found' };
+  if (job.status === 'cancelled') return { outcome: 'already_cancelled', job: cloneSnapshot(job) };
+  if (job.status === 'failed' || (job.status === 'succeeded' && job.deliveryStatus !== 'pending')) {
+    return { outcome: 'already_terminal', job: cloneSnapshot(job) };
+  }
+
+  const wasQueued = job.status === 'queued';
+  job.cancelRequested = true;
+  const queue = queues[job.kind];
+  const queueIndex = queue.indexOf(job.id);
+  if (queueIndex >= 0) queue.splice(queueIndex, 1);
+  markJobCancelled(job);
+  try {
+    job.worker?.kill();
+  } catch {
+    // ignore
+  }
+  job.worker = undefined;
+  if (wasQueued) setImmediate(() => pumpQueue(job.kind));
+  return { outcome: 'cancelled', job: cloneSnapshot(job) };
+}
+
+export function cancelMediaGenerationJob(jobId: string): boolean {
+  return cancelMediaGenerationJobWithResult(jobId).outcome === 'cancelled';
+}
+
+export function retryMediaGenerationJobDelivery(jobId: string): MediaGenerationJobDeliveryRetryResult {
+  ensureJobJournalInitialized();
+  const job = jobs.get(jobId);
+  if (!job) return { outcome: 'not_found' };
+  if (activeDeliveryRetryJobIds.has(job.id) || job.deliveryStatus === 'pending') {
+    return { outcome: 'already_in_progress', job: cloneSnapshot(job) };
+  }
+  if (
+    job.ownerKind !== 'standalone'
+    || job.status !== 'succeeded'
+    || job.deliveryStatus !== 'failed'
+  ) {
+    return { outcome: 'not_retryable', job: cloneSnapshot(job) };
+  }
+
+  job.deliveryStatus = 'pending';
+  job.deliveryError = undefined;
+  job.recoverable = true;
+  recordJobProgress(job, {
+    id: 'job:delivery',
+    event: 'manual_delivery_retry_started',
+    label: '重新写入会话历史',
+    status: 'running',
+    timestampMs: Date.now(),
+    detail: '仅重试已有产物的会话交付，不会重新请求媒体提供方。',
+  });
+  activeDeliveryRetryJobIds.add(job.id);
+  scheduleJobJournalPersist(true);
+  setImmediate(() => {
+    void appendCompletedConversation(job)
+      .then(() => markDeliverySucceeded(job))
+      .catch((error) => markDeliveryFailed(job, error instanceof Error ? error.message : String(error)))
+      .finally(() => activeDeliveryRetryJobIds.delete(job.id));
+  });
+  return { outcome: 'retry_started', job: cloneSnapshot(job) };
+}
+
+export function cancelMediaGenerationJobsForSession(sessionKey: string): string[] {
+  ensureJobJournalInitialized();
+  const cancelledJobIds: string[] = [];
+  for (const job of jobs.values()) {
+    if (job.sessionKey !== sessionKey) continue;
+    if (cancelMediaGenerationJob(job.id)) cancelledJobIds.push(job.id);
+  }
+  return cancelledJobIds;
+}
+
+export function cancelMediaGenerationJobsForRun(runId: string, sessionKey?: string): string[] {
+  ensureJobJournalInitialized();
+  const normalizedRunId = runId.trim();
+  const normalizedSessionKey = sessionKey?.trim();
+  if (!normalizedRunId) return [];
+
+  const cancelledJobIds: string[] = [];
+  for (const job of jobs.values()) {
+    if (job.runId !== normalizedRunId) continue;
+    if (normalizedSessionKey && job.sessionKey !== normalizedSessionKey) continue;
+    if (cancelMediaGenerationJob(job.id)) cancelledJobIds.push(job.id);
+  }
+  return cancelledJobIds;
 }
 
 export async function prepareMediaGenerationJob(payload: MediaGenerationJobPayload): Promise<void> {
@@ -1018,4 +1636,14 @@ export async function prepareMediaGenerationJob(payload: MediaGenerationJobPaylo
     await ensureManagedOpenAiImageRelay();
   }
   await ensureManagedOpenAiVideoRelay();
+}
+
+if (typeof app.whenReady === 'function') {
+  void app.whenReady()
+    .then(() => initializeJobJournal())
+    .catch((error) => {
+      logger.warn('[media-generation] unable to initialize job journal at startup', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
 }

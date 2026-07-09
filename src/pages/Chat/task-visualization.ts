@@ -1,5 +1,4 @@
 import {
-  extractImages,
   extractText,
   extractTextSegments,
   extractToolUse,
@@ -7,7 +6,7 @@ import {
   isInternalAssistantReplyText,
   isInternalProcessNarration,
 } from './message-utils';
-import { isInternalMessage } from '@/stores/chat/helpers';
+import { isInternalMessage, messageHasDeliverableContent } from '@/stores/chat/helpers';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
 import type { ChatRuntimeRunState } from '@/stores/chat/types';
 import { appendToolErrorHint, normalizeToolErrorMessage } from '@/lib/tool-error-messages';
@@ -92,20 +91,14 @@ export function findReplyMessageIndex(messages: RawMessage[], hasStreamingReply:
   for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
     const message = messages[idx];
     if (!message || message.role !== 'assistant') continue;
+    if (!messageHasDeliverableContent(message)) continue;
+    if (messageHasDeliverableContent(message, { includeText: false })) return idx;
     const replyText = extractText(message).trim();
-    if (messageHasUserVisibleImage(message)) return idx;
     if (replyText.length === 0 || isInternalAssistantReplyText(replyText)) continue;
     if (isGeneratingStatusNarration(replyText)) continue;
     return idx;
   }
   return -1;
-}
-
-function messageHasUserVisibleImage(message: RawMessage): boolean {
-  if ((message._attachedFiles ?? []).some((file) => file.mimeType.startsWith('image/'))) {
-    return true;
-  }
-  return extractImages(message).length > 0;
 }
 
 /**
@@ -214,7 +207,8 @@ export function segmentHasFinalReply(segmentMessages: RawMessage[]): boolean {
   return segmentMessages.some((message, index) => {
     if (index <= lastToolUseOffset) return false;
     if (message.role !== 'assistant') return false;
-    if (messageHasUserVisibleImage(message)) return true;
+    if (!messageHasDeliverableContent(message)) return false;
+    if (messageHasDeliverableContent(message, { includeText: false })) return true;
     const replyText = extractText(message).trim();
     if (replyText.length === 0 || isInternalAssistantReplyText(replyText)) return false;
     if (isGeneratingStatusNarration(replyText)) return false;

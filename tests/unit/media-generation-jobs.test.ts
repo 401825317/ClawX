@@ -86,7 +86,10 @@ async function waitForJobStatus(jobId: string, status: string): Promise<unknown>
   const { getMediaGenerationJob } = await import('@electron/utils/media-generation-jobs');
   for (let i = 0; i < 20; i += 1) {
     const job = getMediaGenerationJob(jobId);
-    if (job?.status === status) return job;
+    if (
+      job?.status === status
+      && (status !== 'succeeded' || job.deliveryStatus !== 'pending')
+    ) return job;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return getMediaGenerationJob(jobId);
@@ -130,7 +133,8 @@ describe('media generation jobs', () => {
     const transcript = readFileSync(transcriptPath, 'utf8');
     expect(transcript).toContain('draw a city');
     expect(transcript).toContain('图片已生成。');
-    expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
+    expect(transcript).not.toContain('MEDIA:/tmp/generated/city.png');
+    expect(transcript).toContain('"_attachedFiles"');
   });
 
   it('runs up to five image jobs and five video jobs concurrently', async () => {
@@ -223,7 +227,8 @@ describe('media generation jobs', () => {
     expect(transcript).not.toContain('Internal planner prompt');
     expect(transcript).not.toContain('/tmp/previous-dog.png');
     expect(transcript).toContain('图片已修改。');
-    expect(transcript).toContain('MEDIA:/tmp/generated/city.png');
+    expect(transcript).not.toContain('MEDIA:/tmp/generated/city.png');
+    expect(transcript).toContain('"_attachedFiles"');
   });
 
   it('includes bounded worker stdout and stderr when the worker exits before completion', async () => {
