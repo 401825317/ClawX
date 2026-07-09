@@ -72,6 +72,11 @@ import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { proxyAwareFetch } from '../utils/proxy-fetch';
 import { getRecentTokenUsageHistory } from '../utils/token-usage';
+import {
+  buildOpenClawInlineImageAttachment,
+  OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
+  OPENCLAW_VISION_MIME_TYPES,
+} from '../utils/openclaw-inline-image';
 import { getProviderService } from '../services/providers/provider-service';
 import {
   getOpenClawProviderKey,
@@ -1462,18 +1467,16 @@ function registerGatewayHandlers(
   });
 
   // Chat send with media — reads staged files from disk and builds attachments.
-  // Raster images (png/jpg/gif/webp) are inlined as base64 vision attachments.
+  // Raster images are inlined as bounded base64 vision attachments only for
+  // explicit uploads. Candidate images use path references.
   // All other files are referenced by path in the message text so the model
   // can access them via tools (the same format channels use).
-  const VISION_MIME_TYPES = new Set([
-    'image/png', 'image/jpeg', 'image/bmp', 'image/webp',
-  ]);
-
   ipcMain.handle('chat:sendWithMedia', async (_, params: {
     sessionKey: string;
     message: string;
     deliver?: boolean;
     idempotencyKey: string;
+    inlineAttachments?: boolean;
     media?: Array<{ filePath: string; mimeType: string; fileName: string }>;
   }) => {
     try {
@@ -1485,32 +1488,56 @@ function registerGatewayHandlers(
       // Path B: `[media attached: ...]` in message text → Gateway's native image
       //   detection (`detectAndLoadPromptImages`) reads the file from disk and
       //   injects it as inline vision content. Also works for history messages.
-      // We use BOTH paths for maximum reliability.
+      // Use Path A only for explicit user-provided attachments. Automatically
+      // selected candidate images use Path B only so hidden context cannot trip
+      // OpenClaw's recursive attachment parser.
       const imageAttachments: Array<Record<string, unknown>> = [];
       const fileReferences: string[] = [];
+      const shouldInlineAttachments = params.inlineAttachments !== false;
 
       if (params.media && params.media.length > 0) {
         const fsP = await import('fs/promises');
         for (const m of params.media) {
           const exists = await fsP.access(m.filePath).then(() => true, () => false);
-          logger.info(`[chat:sendWithMedia] Processing file: ${m.fileName} (${m.mimeType}), path: ${m.filePath}, exists: ${exists}, isVision: ${VISION_MIME_TYPES.has(m.mimeType)}`);
+          logger.info(`[chat:sendWithMedia] Processing file: ${m.fileName} (${m.mimeType}), path: ${m.filePath}, exists: ${exists}, isVision: ${OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)}`);
 
           // Always add file path reference so the model can access it via tools
           fileReferences.push(
             `[media attached: ${m.filePath} (${m.mimeType}) | ${m.filePath}]`,
           );
 
-          if (VISION_MIME_TYPES.has(m.mimeType)) {
+          if (shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
             // Send as base64 attachment in the format the Gateway expects:
             // { content: base64String, mimeType: string, fileName?: string }
             // The Gateway normalizer looks for `a.content` (NOT `a.source.data`).
-            const fileBuffer = await fsP.readFile(m.filePath);
-            const base64Data = fileBuffer.toString('base64');
-            logger.info(`[chat:sendWithMedia] Read ${fileBuffer.length} bytes, base64 length: ${base64Data.length}`);
-            imageAttachments.push({
-              content: base64Data,
-              mimeType: m.mimeType,
+            const inlineImage = await buildOpenClawInlineImageAttachment(m);
+            if (!inlineImage.attachment) {
+              logger.warn('[chat:sendWithMedia] Skipping inline image attachment above OpenClaw safe inline cap', {
+                sessionKey: params.sessionKey,
+                fileName: m.fileName,
+                bytes: inlineImage.inputBytes,
+                limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
+                reason: inlineImage.skippedReason,
+              });
+              continue;
+            }
+            if (inlineImage.resized) {
+              logger.info('[chat:sendWithMedia] Resized inline image attachment for OpenClaw parser safety', {
+                sessionKey: params.sessionKey,
+                fileName: m.fileName,
+                inputBytes: inlineImage.inputBytes,
+                outputBytes: inlineImage.outputBytes,
+                outputMimeType: inlineImage.outputMimeType,
+                limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
+              });
+            }
+            logger.info(`[chat:sendWithMedia] Prepared inline image attachment: ${inlineImage.outputBytes ?? inlineImage.inputBytes} bytes`);
+            imageAttachments.push(inlineImage.attachment);
+          } else if (!shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
+            logger.info('[chat:sendWithMedia] Using media path reference without inline attachment', {
+              sessionKey: params.sessionKey,
               fileName: m.fileName,
+              mimeType: m.mimeType,
             });
           }
         }
@@ -1537,6 +1564,7 @@ function registerGatewayHandlers(
         imageAttachmentCount: imageAttachments.length,
         fileReferenceCount: fileReferences.length,
         mediaCount: params.media?.length ?? 0,
+        inlineAttachments: shouldInlineAttachments,
       }));
       void logOfficeToolDiagnostics(gatewayManager, 'chat:sendWithMedia', params.sessionKey);
 

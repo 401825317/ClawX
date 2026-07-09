@@ -119,4 +119,179 @@ describe('GatewayManager restart recovery', () => {
     // (it may be called from other paths, but not the restart-recovery catch)
     expect(scheduleReconnectSpy).not.toHaveBeenCalled();
   });
+
+  it('defers restart until an active runtime run finishes', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    const internals = manager as unknown as {
+      shouldReconnect: boolean;
+      status: { state: string; port: number };
+      startLock: boolean;
+    };
+
+    internals.status = { state: 'running', port: 18789 };
+    internals.startLock = false;
+    internals.shouldReconnect = true;
+
+    const stopSpy = vi.spyOn(manager, 'stop').mockResolvedValue();
+    const startSpy = vi.spyOn(manager, 'start').mockResolvedValue();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.started',
+      runId: 'run-active',
+      sessionKey: 'agent:main:main',
+    });
+
+    await manager.restart({
+      reason: 'provider-config-save',
+      source: 'test',
+    });
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(startSpy).not.toHaveBeenCalled();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.ended',
+      runId: 'run-active',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+    });
+    await vi.runAllTicks();
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces deferred restarts while the same run is still active', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    const internals = manager as unknown as {
+      shouldReconnect: boolean;
+      status: { state: string; port: number };
+      startLock: boolean;
+    };
+
+    internals.status = { state: 'running', port: 18789 };
+    internals.startLock = false;
+    internals.shouldReconnect = true;
+
+    const stopSpy = vi.spyOn(manager, 'stop').mockResolvedValue();
+    const startSpy = vi.spyOn(manager, 'start').mockResolvedValue();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.started',
+      runId: 'run-active',
+      sessionKey: 'agent:main:main',
+    });
+
+    await Promise.all([
+      manager.restart({ reason: 'config-save-a', source: 'test' }),
+      manager.restart({ reason: 'config-save-b', source: 'test' }),
+    ]);
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(startSpy).not.toHaveBeenCalled();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.ended',
+      runId: 'run-active',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+    });
+    await vi.runAllTicks();
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers restart until a blocking rpc request settles', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    const internals = manager as unknown as {
+      shouldReconnect: boolean;
+      status: { state: string; port: number };
+      startLock: boolean;
+      ws: {
+        readyState: number;
+        send: ReturnType<typeof vi.fn>;
+        ping: ReturnType<typeof vi.fn>;
+        terminate: ReturnType<typeof vi.fn>;
+        on: ReturnType<typeof vi.fn>;
+      } | null;
+      pendingRequests: Map<string, unknown>;
+      handleMessage: (message: unknown) => void;
+    };
+
+    internals.status = { state: 'running', port: 18789 };
+    internals.startLock = false;
+    internals.shouldReconnect = true;
+    internals.ws = {
+      readyState: 1,
+      send: vi.fn(),
+      ping: vi.fn(),
+      terminate: vi.fn(),
+      on: vi.fn(),
+    };
+
+    const stopSpy = vi.spyOn(manager, 'stop').mockResolvedValue();
+    const startSpy = vi.spyOn(manager, 'start').mockResolvedValue();
+
+    const rpcPromise = manager.rpc('chat.send', { text: 'hello' }, 5000);
+    const requestId = Array.from(internals.pendingRequests.keys())[0] as string;
+
+    await manager.restart({
+      reason: 'reload-config',
+      source: 'test',
+    });
+
+    expect(stopSpy).not.toHaveBeenCalled();
+    expect(startSpy).not.toHaveBeenCalled();
+
+    internals.handleMessage({
+      type: 'res',
+      id: requestId,
+      ok: true,
+      payload: { runId: 'run-active' },
+    });
+    await expect(rpcPromise).resolves.toEqual({ runId: 'run-active' });
+    await vi.runAllTicks();
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let heartbeat recovery wait behind active runtime work', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    const internals = manager as unknown as {
+      shouldReconnect: boolean;
+      status: { state: string; port: number };
+      startLock: boolean;
+    };
+
+    internals.status = { state: 'running', port: 18789 };
+    internals.startLock = false;
+    internals.shouldReconnect = true;
+
+    const stopSpy = vi.spyOn(manager, 'stop').mockResolvedValue();
+    const startSpy = vi.spyOn(manager, 'start').mockResolvedValue();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.started',
+      runId: 'run-stuck',
+      sessionKey: 'agent:main:main',
+    });
+
+    await manager.restart({
+      reason: 'heartbeat-timeout',
+      source: 'gateway-heartbeat',
+    });
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(startSpy).toHaveBeenCalledTimes(1);
+  });
 });

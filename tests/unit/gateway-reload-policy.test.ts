@@ -148,3 +148,66 @@ describe('loadGatewayReloadPolicy', () => {
     });
   });
 });
+
+describe('GatewayManager reload deferral', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-10T00:00:00.000Z'));
+  });
+
+  it('defers reload while a runtime run is active and flushes as a deferred restart after run.ended', async () => {
+    const { GatewayManager } = await import('@electron/gateway/manager');
+    const manager = new GatewayManager();
+
+    const internals = manager as unknown as {
+      shouldReconnect: boolean;
+      status: { state: string; port: number; connectedAt?: number };
+      startLock: boolean;
+      process: { pid: number } | null;
+      reloadPolicy: { mode: 'reload' | 'restart' | 'hybrid' | 'off'; debounceMs: number };
+      refreshReloadPolicy: (force?: boolean) => Promise<void>;
+    };
+
+    internals.status = {
+      state: 'running',
+      port: 18789,
+      connectedAt: Date.now() - 60_000,
+    };
+    internals.startLock = false;
+    internals.shouldReconnect = true;
+    internals.process = { pid: 4321 };
+    internals.reloadPolicy = { mode: 'reload', debounceMs: 0 };
+
+    vi.spyOn(internals, 'refreshReloadPolicy').mockResolvedValue();
+    const restartSpy = vi.spyOn(manager, 'restart').mockResolvedValue();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.started',
+      runId: 'run-reload',
+      sessionKey: 'agent:main:main',
+    });
+
+    await manager.reload({
+      reason: 'channel-config-save',
+      source: 'test',
+    });
+
+    expect(restartSpy).not.toHaveBeenCalled();
+
+    manager.emit('chat:runtime-event', {
+      type: 'run.ended',
+      runId: 'run-reload',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+    });
+    await vi.runAllTicks();
+
+    expect(restartSpy).toHaveBeenCalledTimes(1);
+    expect(restartSpy).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'deferred-restart-flush',
+      source: 'runtime:run.ended',
+    }));
+  });
+});

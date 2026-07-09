@@ -28,6 +28,7 @@ interface RunProgressCardProps {
   status: TaskStep['status'];
   steps: TaskStep[];
   progressEntries?: ChatRuntimeProgressEntry[];
+  liveText?: string | null;
 }
 
 const NOISY_MESSAGE_LABELS = new Set(['gate', 'checkpoint']);
@@ -139,20 +140,14 @@ function inferToolNarration(step: TaskStep): { key: string; text: string } | nul
 function buildActionEntry(step: TaskStep): RunProgressEntry {
   const command = extractCommandPreview(step);
   const label = step.label.trim().toLowerCase();
-  let text = '已调用相关工具';
-  if (step.status === 'running') {
-    text = '正在执行';
-  } else if (PROBLEM_STATUSES.has(step.status)) {
-    text = '执行失败';
-  } else if (label === 'web_fetch' && command) {
-    text = '已访问相关页面';
-  } else if (label === 'read' && command) {
-    text = '已读取相关内容';
-  } else if (label === 'edit' || label === 'apply_patch') {
-    text = '已修改相关内容';
-  } else {
-    text = '已运行';
-  }
+  const text = (() => {
+    if (step.status === 'running') return '正在执行';
+    if (PROBLEM_STATUSES.has(step.status)) return '执行失败';
+    if (label === 'web_fetch' && command) return '已访问相关页面';
+    if (label === 'read' && command) return '已读取相关内容';
+    if (label === 'edit' || label === 'apply_patch') return '已修改相关内容';
+    return '已运行';
+  })();
   return {
     id: `${step.id}:action`,
     kind: 'action',
@@ -184,9 +179,10 @@ function shouldKeepNarration(step: TaskStep): boolean {
 function buildRunProgressEntries(
   steps: TaskStep[],
   progressEntries: ChatRuntimeProgressEntry[] | undefined,
+  liveText: string | null | undefined,
 ): RunProgressEntry[] {
   if ((progressEntries?.length ?? 0) > 0) {
-    return progressEntries!.map((entry): RunProgressEntry => {
+    const entries = progressEntries!.map((entry): RunProgressEntry => {
       if (entry.kind === 'commentary') {
         return {
           id: entry.id,
@@ -210,6 +206,15 @@ function buildRunProgressEntries(
         status: entry.status ?? 'completed',
       };
     });
+    const normalizedLiveText = normalizeText(liveText);
+    if (!normalizedLiveText) return entries;
+    const alreadyPresent = entries.some((entry) => normalizeText(entry.text) === normalizedLiveText);
+    if (alreadyPresent) return entries;
+    return [{
+      id: 'live-text',
+      kind: 'narration',
+      text: normalizedLiveText,
+    }, ...entries];
   }
 
   const entries: RunProgressEntry[] = [];
@@ -251,6 +256,18 @@ function buildRunProgressEntries(
     }
   }
 
+  const normalizedLiveText = normalizeText(liveText);
+  if (normalizedLiveText) {
+    const alreadyPresent = entries.some((entry) => normalizeText(entry.text) === normalizedLiveText);
+    if (!alreadyPresent) {
+      entries.unshift({
+        id: 'live-text',
+        kind: 'narration',
+        text: normalizedLiveText,
+      });
+    }
+  }
+
   return entries;
 }
 
@@ -280,8 +297,8 @@ function ActionStatusIcon({ status }: { status: TaskStep['status'] }) {
   return <CheckCircle2 className="h-3.5 w-3.5" />;
 }
 
-export function RunProgressCard({ summary, status, steps, progressEntries }: RunProgressCardProps) {
-  const entries = buildRunProgressEntries(steps, progressEntries).filter(shouldRenderEntry);
+export function RunProgressCard({ summary, status, steps, progressEntries, liveText }: RunProgressCardProps) {
+  const entries = buildRunProgressEntries(steps, progressEntries, liveText).filter(shouldRenderEntry);
   if (entries.length === 0) return null;
 
   return (

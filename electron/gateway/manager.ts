@@ -58,6 +58,7 @@ import {
   type GatewayCapabilityName,
   type GatewayCapabilitySnapshot,
 } from './capability-monitor';
+import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
 
 export interface GatewayStatus {
   state: GatewayLifecycleState;
@@ -198,6 +199,8 @@ export class GatewayManager extends EventEmitter {
   private lastSpawnSummary: string | null = null;
   private recentStartupStderrLines: string[] = [];
   private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
+  private readonly blockingRpcRequestIds = new Set<string>();
+  private readonly activeRuntimeRuns = new Map<string, { startedAt: number; lastEventAt: number; sessionKey?: string }>();
   private deviceIdentity: DeviceIdentity | null = null;
   private restartInFlight: Promise<void> | null = null;
   private readonly connectionMonitor = new GatewayConnectionMonitor();
@@ -246,8 +249,7 @@ export class GatewayManager extends EventEmitter {
         this.restartController.flushDeferredRestart(
           `status:${previousState}->${nextState}`,
           {
-            state: this.status.state,
-            startLock: this.startLock,
+            ...this.getRestartDeferralState(),
             shouldReconnect: this.shouldReconnect,
           },
           () => {
@@ -278,6 +280,9 @@ export class GatewayManager extends EventEmitter {
     });
     this.on('gateway:presence', (payload) => {
       this.capabilityMonitor.recordPresence(payload);
+    });
+    this.on('chat:runtime-event', (payload) => {
+      this.trackRuntimeWorkEvent(payload);
     });
   }
 
@@ -366,6 +371,92 @@ export class GatewayManager extends EventEmitter {
     const message = error instanceof Error ? error.message : String(error);
     return /unknown method:\s*shutdown/i.test(message);
   }
+
+  private shouldTrackBlockingRpcMethod(method: string): boolean {
+    return method === 'chat.send';
+  }
+
+  private shouldBypassActiveWorkDeferral(context?: GatewayLifecycleContext): boolean {
+    const source = context?.source ?? '';
+    const reason = context?.reason ?? '';
+    if (source === 'gateway-heartbeat') return true;
+    if (reason === 'heartbeat-timeout' || reason === 'initial-gateway-ready-heartbeat-timeout') {
+      return true;
+    }
+    if (source === 'gateway-reload' && reason.startsWith('reload-fallback-')) {
+      return true;
+    }
+    return false;
+  }
+
+  private hasInFlightGatewayWork(): boolean {
+    return this.blockingRpcRequestIds.size > 0 || this.activeRuntimeRuns.size > 0;
+  }
+
+  private getRestartDeferralState(context?: GatewayLifecycleContext): {
+    state: GatewayLifecycleState;
+    startLock: boolean;
+    hasInFlightWork: boolean;
+    activeRunCount: number;
+    blockingRpcCount: number;
+  } {
+    const hasInFlightWork = this.hasInFlightGatewayWork() && !this.shouldBypassActiveWorkDeferral(context);
+    return {
+      state: this.status.state,
+      startLock: this.startLock,
+      hasInFlightWork,
+      activeRunCount: this.activeRuntimeRuns.size,
+      blockingRpcCount: this.blockingRpcRequestIds.size,
+    };
+  }
+
+  private flushDeferredRestartIfIdle(trigger: string): void {
+    this.restartController.flushDeferredRestart(
+      trigger,
+      {
+        ...this.getRestartDeferralState(),
+        shouldReconnect: this.shouldReconnect,
+      },
+      () => {
+        void this.restart({
+          reason: 'deferred-restart-flush',
+          source: trigger,
+        }).catch((error) => {
+          logger.warn('Deferred Gateway restart failed:', error);
+        });
+      },
+    );
+  }
+
+  private trackRuntimeWorkEvent(payload: unknown): void {
+    if (typeof payload !== 'object' || payload === null) {
+      return;
+    }
+
+    const event = payload as Partial<ChatRuntimeEvent>;
+    if (typeof event.runId !== 'string' || event.runId.length === 0 || typeof event.type !== 'string') {
+      return;
+    }
+    if (event.producer === 'history') {
+      return;
+    }
+
+    if (event.type === 'run.ended') {
+      if (this.activeRuntimeRuns.delete(event.runId)) {
+        this.flushDeferredRestartIfIdle(`runtime:${event.type}`);
+      }
+      return;
+    }
+
+    const now = Date.now();
+    const existing = this.activeRuntimeRuns.get(event.runId);
+    this.activeRuntimeRuns.set(event.runId, {
+      startedAt: existing?.startedAt ?? now,
+      lastEventAt: now,
+      sessionKey: typeof event.sessionKey === 'string' ? event.sessionKey : existing?.sessionKey,
+    });
+  }
+
   /**
    * Get current Gateway status
    */
@@ -568,8 +659,7 @@ export class GatewayManager extends EventEmitter {
       this.restartController.flushDeferredRestart(
         'start:finally',
         {
-          state: this.status.state,
-          startLock: this.startLock,
+          ...this.getRestartDeferralState(),
           shouldReconnect: this.shouldReconnect,
         },
         () => {
@@ -639,6 +729,8 @@ export class GatewayManager extends EventEmitter {
     this.ownsProcess = false;
 
     clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
+    this.blockingRpcRequestIds.clear();
+    this.activeRuntimeRuns.clear();
 
     this.restartController.resetDeferredRestart();
     this.isAutoReconnectStart = false;
@@ -669,22 +761,19 @@ export class GatewayManager extends EventEmitter {
    * Restart Gateway process
    */
   async restart(context?: GatewayLifecycleContext): Promise<void> {
-    if (this.restartController.isRestartDeferred({
-      state: this.status.state,
-      startLock: this.startLock,
-    })) {
+    const restartDeferralState = this.getRestartDeferralState(context);
+    if (this.restartController.isRestartDeferred(restartDeferralState)) {
       this.recordLifecycleEvent('restart_deferred', {
         reason: context?.reason ?? 'restart-deferred',
         source: context?.source ?? 'gateway-manager',
         details: {
-          state: this.status.state,
-          startLock: this.startLock,
+          state: restartDeferralState.state,
+          startLock: restartDeferralState.startLock,
+          activeRunCount: restartDeferralState.activeRunCount,
+          blockingRpcCount: restartDeferralState.blockingRpcCount,
         },
       });
-      this.restartController.markDeferredRestart(context?.reason ?? 'restart', {
-        state: this.status.state,
-        startLock: this.startLock,
-      });
+      this.restartController.markDeferredRestart(context?.reason ?? 'restart', restartDeferralState);
       return;
     }
 
@@ -794,8 +883,7 @@ export class GatewayManager extends EventEmitter {
       this.restartController.flushDeferredRestart(
         'restart:finally',
         {
-          state: this.status.state,
-          startLock: this.startLock,
+          ...this.getRestartDeferralState(),
           shouldReconnect: this.shouldReconnect,
         },
         () => {
@@ -853,22 +941,19 @@ export class GatewayManager extends EventEmitter {
       return;
     }
 
-    if (this.restartController.isRestartDeferred({
-      state: this.status.state,
-      startLock: this.startLock,
-    })) {
+    const restartDeferralState = this.getRestartDeferralState(context);
+    if (this.restartController.isRestartDeferred(restartDeferralState)) {
       this.recordLifecycleEvent('reload_deferred', {
         reason: context?.reason ?? 'reload-deferred',
         source: context?.source ?? 'gateway-reload',
         details: {
-          state: this.status.state,
-          startLock: this.startLock,
+          state: restartDeferralState.state,
+          startLock: restartDeferralState.startLock,
+          activeRunCount: restartDeferralState.activeRunCount,
+          blockingRpcCount: restartDeferralState.blockingRpcCount,
         },
       });
-      this.restartController.markDeferredRestart(context?.reason ?? 'reload', {
-        state: this.status.state,
-        startLock: this.startLock,
-      });
+      this.restartController.markDeferredRestart(context?.reason ?? 'reload', restartDeferralState);
       return;
     }
 
@@ -1096,13 +1181,17 @@ export class GatewayManager extends EventEmitter {
    */
   async rpc<T>(method: string, params?: unknown, timeoutMs = 30000): Promise<T> {
     const startedAt = Date.now();
+    const id = crypto.randomUUID();
+    const trackBlockingRequest = this.shouldTrackBlockingRpcMethod(method);
     return await new Promise<T>((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(new Error('Gateway not connected'));
         return;
       }
 
-      const id = crypto.randomUUID();
+      if (trackBlockingRequest) {
+        this.blockingRpcRequestIds.add(id);
+      }
 
       // Set timeout for request
       const timeout = setTimeout(() => {
@@ -1158,6 +1247,9 @@ export class GatewayManager extends EventEmitter {
         this.recordRpcFailure(method);
       }
       throw error;
+    }).finally(() => {
+      this.blockingRpcRequestIds.delete(id);
+      this.flushDeferredRestartIfIdle(`rpc:${method}:settled`);
     });
   }
 

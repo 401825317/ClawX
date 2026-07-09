@@ -6,6 +6,11 @@ import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-devi
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../utils/store';
 import { logger } from '../../utils/logger';
+import {
+  buildOpenClawInlineImageAttachment,
+  OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
+  OPENCLAW_VISION_MIME_TYPES,
+} from '../../utils/openclaw-inline-image';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
@@ -366,24 +371,44 @@ export async function handleGatewayRoutes(
         message: string;
         deliver?: boolean;
         idempotencyKey: string;
+        inlineAttachments?: boolean;
         media?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       }>(req);
       sessionKeyForLog = body.sessionKey;
-      const VISION_MIME_TYPES = new Set([
-        'image/png', 'image/jpeg', 'image/bmp', 'image/webp',
-      ]);
       const imageAttachments: Array<{ content: string; mimeType: string; fileName: string }> = [];
       const fileReferences: string[] = [];
+      const shouldInlineAttachments = body.inlineAttachments !== false;
       if (body.media && body.media.length > 0) {
-        const fsP = await import('node:fs/promises');
         for (const m of body.media) {
           fileReferences.push(`[media attached: ${m.filePath} (${m.mimeType}) | ${m.filePath}]`);
-          if (VISION_MIME_TYPES.has(m.mimeType)) {
-            const fileBuffer = await fsP.readFile(m.filePath);
-            imageAttachments.push({
-              content: fileBuffer.toString('base64'),
-              mimeType: m.mimeType,
+          if (shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
+            const inlineImage = await buildOpenClawInlineImageAttachment(m);
+            if (!inlineImage.attachment) {
+              logger.warn('[chat.send] Skipping inline image attachment above OpenClaw safe inline cap', {
+                sessionKey: sessionKeyForLog,
+                fileName: m.fileName,
+                bytes: inlineImage.inputBytes,
+                limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
+                reason: inlineImage.skippedReason,
+              });
+              continue;
+            }
+            if (inlineImage.resized) {
+              logger.info('[chat.send] Resized inline image attachment for OpenClaw parser safety', {
+                sessionKey: sessionKeyForLog,
+                fileName: m.fileName,
+                inputBytes: inlineImage.inputBytes,
+                outputBytes: inlineImage.outputBytes,
+                outputMimeType: inlineImage.outputMimeType,
+                limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
+              });
+            }
+            imageAttachments.push(inlineImage.attachment);
+          } else if (!shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
+            logger.info('[chat.send] Using media path reference without inline attachment', {
+              sessionKey: sessionKeyForLog,
               fileName: m.fileName,
+              mimeType: m.mimeType,
             });
           }
         }
@@ -400,6 +425,7 @@ export async function handleGatewayRoutes(
       logger.info('[diagnostic] chat.send.request', {
         sessionKey: sessionKeyForLog,
         ...sendDiagnostic,
+        inlineAttachments: shouldInlineAttachments,
       });
       const rpcParams: Record<string, unknown> = {
         sessionKey: body.sessionKey,

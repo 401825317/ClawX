@@ -264,6 +264,8 @@ test.describe('ClawX chat run state events', () => {
       }
 
       await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('chat-execution-graph')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
       await expect(page.getByText('我先查看相关内容。')).toBeVisible();
       await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
       await expect(page.getByText('我现在可以生成文档、表格和演示文稿。')).toBeVisible();

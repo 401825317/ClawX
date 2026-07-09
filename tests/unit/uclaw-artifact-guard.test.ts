@@ -420,6 +420,118 @@ describe('uclaw-artifact-guard', () => {
     }));
   });
 
+  it('summarizes bloated session jsonl exec results before they stay model-visible in transcript', async () => {
+    const pluginModule = await loadGuard();
+    const { toolResultMiddlewares, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+    const middleware = toolResultMiddlewares[0]?.handler;
+    expect(middleware).toBeTypeOf('function');
+
+    const hugeJsonl = Array.from({ length: 90 }, (_, index) => JSON.stringify({
+      sessionId: 'agent:main:main',
+      messageId: `msg-${index}`,
+      role: 'assistant',
+      content: `payload-${index}-${'x'.repeat(64)}`,
+    })).join('\n');
+    const toolEvent = {
+      toolCallId: 'call-session-jsonl',
+      toolName: 'exec',
+      args: {
+        command: 'cat ~/.openclaw/agents/main/sessions/agent-main.jsonl',
+      },
+      result: {
+        content: [{ type: 'text', text: hugeJsonl }],
+        details: {
+          status: 'ok',
+          stdout: hugeJsonl,
+        },
+      },
+    };
+
+    const middlewareResult = await middleware!(toolEvent, {
+      runId: 'run-session-jsonl',
+      sessionKey: 'agent:main:main',
+      runtime: 'openclaw',
+    }) as { result?: { content?: Array<{ text?: string }>; details?: Record<string, unknown> } } | undefined;
+
+    const compactText = middlewareResult?.result?.content?.[0]?.text ?? '';
+    expect(compactText).toContain('已收敛高膨胀 exec 结果');
+    expect(compactText).toContain('session/jsonl');
+    expect(compactText).toContain('模型可见 transcript');
+    expect(compactText).toContain('agent-main.jsonl');
+    expect(compactText).not.toContain('"messageId":"msg-70"');
+    expect(toolEvent.result.content[0]?.text).toBe(compactText);
+    expect(middlewareResult?.result?.details).toMatchObject({
+      summarizedForModel: true,
+      summaryKind: 'tool_result_transcript_compaction',
+    });
+    expect(Array.isArray(middlewareResult?.result?.details?.categories)).toBe(true);
+    expect(middlewareResult?.result?.details?.categories).toEqual(expect.arrayContaining(['session/jsonl']));
+    expect(Number(middlewareResult?.result?.details?.omittedLines)).toBeGreaterThanOrEqual(90);
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-session-jsonl',
+      stream: 'step',
+      data: expect.objectContaining({
+        step: expect.objectContaining({
+          id: 'tool:call-session-jsonl',
+          status: 'completed',
+        }),
+      }),
+    }));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('tool-result-transcript-compact'));
+  });
+
+  it('keeps MEDIA evidence while compacting bloated transcript or log reads', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-tool-result-media-'));
+    const artifactPath = join(tempDir, 'result.png');
+    writeFileSync(artifactPath, 'png');
+
+    try {
+      const { toolResultMiddlewares } = registerHooksWithRuntimeEvents(pluginModule);
+      const middleware = toolResultMiddlewares[0]?.handler;
+      expect(middleware).toBeTypeOf('function');
+
+      const bulkyLog = Array.from({ length: 70 }, (_, index) => `log-${index} ${'y'.repeat(72)}`).join('\n');
+      const toolEvent = {
+        toolCallId: 'call-log-read',
+        toolName: 'read',
+        args: {
+          filePath: '~/.openclaw/agents/main/trajectory/run.trajectory.jsonl',
+        },
+        result: {
+          content: [{
+            type: 'text',
+            text: `${bulkyLog}\nMEDIA:${artifactPath}\n${bulkyLog}`,
+          }],
+          details: {
+            status: 'ok',
+            outputPath: artifactPath,
+            stdout: bulkyLog,
+          },
+        },
+      };
+
+      const middlewareResult = await middleware!(toolEvent, {
+        runId: 'run-log-read',
+        sessionKey: 'agent:main:main',
+        runtime: 'openclaw',
+      }) as { result?: { content?: Array<{ text?: string }>; details?: Record<string, unknown> } } | undefined;
+
+      const compactText = middlewareResult?.result?.content?.[0]?.text ?? '';
+      expect(compactText).toContain('trajectory');
+      expect(compactText).toContain(`MEDIA:${artifactPath}`);
+      expect(compactText).not.toContain(`log-55 ${'y'.repeat(72)}`);
+      expect(middlewareResult?.result?.details).toMatchObject({
+        summarizedForModel: true,
+        outputPath: artifactPath,
+        preservedArtifactRefs: [`MEDIA:${artifactPath}`],
+      });
+      expect(toolEvent.result.content[0]?.text).toBe(compactText);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('forces heartbeat polls to return only the internal heartbeat sentinel', async () => {
     const pluginModule = await loadGuard();
     const finalizeHook = registerFinalizeHook(pluginModule);

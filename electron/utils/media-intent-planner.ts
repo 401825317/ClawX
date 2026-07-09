@@ -248,10 +248,13 @@ function normalizeOptionalBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function isVisualQuestionCuePrompt(prompt: string): boolean {
+  return /(?:美吗|美嘛|好看吗|漂亮吗|丑吗|怎么样|咋样|如何|评价|点评|审美|哪里.*(?:好|不好|优化|改进)|看一下|看看|帮我看|分析一下|what do you think|look good|beautiful|pretty|rate|review|critique|analy[sz]e)/i.test(prompt);
+}
+
 function isVisualQuestionPrompt(prompt: string): boolean {
   const referencesImage = /(?:这张|这幅|这个图|这图|图片|照片|画面|上一张|上一个|刚才|刚生成|previous|last|this image|this picture|this photo|the image|the picture)/i.test(prompt);
-  const asksAboutImage = /(?:美吗|美嘛|好看吗|漂亮吗|丑吗|怎么样|咋样|如何|评价|点评|审美|哪里.*(?:好|不好|优化|改进)|what do you think|look good|beautiful|pretty|rate|review|critique|analy[sz]e)/i.test(prompt);
-  return asksAboutImage || (referencesImage && /(?:看|分析|评价|点评|怎么样|如何|哪里|review|critique|analy[sz]e)/i.test(prompt));
+  return referencesImage && isVisualQuestionCuePrompt(prompt);
 }
 
 function isImageSource(value: unknown): value is PlannerImageSource {
@@ -626,6 +629,10 @@ function promptReferencesExistingImage(prompt: string): boolean {
   return /(?:这张|这幅|这个图|这图|图片上|照片上|上一张|上一个|刚才(?:那张|生成的)?|刚生成|根据(?:这张|图片|照片|上一个|上一张)|基于(?:这张|图片|照片|上一个|上一张)|用(?:这张|图片|照片|上一个|上一张)|previous image|last image|this image|this picture|the image|the picture)/i.test(prompt);
 }
 
+function canUseCandidateImagesForPrompt(prompt: string): boolean {
+  return promptReferencesExistingImage(prompt);
+}
+
 function isImageEditPrompt(prompt: string): boolean {
   return /(?:修图|改图|精修|编辑图片|图片编辑|调整图片|优化图片|换背景|去背景|抠图|加上|去掉|删除|移除|把.+改成|把.+换成|logo|remove|edit image|image edit|retouch|modify)/i.test(prompt)
     || (promptReferencesExistingImage(prompt) && /(?:改|修|换|加|去|删|调整|优化|编辑|变成|edit|modify|remove|replace|add)/i.test(prompt));
@@ -661,6 +668,10 @@ function isMediaPromptDraftingPrompt(prompt: string): boolean {
 function isTextOnlyRequestInMediaMode(prompt: string): boolean {
   return /(?:文案|朋友圈|标题|脚本|提示词|prompt|解释|区别|说明|参数|怎么写|写(?:一段|几个|几条)?|copy|caption|script|explain)/i.test(prompt)
     && !/(?:并(?:生成|生图|出图|做视频)|同时(?:生成|生图|出图|做视频)|顺便(?:生成|生图|出图|做视频))/i.test(prompt);
+}
+
+function isUiDesignDiscussionPrompt(prompt: string): boolean {
+  return /(?:页面|界面|客户端|应用|app|网站|网页|UI|ux|交互|布局|聊天页|聊天页面|composer|sidebar|面板).{0,40}(?:太丑|丑|不好看|难看|咋办|怎么办|怎么改|如何改|优化|改进|美化|设计)|(?:太丑|丑|不好看|难看|优化|改进|美化|设计).{0,40}(?:页面|界面|客户端|应用|app|网站|网页|UI|ux|交互|布局|聊天页|聊天页面|composer|sidebar|面板)/i.test(prompt);
 }
 
 function isPreferenceOrMemoryPrompt(prompt: string): boolean {
@@ -714,6 +725,8 @@ function isMetaLookupContinuationPrompt(prompt: string): boolean {
 function localNonMediaChatPlan(params: {
   prompt: string;
   requestedMode: 'chat' | 'image' | 'video';
+  explicitImages: MediaGenerationInputImageRef[];
+  candidateImages: MediaGenerationInputImageRef[];
   recentMessages?: MediaIntentRecentMessage[];
 }): MediaIntentPlan | null {
   const prompt = params.prompt.trim();
@@ -731,6 +744,14 @@ function localNonMediaChatPlan(params: {
   }
   if (isPlainConversationalPrompt(prompt)) {
     return localChatPlan('local_non_media_plain_conversation', prompt, 'ordinary_chat');
+  }
+  if (
+    params.requestedMode === 'chat'
+    && params.explicitImages.length === 0
+    && !canUseCandidateImagesForPrompt(prompt)
+    && isUiDesignDiscussionPrompt(prompt)
+  ) {
+    return localChatPlan('local_non_media_ui_design_discussion_without_image', prompt, 'current_non_media_task');
   }
   if (isMetaLookupContinuationPrompt(prompt) && recentContextLooksLikeMediaMetaLookup(params.recentMessages)) {
     return localChatPlan('local_non_media_meta_lookup_continuation', prompt, 'current_non_media_task');
@@ -767,7 +788,7 @@ function localSelectedImageForPrompt(params: {
       candidateImages: params.candidateImages,
     });
   }
-  if (params.candidateImages.length > 0 && (promptReferencesExistingImage(params.prompt) || (params.allowImplicitExplicitImage && isImageEditPrompt(params.prompt)))) {
+  if (params.candidateImages.length > 0 && canUseCandidateImagesForPrompt(params.prompt)) {
     return selectImage({
       selectedImageSource: 'candidate',
       selectedImageIndex: 0,
@@ -788,7 +809,8 @@ function localFastPathPlan(params: {
   if (!prompt) return null;
 
   if (params.requestedMode === 'image') {
-    const visualQuestion = isVisualQuestionPrompt(prompt);
+    const visualQuestion = isVisualQuestionPrompt(prompt)
+      || (params.explicitImages.length > 0 && isVisualQuestionCuePrompt(prompt));
     const editPrompt = isImageEditPrompt(prompt);
     const revisionFeedback = isImageRevisionFeedbackPrompt(prompt);
     const imageSelection = visualQuestion || revisionFeedback
@@ -879,7 +901,10 @@ function localFastPathPlan(params: {
     };
   }
 
-  if (isVisualQuestionPrompt(prompt) && (params.explicitImages.length > 0 || params.candidateImages.length > 0)) {
+  if (
+    (isVisualQuestionPrompt(prompt) || (params.explicitImages.length > 0 && isVisualQuestionCuePrompt(prompt)))
+    && (params.explicitImages.length > 0 || params.candidateImages.length > 0)
+  ) {
     const imageSelection = selectPreferredImage({
       selectedImageSource: params.explicitImages.length > 0 ? 'explicit' : 'candidate',
       selectedImageIndex: 0,
@@ -1030,6 +1055,18 @@ function normalizePlannerDecision(params: {
     if (!imageSelection.sourceImages?.length) {
       return clarificationPlan('vision_chat_missing_input_image', normalizeOptionalText(params.raw.clarification));
     }
+    if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForPrompt(params.prompt)) {
+      return {
+        action: 'chat',
+        source: 'planner',
+        intentKind: 'current_non_media_task',
+        currentTurnMediaRequest: false,
+        confidence,
+        reason: reason || 'candidate_image_not_explicitly_referenced',
+        selectedImageSource: 'none',
+        prompt,
+      };
+    }
     return {
       action,
       source: 'planner',
@@ -1053,6 +1090,9 @@ function normalizePlannerDecision(params: {
     });
     if (!imageSelection.sourceImages?.length) {
       return clarificationPlan('image_edit_missing_input_image', normalizeOptionalText(params.raw.clarification));
+    }
+    if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForPrompt(params.prompt)) {
+      return clarificationPlan('image_edit_candidate_not_explicitly_referenced', normalizeOptionalText(params.raw.clarification));
     }
     return {
       action,
@@ -1082,6 +1122,23 @@ function normalizePlannerDecision(params: {
     if (videoMode !== 'text_to_video' && !imageSelection.sourceImages?.length) {
       return clarificationPlan('video_generate_missing_input_image', normalizeOptionalText(params.raw.clarification));
     }
+    if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForPrompt(params.prompt)) {
+      return {
+        action,
+        source: 'planner',
+        intentKind,
+        currentTurnMediaRequest,
+        confidence,
+        reason: reason || 'video_generate_candidate_image_not_explicitly_referenced',
+        selectedImageSource: 'none',
+        sourceImages: [],
+        prompt,
+        videoMode: 'text_to_video',
+        videoSize,
+        videoDurationSeconds,
+        videoPrompt,
+      };
+    }
     return {
       action,
       source: 'planner',
@@ -1107,7 +1164,7 @@ function normalizePlannerDecision(params: {
 
   if (
     action === 'chat'
-    && isVisualQuestionPrompt(params.prompt)
+    && (isVisualQuestionPrompt(params.prompt) || (params.explicitImages.length > 0 && isVisualQuestionCuePrompt(params.prompt)))
     && (params.explicitImages.length > 0 || params.candidateImages.length > 0)
   ) {
     const imageSelection = selectPreferredImage({
@@ -1117,6 +1174,18 @@ function normalizePlannerDecision(params: {
       candidateImages: params.candidateImages,
     });
     if (imageSelection.sourceImages?.length) {
+      if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForPrompt(params.prompt)) {
+        return {
+          action: 'chat',
+          source: 'planner',
+          intentKind,
+          currentTurnMediaRequest,
+          confidence,
+          reason: reason || 'candidate_image_not_explicitly_referenced',
+          selectedImageSource: 'none',
+          prompt,
+        };
+      }
       return {
         action: 'vision_chat',
         source: 'planner',
@@ -1174,7 +1243,7 @@ function buildPlannerMessages(params: {
         'Use image_generate only when the user wants a new still image from text.',
         'Use image_edit only when the user wants to change an existing image. image_edit MUST select exactly one explicit_images or candidate_images item.',
         'If the user asks to edit "this image", "it", "the previous image", or similar but no usable image exists, use clarify. Never downgrade image_edit to image_generate.',
-        'Use explicit_images before candidate_images. Use candidate_images only when the user clearly refers to current/recent/previous image context.',
+        'Use explicit_images before candidate_images. Use candidate_images only when the user clearly refers to current/recent/previous image context using words like this image, previous image, 上一张, 这张图, 图片上, or 刚生成. Do not use candidate_images merely because the user says this page, this client, this UI, design, ugly, or pretty.',
         'Use video_generate only when the user wants video creation, animation, or image-to-video.',
         'For video_generate, also choose video_mode: text_to_video, image_to_video, or edit_image_then_video.',
         'Use edit_image_then_video when the image should be changed first, then animated.',
@@ -1234,6 +1303,8 @@ export async function planMediaIntent(
   const localNonMediaPlan = localNonMediaChatPlan({
     prompt,
     requestedMode,
+    explicitImages,
+    candidateImages,
     recentMessages: params.recentMessages,
   });
   if (localNonMediaPlan) {

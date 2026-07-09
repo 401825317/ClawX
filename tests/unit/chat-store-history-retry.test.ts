@@ -2152,6 +2152,101 @@ describe('useChatStore startup history retry', () => {
     }));
   });
 
+  it.each([
+    { sessionStatus: 'failed', expectedRunStatus: 'error' as const },
+    { sessionStatus: 'aborted', expectedRunStatus: 'aborted' as const },
+  ])('does not re-arm an interrupted historical run when the persisted session is $sessionStatus', async ({
+    sessionStatus,
+    expectedRunStatus,
+  }) => {
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            {
+              id: `user-${sessionStatus}`,
+              role: 'user',
+              content: [{ type: 'text', text: '继续帮我处理这个任务' }],
+              timestamp: 1783620000,
+            },
+            {
+              id: `assistant-tool-${sessionStatus}`,
+              role: 'assistant',
+              content: [{
+                type: 'toolCall',
+                id: `call-${sessionStatus}`,
+                name: 'read',
+                arguments: { path: `/tmp/${sessionStatus}.md` },
+              }],
+              timestamp: 1783620001,
+            },
+            {
+              role: 'toolResult',
+              toolCallId: `call-${sessionStatus}`,
+              toolName: 'read',
+              content: [{
+                type: 'text',
+                text: `status=${sessionStatus}`,
+              }],
+              details: {
+                status: 'completed',
+                aggregated: `status=${sessionStatus}`,
+                path: `/tmp/${sessionStatus}.md`,
+              },
+              isError: false,
+              timestamp: 1783620002,
+            },
+          ],
+        };
+      }
+      return { messages: [] };
+    });
+
+    const sessionKey = `agent:main:session-${sessionStatus}`;
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: sessionKey,
+      currentAgentId: 'main',
+      sessions: [{
+        key: sessionKey,
+        status: sessionStatus,
+        hasActiveRun: false,
+        updatedAt: 1783620005 * 1000,
+      }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      runtimeRuns: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const state = useChatStore.getState();
+    expect(state.sending).toBe(false);
+    expect(state.activeRunId).toBeNull();
+    expect(state.pendingFinal).toBe(false);
+    expect(state.lastUserMessageAt).toBeNull();
+
+    const historicalRunId = `history:${sessionKey}:user-${sessionStatus}`;
+    expect(state.runtimeRuns[historicalRunId]).toEqual(expect.objectContaining({
+      status: expectedRunStatus,
+      sessionKey,
+      endedAt: 1783620005 * 1000,
+    }));
+  });
+
   it('does not treat prior-turn assistant history as progress for a new send', async () => {
     let resolveSend: ((value: { runId: string }) => void) | undefined;
     gatewayRpcMock.mockImplementation((method: string) => {

@@ -67,6 +67,9 @@ vi.mock('react-i18next', () => ({
       if (key === 'executionGraph.thinkingLabel') {
         return 'Thinking';
       }
+      if (key === 'executionGraph.imageGenerateLabel') {
+        return 'image_generate';
+      }
       if (key.startsWith('taskPanel.stepStatus.')) {
         return key.split('.').at(-1) ?? key;
       }
@@ -262,7 +265,7 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
+      expect(screen.getByTestId('mock-streaming-message')).toHaveTextContent('I will read the file first.');
     });
 
     expect(screen.queryByText('read')).not.toBeInTheDocument();
@@ -450,7 +453,7 @@ describe('Chat execution graph lifecycle', () => {
     expect(screen.queryByText('foreign_tool')).not.toBeInTheDocument();
   });
 
-  it('renders the execution graph immediately for an active run before any stream content arrives', async () => {
+  it('shows a lightweight pending commentary instead of an empty execution graph before any stream content arrives', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -483,10 +486,11 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
+      expect(screen.getByTestId('chat-typing-indicator')).toBeInTheDocument();
     });
 
-    expect(screen.queryByTestId('chat-execution-step-thinking-trailing')).not.toBeInTheDocument();
+    expect(screen.getByText('我先看下这条请求。')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-execution-graph')).not.toBeInTheDocument();
   });
 
   it('renders generated file cards with line stats for edit tools', async () => {
@@ -1200,7 +1204,7 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'false');
+      expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
     });
 
     expect(screen.getByTestId('mock-streaming-message')).toHaveTextContent(finalText);
@@ -1263,6 +1267,74 @@ describe('Chat execution graph lifecycle', () => {
     expect(screen.getByText('执行完成 ✅ 今天的 github1 已写入飞书文档。')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-typing-indicator')).not.toBeInTheDocument();
     expect(screen.queryByTestId('chat-activity-indicator')).not.toBeInTheDocument();
+  });
+
+  it('keeps capability-style final replies visible when they mention generated artifacts', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          content: '你现在能做哪些文件类产物？',
+        },
+        {
+          role: 'assistant',
+          id: 'history-read-capabilities',
+          content: [
+            { type: 'text', text: '我先查看相关内容。' },
+            { type: 'tool_use', id: 'read-capabilities', name: 'read', input: { path: '/tmp/capabilities.md' } },
+          ],
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'read-capabilities',
+          toolName: 'read',
+          content: [{ type: 'text', text: '- 文档\n- 表格\n- 演示文稿' }],
+          details: {
+            status: 'completed',
+            aggregated: '- 文档\n- 表格\n- 演示文稿',
+            path: '/tmp/capabilities.md',
+          },
+          isError: false,
+        },
+        {
+          role: 'assistant',
+          id: 'history-capabilities-final',
+          content: [{ type: 'text', text: '我现在可以生成文档、表格和演示文稿。' }],
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+      runtimeRuns: {},
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-run-progress')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('我先查看相关内容。')).toBeInTheDocument();
+    expect(screen.getByText('/tmp/capabilities.md')).toBeInTheDocument();
+    expect(screen.getByText('我现在可以生成文档、表格和演示文稿。')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
   });
 
   it('settles composer when generated image media arrives without transcript tool calls', async () => {
@@ -1477,13 +1549,14 @@ describe('Chat execution graph lifecycle', () => {
 
     render(<Chat />);
 
-    await waitFor(() => {
-      expect(screen.getByText('browser')).toBeInTheDocument();
-      expect(screen.getByTestId('chat-execution-step-thinking-trailing')).toBeInTheDocument();
-    });
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+    expect(await screen.findByText('browser')).toBeInTheDocument();
   });
 
-  it('keeps trailing thinking visible while waiting for final history after completed tool status', async () => {
+  it('keeps the execution graph reachable while waiting for final history after completed tool status', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -1529,9 +1602,11 @@ describe('Chat execution graph lifecycle', () => {
 
     render(<Chat />);
 
-    await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-step-thinking-trailing')).toBeInTheDocument();
-    });
+    const graph = await screen.findByTestId('chat-execution-graph');
+    if (graph.getAttribute('data-collapsed') === 'true') {
+      fireEvent.click(graph);
+    }
+    expect(await screen.findByText('browser')).toBeInTheDocument();
   });
 
   it('settles image generation runs after message tool delivers generated media', async () => {
@@ -1603,7 +1678,7 @@ describe('Chat execution graph lifecycle', () => {
     expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-sending', 'false');
   });
 
-  it('keeps image generation runs active after async task status narration', async () => {
+  it('keeps image generation runs active while surfacing narration ahead of the graph', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -1656,12 +1731,13 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-step-thinking-trailing')).toBeInTheDocument();
+      expect(screen.getByText('图已经开始生成啦 🍒 完成后会直接发到这里。')).toBeInTheDocument();
     });
+    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
     expect(screen.getByTestId('mock-chat-input')).toHaveAttribute('data-sending', 'true');
   });
 
-  it('keeps the run active when narration landed in history before tools finished', async () => {
+  it('keeps the run active when narration lands in history before tools finish', async () => {
     const { useChatStore } = await import('@/stores/chat');
     useChatStore.setState({
       messages: [
@@ -1706,7 +1782,8 @@ describe('Chat execution graph lifecycle', () => {
     render(<Chat />);
 
     await waitFor(() => {
-      expect(screen.getByTestId('chat-execution-step-thinking-trailing')).toBeInTheDocument();
+      expect(screen.getByText('Let me search for that first.')).toBeInTheDocument();
     });
+    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
   });
 });

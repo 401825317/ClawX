@@ -225,6 +225,8 @@ export function isGeneratingStatusNarration(text: string): boolean {
   if (!trimmed) return false;
   if (/^(?:图片(?:正在)?生成中|正在生成(?:图片|图像)|生成中)/i.test(trimmed)) return true;
   if (/稍等(片刻|一下)?/.test(trimmed) && trimmed.length <= 80 && /生成|generat/i.test(trimmed)) return true;
+  const looksLikeCapabilityDescription = /(?:^|[。！？!?]\s*|\n)(?:我|现在|目前|这里|当前|系统).{0,16}(?:可以|能够|支持|能).{0,24}(?:生成|制作|交付|导出).{0,48}(?:PPT|ppt|产物|文件|文档|表格|演示文稿|图片|图像|视频|媒体)/u.test(trimmed);
+  if (looksLikeCapabilityDescription) return false;
   if (/^继续收尾[：:]/u.test(trimmed)) return true;
   if (/^继续(?:执行|处理|推进)[：:]/u.test(trimmed) && /(?:产物|文件|媒体|工具|验证|后台)/u.test(trimmed)) return true;
   const hasConcreteArtifactEvidence = /(?:MEDIA:\s*(?:[A-Za-z]:[\\/]|\/|~\/|\.{1,2}\/)|(?:[A-Za-z]:[\\/]|\/|~\/|\.{1,2}\/)[^\s`"'<>]+\.(?:pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|mp4|mov|webm)\b)/iu.test(trimmed);

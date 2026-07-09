@@ -218,7 +218,7 @@ describe('Chat run progress transcript', () => {
     });
   });
 
-  it('renders the compact transcript and keeps the raw execution graph hidden by default', async () => {
+  it('renders the compact transcript first and keeps the execution graph as a collapsed secondary entry', async () => {
     const { Chat } = await import('@/pages/Chat/index');
 
     render(<Chat />);
@@ -229,6 +229,83 @@ describe('Chat run progress transcript', () => {
 
     expect(screen.getByText('我先尝试打开 QQMusic。')).toBeInTheDocument();
     expect(screen.getByText('已运行')).toBeInTheDocument();
-    expect(screen.queryByTestId('chat-execution-graph')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
+  });
+
+  it('surfaces live streaming commentary in the transcript while keeping the graph collapsed', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      messages: [
+        {
+          role: 'user',
+          content: '帮我先读一下这个文件再总结',
+          timestamp: Date.now() / 1000,
+        },
+      ],
+      loading: false,
+      error: null,
+      runError: null,
+      sending: true,
+      activeRunId: 'run-live-commentary',
+      streamingText: '',
+      streamingMessage: {
+        role: 'assistant',
+        content: [{ type: 'text', text: '我先读一下文件，马上给你结论。' }],
+      },
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: Date.now(),
+      pendingToolImages: [],
+      sessions: [{ key: 'agent:main:main' }],
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessionLabels: {},
+      sessionLastActivity: {},
+      thinkingLevel: null,
+      runtimeRuns: {
+        'run-live-commentary': {
+          runId: 'run-live-commentary',
+          sessionKey: 'agent:main:main',
+          status: 'running',
+          startedAt: 1773281731000,
+          lastEventAt: 1773281732000,
+          objective: '读取文件并总结',
+          planSummary: '',
+          planSteps: [],
+          artifacts: [],
+          verifications: [],
+          issues: [],
+          checkpoints: [],
+          gateEvaluations: [],
+          gateResult: undefined,
+          assistantText: '',
+          thinkingText: '',
+          progressEntries: [],
+          events: [
+            {
+              type: 'tool.started',
+              runId: 'run-live-commentary',
+              sessionKey: 'agent:main:main',
+              toolCallId: 'call-read-file',
+              name: 'read',
+              args: { filePath: '/tmp/demo.md' },
+              ts: 1773281731100,
+            },
+          ],
+        },
+      },
+    });
+
+    const { Chat } = await import('@/pages/Chat/index');
+
+    render(<Chat />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-run-progress')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('我先读一下文件，马上给你结论。')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
+    expect(screen.queryByTestId('mock-streaming-message')).not.toBeInTheDocument();
   });
 });

@@ -144,6 +144,15 @@ export function hasDeliveredImageGenerationResult(segmentMessages: RawMessage[])
     return true;
   }
 
+  // Some runtime/image bridge flows deliver the final image directly into the
+  // assistant stream without leaving a transcript-visible `image_generate`
+  // tool call inside this segment. Once user-visible image media is already in
+  // the chat, treat the generation as settled rather than keeping the composer
+  // stuck in a waiting state.
+  if (segmentMessages.some((message) => message.role === 'assistant' && messageHasDeliveredImage(message))) {
+    return true;
+  }
+
   const asyncStarts = collectAsyncImageTaskStarts(segmentMessages);
   if (asyncStarts.length === 0) return false;
   return segmentMessages.some((message) => message.role === 'assistant' && messageHasDeliveredImage(message));

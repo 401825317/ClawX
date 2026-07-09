@@ -192,4 +192,73 @@ describe('chat store loadSessions startup selection', () => {
 
     expect(useChatStore.getState().sessions.map((session) => session.key)).toEqual(['agent:uclaw3d:main']);
   });
+
+  it('closes a stuck lifecycle when sessions.list says the current run already failed', async () => {
+    const lastUserAt = 1_783_630_000_000;
+    const sessionUpdatedAt = 1_783_630_005_000;
+    gatewayRpcMock.mockImplementation(async (method: string) => {
+      if (method === 'sessions.list') {
+        return {
+          sessions: [
+            {
+              key: 'agent:main:session-failed',
+              displayName: 'Interrupted chat',
+              updatedAt: sessionUpdatedAt,
+              status: 'failed',
+              hasActiveRun: false,
+            },
+          ],
+        };
+      }
+      if (method === 'chat.history') {
+        return { messages: [] };
+      }
+      throw new Error(`Unexpected gateway RPC: ${method}`);
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-failed',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:session-failed' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: true,
+      activeRunId: 'run-stuck',
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: true,
+      lastUserMessageAt: lastUserAt,
+      pendingToolImages: [],
+      runtimeRuns: {
+        'run-stuck': {
+          runId: 'run-stuck',
+          sessionKey: 'agent:main:session-failed',
+          status: 'running',
+          startedAt: lastUserAt,
+          lastEventAt: sessionUpdatedAt - 1_000,
+          assistantText: '',
+          thinkingText: '',
+          events: [],
+        },
+      },
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadSessions();
+
+    const state = useChatStore.getState();
+    expect(state.sending).toBe(false);
+    expect(state.activeRunId).toBeNull();
+    expect(state.pendingFinal).toBe(false);
+    expect(state.runtimeRuns['run-stuck']).toEqual(expect.objectContaining({
+      status: 'error',
+      endedAt: sessionUpdatedAt,
+    }));
+  });
 });

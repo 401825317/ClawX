@@ -74,6 +74,7 @@ type UserRunCard = {
   steps: TaskStep[];
   messageStepTexts: string[];
   streamingReplyText: string | null;
+  liveText: string | null;
   elapsedStartedAtMs: number | null;
   elapsedCompletedMs: number | null;
   /**
@@ -687,7 +688,10 @@ export function Chat() {
     closeArtifactPanel();
   }, [currentSessionKey, closeArtifactPanel]);
   useEffect(() => {
-    setImageEditReference(null);
+    const timer = window.setTimeout(() => {
+      setImageEditReference(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [currentSessionKey]);
   const [childTranscriptsBySession, setChildTranscriptsBySession] = useState<Record<string, Record<string, RawMessage[]>>>({});
   const [questionDirectoryOpenSessionKey, setQuestionDirectoryOpenSessionKey] = useState<string | null>(null);
@@ -1163,6 +1167,7 @@ export function Chat() {
           steps: [],
           messageStepTexts: [],
           streamingReplyText: null,
+          liveText: null,
           elapsedStartedAtMs,
           elapsedCompletedMs: null,
           suppressThinking: false,
@@ -1188,6 +1193,7 @@ export function Chat() {
         steps: cleanedSteps,
         messageStepTexts: getPrimaryMessageStepTexts(cleanedSteps),
         streamingReplyText: null,
+        liveText: null,
         elapsedStartedAtMs: null,
         elapsedCompletedMs: elapsedCompletedMs ?? getRunDurationStepElapsedMs(cleanedSteps),
         suppressThinking: false,
@@ -1233,6 +1239,13 @@ export function Chat() {
     const streamIsInGraph =
       isLatestOpenRun && streamingReplyText == null && streamVisiblyActiveInGraph;
     const suppressThinking = streamIsInGraph;
+    const liveText = isLatestOpenRun && streamingReplyText == null
+      ? (() => {
+        const trimmedLiveText = stripProcessMessagePrefix(streamText, getPrimaryMessageStepTexts(steps)).trim();
+        if (!trimmedLiveText || isInternalAssistantReplyText(trimmedLiveText)) return null;
+        return trimmedLiveText;
+      })()
+      : null;
 
     return [{
       triggerIndex: idx,
@@ -1245,6 +1258,7 @@ export function Chat() {
       steps,
       messageStepTexts: getPrimaryMessageStepTexts(steps),
       streamingReplyText,
+      liveText,
       elapsedStartedAtMs,
       elapsedCompletedMs: cardActive ? null : (elapsedCompletedMs ?? getRunDurationStepElapsedMs(steps)),
       suppressThinking,
@@ -1376,28 +1390,38 @@ export function Chat() {
       const hasUserFacingActivity = runCardHasUserFacingActivity(card, generatedFiles);
       const hasProblem = runCardHasUserFacingProblem(card, generatedFiles);
       const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
+      const hasExecutionGraphDetails = card.steps.length > 0;
+      const hasVisibleProcessActivity = card.steps.length > 0 || (card.runtimeRun?.progressEntries?.length ?? 0) > 0;
+      const hasToolSteps = card.steps.some((step) => step.kind === 'tool');
+      const hasNarrationSteps = card.steps.some((step) => step.kind === 'message');
+      const hasRuntimeProgressEntries = (card.runtimeRun?.progressEntries?.length ?? 0) > 0;
       const shouldShowTranscript = shouldUseRunProgressTranscript(
         card.steps,
         generatedFiles.length,
         card.runtimeRun?.progressEntries,
+      ) && (
+        !!card.liveText
+        || card.streamingReplyText != null
+        || hasNarrationSteps
+        || hasRuntimeProgressEntries
+        || (!card.active && hasToolSteps && !card.runtimeRun)
       );
-      const hasVisibleProcessActivity = card.steps.length > 0 || (card.runtimeRun?.progressEntries?.length ?? 0) > 0;
+      const hasTextFirstSurface = shouldShowTranscript || card.streamingReplyText != null;
       const shouldExposeActiveGenericProcess = card.active && hasVisibleProcessActivity && !shouldShowTranscript;
-      const shouldShowRunStatus = (hasUserFacingActivity || shouldExposeActiveGenericProcess)
-        && (
-          card.active
-          || hasProblem
-          || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary || shouldExposeActiveGenericProcess))
-        );
-      const hideExecutionGraphByDefault = shouldShowTranscript
-        && generatedFiles.length === 0
-        && !devModeUnlocked;
-      const shouldRenderExecutionGraph = shouldShowRunStatus
-        && !hideExecutionGraphByDefault
+      const shouldRenderExecutionGraph = hasExecutionGraphDetails
         && (
           devModeUnlocked
           || hasProblem
-          || !shouldShowTranscript
+          || hasTextFirstSurface
+          || hasUserFacingActivity
+          || shouldExposeActiveGenericProcess
+        );
+      const shouldShowRunStatus = shouldRenderExecutionGraph
+        || (hasUserFacingActivity || hasTextFirstSurface || shouldExposeActiveGenericProcess)
+        && (
+          card.active
+          || hasProblem
+          || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary || hasVisibleProcessActivity))
         );
       map.set(card.triggerIndex, {
         shouldShowTranscript,
@@ -1414,11 +1438,15 @@ export function Chat() {
 
   useEffect(() => {
     if (!hasVisibleActiveExecutionGraph) return;
-    setRuntimeNowMs(Date.now());
-    const timer = window.setInterval(() => {
+    const tick = () => {
       setRuntimeNowMs(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timer);
+    };
+    const immediateTimer = window.setTimeout(tick, 0);
+    const timer = window.setInterval(tick, 1000);
+    return () => {
+      window.clearTimeout(immediateTimer);
+      window.clearInterval(timer);
+    };
   }, [hasVisibleActiveExecutionGraph]);
 
   const graphFoldedNarrationIndices = useMemo(() => {
@@ -1643,7 +1671,9 @@ export function Chat() {
                           const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
                           const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
                           const compactStatus = getRunCompactStatus(card);
-                          const detailsEnabled = devModeUnlocked;
+                          // The graph stays secondary by default, but it still
+                          // needs to be inspectable in normal chat mode.
+                          const detailsEnabled = true;
                           const surfaceState = runSurfaceStates.get(card.triggerIndex) ?? {
                             shouldShowTranscript: false,
                             shouldShowRunStatus: false,
@@ -1665,6 +1695,7 @@ export function Chat() {
                                   status={compactStatus}
                                   steps={card.steps}
                                   progressEntries={card.runtimeRun?.progressEntries}
+                                  liveText={card.liveText}
                                 />
                               )}
                               {shouldRenderExecutionGraph && (
@@ -1986,10 +2017,9 @@ function TypingIndicator() {
         <img src={DEFAULT_AGENT_AVATAR_SRC} alt="" className="h-full w-full rounded-full object-cover" />
       </div>
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
-        <div className="flex gap-1">
-          <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-          <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-          <span className="w-2 h-2 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+          <span>我先看下这条请求。</span>
         </div>
       </div>
     </div>
