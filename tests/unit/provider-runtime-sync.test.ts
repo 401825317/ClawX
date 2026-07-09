@@ -83,6 +83,11 @@ const PROMPT_CACHE_KEY_COMPAT = {
   supportsPromptCacheKey: true,
 };
 
+const OPENROUTER_REASONING_COMPAT = {
+  supportsPromptCacheKey: true,
+  thinkingFormat: 'openrouter',
+};
+
 function createProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
     id: 'moonshot',
@@ -166,6 +171,15 @@ describe('provider-runtime-sync refresh strategy', () => {
       api: 'openai-completions',
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      models: [
+        {
+          id: 'smart-latest',
+          name: '智能路由',
+          contextWindow: 200_000,
+          reasoning: true,
+          input: ['text', 'image'],
+        },
+      ],
     });
 
     await syncSavedProviderToRuntime(createManagedProvider(), undefined);
@@ -187,6 +201,15 @@ describe('provider-runtime-sync refresh strategy', () => {
       api: 'openai-completions',
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      models: [
+        {
+          id: 'smart-latest',
+          name: '智能路由',
+          contextWindow: 200_000,
+          reasoning: true,
+          input: ['text', 'image'],
+        },
+      ],
     });
 
     await syncSavedProviderToRuntime(createManagedProvider({
@@ -220,6 +243,15 @@ describe('provider-runtime-sync refresh strategy', () => {
       api: 'openai-completions',
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      models: [
+        {
+          id: 'smart-latest',
+          name: '智能路由',
+          contextWindow: 200_000,
+          reasoning: true,
+          input: ['text', 'image'],
+        },
+      ],
     });
 
     await syncSavedProviderToRuntime(createManagedProvider(), 'fresh-relay-key');
@@ -245,7 +277,9 @@ describe('provider-runtime-sync refresh strategy', () => {
       expect.objectContaining({
         id: 'smart-latest',
         contextWindow: 200_000,
-        compat: PROMPT_CACHE_KEY_COMPAT,
+        reasoning: true,
+        input: ['text', 'image'],
+        compat: OPENROUTER_REASONING_COMPAT,
       }),
     ]);
     expect(mainAgentEntry.models?.[0]?.compat).not.toHaveProperty('supportsLongCacheRetention');
@@ -275,7 +309,9 @@ describe('provider-runtime-sync refresh strategy', () => {
     expect(managedEntry.models).toEqual([
       expect.objectContaining({
         id: 'smart-latest',
-        compat: PROMPT_CACHE_KEY_COMPAT,
+        reasoning: true,
+        input: ['text', 'image'],
+        compat: OPENROUTER_REASONING_COMPAT,
       }),
     ]);
     expect(managedEntry.models?.[0]?.compat).not.toHaveProperty('supportsLongCacheRetention');
@@ -331,7 +367,13 @@ describe('provider-runtime-sync refresh strategy', () => {
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
       models: [
-        { id: 'smart-latest', name: '智能路由', contextWindow: 321_000 },
+        {
+          id: 'smart-latest',
+          name: '智能路由',
+          contextWindow: 321_000,
+          reasoning: true,
+          input: ['text', 'image'],
+        },
       ],
     });
 
@@ -345,6 +387,8 @@ describe('provider-runtime-sync refresh strategy', () => {
         id: 'smart-latest',
         name: '智能路由',
         contextWindow: 321_000,
+        reasoning: true,
+        input: ['text', 'image'],
       }),
     ]);
   });

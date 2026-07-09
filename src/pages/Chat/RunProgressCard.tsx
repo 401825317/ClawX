@@ -254,6 +254,16 @@ function buildRunProgressEntries(
   return entries;
 }
 
+function shouldRenderEntry(entry: RunProgressEntry): boolean {
+  if (entry.kind !== 'action') return true;
+  if (normalizeText(entry.command)) return true;
+  if (entry.status === 'running') return true;
+  if (PROBLEM_STATUSES.has(entry.status)) return true;
+  const normalizedText = normalizeText(entry.text);
+  if (!normalizedText) return false;
+  return normalizedText !== '已运行' && normalizedText !== '已调用相关工具';
+}
+
 export function shouldUseRunProgressTranscript(
   steps: TaskStep[],
   generatedFilesCount: number,
@@ -271,26 +281,26 @@ function ActionStatusIcon({ status }: { status: TaskStep['status'] }) {
 }
 
 export function RunProgressCard({ summary, status, steps, progressEntries }: RunProgressCardProps) {
-  const entries = buildRunProgressEntries(steps, progressEntries);
+  const entries = buildRunProgressEntries(steps, progressEntries).filter(shouldRenderEntry);
   if (entries.length === 0) return null;
 
   return (
     <div
       data-testid="chat-run-progress"
-      className="rounded-2xl border border-black/5 bg-black/[0.02] px-4 py-3 dark:border-white/10 dark:bg-white/[0.03]"
+      className="rounded-xl border border-black/6 bg-black/[0.015] px-3.5 py-2.5 dark:border-white/10 dark:bg-white/[0.025]"
     >
-      <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
+      <div className="mb-2 flex items-center gap-2 text-[11px] text-muted-foreground">
         <span className="shrink-0">
           <ActionStatusIcon status={status} />
         </span>
         <span className="truncate">{summary}</span>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-2.5">
         {entries.map((entry) => {
           if (entry.kind === 'narration') {
             return (
-              <p key={entry.id} className="text-sm leading-7 text-foreground/90 dark:text-foreground/85">
+              <p key={entry.id} className="text-sm leading-6 text-foreground/90 dark:text-foreground/85">
                 {entry.text}
               </p>
             );
@@ -300,7 +310,7 @@ export function RunProgressCard({ summary, status, steps, progressEntries }: Run
             return (
               <div
                 key={entry.id}
-                className="flex items-start gap-2 rounded-xl border border-amber-500/15 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:border-amber-300/15 dark:bg-amber-300/5 dark:text-amber-200/85"
+                className="flex items-start gap-2 rounded-lg border border-amber-500/15 bg-amber-500/[0.055] px-2.5 py-1.5 text-xs text-amber-700 dark:border-amber-300/15 dark:bg-amber-300/[0.07] dark:text-amber-200/85"
               >
                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 <span className="min-w-0 break-words leading-5">{entry.text}</span>
@@ -312,10 +322,10 @@ export function RunProgressCard({ summary, status, steps, progressEntries }: Run
             <div
               key={entry.id}
               className={cn(
-                'flex items-start gap-2 rounded-xl px-3 py-2 text-xs',
+                'flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-xs',
                 PROBLEM_STATUSES.has(entry.status)
                   ? 'border border-destructive/15 bg-destructive/5 text-destructive/85'
-                  : 'bg-black/[0.03] text-muted-foreground dark:bg-white/[0.04]',
+                  : 'bg-black/[0.025] text-muted-foreground dark:bg-white/[0.035]',
               )}
             >
               <div className="mt-0.5 shrink-0">
@@ -331,7 +341,7 @@ export function RunProgressCard({ summary, status, steps, progressEntries }: Run
                 <div className="flex flex-wrap items-center gap-2">
                   <span>{entry.text}</span>
                   {entry.command ? (
-                    <code className="rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80 dark:bg-white/10 dark:text-foreground/80">
+                    <code className="max-w-full break-all rounded-md bg-black/[0.045] px-1.5 py-0.5 font-mono text-[11px] leading-5 text-foreground/75 dark:bg-white/[0.08] dark:text-foreground/75">
                       {entry.command}
                     </code>
                   ) : null}

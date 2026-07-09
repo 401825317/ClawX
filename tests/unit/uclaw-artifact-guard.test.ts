@@ -70,22 +70,117 @@ describe('uclaw-artifact-guard', () => {
     vi.restoreAllMocks();
   });
 
-  it('injects Chinese and artifact delivery rules before prompt build', async () => {
+  it('injects only compact base rules for ordinary diagnostic prompts', async () => {
     const pluginModule = await loadGuard();
     const hooks = registerHooks(pluginModule);
     const promptHook = hooks.get('before_prompt_build');
 
     expect(promptHook).toBeTypeOf('function');
-    const result = await promptHook!({ runId: 'run-prompt-context' }) as { appendSystemContext?: string };
+    const result = await promptHook!({
+      runId: 'run-prompt-context',
+      userMessage: '只读诊断当前 ClawX 项目，不要改文件。请引用证据路径。',
+    }) as { appendSystemContext?: string };
+
+    expect(result.appendSystemContext).toContain('简体中文');
+    expect(result.appendSystemContext).toContain('普通工程诊断');
+    expect(result.appendSystemContext).not.toContain('真实本地产物');
+    expect(result.appendSystemContext).not.toContain('MEDIA:<absolute-path>');
+    expect(result.appendSystemContext).not.toContain('~/.openclaw/media/outbound/');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('prompt-context'));
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"hasArtifactRule":false'));
+    expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('做个电站维保'));
+  });
+
+  it('injects artifact delivery rules only for artifact-producing prompts', async () => {
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    const promptHook = hooks.get('before_prompt_build');
+
+    expect(promptHook).toBeTypeOf('function');
+    const result = await promptHook!({
+      runId: 'run-prompt-artifact-context',
+      userMessage: '帮我生成一份电站维保方案 PPT',
+    }) as { appendSystemContext?: string };
 
     expect(result.appendSystemContext).toContain('简体中文');
     expect(result.appendSystemContext).toContain('真实本地产物');
     expect(result.appendSystemContext).toContain('MEDIA:<absolute-path>');
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('prompt-context'));
+    expect(result.appendSystemContext).toContain('~/.openclaw/media/outbound/');
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('"hasArtifactRule":true'));
     expect(console.warn).not.toHaveBeenCalledWith(expect.stringContaining('做个电站维保'));
   });
 
-  it('blocks image generation tools when the current turn is not authorized as media intent', async () => {
+  it('blocks internal plumbing messages before transcript write', async () => {
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    const writeHook = hooks.get('before_message_write');
+
+    expect(writeHook).toBeTypeOf('function');
+    expect(writeHook!({
+      message: {
+        role: 'user',
+        content: '[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response.',
+      },
+    })).toEqual({ block: true });
+    expect(writeHook!({
+      message: {
+        role: 'user',
+        content: '[OpenClaw heartbeat poll]',
+      },
+    })).toEqual({ block: true });
+    expect(writeHook!({
+      message: {
+        role: 'assistant',
+        content: 'HEARTBEAT_OK',
+      },
+    })).toEqual({ block: true });
+    expect(writeHook!({
+      message: {
+        role: 'user',
+        content: '帮我分析一下 ClawX 为什么不像 Codex Desktop 聪明',
+      },
+    })).toBeUndefined();
+  });
+
+  it('rewrites bare /tmp screenshot outputs to the managed OpenClaw media directory', async () => {
+    vi.stubEnv('OPENCLAW_STATE_DIR', '/tmp/uclaw-test-openclaw');
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    const toolHook = hooks.get('before_tool_call');
+
+    expect(toolHook).toBeTypeOf('function');
+    const result = await toolHook!({
+      runId: 'run-screenshot-rewrite',
+      toolName: 'exec',
+      params: {
+        command: 'screencapture -x /tmp/uclaw_desktop_check2.png && file /tmp/uclaw_desktop_check2.png',
+      },
+    }) as { params?: { command?: string } };
+
+    expect(result.params?.command).toBe(
+      'mkdir -p /tmp/uclaw-test-openclaw/media/outbound && screencapture -x /tmp/uclaw-test-openclaw/media/outbound/uclaw_desktop_check2.png && file /tmp/uclaw-test-openclaw/media/outbound/uclaw_desktop_check2.png',
+    );
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('exec-screenshot-path-rewrite'));
+  });
+
+  it('does not rewrite ordinary non-screenshot /tmp file commands', async () => {
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    const toolHook = hooks.get('before_tool_call');
+
+    expect(toolHook).toBeTypeOf('function');
+    const result = await toolHook!({
+      runId: 'run-non-screenshot',
+      toolName: 'exec',
+      params: {
+        command: 'ls -lh /tmp/report.pdf',
+      },
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  it('blocks image generation tools without calling the host planner for media capability questions', async () => {
     vi.stubEnv('CLAWX_HOST_API_ORIGIN', 'http://127.0.0.1:13210');
     vi.stubEnv('CLAWX_HOST_API_TOKEN', 'host-token');
     const fetchMock = vi.fn().mockResolvedValue({
@@ -124,21 +219,7 @@ describe('uclaw-artifact-guard', () => {
       sessionKey: 'session-media-question',
     });
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:13210/api/media/intent-plan',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          Authorization: 'Bearer host-token',
-          'Content-Type': 'application/json',
-        }),
-      }),
-    );
-    const requestBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    expect(requestBody).toEqual(expect.objectContaining({
-      prompt: '我问你的是你用的生图模型是什么？',
-      requestedMode: 'chat',
-    }));
+    expect(fetchMock).not.toHaveBeenCalled();
 
     const result = toolHook!({
       runId: 'run-media-question',
@@ -154,6 +235,40 @@ describe('uclaw-artifact-guard', () => {
       block: true,
       blockReason: expect.stringContaining('没有授权生成图片'),
     }));
+  });
+
+  it('does not call the host planner for ordinary chat prompts', async () => {
+    vi.stubEnv('CLAWX_HOST_API_ORIGIN', 'http://127.0.0.1:13210');
+    vi.stubEnv('CLAWX_HOST_API_TOKEN', 'host-token');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pluginModule = await loadGuard();
+    const hooks = registerHooks(pluginModule);
+    await hooks.get('before_prompt_build')!({
+      runId: 'run-ordinary-chat',
+      sessionKey: 'session-ordinary-chat',
+      prompt: '帮我分析一下为什么现在像普通聊天壳子',
+      messages: [
+        { role: 'user', content: '帮我分析一下为什么现在像普通聊天壳子' },
+      ],
+    }, {
+      runId: 'run-ordinary-chat',
+      sessionKey: 'session-ordinary-chat',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    const result = hooks.get('before_tool_call')!({
+      runId: 'run-ordinary-chat',
+      sessionKey: 'session-ordinary-chat',
+      toolName: 'image_generate',
+      params: { action: 'generate', prompt: '配图' },
+    }, {
+      runId: 'run-ordinary-chat',
+      sessionKey: 'session-ordinary-chat',
+    }) as { block?: boolean };
+
+    expect(result?.block).toBe(true);
   });
 
   it('allows image generation tools only when planner authorizes a current media task', async () => {
@@ -214,6 +329,56 @@ describe('uclaw-artifact-guard', () => {
     expect(result).toBeUndefined();
   });
 
+  it('emits native progress updates before a tool call starts', async () => {
+    const pluginModule = await loadGuard();
+    const { hooks, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+
+    const result = hooks.get('before_tool_call')!({
+      runId: 'run-native-progress-start',
+      sessionKey: 'session-native-progress-start',
+      toolCallId: 'call-open-music',
+      toolName: 'exec',
+      params: {
+        command: 'open -a "QQMusic"',
+      },
+    }, {
+      runId: 'run-native-progress-start',
+      sessionKey: 'session-native-progress-start',
+    });
+
+    expect(result).toBeUndefined();
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-native-progress-start',
+      sessionKey: 'session-native-progress-start',
+      stream: 'progress',
+      data: expect.objectContaining({
+        entry: expect.objectContaining({
+          id: 'progress:native:tool:call-open-music:commentary',
+          kind: 'commentary',
+          text: '我先尝试打开 QQMusic。',
+          toolCallId: 'call-open-music',
+          source: 'native',
+        }),
+      }),
+    }));
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-native-progress-start',
+      sessionKey: 'session-native-progress-start',
+      stream: 'progress',
+      data: expect.objectContaining({
+        entry: expect.objectContaining({
+          id: 'progress:native:tool:call-open-music',
+          kind: 'action',
+          text: '正在执行',
+          status: 'running',
+          command: 'open -a "QQMusic"',
+          toolCallId: 'call-open-music',
+          source: 'native',
+        }),
+      }),
+    }));
+  });
+
   it('registers an OpenClaw tool-result middleware as an execution event producer', async () => {
     const pluginModule = await loadGuard();
     const { toolResultMiddlewares } = createHookRegistry(pluginModule);
@@ -222,6 +387,37 @@ describe('uclaw-artifact-guard', () => {
     expect(toolResultMiddlewares[0]?.options).toEqual({
       runtimes: ['openclaw'],
     });
+  });
+
+  it('emits native completion progress when a tool result arrives', async () => {
+    const pluginModule = await loadGuard();
+    const { toolResultMiddlewares, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
+
+    await toolResultMiddlewares[0]?.handler({
+      toolCallId: 'call-read-capabilities',
+      toolName: 'read',
+      result: { summary: 'done' },
+      isError: false,
+    }, {
+      runId: 'run-native-progress-result',
+      sessionKey: 'session-native-progress-result',
+    });
+
+    expect(emitAgentEvent).toHaveBeenCalledWith(expect.objectContaining({
+      runId: 'run-native-progress-result',
+      sessionKey: 'session-native-progress-result',
+      stream: 'progress',
+      data: expect.objectContaining({
+        entry: expect.objectContaining({
+          id: 'progress:native:tool:call-read-capabilities',
+          kind: 'action',
+          text: '已读取相关内容',
+          status: 'completed',
+          toolCallId: 'call-read-capabilities',
+          source: 'native',
+        }),
+      }),
+    }));
   });
 
   it('forces heartbeat polls to return only the internal heartbeat sentinel', async () => {

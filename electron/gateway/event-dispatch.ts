@@ -83,7 +83,7 @@ function logChatMessageDiagnostic(payload: unknown): void {
 
 function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatRuntimeEvent>): void {
   if (!event) return;
-  if (event.type === 'assistant.delta' || event.type === 'thinking.delta' || event.type === 'progress.update') return;
+  if (event.type === 'assistant.delta' || event.type === 'thinking.delta') return;
 
   const base = {
     type: event.type,
@@ -101,6 +101,18 @@ function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatR
       name: event.name,
       isError: event.type === 'tool.completed' ? event.isError : undefined,
       durationMs: event.type === 'tool.completed' ? event.durationMs : undefined,
+    });
+    return;
+  }
+
+  if (event.type === 'progress.update') {
+    logger.info('[metric] chat.runtime.event', {
+      ...base,
+      progressId: event.entry.id,
+      progressKind: event.entry.kind,
+      progressStatus: event.entry.status,
+      progressSource: event.entry.source,
+      toolCallId: event.entry.toolCallId,
     });
     return;
   }

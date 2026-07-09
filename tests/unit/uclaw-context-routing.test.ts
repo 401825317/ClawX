@@ -47,6 +47,15 @@ describe('UClaw tool routing context', () => {
     expect(toolsContext).toContain('Shell commands are not a substitute for reliable desktop UI automation of native chat apps');
   });
 
+  it('directs temporary screenshots into OpenClaw-managed media roots', () => {
+    expect(toolsContext).toContain('save it under an OpenClaw media/workspace directory');
+    expect(toolsContext).toContain('~/.openclaw/media/outbound/');
+    expect(toolsContext).toContain('not directly under `/tmp/*.png`');
+    expect(toolsContext).toContain('Local media tools reject bare system-temp image paths');
+    expect(artifactGuard).toContain('rewriteTmpScreenshotMediaPaths');
+    expect(artifactGuard).toContain('exec-screenshot-path-rewrite');
+  });
+
   it('keeps ordinary public web research on web tools before browser or shell fallbacks', () => {
     expect(toolsContext).toContain('For public search, research, URL reading, current information');
     expect(toolsContext).toContain('prefer `web_search` first');

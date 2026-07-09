@@ -6,7 +6,7 @@ import {
   stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
-import type { AttachedFileMeta, ChatSession, ContentBlock, RawMessage, ToolStatus } from './types';
+import type { AttachedFileMeta, ChatRuntimeRunState, ChatSession, ContentBlock, RawMessage, ToolStatus } from './types';
 
 // Module-level timestamp tracking the last chat event received.
 // Used by the safety timeout to avoid false-positive "no response" errors
@@ -169,6 +169,58 @@ function normalizeStreamingMessage(message: unknown): unknown {
   return didChange
     ? { ...rawMessage, content: normalizedContent }
     : rawMessage;
+}
+
+function buildRuntimeStreamingContent(
+  currentStream: RawMessage | null | undefined,
+  assistantText: string,
+  thinkingText: string,
+): ContentBlock[] {
+  const preservedBlocks = Array.isArray(currentStream?.content)
+    ? (currentStream.content as ContentBlock[]).filter((block) => block.type !== 'text' && block.type !== 'thinking')
+    : [];
+  const nextBlocks: ContentBlock[] = [];
+
+  if (thinkingText.trim()) {
+    nextBlocks.push({
+      type: 'thinking',
+      thinking: thinkingText,
+    });
+  }
+
+  if (assistantText.trim()) {
+    nextBlocks.push({
+      type: 'text',
+      text: assistantText,
+    });
+  }
+
+  return [...nextBlocks, ...preservedBlocks];
+}
+
+export function buildStreamingAssistantMessageFromRuntimeRun(
+  run: Pick<ChatRuntimeRunState, 'assistantText' | 'thinkingText'> | null | undefined,
+  currentStream: RawMessage | null | undefined,
+  options: {
+    timestamp?: number;
+  } = {},
+): RawMessage | null {
+  const assistantText = run?.assistantText ?? '';
+  const thinkingText = run?.thinkingText ?? '';
+  const normalizedCurrentStream = currentStream && currentStream.role !== 'user' && currentStream.role !== 'toolresult'
+    ? normalizeStreamingMessage(currentStream) as RawMessage
+    : null;
+
+  if (!assistantText.trim() && !thinkingText.trim()) {
+    return normalizedCurrentStream ?? null;
+  }
+
+  return {
+    ...(normalizedCurrentStream ?? {}),
+    role: 'assistant',
+    content: buildRuntimeStreamingContent(normalizedCurrentStream, assistantText, thinkingText),
+    timestamp: normalizedCurrentStream?.timestamp ?? options.timestamp ?? Date.now() / 1000,
+  } as RawMessage;
 }
 
 /**

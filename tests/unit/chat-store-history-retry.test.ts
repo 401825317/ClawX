@@ -1415,6 +1415,106 @@ describe('useChatStore startup history retry', () => {
     expect(state.activeRunId).toBe('run-anthropic');
   });
 
+  it('rebuilds compact tool-work transcript state from history after reload', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-history-progress',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:session-history-progress' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      runtimeRuns: {},
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    gatewayRpcMock.mockResolvedValueOnce({
+      messages: [
+        {
+          id: 'user-file-capabilities',
+          role: 'user',
+          content: '你现在能做哪些文件类产物？',
+          timestamp: 7000,
+        },
+        {
+          id: 'assistant-history-read',
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'call-read-capabilities',
+              name: 'read',
+              arguments: { path: '/tmp/capabilities.md' },
+            },
+          ],
+          timestamp: 7500,
+        },
+        {
+          role: 'toolResult',
+          toolCallId: 'call-read-capabilities',
+          toolName: 'read',
+          content: [
+            {
+              type: 'text',
+              text: '- 文档\n- 表格\n- 演示文稿',
+            },
+          ],
+          details: {
+            status: 'completed',
+            aggregated: '- 文档\n- 表格\n- 演示文稿',
+            path: '/tmp/capabilities.md',
+          },
+          isError: false,
+          timestamp: 8000,
+        },
+        {
+          id: 'assistant-history-final',
+          role: 'assistant',
+          content: '我现在可以生成文档、表格和演示文稿。',
+          timestamp: 8500,
+        },
+      ],
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const state = useChatStore.getState();
+    const run = state.runtimeRuns['history:agent:main:session-history-progress:user-file-capabilities'];
+    expect(run).toBeDefined();
+    expect(run?.status).toBe('completed');
+    expect(run?.progressEntries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'progress:tool:call-read-capabilities:commentary',
+        kind: 'commentary',
+        text: '我先查看相关内容。',
+      }),
+      expect.objectContaining({
+        id: 'progress:tool:call-read-capabilities',
+        kind: 'action',
+        text: '已读取相关内容',
+        command: '/tmp/capabilities.md',
+        status: 'completed',
+      }),
+    ]));
+    expect(run?.gateResult).toEqual(expect.objectContaining({ decision: 'deliverable' }));
+    expect(state.messages.map((message) => message.id)).toEqual([
+      'user-file-capabilities',
+      'assistant-history-read',
+      'assistant-history-final',
+    ]);
+    expect(state.messages.at(-1)?.content).toBe('我现在可以生成文档、表格和演示文稿。');
+  });
+
   // Cross-protocol coverage: OpenAI Chat Completions native shape. The
   // tool-call signal is the top-level `tool_calls` array on the message, with
   // no `stop_reason` / `stopReason` field (OpenAI uses `finish_reason` at the
@@ -1970,6 +2070,86 @@ describe('useChatStore startup history retry', () => {
       'user-composite-clean',
       'composite-result:run-clean',
     ]);
+  });
+
+  it('re-arms an open historical tool run on cold history reload', async () => {
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            {
+              id: 'user-open-run',
+              role: 'user',
+              content: [{ type: 'text', text: '你现在能做哪些文件类产物？' }],
+              timestamp: 1783610000,
+            },
+            {
+              id: 'assistant-open-run-tool',
+              role: 'assistant',
+              content: [{
+                type: 'toolCall',
+                id: 'call-open-read',
+                name: 'read',
+                arguments: { path: '/tmp/capabilities.md' },
+              }],
+              timestamp: 1783610001,
+            },
+            {
+              role: 'toolResult',
+              toolCallId: 'call-open-read',
+              toolName: 'read',
+              content: [{
+                type: 'text',
+                text: '- 文档\n- 表格\n- 演示文稿',
+              }],
+              details: {
+                status: 'completed',
+                aggregated: '- 文档\n- 表格\n- 演示文稿',
+                path: '/tmp/capabilities.md',
+              },
+              isError: false,
+              timestamp: 1783610002,
+            },
+          ],
+        };
+      }
+      return { messages: [] };
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:session-running',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:session-running' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      runtimeRuns: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      runError: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const state = useChatStore.getState();
+    expect(state.sending).toBe(true);
+    expect(state.pendingFinal).toBe(true);
+    expect(state.activeRunId).toBe('history:agent:main:session-running:user-open-run');
+    expect(state.lastUserMessageAt).toBe(1783610000 * 1000);
+    expect(state.runtimeRuns[state.activeRunId as string]).toEqual(expect.objectContaining({
+      status: 'running',
+      sessionKey: 'agent:main:session-running',
+    }));
   });
 
   it('does not treat prior-turn assistant history as progress for a new send', async () => {

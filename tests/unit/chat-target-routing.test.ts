@@ -215,6 +215,37 @@ describe('chat target routing', () => {
     vi.useRealTimers();
   });
 
+  it('drops internal heartbeat turns before they enter chat.send', async () => {
+    const { useChatStore } = await import('@/stores/chat');
+
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().sendMessage('[OpenClaw heartbeat poll]');
+
+    expect(useChatStore.getState().messages).toEqual([]);
+    expect(useChatStore.getState().sending).toBe(false);
+    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send')).toBe(false);
+    expect(gatewayRpcMock.mock.calls.some(([method]) => method === 'chat.send')).toBe(false);
+  });
+
   it('switches to the selected agent main session before sending text', async () => {
     const { useChatStore } = await import('@/stores/chat');
 

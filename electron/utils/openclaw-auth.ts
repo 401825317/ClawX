@@ -392,6 +392,53 @@ function ensurePluginHookAccess(config: Record<string, unknown>, pluginId: strin
   return true;
 }
 
+function ensureClawXMemoryFeaturesDisabled(config: Record<string, unknown>): boolean {
+  let modified = false;
+
+  const agents = isPlainRecord(config.agents) ? config.agents as Record<string, unknown> : {};
+  const defaults = isPlainRecord(agents.defaults) ? agents.defaults as Record<string, unknown> : {};
+  const memorySearch = isPlainRecord(defaults.memorySearch) ? defaults.memorySearch as Record<string, unknown> : {};
+  const sync = isPlainRecord(memorySearch.sync) ? memorySearch.sync as Record<string, unknown> : {};
+
+  if (memorySearch.enabled !== false) {
+    memorySearch.enabled = false;
+    modified = true;
+  }
+  if (memorySearch.provider !== 'none') {
+    memorySearch.provider = 'none';
+    modified = true;
+  }
+  if (sync.onSessionStart !== false) {
+    sync.onSessionStart = false;
+    modified = true;
+  }
+
+  memorySearch.sync = sync;
+  defaults.memorySearch = memorySearch;
+  agents.defaults = defaults;
+  config.agents = agents;
+
+  const plugins = isPlainRecord(config.plugins)
+    ? config.plugins as Record<string, unknown>
+    : (Array.isArray(config.plugins) ? { load: [...config.plugins] } : {});
+  const slots = isPlainRecord(plugins.slots) ? plugins.slots as Record<string, unknown> : {};
+  if (slots.memory !== 'none') {
+    slots.memory = 'none';
+    modified = true;
+  }
+  plugins.slots = slots;
+  config.plugins = plugins;
+
+  if (ensurePluginEntryDisabled(config, 'memory-core')) {
+    modified = true;
+  }
+  if (ensurePluginEntryDisabled(config, 'active-memory')) {
+    modified = true;
+  }
+
+  return modified;
+}
+
 function isParallelWebSearchConfigured(config: Record<string, unknown>): boolean {
   const tools = isPlainRecord(config.tools) ? config.tools : null;
   const web = tools && isPlainRecord(tools.web) ? tools.web : null;
@@ -892,7 +939,6 @@ const ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GU
 const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
   'acpx',
-  'memory-core',
 ]);
 const FREE_WEB_SEARCH_PROVIDER_ID = 'parallel-free';
 const LEGACY_DUCKDUCKGO_SEARCH_PLUGIN_ID = 'duckduckgo';
@@ -3233,6 +3279,11 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
           modified = true;
         }
       }
+    }
+
+    if (ensureClawXMemoryFeaturesDisabled(config)) {
+      modified = true;
+      console.log('[sanitize] Disabled ClawX memory embedding features (memorySearch/provider, memory slot, and memory plugins)');
     }
 
     // ── plugins section ──────────────────────────────────────────────

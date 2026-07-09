@@ -132,6 +132,9 @@ export type ChatRuntimeProgressEntry = {
   command?: string;
   detail?: string;
   dedupeKey?: string;
+  toolCallId?: string;
+  stepId?: string;
+  source?: 'native' | 'derived' | 'history' | string;
 };
 
 export type ChatRuntimeEvent =

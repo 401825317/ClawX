@@ -162,6 +162,9 @@ function normalizeProgressEntry(value: unknown): ChatRuntimeProgressEntry | null
     command: readString(record.command),
     detail: readString(record.detail),
     dedupeKey: readString(record.dedupeKey),
+    toolCallId: readString(record.toolCallId),
+    stepId: readString(record.stepId),
+    source: readString(record.source),
   };
 }
 

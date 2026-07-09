@@ -7,7 +7,7 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, ArrowDownToLine, Loader2 } from 'lucide-react';
 import { useChatStore, type ChatRuntimeRunState, type RawMessage } from '@/stores/chat';
-import { isInternalMessage } from '@/stores/chat/helpers';
+import { buildStreamingAssistantMessageFromRuntimeRun, isInternalMessage } from '@/stores/chat/helpers';
 import { buildBaselineRunKey, getBaseline } from '@/stores/baseline-cache';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
@@ -88,6 +88,12 @@ type UserRunCard = {
    * "work is still in progress".
    */
   suppressThinking: boolean;
+};
+
+type RunSurfaceState = {
+  shouldShowTranscript: boolean;
+  shouldShowRunStatus: boolean;
+  shouldRenderExecutionGraph: boolean;
 };
 
 type QuestionDirectoryItem = {
@@ -821,37 +827,6 @@ export function Chat() {
   const streamMsg = streamingMessage && typeof streamingMessage === 'object'
     ? streamingMessage as unknown as { role?: string; content?: unknown; timestamp?: number }
     : null;
-  const streamTimestamp = typeof streamMsg?.timestamp === 'number' ? streamMsg.timestamp : 0;
-  useEffect(() => {
-    if (!sending) {
-      streamingTimestampStore.delete(currentSessionKey);
-      return;
-    }
-    if (!streamingTimestampStore.has(currentSessionKey)) {
-      setBoundedSessionEntry(streamingTimestampStore, currentSessionKey, streamTimestamp || Date.now() / 1000);
-    }
-  }, [currentSessionKey, sending, streamTimestamp]);
-
-  const streamingTimestamp = sending
-    ? (streamingTimestampStore.get(currentSessionKey) ?? streamTimestamp)
-    : 0;
-  const streamText = streamMsg ? extractText(streamMsg) : (typeof streamingMessage === 'string' ? streamingMessage : '');
-  const hasStreamText = streamText.trim().length > 0;
-  // Whether the streaming chunk currently carries a `thinking` block. Used as
-  // a liveness signal so the run stays "active" (and the ExecutionGraphCard
-  // keeps showing its trailing "Thinking..." indicator) during the brief window
-  // between a tool finishing and the next text/tool chunk arriving — that gap
-  // is normally only filled by streamed thinking. NOT included in
-  // `shouldRenderStreaming`: a thinking-only stream chunk should not produce
-  // a chat bubble (thinking is rendered exclusively inside the ExecutionGraph).
-  const streamThinking = streamMsg ? extractThinking(streamMsg) : null;
-  const hasStreamThinking = !!streamThinking && streamThinking.trim().length > 0;
-  const streamTools = streamMsg ? extractToolUse(streamMsg) : [];
-  const hasStreamTools = streamTools.length > 0;
-  const streamImages = streamMsg ? extractImages(streamMsg) : [];
-  const hasStreamImages = streamImages.length > 0;
-  const hasStreamToolStatus = streamingTools.length > 0;
-  const hasRunningStreamToolStatus = streamingTools.some((tool) => tool.status === 'running');
   const latestRealUserMessage = findLatestRealUserMessage(messages);
   const currentRuntimeRun = activeRunId
     ? mergeRuntimeRunsForSegment(
@@ -868,6 +843,46 @@ export function Chat() {
       }),
     )
     : null;
+  const effectiveStreamMsg = useMemo(() => (
+    buildStreamingAssistantMessageFromRuntimeRun(
+      currentRuntimeRun,
+      streamMsg as RawMessage | null,
+      { timestamp: currentRuntimeRun?.lastEventAt },
+    ) as (RawMessage & { timestamp?: number }) | null
+  ), [currentRuntimeRun, streamMsg]);
+  const streamTimestamp = typeof effectiveStreamMsg?.timestamp === 'number' ? effectiveStreamMsg.timestamp : 0;
+  useEffect(() => {
+    if (!sending) {
+      streamingTimestampStore.delete(currentSessionKey);
+      return;
+    }
+    if (!streamingTimestampStore.has(currentSessionKey)) {
+      setBoundedSessionEntry(streamingTimestampStore, currentSessionKey, streamTimestamp || Date.now() / 1000);
+    }
+  }, [currentSessionKey, sending, streamTimestamp]);
+
+  const streamingTimestamp = sending
+    ? (streamingTimestampStore.get(currentSessionKey) ?? streamTimestamp)
+    : 0;
+  const streamText = effectiveStreamMsg
+    ? extractText(effectiveStreamMsg)
+    : (typeof streamingMessage === 'string' ? streamingMessage : '');
+  const hasStreamText = streamText.trim().length > 0;
+  // Whether the streaming chunk currently carries a `thinking` block. Used as
+  // a liveness signal so the run stays "active" (and the ExecutionGraphCard
+  // keeps showing its trailing "Thinking..." indicator) during the brief window
+  // between a tool finishing and the next text/tool chunk arriving — that gap
+  // is normally only filled by streamed thinking. NOT included in
+  // `shouldRenderStreaming`: a thinking-only stream chunk should not produce
+  // a chat bubble (thinking is rendered exclusively inside the ExecutionGraph).
+  const streamThinking = effectiveStreamMsg ? extractThinking(effectiveStreamMsg) : null;
+  const hasStreamThinking = !!streamThinking && streamThinking.trim().length > 0;
+  const streamTools = effectiveStreamMsg ? extractToolUse(effectiveStreamMsg) : [];
+  const hasStreamTools = streamTools.length > 0;
+  const streamImages = effectiveStreamMsg ? extractImages(effectiveStreamMsg) : [];
+  const hasStreamImages = streamImages.length > 0;
+  const hasStreamToolStatus = streamingTools.length > 0;
+  const hasRunningStreamToolStatus = streamingTools.some((tool) => tool.status === 'running');
   const currentRuntimeHasToolActivity = hasRuntimeGraphActivity(currentRuntimeRun);
   const hasRunningRuntimeToolStatus = hasRunningRuntimeTool(currentRuntimeRun);
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamTools || hasStreamImages || hasStreamToolStatus);
@@ -924,13 +939,11 @@ export function Chat() {
 
   const {
     userRunCards,
-    foldedNarrationIndices,
     userRunCardsByTriggerIndex,
   } = useMemo(() => {
     // Indices of intermediate assistant process messages that are represented
     // in the ExecutionGraphCard (narration text and/or thinking). We suppress
     // them from the chat stream so they don't appear duplicated below the graph.
-    const foldedNarrationIndices = new Set<number>();
     const userRunCards = messages.flatMap((message, idx): UserRunCard[] => {
     if (!isRealUserMessage(message) || subagentCompletionInfos[idx]) return [];
 
@@ -975,6 +988,12 @@ export function Chat() {
       && hasDeliveredImageGenerationResult(postTriggerMessages)
       && !pendingImageGeneration;
     const runStillExecutingTools = hasToolActivity && !hasFinalReply;
+    const runtimeKeepsRunOpen = isLatestRunSegment
+      && segmentRuntimeRun?.status === 'running'
+      && !hasFinalReply
+      && (runtimeHasToolActivity
+        || runtimeHasRunningTool
+        || (segmentRuntimeRun?.progressEntries?.length ?? 0) > 0);
     // runStillExecutingTools bridges the brief gap between tool rounds when
     // Gateway temporarily clears sending.  However, after an explicit abort
     // (which clears activeRunId), we must NOT keep the run "open" — so we
@@ -995,7 +1014,14 @@ export function Chat() {
     const isLatestOpenRun = isLatestRunSegment
       && !runError
       && !runCompletedInHistory
-      && (sending || pendingFinal || pendingImageGeneration || hasAnyStreamContent || (runStillExecutingTools && !!activeRunId));
+      && (
+        sending
+        || pendingFinal
+        || pendingImageGeneration
+        || hasAnyStreamContent
+        || runtimeKeepsRunOpen
+        || (runStillExecutingTools && !!activeRunId)
+      );
 
     const buildSteps = (omitLastStreamingMessageSegment: boolean): TaskStep[] => {
       let builtSteps = deriveTaskSteps({
@@ -1181,19 +1207,6 @@ export function Chat() {
     // While the live stream carries the answer, fold assistant history into the
     // graph. If the reply is already in history but not streaming, keep it in
     // the chat stream (do not pass `isLatestOpenRun` alone — that folds all).
-    if (cardActive) {
-      const segmentReplyOffset = findReplyMessageIndex(postTriggerMessages, hasActiveStreamingReply);
-      for (let offset = 0; offset < postTriggerMessages.length; offset += 1) {
-        if (offset === segmentReplyOffset) continue;
-        const candidate = postTriggerMessages[offset];
-        if (!candidate || candidate.role !== 'assistant') continue;
-        const hasNarrationText = extractText(candidate).trim().length > 0;
-        const hasThinking = !!extractThinking(candidate);
-        if (!hasNarrationText && !hasThinking) continue;
-        foldedNarrationIndices.add(idx + 1 + offset);
-      }
-    }
-
     // The graph should stay "active" (expanded, can show trailing thinking)
     // for the entire duration of the run — not just until a streaming reply
     // appears.  Tying active to streamingReplyText caused a flicker: a brief
@@ -1248,31 +1261,9 @@ export function Chat() {
     }
     return {
       userRunCards,
-      foldedNarrationIndices,
       userRunCardsByTriggerIndex,
     };
   }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, hasStreamTools, hasStreamToolStatus, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns, lastUserMessageAt]);
-  const hasActiveExecutionGraph = userRunCards.some((card) => card.active);
-
-  useEffect(() => {
-    if (!hasActiveExecutionGraph) return;
-    setRuntimeNowMs(Date.now());
-    const timer = window.setInterval(() => {
-      setRuntimeNowMs(Date.now());
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [hasActiveExecutionGraph]);
-
-  const foldedProcessMessageIndices = useMemo(() => {
-    const indices = new Set<number>();
-    for (const card of userRunCards) {
-      if (!card.active && card.streamingReplyText == null) continue;
-      for (let index = card.triggerIndex + 1; index <= card.segmentEnd; index += 1) {
-        indices.add(index);
-      }
-    }
-    return indices;
-  }, [userRunCards]);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
   let pendingVideoGeneration = false;
@@ -1314,8 +1305,6 @@ export function Chat() {
       imageGenerationSettledInHistory
       || (!hasRunningRuntimeToolStatus && !hasRunningStreamToolStatus)
     );
-  const inputRunActive = sending || pendingImageGeneration || pendingVideoGeneration || (hasActiveExecutionGraph && !runSettledInHistory);
-
   useEffect(() => {
     if (!shouldClearStoreLifecycleFromHistory) return;
     useChatStore.setState({
@@ -1377,6 +1366,98 @@ export function Chat() {
     for (const files of filesByRun.values()) all.push(...files);
     return all;
   }, [filesByRun]);
+
+  const runSurfaceStates = useMemo(() => {
+    const map = new Map<number, RunSurfaceState>();
+    for (const card of userRunCards) {
+      const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
+      const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
+      const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
+      const hasUserFacingActivity = runCardHasUserFacingActivity(card, generatedFiles);
+      const hasProblem = runCardHasUserFacingProblem(card, generatedFiles);
+      const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
+      const shouldShowTranscript = shouldUseRunProgressTranscript(
+        card.steps,
+        generatedFiles.length,
+        card.runtimeRun?.progressEntries,
+      );
+      const hasVisibleProcessActivity = card.steps.length > 0 || (card.runtimeRun?.progressEntries?.length ?? 0) > 0;
+      const shouldExposeActiveGenericProcess = card.active && hasVisibleProcessActivity && !shouldShowTranscript;
+      const shouldShowRunStatus = (hasUserFacingActivity || shouldExposeActiveGenericProcess)
+        && (
+          card.active
+          || hasProblem
+          || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary || shouldExposeActiveGenericProcess))
+        );
+      const hideExecutionGraphByDefault = shouldShowTranscript
+        && generatedFiles.length === 0
+        && !devModeUnlocked;
+      const shouldRenderExecutionGraph = shouldShowRunStatus
+        && !hideExecutionGraphByDefault
+        && (
+          devModeUnlocked
+          || hasProblem
+          || !shouldShowTranscript
+        );
+      map.set(card.triggerIndex, {
+        shouldShowTranscript,
+        shouldShowRunStatus,
+        shouldRenderExecutionGraph,
+      });
+    }
+    return map;
+  }, [devModeUnlocked, filesByRun, messages, runtimeNowMs, userRunCards]);
+
+  const hasVisibleActiveExecutionGraph = userRunCards.some((card) => (
+    card.active && Boolean(runSurfaceStates.get(card.triggerIndex)?.shouldRenderExecutionGraph)
+  ));
+
+  useEffect(() => {
+    if (!hasVisibleActiveExecutionGraph) return;
+    setRuntimeNowMs(Date.now());
+    const timer = window.setInterval(() => {
+      setRuntimeNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [hasVisibleActiveExecutionGraph]);
+
+  const graphFoldedNarrationIndices = useMemo(() => {
+    const indices = new Set<number>();
+    for (const card of userRunCards) {
+      if (!card.active) continue;
+      if (!runSurfaceStates.get(card.triggerIndex)?.shouldRenderExecutionGraph) continue;
+      for (let index = card.triggerIndex + 1; index <= card.segmentEnd; index += 1) {
+        if (index === card.replyIndex) continue;
+        const candidate = messages[index];
+        if (!candidate || candidate.role !== 'assistant') continue;
+        const hasNarrationText = extractText(candidate).trim().length > 0;
+        const hasThinking = !!extractThinking(candidate);
+        if (!hasNarrationText && !hasThinking) continue;
+        indices.add(index);
+      }
+    }
+    return indices;
+  }, [messages, runSurfaceStates, userRunCards]);
+
+  const graphFoldedProcessMessageIndices = useMemo(() => {
+    const indices = new Set<number>();
+    for (const card of userRunCards) {
+      if (!runSurfaceStates.get(card.triggerIndex)?.shouldRenderExecutionGraph) continue;
+      if (!card.active && card.streamingReplyText == null) continue;
+      for (let index = card.triggerIndex + 1; index <= card.segmentEnd; index += 1) {
+        indices.add(index);
+      }
+    }
+    return indices;
+  }, [runSurfaceStates, userRunCards]);
+  const inputRunActive = sending || pendingImageGeneration || pendingVideoGeneration || (hasVisibleActiveExecutionGraph && !runSettledInHistory);
+  const shouldShowThinkingActivity = inputRunActive
+    && hasStreamThinking
+    && !hasStreamText
+    && !hasStreamTools
+    && !hasStreamImages
+    && !hasStreamToolStatus
+    && !hasVisibleActiveExecutionGraph;
 
   const transcriptRunKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -1525,9 +1606,9 @@ export function Chat() {
                   {messages.map((msg, idx) => {
                     if (isInternalMessage(msg) && !hasUserFacingMediaAttachments(msg)) return null;
                     const isTranscriptFolded = transcriptFoldedMessageIndices.has(idx);
-                    const isFoldedNarration = foldedNarrationIndices.has(idx) || isTranscriptFolded;
+                    const isFoldedNarration = graphFoldedNarrationIndices.has(idx) || isTranscriptFolded;
                     if (isFoldedNarration && !hasUserFacingMediaAttachments(msg)) return null;
-                    const suppressToolCards = foldedProcessMessageIndices.has(idx) || isTranscriptFolded;
+                    const suppressToolCards = graphFoldedProcessMessageIndices.has(idx) || isTranscriptFolded;
                     const isToolOnlyAssistant = normalizeMessageRole(msg.role) === 'assistant'
                       && extractToolUse(msg).length > 0
                       && extractText(msg).trim().length === 0
@@ -1559,23 +1640,16 @@ export function Chat() {
                             : `${currentSessionKey}:trigger-${card.triggerIndex}`;
                           const userOverride = graphExpandedOverrides[runKey];
                           const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
-                          const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd);
+                          const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
                           const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
                           const compactStatus = getRunCompactStatus(card);
-                          const hasUserFacingActivity = runCardHasUserFacingActivity(card, generatedFiles);
-                          const hasProblem = runCardHasUserFacingProblem(card, generatedFiles);
-                          const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
                           const detailsEnabled = devModeUnlocked;
-                          const shouldShowTranscript = shouldUseRunProgressTranscript(
-                            card.steps,
-                            generatedFiles.length,
-                            card.runtimeRun?.progressEntries,
-                          );
-                          const shouldShowRunStatus = hasUserFacingActivity
-                            && (card.active || hasProblem || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary)));
-                          const hideExecutionGraphByDefault = shouldShowTranscript
-                            && generatedFiles.length === 0
-                            && !detailsEnabled;
+                          const surfaceState = runSurfaceStates.get(card.triggerIndex) ?? {
+                            shouldShowTranscript: false,
+                            shouldShowRunStatus: false,
+                            shouldRenderExecutionGraph: false,
+                          };
+                          const { shouldShowTranscript, shouldShowRunStatus, shouldRenderExecutionGraph } = surfaceState;
                           if (!shouldShowRunStatus && !shouldShowTranscript && generatedFiles.length === 0) return null;
                           // Keep the run surface compact by default. User toggles
                           // persist across history refreshes through this controlled
@@ -1593,7 +1667,7 @@ export function Chat() {
                                   progressEntries={card.runtimeRun?.progressEntries}
                                 />
                               )}
-                              {shouldShowRunStatus && !hideExecutionGraphByDefault && (
+                              {shouldRenderExecutionGraph && (
                                 <ExecutionGraphCard
                                   key={`graph-${currentSessionKey}:${card.triggerIndex}`}
                                   agentLabel={card.agentLabel}
@@ -1633,19 +1707,19 @@ export function Chat() {
                       OR when there's streaming content without an active graph */}
                   {shouldRenderStreaming && (
                     streamingReplyText != null
-                    || !hasActiveExecutionGraph
+                    || !hasVisibleActiveExecutionGraph
                     || (hasStreamText && streamTools.length === 0 && !hasRunningStreamToolStatus && !hasRunningRuntimeToolStatus)
                   ) && (
                     <ChatMessage
-                      suppressToolCards={hasActiveExecutionGraph || foldedProcessMessageIndices.size > 0}
-                      assistantAvatarSrc={currentAgentAvatarSrc}
+                        suppressToolCards={hasVisibleActiveExecutionGraph || graphFoldedProcessMessageIndices.size > 0}
+                        assistantAvatarSrc={currentAgentAvatarSrc}
                       message={(() => {
-                        const base = streamMsg
+                        const base = effectiveStreamMsg
                           ? {
-                              ...(streamMsg as Record<string, unknown>),
-                              role: (typeof streamMsg.role === 'string' ? streamMsg.role : 'assistant') as RawMessage['role'],
-                              content: streamMsg.content ?? streamText,
-                              timestamp: streamMsg.timestamp ?? streamingTimestamp,
+                              ...(effectiveStreamMsg as unknown as Record<string, unknown>),
+                              role: (typeof effectiveStreamMsg.role === 'string' ? effectiveStreamMsg.role : 'assistant') as RawMessage['role'],
+                              content: effectiveStreamMsg.content ?? streamText,
+                              timestamp: effectiveStreamMsg.timestamp ?? streamingTimestamp,
                             }
                           : {
                               role: 'assistant' as const,
@@ -1668,27 +1742,31 @@ export function Chat() {
                       })()}
                       textOverride={streamingReplyText ?? undefined}
                       isStreaming
-                      streamingTools={streamingReplyText != null || hasActiveExecutionGraph ? [] : streamingTools}
+                      streamingTools={streamingReplyText != null || hasVisibleActiveExecutionGraph ? [] : streamingTools}
                       onOpenFile={handleOpenAttachedFile}
                       onUseImageAsReference={handleUseImageAsReference}
                     />
                   )}
 
+                  {shouldShowThinkingActivity && (
+                    <ActivityIndicator phase="thinking" />
+                  )}
+
                   {/* Activity indicator: waiting for next AI turn after tool execution */}
-                  {inputRunActive && pendingFinal && !shouldRenderStreaming && !hasActiveExecutionGraph && (
+                  {inputRunActive && pendingFinal && !shouldRenderStreaming && !hasVisibleActiveExecutionGraph && (
                     <ActivityIndicator phase="tool_processing" />
                   )}
 
-                  {pendingImageGeneration && !hasActiveExecutionGraph && (
+                  {pendingImageGeneration && !hasVisibleActiveExecutionGraph && (
                     <ImageGeneratingIndicator />
                   )}
 
-                  {pendingVideoGeneration && !hasActiveExecutionGraph && (
+                  {pendingVideoGeneration && !hasVisibleActiveExecutionGraph && (
                     <VideoGeneratingIndicator />
                   )}
 
                   {/* Typing indicator when sending but no stream content yet */}
-                  {inputRunActive && !pendingFinal && !hasAnyStreamContent && !hasActiveExecutionGraph && !pendingImageGeneration && !pendingVideoGeneration && (
+                  {inputRunActive && !pendingFinal && !hasAnyStreamContent && !hasVisibleActiveExecutionGraph && !pendingImageGeneration && !pendingVideoGeneration && (
                     <TypingIndicator />
                   )}
                 </>
@@ -1918,10 +1996,10 @@ function TypingIndicator() {
   );
 }
 
-// ── Activity Indicator (shown between tool cycles) ─────────────
+// ── Activity Indicator (shown between tool cycles / thinking-only stream) ─────────────
 
-function ActivityIndicator({ phase }: { phase: 'tool_processing' }) {
-  void phase;
+function ActivityIndicator({ phase }: { phase: 'tool_processing' | 'thinking' }) {
+  const label = phase === 'thinking' ? '正在思考…' : '正在整理执行结果…';
   return (
     <div className="flex gap-3" data-testid="chat-activity-indicator">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
@@ -1930,7 +2008,7 @@ function ActivityIndicator({ phase }: { phase: 'tool_processing' }) {
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>正在整理执行结果…</span>
+          <span>{label}</span>
         </div>
       </div>
     </div>

@@ -4,7 +4,7 @@ import type {
   ProviderType,
   ProviderTypeInfo,
 } from './types';
-import { PI_AI_PROMPT_CACHE_KEY_COMPAT } from '../pi-ai-model-cost';
+import { PI_AI_OPENROUTER_REASONING_COMPAT, PI_AI_PROMPT_CACHE_KEY_COMPAT } from '../pi-ai-model-cost';
 import { JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW } from '../../utils/junfeiai-distribution';
 
 const LINGZHIWUXIAN_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
@@ -77,7 +77,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
           input: ['text', 'image'],
           contextWindow: JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          compat: PI_AI_PROMPT_CACHE_KEY_COMPAT,
+          compat: PI_AI_OPENROUTER_REASONING_COMPAT,
         },
         {
           id: 'qwen-latest',

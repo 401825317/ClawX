@@ -1,6 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
@@ -9,20 +9,25 @@ const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
 const MEDIA_INTENT_TOOL_GATE_HOOK_ID = `${PLUGIN_ID}:media-intent-tool-gate`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
 let runtimeEventSeq = 0;
-const PROMPT_CONTEXT = [
-  'UClaw 交付与语言规则：',
-  '- 如果最新用户消息是内部心跳 `[OpenClaw heartbeat poll]`，必须只回复 `HEARTBEAT_OK`，不能继续、评价、补做或复述任何历史任务。',
+const BASE_PROMPT_CONTEXT = [
+  'UClaw 基础回复规则：',
   '- 默认所有面向用户的自然语言回复必须使用简体中文；不要因为工具、技能、日志、模板或上一次回复是英文而切换成英文。',
+  '- 先判断当前用户真实意图；普通工程诊断、配置查询和只读分析任务应优先查证事实、引用证据路径，不要套用产物生成流程。',
+].join('\n');
+const ARTIFACT_PROMPT_CONTEXT = [
+  'UClaw 产物与外部操作规则（仅在当前轮涉及产物、媒体或本地应用操作时适用）：',
   '- 用户要求生成、创建、导出、美化或打开 PPT/PPTX、Word/DOCX、Excel/XLSX、PDF、文档、报告、表格、图片、网页、脚本或压缩包时，必须交付真实本地产物，不能只回复计划、承诺、大纲或说明。',
   '- 用户对上一轮已生成的产物给出负反馈或修改意图（例如太丑、不满意、不行、重做、换一版、美化、优化）时，应视为新的产物修订任务：必须直接制作一个新的非覆盖改进版，不能只评价或承诺。',
   '- 如果专用产物工具不可用，继续使用可用的 skill、exec、Node、Python 或 uv 路径创建文件；只有完成并验证、遇到具体阻塞点、或需要用户确认时才能结束。',
   '- 文件任务最终回复必须包含 MEDIA:<absolute-path> 或已验证的绝对文件路径。',
   '- 旧的 uclaw-computer-use 插件不属于可靠执行面；不要把启用它当作恢复路径，也不要假装存在 computer_* 桌面工具。',
+  '- 如果确实需要用 shell 生成临时截图或图片供后续视觉/图片工具读取，必须写入 OpenClaw media/workspace 目录，例如 `~/.openclaw/media/outbound/`；不要写入裸 `/tmp/*.png`，因为本地媒体读取会拒绝非受管目录。',
   '- 用户要求打开/操作微信、QQ、钉钉、飞书、本机浏览器或其他本地应用并发送外部消息时，只有在当前工具清单存在可靠结构化 connector 且已经得到工具成功证据后，才能说“已发送/已打开”。',
   '- 如果没有可靠 connector，必须用简体中文说明具体能力缺失或阻塞点，可以给出消息草稿，但不能声称已经操作桌面或发出消息。',
 ].join('\n');
+const PROMPT_CONTEXT = `${BASE_PROMPT_CONTEXT}\n\n${ARTIFACT_PROMPT_CONTEXT}`;
 
-const MEDIA_INTENT_GATE_TIMEOUT_MS = 8_000;
+const MEDIA_INTENT_GATE_TIMEOUT_MS = 1_200;
 const MEDIA_INTENT_GATE_TTL_MS = 10 * 60 * 1000;
 const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate']);
 const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
@@ -38,6 +43,15 @@ const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|
 const ARTIFACT_REVISION_NEGATION_RE = /(?:不要|别|不用|先别|无需|不需要|do not|don't|no need).{0,12}(?:重做|重新|修改|改|美化|优化|生成|制作|redo|remake|regenerate|improve|polish)/iu;
 const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
 const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
+const INTERNAL_SENTINEL_RE = /^\s*(?:HEARTBEAT_OK|NO_REPLY)\s*$/iu;
+const GATEWAY_RESTART_CONTINUATION_RE = /\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\./iu;
+const RUNTIME_EVENT_CONTINUATION_RE = /^Continue the OpenClaw runtime event\.?\s*$/iu;
+const MEDIA_KEYWORD_RE = /(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|动起来|截图|截屏|image|photo|picture|poster|illustration|cover|video|animate|screenshot)/iu;
+const MEDIA_INFO_OR_CAPABILITY_RE = /(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why).{0,36}(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|poster|video|screenshot)|(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|poster|video|screenshot).{0,36}(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why)/iu;
+const IMAGE_GENERATE_REQUEST_RE = /(?:生图|画(?:一张|张|个)?|绘制|生成.{0,16}(?:图片|图像|照片|海报|插画|封面)|(?:图片|图像|照片|海报|插画|封面).{0,16}(?:生成|制作|做|画)|(?:generate|create|make|draw).{0,24}(?:image|photo|picture|poster|illustration|cover))/iu;
+const IMAGE_EDIT_REQUEST_RE = /(?:修图|改图|编辑图片|图片编辑|图像编辑|美化图片|(?:把|将|给|帮).{0,30}(?:图片|图像|照片|这张图|上一张).{0,40}(?:改|换|去掉|去除|加|添加|美化|编辑)|(?:edit|modify|retouch|remove|add).{0,40}(?:image|photo|picture))/iu;
+const VIDEO_GENERATE_REQUEST_RE = /(?:生视频|生成.{0,16}视频|视频.{0,16}(?:生成|制作|做)|动起来|动画化|转成视频|(?:generate|create|make|animate).{0,24}video|image[-\s]?to[-\s]?video)/iu;
+const DESKTOP_SCREENSHOT_REQUEST_RE = /(?:截图|截屏|屏幕截图|当前桌面|当前屏幕|screenshot|screen capture)/iu;
 const PROMISE_ONLY_RE = /(?:(?:^|[。！？!?；;\n\r]\s*)(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在|继续|直接|随后|稍后)|(?:接下来|下一步|随后|稍后|现在|马上|继续).{0,12}(?:我)?(?:会|将|来|准备|可以|马上|先|继续|直接)?|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成|校验|验证|测试|检查)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|修(?:复|掉|正|改)?|修改|调整|补(?:做|齐|上)|校验|验证|测试|检查|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish|fix|repair|validate|verify|test|continue))/iu;
 const ARTIFACT_REPAIR_PROMISE_CUE_RE = /(?:发现.{0,80}(?:问题|不对|不符合|未通过|失败|bug|错误)|实际.{0,40}(?:生成|只有|多了|少了|不符合)|(?:多了|少了|额外).{0,30}(?:页|项|个|张|条)|首屏可见|验证未通过|校验未通过|测试未通过|不符合(?:交互|预期|要求)|空页|页数不(?:对|符)|公式(?:缺失|错误)|交互(?:异常|错误)|bug|错误)/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
@@ -59,6 +73,8 @@ const COMPOSITE_TASK_RE = /^\s*\d+\.\s+\[[^\]]+\]\s+.+$/gmu;
 const COMPOSITE_REQUIRED_ARTIFACT_RE = /产物要求：必须为这个子任务生成一个可见、可追踪的产物/gu;
 const RAW_COMPOSITE_STRONG_CUE_RE = /(?:每(?:个|项|件|类|种)(?:事儿|事情|任务|产物)?|每个事儿|各(?:来|做|生成|出)|分别|都(?:随便)?(?:给我)?(?:来|做|生成|出)|一套|组合任务|多个|多种|全都|全部)/iu;
 const RAW_COMPOSITE_SEPARATOR_RE = /[，、,；;]|(?:\s+(?:和|以及|还有|并且)\s*)/u;
+const SCREENSHOT_COMMAND_RE = /(?:screencapture|gnome-screenshot|scrot|grim|spectacle|import\s+-window\s+root|xwd|desktop[_-]?screenshot|screen\s*capture|screenshot|截图|截屏)/iu;
+const TMP_SCREENSHOT_MEDIA_PATH_RE = /\/tmp\/((?:uclaw|clawx|desktop|screen|screenshot)[A-Za-z0-9._ -]*\.(?:png|jpe?g|webp|bmp))/giu;
 const RAW_COMPOSITE_ARTIFACT_DETECTORS = [
   {
     id: 'image-generation',
@@ -306,6 +322,82 @@ function summarizeMediaIntentPlan(plan) {
   };
 }
 
+function buildLocalMediaIntentPlan(prompt) {
+  const text = String(prompt ?? '').trim();
+  if (!text) return undefined;
+  if (isHeartbeatPoll(text) || isInternalTranscriptText(text)) {
+    return {
+      action: 'chat',
+      source: 'local',
+      intentKind: 'current_non_media_task',
+      currentTurnMediaRequest: false,
+      confidence: 1,
+      reason: 'local_internal_or_runtime_message',
+    };
+  }
+  if (MEDIA_INFO_OR_CAPABILITY_RE.test(text)) {
+    return {
+      action: 'chat',
+      source: 'local',
+      intentKind: 'current_non_media_task',
+      currentTurnMediaRequest: false,
+      confidence: 0.95,
+      reason: 'local_media_info_or_capability_question',
+    };
+  }
+  if (VIDEO_GENERATE_REQUEST_RE.test(text)) {
+    return {
+      action: 'video_generate',
+      source: 'local',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 0.9,
+      reason: 'local_video_generation_request',
+    };
+  }
+  if (IMAGE_EDIT_REQUEST_RE.test(text)) {
+    return {
+      action: 'image_edit',
+      source: 'local',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 0.85,
+      reason: 'local_image_edit_request',
+    };
+  }
+  if (IMAGE_GENERATE_REQUEST_RE.test(text)) {
+    return {
+      action: 'image_generate',
+      source: 'local',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 0.9,
+      reason: 'local_image_generation_request',
+    };
+  }
+  if (DESKTOP_SCREENSHOT_REQUEST_RE.test(text)) {
+    return {
+      action: 'desktop_screenshot',
+      source: 'local',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      confidence: 0.85,
+      reason: 'local_desktop_screenshot_request',
+    };
+  }
+  if (!MEDIA_KEYWORD_RE.test(text)) {
+    return {
+      action: 'chat',
+      source: 'local',
+      intentKind: 'ordinary_chat',
+      currentTurnMediaRequest: false,
+      confidence: 0.9,
+      reason: 'local_no_media_terms',
+    };
+  }
+  return undefined;
+}
+
 function rememberMediaIntentGate(event, ctx, gate) {
   const runId = getRunId(event, ctx);
   const sessionKey = getSessionKey(event, ctx);
@@ -355,6 +447,16 @@ async function requestMediaIntentPlanFromHost(event) {
       ok: false,
       reason: 'missing_prompt',
       promptChars: 0,
+    };
+  }
+
+  const localPlan = buildLocalMediaIntentPlan(prompt);
+  if (localPlan) {
+    return {
+      ok: true,
+      source: 'local',
+      plan: localPlan,
+      promptChars: prompt.length,
     };
   }
 
@@ -420,7 +522,7 @@ async function buildMediaIntentGate(event, ctx) {
   const plan = result.ok ? result.plan : undefined;
   const allowedMediaTools = allowedMediaToolsForPlan(plan);
   const gate = rememberMediaIntentGate(event, ctx, {
-    source: result.ok ? 'host-planner' : 'fallback',
+    source: result.ok ? (result.source || 'host-planner') : 'fallback',
     reason: result.ok ? (plan?.reason || 'host_planner') : result.reason,
     promptChars: result.promptChars,
     plan: summarizeMediaIntentPlan(plan),
@@ -440,6 +542,31 @@ async function buildMediaIntentGate(event, ctx) {
     reason: gate.reason,
   });
   return gate;
+}
+
+function shouldInjectArtifactPromptContext(event, gate) {
+  const latest = extractLatestUserRequestText(event);
+  const allUserText = extractUserRequestText(event);
+  const text = latest || allUserText;
+  if (!text.trim()) return false;
+  return Boolean(
+    gate?.authorized
+    || gate?.currentTurnMediaRequest
+    || isArtifactRequest(text)
+    || isArtifactRevisionFeedback(text)
+    || isDesktopActionRequest(text)
+    || matchRawCompositeArtifactDetectors(text).length > 0
+  );
+}
+
+function buildPromptContextForEvent(event, gate) {
+  const includeArtifactContext = shouldInjectArtifactPromptContext(event, gate);
+  return {
+    text: includeArtifactContext
+      ? `${BASE_PROMPT_CONTEXT}\n\n${ARTIFACT_PROMPT_CONTEXT}`
+      : BASE_PROMPT_CONTEXT,
+    includeArtifactContext,
+  };
 }
 
 function normalizeToolName(event) {
@@ -498,6 +625,82 @@ function buildMediaToolBlockReason(decision) {
   return '当前用户消息没有授权生成图片，已阻止 image_generate 执行。';
 }
 
+function resolveOpenClawHomeForPlugin() {
+  const explicitHome = normalizeOptionalString(process.env.OPENCLAW_HOME);
+  if (!explicitHome) return homedir();
+  if (explicitHome === '~' || explicitHome.startsWith('~/') || explicitHome.startsWith('~\\')) {
+    return resolve(explicitHome.replace(/^~(?=$|[\\/])/, homedir()));
+  }
+  return resolve(explicitHome);
+}
+
+function expandOpenClawPathForPlugin(value) {
+  if (value === '~' || value.startsWith('~/') || value.startsWith('~\\')) {
+    return resolve(value.replace(/^~(?=$|[\\/])/, resolveOpenClawHomeForPlugin()));
+  }
+  return value;
+}
+
+function resolveOpenClawConfigDirForPlugin() {
+  const explicitStateDir = normalizeOptionalString(process.env.OPENCLAW_STATE_DIR);
+  if (explicitStateDir) return resolve(expandOpenClawPathForPlugin(explicitStateDir));
+  const explicitConfigPath = normalizeOptionalString(process.env.OPENCLAW_CONFIG_PATH)
+    ?? normalizeOptionalString(process.env.OPENCLAW_CONFIG);
+  if (explicitConfigPath) return dirname(resolve(expandOpenClawPathForPlugin(explicitConfigPath)));
+  return join(resolveOpenClawHomeForPlugin(), '.openclaw');
+}
+
+function resolveManagedScreenshotDir() {
+  return join(resolveOpenClawConfigDirForPlugin(), 'media', 'outbound');
+}
+
+function commandParamKey(params) {
+  for (const key of ['command', 'cmd', 'script']) {
+    if (typeof params?.[key] === 'string' && params[key].trim()) return key;
+  }
+  return undefined;
+}
+
+function rewriteTmpScreenshotMediaPaths(command) {
+  const original = String(command ?? '');
+  if (!SCREENSHOT_COMMAND_RE.test(original)) return null;
+
+  const managedScreenshotDir = resolveManagedScreenshotDir();
+  const rewrittenPaths = [];
+  const rewritten = original.replace(TMP_SCREENSHOT_MEDIA_PATH_RE, (match, fileName) => {
+    const replacement = join(managedScreenshotDir, fileName);
+    if (replacement !== match) {
+      rewrittenPaths.push({ from: match, to: replacement });
+    }
+    return replacement;
+  });
+  if (rewrittenPaths.length === 0 || rewritten === original) return null;
+
+  return {
+    command: `mkdir -p ${managedScreenshotDir} && ${rewritten}`,
+    rewrittenPaths,
+  };
+}
+
+function rewriteExecScreenshotParams(event) {
+  const toolName = normalizeToolName(event);
+  if (!/^(?:exec|exec_command|shell|bash|terminal|run_command)$/iu.test(toolName)) return null;
+  const params = normalizeToolParams(event);
+  const key = commandParamKey(params);
+  if (!key) return null;
+  const rewrite = rewriteTmpScreenshotMediaPaths(params[key]);
+  if (!rewrite) return null;
+  return {
+    params: {
+      ...params,
+      [key]: rewrite.command,
+    },
+    rewrittenPaths: rewrite.rewrittenPaths,
+    commandKey: key,
+    toolName,
+  };
+}
+
 function isArtifactCapabilityQuestion(text) {
   const value = String(text ?? '').replace(/\s+/gu, ' ').trim();
   if (!value) return false;
@@ -528,6 +731,74 @@ function isHeartbeatPoll(text) {
 function isHeartbeatOk(text) {
   resetRegex(HEARTBEAT_OK_RE);
   return HEARTBEAT_OK_RE.test(String(text ?? ''));
+}
+
+function isOpenClawRuntimeEventPromptText(text) {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return false;
+  resetRegex(RUNTIME_EVENT_CONTINUATION_RE);
+  if (RUNTIME_EVENT_CONTINUATION_RE.test(normalized)) return true;
+  return normalized.split(/\n+/u).some((line) => {
+    resetRegex(RUNTIME_EVENT_CONTINUATION_RE);
+    return RUNTIME_EVENT_CONTINUATION_RE.test(line.trim());
+  });
+}
+
+function isRuntimeSystemInjectionText(text) {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return false;
+  if (/^\s*System\s*\(untrusted\)\s*:/iu.test(normalized)) return true;
+  if (
+    /An async command you ran earlier has completed/iu.test(normalized)
+    && /Do not relay it to the user unless explicitly requested/iu.test(normalized)
+  ) {
+    return true;
+  }
+  if (/^\[Inter-session message\]/iu.test(normalized)) return true;
+  if (isOpenClawRuntimeEventPromptText(normalized)) return true;
+  if (
+    /^\s*Current time\s*:/iu.test(normalized)
+    && /^\s*Current time\s*:[^\n]*\/\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC\s*$/iu.test(normalized)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isInternalTranscriptText(text) {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return false;
+  resetRegex(INTERNAL_SENTINEL_RE);
+  return INTERNAL_SENTINEL_RE.test(normalized)
+    || isHeartbeatPoll(normalized)
+    || GATEWAY_RESTART_CONTINUATION_RE.test(normalized)
+    || isRuntimeSystemInjectionText(normalized);
+}
+
+function classifyInternalTranscriptMessage(message) {
+  if (!isPlainRecord(message)) return undefined;
+  const role = String(message.role ?? '').toLowerCase();
+  const text = extractMessageText(message);
+  const normalized = text.trim();
+  if (!normalized) return undefined;
+
+  resetRegex(INTERNAL_SENTINEL_RE);
+  if (INTERNAL_SENTINEL_RE.test(normalized)) return 'internal_sentinel';
+  if (role === 'user' && isHeartbeatPoll(normalized)) return 'heartbeat_poll_user';
+  if ((role === 'toolresult' || role === 'tool_result' || role === 'tool') && isHeartbeatPoll(normalized)) {
+    return 'heartbeat_poll_tool_result';
+  }
+  if ((role === 'user' || role === 'system') && GATEWAY_RESTART_CONTINUATION_RE.test(normalized)) {
+    return 'gateway_restart_continuation';
+  }
+  if ((role === 'user' || role === 'assistant' || role === 'system') && isRuntimeSystemInjectionText(normalized)) {
+    return 'runtime_system_injection';
+  }
+  return undefined;
+}
+
+function isInternalTranscriptMessage(message) {
+  return Boolean(classifyInternalTranscriptMessage(message));
 }
 
 function inferRequestedArtifactKind(text) {
@@ -1486,10 +1757,162 @@ function buildToolStep(event) {
   };
 }
 
+function summarizeProgressCommand(command) {
+  const candidate = String(command ?? '')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .find((line) => !/^(?:set\s+-[A-Za-z]+|printf\b|echo\b|#|true$|false$)/u.test(line));
+  return truncateText(candidate || String(command ?? ''), 160);
+}
+
+function extractProgressPathLike(params) {
+  for (const key of ['path', 'filePath', 'url']) {
+    if (typeof params?.[key] === 'string' && params[key].trim()) {
+      return truncateText(params[key].trim(), 160);
+    }
+  }
+  return undefined;
+}
+
+function extractToolProgressCommand(event) {
+  const params = normalizeToolParams(event);
+  const commandKey = commandParamKey(params);
+  if (commandKey) {
+    return summarizeProgressCommand(params[commandKey]);
+  }
+  return extractProgressPathLike(params);
+}
+
+function extractOpenAppName(command) {
+  const byApp = command.match(/\bopen\s+-a\s+["']?([^"'\n]+)["']?/iu);
+  if (byApp?.[1]) return byApp[1].trim();
+  const byPath = command.match(/\bopen\s+((?:\/|~\/)[^\n]+)/u);
+  if (!byPath?.[1]) return undefined;
+  const normalized = byPath[1].trim();
+  return normalized.split(/[\\/]/u).pop()?.replace(/\.app$/iu, '') || normalized;
+}
+
+function buildNativeToolCommentary(toolName, command) {
+  const label = String(toolName ?? '').trim().toLowerCase();
+  if (label === 'exec') {
+    if (!command) return '我先继续执行当前步骤。';
+    if (/\b(?:mdfind|find|lsregister|locate|rg|ls)\b/iu.test(command) && /(?:Applications|Desktop|Music|音乐|QQ|Netease|qq|netease)/iu.test(command)) {
+      return '我先在本机查找相关应用和快捷方式。';
+    }
+    if (/\bopen\b/iu.test(command)) {
+      const appName = extractOpenAppName(command);
+      return appName ? `我先尝试打开 ${appName}。` : '我先尝试启动相关应用。';
+    }
+    if (/\bosascript\b/iu.test(command) && /\b(?:keystroke|key\s+code|activate)\b/iu.test(command)) {
+      return '我尝试继续执行应用里的下一步操作。';
+    }
+    if (/\b(?:pgrep|ps)\b/iu.test(command)) {
+      return '我再确认应用是否仍在运行。';
+    }
+    if (/\b(?:cat|sed|awk|jq|plutil|defaults)\b/iu.test(command)) {
+      return '我先查看相关信息。';
+    }
+    return undefined;
+  }
+  if (label === 'web_fetch' || label === 'browser') return '我先继续查看相关页面和内容。';
+  if (label === 'read') return '我先查看相关内容。';
+  if (label === 'edit' || label === 'apply_patch') return '我先修改相关内容。';
+  return undefined;
+}
+
+function buildNativeToolActionText(toolName, status, command) {
+  const label = String(toolName ?? '').trim().toLowerCase();
+  if (status === 'running') {
+    if (label === 'web_fetch' || label === 'browser') return '正在查看页面';
+    if (label === 'read') return '正在读取相关内容';
+    if (label === 'edit' || label === 'apply_patch') return '正在修改相关内容';
+    return '正在执行';
+  }
+  if (status === 'error') return '执行失败';
+  if (label === 'web_fetch' || label === 'browser') return '已访问相关页面';
+  if (label === 'read') return '已读取相关内容';
+  if (label === 'edit' || label === 'apply_patch') return '已修改相关内容';
+  return '已运行';
+}
+
+function buildNativeToolProgressId(event, suffix = '') {
+  const toolCallId = normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id);
+  const base = toolCallId
+    ? `progress:native:tool:${toolCallId}`
+    : `progress:native:tool:${hashString(normalizeToolName(event) || 'tool')}`;
+  return suffix ? `${base}:${suffix}` : base;
+}
+
+function emitNativeToolProgress(api, event, ctx, entry) {
+  const runEvent = {
+    runId: getRunId(event, ctx),
+    sessionKey: getSessionKey(event, ctx),
+    cwd: event?.cwd ?? ctx?.cwd,
+  };
+  if (!getRunId(runEvent)) return;
+  emitRuntimeEvent(api, runEvent, 'progress', {
+    entry: {
+      ...entry,
+      source: 'native',
+      toolCallId: normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id),
+    },
+  });
+}
+
+function emitToolCallProgress(api, event, ctx) {
+  const toolName = normalizeToolName(event);
+  if (!toolName) return;
+  const command = extractToolProgressCommand(event);
+  const commentary = buildNativeToolCommentary(toolName, command);
+  if (commentary) {
+    emitNativeToolProgress(api, event, ctx, {
+      id: buildNativeToolProgressId(event, 'commentary'),
+      kind: 'commentary',
+      text: commentary,
+      command,
+      stepId: normalizeOptionalString(event?.toolCallId),
+    });
+  }
+  emitNativeToolProgress(api, event, ctx, {
+    id: buildNativeToolProgressId(event),
+    kind: 'action',
+    text: buildNativeToolActionText(toolName, 'running', command),
+    status: 'running',
+    command,
+    stepId: normalizeOptionalString(event?.toolCallId),
+  });
+}
+
+function emitToolResultProgress(api, event, ctx) {
+  const toolName = normalizeToolName(event);
+  if (!toolName) return;
+  const failed = isToolError(event);
+  emitNativeToolProgress(api, event, ctx, {
+    id: buildNativeToolProgressId(event),
+    kind: 'action',
+    text: buildNativeToolActionText(toolName, failed ? 'error' : 'completed'),
+    status: failed ? 'error' : 'completed',
+    stepId: normalizeOptionalString(event?.toolCallId),
+  });
+  if (!failed) return;
+  const detail = summarizeToolFailure(event);
+  if (!detail) return;
+  emitNativeToolProgress(api, event, ctx, {
+    id: buildNativeToolProgressId(event, 'status'),
+    kind: 'status',
+    text: detail,
+    status: 'error',
+    detail,
+    stepId: normalizeOptionalString(event?.toolCallId),
+  });
+}
+
 function emitToolResultRuntimeEvents(api, event, ctx) {
   const runEvent = buildMiddlewareRunEvent(event, ctx);
   if (!getRunId(runEvent)) return;
 
+  emitToolResultProgress(api, event, ctx);
   emitRuntimeEvent(api, runEvent, 'step', {
     step: buildToolStep(event),
     toolCallId: event?.toolCallId,
@@ -1592,17 +2015,32 @@ function registerLifecycleHook(api, name, handler, options) {
 function registerArtifactGuard(api) {
   registerToolResultMiddleware(api);
   if (typeof api.registerHook === 'function' || typeof api.on === 'function') {
+    registerLifecycleHook(api, 'before_message_write', (event, ctx) => {
+      const reason = classifyInternalTranscriptMessage(event?.message);
+      if (!reason) return undefined;
+      logDiagnostic('internal-transcript-block', {
+        eventId: eventId(event, ctx),
+        role: event?.message?.role,
+        reason,
+      });
+      return { block: true };
+    }, {
+      name: `${PLUGIN_ID}:internal-transcript-isolation`,
+      description: 'Keep OpenClaw heartbeat, restart continuation, and runtime plumbing messages out of persisted transcripts.',
+      priority: 1000,
+    });
     registerLifecycleHook(api, 'before_prompt_build', async (event, ctx) => {
-      await buildMediaIntentGate(event, ctx);
+      const gate = await buildMediaIntentGate(event, ctx);
+      const promptContext = buildPromptContextForEvent(event, gate);
       logDiagnostic('prompt-context', {
         eventId: eventId(event, ctx),
         injected: true,
-        contextChars: PROMPT_CONTEXT.length,
+        contextChars: promptContext.text.length,
         hasChineseRule: true,
-        hasArtifactRule: true,
+        hasArtifactRule: promptContext.includeArtifactContext,
       });
       return {
-        appendSystemContext: PROMPT_CONTEXT,
+        appendSystemContext: promptContext.text,
       };
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
@@ -1610,25 +2048,51 @@ function registerArtifactGuard(api) {
       timeoutMs: MEDIA_INTENT_GATE_TIMEOUT_MS + 2_000,
     });
     registerLifecycleHook(api, 'before_tool_call', (event, ctx) => {
-      const decision = shouldBlockMediaToolCall(event, ctx);
-      if (!decision.toolName || !MEDIA_SIDE_EFFECT_TOOLS.has(decision.toolName)) return;
-      logDiagnostic('media-tool-gate', {
-        eventId: eventId(event, ctx),
-        toolName: decision.toolName,
-        blocked: decision.block,
-        reason: decision.reason,
-        gateSource: decision.gate?.source,
-        gateAction: decision.gate?.plan?.action,
-        gateIntentKind: decision.gate?.plan?.intentKind,
-        gateAuthorized: decision.gate?.authorized,
-      });
-      if (!decision.block) return;
-      const blockReason = buildMediaToolBlockReason(decision);
-      return {
-        block: true,
-        blockReason,
-        reason: blockReason,
-      };
+      const screenshotRewrite = rewriteExecScreenshotParams(event);
+      const effectiveEvent = screenshotRewrite
+        ? {
+            ...event,
+            params: screenshotRewrite.params,
+          }
+        : event;
+      if (screenshotRewrite) {
+        logDiagnostic('exec-screenshot-path-rewrite', {
+          eventId: eventId(event, ctx),
+          toolName: screenshotRewrite.toolName,
+          commandKey: screenshotRewrite.commandKey,
+          rewrittenPaths: screenshotRewrite.rewrittenPaths,
+        });
+      }
+
+      const decision = shouldBlockMediaToolCall(effectiveEvent, ctx);
+      if (decision.toolName && MEDIA_SIDE_EFFECT_TOOLS.has(decision.toolName)) {
+        logDiagnostic('media-tool-gate', {
+          eventId: eventId(event, ctx),
+          toolName: decision.toolName,
+          blocked: decision.block,
+          reason: decision.reason,
+          gateSource: decision.gate?.source,
+          gateAction: decision.gate?.plan?.action,
+          gateIntentKind: decision.gate?.plan?.intentKind,
+          gateAuthorized: decision.gate?.authorized,
+        });
+        if (decision.block) {
+          const blockReason = buildMediaToolBlockReason(decision);
+          return {
+            block: true,
+            blockReason,
+            reason: blockReason,
+          };
+        }
+      }
+
+      emitToolCallProgress(api, effectiveEvent, ctx);
+      if (screenshotRewrite) {
+        return {
+          params: screenshotRewrite.params,
+        };
+      }
+      return undefined;
     }, {
       name: MEDIA_INTENT_TOOL_GATE_HOOK_ID,
       description: 'Block image/video generation tools unless the current turn has structured media intent authorization.',
@@ -1686,7 +2150,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.2',
+  version: '0.1.4',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -1704,5 +2168,10 @@ export const __test = {
   buildToolArtifactEvidence,
   emitToolResultRuntimeEvents,
   emitRuntimeEvent,
+  rewriteTmpScreenshotMediaPaths,
+  rewriteExecScreenshotParams,
+  buildLocalMediaIntentPlan,
+  isInternalTranscriptMessage,
+  classifyInternalTranscriptMessage,
   PROMPT_CONTEXT,
 };

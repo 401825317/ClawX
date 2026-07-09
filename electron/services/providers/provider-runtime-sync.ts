@@ -19,6 +19,7 @@ import {
   updateSingleAgentModelProvider,
 } from '../../utils/openclaw-auth';
 import {
+  PI_AI_OPENROUTER_REASONING_COMPAT,
   piAiModelsJsonModelEntry,
   piAiPromptCacheModelEntry,
   type PiAiModelsJsonModelEntry,
@@ -145,10 +146,15 @@ function runtimeModelEntryForProvider(
   const registryModel = getProviderConfig(config.type)?.models?.find((model) => model.id === modelId);
   const contextWindow = normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
     ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
+  const metadata = {
+    ...registryModel,
+    ...(modelId === 'smart-latest' ? { compat: PI_AI_OPENROUTER_REASONING_COMPAT } : {}),
+  };
   return piAiPromptCacheModelEntry(
     modelId,
     registryModel?.name || modelId,
     contextWindow,
+    metadata,
   );
 }
 

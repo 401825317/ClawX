@@ -119,6 +119,15 @@ function findProgressEntry(
   return (run?.progressEntries ?? []).find((entry) => entry.id === id);
 }
 
+function hasNativeToolProgress(
+  run: ChatRuntimeRunState | undefined,
+  toolCallId: string,
+): boolean {
+  return (run?.progressEntries ?? []).some((entry) => (
+    entry.toolCallId === toolCallId && entry.source === 'native'
+  ));
+}
+
 function lastNarrationKey(run: ChatRuntimeRunState | undefined): string | undefined {
   const entries = run?.progressEntries ?? [];
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -204,6 +213,7 @@ export function buildRuntimeProgressEvents(
   if (event.type === 'progress.update') return [];
 
   if (event.type === 'tool.started' || event.type === 'tool.completed') {
+    if (hasNativeToolProgress(run, event.toolCallId)) return [];
     const command = extractCommandPreviewFromUnknown(
       event.type === 'tool.started'
         ? event.args
@@ -219,6 +229,8 @@ export function buildRuntimeProgressEvents(
         kind: 'commentary',
         text: narration.text,
         dedupeKey: narration.key,
+        toolCallId: event.toolCallId,
+        source: 'derived',
       }));
     }
     nextEvents.push(buildProgressEntryEvent(event, {
@@ -227,6 +239,8 @@ export function buildRuntimeProgressEvents(
       text: buildToolActionText(event.name, toolActionStatus(event), command),
       status: toolActionStatus(event),
       command,
+      toolCallId: event.toolCallId,
+      source: 'derived',
     }));
     const detail = event.type === 'tool.completed' ? buildToolStatusDetail(event) : undefined;
     if (detail) {
@@ -235,6 +249,8 @@ export function buildRuntimeProgressEvents(
         kind: 'status',
         text: detail,
         status: 'error',
+        toolCallId: event.toolCallId,
+        source: 'derived',
       }));
     }
     return nextEvents;
@@ -250,6 +266,7 @@ export function buildRuntimeProgressEvents(
       text: status === 'error' ? '执行失败' : status === 'completed' ? '已运行' : '正在执行',
       status,
       command: summarizedCommand,
+      source: 'derived',
     })];
   }
 
@@ -263,6 +280,8 @@ export function buildRuntimeProgressEvents(
       kind: 'status',
       text: truncateText(detail, 180),
       status: normalized as ChatRuntimeProgressEntry['status'],
+      toolCallId: event.toolCallId,
+      source: 'derived',
     })];
   }
 

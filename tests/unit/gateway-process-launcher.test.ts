@@ -19,18 +19,23 @@ function runGatewayPreloadInVm(params: {
   preloadSource: string;
   childProcess: Record<string, unknown>;
   processMock: Record<string, unknown>;
+  globalThisMock?: Record<string, unknown>;
 }) {
   const patchSource = readFileSync(
     resolve(process.cwd(), 'electron/gateway/gateway-child-process-patch.cjs'),
     'utf-8',
   );
-  vm.runInNewContext(params.preloadSource, {
-    globalThis: { fetch: vi.fn() },
+  const context = {
+    globalThis: { fetch: vi.fn(), ...(params.globalThisMock ?? {}) },
     process: params.processMock,
+    Buffer,
+    URL,
     require: (id: string) => {
       if (id === './gateway-child-process-patch.cjs') {
         vm.runInNewContext(patchSource, {
           process: params.processMock,
+          Buffer,
+          URL,
           require: (patchId: string) => {
             if (patchId === 'child_process' || patchId === 'node:child_process') return params.childProcess;
             if (patchId === 'node:module') return { syncBuiltinESMExports: vi.fn() };
@@ -43,7 +48,9 @@ function runGatewayPreloadInVm(params: {
       if (id === 'node:module') return { syncBuiltinESMExports: vi.fn() };
       throw new Error(`Unexpected require: ${id}`);
     },
-  });
+  };
+  vm.runInNewContext(params.preloadSource, context);
+  return context;
 }
 
 describe('Gateway process preload', () => {
@@ -86,6 +93,75 @@ describe('Gateway process preload', () => {
     expect(stderrWrite).toHaveBeenCalledWith(
       '[diagnostic] gateway.fetch.preload.ready {"fetchAvailable":true,"patched":true}\n',
     );
+  });
+
+  it('summarizes model request body without logging transcript text', async () => {
+    const preloadSource = readFileSync(
+      resolve(process.cwd(), 'electron/gateway/gateway-fetch-preload.cjs'),
+      'utf-8',
+    );
+    const stderrWrite = vi.fn();
+    const upstreamFetch = vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      headers: { get: () => 'application/json' },
+      clone: () => ({
+        status: 200,
+        ok: true,
+        headers: { get: () => 'application/json' },
+        body: null,
+      }),
+      body: null,
+    }));
+
+    const context = runGatewayPreloadInVm({
+      preloadSource,
+      globalThisMock: { fetch: upstreamFetch },
+      childProcess: {
+        spawn: vi.fn(),
+        execFile: vi.fn(),
+        fork: vi.fn(),
+        spawnSync: vi.fn(),
+        execFileSync: vi.fn(),
+      },
+      processMock: {
+        platform: 'darwin',
+        execPath: '/Applications/UClaw.app/Contents/MacOS/UClaw',
+        env: { PATH: '/usr/bin' },
+        stderr: { write: stderrWrite },
+      },
+    });
+    await context.globalThis.fetch('https://zz-cn.lingzhiwuxian.com/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'smart-latest',
+        messages: [
+          { role: 'system', content: 'system secret should not appear' },
+          { role: 'user', content: 'private user prompt should not appear' },
+        ],
+        tools: [
+          { type: 'function', function: { name: 'exec', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } } },
+        ],
+        tool_choice: 'auto',
+        stream: true,
+        prompt_cache_key: 'cache-key-should-not-appear',
+        reasoning: { effort: 'high' },
+      }),
+    });
+    await Promise.resolve();
+
+    const requestLine = stderrWrite.mock.calls
+      .map((call) => String(call[0]))
+      .find((line) => line.startsWith('[diagnostic] model.fetch.request '));
+    expect(requestLine).toBeTruthy();
+    expect(requestLine).toContain('"reasoning":{"present":true,"type":"object","effort":"high"');
+    expect(requestLine).toContain('"promptCacheKeyPresent":true');
+    expect(requestLine).toContain('"messagesCount":2');
+    expect(requestLine).toContain('"toolsCount":1');
+    expect(requestLine).toContain('"toolSchemaBytes":');
+    expect(requestLine).not.toContain('private user prompt');
+    expect(requestLine).not.toContain('system secret');
+    expect(requestLine).not.toContain('cache-key-should-not-appear');
   });
 
   it('runs process.execPath children in Node mode inside Electron utility process', async () => {

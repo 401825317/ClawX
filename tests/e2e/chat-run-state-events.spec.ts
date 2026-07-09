@@ -150,6 +150,244 @@ test.describe('ClawX chat run state events', () => {
     }
   });
 
+  test('replays compact tool-work transcript from history on reopen', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const historyTimestamp = Math.floor(Date.now() / 1000);
+    const history = [
+      {
+        id: 'user-file-capabilities',
+        role: 'user',
+        content: [{ type: 'text', text: '你现在能做哪些文件类产物？' }],
+        timestamp: historyTimestamp,
+      },
+      {
+        id: 'assistant-history-read',
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'call-read-capabilities',
+          name: 'read',
+          arguments: { path: '/tmp/capabilities.md' },
+        }],
+        timestamp: historyTimestamp + 1,
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'call-read-capabilities',
+        toolName: 'read',
+        content: [{
+          type: 'text',
+          text: '- 文档\n- 表格\n- 演示文稿',
+        }],
+        details: {
+          status: 'completed',
+          aggregated: '- 文档\n- 表格\n- 演示文稿',
+          path: '/tmp/capabilities.md',
+        },
+        isError: false,
+        timestamp: historyTimestamp + 2,
+      },
+      {
+        id: 'assistant-history-final',
+        role: 'assistant',
+        content: [{ type: 'text', text: '我现在可以生成文档、表格和演示文稿。' }],
+        timestamp: historyTimestamp + 3,
+      },
+    ];
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+        gatewayRpc: {
+          [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
+            success: true,
+            result: {
+              sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
+            },
+          },
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+            success: true,
+            result: { messages: history },
+          },
+        },
+        hostApi: {
+          [stableStringify(['/api/gateway/status', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                result: {
+                  sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
+                },
+              },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                result: { messages: history },
+              },
+            },
+          },
+          [stableStringify(['/api/agents', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, agents: [{ id: 'main', name: 'Main' }] },
+            },
+          },
+        },
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) {
+          throw error;
+        }
+      }
+
+      await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('我先查看相关内容。')).toBeVisible();
+      await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
+      await expect(page.getByText('我现在可以生成文档、表格和演示文稿。')).toBeVisible();
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps an open historical tool run active on reopen', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const historyTimestamp = Math.floor(Date.now() / 1000);
+    const history = [
+      {
+        id: 'user-open-history-run',
+        role: 'user',
+        content: [{ type: 'text', text: '你现在能做哪些文件类产物？' }],
+        timestamp: historyTimestamp,
+      },
+      {
+        id: 'assistant-open-history-tool',
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'call-open-history-read',
+          name: 'read',
+          arguments: { path: '/tmp/capabilities.md' },
+        }],
+        timestamp: historyTimestamp + 1,
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'call-open-history-read',
+        toolName: 'read',
+        content: [{
+          type: 'text',
+          text: '- 文档\n- 表格\n- 演示文稿',
+        }],
+        details: {
+          status: 'completed',
+          aggregated: '- 文档\n- 表格\n- 演示文稿',
+          path: '/tmp/capabilities.md',
+        },
+        isError: false,
+        timestamp: historyTimestamp + 2,
+      },
+    ];
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+        gatewayRpc: {
+          [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
+            success: true,
+            result: {
+              sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
+            },
+          },
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+            success: true,
+            result: { messages: history },
+          },
+        },
+        hostApi: {
+          [stableStringify(['/api/gateway/status', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                result: {
+                  sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
+                },
+              },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                result: { messages: history },
+              },
+            },
+          },
+          [stableStringify(['/api/agents', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, agents: [{ id: 'main', name: 'Main' }] },
+            },
+          },
+        },
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) {
+          throw error;
+        }
+      }
+
+      await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('我先查看相关内容。')).toBeVisible();
+      await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
+      await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('shows clear image preview states for generated media while hydration retries', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     const gatewayUrl = '/api/chat/media/outgoing/agent%3Amain%3Aimage-preview/image-1/full';

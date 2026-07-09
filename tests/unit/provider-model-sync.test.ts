@@ -106,6 +106,12 @@ describe('provider-model-sync', () => {
       expect.objectContaining({
         id: 'smart-latest',
         contextWindow: 200_000,
+        reasoning: true,
+        input: ['text', 'image'],
+        compat: {
+          supportsPromptCacheKey: true,
+          thinkingFormat: 'openrouter',
+        },
       }),
     ]);
   });

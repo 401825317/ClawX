@@ -2,6 +2,7 @@ import { getProviderConfig } from '../utils/provider-registry';
 import { getOpenClawProviderKeyForType, isOAuthProviderType } from '../utils/provider-keys';
 import type { ProviderConfig } from '../utils/secure-storage';
 import {
+  PI_AI_OPENROUTER_REASONING_COMPAT,
   piAiModelsJsonModelEntry,
   piAiPromptCacheModelEntry,
   type PiAiModelsJsonModelEntry,
@@ -37,10 +38,15 @@ function modelEntryForProvider(provider: ProviderConfig, modelId: string): PiAiM
   const registryModel = getProviderConfig(provider.type)?.models?.find((model) => model.id === modelId);
   const contextWindow = normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
     ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
+  const metadata = {
+    ...registryModel,
+    ...(modelId === 'smart-latest' ? { compat: PI_AI_OPENROUTER_REASONING_COMPAT } : {}),
+  };
   return piAiPromptCacheModelEntry(
     modelId,
     registryModel?.name || modelId,
     contextWindow,
+    metadata,
   );
 }
 

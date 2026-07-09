@@ -66,11 +66,17 @@ import {
   buildRuntimeStartContractEvents,
 } from './chat/runtime-contract';
 import {
+  buildStreamingAssistantMessageFromRuntimeRun,
   enrichWithToolCallAttachments,
   isInternalMessage as isHistoryInternalMessage,
   shouldDropMessageFromHistory,
 } from './chat/helpers';
 import {
+  extractTextSegments,
+  extractToolUse,
+  isGeneratingStatusNarration,
+  isInternalAssistantReplyText,
+  isInternalProcessNarration,
   stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 
@@ -896,12 +902,272 @@ function collapseSupersededCompositeHistoryReplies(messages: RawMessage[]): RawM
   return result;
 }
 
+function shouldDropMessageFromRuntimeReplay(message: RawMessage): boolean {
+  if (isToolResultRole(message.role)) return false;
+  if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
+  return isInternalMessage(message);
+}
+
+function buildRuntimeReplayMessages(messages: RawMessage[]): RawMessage[] {
+  return collapseSupersededCompositeHistoryReplies(
+    dedupeRedundantAssistantReplies(
+      enrichWithCachedImages(
+        messages.filter((message) => !shouldDropMessageFromRuntimeReplay(message)),
+      ),
+    ),
+  );
+}
+
+function stripHistoricalRunsForSession(
+  runtimeRuns: ChatState['runtimeRuns'],
+  sessionKey: string,
+): ChatState['runtimeRuns'] {
+  const historicalPrefix = `history:${sessionKey}:`;
+  return Object.fromEntries(
+    Object.entries(runtimeRuns).filter(([runId, run]) => (
+      !(runId.startsWith(historicalPrefix)
+        && run?.sessionKey === sessionKey
+        && run.events.some((event) => event.producer === 'history'))
+    )),
+  );
+}
+
+function messageHasHistoricalToolResult(message: RawMessage): boolean {
+  if (isToolResultRole(message.role)) return true;
+  if (!Array.isArray(message.content)) return false;
+  return (message.content as ContentBlock[]).some((block) => (
+    block.type === 'tool_result' || block.type === 'toolResult'
+  ));
+}
+
+function messageHasHistoricalToolActivity(message: RawMessage): boolean {
+  if (message.role === 'assistant' && extractToolUse(message).length > 0) return true;
+  return messageHasHistoricalToolResult(message);
+}
+
+function buildHistoricalProgressEvent(
+  runId: string,
+  sessionKey: string,
+  ts: number,
+  entry: Extract<ChatRuntimeEvent, { type: 'progress.update' }>['entry'],
+): Extract<ChatRuntimeEvent, { type: 'progress.update' }> {
+  return {
+    contractVersion: 1,
+    producer: 'history',
+    runId,
+    sessionKey,
+    ts,
+    type: 'progress.update',
+    entry,
+  };
+}
+
+function summarizeHistoricalToolCallId(
+  toolCallId: string | undefined,
+  toolName: string,
+  message: RawMessage,
+  segmentIndex: number,
+  toolIndex: number,
+): string {
+  const normalized = toolCallId?.trim();
+  if (normalized) return normalized;
+  if (typeof message.id === 'string' && message.id.trim()) {
+    return `${toolName || 'tool'}:${message.id.trim()}:${segmentIndex}:${toolIndex}`;
+  }
+  if (typeof message.timestamp === 'number') {
+    return `${toolName || 'tool'}:${Math.floor(toMs(message.timestamp))}:${segmentIndex}:${toolIndex}`;
+  }
+  return `${toolName || 'tool'}:${segmentIndex}:${toolIndex}`;
+}
+
+function buildHistoricalToolCompletedEvents(
+  message: RawMessage,
+  runId: string,
+  sessionKey: string,
+  segmentIndex: number,
+): Array<Extract<ChatRuntimeEvent, { type: 'tool.completed' }>> {
+  const baseTs = message.timestamp ? toMs(message.timestamp) : Date.now();
+  const events: Array<Extract<ChatRuntimeEvent, { type: 'tool.completed' }>> = [];
+
+  const pushCompletedEvent = (
+    toolCallId: string | undefined,
+    toolName: string | undefined,
+    result: unknown,
+    meta: unknown,
+    isError: boolean | undefined,
+    offset: number,
+  ) => {
+    const name = (toolName || toolCallId || 'tool').trim() || 'tool';
+    events.push({
+      contractVersion: 1,
+      producer: 'history',
+      runId,
+      sessionKey,
+      ts: baseTs + offset,
+      type: 'tool.completed',
+      toolCallId: summarizeHistoricalToolCallId(toolCallId, name, message, segmentIndex, offset),
+      name,
+      result,
+      meta,
+      isError,
+    });
+  };
+
+  if (isToolResultRole(message.role)) {
+    const detailRecord = message.details && typeof message.details === 'object'
+      ? message.details as Record<string, unknown>
+      : undefined;
+    const detailStatus = typeof detailRecord?.status === 'string' ? detailRecord.status.toLowerCase() : '';
+    const contentText = getMessageText(message.content).trim();
+    pushCompletedEvent(
+      typeof message.toolCallId === 'string' ? message.toolCallId : undefined,
+      typeof message.toolName === 'string' ? message.toolName : undefined,
+      contentText ? { summary: contentText } : undefined,
+      detailRecord ?? message.details,
+      message.isError === true || detailStatus === 'error' || detailStatus === 'failed',
+      0,
+    );
+    return events;
+  }
+
+  if (!Array.isArray(message.content)) return events;
+  let toolResultIndex = 0;
+  for (const block of message.content as ContentBlock[]) {
+    if (block.type !== 'tool_result' && block.type !== 'toolResult') continue;
+    const contentText = getMessageText(block.content ?? block.text ?? '').trim();
+    pushCompletedEvent(
+      block.id,
+      block.name,
+      contentText ? { summary: contentText } : undefined,
+      undefined,
+      false,
+      toolResultIndex,
+    );
+    toolResultIndex += 1;
+  }
+  return events;
+}
+
+function buildHistoricalToolRuntimeEventsFromSegment(params: {
+  runId: string;
+  sessionKey: string;
+  objective: string;
+  segment: RawMessage[];
+  ts: number;
+}): ChatRuntimeEvent[] {
+  const openToolRun = segmentHasOpenToolRun(params.segment);
+  const terminalAssistantError = [...params.segment].reverse().find((message) => (
+    message.role === 'assistant'
+    && (getMessageStopReason(message) === 'error' || isFailedAssistantTurnMessage(message))
+  ));
+  const terminalAssistantErrorMessage = terminalAssistantError
+    ? (getMessageErrorMessage(terminalAssistantError)
+      ?? (isFailedAssistantTurnMessage(terminalAssistantError)
+        ? getMessageText(terminalAssistantError.content).trim()
+        : undefined))
+    : undefined;
+  const lastToolActivityIndex = (() => {
+    for (let index = params.segment.length - 1; index >= 0; index -= 1) {
+      if (messageHasHistoricalToolActivity(params.segment[index]!)) return index;
+    }
+    return -1;
+  })();
+  if (lastToolActivityIndex < 0) return [];
+
+  const events = buildRuntimeStartContractEvents(undefined, {
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    objective: params.objective,
+    mode: 'chat',
+    ts: params.ts,
+    producer: 'history',
+  });
+
+  for (let segmentIndex = 0; segmentIndex < params.segment.length; segmentIndex += 1) {
+    const message = params.segment[segmentIndex]!;
+    const baseTs = message.timestamp ? toMs(message.timestamp) : params.ts;
+
+    if (
+      message.role === 'assistant'
+      && segmentIndex < lastToolActivityIndex
+      && extractToolUse(message).length === 0
+      && !messageHasHistoricalToolResult(message)
+    ) {
+      const segments = extractTextSegments(message).filter((segmentText) => {
+        const trimmed = segmentText.trim();
+        if (!trimmed) return false;
+        if (isInternalAssistantReplyText(trimmed)) return false;
+        if (isGeneratingStatusNarration(trimmed)) return false;
+        if (isInternalProcessNarration(trimmed)) return false;
+        return true;
+      });
+      segments.forEach((segmentText, textIndex) => {
+        events.push(buildHistoricalProgressEvent(
+          params.runId,
+          params.sessionKey,
+          baseTs + textIndex,
+          {
+            id: `history:progress:${segmentIndex}:${textIndex}`,
+            kind: 'commentary',
+            text: segmentText,
+            source: 'history',
+          },
+        ));
+      });
+    }
+
+    if (message.role === 'assistant') {
+      const toolUses = extractToolUse(message);
+      toolUses.forEach((tool, toolIndex) => {
+        const toolCallId = summarizeHistoricalToolCallId(tool.id, tool.name, message, segmentIndex, toolIndex);
+        events.push({
+          contractVersion: 1,
+          producer: 'history',
+          runId: params.runId,
+          sessionKey: params.sessionKey,
+          ts: baseTs + toolIndex,
+          type: 'tool.started',
+          toolCallId,
+          name: tool.name,
+          args: tool.input,
+        });
+      });
+    }
+
+    events.push(...buildHistoricalToolCompletedEvents(
+      message,
+      params.runId,
+      params.sessionKey,
+      segmentIndex,
+    ));
+  }
+
+  if (!openToolRun) {
+    const endTs = params.segment.reduce((latest, message) => {
+      const messageTs = message.timestamp ? toMs(message.timestamp) : latest;
+      return Math.max(latest, messageTs);
+    }, params.ts);
+    events.push({
+      contractVersion: 1,
+      producer: 'history',
+      runId: params.runId,
+      sessionKey: params.sessionKey,
+      ts: endTs,
+      type: 'run.ended',
+      status: terminalAssistantErrorMessage ? 'error' : 'completed',
+      ...(terminalAssistantErrorMessage ? { error: terminalAssistantErrorMessage } : {}),
+    });
+  }
+
+  return events;
+}
+
 function applyHistoricalRuntimeRunsFromMessages(
   runtimeRuns: ChatState['runtimeRuns'],
   sessionKey: string,
   messages: RawMessage[],
 ): ChatState['runtimeRuns'] {
-  let nextRuns = runtimeRuns;
+  let nextRuns = stripHistoricalRunsForSession(runtimeRuns, sessionKey);
   for (let index = 0; index < messages.length; index += 1) {
     const trigger = messages[index];
     if (!trigger || !isRealUserBoundaryMessage(trigger)) continue;
@@ -916,29 +1182,55 @@ function applyHistoricalRuntimeRunsFromMessages(
       : segment
         .filter((message) => message.role === 'assistant')
         .flatMap((message) => extractMessageArtifactFiles(message));
-    if (artifactFiles.length === 0) continue;
     const uniqueArtifactFiles = dedupeAttachedFiles(artifactFiles);
-
-    const runId = buildHistoricalRunIds(sessionKey, trigger, index)
-      .find((candidateRunId) => nextRuns[candidateRunId])
-      ?? buildHistoricalRunId(sessionKey, trigger, index);
-    const existing = nextRuns[runId];
-    if (existing?.gateResult?.decision === 'deliverable') continue;
-
     const objective = getMessageText(trigger.content).trim();
     const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
+    const runId = buildHistoricalRunId(sessionKey, trigger, index);
+
+    if (uniqueArtifactFiles.length === 0) {
+      const historicalToolEvents = buildHistoricalToolRuntimeEventsFromSegment({
+        runId,
+        sessionKey,
+        objective,
+        segment,
+        ts,
+      });
+      if (historicalToolEvents.length === 0) continue;
+      nextRuns = applyRuntimeContractEvents(nextRuns, historicalToolEvents);
+      const toolRun = nextRuns[runId];
+      const toolRunEnded = toolRun?.events.some((event) => event.type === 'run.ended') === true;
+      if (toolRunEnded) {
+        const completedStatus: Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'] = toolRun?.status === 'error'
+          ? 'error'
+          : toolRun?.status === 'aborted'
+            ? 'aborted'
+            : 'completed';
+        nextRuns = applyRuntimeContractEvents(
+          nextRuns,
+          buildRuntimeCompletionGateEvents(toolRun, {
+            runId,
+            sessionKey,
+            ts: toolRun.endedAt ?? toolRun.lastEventAt ?? ts,
+            status: completedStatus,
+          }),
+        );
+      }
+      continue;
+    }
+
     const historicalCompositeTasks = compositeResultMessage
       ? parseHistoricalCompositeTasks(compositeResultMessage)
       : [];
     const restoreCompositePlan = historicalCompositeTasks.length > 0
       || looksLikeCompositeArtifactHistory(objective, uniqueArtifactFiles);
     const mode = restoreCompositePlan ? 'chat' : inferHistoricalRunMode(uniqueArtifactFiles);
-    const startEvents = buildRuntimeStartContractEvents(existing, {
+    const startEvents = buildRuntimeStartContractEvents(undefined, {
       runId,
       sessionKey,
       objective,
       mode,
       ts,
+      producer: 'history',
     });
     const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
       runId,
@@ -5466,6 +5758,46 @@ function findLastRealUserMessage(messages: RawMessage[]): RawMessage | null {
   return null;
 }
 
+function findLastRealUserBoundaryIndex(messages: RawMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (isRealUserBoundaryMessage(messages[i])) return i;
+  }
+  return -1;
+}
+
+function inferHistoricalOpenRunState(
+  runtimeRuns: ChatState['runtimeRuns'],
+  sessionKey: string,
+  messages: RawMessage[],
+): { runId: string; lastUserMessageAt: number; segment: RawMessage[] } | null {
+  const lastUserIndex = findLastRealUserBoundaryIndex(messages);
+  if (lastUserIndex < 0) return null;
+
+  const lastUser = messages[lastUserIndex];
+  if (!lastUser) return null;
+
+  const segment = messages.slice(lastUserIndex + 1);
+  if (segment.length === 0) return null;
+
+  const hasConclusiveReply = segment.some((message) => {
+    if (message.role !== 'assistant') return false;
+    if (hasPendingToolUse(message)) return false;
+    return hasNonToolAssistantContent(message);
+  });
+  if (hasConclusiveReply) return null;
+
+  const runId = buildHistoricalRunId(sessionKey, lastUser, lastUserIndex);
+  const runtimeRun = runtimeRuns[runId];
+  const runtimeStillRunning = runtimeRun?.sessionKey === sessionKey && runtimeRun.status === 'running';
+  if (!runtimeStillRunning && !segmentHasOpenToolRun(segment)) return null;
+
+  return {
+    runId,
+    lastUserMessageAt: lastUser.timestamp ? toMs(lastUser.timestamp) : Date.now(),
+    segment,
+  };
+}
+
 function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
   const seen = new Set<string>();
   const next: AttachedFileMeta[] = [];
@@ -6238,6 +6570,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const filteredMessages = messagesWithToolAttachments.filter((msg) => !shouldDropMessageFromHistory(msg));
       // Restore file attachments for user/assistant messages (from cache + text patterns)
       const enrichedMessages = dedupeRedundantAssistantReplies(enrichWithCachedImages(filteredMessages));
+      const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
 
       // Preserve optimistic user messages independently from sending state.
       // Gateway phase=end can clear sending before chat.history has persisted
@@ -6320,15 +6653,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ];
       }
 
-      set((state) => ({
+      const nextRuntimeRuns = applyHistoricalRuntimeRunsFromMessages(
+        get().runtimeRuns,
+        currentSessionKey,
+        runtimeHistoryMessages,
+      );
+      const inferredHistoricalOpenRun = !isSendingNow && !latestTerminalAssistantErrorMessage
+        ? inferHistoricalOpenRunState(nextRuntimeRuns, currentSessionKey, filteredMessages)
+        : null;
+
+      set({
         messages: finalMessages,
         thinkingLevel,
         loading: false,
         runError: historyErrorIsTransient || terminalArtifactFallbackMessage
           ? null
           : normalizedTerminalAssistantErrorMessage,
-        runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, finalMessages),
-      }));
+        runtimeRuns: nextRuntimeRuns,
+      });
       cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
 
       // Seed a missing label from immutable history only. Once a label exists
@@ -6372,7 +6714,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 runtimeRuns: applyHistoricalRuntimeRunsFromMessages(
                   state.runtimeRuns,
                   currentSessionKey,
-                  messages,
+                  runtimeHistoryMessages,
                 ),
               };
             })(),
@@ -6528,15 +6870,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // though the Gateway is still executing a user-initiated turn. Re-arm only
       // when this session had an active cached run (e.g. user switched away
       // mid-send). Do not re-arm from stale :main heartbeat/tool history alone.
-      if (!get().sending && !latestTerminalAssistantErrorMessage && hasCachedActiveUserRun(currentSessionKey)) {
-        const openSegment = postUserSegmentMessages(filteredMessages);
-        if (segmentHasOpenToolRun(openSegment)) {
-          const lastUser = findLastRealUserMessage(filteredMessages);
-          const inferredUserAt = lastUser?.timestamp ? toMs(lastUser.timestamp) : Date.now();
+      if (!get().sending && !latestTerminalAssistantErrorMessage) {
+        const cachedRunState = getCachedSessionRunState(currentSessionKey);
+        const cachedOpenSegment = postUserSegmentMessages(filteredMessages);
+        const shouldRearmFromCachedRun = (
+          cachedRunState.sending
+          || cachedRunState.activeRunId != null
+          || cachedRunState.pendingFinal
+        ) && segmentHasOpenToolRun(cachedOpenSegment);
+        const inferredOpenRun = inferredHistoricalOpenRun;
+        if (shouldRearmFromCachedRun || inferredOpenRun) {
+          _lastChatEventAt = Date.now();
           set({
             sending: true,
+            activeRunId: inferredOpenRun?.runId ?? cachedRunState.activeRunId,
             pendingFinal: true,
-            lastUserMessageAt: inferredUserAt,
+            lastUserMessageAt: inferredOpenRun?.lastUserMessageAt
+              ?? cachedRunState.lastUserMessageAt
+              ?? optionalToMs(findLastRealUserMessage(filteredMessages)?.timestamp ?? null)
+              ?? Date.now(),
+            runError: null,
           });
           captureSessionRunState(currentSessionKey, get());
         }
@@ -6795,11 +7148,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = messagesWithToolAttachments.filter((msg) => !shouldDropMessageFromHistory(msg));
       const enrichedMessages = dedupeRedundantAssistantReplies(enrichWithCachedImages(filteredMessages));
+      const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
       set((state) => ({
         messages: enrichedMessages,
         loadingMoreHistory: false,
         hasMoreHistory: rawMessages.length >= nextLimit && nextLimit < HISTORY_MAX_RENDERED_MESSAGES,
-        runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, enrichedMessages),
+        runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, runtimeHistoryMessages),
       }));
       cacheSessionHistory(currentSessionKey, enrichedMessages, get().thinkingLevel);
       const previewHydrationMessages = enrichedMessages.slice(-PREVIEW_HYDRATION_MESSAGE_LIMIT);
@@ -6819,7 +7173,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               runtimeRuns: applyHistoricalRuntimeRunsFromMessages(
                 state.runtimeRuns,
                 currentSessionKey,
-                messages,
+                runtimeHistoryMessages,
               ),
             };
           })(),
@@ -6850,6 +7204,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
       ?? get().currentSessionKey;
+
+    if (!attachments?.length && isInternalMessage({ role: 'user', content: trimmed })) {
+      console.info('[sendMessage] Dropping internal user message before gateway send', {
+        sessionKey: targetSessionKey,
+      });
+      return;
+    }
 
     // Same-session sends must stay ordered. The renderer owns a single active
     // run slot, so queue follow-up turns instead of dropping them or racing the
@@ -8463,6 +8824,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (appliesToActiveUi && (initialState.error || initialState.runError)) {
         nextPatch.error = null;
         nextPatch.runError = null;
+      }
+      if (appliesToActiveUi) {
+        const runtimeStreamMessage = buildStreamingAssistantMessageFromRuntimeRun(
+          runtimeRuns[eventForSession.runId],
+          initialState.streamingMessage as RawMessage | null,
+          { timestamp: eventForSession.ts },
+        );
+        if (runtimeStreamMessage) {
+          nextPatch.streamingMessage = runtimeStreamMessage;
+          nextPatch.streamingText = runtimeRuns[eventForSession.runId]?.assistantText ?? '';
+        }
+        if (!initialState.sending && matchesCurrentSession && shouldTrackInboundRunLifecycle(initialState, currentSessionKey)) {
+          nextPatch.sending = true;
+        }
       }
       set(nextPatch);
       return;

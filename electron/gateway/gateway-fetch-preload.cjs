@@ -112,6 +112,72 @@
     return Object.keys(value).sort().join(',');
   }
 
+  function jsonSize(value) {
+    try {
+      return Buffer.byteLength(JSON.stringify(value));
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function textCharLength(value) {
+    if (typeof value === 'string') return Array.from(value).length;
+    if (Array.isArray(value)) {
+      return value.reduce(function (sum, item) { return sum + textCharLength(item); }, 0);
+    }
+    if (!isRecord(value)) return 0;
+    var total = 0;
+    for (var key of ['text', 'content', 'input_text', 'output_text']) {
+      total += textCharLength(value[key]);
+    }
+    return total;
+  }
+
+  function summarizeMessages(messages) {
+    var byRole = {};
+    var charsByRole = {};
+    var contentItems = 0;
+    for (var message of messages) {
+      if (!isRecord(message)) continue;
+      var role = typeof message.role === 'string' ? message.role : 'unknown';
+      byRole[role] = (byRole[role] || 0) + 1;
+      charsByRole[role] = (charsByRole[role] || 0) + textCharLength(message.content);
+      if (Array.isArray(message.content)) contentItems += message.content.length;
+    }
+    return {
+      messageRoles: byRole,
+      messageTextCharsByRole: charsByRole,
+      messageContentItems: contentItems,
+    };
+  }
+
+  function summarizeReasoning(value) {
+    if (value == null) return { present: false };
+    if (typeof value === 'boolean') return { present: true, type: 'boolean', enabled: value };
+    if (typeof value === 'string') return { present: true, type: 'string', value };
+    if (!isRecord(value)) return { present: true, type: typeof value };
+    return {
+      present: true,
+      type: 'object',
+      effort: typeof value.effort === 'string' ? value.effort : undefined,
+      enabled: typeof value.enabled === 'boolean' ? value.enabled : undefined,
+      exclude: typeof value.exclude === 'boolean' ? value.exclude : undefined,
+      keys: Object.keys(value).sort(),
+    };
+  }
+
+  function summarizeTools(tools) {
+    var schemaBytes = tools.reduce(function (sum, tool) { return sum + jsonSize(tool); }, 0);
+    var functionParamBytes = tools.reduce(function (sum, tool) {
+      if (!isRecord(tool) || !isRecord(tool.function)) return sum;
+      return sum + jsonSize(tool.function.parameters);
+    }, 0);
+    return {
+      toolSchemaBytes: schemaBytes,
+      toolFunctionParameterBytes: functionParamBytes,
+    };
+  }
+
   function summarizeInput(inputValue) {
     if (Array.isArray(inputValue)) {
       return {
@@ -150,6 +216,8 @@
     var instructions = typeof body.instructions === 'string' ? body.instructions : '';
     var system = typeof body.system === 'string' ? body.system : '';
     var toolNames = tools.map(toolName).filter(Boolean);
+    var messageSummary = summarizeMessages(messages);
+    var toolSummary = summarizeTools(tools);
 
     return {
       endpoint: endpointLabel(rawUrl),
@@ -163,10 +231,18 @@
       inputChars: inputSummary.inputChars,
       instructionsChars: Array.from(instructions).length,
       systemChars: Array.from(system).length,
+      messageRoles: messageSummary.messageRoles,
+      messageTextCharsByRole: messageSummary.messageTextCharsByRole,
+      messageContentItems: messageSummary.messageContentItems,
       toolsCount: tools.length,
       toolNames: toolNames.slice(0, 30),
       toolNamesTruncated: toolNames.length > 30,
+      toolSchemaBytes: toolSummary.toolSchemaBytes,
+      toolFunctionParameterBytes: toolSummary.toolFunctionParameterBytes,
       toolChoice: summarizeToolChoice(body.tool_choice ?? body.toolChoice),
+      reasoning: summarizeReasoning(body.reasoning),
+      reasoningEffort: typeof body.reasoning_effort === 'string' ? body.reasoning_effort : undefined,
+      promptCacheKeyPresent: typeof body.prompt_cache_key === 'string' || typeof body.promptCacheKey === 'string',
       responseFormat: body.response_format ? true : undefined,
       maxOutputTokens: body.max_output_tokens ?? body.max_tokens ?? undefined,
       topLevelKeys: Object.keys(body).sort(),
