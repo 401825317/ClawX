@@ -606,6 +606,34 @@ function stringifyJson(value) {
   }
 }
 
+function parseJsonRecordText(value) {
+  const text = String(value ?? '').trim();
+  if (!text || !/^[{[]/u.test(text)) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function appendStructuredResultText(parts, result) {
+  if (!isRecord(result)) return;
+  for (const key of ['filePath', 'outputPath', 'output_path', 'path', 'out', 'url', 'mediaUrl', 'media_url']) {
+    if (typeof result[key] === 'string') parts.push(`${key}: "${result[key]}"`);
+  }
+  for (const key of ['artifact', 'artifacts', 'output', 'outputs', 'files', 'media']) {
+    const rendered = stringifyJson(result[key]);
+    if (rendered) parts.push(rendered);
+  }
+}
+
+function appendPossiblyJsonText(parts, value) {
+  const parsed = parseJsonRecordText(value);
+  if (parsed) appendStructuredResultText(parts, parsed);
+  else parts.push(value);
+}
+
 function stripArtifactRef(value) {
   return String(value ?? '')
     .trim()
@@ -818,22 +846,14 @@ function buildArtifactEvidence(event, finalText, options = {}) {
 
 function extractToolResultText(result) {
   const parts = [];
-  if (isRecord(result)) {
-    for (const key of ['filePath', 'outputPath', 'output_path', 'path', 'out', 'url', 'mediaUrl', 'media_url']) {
-      if (typeof result[key] === 'string') parts.push(`${key}: "${result[key]}"`);
-    }
-    for (const key of ['artifact', 'artifacts', 'output', 'outputs', 'files', 'media']) {
-      const rendered = stringifyJson(result[key]);
-      if (rendered) parts.push(rendered);
-    }
-  }
+  appendStructuredResultText(parts, result);
   if (Array.isArray(result?.content)) {
     for (const part of result.content) {
       if (typeof part === 'string') {
-        parts.push(part);
+        appendPossiblyJsonText(parts, part);
       } else if (isRecord(part)) {
-        if (typeof part.text === 'string') parts.push(part.text);
-        if (typeof part.content === 'string') parts.push(part.content);
+        if (typeof part.text === 'string') appendPossiblyJsonText(parts, part.text);
+        if (typeof part.content === 'string') appendPossiblyJsonText(parts, part.content);
         if (typeof part.url === 'string') parts.push(part.url);
         if (typeof part.filePath === 'string') parts.push(`filePath: "${part.filePath}"`);
         if (typeof part.outputPath === 'string') parts.push(`outputPath: "${part.outputPath}"`);
