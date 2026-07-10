@@ -31,6 +31,7 @@ import { prepareGatewayLaunchContext } from './config-sync';
 import { connectGatewaySocket, waitForGatewayReady } from './ws-client';
 import {
   findExistingGatewayProcess,
+  isGatewayPortOwnershipConflictError,
   runOpenClawDoctorRepair,
   terminateOwnedGatewayProcess,
   unloadLaunchctlGatewayService,
@@ -638,6 +639,22 @@ export class GatewayManager extends EventEmitter {
         logger.debug(error.message);
         return;
       }
+      if (isGatewayPortOwnershipConflictError(error)) {
+        const conflictPort = error.port ?? this.status.port;
+        this.shouldReconnect = false;
+        this.recordLifecycleEvent('start_blocked', {
+          reason: 'external-gateway-port-owner',
+          source: context?.source ?? 'gateway-start',
+          details: {
+            port: conflictPort,
+            listenerPids: error.listenerPids ?? [],
+            gatewayReady: error.gatewayReady ?? false,
+          },
+        });
+        logger.warn(
+          `Gateway startup blocked by external port owner on ${conflictPort}; auto-reconnect disabled`,
+        );
+      }
       logger.error(
         `Gateway start failed (port=${this.status.port}, reconnectAttempts=${this.reconnectAttempts}, spawn=${this.lastSpawnSummary ?? 'n/a'})`,
         error
@@ -836,6 +853,14 @@ export class GatewayManager extends EventEmitter {
           source: context?.source ?? 'gateway-manager',
         });
       } catch (err) {
+        if (isGatewayPortOwnershipConflictError(err)) {
+          const conflictPort = err.port ?? this.status.port;
+          this.shouldReconnect = false;
+          logger.warn(
+            `Gateway restart blocked by external port owner on ${conflictPort}; auto-reconnect remains disabled`,
+          );
+          throw err;
+        }
         // stop() set shouldReconnect=false. Restore it so the gateway
         // can self-heal via scheduleReconnect() instead of dying permanently.
         logger.warn('Gateway restart: start() failed after stop(), enabling auto-reconnect recovery', err);

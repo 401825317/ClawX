@@ -1,9 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { dialog, nativeImage } from 'electron';
 import crypto from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import { createReadStream } from 'node:fs';
+import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { basename, extname, join, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 import { expandFilePreviewPath, getOpenClawMediaDir } from '../../utils/paths';
@@ -52,6 +55,10 @@ function isStreamableMediaMime(mimeType: string): boolean {
   return mimeType.startsWith('video/') || mimeType.startsWith('audio/') || mimeType.startsWith('image/');
 }
 
+function normalizeMimeType(mimeType: string | null | undefined): string {
+  return (mimeType ?? '').split(';')[0]!.trim().toLowerCase();
+}
+
 function mimeToExt(mimeType: string): string {
   for (const [ext, mime] of Object.entries(EXT_MIME_MAP)) {
     if (mime === mimeType) return ext;
@@ -60,6 +67,7 @@ function mimeToExt(mimeType: string): string {
 }
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
+const REMOTE_MEDIA_MAX_REDIRECTS = 5;
 
 function getOutboundDir(): string {
   return join(getOpenClawMediaDir(), 'outbound');
@@ -89,6 +97,124 @@ function parseRangeHeader(rangeHeader: string | undefined, fileSize: number): { 
     return null;
   }
   return { start, end: Math.min(end, fileSize - 1) };
+}
+
+function isBlockedPrivateIpAddress(address: string): boolean {
+  if (!isIP(address)) return true;
+  if (address === '::1' || address === '::' || address.startsWith('fe80:')) return true;
+  if (/^(?:fc|fd)[0-9a-f]{2}:/i.test(address)) return true;
+  const ipv4Mapped = address.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i)?.[1];
+  const ipv4 = ipv4Mapped ?? address;
+  if (!isIP(ipv4) || !ipv4.includes('.')) return false;
+  const parts = ipv4.split('.').map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) return true;
+  const [a, b] = parts as [number, number, number, number];
+  return a === 0
+    || a === 10
+    || a === 127
+    || a === 169 && b === 254
+    || a === 172 && b >= 16 && b <= 31
+    || a === 192 && b === 168
+    || a >= 224;
+}
+
+async function resolveSafeRemoteMediaUrl(rawUrl: string): Promise<URL | null> {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim() || rawUrl.includes('\0')) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  if (parsed.username || parsed.password) return null;
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+  ) {
+    return null;
+  }
+
+  if (isIP(hostname)) {
+    return isBlockedPrivateIpAddress(hostname) ? null : parsed;
+  }
+
+  try {
+    const addresses = await lookup(hostname, { all: true, verbatim: false });
+    if (addresses.length === 0 || addresses.some((entry) => isBlockedPrivateIpAddress(entry.address))) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return parsed;
+}
+
+function inferRemoteMediaMimeType(sourceUrl: URL, upstreamContentType: string | null, mimeHint: string | null): string {
+  const upstreamMime = normalizeMimeType(upstreamContentType);
+  if (upstreamMime && isStreamableMediaMime(upstreamMime)) return upstreamMime;
+  const hintedMime = normalizeMimeType(mimeHint);
+  if (hintedMime && isStreamableMediaMime(hintedMime)) return hintedMime;
+  const extensionMime = getMimeType(extname(sourceUrl.pathname));
+  return isStreamableMediaMime(extensionMime) ? extensionMime : 'application/octet-stream';
+}
+
+async function sendRemoteMediaResponse(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sourceUrl: URL,
+  mimeHint: string | null,
+): Promise<void> {
+  const upstream = await fetchRemoteMedia(sourceUrl, req);
+  const contentType = inferRemoteMediaMimeType(sourceUrl, upstream.headers.get('content-type'), mimeHint);
+  if (!isStreamableMediaMime(contentType)) {
+    sendJson(res, 415, { success: false, error: 'Remote media type is not streamable' });
+    return;
+  }
+
+  res.statusCode = upstream.status;
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges') || 'bytes');
+  res.setHeader('Cache-Control', 'private, max-age=900');
+  const contentLength = upstream.headers.get('content-length');
+  if (contentLength) res.setHeader('Content-Length', contentLength);
+  const contentRange = upstream.headers.get('content-range');
+  if (contentRange) res.setHeader('Content-Range', contentRange);
+
+  if (req.method === 'HEAD' || !upstream.body) {
+    res.end();
+    return;
+  }
+  Readable.fromWeb(upstream.body as unknown as ReadableStream<Uint8Array>).pipe(res);
+}
+
+async function fetchRemoteMedia(
+  sourceUrl: URL,
+  req: IncomingMessage,
+  redirectCount = 0,
+): Promise<Response> {
+  const rangeHeader = typeof req.headers.range === 'string' ? req.headers.range : undefined;
+  const upstream = await fetch(sourceUrl, {
+    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+    headers: {
+      Accept: 'video/*, audio/*, image/*, */*;q=0.8',
+      ...(rangeHeader ? { Range: rangeHeader } : {}),
+    },
+    redirect: 'manual',
+  });
+  if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.get('location')) {
+    if (redirectCount >= REMOTE_MEDIA_MAX_REDIRECTS) {
+      throw new Error('Remote media redirect limit exceeded');
+    }
+    const nextUrl = await resolveSafeRemoteMediaUrl(new URL(upstream.headers.get('location')!, sourceUrl).toString());
+    if (!nextUrl) {
+      throw new Error('Remote media redirect target is not allowed');
+    }
+    return fetchRemoteMedia(nextUrl, req, redirectCount + 1);
+  }
+  return upstream;
 }
 
 async function resolveLocalMediaFile(filePath: string): Promise<{ realPath: string; size: number; mimeType: string } | null> {
@@ -226,6 +352,20 @@ export async function handleFileRoutes(
       sendLocalMediaResponse(req, res, file);
     } catch (error) {
       sendJson(res, 404, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/files/remote-media' && (req.method === 'GET' || req.method === 'HEAD')) {
+    try {
+      const sourceUrl = await resolveSafeRemoteMediaUrl(url.searchParams.get('url') || '');
+      if (!sourceUrl) {
+        sendJson(res, 400, { success: false, error: 'Invalid remote media URL' });
+        return true;
+      }
+      await sendRemoteMediaResponse(req, res, sourceUrl, url.searchParams.get('mimeType'));
+    } catch (error) {
+      sendJson(res, 502, { success: false, error: String(error) });
     }
     return true;
   }

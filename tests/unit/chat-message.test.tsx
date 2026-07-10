@@ -21,6 +21,32 @@ vi.mock('@/lib/api-client', () => ({
   }),
 }));
 
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) => {
+      const translations: Record<string, string> = {
+        'artifactManifest.title': '产物清单',
+        'artifactManifest.completed': '已完成',
+        'artifactManifest.failed': '失败',
+        'artifactManifest.blocked': '待补充',
+        'artifactManifest.noArtifact': '未生成产物',
+        'artifactManifest.playable': '可播放',
+        'artifactManifest.videoLink': '视频链接',
+        'artifactManifest.generated': '已生成',
+        'artifactManifest.types.image': '图片',
+        'artifactManifest.types.video': '视频',
+        'artifactManifest.types.presentation': 'PPT',
+        'artifactManifest.types.spreadsheet': 'Excel',
+        'artifactManifest.types.miniProgram': '网页',
+        'artifactManifest.types.copywriting': '文案',
+        'artifactManifest.types.file': '文件',
+      };
+      if (key === 'artifactManifest.count') return `${Number(options?.count ?? 0)} 个`;
+      return translations[key] ?? key;
+    },
+  }),
+}));
+
 describe('ChatMessage attachment dedupe', () => {
   it('renders one file card when the same attachment path is present twice', () => {
     const file = {
@@ -577,7 +603,8 @@ describe('ChatMessage attachment dedupe', () => {
     expect(screen.queryByText('debug.log')).not.toBeInTheDocument();
   });
 
-  it('renders remote video MEDIA refs without local file validation', () => {
+  it('renders remote video MEDIA refs through the authenticated Host API media proxy', async () => {
+    vi.mocked(invokeIpc).mockResolvedValueOnce('host-token-1');
     const url = 'https://video.junfeiai.hk-proxy.lingzhiwuxian.com/video/grok/task_demo?exp=1782115630&sig=abc123';
     const message: RawMessage = {
       role: 'assistant',
@@ -601,9 +628,15 @@ describe('ChatMessage attachment dedupe', () => {
       />,
     );
 
-    const video = container.querySelector('video');
-    expect(video).not.toBeNull();
-    expect(video?.getAttribute('src')).toBe(url);
+    await waitFor(() => {
+      const video = container.querySelector('video');
+      expect(video).not.toBeNull();
+      const src = video?.getAttribute('src') || '';
+      expect(src).toContain('http://127.0.0.1:13210/api/files/remote-media?');
+      expect(src).toContain(`url=${encodeURIComponent(url)}`);
+      expect(src).toContain('mimeType=video%2Fmp4');
+      expect(src).toContain('token=host-token-1');
+    });
     expect(screen.getByText('task_demo.mp4')).toBeInTheDocument();
   });
 

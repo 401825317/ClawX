@@ -19,7 +19,16 @@
         "currentAgent": "当前对话对象：{{agent}}",
         "agentSwitcher": "选择 Agent",
         "agentRunning": "运行中",
-        "workspace": "工作空间"
+        "workspace": "工作空间",
+        "projectWorkspace": "当前项目目录",
+        "chooseProjectWorkspace": "选择项目文件夹",
+        "useAgentWorkspace": "使用 Agent 工作空间",
+        "browseWorkspace": "浏览项目文件",
+        "closeWorkspaceBrowser": "关闭文件浏览",
+        "workspaceLocked": "任务运行期间不能切换项目目录。",
+        "workspaceUpdated": "项目目录已更新",
+        "workspaceReset": "已恢复 Agent 工作空间",
+        "workspaceUpdateFailed": "项目目录更新失败"
     },
     "generatedFiles": {
         "title": "文件变更（{{count}} 个）",

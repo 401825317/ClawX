@@ -787,9 +787,14 @@ function openAttachment(file: AttachedFileMeta, onOpenFile?: (file: AttachedFile
   }
 }
 
-function useResolvedMediaSrc(target: string | undefined): string | null {
+type MediaSrcResolveOptions = {
+  mimeType?: string;
+  proxyRemote?: boolean;
+};
+
+function useResolvedMediaSrc(target: string | undefined, options: MediaSrcResolveOptions = {}): string | null {
   const key = target ?? '';
-  const immediate = immediateMediaSrcFromFilePath(target);
+  const immediate = immediateMediaSrcFromFilePath(target, options);
   const [resolved, setResolved] = useState<{ key: string; src: string | null }>(() => ({
     key,
     src: immediate,
@@ -797,7 +802,7 @@ function useResolvedMediaSrc(target: string | undefined): string | null {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.resolve(immediate ?? mediaSrcFromFilePath(target))
+    Promise.resolve(immediate ?? mediaSrcFromFilePath(target, options))
       .then((src) => {
         if (!cancelled) setResolved({ key, src });
       })
@@ -807,7 +812,7 @@ function useResolvedMediaSrc(target: string | undefined): string | null {
     return () => {
       cancelled = true;
     };
-  }, [key, immediate, target]);
+  }, [key, immediate, target, options.mimeType, options.proxyRemote]);
 
   return resolved.key === key ? resolved.src : immediate;
 }
@@ -1214,11 +1219,19 @@ function localPathFromMediaFilePath(filePath: string): string | null {
   return filePath;
 }
 
-async function mediaSrcFromFilePath(filePath: string | undefined): Promise<string | null> {
+async function mediaSrcFromFilePath(
+  filePath: string | undefined,
+  options: MediaSrcResolveOptions = {},
+): Promise<string | null> {
   if (!filePath) return null;
   const trimmed = filePath.trim();
   if (!trimmed) return null;
   if (/^https?:\/\//i.test(trimmed)) {
+    if (options.proxyRemote) {
+      const params = new URLSearchParams({ url: trimmed });
+      if (options.mimeType) params.set('mimeType', options.mimeType);
+      return createAuthenticatedHostApiUrl(`/api/files/remote-media?${params.toString()}`);
+    }
     return trimmed;
   }
   const localPath = localPathFromMediaFilePath(trimmed);
@@ -1226,15 +1239,21 @@ async function mediaSrcFromFilePath(filePath: string | undefined): Promise<strin
   return createAuthenticatedHostApiUrl(`/api/files/local-media?path=${encodeURIComponent(localPath)}`);
 }
 
-function immediateMediaSrcFromFilePath(filePath: string | undefined): string | null {
+function immediateMediaSrcFromFilePath(
+  filePath: string | undefined,
+  options: MediaSrcResolveOptions = {},
+): string | null {
   const trimmed = filePath?.trim();
   if (!trimmed) return null;
-  return /^https?:\/\//i.test(trimmed) ? trimmed : null;
+  return /^https?:\/\//i.test(trimmed) && !options.proxyRemote ? trimmed : null;
 }
 
 function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
   const mediaTarget = attachmentOpenTarget(file);
-  const src = useResolvedMediaSrc(mediaTarget);
+  const src = useResolvedMediaSrc(mediaTarget, {
+    mimeType: file.mimeType,
+    proxyRemote: Boolean(mediaTarget && isRemoteHttpUrl(mediaTarget)),
+  });
 
   const handleOpen = useCallback(() => {
     const target = attachmentOpenTarget(file);
@@ -1264,7 +1283,7 @@ function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (
         type="button"
         onClick={handleOpen}
         className="flex items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5"
-        title={file.filePath}
+        title={mediaTarget}
       >
         <Film className="h-4 w-4 shrink-0" />
         <span className="truncate">{file.fileName}</span>

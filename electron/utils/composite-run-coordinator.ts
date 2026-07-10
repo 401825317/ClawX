@@ -11,6 +11,8 @@ import type {
 } from '../../shared/chat-runtime-events';
 import {
   COMPOSITE_RUN_SCHEMA_VERSION,
+  isLocalArtifactTaskKind,
+  isSupportedCompositeRunTaskSet,
   isCompositeRunTerminal,
   type CompositeRunApiResponse,
   type CompositeRunCancelResult,
@@ -39,6 +41,10 @@ import {
   type LocalArtifactCreateRequest,
   type LocalArtifactCreateResult,
 } from './local-artifact-runtime';
+import {
+  verifyLocalArtifactOpenability,
+  type LocalArtifactOpenabilityResult,
+} from './local-artifact-openability';
 import {
   planLocalArtifactBatch,
   type LocalArtifactPlanItem,
@@ -133,11 +139,12 @@ function outputTitle(output: MediaGenerationJobOutput, index: number, kind: 'ima
   return output.fileName?.trim() || location.split(/[\\/]/u).pop()?.split(/[?#]/u)[0] || `${kind}-${index + 1}`;
 }
 
-function localTaskRequest(task: CompositeRunTaskInput, originalPrompt: string): LocalArtifactCreateRequest {
+function localTaskRequest(task: CompositeRunTaskInput, originalPrompt: string, cwd?: string): LocalArtifactCreateRequest {
   const common = {
     title: task.title,
     sourcePrompt: task.prompt,
     originalPrompt,
+    ...(cwd ? { outputDir: path.join(cwd, 'outputs') } : {}),
   };
   if (task.kind === 'presentation') return { kind: 'presentation', ...common };
   if (task.kind === 'spreadsheet') return { kind: 'spreadsheet', ...common };
@@ -146,14 +153,25 @@ function localTaskRequest(task: CompositeRunTaskInput, originalPrompt: string): 
 }
 
 function isLocalTask(task: CompositeRunTaskRecord): boolean {
-  return task.kind === 'presentation'
-    || task.kind === 'spreadsheet'
-    || task.kind === 'mini_program'
-    || task.kind === 'copywriting';
+  return isLocalArtifactTaskKind(task.kind);
 }
 
 function isMediaTask(task: CompositeRunTaskRecord): boolean {
   return task.kind === 'image_generate' || task.kind === 'image_edit' || task.kind === 'video_generate';
+}
+
+function failedLocalRepairableVerification(
+  run: CompositeRunRecord,
+  task: CompositeRunTaskRecord,
+): ChatRuntimeVerification | undefined {
+  const artifactIds = new Set(task.artifactIds);
+  return [...run.verifications].reverse().find((verification) => (
+    Boolean(verification.artifactId && artifactIds.has(verification.artifactId))
+    && (verification.source === 'local-artifact-runtime' || verification.source === 'local-artifact-openability')
+    && verification.kind !== 'artifact.availability'
+    && verification.required !== false
+    && verification.status !== 'passed'
+  ));
 }
 
 function terminalTask(task: CompositeRunTaskRecord): boolean {
@@ -186,7 +204,9 @@ function validateStartRequest(request: CompositeRunStartRequest): void {
   if (!request.clientRequestId?.trim()) throw new Error('clientRequestId is required');
   if (!request.sessionKey?.trim()) throw new Error('sessionKey is required');
   if (!request.prompt?.trim()) throw new Error('prompt is required');
-  if (!Array.isArray(request.tasks) || request.tasks.length < 2) throw new Error('At least two composite tasks are required');
+  if (!Array.isArray(request.tasks) || !isSupportedCompositeRunTaskSet(request.tasks)) {
+    throw new Error('A run requires either one local artifact task or at least two composite tasks');
+  }
   if (request.tasks.length > MAX_COMPOSITE_TASKS) throw new Error(`Composite task count exceeds ${MAX_COMPOSITE_TASKS}`);
   const ids = new Set<string>();
   for (const task of request.tasks) {
@@ -329,14 +349,13 @@ function buildManifest(run: CompositeRunRecord, trailingEvents: ChatRuntimeEvent
 function deliveryText(run: CompositeRunRecord): string {
   const completed = run.tasks.filter((task) => task.status === 'completed');
   const incomplete = run.tasks.filter((task) => task.status !== 'completed');
-  const lines = [`已完成 ${completed.length}/${run.tasks.length} 项。`];
-  if (completed.length > 0) {
-    lines.push('', '已完成：', ...completed.map((task) => `- ${task.title}`));
-  }
+  const lines = [`已完成 ${completed.length}/${run.tasks.length} 项，产物已整理如下。`];
   if (incomplete.length > 0) {
     lines.push('', '需要补充处理：', ...incomplete.map((task) => `- ${task.title}：${task.error || '未完成'}`));
   }
-  lines.push('', '已完成基础产物验证。');
+  if (completed.length > 0) {
+    lines.push('', '基础验证已完成：本地文件已检查内容和可用性，媒体产物已检查文件或元数据证据。');
+  }
   return lines.join('\n');
 }
 
@@ -363,6 +382,12 @@ export class CompositeRunCoordinator {
 
   async start(request: CompositeRunStartRequest): Promise<CompositeRunApiResponse> {
     validateStartRequest(request);
+    const cwd = request.cwd?.trim();
+    if (cwd && !path.isAbsolute(cwd)) throw new Error('Composite run cwd must be an absolute path');
+    if (cwd) {
+      const stat = await fsP.stat(cwd).catch(() => null);
+      if (!stat?.isDirectory()) throw new Error('Composite run cwd is not an accessible directory');
+    }
     await this.initialize();
     let release!: () => void;
     const previous = this.createLock;
@@ -385,6 +410,7 @@ export class CompositeRunCoordinator {
         clientRequestId,
         sessionKey: request.sessionKey.trim(),
         prompt: request.prompt.trim(),
+        ...(cwd ? { cwd } : {}),
         requestedMode: request.requestedMode ?? 'chat',
         userMessageTimestampMs: Number.isFinite(request.userMessageTimestampMs) ? Math.floor(request.userMessageTimestampMs!) : now,
         imageOptions: request.imageOptions ? { ...request.imageOptions } : undefined,
@@ -703,6 +729,10 @@ export class CompositeRunCoordinator {
         && (task.dependsOn ?? []).every((dependencyId) => current.tasks.find((candidate) => candidate.id === dependencyId)?.status === 'completed')
       ));
       if (ready.length > 0) {
+        if (ready.some((task) => isLocalTask(task) && !task.plannedRequest)) {
+          await this.ensureLocalPlans(runId);
+          continue;
+        }
         await Promise.all(ready.map((task) => this.runTask(runId, task.id)));
         continue;
       }
@@ -715,6 +745,38 @@ export class CompositeRunCoordinator {
   }
 
   private async scheduleSafeAutomaticRetries(runId: string): Promise<boolean> {
+    const snapshot = this.runs.get(runId);
+    const localRetryItems: LocalArtifactPlanItem[] = snapshot?.tasks
+      .filter((task) => (
+        isLocalTask(task)
+        && task.status === 'failed'
+        && task.recoverable === true
+        && task.autoRetrySafe === true
+        && task.automaticRetryCount < MAX_SAFE_AUTOMATIC_RETRIES
+        && Boolean(task.plannedRequest)
+      ))
+      .flatMap((task) => {
+        const verification = failedLocalRepairableVerification(snapshot, task);
+        if (!verification) return [];
+        return [{
+          id: task.id,
+          request: clone(task.plannedRequest) as LocalArtifactCreateRequest,
+          verificationFeedback: {
+            detail: verification.detail,
+            evidence: verification.evidence,
+          },
+        }];
+      }) ?? [];
+    const replacementRequests = new Map<string, LocalArtifactCreateRequest>();
+    let retryPlanSource: 'model' | 'fallback' | undefined;
+    let retryPlanError: string | undefined;
+    if (localRetryItems.length > 0) {
+      const result = await planLocalArtifactBatch(localRetryItems);
+      retryPlanSource = result.source;
+      retryPlanError = result.error;
+      for (const item of result.items) replacementRequests.set(item.id, item.request);
+    }
+
     let scheduled = false;
     await this.mutate(runId, async (run) => {
       const retryableTasks = run.tasks.filter((task) => (
@@ -722,6 +784,7 @@ export class CompositeRunCoordinator {
         && task.recoverable === true
         && task.autoRetrySafe === true
         && task.automaticRetryCount < MAX_SAFE_AUTOMATIC_RETRIES
+        && (!isLocalTask(task) || replacementRequests.has(task.id))
       ));
       if (retryableTasks.length === 0) return;
       scheduled = true;
@@ -734,6 +797,8 @@ export class CompositeRunCoordinator {
         !verification.artifactId || !removedArtifactIds.has(verification.artifactId)
       ));
       for (const task of retryableTasks) {
+        const replacementRequest = replacementRequests.get(task.id);
+        if (replacementRequest) task.plannedRequest = clone(replacementRequest) as Record<string, unknown>;
         task.status = 'pending';
         task.automaticRetryCount += 1;
         task.recoverable = undefined;
@@ -746,6 +811,11 @@ export class CompositeRunCoordinator {
         await this.record(run, 'task.auto_retry_scheduled', {
           automaticRetryCount: task.automaticRetryCount,
           maxAutomaticRetries: MAX_SAFE_AUTOMATIC_RETRIES,
+          ...(replacementRequest ? {
+            replanned: true,
+            plannerSource: retryPlanSource,
+            plannerError: retryPlanError,
+          } : {}),
         }, task.id);
         await this.emitTaskStep(run, task);
         await this.emitProgress(run, task, `${task.title}准备自动重试`, 'running');
@@ -817,18 +887,52 @@ export class CompositeRunCoordinator {
       if (!run) return;
       const items: LocalArtifactPlanItem[] = run.tasks
         .filter((task) => isLocalTask(task) && !task.plannedRequest)
-        .map((task) => ({ id: task.id, request: localTaskRequest(task, run.prompt) }));
+        .map((task) => ({ id: task.id, request: localTaskRequest(task, run.prompt, run.cwd) }));
       if (items.length === 0) return;
+      await this.mutate(runId, async (current) => {
+        await this.record(current, 'local.plan.started', { plannedItemCount: items.length });
+        await this.emitRuntime(current, {
+          type: 'progress.update',
+          entry: {
+            id: `progress:${current.runId}:local-plan`,
+            kind: 'commentary',
+            text: `正在规划 ${items.length} 个文件产物`,
+            status: 'running',
+            detail: '正在统一主题、内容结构和交付格式。',
+            stepId: 'uclaw.composite',
+            source: 'native',
+          },
+        });
+      });
       const result = await planLocalArtifactBatch(items);
       await this.mutate(runId, async (current) => {
-        for (const item of result.items) {
+        const plannedById = new Map(result.items.map((item) => [item.id, item.request]));
+        for (const item of items) {
           const task = current.tasks.find((candidate) => candidate.id === item.id);
-          if (task && item.request.planningMode === 'model') task.plannedRequest = clone(item.request) as Record<string, unknown>;
+          const plannedRequest = plannedById.get(item.id) ?? item.request;
+          if (task && !task.plannedRequest) task.plannedRequest = clone(plannedRequest) as Record<string, unknown>;
         }
         await this.record(current, 'local.plan.completed', {
           source: result.source,
           durationMs: result.durationMs,
           error: result.error,
+          plannedItemCount: items.length,
+        });
+        await this.emitRuntime(current, {
+          type: 'progress.update',
+          entry: {
+            id: `progress:${current.runId}:local-plan`,
+            kind: 'commentary',
+            text: `已完成 ${items.length} 个文件产物的规划`,
+            status: 'completed',
+            detail: result.source === 'model'
+              ? '已生成可执行内容计划。'
+              : result.error === 'artifact_planner_single_artifact_fast_path'
+                ? '已使用本地可执行快路径生成内容计划。'
+                : '模型规划不可用，已切换本地可执行保底方案。',
+            stepId: 'uclaw.composite',
+            source: 'native',
+          },
         });
       });
     })().finally(() => this.localPlanning.delete(runId));
@@ -843,10 +947,16 @@ export class CompositeRunCoordinator {
     if (!run || !task || task.status !== 'running') return;
     if (!task.plannedRequest) throw new Error('本地产物模型规划未返回有效内容。');
     const result = await createLocalArtifact(task.plannedRequest as LocalArtifactCreateRequest);
-    await this.completeLocalTask(runId, taskId, result);
+    const openability = await verifyLocalArtifactOpenability({ filePath: result.filePath });
+    await this.completeLocalTask(runId, taskId, result, openability);
   }
 
-  private async completeLocalTask(runId: string, taskId: string, result: LocalArtifactCreateResult): Promise<void> {
+  private async completeLocalTask(
+    runId: string,
+    taskId: string,
+    result: LocalArtifactCreateResult,
+    openability: LocalArtifactOpenabilityResult,
+  ): Promise<void> {
     await this.mutate(runId, async (run) => {
       const task = run.tasks.find((candidate) => candidate.id === taskId);
       if (!task || task.status !== 'running' || run.status === 'cancelled') return;
@@ -886,16 +996,38 @@ export class CompositeRunCoordinator {
         artifactId: artifact.id,
         source: 'local-artifact-runtime',
       };
+      const openabilityVerification: ChatRuntimeVerification = {
+        id: verificationId(artifact, openability.kind),
+        status: openability.status,
+        kind: openability.kind,
+        required: openability.required,
+        severity: openability.severity,
+        title: `打开验证 ${result.fileName}`,
+        detail: openability.detail,
+        evidence: [
+          openability.evidence,
+          `verifier=${openability.verifier}`,
+          `durationMs=${openability.durationMs}`,
+        ].filter(Boolean).join('; '),
+        targetId: artifact.id,
+        artifactId: artifact.id,
+        source: 'local-artifact-openability',
+      };
+      const taskVerifications = [availabilityVerification, contentVerification, openabilityVerification];
       run.artifacts.push(artifact);
-      run.verifications.push(availabilityVerification, contentVerification);
+      run.verifications.push(...taskVerifications);
       task.artifactIds.push(artifact.id);
-      const requiredVerificationFailed = [availabilityVerification, contentVerification]
+      const requiredVerificationFailed = taskVerifications
         .some((verification) => verification.required !== false && verification.status !== 'passed');
       if (requiredVerificationFailed) {
         task.status = 'failed';
         task.recoverable = true;
-        task.autoRetrySafe = true;
-        task.error = [availabilityVerification, contentVerification]
+        task.autoRetrySafe = taskVerifications.some((verification) => (
+          verification.kind !== 'artifact.availability'
+          && verification.required !== false
+          && verification.status !== 'passed'
+        ));
+        task.error = taskVerifications
           .find((verification) => verification.required !== false && verification.status !== 'passed')?.detail
           || '本地产物验证未通过。';
       } else {
@@ -908,6 +1040,7 @@ export class CompositeRunCoordinator {
       await this.emitArtifact(run, artifact);
       await this.emitVerification(run, availabilityVerification);
       await this.emitVerification(run, contentVerification);
+      await this.emitVerification(run, openabilityVerification);
       await this.emitTaskStep(run, task);
       await this.emitProgress(run, task, task.status === 'completed' ? `${task.title}已完成` : `${task.title}验证未通过`, task.status === 'completed' ? 'completed' : 'error');
     });
@@ -1159,6 +1292,7 @@ export class CompositeRunCoordinator {
       run.status = 'finalizing';
       run.delivery.status = 'writing';
       run.delivery.attempts += 1;
+      run.delivery.text = deliveryText(run);
       run.delivery.error = undefined;
       const terminalEvent: ChatRuntimeEvent = {
         contractVersion: 1,
@@ -1246,7 +1380,7 @@ export class CompositeRunCoordinator {
         await appendCompositeArtifactConversation({
           sessionKey: run.sessionKey,
           prompt: run.prompt,
-          summaryText: deliveryText(run),
+          summaryText: run.delivery.text || deliveryText(run),
           runId: deliveryIdentity(run.runId, run.delivery.generation || 1).appendRunId,
           files,
           outputPaths: files.map((file) => file.filePath || file.gatewayUrl || '').filter(Boolean),

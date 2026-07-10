@@ -19,7 +19,16 @@
         "currentAgent": "Общение с {{agent}}",
         "agentSwitcher": "Выбрать агента",
         "agentRunning": "Выполняется",
-        "workspace": "Рабочая область"
+        "workspace": "Рабочая область",
+        "projectWorkspace": "Текущий каталог проекта",
+        "chooseProjectWorkspace": "Выбрать папку проекта",
+        "useAgentWorkspace": "Использовать рабочую область агента",
+        "browseWorkspace": "Просмотреть файлы проекта",
+        "closeWorkspaceBrowser": "Закрыть просмотр файлов",
+        "workspaceLocked": "Нельзя менять каталог проекта во время выполнения задачи.",
+        "workspaceUpdated": "Каталог проекта обновлён",
+        "workspaceReset": "Рабочая область агента восстановлена",
+        "workspaceUpdateFailed": "Не удалось обновить каталог проекта"
     },
     "generatedFiles": {
         "title": "Изменения файлов ({{count}})",

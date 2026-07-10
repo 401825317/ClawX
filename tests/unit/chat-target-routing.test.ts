@@ -1,4 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  CompositeRunRecord,
+  CompositeRunStartRequest,
+} from '../../shared/composite-run';
+import type {
+  ChatRuntimeArtifact,
+  ChatRuntimeEvent,
+  ChatRuntimeGateEvaluation,
+  ChatRuntimeVerification,
+} from '../../shared/chat-runtime-events';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { chatHistoryRpcParams } from './gateway-rpc-test-utils';
 
@@ -18,6 +28,197 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+type CompositeArtifactFixture = {
+  taskId: string;
+  fileName: string;
+  mimeType: string;
+  filePath?: string;
+  url?: string;
+  sizeBytes?: number;
+};
+
+function completedCompositeRun(
+  request: CompositeRunStartRequest,
+  artifactFixtures: CompositeArtifactFixture[],
+  options?: { runId?: string; deliveryText?: string },
+): CompositeRunRecord {
+  const runId = options?.runId ?? 'composite-run-test';
+  const now = Date.now();
+  const artifactByTask = new Map(artifactFixtures.map((artifact) => [artifact.taskId, artifact]));
+  const artifacts: ChatRuntimeArtifact[] = request.tasks.map((task) => {
+    const fixture = artifactByTask.get(task.id);
+    if (!fixture) throw new Error(`Missing composite artifact fixture for ${task.id}`);
+    return {
+      id: `artifact:${task.id}`,
+      kind: task.kind,
+      title: fixture.fileName,
+      filePath: fixture.filePath,
+      url: fixture.url,
+      mimeType: fixture.mimeType,
+      sizeBytes: fixture.sizeBytes ?? 1024,
+      stepId: `uclaw.composite.${task.id}`,
+      source: 'composite-main',
+    };
+  });
+  const verifications: ChatRuntimeVerification[] = artifacts.map((artifact) => ({
+    id: `verification:${artifact.id}`,
+    status: 'passed',
+    kind: 'artifact.availability',
+    required: true,
+    severity: 'info',
+    title: '产物可用',
+    artifactId: artifact.id,
+    targetId: artifact.id,
+    source: 'composite-main',
+  }));
+  const gate: ChatRuntimeGateEvaluation = {
+    id: `gate:${runId}`,
+    decision: 'deliverable',
+    summary: '所有必需产物均已生成并通过验证。',
+    artifactCount: artifacts.length,
+    requiredVerificationCount: verifications.length,
+    passedRequiredVerificationCount: verifications.length,
+    blockingIssueCount: 0,
+    warningIssueCount: 0,
+    verificationCoverage: 1,
+    issues: [],
+  };
+  const runtimeEvents: ChatRuntimeEvent[] = [];
+  let seq = 0;
+  const emit = (event: Omit<ChatRuntimeEvent, 'runId' | 'sessionKey' | 'seq' | 'ts'>): void => {
+    runtimeEvents.push({
+      ...event,
+      contractVersion: 1,
+      producer: 'composite-coordinator',
+      runId,
+      sessionKey: request.sessionKey,
+      seq: ++seq,
+      ts: now,
+    } as ChatRuntimeEvent);
+  };
+  emit({ type: 'run.started', objective: request.prompt, startedAt: now });
+  emit({
+    type: 'run.plan.updated',
+    objective: request.prompt,
+    summary: 'UClaw Main 已接管组合任务。',
+    steps: [
+      {
+        id: 'uclaw.composite',
+        title: '执行组合任务',
+        status: 'running',
+        kind: 'composite',
+        order: 1,
+      },
+      ...request.tasks.map((task, index) => ({
+        id: `uclaw.composite.${task.id}`,
+        title: task.title,
+        status: 'pending' as const,
+        detail: task.prompt,
+        kind: 'composite-task',
+        parentId: 'uclaw.composite',
+        requiresArtifact: task.requiresArtifact !== false,
+        order: index + 2,
+      })),
+    ],
+  });
+  request.tasks.forEach((task, index) => {
+    emit({
+      type: 'run.step.updated',
+      step: {
+        id: `uclaw.composite.${task.id}`,
+        title: task.title,
+        status: 'completed',
+        detail: task.prompt,
+        kind: 'composite-task',
+        parentId: 'uclaw.composite',
+        requiresArtifact: task.requiresArtifact !== false,
+        order: index + 2,
+      },
+    });
+    emit({ type: 'artifact.produced', artifact: artifacts[index] });
+    emit({ type: 'verification.completed', verification: verifications[index] });
+  });
+  emit({
+    type: 'run.step.updated',
+    step: {
+      id: 'uclaw.composite',
+      title: '执行组合任务',
+      status: 'completed',
+      kind: 'composite',
+      order: 1,
+    },
+  });
+  emit({ type: 'gate.evaluated', gate });
+  emit({ type: 'run.ended', status: 'completed', endedAt: now });
+
+  const deliveryText = options?.deliveryText ?? `已完成 ${request.tasks.length}/${request.tasks.length} 项。`;
+  return {
+    version: 1,
+    revision: 1,
+    runId,
+    clientRequestId: request.clientRequestId,
+    sessionKey: request.sessionKey,
+    prompt: request.prompt,
+    cwd: request.cwd,
+    requestedMode: request.requestedMode ?? 'chat',
+    userMessageTimestampMs: request.userMessageTimestampMs ?? now,
+    imageOptions: request.imageOptions,
+    videoOptions: request.videoOptions,
+    status: 'completed',
+    tasks: request.tasks.map((task, index) => ({
+      ...task,
+      requiresArtifact: task.requiresArtifact ?? true,
+      status: 'completed',
+      attempt: 1,
+      automaticRetryCount: 0,
+      artifactIds: [artifacts[index].id],
+      startedAt: now,
+      completedAt: now,
+    })),
+    artifacts,
+    verifications,
+    gate,
+    delivery: {
+      status: 'succeeded',
+      generation: 1,
+      assistantMessageId: `composite-result:${runId}`,
+      attempts: 1,
+      text: deliveryText,
+      persistedAt: now,
+    },
+    manifest: {
+      version: 2,
+      runId,
+      requestedTaskCount: request.tasks.length,
+      runStatus: 'completed',
+      runtimeEvents,
+      tasks: request.tasks.map((task, index) => ({
+        id: task.id,
+        kind: task.kind,
+        title: task.title,
+        status: 'completed',
+        artifactRefs: [artifacts[index].id],
+      })),
+    },
+    runtimeEvents,
+    lastSeq: seq,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function expectNoRendererCompositeExecutionCalls(): void {
+  const forbidden = new Set([
+    '/api/chat/send',
+    '/api/chat/send-with-media',
+    '/api/media/image-generation/chat-send',
+    '/api/media/video-generation/chat-send',
+    '/api/local-artifacts/create',
+    '/api/local-artifacts/append-conversation',
+  ]);
+  expect(hostApiFetchMock.mock.calls.filter(([url]) => forbidden.has(String(url)))).toEqual([]);
 }
 
 vi.mock('@/stores/gateway', () => ({
@@ -91,7 +292,7 @@ describe('chat target routing', () => {
     });
 
     hostApiFetchMock.mockReset();
-    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string; method?: string }) => {
       if (url === '/api/media/intent-plan') {
         const body = JSON.parse(init?.body || '{}') as {
           prompt?: string;
@@ -1068,14 +1269,14 @@ describe('chat target routing', () => {
     expect(run?.verifications).toEqual(expect.arrayContaining([
       expect.objectContaining({
         artifactId,
-        kind: 'artifact.availability',
-        required: true,
+        kind: 'artifact.registration',
+        required: false,
         status: 'passed',
       }),
       expect.objectContaining({
         artifactId,
         kind: 'media.metadata',
-        required: false,
+        required: true,
         status: 'passed',
       }),
     ]));
@@ -1684,32 +1885,25 @@ describe('chat target routing', () => {
       loading: false,
       thinkingLevel: null,
     });
-    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+    let submittedRun: CompositeRunStartRequest | undefined;
+    let completedRun: CompositeRunRecord | undefined;
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string; method?: string }) => {
       if (url.toString().startsWith('/api/sessions/transcript?')) {
         return { messages: [] };
       }
-      if (url === '/api/media/image-generation/chat-send') {
-        const body = init?.body ? JSON.parse(init.body) as { inputImages?: unknown[] } : {};
-        const edited = (body.inputImages?.length ?? 0) > 0;
-        return {
-          success: true,
-          job: {
-            id: edited ? 'job-edit-poster' : 'job-poster',
-            kind: 'image',
-            sessionKey: 'agent:main:main',
-            status: 'succeeded',
-            result: {
-              outputs: [{
-                path: edited ? '/tmp/edit-poster.png' : '/tmp/poster.png',
-                fileName: edited ? 'edit-poster.png' : 'poster.png',
-                mimeType: 'image/png',
-                size: 1024,
-                width: 1024,
-                height: 1024,
-              }],
-            },
-          },
-        };
+      if (url === '/api/composite-runs' && init?.method === 'POST') {
+        submittedRun = JSON.parse(init.body || '{}') as CompositeRunStartRequest;
+        completedRun = completedCompositeRun(submittedRun, [
+          { taskId: 'poster', fileName: 'poster.png', mimeType: 'image/png', filePath: '/tmp/poster.png' },
+          { taskId: 'edit-poster', fileName: 'edit-poster.png', mimeType: 'image/png', filePath: '/tmp/edit-poster.png' },
+        ], {
+          runId: 'composite-run-poster',
+          deliveryText: '已完成 2/2 项，活动主视觉及蓝色调版本已交付。',
+        });
+        return { success: true, run: completedRun };
+      }
+      if (url === '/api/composite-runs/composite-run-poster') {
+        return { success: true, run: completedRun };
       }
       if (url !== '/api/media/intent-plan') {
         return { success: true, result: {} };
@@ -1743,19 +1937,27 @@ describe('chat target routing', () => {
 
     await useChatStore.getState().sendMessage('生成一张活动主视觉，再改成蓝色调');
 
-    const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
-    expect(sendCall).toBeFalsy();
-    const imageCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/image-generation/chat-send');
-    expect(imageCalls).toHaveLength(2);
-    for (const call of imageCalls) {
-      const payload = JSON.parse((call[1] as { body: string }).body) as { suppressConversationAppend?: boolean };
-      expect(payload.suppressConversationAppend).toBe(true);
-    }
-    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/media/video-generation/chat-send')).toBe(false);
-    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
-    expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/local-artifacts/append-conversation')).toBe(true);
+    expect(submittedRun).toEqual(expect.objectContaining({
+      sessionKey: 'agent:main:main',
+      prompt: '生成一张活动主视觉，再改成蓝色调',
+      requestedMode: 'chat',
+    }));
+    expect(submittedRun?.tasks).toEqual([
+      expect.objectContaining({
+        id: 'poster',
+        kind: 'image_generate',
+      }),
+      expect.objectContaining({
+        id: 'edit-poster',
+        kind: 'image_edit',
+        dependsOn: ['poster'],
+      }),
+    ]);
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/composite-runs')).toHaveLength(1);
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/composite-runs/composite-run-poster')).toHaveLength(1);
+    expectNoRendererCompositeExecutionCalls();
 
-    const run = Object.values(useChatStore.getState().runtimeRuns)[0];
+    const run = useChatStore.getState().runtimeRuns['composite-run-poster'];
     expect(run?.planSteps).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'uclaw.composite', kind: 'composite', status: 'completed' }),
       expect.objectContaining({
@@ -1775,9 +1977,22 @@ describe('chat target routing', () => {
         requiresArtifact: true,
       }),
     ]));
+    expect(run?.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ filePath: '/tmp/poster.png' }),
+      expect.objectContaining({ filePath: '/tmp/edit-poster.png' }),
+    ]));
+    expect(run?.gateResult?.decision).toBe('deliverable');
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '已完成 2/2 项，活动主视觉及蓝色调版本已交付。',
+      _attachedFiles: expect.arrayContaining([
+        expect.objectContaining({ fileName: 'poster.png', filePath: '/tmp/poster.png' }),
+        expect.objectContaining({ fileName: 'edit-poster.png', filePath: '/tmp/edit-poster.png' }),
+      ]),
+    });
   });
 
-  it('feeds the latest dependent edited image into composite video generation', async () => {
+  it('submits edited-image dependencies for Main-owned composite video generation', async () => {
     const { useChatStore } = await import('@/stores/chat');
 
     useChatStore.setState({
@@ -1802,52 +2017,26 @@ describe('chat target routing', () => {
       loading: false,
       thinkingLevel: null,
     });
-    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
+    let submittedRun: CompositeRunStartRequest | undefined;
+    let completedRun: CompositeRunRecord | undefined;
+    hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string; method?: string }) => {
       if (url.toString().startsWith('/api/sessions/transcript?')) {
         return { messages: [] };
       }
-      if (url === '/api/media/image-generation/chat-send') {
-        const body = init?.body ? JSON.parse(init.body) as { inputImages?: unknown[] } : {};
-        const edited = (body.inputImages?.length ?? 0) > 0;
-        return {
-          success: true,
-          job: {
-            id: edited ? 'job-edited-image' : 'job-generated-image',
-            kind: 'image',
-            sessionKey: 'agent:main:main',
-            status: 'succeeded',
-            result: {
-              outputs: [{
-                path: edited ? '/tmp/edited-image.png' : '/tmp/generated-image.png',
-                fileName: edited ? 'edited-image.png' : 'generated-image.png',
-                mimeType: 'image/png',
-                size: 1024,
-                width: 1024,
-                height: 1024,
-              }],
-            },
-          },
-        };
+      if (url === '/api/composite-runs' && init?.method === 'POST') {
+        submittedRun = JSON.parse(init.body || '{}') as CompositeRunStartRequest;
+        completedRun = completedCompositeRun(submittedRun, [
+          { taskId: 'task-1-image_generate', fileName: 'generated-image.png', mimeType: 'image/png', filePath: '/tmp/generated-image.png' },
+          { taskId: 'task-2-image_edit', fileName: 'edited-image.png', mimeType: 'image/png', filePath: '/tmp/edited-image.png' },
+          { taskId: 'task-3-video_generate', fileName: 'video-from-edit.mp4', mimeType: 'video/mp4', filePath: '/tmp/video-from-edit.mp4', sizeBytes: 4096 },
+        ], {
+          runId: 'composite-run-image-to-video',
+          deliveryText: '图片、改图和视频均已完成。',
+        });
+        return { success: true, run: completedRun };
       }
-      if (url === '/api/media/video-generation/chat-send') {
-        return {
-          success: true,
-          job: {
-            id: 'job-video-from-edit',
-            kind: 'video',
-            sessionKey: 'agent:main:main',
-            status: 'succeeded',
-            result: {
-              outputs: [{
-                path: '/tmp/video-from-edit.mp4',
-                fileName: 'video-from-edit.mp4',
-                mimeType: 'video/mp4',
-                size: 4096,
-                durationSeconds: 15,
-              }],
-            },
-          },
-        };
+      if (url === '/api/composite-runs/composite-run-image-to-video') {
+        return { success: true, run: completedRun };
       }
       if (url !== '/api/media/intent-plan') {
         return { success: true, result: {} };
@@ -1888,26 +2077,36 @@ describe('chat target routing', () => {
 
     await useChatStore.getState().sendMessage('生成一张图，然后把这张图改成赛博朋克风，再基于改后的图生成 15 秒视频');
 
-    const imageCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/image-generation/chat-send');
-    const videoCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/media/video-generation/chat-send');
-    expect(imageCalls).toHaveLength(2);
-    expect(videoCall).toBeTruthy();
-    const payload = JSON.parse((videoCall?.[1] as { body: string }).body) as {
-      inputImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
-      route?: {
-        mode?: string;
-        sourceImages?: Array<{ filePath: string; mimeType: string; fileName: string }>;
-      };
-    };
-    expect(payload.inputImages).toEqual([
-      {
-        fileName: 'edited-image.png',
-        mimeType: 'image/png',
-        filePath: '/tmp/edited-image.png',
-      },
+    expect(submittedRun?.tasks).toEqual([
+      expect.objectContaining({ id: 'task-1-image_generate', kind: 'image_generate' }),
+      expect.objectContaining({
+        id: 'task-2-image_edit',
+        kind: 'image_edit',
+        dependsOn: ['task-1-image_generate'],
+      }),
+      expect.objectContaining({
+        id: 'task-3-video_generate',
+        kind: 'video_generate',
+        dependsOn: ['task-2-image_edit'],
+      }),
     ]);
-    expect(payload.route?.mode).toBe('image_to_video');
-    expect(payload.route?.sourceImages).toEqual(payload.inputImages);
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/composite-runs')).toHaveLength(1);
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/composite-runs/composite-run-image-to-video')).toHaveLength(1);
+    expectNoRendererCompositeExecutionCalls();
+    const run = useChatStore.getState().runtimeRuns['composite-run-image-to-video'];
+    expect(run?.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ filePath: '/tmp/edited-image.png' }),
+      expect.objectContaining({ filePath: '/tmp/video-from-edit.mp4' }),
+    ]));
+    expect(run?.gateResult?.decision).toBe('deliverable');
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: '图片、改图和视频均已完成。',
+      _attachedFiles: expect.arrayContaining([
+        expect.objectContaining({ fileName: 'edited-image.png', filePath: '/tmp/edited-image.png' }),
+        expect.objectContaining({ fileName: 'video-from-edit.mp4', filePath: '/tmp/video-from-edit.mp4' }),
+      ]),
+    });
   });
 
   it('routes a no-attachment multi-deliverable sample pack through the composite artifact runner', async () => {
@@ -1935,9 +2134,40 @@ describe('chat target routing', () => {
       loading: false,
       thinkingLevel: null,
     });
+    let submittedRun: CompositeRunStartRequest | undefined;
+    let completedRun: CompositeRunRecord | undefined;
     hostApiFetchMock.mockImplementation(async (url: string, init?: { body?: string }) => {
       if (url.toString().startsWith('/api/sessions/transcript?')) {
         return { messages: [] };
+      }
+      if (url === '/api/composite-runs' && init?.method === 'POST') {
+        submittedRun = JSON.parse(init.body || '{}') as CompositeRunStartRequest;
+        completedRun = completedCompositeRun(submittedRun, [
+          { taskId: 'task-1-image_generate', fileName: 'uclaw-image.png', mimeType: 'image/png', filePath: '/tmp/uclaw-image.png' },
+          {
+            taskId: 'task-2-presentation',
+            fileName: 'uclaw-presentation.pptx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            filePath: '/tmp/uclaw-presentation.pptx',
+          },
+          {
+            taskId: 'task-3-spreadsheet',
+            fileName: 'uclaw-spreadsheet.xlsx',
+            mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            filePath: '/tmp/uclaw-spreadsheet.xlsx',
+          },
+          { taskId: 'task-4-video_generate', fileName: 'uclaw-video.mp4', mimeType: 'video/mp4', filePath: '/tmp/uclaw-video.mp4' },
+          { taskId: 'task-5-image_edit', fileName: 'uclaw-edit.png', mimeType: 'image/png', filePath: '/tmp/uclaw-edit.png' },
+          { taskId: 'task-6-mini_program', fileName: 'uclaw-mini_program.html', mimeType: 'text/html', filePath: '/tmp/uclaw-mini_program.html' },
+          { taskId: 'task-7-copywriting', fileName: 'uclaw-copywriting.md', mimeType: 'text/markdown', filePath: '/tmp/uclaw-copywriting.md' },
+        ], {
+          runId: 'composite-run-sample-pack',
+          deliveryText: '已完成 7/7 项：图片、PPT、Excel、视频、修图、小程序和文案均已交付。',
+        });
+        return { success: true, run: completedRun };
+      }
+      if (url === '/api/composite-runs/composite-run-sample-pack') {
+        return { success: true, run: completedRun };
       }
       if (url === '/api/media/image-generation/chat-send') {
         const body = init?.body ? JSON.parse(init.body) as { inputImages?: unknown[] } : {};
@@ -2042,75 +2272,18 @@ describe('chat target routing', () => {
 
     const sendCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/chat/send');
     expect(sendCall).toBeFalsy();
-    const imageCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/image-generation/chat-send');
-    const videoCalls = hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/media/video-generation/chat-send');
-    expect(imageCalls).toHaveLength(2);
-    expect(videoCalls).toHaveLength(1);
-    for (const call of [...imageCalls, ...videoCalls]) {
-      const payload = JSON.parse((call[1] as { body: string }).body) as { suppressConversationAppend?: boolean };
-      expect(payload.suppressConversationAppend).toBe(true);
-    }
-    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/local-artifacts/create')).toHaveLength(4);
-    const appendConversationCall = hostApiFetchMock.mock.calls.find(([url]) => url === '/api/local-artifacts/append-conversation');
-    expect(appendConversationCall).toBeTruthy();
-    const appendPayload = JSON.parse((appendConversationCall?.[1] as { body: string }).body) as {
-      runId?: string;
-      prompt?: string;
-      summaryText?: string;
-      files?: Array<{
-        fileName?: string;
-        mimeType?: string;
-        filePath?: string;
-        gatewayUrl?: string;
-        source?: string;
-      }>;
-      outputPaths?: string[];
-      manifest?: {
-        version?: number;
-        requestedTaskCount?: number;
-        tasks?: unknown[];
-        runtimeEvents?: Array<{ type?: string }>;
-      };
-    };
-    expect(appendPayload.runId).toContain('history:agent:main:main:');
-    expect(appendPayload.prompt).toBe(prompt);
-    expect(appendPayload.summaryText).toContain('已完成 7/7 项');
-    expect(appendPayload.manifest).toEqual(expect.objectContaining({
-      version: 2,
-      requestedTaskCount: 7,
+    expect(submittedRun).toEqual(expect.objectContaining({
+      sessionKey: 'agent:main:main',
+      prompt,
+      requestedMode: 'chat',
     }));
-    expect(appendPayload.manifest?.tasks).toHaveLength(7);
-    expect(appendPayload.manifest?.runtimeEvents).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'gate.evaluated' }),
-      expect.objectContaining({ type: 'run.ended' }),
-    ]));
-    expect(appendPayload.files).toHaveLength(7);
-    expect(appendPayload.files).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        fileName: 'uclaw-image.png',
-        mimeType: 'image/png',
-        filePath: '/tmp/uclaw-image.png',
-        source: 'tool-result',
-      }),
-      expect.objectContaining({
-        fileName: 'uclaw-video.mp4',
-        mimeType: 'video/mp4',
-        filePath: '/tmp/uclaw-video.mp4',
-        source: 'tool-result',
-      }),
-    ]));
-    expect(appendPayload.outputPaths).toEqual(expect.arrayContaining([
-      '/tmp/uclaw-image.png',
-      '/tmp/uclaw-presentation.pptx',
-      '/tmp/uclaw-spreadsheet.xlsx',
-      '/tmp/uclaw-video.mp4',
-      '/tmp/uclaw-edit.png',
-      '/tmp/uclaw-mini_program.html',
-      '/tmp/uclaw-copywriting.md',
-    ]));
+    expect(submittedRun?.tasks).toHaveLength(7);
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/composite-runs')).toHaveLength(1);
+    expect(hostApiFetchMock.mock.calls.filter(([url]) => url === '/api/composite-runs/composite-run-sample-pack')).toHaveLength(1);
+    expectNoRendererCompositeExecutionCalls();
     expect(hostApiFetchMock.mock.calls.some(([url]) => url === '/api/chat/send-with-media')).toBe(false);
 
-    const run = Object.values(useChatStore.getState().runtimeRuns)[0];
+    const run = useChatStore.getState().runtimeRuns['composite-run-sample-pack'];
     const compositeSteps = run?.planSteps.filter((step) => step.kind === 'composite-task') ?? [];
     expect(compositeSteps).toHaveLength(7);
     expect(compositeSteps.map((step) => step.title)).toEqual([
@@ -2124,7 +2297,24 @@ describe('chat target routing', () => {
     ]);
     expect(compositeSteps.every((step) => step.requiresArtifact === true)).toBe(true);
     expect(run?.artifacts).toHaveLength(7);
+    expect(run?.artifacts.map((artifact) => artifact.filePath)).toEqual(expect.arrayContaining([
+      '/tmp/uclaw-image.png',
+      '/tmp/uclaw-presentation.pptx',
+      '/tmp/uclaw-spreadsheet.xlsx',
+      '/tmp/uclaw-video.mp4',
+      '/tmp/uclaw-edit.png',
+      '/tmp/uclaw-mini_program.html',
+      '/tmp/uclaw-copywriting.md',
+    ]));
     expect(run?.gateResult?.decision).toBe('deliverable');
+    expect(useChatStore.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: expect.stringContaining('已完成 7/7 项'),
+      _attachedFiles: expect.arrayContaining([
+        expect.objectContaining({ fileName: 'uclaw-image.png', filePath: '/tmp/uclaw-image.png' }),
+        expect.objectContaining({ fileName: 'uclaw-video.mp4', filePath: '/tmp/uclaw-video.mp4' }),
+      ]),
+    });
   });
 
   it('keeps automation planning requests with illustration wording on the normal chat path', async () => {

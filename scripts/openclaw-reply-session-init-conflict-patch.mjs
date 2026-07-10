@@ -3,7 +3,10 @@ import { join } from 'path';
 
 const PATCH_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS';
 const QUEUE_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_MARKER';
+const QUEUE_CLEANUP_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_CLEANUP_MARKER';
 const QUEUE_GUARD_MARKER = '__uclawReplySessionInitQueued';
+const STALE_SNAPSHOT_RELOAD_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RELOAD_MARKER';
+const STABLE_REVISION_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_STABLE_REVISION_MARKER';
 const RETRY_TIMEOUT_MS = 30_000;
 const RETRY_TIMEOUT_DECLARATION_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = [^;]+;/u;
 const RETRY_BASE_DECLARATION_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_BASE_DELAY_MS = [^;]+;/u;
@@ -30,6 +33,23 @@ const SESSION_KEY_QUEUE_GUARD = `${SESSION_KEY_ANCHOR}\tif (!params.__uclawReply
 `;
 
 const INIT_SESSION_QUEUE_HELPERS = `const ${QUEUE_MARKER} = true;
+const ${QUEUE_CLEANUP_MARKER} = true;
+const UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES = globalThis.__uclawReplySessionInitConflictQueues || (globalThis.__uclawReplySessionInitConflictQueues = new Map());
+function runUclawReplySessionInitializationInQueue(sessionKey, task) {
+\tconst key = String(sessionKey || "__unknown__");
+\tconst previous = UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) || Promise.resolve();
+\tconst run = previous.catch(() => void 0).then(task);
+\tconst cleanup = run.catch(() => void 0).then(() => {
+\t\tif (UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) === cleanup) {
+\t\t\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.delete(key);
+\t\t}
+\t});
+\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.set(key, cleanup);
+\treturn run;
+}
+`;
+
+const LEGACY_INIT_SESSION_QUEUE_HELPERS = `const ${QUEUE_MARKER} = true;
 const UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES = globalThis.__uclawReplySessionInitConflictQueues || (globalThis.__uclawReplySessionInitConflictQueues = new Map());
 function runUclawReplySessionInitializationInQueue(sessionKey, task) {
 \tconst key = String(sessionKey || "__unknown__");
@@ -42,6 +62,42 @@ function runUclawReplySessionInitializationInQueue(sessionKey, task) {
 \t});
 \tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.set(key, cleanup);
 \treturn run;
+}
+`;
+
+const STALE_SNAPSHOT_RETRY_BLOCK = `\tif (!committed.ok) {
+\t\tif (!staleSnapshotRetried) return await initSessionStateAttempt(params, true);
+\t\tthrow new Error(\`reply session initialization conflicted for \${sessionKey}\`);
+\t}
+`;
+
+const STALE_SNAPSHOT_RELOAD_BLOCK = `\tif (!committed.ok) {
+\t\t// ${STALE_SNAPSHOT_RELOAD_MARKER}: bounce to initSessionState so the next attempt reloads a fresh snapshot.
+\t\tthrow new Error(\`reply session initialization conflicted for \${sessionKey}\`);
+\t}
+`;
+
+const SESSION_REVISION_ANCHOR = `function createReplySessionInitializationRevision(entry) {
+\treturn JSON.stringify(entry ?? null);
+}
+`;
+
+const STABLE_SESSION_REVISION_PATCH = `const ${STABLE_REVISION_MARKER} = true;
+function stringifyUclawReplySessionInitializationRevision(value) {
+\tif (value === void 0) return void 0;
+\tif (value === null || typeof value !== "object") return JSON.stringify(value);
+\tif (Array.isArray(value)) {
+\t\treturn \`[\${value.map((item) => stringifyUclawReplySessionInitializationRevision(item) ?? "null").join(",")}]\`;
+\t}
+\tconst parts = [];
+\tfor (const key of Object.keys(value).sort()) {
+\t\tconst encoded = stringifyUclawReplySessionInitializationRevision(value[key]);
+\t\tif (encoded !== void 0) parts.push(\`\${JSON.stringify(key)}:\${encoded}\`);
+\t}
+\treturn \`{\${parts.join(",")}}\`;
+}
+function createReplySessionInitializationRevision(entry) {
+\treturn stringifyUclawReplySessionInitializationRevision(entry ?? null);
 }
 `;
 
@@ -73,12 +129,19 @@ async function initSessionState(params) {
 async function initSessionStateAttempt(params, staleSnapshotRetried) {
 `;
 
-function patchQueueGuard(content) {
-  if (content.includes(QUEUE_MARKER) && content.includes(QUEUE_GUARD_MARKER)) {
+function patchQueueHelper(content) {
+  if (!content.includes(QUEUE_MARKER) || content.includes(QUEUE_CLEANUP_MARKER)) {
     return content;
   }
+  return content.replace(LEGACY_INIT_SESSION_QUEUE_HELPERS, INIT_SESSION_QUEUE_HELPERS);
+}
 
-  let next = content;
+function patchQueueGuard(content) {
+  let next = patchQueueHelper(content);
+  if (next.includes(QUEUE_MARKER) && next.includes(QUEUE_GUARD_MARKER)) {
+    return next;
+  }
+
   if (!next.includes(QUEUE_MARKER)) {
     next = next.replace(
       RETRY_BASE_DECLARATION_RE,
@@ -94,21 +157,37 @@ function patchQueueGuard(content) {
   return next;
 }
 
+function patchStaleSnapshotRetry(content) {
+  if (content.includes(STALE_SNAPSHOT_RELOAD_MARKER)) {
+    return content;
+  }
+  return content.replace(STALE_SNAPSHOT_RETRY_BLOCK, STALE_SNAPSHOT_RELOAD_BLOCK);
+}
+
+function patchStableSessionRevision(content) {
+  if (content.includes(STABLE_REVISION_MARKER)) {
+    return content;
+  }
+  return content.replace(SESSION_REVISION_ANCHOR, STABLE_SESSION_REVISION_PATCH);
+}
+
 function patchReplySessionInitConflictContent(content) {
-  if (content.includes(PATCH_MARKER)) {
-    const withTimeout = content.replace(
+  let next = patchStableSessionRevision(content);
+
+  if (next.includes(PATCH_MARKER)) {
+    const withTimeout = next.replace(
       RETRY_TIMEOUT_DECLARATION_RE,
       `const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = ${RETRY_TIMEOUT_MS};`,
     );
-    const next = patchQueueGuard(withTimeout);
+    next = patchStaleSnapshotRetry(patchQueueGuard(withTimeout));
     return { content: next, changed: next !== content };
   }
 
-  if (!content.includes(INIT_SESSION_STATE_ANCHOR)) {
-    return { content, changed: false };
+  if (!next.includes(INIT_SESSION_STATE_ANCHOR)) {
+    return { content: next, changed: next !== content };
   }
 
-  const next = patchQueueGuard(content.replace(INIT_SESSION_STATE_ANCHOR, INIT_SESSION_STATE_PATCH));
+  next = patchStaleSnapshotRetry(patchQueueGuard(next.replace(INIT_SESSION_STATE_ANCHOR, INIT_SESSION_STATE_PATCH)));
   return {
     content: next,
     changed: next !== content,

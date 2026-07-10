@@ -5,6 +5,7 @@ const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
 const prepareMediaGenerationJobMock = vi.fn();
 const enqueueMediaGenerationJobMock = vi.fn();
+const enqueueMediaGenerationJobWithResultMock = vi.fn();
 const getMediaGenerationJobMock = vi.fn();
 
 vi.mock('@electron/api/route-utils', () => ({
@@ -30,6 +31,7 @@ vi.mock('@electron/utils/openclaw-video-generation', () => ({
 
 vi.mock('@electron/utils/media-generation-jobs', () => ({
   enqueueMediaGenerationJob: (...args: unknown[]) => enqueueMediaGenerationJobMock(...args),
+  enqueueMediaGenerationJobWithResult: (...args: unknown[]) => enqueueMediaGenerationJobWithResultMock(...args),
   getMediaGenerationJob: (...args: unknown[]) => getMediaGenerationJobMock(...args),
   prepareMediaGenerationJob: (...args: unknown[]) => prepareMediaGenerationJobMock(...args),
 }));
@@ -56,6 +58,18 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
       createdAt: 1,
       updatedAt: 1,
     });
+    enqueueMediaGenerationJobWithResultMock.mockImplementation((payload) => ({
+      idempotent: false,
+      job: {
+        id: 'job-image-1',
+        kind: 'image',
+        sessionKey: 'agent:main:main',
+        status: 'queued',
+        createdAt: 1,
+        updatedAt: 1,
+        ...payload,
+      },
+    }));
     prepareMediaGenerationJobMock.mockResolvedValue(undefined);
   });
 
@@ -77,7 +91,7 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
 
     expect(handled).toBe(true);
     expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
-    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
+    expect(enqueueMediaGenerationJobWithResultMock).toHaveBeenCalledWith({
       kind: 'image',
       sessionKey: 'agent:main:main',
       prompt: 'draw a night city poster',
@@ -116,7 +130,7 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
 
     expect(handled).toBe(true);
     expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
-    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(enqueueMediaGenerationJobWithResultMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'image',
       sessionKey: 'agent:main:main',
       prompt: 'make the dot red',
@@ -155,7 +169,7 @@ describe('handleMediaRoutes POST /api/media/image-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(enqueueMediaGenerationJobWithResultMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'image',
       sessionKey: 'agent:main:main',
       prompt: 'Internal planner prompt: turn one dog into two dogs.',

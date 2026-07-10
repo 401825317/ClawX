@@ -7,6 +7,22 @@ import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 
 describe('presentation-maker skill', () => {
+  it('keeps the legacy office create path on a deterministic PPTX route', () => {
+    const compatibilityPath = join(
+      process.cwd(),
+      'resources',
+      'openclaw-skill-shims',
+      'office-toolkit',
+      'create.md',
+    );
+
+    expect(existsSync(compatibilityPath)).toBe(true);
+    const instructions = readFileSync(compatibilityPath, 'utf8');
+    expect(instructions).toContain('references/create.md');
+    expect(instructions).toContain('create_pptx_file');
+    expect(instructions).toContain('Do not finish');
+  });
+
   it('generates a valid pptx package without Python setup', async () => {
     const root = mkdtempSync(join(tmpdir(), 'uclaw-pptx-'));
     const input = join(root, 'deck.json');

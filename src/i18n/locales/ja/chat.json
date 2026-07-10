@@ -19,7 +19,16 @@
         "currentAgent": "現在の会話相手: {{agent}}",
         "agentSwitcher": "Agent を選択",
         "agentRunning": "実行中",
-        "workspace": "ワークスペース"
+        "workspace": "ワークスペース",
+        "projectWorkspace": "現在のプロジェクトディレクトリ",
+        "chooseProjectWorkspace": "プロジェクトフォルダーを選択",
+        "useAgentWorkspace": "Agent ワークスペースを使用",
+        "browseWorkspace": "プロジェクトファイルを閲覧",
+        "closeWorkspaceBrowser": "ファイルブラウザーを閉じる",
+        "workspaceLocked": "タスクの実行中はプロジェクトディレクトリを変更できません。",
+        "workspaceUpdated": "プロジェクトディレクトリを更新しました",
+        "workspaceReset": "Agent ワークスペースに戻しました",
+        "workspaceUpdateFailed": "プロジェクトディレクトリを更新できませんでした"
     },
     "generatedFiles": {
         "title": "ファイルの変更（{{count}} 件）",

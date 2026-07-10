@@ -1527,6 +1527,18 @@ function isToolOnlyMessage(message: RawMessage | undefined): boolean {
   return hasTool && !hasText && !hasNonToolContent;
 }
 
+function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  const content = message.content;
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return (content as ContentBlock[]).some((block) => {
+    if (block.type === 'text') return Boolean(block.text?.trim());
+    if (block.type === 'image') return true;
+    return false;
+  });
+}
+
 function isToolResultRole(role: unknown): boolean {
   if (!role) return false;
   const normalized = String(role).toLowerCase();
@@ -1554,6 +1566,7 @@ function isInternalMessage(msg: {
   idempotencyKey?: unknown;
   syntheticLocalArtifactConversation?: unknown;
 }): boolean {
+  if (msg.syntheticLocalArtifactConversation === true) return true;
   if (msg.role === 'system') return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
@@ -1588,7 +1601,7 @@ function isInternalMessage(msg: {
  * text is internal narration (e.g. "生成中，稍等" + `image_generate`). Those
  * turns power the execution graph and run lifecycle detection.
  */
-function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown }): boolean {
+function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown; syntheticLocalArtifactConversation?: unknown }): boolean {
   if (isToolResultRole(msg.role)) return true;
   if (messageHasToolUse(msg)) return false;
   return isInternalMessage(msg);
@@ -2219,6 +2232,7 @@ export {
   extractAsyncTaskEvidence,
   applyAsyncTaskEvidenceToRuns,
   runtimeRunHasPendingAsyncTasks,
+  hasNonToolAssistantContent,
   hasPendingToolUse,
   hasAssistantAfterLastRealUser,
   hasAssistantProgressSinceSend,

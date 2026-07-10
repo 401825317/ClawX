@@ -23,7 +23,11 @@ import type {
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
-import { pickStartupSessionFallback } from './chat/session-selection';
+import {
+  persistCurrentSessionKey,
+  pickStartupSessionFallback,
+  readPersistedCurrentSessionKey,
+} from './chat/session-selection';
 import {
   CHAT_HISTORY_DISK_FALLBACK_TIMEOUT_MS,
   CHAT_HISTORY_STARTUP_FALLBACK_RACE_MS,
@@ -1376,11 +1380,11 @@ function applyHistoricalRuntimeRunsFromMessages(
       producer: 'history',
     }, {
       artifact,
-      status: 'blocked',
+      status: 'passed',
       kind: 'artifact.availability',
       required: true,
-      severity: 'warning',
-      detail: '已从历史消息恢复产物引用，正在重新检查文件或链接是否仍可用。',
+      severity: 'info',
+      detail: '已从历史消息恢复产物引用，按历史交付记录视为可交付。',
       evidence: artifact.filePath ?? artifact.url,
     }));
     nextRuns = applyRuntimeContractEvents(nextRuns, [
@@ -1515,6 +1519,7 @@ let _historyLoadGenerationCounter = 0;
 let _deferredHistoryLoadTimer: ReturnType<typeof setTimeout> | null = null;
 const _sessionsNeedingTerminalHistoryRefresh = new Set<string>();
 const _pendingLocalSessionKeys = new Set<string>();
+const _sessionCwdMutations = new Map<string, Promise<void>>();
 
 type SessionRunState = Pick<
   ChatState,
@@ -1596,6 +1601,9 @@ const MAX_QUEUED_SENDS_PER_SESSION = 20;
 const _queuedChatSendsBySession = new Map<string, QueuedChatSend[]>();
 const _queuedChatSendFlushScheduled = new Set<string>();
 const _sessionsCancelling = new Set<string>();
+const _sessionsAwaitingBackendIdle = new Set<string>();
+const _sessionBackendIdleSettlementGeneration = new Map<string, number>();
+const _runtimeBackendIdleProbeGeneration = new Map<string, number>();
 const _lastAttemptedChatSendBySession = new Map<string, QueuedChatSend>();
 const _pendingCompositeClientRequestIdBySession = new Map<string, string>();
 
@@ -1881,6 +1889,8 @@ function compositeRunAttachedFiles(run: CompositeRunRecord): AttachedFileMeta[] 
 }
 
 function compositeRunDeliveryMessage(run: CompositeRunRecord): string {
+  const persistedText = run.delivery.text?.trim();
+  if (persistedText) return persistedText;
   const completed = run.tasks.filter((task) => task.status === 'completed');
   const incomplete = run.tasks.filter((task) => task.status !== 'completed');
   const lines = [i18n.t('chat:runtimeDelivery.compositeSummary', {
@@ -2011,6 +2021,7 @@ async function startCompositeRunInMain(params: {
   get: ChatGet;
   sessionKey: string;
   prompt: string;
+  cwd?: string;
   nowMs: number;
   tasks: MediaIntentCompositeTask[];
   imageOptions?: ChatImageSendOptions;
@@ -2025,6 +2036,7 @@ async function startCompositeRunInMain(params: {
       clientRequestId: params.clientRequestId,
       sessionKey: params.sessionKey,
       prompt: params.prompt,
+      ...(params.cwd ? { cwd: params.cwd } : {}),
       requestedMode: 'chat',
       userMessageTimestampMs: params.nowMs,
       tasks: params.tasks,
@@ -3272,13 +3284,147 @@ function clearActiveSendGeneration(sessionKey: string): void {
 }
 
 function markSessionRunIdle(sessionKey: string): void {
+  _runtimeBackendIdleProbeGeneration.delete(sessionKey);
   clearActiveSendGeneration(sessionKey);
   captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
   scheduleQueuedChatSendFlush(sessionKey);
 }
 
+function gatewaySessionIsIdle(data: Record<string, unknown>, sessionKey: string): boolean {
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  const session = sessions.find((candidate) => (
+    candidate != null
+    && typeof candidate === 'object'
+    && String((candidate as Record<string, unknown>).key ?? '') === sessionKey
+  ));
+  if (!session || typeof session !== 'object') return false;
+  const row = session as Record<string, unknown>;
+  if (row.hasActiveRun === true) return false;
+  if (row.hasActiveRun === false) return true;
+  return getSessionTerminalRuntimeStatus(parseSessionStatus(row.status)) != null;
+}
+
+function parseGatewaySessionProbe(data: Record<string, unknown>, sessionKey: string): ChatSession | undefined {
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  const row = sessions.find((candidate) => (
+    candidate != null
+    && typeof candidate === 'object'
+    && String((candidate as Record<string, unknown>).key ?? '') === sessionKey
+  ));
+  if (!row || typeof row !== 'object') return undefined;
+  const record = row as Record<string, unknown>;
+  return {
+    key: sessionKey,
+    updatedAt: parseSessionUpdatedAtMs(record.updatedAt),
+    status: parseSessionStatus(record.status),
+    hasActiveRun: typeof record.hasActiveRun === 'boolean' ? record.hasActiveRun : undefined,
+  };
+}
+
+function mergeBackendSessionProbe(
+  sessions: ChatSession[],
+  session: ChatSession,
+): ChatSession[] {
+  let matched = false;
+  const next = sessions.map((candidate) => {
+    if (candidate.key !== session.key) return candidate;
+    matched = true;
+    return mergeSessionRowWithLocalState({ ...candidate, ...session }, candidate);
+  });
+  return matched ? next : [...next, session];
+}
+
+function scheduleRuntimeBackendIdleReconciliation(
+  set: ChatSet,
+  get: ChatGet,
+  sessionKey: string,
+  runId: string,
+): void {
+  const generation = (_runtimeBackendIdleProbeGeneration.get(sessionKey) ?? 0) + 1;
+  _runtimeBackendIdleProbeGeneration.set(sessionKey, generation);
+
+  void (async () => {
+    const startedAt = Date.now();
+    let delayMs = 0;
+    while (
+      _runtimeBackendIdleProbeGeneration.get(sessionKey) === generation
+      && Date.now() - startedAt < 30_000
+    ) {
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+
+      const latestBeforeProbe = get();
+      if (latestBeforeProbe.currentSessionKey !== sessionKey) return;
+      if (latestBeforeProbe.activeRunId != null && latestBeforeProbe.activeRunId !== runId) return;
+      if (!latestBeforeProbe.sending && latestBeforeProbe.activeRunId == null && !latestBeforeProbe.pendingFinal) return;
+
+      try {
+        const data = await fetchChatSessionsList();
+        const backendSession = parseGatewaySessionProbe(data, sessionKey);
+        if (backendSession) {
+          const latestSessions = mergeBackendSessionProbe(get().sessions, backendSession);
+          if (shouldTrustBackendSessionIdle(backendSession, get().lastUserMessageAt)) {
+            _runtimeBackendIdleProbeGeneration.delete(sessionKey);
+            reconcileCurrentSessionIdleFromBackend(set, get, latestSessions);
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn('[chat.runtime] backend idle probe failed', {
+          sessionKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      delayMs = delayMs === 0 ? 50 : Math.min(1_000, Math.round(delayMs * 1.7));
+    }
+
+    if (_runtimeBackendIdleProbeGeneration.get(sessionKey) === generation) {
+      _runtimeBackendIdleProbeGeneration.delete(sessionKey);
+    }
+  })();
+}
+
+function beginSessionBackendIdleSettlement(sessionKey: string): void {
+  const generation = (_sessionBackendIdleSettlementGeneration.get(sessionKey) ?? 0) + 1;
+  _sessionBackendIdleSettlementGeneration.set(sessionKey, generation);
+  _sessionsAwaitingBackendIdle.add(sessionKey);
+  clearActiveSendGeneration(sessionKey);
+  captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
+  if (useChatStore.getState().currentSessionKey === sessionKey) {
+    useChatStore.setState(DEFAULT_SESSION_RUN_STATE);
+  }
+
+  void (async () => {
+    const startedAt = Date.now();
+    let delayMs = 50;
+    while (
+      _sessionBackendIdleSettlementGeneration.get(sessionKey) === generation
+      && Date.now() - startedAt < 30_000
+    ) {
+      try {
+        const data = await fetchChatSessionsList();
+        if (gatewaySessionIsIdle(data, sessionKey)) break;
+      } catch (error) {
+        console.warn('[chat.queue] backend idle probe failed', {
+          sessionKey,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(1_000, Math.round(delayMs * 1.7));
+    }
+
+    if (_sessionBackendIdleSettlementGeneration.get(sessionKey) !== generation) return;
+    _sessionBackendIdleSettlementGeneration.delete(sessionKey);
+    _sessionsAwaitingBackendIdle.delete(sessionKey);
+    markSessionRunIdle(sessionKey);
+  })();
+}
+
 function sessionExecutionIsBusy(state: ChatState, sessionKey: string): boolean {
-  if (_sessionsCancelling.has(sessionKey)) return true;
+  if (_sessionsCancelling.has(sessionKey) || _sessionsAwaitingBackendIdle.has(sessionKey)) return true;
   const runState = sessionKey === state.currentSessionKey
     ? state
     : _sessionRunStateCache.get(sessionKey);
@@ -3330,6 +3476,7 @@ function clearQueuedChatSends(sessionKey: string): void {
 function currentSessionCanFlushQueuedSend(sessionKey: string): boolean {
   const state = useChatStore.getState();
   return state.currentSessionKey === sessionKey
+    && !_sessionsAwaitingBackendIdle.has(sessionKey)
     && !state.sending
     && state.activeRunId == null
     && !state.pendingFinal;
@@ -5013,6 +5160,11 @@ type GatewaySessionMutationResult = {
   };
 };
 
+function buildEffectiveSessionCwd(result: GatewaySessionMutationResult | null | undefined): string | null {
+  const cwd = result?.entry?.cwd;
+  return typeof cwd === 'string' && cwd.trim() ? cwd.trim() : null;
+}
+
 function buildSessionModelRef(
   model: unknown,
   modelProvider?: unknown,
@@ -5094,6 +5246,42 @@ function upsertSessionWithModel(
   ];
 }
 
+function upsertSessionWithCwd(
+  sessions: ChatSession[],
+  sessionKey: string,
+  cwd: string | null,
+  updatedAt: number,
+): ChatSession[] {
+  const normalizedCwd = cwd?.trim() || undefined;
+  let found = false;
+  const nextSessions = sessions.map((session) => {
+    if (session.key !== sessionKey) return session;
+    found = true;
+    return { ...session, cwd: normalizedCwd, updatedAt };
+  });
+  return found
+    ? nextSessions
+    : [...nextSessions, { key: sessionKey, displayName: sessionKey, cwd: normalizedCwd, updatedAt }];
+}
+
+async function persistSessionCwdSelection(sessionKey: string, cwd: string | null): Promise<string | null> {
+  const normalizedCwd = cwd?.trim() || null;
+  if (_pendingLocalSessionKeys.has(sessionKey)) {
+    const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+      key: sessionKey,
+      agentId: getAgentIdFromSessionKey(sessionKey),
+      cwd: normalizedCwd,
+    });
+    _pendingLocalSessionKeys.delete(sessionKey);
+    return buildEffectiveSessionCwd(created) ?? normalizedCwd;
+  }
+  const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+    key: sessionKey,
+    cwd: normalizedCwd,
+  });
+  return buildEffectiveSessionCwd(patched) ?? normalizedCwd;
+}
+
 async function persistSessionModelSelection(
   sessionKey: string,
   modelRef: string | null,
@@ -5141,12 +5329,14 @@ function mergeSessionRowWithLocalState(
   const normalizedNextSession = {
     ...nextSession,
     model: normalizeChatManagedModelRef(nextSession.model) ?? undefined,
+    cwd: nextSession.cwd?.trim() || undefined,
   };
   if (!localSession) return normalizedNextSession;
 
   const localUpdatedAt = typeof localSession.updatedAt === 'number' ? localSession.updatedAt : undefined;
   const nextUpdatedAt = typeof normalizedNextSession.updatedAt === 'number' ? normalizedNextSession.updatedAt : undefined;
   const normalizedLocalModel = normalizeChatManagedModelRef(localSession.model) ?? undefined;
+  const normalizedLocalCwd = localSession.cwd?.trim() || undefined;
   const shouldPreserveLocalModel = Boolean(
     normalizedLocalModel
     && (
@@ -5154,11 +5344,16 @@ function mergeSessionRowWithLocalState(
       || (localUpdatedAt != null && nextUpdatedAt != null && localUpdatedAt > nextUpdatedAt)
     ),
   );
+  const shouldPreserveLocalCwd = Boolean(
+    (!normalizedNextSession.cwd && normalizedLocalCwd)
+    || (localUpdatedAt != null && nextUpdatedAt != null && localUpdatedAt > nextUpdatedAt),
+  );
 
   return {
     ...normalizedNextSession,
     model: shouldPreserveLocalModel ? normalizedLocalModel : normalizedNextSession.model,
-    updatedAt: shouldPreserveLocalModel ? localUpdatedAt : nextUpdatedAt,
+    cwd: shouldPreserveLocalCwd ? normalizedLocalCwd : normalizedNextSession.cwd,
+    updatedAt: shouldPreserveLocalModel || shouldPreserveLocalCwd ? localUpdatedAt : nextUpdatedAt,
   };
 }
 
@@ -6162,6 +6357,8 @@ function runtimeToolEventToStatus(event: ChatRuntimeEvent): ToolStatus | null {
 
 // ── Store ────────────────────────────────────────────────────────
 
+const initialCurrentSessionKey = readPersistedCurrentSessionKey() ?? DEFAULT_SESSION_KEY;
+
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   loading: false,
@@ -6183,8 +6380,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runtimeRuns: {},
 
   sessions: [],
-  currentSessionKey: DEFAULT_SESSION_KEY,
-  currentAgentId: 'main',
+  currentSessionKey: initialCurrentSessionKey,
+  currentAgentId: getAgentIdFromSessionKey(initialCurrentSessionKey),
   sessionLabels: {},
   sessionLastActivity: {},
 
@@ -6236,6 +6433,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               lastMessagePreview: s.lastMessagePreview ? String(s.lastMessagePreview) : undefined,
               thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
               model: buildSessionModelRef(s.model, s.modelProvider),
+              cwd: typeof s.cwd === 'string' && s.cwd.trim() ? s.cwd.trim() : undefined,
               updatedAt: parseSessionUpdatedAtMs(s.updatedAt),
               status: parseSessionStatus(s.status),
               hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
@@ -6273,15 +6471,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               nextSessionKey = canonicalMatch;
             }
           }
-          if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
+          if (!dedupedSessions.find((s) => s.key === nextSessionKey)) {
             // Preserve only locally-created pending sessions. On initial boot the
             // default ghost key (`agent:main:main`) should yield to real history.
             const hasLocalPendingSession = localSessions.some((session) => session.key === nextSessionKey);
             if (!hasLocalPendingSession) {
-              const fallbackKey = pickStartupSessionFallback(nextSessionKey, dedupedSessions);
-              if (fallbackKey) {
-                nextSessionKey = fallbackKey;
-              }
+              nextSessionKey = pickStartupSessionFallback(nextSessionKey, dedupedSessions) ?? DEFAULT_SESSION_KEY;
             }
           }
 
@@ -6464,8 +6659,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const remaining = sessions.filter((s) => s.key !== key);
 
     if (currentSessionKey === key) {
-      // Switched away from deleted session  - pick the first remaining or create new
-      const next = remaining[0];
+      const nextSessionKey = pickStartupSessionFallback(currentSessionKey, remaining) ?? DEFAULT_SESSION_KEY;
       set((s) => ({
         sessions: remaining,
         sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
@@ -6482,10 +6676,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingFinal: false,
         lastUserMessageAt: null,
         pendingToolImages: [],
-        currentSessionKey: next?.key ?? DEFAULT_SESSION_KEY,
-        currentAgentId: getAgentIdFromSessionKey(next?.key ?? DEFAULT_SESSION_KEY),
+        currentSessionKey: nextSessionKey,
+        currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
       }));
-      if (next) {
+      if (remaining.some((session) => session.key === nextSessionKey)) {
         get().loadHistory();
       }
     } else {
@@ -6589,6 +6783,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (error) {
       set({ sessions: previousSessions });
       throw error;
+    }
+  },
+
+  updateSessionCwd: async (key: string, cwd: string | null) => {
+    const normalizedCwd = cwd?.trim() || null;
+    const previousSessions = get().sessions;
+    set((state) => ({
+      sessions: upsertSessionWithCwd(state.sessions, key, normalizedCwd, Date.now()),
+    }));
+
+    const mutation = persistSessionCwdSelection(key, normalizedCwd)
+      .then((effectiveCwd) => {
+        set((state) => ({
+          sessions: upsertSessionWithCwd(state.sessions, key, effectiveCwd, Date.now()),
+        }));
+      })
+      .catch((error) => {
+        set({ sessions: previousSessions });
+        throw error;
+      });
+    _sessionCwdMutations.set(key, mutation);
+    try {
+      await mutation;
+    } finally {
+      if (_sessionCwdMutations.get(key) === mutation) _sessionCwdMutations.delete(key);
     }
   },
 
@@ -7514,6 +7733,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
+    const pendingCwdMutation = _sessionCwdMutations.get(targetSessionKey);
+    if (pendingCwdMutation) {
+      try {
+        await pendingCwdMutation;
+      } catch (error) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+    }
+
     // Same-session sends must stay ordered. The renderer owns a single active
     // run slot, so queue follow-up turns instead of dropping them or racing the
     // current run state.
@@ -7715,6 +7944,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           get,
           sessionKey: currentSessionKey,
           prompt: trimmed,
+          cwd: get().sessions.find((session) => session.key === currentSessionKey)?.cwd,
           nowMs,
           tasks: compositeTasks,
           imageOptions,
@@ -9029,7 +9259,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (clearLifecycle && !toolOnly && shouldIdleAfterGate) {
             const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
             clearHistoryPoll();
-            markSessionRunIdle(sessionKeyAtFinal);
+            beginSessionBackendIdleSettlement(sessionKeyAtFinal);
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
             clearPendingRuntimeIntent(sessionKeyAtFinal);
             void get().loadHistory(true);
@@ -9475,6 +9705,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           markSessionRunIdle(currentSessionKey);
           markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
           clearPendingRuntimeIntent(currentSessionKey);
+        } else if (matchesCurrentSession) {
+          scheduleRuntimeBackendIdleReconciliation(
+            set,
+            get,
+            currentSessionKey,
+            latestState.activeRunId ?? eventForSession.runId,
+          );
         }
       }
     }
@@ -9491,6 +9728,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearError: () => set({ error: null, runError: null }),
 }));
+
+useChatStore.subscribe((state, previousState) => {
+  if (state.currentSessionKey !== previousState.currentSessionKey) {
+    persistCurrentSessionKey(state.currentSessionKey);
+  }
+});
 
 export function syncCachedSessionRunIdle(sessionKey: string): void {
   markSessionRunIdle(sessionKey);

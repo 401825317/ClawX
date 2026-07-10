@@ -1630,49 +1630,34 @@ export function ChatInput({
             </Button>
           </div>
         </div>
-        <div className="mt-2.5 flex items-center justify-between gap-2 text-tiny text-muted-foreground/60 px-4">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <div className={cn(
-              "w-1.5 h-1.5 rounded-full",
-              isGatewayUsable ? "bg-green-500/80" : "bg-red-500/80",
-            )} />
-            <span>
-              {t('composer.gatewayStatus', {
-                state: isGatewayUsable
-                  ? t('composer.gatewayConnected')
-                  : gatewayStatus.state === 'running'
-                    ? 'starting'
-                    : gatewayStatus.state,
-                port: gatewayStatus.port,
-                pid: gatewayStatus.pid ? `| pid: ${gatewayStatus.pid}` : '',
-              })}
-            </span>
-            {chatComposerStatusComponents.map((Component, index) => (
-              <Component key={`${index}`} gatewayStatus={gatewayStatus} />
-            ))}
-            {sending && (
-              <span className="ml-2 truncate text-muted-foreground/75" data-testid="chat-composer-busy-hint">
-                {t(
-                  'composer.busyHint',
-                  'Current task is still running. Messages already accepted by OpenClaw will wait for the current work to finish.',
-                )}
-              </span>
+        {(!isGatewayUsable || chatComposerStatusComponents.length > 0 || hasFailedAttachments) && (
+          <div className="mt-2.5 flex items-center justify-between gap-2 px-4 text-tiny text-muted-foreground/60">
+            <div className="flex min-w-0 items-center gap-1.5">
+              {!isGatewayUsable && (
+                <>
+                  <div className="h-1.5 w-1.5 rounded-full bg-red-500/80" />
+                  <span>{t('composer.gatewayDisconnectedPlaceholder')}</span>
+                </>
+              )}
+              {chatComposerStatusComponents.map((Component, index) => (
+                <Component key={`${index}`} gatewayStatus={gatewayStatus} />
+              ))}
+            </div>
+            {hasFailedAttachments && (
+              <Button
+                variant="link"
+                size="sm"
+                className="h-auto p-0 text-tiny"
+                onClick={() => {
+                  setAttachments((prev) => prev.filter((att) => att.status !== 'error'));
+                  void pickFiles();
+                }}
+              >
+                {t('composer.retryFailedAttachments')}
+              </Button>
             )}
           </div>
-          {hasFailedAttachments && (
-            <Button
-              variant="link"
-              size="sm"
-              className="h-auto p-0 text-tiny"
-              onClick={() => {
-                setAttachments((prev) => prev.filter((att) => att.status !== 'error'));
-                void pickFiles();
-              }}
-            >
-              {t('composer.retryFailedAttachments')}
-            </Button>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );

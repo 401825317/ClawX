@@ -36,13 +36,15 @@ export interface ArtifactPanelProps {
   files: GeneratedFile[];
   /** Currently selected agent (drives the workspace tab). */
   agent: AgentSummary | null;
+  /** Session project cwd, falling back to the Agent workspace. */
+  workspace?: string;
   /** Used to mark "Added this run" badges on the workspace tree. */
   runStartedAt?: number | null;
   /** Bumping this number triggers a workspace tree reload. */
   refreshSignal?: number;
 }
 
-export function ArtifactPanel({ files, agent, runStartedAt, refreshSignal }: ArtifactPanelProps) {
+export function ArtifactPanel({ files, agent, workspace, runStartedAt, refreshSignal }: ArtifactPanelProps) {
   const { t } = useTranslation('chat');
   const isMac = window.electron?.platform === 'darwin';
   const tab = useArtifactPanel((s) => s.tab);
@@ -134,6 +136,7 @@ export function ArtifactPanel({ files, agent, runStartedAt, refreshSignal }: Art
           <div className={cn('h-full min-h-0', visibleTab !== 'browser' && 'hidden')}>
             <WorkspaceBrowserBody
               agent={agent}
+              workspaceRoot={workspace}
               runStartedAt={runStartedAt}
               refreshSignal={refreshSignal}
               compact

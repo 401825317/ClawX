@@ -16,6 +16,24 @@ export type CompositeRunTaskKind =
   | 'mini_program'
   | 'copywriting';
 
+const LOCAL_ARTIFACT_TASK_KINDS = new Set<CompositeRunTaskKind>([
+  'presentation',
+  'spreadsheet',
+  'mini_program',
+  'copywriting',
+]);
+
+export function isLocalArtifactTaskKind(kind: CompositeRunTaskKind): boolean {
+  return LOCAL_ARTIFACT_TASK_KINDS.has(kind);
+}
+
+export function isSupportedCompositeRunTaskSet(
+  tasks: ReadonlyArray<Pick<CompositeRunTaskInput, 'kind'>>,
+): boolean {
+  if (tasks.length >= 2) return true;
+  return tasks.length === 1 && isLocalArtifactTaskKind(tasks[0].kind);
+}
+
 export type CompositeRunImageRef = {
   fileName?: string;
   mimeType?: string;
@@ -51,6 +69,7 @@ export type CompositeRunStartRequest = {
   clientRequestId: string;
   sessionKey: string;
   prompt: string;
+  cwd?: string;
   requestedMode?: 'chat' | 'image' | 'video';
   userMessageTimestampMs?: number;
   tasks: CompositeRunTaskInput[];
@@ -95,6 +114,7 @@ export type CompositeRunDeliveryState = {
   generation: number;
   assistantMessageId: string;
   attempts: number;
+  text?: string;
   error?: string;
   persistedAt?: number;
 };
@@ -122,6 +142,7 @@ export type CompositeRunRecord = {
   clientRequestId: string;
   sessionKey: string;
   prompt: string;
+  cwd?: string;
   requestedMode: 'chat' | 'image' | 'video';
   userMessageTimestampMs: number;
   imageOptions?: CompositeRunImageOptions;

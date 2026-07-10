@@ -6,6 +6,7 @@ const parseJsonBodyMock = vi.fn();
 const sendJsonMock = vi.fn();
 const prepareMediaGenerationJobMock = vi.fn();
 const enqueueMediaGenerationJobMock = vi.fn();
+const enqueueMediaGenerationJobWithResultMock = vi.fn();
 
 vi.mock('@electron/api/route-utils', () => ({
   parseJsonBody: (...args: unknown[]) => parseJsonBodyMock(...args),
@@ -30,6 +31,7 @@ vi.mock('@electron/utils/openclaw-video-generation', () => ({
 
 vi.mock('@electron/utils/media-generation-jobs', () => ({
   enqueueMediaGenerationJob: (...args: unknown[]) => enqueueMediaGenerationJobMock(...args),
+  enqueueMediaGenerationJobWithResult: (...args: unknown[]) => enqueueMediaGenerationJobWithResultMock(...args),
   prepareMediaGenerationJob: (...args: unknown[]) => prepareMediaGenerationJobMock(...args),
   getMediaGenerationJob: vi.fn(),
 }));
@@ -63,6 +65,18 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
       createdAt: 1,
       updatedAt: 1,
     });
+    enqueueMediaGenerationJobWithResultMock.mockImplementation((payload) => ({
+      idempotent: false,
+      job: {
+        id: 'job-video-1',
+        kind: 'video',
+        sessionKey: 'agent:main:main',
+        status: 'queued',
+        createdAt: 1,
+        updatedAt: 1,
+        ...payload,
+      },
+    }));
     prepareMediaGenerationJobMock.mockResolvedValue(undefined);
   });
 
@@ -84,7 +98,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
 
     expect(handled).toBe(true);
     expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
-    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith({
+    expect(enqueueMediaGenerationJobWithResultMock).toHaveBeenCalledWith({
       kind: 'video',
       sessionKey: 'agent:main:main',
       prompt: 'make a short product video',
@@ -128,7 +142,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
 
     expect(handled).toBe(true);
     expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
-    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(enqueueMediaGenerationJobWithResultMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'video',
       sessionKey: 'agent:main:main',
       prompt: 'animate this frame',
@@ -175,7 +189,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
     );
 
     expect(handled).toBe(true);
-    expect(enqueueMediaGenerationJobMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(enqueueMediaGenerationJobWithResultMock).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'video',
       sessionKey: 'agent:main:main',
       prompt: '让蓝色调画面缓慢推进并带有电影感。',
@@ -220,7 +234,7 @@ describe('handleMediaRoutes POST /api/media/video-generation/chat-send', () => {
 
     expect(handled).toBe(true);
     expect(prepareMediaGenerationJobMock).not.toHaveBeenCalled();
-    expect(enqueueMediaGenerationJobMock).not.toHaveBeenCalled();
+    expect(enqueueMediaGenerationJobWithResultMock).not.toHaveBeenCalled();
     expect(sendJsonMock).toHaveBeenCalledWith(
       expect.anything(),
       400,

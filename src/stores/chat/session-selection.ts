@@ -1,6 +1,53 @@
 import { isCronSessionKey } from './cron-session-utils';
 import type { ChatSession } from './types';
 
+export const CURRENT_SESSION_STORAGE_KEY = 'clawx:chat:current-session-key';
+const MAX_SESSION_KEY_LENGTH = 2_048;
+
+export function isCanonicalSessionKey(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.length <= MAX_SESSION_KEY_LENGTH
+    && /^agent:[^:\s]+:[^:\s]+(?::[^:\s]+)*$/.test(value);
+}
+
+function getLocalStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function readPersistedCurrentSessionKey(): string | null {
+  const storage = getLocalStorage();
+  if (!storage) return null;
+
+  try {
+    const value = storage.getItem(CURRENT_SESSION_STORAGE_KEY);
+    if (value == null) return null;
+    if (isCanonicalSessionKey(value)) return value;
+    storage.removeItem(CURRENT_SESSION_STORAGE_KEY);
+  } catch {
+    // localStorage can be unavailable in restricted renderer contexts.
+  }
+  return null;
+}
+
+export function persistCurrentSessionKey(sessionKey: string): void {
+  const storage = getLocalStorage();
+  if (!storage) return;
+
+  try {
+    if (isCanonicalSessionKey(sessionKey)) {
+      storage.setItem(CURRENT_SESSION_STORAGE_KEY, sessionKey);
+    } else {
+      storage.removeItem(CURRENT_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Session selection must keep working when localStorage is unavailable.
+  }
+}
+
 function getAgentIdFromSessionKey(sessionKey: string): string {
   if (!sessionKey.startsWith('agent:')) return 'main';
   const [, agentId] = sessionKey.split(':');

@@ -38,6 +38,7 @@ function makeRes(): ServerResponse {
 const STAGE_PATHS_URL = new URL('http://127.0.0.1:13210/api/files/stage-paths');
 const THUMBNAILS_URL = new URL('http://127.0.0.1:13210/api/files/thumbnails');
 const LOCAL_MEDIA_URL = new URL('http://127.0.0.1:13210/api/files/local-media');
+const REMOTE_MEDIA_URL = new URL('http://127.0.0.1:13210/api/files/remote-media');
 const ctx = {} as never;
 
 function makeStreamingRes(): {
@@ -140,5 +141,53 @@ describe('handleFileRoutes — POST /api/files/stage-paths', () => {
     expect(headers['content-range']).toBe('bytes 2-5/10');
     expect(headers['content-length']).toBe('4');
     await expect(body).resolves.toEqual(Buffer.from('2345'));
+  });
+
+  it('proxies remote media with byte range support for Electron video previews', async () => {
+    const upstreamBody = 'cdef';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(upstreamBody, {
+      status: 206,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-range': 'bytes 2-5/10',
+        'content-length': String(Buffer.byteLength(upstreamBody)),
+      },
+    }));
+    const url = new URL(REMOTE_MEDIA_URL);
+    url.searchParams.set('url', 'https://203.0.113.10/video/task_demo');
+    url.searchParams.set('mimeType', 'video/mp4');
+    const { res, headers, body } = makeStreamingRes();
+
+    const { handleFileRoutes } = await import('@electron/api/routes/files');
+    const handled = await handleFileRoutes(makeReq('GET', { range: 'bytes=2-5' }), res, url, ctx);
+
+    expect(handled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(new URL('https://203.0.113.10/video/task_demo'), expect.objectContaining({
+      method: 'GET',
+      headers: expect.objectContaining({ Range: 'bytes=2-5' }),
+    }));
+    expect(res.statusCode).toBe(206);
+    expect(headers['content-type']).toBe('video/mp4');
+    expect(headers['accept-ranges']).toBe('bytes');
+    expect(headers['content-range']).toBe('bytes 2-5/10');
+    await expect(body).resolves.toEqual(Buffer.from(upstreamBody));
+    fetchMock.mockRestore();
+  });
+
+  it('rejects private remote media URLs before proxying', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    const url = new URL(REMOTE_MEDIA_URL);
+    url.searchParams.set('url', 'http://127.0.0.1/private.mp4');
+
+    const { handleFileRoutes } = await import('@electron/api/routes/files');
+    const handled = await handleFileRoutes(makeReq('GET'), makeRes(), url, ctx);
+
+    expect(handled).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sendJsonMock).toHaveBeenCalledWith(expect.anything(), 400, {
+      success: false,
+      error: 'Invalid remote media URL',
+    });
+    fetchMock.mockRestore();
   });
 });

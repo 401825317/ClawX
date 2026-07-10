@@ -221,45 +221,41 @@ async function getListeningProcessIds(port: number): Promise<string[]> {
   return [...new Set(stdout.trim().split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
 }
 
-async function terminateOrphanedProcessIds(port: number, pids: string[]): Promise<void> {
-  logger.info(`Found orphaned process listening on port ${port} (PIDs: ${pids.join(', ')}), attempting to kill...`);
+export const GATEWAY_PORT_OWNERSHIP_CONFLICT = 'GATEWAY_PORT_OWNERSHIP_CONFLICT' as const;
 
-  if (process.platform === 'darwin') {
-    await unloadLaunchctlGatewayService();
+export interface GatewayPortOwnershipConflict {
+  code: typeof GATEWAY_PORT_OWNERSHIP_CONFLICT;
+  port?: number;
+  listenerPids?: readonly string[];
+  gatewayReady?: boolean;
+}
+
+export class GatewayPortOwnershipConflictError extends Error {
+  readonly code = GATEWAY_PORT_OWNERSHIP_CONFLICT;
+
+  constructor(
+    readonly port: number,
+    readonly listenerPids: string[],
+    readonly gatewayReady: boolean,
+  ) {
+    const owner = listenerPids.length > 0
+      ? `PID ${listenerPids.join(', ')}`
+      : 'an unknown process';
+    super(
+      `Gateway port ${port} is already owned by ${owner}. `
+      + 'Close the other UClaw/OpenClaw instance before retrying.',
+    );
+    this.name = 'GatewayPortOwnershipConflictError';
   }
+}
 
-  for (const pid of pids) {
-    try {
-      if (process.platform === 'win32') {
-        const cp = await import('child_process');
-        await new Promise<void>((resolve) => {
-          cp.exec(
-            `taskkill /F /PID ${pid} /T`,
-            { timeout: 5000, windowsHide: true },
-            () => resolve(),
-          );
-        });
-      } else {
-        process.kill(parseInt(pid, 10), 'SIGTERM');
-      }
-    } catch {
-      // Ignore processes that have already exited.
-    }
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, process.platform === 'win32' ? 2000 : 3000));
-
-  if (process.platform !== 'win32') {
-    for (const pid of pids) {
-      try {
-        process.kill(parseInt(pid, 10), 0);
-        process.kill(parseInt(pid, 10), 'SIGKILL');
-      } catch {
-        // Already exited.
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+export function isGatewayPortOwnershipConflictError(
+  error: unknown,
+): error is GatewayPortOwnershipConflict {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && error.code === GATEWAY_PORT_OWNERSHIP_CONFLICT;
 }
 
 export async function findExistingGatewayProcess(options: {
@@ -268,25 +264,33 @@ export async function findExistingGatewayProcess(options: {
 }): Promise<{ port: number; externalToken?: string } | null> {
   const { port, ownedPid } = options;
 
+  let pids: string[] = [];
   try {
-    try {
-      const pids = await getListeningProcessIds(port);
-      if (pids.length > 0 && (!ownedPid || !pids.includes(String(ownedPid)))) {
-        await terminateOrphanedProcessIds(port, pids);
-        if (process.platform === 'win32') {
-          await waitForPortFree(port, 10000);
-        }
-        return null;
-      }
-    } catch (err) {
-      logger.warn('Error checking for existing process on port:', err);
-    }
-
-    const ready = await probeGatewayReady(port, 5000);
-    return ready ? { port } : null;
-  } catch {
-    return null;
+    pids = await getListeningProcessIds(port);
+  } catch (error) {
+    logger.warn('Error checking for existing process on port:', error);
   }
+
+  const externalPids = pids.filter((pid) => !ownedPid || pid !== String(ownedPid));
+  if (externalPids.length > 0) {
+    const ready = await probeGatewayReady(port, 5000).catch(() => false);
+    logger.warn(
+      `Gateway port ${port} is owned by an external process (PIDs: ${externalPids.join(', ')}); `
+      + 'leaving it untouched and blocking local Gateway startup',
+    );
+    throw new GatewayPortOwnershipConflictError(port, externalPids, ready);
+  }
+
+  const ready = await probeGatewayReady(port, 5000).catch(() => false);
+  if (ready && !ownedPid) {
+    logger.warn(
+      `Gateway port ${port} answered a readiness probe but its owner PID could not be verified; `
+      + 'leaving it untouched and blocking local Gateway startup',
+    );
+    throw new GatewayPortOwnershipConflictError(port, [], true);
+  }
+
+  return ready ? { port } : null;
 }
 
 export async function runOpenClawDoctorRepair(): Promise<boolean> {

@@ -85,7 +85,7 @@ describe('planMediaIntent', () => {
     }));
   });
 
-  it('keeps a single PPT artifact request on the local chat path', async () => {
+  it('routes a single PPT artifact request through the deterministic local artifact runner', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
       prompt: '做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划',
@@ -98,11 +98,75 @@ describe('planMediaIntent', () => {
     expect(plan).toEqual(expect.objectContaining({
       action: 'chat',
       source: 'fallback',
+      intentKind: 'current_non_media_task',
       currentTurnMediaRequest: false,
       selectedImageSource: 'none',
-      reason: 'local_no_media_planning_signal',
+      reason: 'composite_intent_local',
     }));
-    expect(plan.compositeTasks).toBeUndefined();
+    expect(plan.compositeTasks).toEqual([
+      expect.objectContaining({
+        kind: 'presentation',
+        requiresArtifact: true,
+      }),
+    ]);
+  });
+
+  it('keeps the kitten PPT support repro on the presentation route even in video mode', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const prompt = '做一个小猫的ppt，带图片的，精致一点，做好直接打开';
+    const plan = await planMediaIntent({
+      prompt,
+      requestedMode: 'video',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      intentKind: 'current_non_media_task',
+      currentTurnMediaRequest: false,
+      selectedImageSource: 'none',
+      reason: 'composite_intent_local',
+    }));
+    expect(plan.compositeTasks).toEqual([
+      expect.objectContaining({
+        kind: 'presentation',
+        prompt,
+        requiresArtifact: true,
+      }),
+    ]);
+  });
+
+  it.each([
+    {
+      prompt: '整理一份销售数据 Excel，包含月度汇总和趋势图',
+      kind: 'spreadsheet' as const,
+    },
+    {
+      prompt: '帮我做一个活动报名小程序',
+      kind: 'mini_program' as const,
+    },
+    {
+      prompt: '写一份新品发布文案，突出续航和轻量化',
+      kind: 'copywriting' as const,
+    },
+  ])('routes one explicit $kind artifact through a one-task composite plan', async ({ prompt, kind }) => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({ prompt, requestedMode: 'chat' });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      source: 'fallback',
+      reason: 'composite_intent_local',
+    }));
+    expect(plan.compositeTasks).toEqual([
+      expect.objectContaining({ kind, requiresArtifact: true }),
+    ]);
   });
 
   it('keeps image-edit in a composite sample pack even without an input image', async () => {
@@ -220,6 +284,155 @@ describe('planMediaIntent', () => {
     ]);
   });
 
+  it('executes an explicit video request even when the prompt is supplied as text context', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const prompt = '按照这个提示词给我生成一个15s的科技型展厅推广视频';
+    const plan = await planMediaIntent({
+      prompt,
+      requestedMode: 'video',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'video_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      reason: 'local_fast_path_video_mode_generate',
+      videoMode: 'text_to_video',
+      videoPrompt: prompt,
+    }));
+    expect(plan.compositeTasks).toBeUndefined();
+  });
+
+  it('does not infer an image deliverable from video-frame context in an explicit video request', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const prompt = [
+      '根据视频画面、字幕和营销意图，提取到以下关键词：',
+      '科技展厅、展厅效果图、数字大屏、蓝色灯带、互动展示',
+      '按照这个提示词给我生成一个15s的科技型展厅推广视频',
+    ].join('\n');
+    const plan = await planMediaIntent({
+      prompt,
+      requestedMode: 'video',
+      candidateImages: [
+        {
+          fileName: 'extracted-frame.jpg',
+          mimeType: 'image/jpeg',
+          filePath: '/tmp/extracted-frame.jpg',
+        },
+      ],
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'video_generate',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      selectedImageSource: 'none',
+      videoMode: 'text_to_video',
+    }));
+    expect(plan.compositeTasks).toBeUndefined();
+  });
+
+  it('keeps the full showroom keyword support repro as a single video request', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const prompt = [
+      '根据视频画面、字幕和营销意图，提取到以下关键词：',
+      '',
+      '核心关键词',
+      '展厅设计',
+      '展厅施工',
+      '科技展厅',
+      '高质感展厅',
+      '展厅效果图',
+      '展厅报价',
+      '展厅价格',
+      '展示空间设计',
+      '场景与行业关键词',
+      '企业展厅',
+      '能源展厅',
+      '数字展厅',
+      '智慧展厅',
+      '品牌展厅',
+      '多媒体展厅',
+      '科技馆',
+      '城市展厅',
+      '设计元素关键词',
+      '科技感',
+      '环形吊顶',
+      '数字大屏',
+      'LED显示屏',
+      '蓝色灯带',
+      '数据可视化',
+      '互动展示',
+      '展示墙',
+      '展柜设计',
+      '沉浸式空间',
+      '蓝白科技风',
+      '营销与转化关键词',
+      '高档展厅',
+      '展厅设计费用',
+      '展厅收费标准',
+      '展厅实价',
+      '免费咨询',
+      '我要设计',
+      '评论区咨询',
+      '展厅设计方案',
+      '展厅设计公司',
+      '按照这个提示词给我生成一个15s的科技型展厅推广视频',
+    ].join('\n');
+    const plan = await planMediaIntent({
+      prompt,
+      requestedMode: 'video',
+      candidateImages: [
+        {
+          fileName: 'contact.jpg',
+          mimeType: 'image/jpeg',
+          filePath: '/tmp/video_read/contact.jpg',
+        },
+      ],
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'video_generate',
+      source: 'fallback',
+      intentKind: 'current_media_task',
+      currentTurnMediaRequest: true,
+      selectedImageSource: 'none',
+      videoMode: 'text_to_video',
+      videoPrompt: prompt,
+    }));
+    expect(plan.compositeTasks).toBeUndefined();
+  });
+
+  it('keeps explicitly requested image and video deliverables as a composite run', async () => {
+    const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
+    const plan = await planMediaIntent({
+      prompt: '请生成一张展厅海报，并制作一个15秒的展厅宣传视频',
+      requestedMode: 'chat',
+    });
+
+    expect(getProviderSecretMock).not.toHaveBeenCalled();
+    expect(getProviderAccountMock).not.toHaveBeenCalled();
+    expect(proxyAwareFetchMock).not.toHaveBeenCalled();
+    expect(plan).toEqual(expect.objectContaining({
+      action: 'chat',
+      reason: 'composite_intent_local',
+    }));
+    expect(plan.compositeTasks?.map((task) => task.kind)).toEqual([
+      'image_generate',
+      'video_generate',
+    ]);
+  });
+
   it('routes explicit image mode locally without calling the LLM planner', async () => {
     const { planMediaIntent } = await import('@electron/utils/media-intent-planner');
     const plan = await planMediaIntent({
@@ -295,8 +508,9 @@ describe('planMediaIntent', () => {
     expect(plan).toEqual(expect.objectContaining({
       action: 'chat',
       source: 'fallback',
+      intentKind: 'preference_or_memory_update',
       currentTurnMediaRequest: false,
-      reason: 'local_no_media_planning_signal',
+      reason: 'local_non_media_preference_update',
       selectedImageSource: 'none',
     }));
   });
@@ -357,6 +571,12 @@ describe('planMediaIntent', () => {
       intentKind: 'current_non_media_task',
     },
     {
+      prompt: '只写一个 15 秒视频脚本和提示词，先别生成视频',
+      requestedMode: 'video' as const,
+      reason: 'local_non_media_media_reference_instruction',
+      intentKind: 'current_non_media_task',
+    },
+    {
       prompt: '解释一下图片模式和普通聊天有什么区别',
       requestedMode: 'image' as const,
       reason: 'local_non_media_media_meta_question',
@@ -373,12 +593,6 @@ describe('planMediaIntent', () => {
       requestedMode: 'chat' as const,
       reason: 'local_non_media_media_reference_instruction',
       intentKind: 'preference_or_memory_update',
-    },
-    {
-      prompt: '图片模式里帮我写一段朋友圈文案',
-      requestedMode: 'image' as const,
-      reason: 'local_non_media_text_request_in_media_mode',
-      intentKind: 'ordinary_chat',
     },
   ])('keeps mode-hint non-media prompt on chat: $prompt', async ({ prompt, requestedMode, reason, intentKind }) => {
     const { planMediaIntent, isCurrentTurnMediaSideEffectAuthorized } = await import('@electron/utils/media-intent-planner');

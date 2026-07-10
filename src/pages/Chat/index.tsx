@@ -257,14 +257,43 @@ function getRunCardElapsedMs(card: UserRunCard, nowMs: number): number | null {
   if (card.active && card.elapsedStartedAtMs != null) {
     return Math.max(0, nowMs - card.elapsedStartedAtMs);
   }
+  if (card.runtimeRun?.events.some((event) => event.producer === 'history')) {
+    return null;
+  }
   return card.elapsedCompletedMs ?? getRunDurationStepElapsedMs(card.steps);
 }
 
 function getCompletedRunElapsedMs(run: ChatRuntimeRunState | null, startedAtMs: number | null): number | null {
   if (!run || startedAtMs == null) return null;
-  const endedAtMs = getRunLastEventMs(run);
+  const terminalEvent = [...run.events].reverse().find((event) => event.type === 'run.ended');
+  const endedAtMs = toTimestampMs(run.endedAt)
+    ?? (terminalEvent?.type === 'run.ended'
+      ? toTimestampMs(terminalEvent.endedAt) ?? toTimestampMs(terminalEvent.ts)
+      : null);
   if (endedAtMs == null || endedAtMs < startedAtMs) return null;
   return endedAtMs - startedAtMs;
+}
+
+function hasFinalAssistantDeltaAfterLatestTool(run: ChatRuntimeRunState | null): boolean {
+  if (!run) return false;
+  let latestToolIndex = -1;
+  let latestAssistantIndex = -1;
+  let latestAssistantPhase = '';
+
+  run.events.forEach((event, index) => {
+    if (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed') {
+      latestToolIndex = index;
+      return;
+    }
+    if (event.type !== 'assistant.delta') return;
+    const text = event.text ?? event.delta ?? '';
+    if (!text.trim()) return;
+    latestAssistantIndex = index;
+    latestAssistantPhase = event.phase?.trim().toLowerCase() ?? '';
+  });
+
+  if (latestAssistantIndex <= latestToolIndex) return false;
+  return !['analysis', 'commentary', 'preamble', 'progress', 'thinking'].includes(latestAssistantPhase);
 }
 
 function inferRunCompactKind(card: UserRunCard, generatedFiles: GeneratedFile[]): RunCompactKind {
@@ -683,6 +712,7 @@ export function Chat() {
   const messages = useChatStore((s) => s.messages);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
+  const sessions = useChatStore((s) => s.sessions);
   const sessionLabels = useChatStore((s) => s.sessionLabels);
   const loading = useChatStore((s) => s.loading);
   const loadingMoreHistory = useChatStore((s) => s.loadingMoreHistory);
@@ -713,6 +743,9 @@ export function Chat() {
     () => (agentsList ?? []).find((a) => a.id === currentAgentId) ?? null,
     [agentsList, currentAgentId],
   );
+  const currentWorkspace = sessions.find((session) => session.key === currentSessionKey)?.cwd
+    || currentAgent?.workspace
+    || '';
   const currentAgentAvatarSrc = currentAgent?.profile?.avatarId
     ? getAgentAvatar(currentAgent.profile.avatarId).src
     : DEFAULT_AGENT_AVATAR_SRC;
@@ -1114,14 +1147,15 @@ export function Chat() {
     // execution graph) once tool activity has happened and the CURRENT stream
     // chunk carries no tool_use block.
     //
-    // After a tool has run, text-only deltas are ambiguous until the runtime
-    // marks final delivery. Keep them in the process transcript so commentary
-    // cannot flash as a final reply and then jump back when another tool starts.
+    // Runtime commentary arrives through progress entries. Once a newer
+    // assistant delta follows the latest tool event, it is the final response
+    // stream and can render incrementally without waiting for run.ended.
     const runtimeReachedTerminal = segmentRuntimeRun?.status !== undefined
       && segmentRuntimeRun.status !== 'running';
+    const hasFreshFinalAssistantDelta = hasFinalAssistantDeltaAfterLatestTool(segmentRuntimeRun);
     const canPromoteStreamToBubble = !hasToolActivity
       ? (hasStreamText || hasStreamImages)
-      : (pendingFinal || runtimeReachedTerminal);
+      : (hasFreshFinalAssistantDelta || pendingFinal || runtimeReachedTerminal);
     const rawStreamingReplyCandidate = isLatestOpenRun
       && canPromoteStreamToBubble
       && (hasStreamText || hasStreamImages)
@@ -1163,8 +1197,35 @@ export function Chat() {
     const elapsedCompletedMs = isLatestOpenRun
       ? null
       : getCompletedRunElapsedMs(segmentRuntimeRun, elapsedStartedAtMs);
+    const hasRuntimeProgressEntries = (segmentRuntimeRun?.progressEntries?.length ?? 0) > 0;
 
     if (steps.length === 0) {
+      if (hasRuntimeProgressEntries) {
+        const progressCardActive = isLatestOpenRun;
+        const liveText = progressCardActive && streamingReplyText == null
+          ? (() => {
+            const trimmedLiveText = stripProcessMessagePrefix(streamText, []).trim();
+            if (!trimmedLiveText || isInternalAssistantReplyText(trimmedLiveText)) return null;
+            return trimmedLiveText;
+          })()
+          : null;
+        return [{
+          triggerIndex: idx,
+          replyIndex,
+          active: progressCardActive,
+          agentLabel: segmentAgentLabel,
+          sessionLabel: segmentSessionLabel,
+          segmentEnd: nextUserIndex === -1 ? messages.length - 1 : nextUserIndex - 1,
+          runtimeRun: segmentRuntimeRun,
+          steps: [],
+          messageStepTexts: [],
+          streamingReplyText,
+          liveText,
+          elapsedStartedAtMs,
+          elapsedCompletedMs: progressCardActive ? null : elapsedCompletedMs,
+          suppressThinking: false,
+        }];
+      }
       if (isLatestOpenRun && streamingReplyText == null) {
         const historyReplyOffset = findReplyMessageIndex(postTriggerMessages, false);
         // History can contain the final answer while `sending` is still true
@@ -1215,7 +1276,9 @@ export function Chat() {
         streamingReplyText: null,
         liveText: null,
         elapsedStartedAtMs: null,
-        elapsedCompletedMs: elapsedCompletedMs ?? getRunDurationStepElapsedMs(cleanedSteps),
+        elapsedCompletedMs: segmentRuntimeRun
+          ? elapsedCompletedMs
+          : getRunDurationStepElapsedMs(cleanedSteps),
         suppressThinking: false,
       }];
     }
@@ -1280,7 +1343,11 @@ export function Chat() {
       streamingReplyText,
       liveText,
       elapsedStartedAtMs,
-      elapsedCompletedMs: cardActive ? null : (elapsedCompletedMs ?? getRunDurationStepElapsedMs(steps)),
+      elapsedCompletedMs: cardActive
+        ? null
+        : segmentRuntimeRun
+          ? elapsedCompletedMs
+          : getRunDurationStepElapsedMs(steps),
       suppressThinking,
     }];
     });
@@ -1428,7 +1495,13 @@ export function Chat() {
       );
       const hasTextFirstSurface = shouldShowTranscript || card.streamingReplyText != null;
       const shouldExposeActiveGenericProcess = card.active && hasVisibleProcessActivity && !shouldShowTranscript;
+      const hasCanonicalProgressTranscript = hasRuntimeProgressEntries || !!card.liveText;
+      const shouldHideExecutionGraphBehindTranscript = shouldShowTranscript
+        && hasCanonicalProgressTranscript
+        && !devModeUnlocked
+        && !hasProblem;
       const shouldRenderExecutionGraph = hasExecutionGraphDetails
+        && !shouldHideExecutionGraphBehindTranscript
         && (
           devModeUnlocked
           || hasProblem
@@ -1959,6 +2032,7 @@ export function Chat() {
               <ArtifactPanelLazy
                 files={allGeneratedFiles}
                 agent={currentAgent}
+                workspace={currentWorkspace}
                 runStartedAt={lastUserMessageAt ?? null}
                 refreshSignal={refreshSignal}
               />

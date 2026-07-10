@@ -32,7 +32,7 @@
   "scripts": {
     "postinstall": "node scripts/patch-browser-hint.mjs",
     "init": "pnpm install && pnpm run uv:download && pnpm run agent-browser:download",
-    "predev": "node scripts/generate-ext-bridge.mjs",
+    "predev": "node scripts/patch-browser-hint.mjs && node scripts/generate-ext-bridge.mjs",
     "dev": "vite",
     "dev:junfeiai": "node scripts/dev-junfeiai.mjs",
     "ext:bridge": "node scripts/generate-ext-bridge.mjs",

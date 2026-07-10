@@ -32,6 +32,23 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function mockBackendSessionState(
+  sessionKey: string,
+  hasActiveRun: boolean,
+): void {
+  hostApiFetchMock.mockImplementation((path: string) => {
+    if (path === '/api/chat/sessions') {
+      return Promise.resolve({
+        success: true,
+        result: {
+          sessions: [{ key: sessionKey, hasActiveRun }],
+        },
+      });
+    }
+    return Promise.resolve({ state: 'running', port: 18789 });
+  });
+}
+
 vi.mock('@/lib/host-api', () => ({
   hostApiFetch: (...args: unknown[]) => hostApiFetchMock(...args),
 }));
@@ -605,6 +622,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('clears chat sending state on terminal run.ended runtime event', async () => {
+    mockBackendSessionState('agent:main:main', false);
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -632,10 +650,11 @@ describe('gateway store event wiring', () => {
       status: 'completed',
       endedAt: 123,
     });
-    await flushAsyncImports();
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().sending).toBe(false);
+    });
 
     expect(loadHistory).toHaveBeenCalledTimes(1);
-    expect(useChatStore.getState().sending).toBe(false);
     expect(useChatStore.getState().activeRunId).toBeNull();
     expect(useChatStore.getState().pendingFinal).toBe(false);
     expect(useChatStore.getState().lastUserMessageAt).toBeNull();
@@ -678,6 +697,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('clears the active send when a same-turn continuation run ends successfully', async () => {
+    mockBackendSessionState('agent:main:main', false);
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -724,10 +744,11 @@ describe('gateway store event wiring', () => {
       endedAt: 1773281733000,
       ts: 1773281733000,
     });
-    await flushAsyncImports();
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().sending).toBe(false);
+    });
 
     expect(loadHistory).toHaveBeenCalledTimes(1);
-    expect(useChatStore.getState().sending).toBe(false);
     expect(useChatStore.getState().activeRunId).toBeNull();
     expect(useChatStore.getState().pendingFinal).toBe(false);
     expect(useChatStore.getState().runtimeRuns['video_generate:job-1:ok']?.gateResult).toEqual(expect.objectContaining({
@@ -1063,6 +1084,7 @@ describe('gateway store event wiring', () => {
   });
 
   it('forces a terminal history reload when the runtime emits run.ended', async () => {
+    mockBackendSessionState('agent:main:main', false);
     const handlers = new Map<string, (payload: unknown) => void>();
     subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
       handlers.set(eventName, handler);
@@ -1100,11 +1122,83 @@ describe('gateway store event wiring', () => {
       status: 'completed',
       endedAt: 456,
     });
-    await flushAsyncImports();
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().sending).toBe(false);
+    });
 
     expect(loadHistory).toHaveBeenCalledTimes(1);
-    expect(useChatStore.getState().sending).toBe(false);
     expect(useChatStore.getState().activeRunId).toBeNull();
+  });
+
+  it('keeps sending active until the backend session becomes idle', async () => {
+    const idleProbe = deferred<{
+      success: boolean;
+      result: { sessions: Array<{ key: string; hasActiveRun: boolean }> };
+    }>();
+    let sessionProbeCount = 0;
+    hostApiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/chat/sessions') {
+        sessionProbeCount += 1;
+        if (sessionProbeCount === 1) {
+          return Promise.resolve({
+            success: true,
+            result: {
+              sessions: [{ key: 'agent:main:main', hasActiveRun: true }],
+            },
+          });
+        }
+        return idleProbe.promise;
+      }
+      return Promise.resolve({ state: 'running', port: 18789 });
+    });
+
+    const handlers = new Map<string, (payload: unknown) => void>();
+    subscribeHostEventMock.mockImplementation((eventName: string, handler: (payload: unknown) => void) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    const { useChatStore } = await importRealChatStore();
+    const loadHistory = vi.fn(async () => {});
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      sessions: [{ key: 'agent:main:main' }],
+      sending: true,
+      activeRunId: 'run-backend-settlement',
+      pendingFinal: true,
+      lastUserMessageAt: 1773281731000,
+      loadHistory,
+    });
+
+    const { useGatewayStore } = await importRealGatewayStore();
+    await useGatewayStore.getState().init();
+
+    handlers.get('chat:runtime-event')?.({
+      type: 'run.ended',
+      runId: 'run-backend-settlement',
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+      endedAt: 1773281732000,
+    });
+
+    await vi.waitFor(() => {
+      expect(sessionProbeCount).toBe(2);
+    });
+    expect(useChatStore.getState().sending).toBe(true);
+    expect(useChatStore.getState().activeRunId).toBe('run-backend-settlement');
+
+    idleProbe.resolve({
+      success: true,
+      result: {
+        sessions: [{ key: 'agent:main:main', hasActiveRun: false }],
+      },
+    });
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().sending).toBe(false);
+    });
+
+    expect(loadHistory).toHaveBeenCalledTimes(1);
+    expect(useChatStore.getState().activeRunId).toBeNull();
+    expect(useChatStore.getState().pendingFinal).toBe(false);
   });
 
   it('surfaces reply session init conflicts that arrive after chat.send ack as run errors', async () => {

@@ -46,7 +46,10 @@ import {
   requestQuitLifecycleAction,
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
-import { acquireProcessInstanceFileLock } from './process-instance-lock';
+import {
+  acquireProcessInstanceFileLock,
+  resolveGlobalProcessInstanceLockDir,
+} from './process-instance-lock';
 import { shouldDisableHardwareAcceleration } from './hardware-acceleration';
 import { ensureBuiltinSkillsInstalled, removeClawXPreinstalledSkillsAndConfigs, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
 import { ensureWeChatPluginInstalled } from '../utils/plugin-install';
@@ -139,6 +142,8 @@ if (process.platform === 'linux') {
 }
 
 // Prevent multiple instances of the app from running simultaneously.
+// Electron's lock is scoped by userData, so portable copies also take a
+// per-OS-user file lock below that is independent of their extraction folder.
 // Without this, two instances each spawn their own gateway process on the
 // same port, then each treats the other's gateway as "orphaned" and kills
 // it — creating an infinite kill/restart loop on Windows.
@@ -152,10 +157,10 @@ let releaseProcessInstanceFileLock: () => void = () => {};
 let gotFileLock = true;
 if (gotElectronLock && !isE2EMode) {
   try {
+    const globalLockDir = resolveGlobalProcessInstanceLockDir(app.getPath('appData'));
     const fileLock = acquireProcessInstanceFileLock({
-      userDataDir: app.getPath('userData'),
-      lockName: 'clawx',
-      force: true, // Electron lock already guarantees exclusivity; force-clean orphan/recycled-PID locks
+      lockDir: globalLockDir,
+      lockName: WINDOWS_APP_USER_MODEL_ID,
     });
     gotFileLock = fileLock.acquired;
     releaseProcessInstanceFileLock = fileLock.release;
@@ -171,7 +176,9 @@ if (gotElectronLock && !isE2EMode) {
       app.exit(0);
     }
   } catch (error) {
-    console.warn('[UClaw] Failed to acquire process instance file lock; continuing with Electron single-instance lock only', error);
+    gotFileLock = false;
+    console.error('[UClaw] Failed to acquire global process instance lock; exiting to avoid a Gateway ownership conflict', error);
+    app.exit(1);
   }
 }
 const gotTheLock = gotElectronLock && gotFileLock;

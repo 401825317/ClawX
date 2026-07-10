@@ -25,6 +25,7 @@ import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-reque
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
+import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
@@ -1084,6 +1085,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (replySessionInitConflictPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${replySessionInitConflictPatch.patchedFiles} reply-session init runtime file(s)`;
+  }
+
+  // --- Ordinary session cwd patch ---
+  // Keep mutable cwd separate from immutable subagent spawn lineage, while
+  // making agent/tool execution prefer the session cwd when one is configured.
+  const sessionCwdPatch = patchOpenClawSessionCwdRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (sessionCwdPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${sessionCwdPatch.patchedFiles} session cwd runtime file(s)`;
   }
 
   // --- Prompt cache key patch ---

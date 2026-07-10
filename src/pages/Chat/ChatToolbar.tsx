@@ -4,7 +4,7 @@
  * entry point.  Rendered in the Header when on the Chat page.
  */
 import { useMemo, useRef, useState } from 'react';
-import { RefreshCw, FolderTree, ListTree, ChevronDown, Check } from 'lucide-react';
+import { RefreshCw, FolderTree, FolderOpen, ListTree, ChevronDown, Check, Loader2, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
@@ -14,6 +14,13 @@ import { cn } from '@/lib/utils';
 import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 import { useTranslation } from 'react-i18next';
 import { WORKSPACE_BROWSER_ENABLED } from '@/components/file-preview/workspace-browser-config';
+import { selectDirectory } from '@/lib/api-client';
+import { toast } from 'sonner';
+
+function workspaceName(workspace: string): string {
+  const normalized = workspace.trim().replace(/[\\/]+$/u, '');
+  return normalized.split(/[\\/]/u).filter(Boolean).at(-1) || normalized;
+}
 
 type ChatToolbarProps = {
   questionDirectoryOpen?: boolean;
@@ -31,6 +38,8 @@ export function ChatToolbar({
   const sending = useChatStore((s) => s.sending);
   const sessions = useChatStore((s) => s.sessions);
   const switchSession = useChatStore((s) => s.switchSession);
+  const currentSessionKey = useChatStore((s) => s.currentSessionKey);
+  const updateSessionCwd = useChatStore((s) => s.updateSessionCwd);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const agents = useAgentsStore((s) => s.agents);
   const openBrowser = useArtifactPanel((s) => s.openBrowser);
@@ -39,12 +48,20 @@ export function ChatToolbar({
   const closePanel = useArtifactPanel((s) => s.close);
   const { t } = useTranslation('chat');
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [workspaceUpdating, setWorkspaceUpdating] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
   );
   const currentAgentName = currentAgent?.profile?.personaName ?? currentAgent?.name ?? currentAgentId;
+  const currentSession = sessions.find((session) => session.key === currentSessionKey);
+  const currentWorkspace = currentSession?.cwd || currentAgent?.workspace || '';
+  const workspaceLocked = sending
+    || currentSession?.hasActiveRun === true
+    || currentSession?.status === 'running'
+    || currentSession?.status === 'active';
   const currentAvatar = getAgentAvatar(currentAgent?.profile?.avatarId);
   const activeAgentIds = useMemo(() => {
     const ids = new Set<string>();
@@ -135,26 +152,102 @@ export function ChatToolbar({
         )}
       </div>
       {WORKSPACE_BROWSER_ENABLED && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                'h-8 w-8 hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
-                browserActive && 'bg-foreground/10 text-foreground',
+        <div className="relative hidden sm:block">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  'h-8 max-w-[190px] rounded-full border-black/10 bg-white/70 px-2.5 text-xs font-medium text-foreground/80 shadow-none hover:bg-black/5 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10',
+                  browserActive && 'bg-foreground/10 text-foreground',
+                )}
+                onClick={() => {
+                  setAgentPickerOpen(false);
+                  setWorkspacePickerOpen((open) => !open);
+                }}
+                disabled={workspaceUpdating}
+                aria-label={t('toolbar.workspace')}
+                aria-expanded={workspacePickerOpen}
+              >
+                {workspaceUpdating ? <Loader2 className="h-4 w-4 animate-spin" /> : <FolderTree className="h-4 w-4" />}
+                <span className="hidden max-w-[130px] truncate md:inline">{workspaceName(currentWorkspace) || t('toolbar.workspace')}</span>
+                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent><p>{currentWorkspace || t('toolbar.workspace')}</p></TooltipContent>
+          </Tooltip>
+          {workspacePickerOpen && (
+            <div className="absolute right-0 top-10 z-50 w-80 rounded-lg border border-black/10 bg-surface-modal p-2 shadow-xl dark:border-white/10">
+              <div className="px-2 py-1.5">
+                <p className="text-xs font-medium text-foreground">{t('toolbar.projectWorkspace')}</p>
+                <p className="mt-1 truncate text-2xs text-muted-foreground" title={currentWorkspace}>{currentWorkspace}</p>
+              </div>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
+                disabled={workspaceLocked}
+                onClick={async () => {
+                  setWorkspaceUpdating(true);
+                  try {
+                    const result = await selectDirectory({
+                      title: t('toolbar.chooseProjectWorkspace'),
+                      defaultPath: currentWorkspace || undefined,
+                    });
+                    const cwd = result.filePaths?.[0]?.trim();
+                    if (result.canceled || !cwd) return;
+                    await updateSessionCwd(currentSessionKey, cwd);
+                    setWorkspacePickerOpen(false);
+                    toast.success(t('toolbar.workspaceUpdated'));
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : t('toolbar.workspaceUpdateFailed'));
+                  } finally {
+                    setWorkspaceUpdating(false);
+                  }
+                }}
+              >
+                <FolderOpen className="h-4 w-4" />
+                <span>{t('toolbar.chooseProjectWorkspace')}</span>
+              </button>
+              {currentSession?.cwd && (
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-black/5 disabled:opacity-50 dark:hover:bg-white/10"
+                  disabled={workspaceLocked}
+                  onClick={async () => {
+                    setWorkspaceUpdating(true);
+                    try {
+                      await updateSessionCwd(currentSessionKey, null);
+                      setWorkspacePickerOpen(false);
+                      toast.success(t('toolbar.workspaceReset'));
+                    } catch (error) {
+                      toast.error(error instanceof Error ? error.message : t('toolbar.workspaceUpdateFailed'));
+                    } finally {
+                      setWorkspaceUpdating(false);
+                    }
+                  }}
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  <span>{t('toolbar.useAgentWorkspace')}</span>
+                </button>
               )}
-              onClick={() => (browserActive ? closePanel() : openBrowser())}
-              disabled={!currentAgent?.workspace}
-              aria-label={t('toolbar.workspace')}
-            >
-              <FolderTree className="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>
-            <p>{t('toolbar.workspace')}</p>
-          </TooltipContent>
-        </Tooltip>
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10"
+                onClick={() => {
+                  setWorkspacePickerOpen(false);
+                  if (browserActive) closePanel();
+                  else openBrowser();
+                }}
+              >
+                <FolderTree className="h-4 w-4" />
+                <span>{browserActive ? t('toolbar.closeWorkspaceBrowser') : t('toolbar.browseWorkspace')}</span>
+              </button>
+              {workspaceLocked && (
+                <p className="px-2 pb-1 pt-2 text-2xs text-muted-foreground">{t('toolbar.workspaceLocked')}</p>
+              )}
+            </div>
+          )}
+        </div>
       )}
       <Tooltip>
         <TooltipTrigger asChild>

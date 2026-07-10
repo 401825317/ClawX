@@ -301,6 +301,17 @@ function isCompositeTaskKind(value: unknown): value is MediaIntentCompositeTaskK
     || value === 'copywriting';
 }
 
+function isMediaCompositeTaskKind(kind: MediaIntentCompositeTaskKind): boolean {
+  return kind === 'image_generate' || kind === 'image_edit' || kind === 'video_generate';
+}
+
+function isSingleLocalArtifactCompositeKind(kind: MediaIntentCompositeTaskKind): boolean {
+  return kind === 'presentation'
+    || kind === 'spreadsheet'
+    || kind === 'mini_program'
+    || kind === 'copywriting';
+}
+
 function isVisualQuestionCuePrompt(prompt: string): boolean {
   return /(?:美吗|美嘛|好看吗|漂亮吗|丑吗|怎么样|咋样|如何|评价|点评|审美|哪里.*(?:好|不好|优化|改进)|看一下|看看|帮我看|分析一下|what do you think|look good|beautiful|pretty|rate|review|critique|analy[sz]e)/i.test(prompt);
 }
@@ -552,8 +563,8 @@ function isCompositeKnowledgeQuestion(prompt: string): boolean {
 }
 
 function hasImmediateExecutionDirective(prompt: string): boolean {
-  return /(?:帮我|给我|请|直接|现在|马上|立刻|替我|来)(?:.{0,20})(?:生成|生图|出图|画|制作|创建|开发|搭建|修图|改图|写|撰写|整理)/iu.test(prompt)
-    || /^(?:生成|生图|出图|画|制作|创建|开发|搭建|修图|改图|写|撰写|整理)(?:.{0,24})/iu.test(prompt.trim())
+  return /(?:帮我|给我|请|直接|现在|马上|立刻|替我|来)(?:.{0,20})(?:生成|生图|出图|画|做|制作|创建|开发|搭建|修图|改图|加|换|去掉|删除|调整|优化|写|撰写|整理)/iu.test(prompt)
+    || /^(?:生成|生图|出图|画|做|制作|创建|开发|搭建|修图|改图|加|换|去掉|删除|调整|优化|写|撰写|整理)(?:.{0,24})/iu.test(prompt.trim())
     || /(?:please|now|directly|go ahead and).{0,20}(?:generate|create|make|build|edit|write)/iu.test(prompt)
     || /^(?:generate|create|make|build|edit|write)\b/iu.test(prompt.trim());
 }
@@ -562,7 +573,8 @@ function isCapabilityOrKnowledgeOnlyPrompt(prompt: string): boolean {
   const mentionsPlannableCapability = /(?:图|图片|图像|照片|生图|修图|视频|动画|ppt|powerpoint|slides?|幻灯片|excel|xlsx|spreadsheet|表格|小程序|文案|截图|image|picture|photo|video|mini\s*program|copywriting|screenshot)/iu.test(prompt);
   if (!mentionsPlannableCapability) return false;
   const explicitlyAsksCapability = /(?:你|当前|现在|目前)?(?:能不能|能否|是否|可不可以|可以吗|支持吗|会不会|会吗)|你(?:能|会|可以).{0,30}(?:吗|么|？|\?)|(?:能力|功能|支持).{0,16}(?:哪些|什么|吗|么)|\b(?:can|could|would)\s+you\b|\bdo\s+you\s+support\b|\bare\s+you\s+able\b/iu.test(prompt);
-  if (explicitlyAsksCapability) return !hasImmediateExecutionDirective(prompt);
+  const politelyRequestsExistingImageEdit = promptReferencesExistingImage(prompt) && isImageEditPrompt(prompt);
+  if (explicitlyAsksCapability) return !hasImmediateExecutionDirective(prompt) && !politelyRequestsExistingImageEdit;
   return isCompositeKnowledgeQuestion(prompt) && !hasImmediateExecutionDirective(prompt);
 }
 
@@ -626,9 +638,9 @@ function explicitCompositeTaskCount(
 }
 
 function explicitlyRequestsCompositeTask(prompt: string, kind: MediaIntentCompositeTaskKind): boolean {
-  if (kind === 'image_generate' || kind === 'image_edit' || kind === 'video_generate') {
-    return true;
-  }
+  if (kind === 'image_generate') return isImageGenerationPrompt(prompt);
+  if (kind === 'image_edit') return isImageEditPrompt(prompt);
+  if (kind === 'video_generate') return isVideoGenerationPrompt(prompt);
   if (kind === 'presentation') {
     return /(?:帮我|给我|请|直接|现在|马上|立刻|来|做|制作|生成|创建|出).{0,18}(?:ppt|powerpoint|slides?|幻灯片|演示文稿|路演稿|汇报材料)|(?:ppt|powerpoint|slides?|幻灯片|演示文稿|路演稿|汇报材料).{0,18}(?:来|做|制作|生成|创建|出)(?:一个|一份|一版)?/iu.test(prompt);
   }
@@ -811,7 +823,7 @@ function detectCompositeTasks(params: {
     {
       kind: 'image_generate',
       title: '生成图片',
-      pattern: /(?:生图|生成(?:(?:[1-9][0-9]*|[一二两三四五六七八九十])\s*(?:张|幅|个)?|几张|个|些)?[^，,、。；;\n]{0,24}(?:图|图片|照片|海报|插画|头像|壁纸|主视觉)|画(?:一张|1\s*张|个)?|出图|做(?:一张|1\s*张)?(?:海报|插画|图片)|来(?:[^，,、。；;\n]{0,12})?(?:图|图片|照片|海报|插画)|image generation|(?:generate|create|make)\s+(?:[1-9][0-9]*\s+|an?\s+|some\s+)?(?:images?|pictures?|posters?|illustrations?))/i,
+      pattern: /(?:生图(?!\s*(?:的)?(?:提示词|prompt|脚本|文案|教程|方法))|生成(?:(?!视频|动画)[^，,、。；;\n]){0,24}(?:图|图片|照片|海报|插画|头像|壁纸|主视觉)|画(?!面)(?:一张|1\s*张|个)?|出图|做(?:一张|1\s*张)?(?:海报|插画|图片)|来(?:[^，,、。；;\n]{0,12})?(?:图|图片|照片|海报|插画)|image generation|(?:generate|create|make)\s+(?:[1-9][0-9]*\s+|an?\s+|some\s+)?(?:images?|pictures?|posters?|illustrations?))/i,
       prompt: taskPrompt(prompt, '生成图片'),
     },
     {
@@ -829,7 +841,7 @@ function detectCompositeTasks(params: {
     {
       kind: 'video_generate',
       title: '生成视频',
-      pattern: /(?:生视频|生成(?:[^，,、。；;\n]{0,16})?视频|做(?:[^，,、。；;\n]{0,16})?视频|来(?:[^，,、。；;\n]{0,12})?视频|视频生成|图生视频|基于[^，,、。；;\n]{0,24}(?:图|图片|照片)[^，,、。；;\n]{0,24}(?:生成|做)[^，,、。；;\n]{0,16}视频|动画|动起来|video generation|(?:generate|create|make)\s+(?:[1-9][0-9]*\s+|a\s+|some\s+)?(?:videos?|animations?))/i,
+      pattern: /(?:生视频|生成(?:[^，,、。；;\n]{0,24})?(?:视频|动画)|(?:做|制作|创建)(?:[^，,、。；;\n]{0,24})?(?:视频|动画)|来(?:[^，,、。；;\n]{0,12})?(?:视频|动画)|图生视频|基于[^，,、。；;\n]{0,24}(?:图|图片|照片)[^，,、。；;\n]{0,24}(?:生成|做)[^，,、。；;\n]{0,16}视频|动起来|video generation|(?:generate|create|make)\s+(?:[1-9][0-9]*\s+|a\s+|some\s+)?(?:videos?|animations?))/i,
       prompt: taskPrompt(prompt, '生成视频'),
     },
     {
@@ -860,7 +872,11 @@ function detectCompositeTasks(params: {
         : null;
     })
     .filter((match): match is CompositeTaskMatch => Boolean(match))
-    .filter((match) => batchExecutionRequested || explicitlyRequestsCompositeTask(prompt, match.spec.kind))
+    .filter((match) => (
+      isMediaCompositeTaskKind(match.spec.kind)
+        ? explicitlyRequestsCompositeTask(prompt, match.spec.kind)
+        : (batchExecutionRequested || explicitlyRequestsCompositeTask(prompt, match.spec.kind))
+    ))
     .sort((left, right) => (left.matchIndex - right.matchIndex) || (left.specIndex - right.specIndex));
 
   const expandedMatches = matches.flatMap((match) => {
@@ -878,7 +894,9 @@ function detectCompositeTasks(params: {
           candidateImages: [],
         })
       : undefined;
-    const basePrompt = compositePromptClause(prompt, match, matches);
+    const basePrompt = expandedMatches.length === 1 && isSingleLocalArtifactCompositeKind(match.spec.kind)
+      ? taskPrompt(prompt, match.spec.prompt)
+      : compositePromptClause(prompt, match, matches);
     return buildCompositeTask({
       index,
       kind: match.spec.kind,
@@ -901,7 +919,9 @@ function detectCompositeTasks(params: {
   });
 
   if (tasks.length === 0) return [];
-  if (tasks.length === 1) return [];
+  if (tasks.length === 1) {
+    return isSingleLocalArtifactCompositeKind(tasks[0]!.kind) ? tasks : [];
+  }
   return hasExplicitMultiplicity || containsCompositeSeparator(prompt) ? tasks : [];
 }
 
@@ -911,7 +931,7 @@ function isImageLookupPrompt(prompt: string): boolean {
 }
 
 function isImageGenerationPrompt(prompt: string): boolean {
-  return /(?:生图|出图|生成(?:(?:[1-9][0-9]*|[一二两三四五六七八九十])\s*(?:张|幅|个)?|几张|个|些)?(?:图|图片|照片|海报|插画|头像|壁纸|主视觉)|画(?:一张|1\s*张|个|幅)?|做(?:一张|1\s*张)?(?:海报|插画|图片|主视觉)|generate (?:[1-9][0-9]* |an? |some )?(?:images?|pictures?|posters?|illustrations?)|create (?:[1-9][0-9]* |an? |some )?(?:images?|pictures?|posters?|illustrations?)|draw|paint)/i.test(prompt);
+  return /(?:生图(?!\s*(?:的)?(?:提示词|prompt|脚本|文案|教程|方法))|出图|生成(?:(?!视频|动画)[^，,、。；;\n]){0,24}(?:图|图片|照片|海报|插画|头像|壁纸|主视觉)|画(?!面)(?:一张|1\s*张|个|幅)?|做(?:一张|1\s*张)?(?:海报|插画|图片|主视觉)|generate (?:[1-9][0-9]* |an? |some )?(?:images?|pictures?|posters?|illustrations?)|create (?:[1-9][0-9]* |an? |some )?(?:images?|pictures?|posters?|illustrations?)|draw|paint)/i.test(prompt);
 }
 
 function promptReferencesExistingImage(prompt: string): boolean {
@@ -936,7 +956,7 @@ function isImageRevisionFeedbackPrompt(prompt: string): boolean {
 }
 
 function isVideoGenerationPrompt(prompt: string): boolean {
-  return /(?:生视频|生成(?:(?:[1-9][0-9]*|[一二两三四五六七八九十])\s*(?:段|个|条)?|一段|一个|个)?视频|做(?:(?:[1-9][0-9]*|[一二两三四五六七八九十])\s*(?:段|个|条)?|一段|一个|个)?视频|视频生成|图生视频|动起来|动画|animate|video generation|generate (?:[1-9][0-9]* |a )?videos?|create (?:[1-9][0-9]* |a )?videos?)/i.test(prompt);
+  return /(?:生视频|(?:生成|做|制作|创建|来)(?:[^，,、。；;\n]{0,32})?(?:视频|动画)|图生视频|动起来|animate|(?:generate|create|make)\s+(?:[^,.;\n]{0,24})?(?:videos?|animations?))/i.test(prompt);
 }
 
 function isMediaMetaQuestionPrompt(prompt: string): boolean {
@@ -954,8 +974,15 @@ function isNegatedMediaGenerationPrompt(prompt: string): boolean {
 
 function isMediaPromptDraftingPrompt(prompt: string): boolean {
   const referencesMediaCreation = /(?:生图|生成(?:图|图片|照片|海报)|出图|画图|视频|生视频|图生视频|image|picture|poster|video)/i.test(prompt);
-  const asksForText = /(?:提示词|prompt|分镜|脚本|文案|朋友圈文案|标题|说明|解释|怎么写|写(?:一段|几个|几条)?|改写|润色|copy|caption|script)/i.test(prompt);
-  const alsoRequestsExecution = /(?:并|同时|顺便|然后|再)(?:帮我)?(?:生成|生图|出图|做视频)/i.test(prompt);
+  const asksForText = /(?:(?:帮我|给我|请|先|只|仅|直接)?(?:写|撰写|编写|改写|润色|整理|提取|给出|输出|提供|创作|生成|制作|创建).{0,28}(?:提示词|prompt|分镜|脚本|文案|朋友圈文案|标题|说明|copy|caption|script)|(?:只要|仅要|给我|请提供).{0,16}(?:提示词|prompt|分镜|脚本|文案|标题|copy|caption|script)|(?:提示词|prompt|分镜|脚本|文案|标题).{0,12}(?:怎么写|改写|润色))/i.test(prompt);
+  const mediaCreationQualifiesText = /(?:写|撰写|编写|改写|润色|整理|给出|输出|提供|创作).{0,28}(?:生图|生成(?:图|图片|照片|海报|视频)|视频生成|图生视频|image generation|video generation).{0,12}(?:的)?(?:提示词|prompt|分镜|脚本|文案|标题|copy|caption|script)/i.test(prompt);
+  const explicitlyGeneratesMedia = (
+    isImageGenerationPrompt(prompt) && !isNegatedCompositeTaskPrompt(prompt, 'image_generate')
+  ) || (
+    isVideoGenerationPrompt(prompt) && !isNegatedCompositeTaskPrompt(prompt, 'video_generate')
+  );
+  const alsoRequestsExecution = /(?:并|同时|顺便|然后|再)(?:帮我)?(?:直接|现在|马上|立刻)?(?:生成|生图|出图|做|制作|创建)(?:[^，,、。；;\n]{0,24})?(?:图|图片|海报|视频|动画)/i.test(prompt)
+    || (explicitlyGeneratesMedia && !mediaCreationQualifiesText);
   return referencesMediaCreation && asksForText && !alsoRequestsExecution;
 }
 
@@ -1064,14 +1091,14 @@ function localNonMediaChatPlan(params: {
   if (isPreferenceOnlyPrompt(prompt, params.requestedMode)) {
     return localChatPlan('local_non_media_preference_update', prompt, 'preference_or_memory_update');
   }
-  if (isCapabilityOrKnowledgeOnlyPrompt(prompt)) {
-    return localChatPlan('local_non_media_capability_or_knowledge_question', prompt, 'current_non_media_task');
-  }
   if (
     isMediaMetaQuestionPrompt(prompt)
     && !isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
   ) {
     return localChatPlan('local_non_media_media_meta_question', prompt, 'current_non_media_task');
+  }
+  if (isCapabilityOrKnowledgeOnlyPrompt(prompt)) {
+    return localChatPlan('local_non_media_capability_or_knowledge_question', prompt, 'current_non_media_task');
   }
   if (isNegatedMediaGenerationPrompt(prompt) || isMediaPromptDraftingPrompt(prompt)) {
     return localChatPlan(
@@ -1395,6 +1422,7 @@ function normalizePlannerCompositeTasks(params: {
 }): MediaIntentCompositeTask[] {
   const rawTasks = params.raw.composite_tasks ?? params.raw.compositeTasks;
   if (!Array.isArray(rawTasks)) return [];
+  const batchExecutionRequested = hasCompositeBatchExecutionDirective(params.prompt);
 
   const kindCounts = new Map<MediaIntentCompositeTaskKind, number>();
   const usedIds = new Set<string>();
@@ -1408,6 +1436,10 @@ function normalizePlannerCompositeTasks(params: {
     if (!rawTask || typeof rawTask !== 'object' || Array.isArray(rawTask)) continue;
     const record = rawTask as Record<string, unknown>;
     if (!isCompositeTaskKind(record.kind)) continue;
+    const explicitlyRequested = explicitlyRequestsCompositeTask(params.prompt, record.kind);
+    if (isMediaCompositeTaskKind(record.kind) ? !explicitlyRequested : (!batchExecutionRequested && !explicitlyRequested)) {
+      continue;
+    }
 
     const kindCount = kindCounts.get(record.kind) ?? 0;
     if (kindCount >= MAX_COMPOSITE_TASKS_PER_KIND) continue;
@@ -1533,7 +1565,9 @@ function normalizePlannerDecision(params: {
   const plannerAuthorizesCurrentMedia = intentKind === 'current_media_task'
     && currentTurnMediaRequest === true;
   const compositeTasks = normalizePlannerCompositeTasks(params);
-  if (compositeTasks.length >= 2) {
+  const hasRunnableComposite = compositeTasks.length >= 2
+    || (compositeTasks.length === 1 && isSingleLocalArtifactCompositeKind(compositeTasks[0]!.kind));
+  if (hasRunnableComposite) {
     const hasMediaTask = compositeTasks.some((task) => (
       task.kind === 'image_generate'
       || task.kind === 'image_edit'
@@ -1770,14 +1804,16 @@ function buildPlannerMessages(params: {
         'Use explicit_images before current-turn dependent image artifacts, then candidate_images. In composite tasks, express a current-turn artifact through depends_on instead of candidate_images.',
         'Use candidate_images when the user clearly refers to current/recent/previous image context using words like this image, previous image, 上一张, 这张图, 图片上, or 刚生成. A short visual follow-up such as 好看吗 or 你觉得美嘛 may use the most recent assistant image even without repeating the image noun. Do not use candidate_images merely because the user says this page, this client, this UI, design, ugly, or pretty.',
         'Use video_generate only when the user wants video creation, animation, or image-to-video.',
+        'Words such as prompt, script, copy, 提示词, 脚本, or 文案 are contextual inputs when the same turn explicitly asks to generate media now. Immediate media execution takes precedence over prompt-drafting heuristics.',
         'For video_generate, also choose video_mode: text_to_video, image_to_video, or edit_image_then_video.',
         'Use edit_image_then_video when the image should be changed first, then animated.',
         'Use image_to_video when the selected image should be animated or used as the visual base without a separate still-image edit.',
         'Use desktop_screenshot only for a direct request to capture the current desktop/screen. Use chat for broader browser automation or local workflow tasks.',
         'For a current-turn request containing two or more deliverables, return action=chat plus composite_tasks in execution order. Each task must contain id, kind, title, prompt, requires_artifact, depends_on, fallback, selected_image_source, and selected_image_index.',
+        'Every composite media task must correspond to an explicitly requested media deliverable. Context phrases such as video frames, image content, reference picture, 视频画面, or 图片内容 do not authorize an extra image_generate or video_generate task.',
         'Allowed composite task kinds: image_generate, presentation, spreadsheet, video_generate, image_edit, mini_program, copywriting.',
         'When the user explicitly requests 2-5 outputs of the same kind, emit that many independent tasks. Never emit more than 5 tasks of one kind. For quantities above 5, emit only 5.',
-        'Do not use composite_tasks for a single presentation, spreadsheet, or mini_program request; keep action=chat and let the default agent handle it.',
+        'For a single explicit presentation, spreadsheet, mini_program, or copywriting artifact request, return action=chat with exactly one composite_task so the deterministic local artifact runtime can deliver it. Keep single image/video requests on their direct media action.',
         'depends_on may reference only task ids that appear earlier in composite_tasks. Use it only when a task consumes an earlier task output, such as editing a generated image or animating it into a video.',
         'When a composite video consumes a current-turn image, depend on the nearest compatible earlier image_edit or image_generate task, preferring the edited image.',
         'For image_edit or image-based video tasks, set selected_image_source to explicit or candidate and select an index only when that input really comes from the supplied image lists. Otherwise use none and express an earlier generated-image dependency through depends_on.',

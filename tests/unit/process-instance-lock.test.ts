@@ -2,7 +2,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { acquireProcessInstanceFileLock } from '@electron/main/process-instance-lock';
+import {
+  acquireProcessInstanceFileLock,
+  resolveGlobalProcessInstanceLockDir,
+} from '@electron/main/process-instance-lock';
 
 const tempDirs: string[] = [];
 
@@ -22,14 +25,14 @@ afterEach(() => {
 
 describe('process instance file lock', () => {
   it('acquires lock and writes owner pid', () => {
-    const userDataDir = createTempDir();
+    const lockDir = createTempDir();
     const lock = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 12345,
     });
 
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
+    const lockPath = join(lockDir, 'clawx.instance.lock');
     expect(lock.acquired).toBe(true);
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(lockPath, 'utf8')).toBe('12345');
@@ -39,16 +42,16 @@ describe('process instance file lock', () => {
   });
 
   it('rejects a second lock when owner pid is alive', () => {
-    const userDataDir = createTempDir();
+    const lockDir = createTempDir();
     const first = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 2222,
       isPidAlive: () => true,
     });
 
     const second = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 3333,
       isPidAlive: () => true,
@@ -63,12 +66,12 @@ describe('process instance file lock', () => {
   });
 
   it('replaces stale lock file when owner pid is not alive', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
+    const lockDir = createTempDir();
+    const lockPath = join(lockDir, 'clawx.instance.lock');
     writeFileSync(lockPath, '4444', 'utf8');
 
     const lock = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 5555,
       isPidAlive: () => false,
@@ -80,8 +83,8 @@ describe('process instance file lock', () => {
   });
 
   it('replaces stale structured lock file when owner pid is not alive', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
+    const lockDir = createTempDir();
+    const lockPath = join(lockDir, 'clawx.instance.lock');
     writeFileSync(lockPath, JSON.stringify({
       schema: 'clawx-instance-lock',
       version: 1,
@@ -89,7 +92,7 @@ describe('process instance file lock', () => {
     }), 'utf8');
 
     const lock = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 6666,
       isPidAlive: () => false,
@@ -101,12 +104,12 @@ describe('process instance file lock', () => {
   });
 
   it('does not treat malformed lock file content as stale', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
+    const lockDir = createTempDir();
+    const lockPath = join(lockDir, 'clawx.instance.lock');
     writeFileSync(lockPath, 'not-a-pid', 'utf8');
 
     const lock = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 6666,
     });
@@ -118,10 +121,10 @@ describe('process instance file lock', () => {
   });
 
   it('does not remove lock file if ownership changed before release', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
+    const lockDir = createTempDir();
+    const lockPath = join(lockDir, 'clawx.instance.lock');
     const first = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 1234,
     });
@@ -134,8 +137,8 @@ describe('process instance file lock', () => {
   });
 
   it('does not treat unknown structured lock schema as stale', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
+    const lockDir = createTempDir();
+    const lockPath = join(lockDir, 'clawx.instance.lock');
     writeFileSync(lockPath, JSON.stringify({
       schema: 'future-lock-schema',
       version: 2,
@@ -144,7 +147,7 @@ describe('process instance file lock', () => {
     }), 'utf8');
 
     const lock = acquireProcessInstanceFileLock({
-      userDataDir,
+      lockDir,
       lockName: 'clawx',
       pid: 9999,
     });
@@ -155,39 +158,52 @@ describe('process instance file lock', () => {
     expect(readFileSync(lockPath, 'utf8')).toContain('future-lock-schema');
   });
 
-  it('force: true acquires lock even when existing owner pid is alive', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
-    // Simulate a lock held by a live process (e.g. orphan Python process after update)
-    writeFileSync(lockPath, '14736', 'utf8');
+  it('shares one OS-user app lock across different portable userData directories', () => {
+    const appDataDir = createTempDir();
+    const portableUserDataA = createTempDir();
+    const portableUserDataB = createTempDir();
+    const lockDir = resolveGlobalProcessInstanceLockDir(appDataDir);
 
-    const lock = acquireProcessInstanceFileLock({
-      userDataDir,
-      lockName: 'clawx',
-      pid: 5555,
-      isPidAlive: () => true, // owner appears alive (PID recycled on Windows)
-      force: true,
+    expect(lockDir.startsWith(portableUserDataA)).toBe(false);
+    expect(lockDir.startsWith(portableUserDataB)).toBe(false);
+
+    const first = acquireProcessInstanceFileLock({
+      lockDir,
+      lockName: 'app.clawx.desktop',
+      pid: 14736,
+      isPidAlive: () => true,
+    });
+    const second = acquireProcessInstanceFileLock({
+      lockDir,
+      lockName: 'app.clawx.desktop',
+      pid: 15555,
+      isPidAlive: () => true,
     });
 
-    expect(lock.acquired).toBe(true);
-    expect(readFileSync(lockPath, 'utf8')).toBe('5555');
-    lock.release();
+    expect(first.acquired).toBe(true);
+    expect(second.acquired).toBe(false);
+    expect(second.lockPath).toBe(first.lockPath);
+    expect(second.ownerPid).toBe(14736);
+    first.release();
   });
 
-  it('force: true acquires lock when lock file has malformed content', () => {
-    const userDataDir = createTempDir();
-    const lockPath = join(userDataDir, 'clawx.instance.lock');
-    writeFileSync(lockPath, 'garbage-content', 'utf8');
-
-    const lock = acquireProcessInstanceFileLock({
-      userDataDir,
-      lockName: 'clawx',
-      pid: 7777,
-      force: true,
+  it('keeps different app identities independent within the same OS-user lock directory', () => {
+    const lockDir = resolveGlobalProcessInstanceLockDir(createTempDir());
+    const uclaw = acquireProcessInstanceFileLock({
+      lockDir,
+      lockName: 'app.clawx.desktop',
+      pid: 1001,
+    });
+    const otherApp = acquireProcessInstanceFileLock({
+      lockDir,
+      lockName: 'other.desktop.app',
+      pid: 1002,
     });
 
-    expect(lock.acquired).toBe(true);
-    expect(readFileSync(lockPath, 'utf8')).toBe('7777');
-    lock.release();
+    expect(uclaw.acquired).toBe(true);
+    expect(otherApp.acquired).toBe(true);
+    expect(otherApp.lockPath).not.toBe(uclaw.lockPath);
+    uclaw.release();
+    otherApp.release();
   });
 });

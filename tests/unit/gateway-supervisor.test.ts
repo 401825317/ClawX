@@ -6,9 +6,11 @@ const originalPlatform = process.platform;
 const {
   mockExec,
   mockCreateServer,
+  mockProbeGatewayReady,
 } = vi.hoisted(() => ({
   mockExec: vi.fn(),
   mockCreateServer: vi.fn(),
+  mockProbeGatewayReady: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -34,6 +36,10 @@ vi.mock('net', () => ({
   createServer: mockCreateServer,
 }));
 
+vi.mock('@electron/gateway/ws-client', () => ({
+  probeGatewayReady: mockProbeGatewayReady,
+}));
+
 class MockUtilityChild extends EventEmitter {
   pid?: number;
   kill = vi.fn();
@@ -52,6 +58,7 @@ describe('gateway supervisor process cleanup', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockProbeGatewayReady.mockResolvedValue(false);
 
     mockExec.mockImplementation((_cmd: string, _opts: object, cb: (err: Error | null, stdout: string) => void) => {
       cb(null, '');
@@ -111,8 +118,37 @@ describe('gateway supervisor process cleanup', () => {
     expect(child.kill).toHaveBeenCalledTimes(1);
   });
 
-  it('waits for port release after orphan cleanup on Windows', async () => {
+  it('does not kill a ready Gateway owned by another Windows process', async () => {
     setPlatform('win32');
+    mockProbeGatewayReady.mockResolvedValue(true);
+    const {
+      findExistingGatewayProcess,
+      GATEWAY_PORT_OWNERSHIP_CONFLICT,
+    } = await import('@electron/gateway/supervisor');
+
+    mockExec.mockImplementation((cmd: string, _opts: object, cb: (err: Error | null, stdout: string) => void) => {
+      if (cmd.includes('netstat -ano')) {
+        cb(null, '  TCP    127.0.0.1:18789    0.0.0.0:0    LISTENING    4321\n');
+        return {} as never;
+      }
+      cb(null, '');
+      return {} as never;
+    });
+
+    await expect(findExistingGatewayProcess({ port: 18789 })).rejects.toMatchObject({
+      code: GATEWAY_PORT_OWNERSHIP_CONFLICT,
+      port: 18789,
+      listenerPids: ['4321'],
+      gatewayReady: true,
+    });
+
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('taskkill'))).toBe(false);
+    expect(mockCreateServer).not.toHaveBeenCalled();
+  });
+
+  it('reuses a ready Gateway only when the listener PID is explicitly owned', async () => {
+    setPlatform('win32');
+    mockProbeGatewayReady.mockResolvedValue(true);
     const { findExistingGatewayProcess } = await import('@electron/gateway/supervisor');
 
     mockExec.mockImplementation((cmd: string, _opts: object, cb: (err: Error | null, stdout: string) => void) => {
@@ -124,14 +160,26 @@ describe('gateway supervisor process cleanup', () => {
       return {} as never;
     });
 
-    const result = await findExistingGatewayProcess({ port: 18789 });
-    expect(result).toBeNull();
+    await expect(findExistingGatewayProcess({ port: 18789, ownedPid: 4321 })).resolves.toEqual({
+      port: 18789,
+    });
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('taskkill'))).toBe(false);
+  });
 
-    expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('taskkill /F /PID 4321 /T'),
-      expect.objectContaining({ timeout: 5000, windowsHide: true }),
-      expect.any(Function),
-    );
-    expect(mockCreateServer).toHaveBeenCalled();
+  it('blocks an unverified ready Gateway even when PID discovery returns nothing', async () => {
+    setPlatform('win32');
+    mockProbeGatewayReady.mockResolvedValue(true);
+    const {
+      findExistingGatewayProcess,
+      GATEWAY_PORT_OWNERSHIP_CONFLICT,
+    } = await import('@electron/gateway/supervisor');
+
+    await expect(findExistingGatewayProcess({ port: 18789 })).rejects.toMatchObject({
+      code: GATEWAY_PORT_OWNERSHIP_CONFLICT,
+      port: 18789,
+      listenerPids: [],
+      gatewayReady: true,
+    });
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('taskkill'))).toBe(false);
   });
 });

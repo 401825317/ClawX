@@ -194,6 +194,100 @@ describe('POST /api/chat/send', () => {
     expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('hello route');
   });
 
+  it('uses one-shot thinking off for low-risk greetings without changing the session', async () => {
+    const rpc = vi.fn().mockResolvedValue({ runId: 'run-route-hi' });
+    const response = createResponse<{ success: boolean; result: { runId: string } }>();
+    const handled = await handleGatewayRoutes(
+      createJsonRequest('POST', {
+        sessionKey: 'agent:main:main',
+        message: 'hi',
+        idempotencyKey: 'idem-route-hi',
+      }),
+      response.res,
+      new URL('http://127.0.0.1/api/chat/send'),
+      createContext(rpc),
+    );
+
+    expect(handled).toBe(true);
+    expect(response.statusCode).toBe(200);
+    expect(rpc).toHaveBeenCalledWith(
+      'chat.send',
+      {
+        sessionKey: 'agent:main:main',
+        message: 'hi',
+        deliver: false,
+        idempotencyKey: 'idem-route-hi',
+        thinking: 'off',
+      },
+      CHAT_SEND_RPC_TIMEOUT_MS,
+    );
+    expect(logger.info).toHaveBeenCalledWith('[diagnostic] chat.send.request', {
+      sessionKey: 'agent:main:main',
+      messageChars: 2,
+      containsCjk: false,
+      artifactIntent: false,
+      media: false,
+      mediaCount: 0,
+      deliver: false,
+      thinkingOverride: 'off',
+      thinkingOverrideReason: 'simple_greeting',
+    });
+    expect(JSON.stringify(vi.mocked(logger.info).mock.calls)).not.toContain('"message":"hi"');
+  });
+
+  it('uses one-shot thinking off for capability questions', async () => {
+    const rpc = vi.fn().mockResolvedValue({ runId: 'run-route-capability' });
+    const response = createResponse<{ success: boolean; result: { runId: string } }>();
+    await handleGatewayRoutes(
+      createJsonRequest('POST', {
+        sessionKey: 'agent:main:main',
+        message: '你能做什么',
+        idempotencyKey: 'idem-route-capability',
+      }),
+      response.res,
+      new URL('http://127.0.0.1/api/chat/send'),
+      createContext(rpc),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(rpc).toHaveBeenCalledWith(
+      'chat.send',
+      expect.objectContaining({
+        sessionKey: 'agent:main:main',
+        message: '你能做什么',
+        thinking: 'off',
+      }),
+      CHAT_SEND_RPC_TIMEOUT_MS,
+    );
+  });
+
+  it('does not lower thinking for short diagnostic questions', async () => {
+    const rpc = vi.fn().mockResolvedValue({ runId: 'run-route-diagnostic' });
+    const response = createResponse<{ success: boolean; result: { runId: string } }>();
+    await handleGatewayRoutes(
+      createJsonRequest('POST', {
+        sessionKey: 'agent:main:main',
+        message: '为什么视频黑屏',
+        idempotencyKey: 'idem-route-diagnostic',
+      }),
+      response.res,
+      new URL('http://127.0.0.1/api/chat/send'),
+      createContext(rpc),
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(rpc).toHaveBeenCalledWith(
+      'chat.send',
+      {
+        sessionKey: 'agent:main:main',
+        message: '为什么视频黑屏',
+        deliver: false,
+        idempotencyKey: 'idem-route-diagnostic',
+      },
+      CHAT_SEND_RPC_TIMEOUT_MS,
+    );
+  });
+
   it('logs Chinese artifact intent diagnostics without logging the prompt body', async () => {
     const rpc = vi.fn().mockResolvedValue({ runId: 'run-route-artifact' });
     const response = createResponse<{ success: boolean; result: { runId: string } }>();

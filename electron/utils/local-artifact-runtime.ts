@@ -9,6 +9,39 @@ export type LocalArtifactKind = 'presentation' | 'spreadsheet' | 'mini_program' 
 
 export type LocalArtifactPlanningMode = 'model' | 'provided' | 'prompt-heuristic' | 'fallback-template';
 
+type PresentationRichLayout = 'two-column' | 'metric' | 'timeline';
+
+type PresentationColumn = {
+  title?: string;
+  body?: string;
+  bullets?: string[];
+};
+
+type PresentationMetric = {
+  label?: string;
+  value?: string | number;
+  detail?: string;
+};
+
+type PresentationTimelineItem = {
+  period?: string;
+  title?: string;
+  body?: string;
+};
+
+type SpreadsheetKeyMetric = {
+  label?: string;
+  value?: unknown;
+  detail?: string;
+};
+
+type SpreadsheetConditionalFormatting = {
+  column?: string | number;
+  type?: 'color-scale' | 'data-bar' | 'cell-is';
+  operator?: 'greaterThan' | 'greaterThanOrEqual' | 'lessThan' | 'lessThanOrEqual' | 'equal' | 'notEqual';
+  value?: number;
+};
+
 export type LocalArtifactVerificationResult = {
   status: 'passed' | 'failed' | 'blocked' | 'skipped';
   kind: string;
@@ -24,10 +57,27 @@ export type LocalArtifactCreateRequest = {
   filename?: string;
   sourcePrompt?: string;
   originalPrompt?: string;
+  outputDir?: string;
   planningMode?: LocalArtifactPlanningMode;
   planningSummary?: string;
-  slides?: Array<{ title?: string; subtitle?: string; body?: string; bullets?: string[] }>;
-  sheets?: Array<{ name?: string; headers?: string[]; rows?: unknown[][] }>;
+  slides?: Array<{
+    title?: string;
+    subtitle?: string;
+    body?: string;
+    bullets?: string[];
+    layout?: PresentationRichLayout;
+    columns?: PresentationColumn[];
+    metrics?: PresentationMetric[];
+    timeline?: PresentationTimelineItem[];
+  }>;
+  sheets?: Array<{
+    name?: string;
+    headers?: string[];
+    rows?: unknown[][];
+    summary?: string;
+    keyMetrics?: SpreadsheetKeyMetric[];
+    conditionalFormatting?: SpreadsheetConditionalFormatting[];
+  }>;
   content?: string;
   sections?: Array<{ title?: string; paragraphs?: string[]; bullets?: string[] }>;
   html?: string;
@@ -61,6 +111,7 @@ const MIME = {
 
 const MIN_HTML_FILE_SIZE_BYTES = 512;
 const BASE_HTML_APP_CSS = '[hidden]{display:none!important}';
+const COMPOSED_HTML_SCAFFOLD_CSS = 'html{color-scheme:light}body{margin:0;padding:24px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f8fb;color:#172033}.uclaw-artifact-heading{width:min(920px,100%);margin:0 auto 16px}.uclaw-artifact-heading h1{margin:0;font-size:24px;line-height:1.3}';
 const PLACEHOLDER_LINE_RE = /^(?:tbd|todo|lorem ipsum|待补充|待完善|内容待定|在此填写.*|请填写.*内容|示例(?:内容|文本|数据)|可继续编辑补充内容[。.！!]?|第\s*\d+\s*页|补充分析\s*\d+)$/iu;
 const GENERIC_TEMPLATE_LINE_RE = /(?:^围绕业务目标补充事实依据$|^明确执行动作和衡量指标$|^沉淀可复用检查清单$|^给出明确动作、负责人或判断标准$|^用可验证产物支撑最终结论$|要服务于「.+」这个核心目标|这份文案强调清晰目标、快速执行和可验证交付)/u;
 
@@ -69,11 +120,22 @@ type PresentationSlide = {
   subtitle?: string;
   body?: string;
   bullets: string[];
+  layout?: PresentationRichLayout;
+  columns: Array<{ title: string; body: string; bullets: string[] }>;
+  metrics: Array<{ label: string; value: string; detail: string }>;
+  timeline: Array<{ period: string; title: string; body: string }>;
 };
 
-type PresentationSlideRole = 'cover' | 'agenda' | 'section' | 'content';
+type PresentationSlideRole = 'cover' | 'agenda' | 'section' | 'content' | PresentationRichLayout;
 
 type SpreadsheetCellFormat = 'text' | 'integer' | 'decimal' | 'percent' | 'currency' | 'date';
+
+type NormalizedConditionalFormatting = {
+  columnIndex: number;
+  type: 'color-scale' | 'data-bar' | 'cell-is';
+  operator?: NonNullable<SpreadsheetConditionalFormatting['operator']>;
+  value?: number;
+};
 
 type NormalizedSheet = {
   name: string;
@@ -81,6 +143,9 @@ type NormalizedSheet = {
   rows: unknown[][];
   columnFormats: SpreadsheetCellFormat[];
   columnWidths: number[];
+  summary: string;
+  keyMetrics: Array<{ label: string; value: unknown; detail: string }>;
+  conditionalFormatting: NormalizedConditionalFormatting[];
 };
 
 function xml(value: unknown): string {
@@ -100,22 +165,35 @@ function rawText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeParagraph(value: unknown): string {
-  return cleanText(value).replace(/[。！？!?]\s*/gu, (match) => `${match.trim()} `).trim();
+function hasMeaningfulSpreadsheetValue(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'boolean') return true;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as { formula?: unknown; value?: unknown };
+    return Boolean(cleanText(record.formula)) || hasMeaningfulSpreadsheetValue(record.value);
+  }
+  return Boolean(cleanText(value));
 }
 
 function hasOwnContent(request: LocalArtifactCreateRequest): boolean {
   const hasSlides = (request.slides ?? []).some((slide) => (
     Boolean(cleanText(slide.title) || cleanText(slide.subtitle) || cleanText(slide.body))
     || (slide.bullets ?? []).some((bullet) => Boolean(cleanText(bullet)))
+    || (slide.columns ?? []).some((column) => (
+      Boolean(cleanText(column.title) || cleanText(column.body))
+      || (column.bullets ?? []).some((bullet) => Boolean(cleanText(bullet)))
+    ))
+    || (slide.metrics ?? []).some((metric) => Boolean(cleanText(metric.label)) && cleanText(metric.value) !== '')
+    || (slide.timeline ?? []).some((item) => Boolean(cleanText(item.period) || cleanText(item.title) || cleanText(item.body)))
   ));
   const hasSheets = (request.sheets ?? []).some((sheet) => (
     (sheet.headers ?? []).some((header) => Boolean(cleanText(header)))
     || (sheet.rows ?? []).some((row) => row.some((cell) => Boolean(cleanText(spreadsheetCellValue(cell)))))
+    || Boolean(cleanText(sheet.summary))
+    || (sheet.keyMetrics ?? []).some((metric) => Boolean(cleanText(metric.label)) && hasMeaningfulSpreadsheetValue(metric.value))
   ));
   const hasSections = (request.sections ?? []).some((section) => (
-    Boolean(cleanText(section.title))
-    || (section.paragraphs ?? []).some((paragraph) => Boolean(cleanText(paragraph)))
+    (section.paragraphs ?? []).some((paragraph) => Boolean(cleanText(paragraph)))
     || (section.bullets ?? []).some((bullet) => Boolean(cleanText(bullet)))
   ));
   return Boolean(
@@ -134,6 +212,132 @@ function hasTaskContext(request: LocalArtifactCreateRequest): boolean {
   return Boolean(sourcePrompt(request) || hasOwnContent(request));
 }
 
+function presentationLayoutFromInput(slide: NonNullable<LocalArtifactCreateRequest['slides']>[number]): PresentationRichLayout | undefined {
+  if (slide.layout === 'two-column' || slide.layout === 'metric' || slide.layout === 'timeline') return slide.layout;
+  if (Array.isArray(slide.columns) && slide.columns.length > 0) return 'two-column';
+  if (Array.isArray(slide.metrics) && slide.metrics.length > 0) return 'metric';
+  if (Array.isArray(slide.timeline) && slide.timeline.length > 0) return 'timeline';
+  return undefined;
+}
+
+function presentationRichContentIssues(request: LocalArtifactCreateRequest): string[] {
+  const issues: string[] = [];
+  (request.slides ?? []).forEach((slide, slideIndex) => {
+    const record = slide as Record<string, unknown>;
+    const rawLayout = cleanText(record.layout);
+    if (rawLayout && !['two-column', 'metric', 'timeline'].includes(rawLayout)) {
+      issues.push(`slides[${slideIndex}].layout`);
+    }
+
+    const columns = record.columns;
+    if (Object.prototype.hasOwnProperty.call(record, 'columns')) {
+      if (!Array.isArray(columns) || columns.length === 0) {
+        issues.push(`slides[${slideIndex}].columns`);
+      } else {
+        columns.forEach((column, columnIndex) => {
+          const item = column && typeof column === 'object' && !Array.isArray(column)
+            ? column as Record<string, unknown>
+            : {};
+          const bullets = Array.isArray(item.bullets) ? item.bullets : [];
+          if (!cleanText(item.title) && !cleanText(item.body) && !bullets.some((bullet) => Boolean(cleanText(bullet)))) {
+            issues.push(`slides[${slideIndex}].columns[${columnIndex}]`);
+          }
+        });
+      }
+    }
+
+    const metrics = record.metrics;
+    if (Object.prototype.hasOwnProperty.call(record, 'metrics')) {
+      if (!Array.isArray(metrics) || metrics.length === 0) {
+        issues.push(`slides[${slideIndex}].metrics`);
+      } else {
+        metrics.forEach((metric, metricIndex) => {
+          const item = metric && typeof metric === 'object' && !Array.isArray(metric)
+            ? metric as Record<string, unknown>
+            : {};
+          const value = item.value;
+          const hasValue = typeof value === 'number' ? Number.isFinite(value) : Boolean(cleanText(value));
+          if (!cleanText(item.label) || !hasValue) issues.push(`slides[${slideIndex}].metrics[${metricIndex}]`);
+        });
+      }
+    }
+
+    const timeline = record.timeline;
+    if (Object.prototype.hasOwnProperty.call(record, 'timeline')) {
+      if (!Array.isArray(timeline) || timeline.length === 0) {
+        issues.push(`slides[${slideIndex}].timeline`);
+      } else {
+        timeline.forEach((item, itemIndex) => {
+          const timelineItem = item && typeof item === 'object' && !Array.isArray(item)
+            ? item as Record<string, unknown>
+            : {};
+          if (!cleanText(timelineItem.period) && !cleanText(timelineItem.title) && !cleanText(timelineItem.body)) {
+            issues.push(`slides[${slideIndex}].timeline[${itemIndex}]`);
+          }
+        });
+      }
+    }
+
+    const layout = presentationLayoutFromInput(slide);
+    if (layout === 'two-column' && (!Array.isArray(columns) || columns.length < 2)) issues.push(`slides[${slideIndex}].columns(two-column)`);
+    if (layout === 'metric' && (!Array.isArray(metrics) || metrics.length === 0)) issues.push(`slides[${slideIndex}].metrics(metric)`);
+    if (layout === 'timeline' && (!Array.isArray(timeline) || timeline.length === 0)) issues.push(`slides[${slideIndex}].timeline(timeline)`);
+  });
+  return [...new Set(issues)];
+}
+
+function spreadsheetRichContentIssues(request: LocalArtifactCreateRequest): string[] {
+  const issues: string[] = [];
+  (request.sheets ?? []).forEach((sheet, sheetIndex) => {
+    const record = sheet as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(record, 'summary') && !cleanText(record.summary)) {
+      issues.push(`sheets[${sheetIndex}].summary`);
+    }
+
+    const keyMetrics = record.keyMetrics;
+    if (Object.prototype.hasOwnProperty.call(record, 'keyMetrics')) {
+      if (!Array.isArray(keyMetrics) || keyMetrics.length === 0) {
+        issues.push(`sheets[${sheetIndex}].keyMetrics`);
+      } else {
+        keyMetrics.forEach((metric, metricIndex) => {
+          const item = metric && typeof metric === 'object' && !Array.isArray(metric)
+            ? metric as Record<string, unknown>
+            : {};
+          if (!cleanText(item.label) || !hasMeaningfulSpreadsheetValue(item.value)) {
+            issues.push(`sheets[${sheetIndex}].keyMetrics[${metricIndex}]`);
+          }
+        });
+      }
+    }
+
+    const conditionalFormatting = record.conditionalFormatting;
+    if (Object.prototype.hasOwnProperty.call(record, 'conditionalFormatting')) {
+      if (!Array.isArray(conditionalFormatting) || conditionalFormatting.length === 0) {
+        issues.push(`sheets[${sheetIndex}].conditionalFormatting`);
+      } else {
+        conditionalFormatting.forEach((rule, ruleIndex) => {
+          const item = rule && typeof rule === 'object' && !Array.isArray(rule)
+            ? rule as Record<string, unknown>
+            : {};
+          const type = cleanText(item.type) || 'color-scale';
+          const headers = Array.isArray(sheet.headers) ? sheet.headers.map(cleanText) : [];
+          const rows = Array.isArray(sheet.rows) ? sheet.rows : [];
+          const columnCount = Math.max(headers.length, ...rows.map((row) => Array.isArray(row) ? row.length : 1), 1);
+          const hasColumn = spreadsheetConditionalColumnIndex(item.column, headers, columnCount) !== undefined;
+          const validType = ['color-scale', 'data-bar', 'cell-is'].includes(type);
+          const validCellRule = type !== 'cell-is'
+            || (['greaterThan', 'greaterThanOrEqual', 'lessThan', 'lessThanOrEqual', 'equal', 'notEqual'].includes(cleanText(item.operator))
+              && typeof item.value === 'number' && Number.isFinite(item.value));
+          if (!hasColumn || !validType || !validCellRule) {
+            issues.push(`sheets[${sheetIndex}].conditionalFormatting[${ruleIndex}]`);
+          }
+        });
+      }
+    }
+  });
+  return [...new Set(issues)];
+}
+
 function isPlaceholderLine(value: string): boolean {
   const normalized = cleanText(value);
   return PLACEHOLDER_LINE_RE.test(normalized) || GENERIC_TEMPLATE_LINE_RE.test(normalized);
@@ -141,6 +345,13 @@ function isPlaceholderLine(value: string): boolean {
 
 function sourcePrompt(request: LocalArtifactCreateRequest): string {
   return cleanText(request.sourcePrompt) || cleanText(request.originalPrompt) || cleanText(request.title);
+}
+
+function planningContextPrompt(request: LocalArtifactCreateRequest): string {
+  const taskPrompt = cleanText(request.sourcePrompt);
+  const batchPrompt = cleanText(request.originalPrompt);
+  if (batchPrompt && taskPrompt && batchPrompt !== taskPrompt) return `${batchPrompt}\n当前产物要求：${taskPrompt}`;
+  return batchPrompt || taskPrompt || cleanText(request.title);
 }
 
 function extractQuotedTopic(prompt: string, fallback: string): string {
@@ -212,8 +423,14 @@ function withExtension(name: string, extension: string): string {
   return name.toLowerCase().endsWith(`.${extension}`) ? name : `${name}.${extension}`;
 }
 
-async function uniqueOutputPath(title: unknown, filename: unknown, extension: string, fallbackName: string): Promise<string> {
-  const outputDir = join(getOpenClawConfigDir(), 'workspace', 'outputs');
+async function uniqueOutputPath(
+  title: unknown,
+  filename: unknown,
+  extension: string,
+  fallbackName: string,
+  requestedOutputDir?: string,
+): Promise<string> {
+  const outputDir = requestedOutputDir?.trim() || join(getOpenClawConfigDir(), 'workspace', 'outputs');
   await mkdir(outputDir, { recursive: true });
   const requested = cleanText(filename);
   const base = requested
@@ -380,6 +597,7 @@ function presentationTextBox(
 
 function presentationSlideRole(slide: PresentationSlide, index: number): PresentationSlideRole {
   if (index === 0) return 'cover';
+  if (slide.layout) return slide.layout;
   if (/^(?:目录|议程|内容概览|overview|agenda)$/iu.test(slide.title)) return 'agenda';
   if (/^(?:第?[一二三四五六七八九十百\d]+[章节部分篇]|chapter\s+\d+|part\s+\d+|section\s+\d+)/iu.test(slide.title)) return 'section';
   if (!slide.body && !slide.subtitle && slide.bullets.length <= 1) return 'section';
@@ -485,6 +703,110 @@ function presentationSlideXml(slide: PresentationSlide, index: number, slideCoun
         spaceAfter: 500,
       }))));
     }
+  } else if (role === 'two-column') {
+    background = 'FFFFFF';
+    addShape(presentationShape(id(), 'UClaw Two Column Accent', 0, 0, 160000, 6858000, '2563EB'));
+    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 3200000, 260000, [
+      { text: `章节 ${String(index).padStart(2, '0')} / COMPARISON`, size: 1050, color: '2563EB', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
+      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
+    ]));
+    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
+    let cardY = 1850000;
+    if (lead.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Rich Lead', 762000, cardY, 10600000, 620000, lead.map((text) => ({
+        text,
+        size: 1500,
+        color: '405166',
+        spaceAfter: 250,
+      })), { fill: 'EFF6FF', line: 'BFDBFE', margin: 160000, vertical: 'ctr' }));
+      cardY = 2650000;
+    }
+    const gap = 260000;
+    const cardWidth = Math.floor((10600000 - gap) / 2);
+    slide.columns.slice(0, 2).forEach((column, columnIndex) => {
+      const bodyValues = [column.body, ...column.bullets].filter(Boolean);
+      addShape(presentationTextBox(id(), `UClaw Two Column ${columnIndex + 1}`, 762000 + columnIndex * (cardWidth + gap), cardY, cardWidth, 5900000 - cardY, [
+        { text: column.title, size: 1900, color: columnIndex === 0 ? '1D4ED8' : 'B45309', bold: true, spaceAfter: 650 },
+        ...bodyValues.map((text, bodyIndex) => ({
+          text,
+          size: presentationBodyFontSize(bodyValues, 24),
+          color: '243247',
+          bullet: bodyIndex > 0 || column.bullets.includes(text),
+          spaceAfter: 550,
+        })),
+      ], { fill: columnIndex === 0 ? 'F4F8FF' : 'FFFAF0', line: columnIndex === 0 ? 'BFDBFE' : 'FDE3B0', margin: 230000 }));
+    });
+  } else if (role === 'metric') {
+    background = 'F7F9FC';
+    addShape(presentationShape(id(), 'UClaw Metric Accent', 0, 0, 160000, 6858000, 'D97706'));
+    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 3200000, 260000, [
+      { text: `章节 ${String(index).padStart(2, '0')} / METRICS`, size: 1050, color: 'B45309', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
+      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
+    ]));
+    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
+    let metricY = 1800000;
+    if (lead.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Rich Lead', 762000, metricY, 10600000, 600000, lead.map((text) => ({
+        text,
+        size: 1450,
+        color: '405166',
+        spaceAfter: 220,
+      })), { margin: 100000, vertical: 'ctr' }));
+      metricY = 2500000;
+    }
+    const metricGap = 220000;
+    const metricWidth = Math.floor((10600000 - metricGap) / 2);
+    const availableHeight = 5900000 - metricY;
+    const metricRows = Math.max(1, Math.ceil(slide.metrics.length / 2));
+    const metricHeight = Math.floor((availableHeight - metricGap * (metricRows - 1)) / metricRows);
+    slide.metrics.slice(0, 4).forEach((metric, metricIndex) => {
+      const column = metricIndex % 2;
+      const row = Math.floor(metricIndex / 2);
+      addShape(presentationTextBox(id(), `UClaw Metric ${metricIndex + 1}`, 762000 + column * (metricWidth + metricGap), metricY + row * (metricHeight + metricGap), metricWidth, metricHeight, [
+        { text: metric.label, size: 1200, color: '64748B', bold: true, spaceAfter: 350 },
+        { text: metric.value, size: metric.value.length > 16 ? 2200 : 3000, color: metricIndex % 2 === 0 ? '0F766E' : 'B45309', bold: true, spaceAfter: 450 },
+        { text: metric.detail, size: 1250, color: '475569' },
+      ], { fill: 'FFFFFF', line: 'DCE4EE', margin: 230000, vertical: 'ctr' }));
+    });
+  } else if (role === 'timeline') {
+    background = 'FFFFFF';
+    addShape(presentationShape(id(), 'UClaw Timeline Accent', 0, 0, 160000, 6858000, '0F766E'));
+    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 3200000, 260000, [
+      { text: `章节 ${String(index).padStart(2, '0')} / TIMELINE`, size: 1050, color: '0F766E', bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
+      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
+    ]));
+    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
+    let timelineY = 2050000;
+    if (lead.length > 0) {
+      addShape(presentationTextBox(id(), 'UClaw Rich Lead', 762000, 1780000, 10600000, 560000, lead.map((text) => ({
+        text,
+        size: 1450,
+        color: '405166',
+      })), { margin: 80000, vertical: 'ctr' }));
+      timelineY = 2700000;
+    }
+    const timelineItems = slide.timeline.slice(0, 5);
+    const timelineGap = 140000;
+    const timelineWidth = Math.floor((10600000 - timelineGap * Math.max(0, timelineItems.length - 1)) / Math.max(1, timelineItems.length));
+    addShape(presentationShape(id(), 'UClaw Timeline Rail', 950000, timelineY + 290000, 10200000, 30000, '99D5CB'));
+    timelineItems.forEach((item, itemIndex) => {
+      const x = 762000 + itemIndex * (timelineWidth + timelineGap);
+      addShape(presentationShape(id(), `UClaw Timeline Marker ${itemIndex + 1}`, x + Math.floor(timelineWidth / 2) - 70000, timelineY + 220000, 140000, 140000, itemIndex % 2 === 0 ? '0F766E' : 'D97706'));
+      addShape(presentationTextBox(id(), `UClaw Timeline Item ${itemIndex + 1}`, x, timelineY + 520000, timelineWidth, 5900000 - timelineY - 520000, [
+        { text: item.period || String(itemIndex + 1).padStart(2, '0'), size: 1150, color: itemIndex % 2 === 0 ? '0F766E' : 'B45309', bold: true, align: 'ctr', spaceAfter: 400 },
+        { text: item.title, size: 1550, color: '172033', bold: true, align: 'ctr', spaceAfter: 450 },
+        { text: item.body, size: timelineItems.length > 4 ? 1100 : 1250, color: '475569', align: 'ctr' },
+      ], { fill: 'F7F9FC', line: 'DCE4EE', margin: 150000 }));
+    });
   } else {
     background = 'FFFFFF';
     addShape(presentationShape(id(), 'UClaw Content Accent', 0, 0, 160000, 6858000, '0F766E'));
@@ -544,10 +866,11 @@ function presentationSlideXml(slide: PresentationSlide, index: number, slideCoun
 }
 
 function buildPlannedPresentation(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
+  const taskPrompt = sourcePrompt(request);
   const topic = extractQuotedTopic(prompt, cleanText(request.title) || 'AI 工作流效率提升');
-  const requestedTopics = splitRequestedTopics(prompt);
-  const slideCount = parseRequestedCount(prompt, '页') ?? Math.max(6, Math.min(10, requestedTopics.length + 2));
+  const requestedTopics = splitRequestedTopics(taskPrompt);
+  const slideCount = parseRequestedCount(taskPrompt, '页') ?? Math.max(6, Math.min(10, requestedTopics.length + 2));
   const outline = requestedTopics.length > 0
     ? requestedTopics
     : ['目录', '现状痛点', '解决方案', '示例场景', '价值与 ROI', '落地计划', '风险与下一步'];
@@ -583,6 +906,25 @@ function buildPlannedPresentation(request: LocalArtifactCreateRequest): LocalArt
 
 function presentationBulletsForTopic(topic: string, item: string): string[] {
   const normalized = item.toLowerCase();
+  const isHospitality = /咖啡|餐饮|门店|开业|菜单|茶饮/u.test(topic);
+  if (isHospitality && /痛点|问题|现状/u.test(item)) {
+    return ['新店首月自然客流不稳定，需要明确引流抓手', '菜单卖点过多会分散记忆点，需要建立主推产品', '高峰时段出品与服务承压，容易影响首次体验'];
+  }
+  if (isHospitality && /方案|路径|架构|设计/u.test(item)) {
+    return ['用限定饮品、经典常驻和轻食组合形成清晰菜单层级', '围绕通勤、午后和好友小聚设计分时段到店理由', '把预热、开业周活动和会员沉淀串成连续运营节奏'];
+  }
+  if (isHospitality && /案例|场景|示例/u.test(item)) {
+    return ['早高峰：外带套餐缩短选择与等待时间', '午后：主题饮品与甜品组合提升客单和分享意愿', '周末：双人套餐和小型活动承接社交场景'];
+  }
+  if (isHospitality && /roi|收益|价值|指标/u.test(normalized)) {
+    return ['跟踪到店人数、下单转化率和平均客单价', '用主推单品销量与套餐占比判断菜单效率', '通过会员新增、二次到店和评价反馈衡量长期价值'];
+  }
+  if (isHospitality && /落地|计划|推进|里程碑/u.test(item)) {
+    return ['开业前 7 天：完成菜单试饮、物料上线和周边预热', '开业首周：按日复盘客流、出品时长和热销组合', '开业后 30 天：保留高转化活动并迭代低效单品'];
+  }
+  if (isHospitality && /风险|trade|取舍/u.test(normalized)) {
+    return ['活动强度要匹配门店产能，避免排队透支体验', '限定原料准备安全库存，同时控制临期损耗', '优惠结束前明确会员承接，避免只形成一次性低价流量'];
+  }
   if (/痛点|问题|现状/u.test(item)) {
     return ['重复工作分散在多个工具里，交接成本高', '关键产物缺少统一验证，返工难以及时发现', '多人协作时上下文容易丢失或被误用'];
   }
@@ -602,17 +944,61 @@ function presentationBulletsForTopic(topic: string, item: string): string[] {
     return ['模型规划失败时必须有可恢复 fallback', '长任务需要明确进度和取消路径', '历史恢复必须以结构化 manifest 为准'];
   }
   return [
-    `${item} 要服务于「${topic}」这个核心目标`,
-    '给出明确动作、负责人或判断标准',
-    '用可验证产物支撑最终结论',
+    `明确「${item}」在「${topic}」中的范围、对象与成功标准`,
+    `梳理${item}阶段的已知事实、关键约束和优先级`,
+    `为${item}结论保留数据、文件与责任人三类核验依据`,
   ];
 }
 
 function buildPlannedSpreadsheet(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
+  const taskPrompt = sourcePrompt(request);
   const topic = extractQuotedTopic(prompt, cleanText(request.title) || '月度预算 Excel');
+  if (/咖啡|餐饮|门店|开业|菜单|茶饮/u.test(prompt)) {
+    const budgetRows = [
+      ['装修与软装', 36000, 34200, { formula: 'B2-C2', value: 1800 }, { formula: 'C2/B2', value: 0.95 }, '控制在预算内'],
+      ['咖啡设备', 52000, 53500, { formula: 'B3-C3', value: -1500 }, { formula: 'C3/B3', value: 1.0288 }, '含磨豆机与净水'],
+      ['首批原料', 12000, 10800, { formula: 'B4-C4', value: 1200 }, { formula: 'C4/B4', value: 0.9 }, '覆盖开业两周'],
+      ['开业营销', 18000, 16500, { formula: 'B5-C5', value: 1500 }, { formula: 'C5/B5', value: 0.9167 }, '物料、试饮与本地推广'],
+      ['人员培训', 8000, 7600, { formula: 'B6-C6', value: 400 }, { formula: 'C6/B6', value: 0.95 }, '含试营业排班'],
+      ['合计', { formula: 'SUM(B2:B6)', value: 126000 }, { formula: 'SUM(C2:C6)', value: 122600 }, { formula: 'SUM(D2:D6)', value: 3400 }, { formula: 'C7/B7', value: 0.973 }, '自动汇总'],
+    ];
+    const menuRows = [
+      ['夏日冷萃', '咖啡', 7.2, 28, { formula: 'D2-C2', value: 20.8 }, { formula: 'E2/D2', value: 0.7429 }],
+      ['燕麦拿铁', '咖啡', 8.5, 30, { formula: 'D3-C3', value: 21.5 }, { formula: 'E3/D3', value: 0.7167 }],
+      ['青提气泡美式', '特调', 9.4, 32, { formula: 'D4-C4', value: 22.6 }, { formula: 'E4/D4', value: 0.7063 }],
+      ['抹茶椰乳', '非咖', 8.8, 29, { formula: 'D5-C5', value: 20.2 }, { formula: 'E5/D5', value: 0.6966 }],
+      ['巴斯克蛋糕', '甜品', 10.5, 32, { formula: 'D6-C6', value: 21.5 }, { formula: 'E6/D6', value: 0.6719 }],
+      ['可颂早餐组合', '套餐', 13.8, 39, { formula: 'D7-C7', value: 25.2 }, { formula: 'E7/D7', value: 0.6462 }],
+    ];
+    return {
+      ...request,
+      title: topic,
+      sheets: [
+        {
+          name: '开业预算',
+          headers: ['项目', '预算', '实际', '差额', '执行率', '备注'],
+          rows: budgetRows,
+          summary: '开业一次性投入当前执行率约 97.3%，设备略超预算，但整体仍有 3400 元余量。',
+          keyMetrics: [
+            { label: '总预算', value: 126000, detail: '装修、设备、原料、营销和培训' },
+            { label: '预计结余', value: 3400, detail: '按当前实际支出计算' },
+          ],
+          conditionalFormatting: [{ column: '执行率', type: 'data-bar' }],
+        },
+        {
+          name: '菜单定价',
+          headers: ['单品', '分类', '单位成本', '售价', '单杯毛利', '毛利率'],
+          rows: menuRows,
+          summary: '菜单覆盖咖啡、特调、非咖、甜品和套餐，可用毛利率辅助选择开业主推单品。',
+          keyMetrics: [{ label: '单品数', value: menuRows.length, detail: '首版开业菜单样例' }],
+          conditionalFormatting: [{ column: '毛利率', type: 'color-scale' }],
+        },
+      ],
+    };
+  }
   if (/模拟.*销售|销售.*模拟|客户数据|销售数据/u.test(prompt)) {
-    const requestedRows = parseRequestedCount(prompt, '条') ?? 20;
+    const requestedRows = parseRequestedCount(taskPrompt, '条') ?? 20;
     const sources = ['官网咨询', '线下活动', '社媒私信', '老客转介绍', '渠道伙伴'];
     const rows = Array.from({ length: Math.min(Math.max(requestedRows, 5), 30) }, (_, index) => {
       const rowNumber = index + 2;
@@ -718,7 +1104,7 @@ function buildPlannedSpreadsheet(request: LocalArtifactCreateRequest): LocalArti
 }
 
 function buildTodoHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   const title = extractQuotedTopic(prompt, cleanText(request.title) || 'Todo 小程序');
   const body = `<main class="shell">
   <header>
@@ -743,7 +1129,7 @@ function buildTodoHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCre
 }
 
 function buildIdeaCollectorHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   const title = extractQuotedTopic(prompt, cleanText(request.title) || '灵感收集小工具');
   const body = `<main class="shell">
   <header><h1>${xml(title)}</h1><input id="searchInput" placeholder="搜索灵感或标签"></header>
@@ -761,7 +1147,7 @@ function buildIdeaCollectorHtmlApp(request: LocalArtifactCreateRequest): LocalAr
 }
 
 function buildSignupHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   const title = extractQuotedTopic(prompt, cleanText(request.title) || '活动报名页面');
   const body = `<main class="shell">
   <section>
@@ -785,7 +1171,7 @@ function buildSignupHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactC
 }
 
 function buildCoffeeMenuHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   const title = extractQuotedTopic(prompt, cleanText(request.title) || '咖啡店菜单小程序');
   const body = `<main class="shell">
   <header><h1>${xml(title)}</h1><strong id="cartTotal">¥0</strong></header>
@@ -799,7 +1185,7 @@ function buildCoffeeMenuHtmlApp(request: LocalArtifactCreateRequest): LocalArtif
 }
 
 function buildKanbanHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   const title = extractQuotedTopic(prompt, cleanText(request.title) || '销售线索 Kanban');
   const body = `<main class="shell">
   <header><h1>${xml(title)}</h1><form id="leadForm"><input id="leadInput" placeholder="新增线索"><button>添加</button></form></header>
@@ -811,7 +1197,7 @@ function buildKanbanHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactC
 }
 
 function buildPlannedHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   if (/咖啡|菜单|购物车|总价|分类/u.test(prompt)) return buildCoffeeMenuHtmlApp(request);
   if (/报名|表单|校验|成功状态/u.test(prompt)) return buildSignupHtmlApp(request);
   if (/kanban|看板|线索|拖动|切换状态|状态/u.test(prompt)) return buildKanbanHtmlApp(request);
@@ -824,18 +1210,35 @@ function buildPlannedHtmlApp(request: LocalArtifactCreateRequest): LocalArtifact
 }
 
 function buildPlannedCopywriting(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
+  const taskPrompt = sourcePrompt(request);
   const topic = extractQuotedTopic(prompt, cleanText(request.title) || '产品宣传文案');
+  const isCoffee = /咖啡|拿铁|冷萃|咖啡店/u.test(prompt);
+  const isOpening = /开业|开店|启幕|新店/u.test(prompt);
+  const lead = isCoffee
+    ? `这个夏天，让一杯认真制作的咖啡成为见面的理由。「${topic}」把清爽风味、舒适空间和开业限定体验放进同一次到店。`
+    : `「${topic}」正式亮相。我们从真实使用场景出发，把核心价值讲清楚，也把下一步行动变得简单。`;
+  const baseSellingPoints = isCoffee
+    ? ['开业限定饮品与组合优惠，第一次到店就有新鲜感', '覆盖堂食、外带和好友小聚，让不同节奏都能找到合适选择', '用稳定出品和轻松空间，把一次尝鲜变成持续回访']
+    : ['围绕真实需求提炼核心价值，让受众快速理解为什么值得关注', '用具体场景承接卖点，减少空泛口号带来的距离感', '给出清晰行动入口，让兴趣自然转化为下一步参与'];
+  const requestedItems = parseRequestedCount(taskPrompt, '条') ?? baseSellingPoints.length;
+  const sellingPoints = ensureLength(baseSellingPoints, requestedItems, (index) => (
+    isCoffee
+      ? `第 ${index + 1} 个传播角度聚焦到店体验，用具体风味、时段或同行场景强化「${topic}」的记忆点`
+      : `第 ${index + 1} 个表达角度围绕受众场景展开，用具体收益和行动理由支撑「${topic}」`
+  ));
+  const callToAction = isCoffee && isOpening
+    ? '开业期间到店，即可解锁限定菜单与首发福利。带上朋友，一起把夏日第一杯安排上。'
+    : `现在就了解「${topic}」，从一个明确行动开始，体验它带来的实际变化。`;
   return {
     ...request,
     title: topic,
-    content: normalizeParagraph(prompt)
-      ? `围绕「${topic}」，这份文案强调清晰目标、快速执行和可验证交付。它适合用作首版宣传稿，后续可以根据品牌语气继续润色。`
-      : undefined,
+    content: lead,
     sections: [
-      { title: '主标题', paragraphs: [`${topic}，让想法更快变成能交付的结果。`] },
-      { title: '核心卖点', bullets: ['自动拆解复杂任务', '多类型产物统一交付', '交付前保留验证证据'] },
-      { title: '短文案', paragraphs: ['从一句需求到一组可用产物，UClaw 帮你把创意、数据、页面和内容连成完整工作流。'] },
+      { title: '主标题', paragraphs: [isCoffee ? `${topic}，把夏日的松弛感装进每一杯。` : `${topic}，让价值被看见，让行动自然发生。`] },
+      { title: '核心卖点', bullets: sellingPoints },
+      { title: '发布正文', paragraphs: [lead, callToAction] },
+      { title: '行动号召', paragraphs: [callToAction] },
     ],
   };
 }
@@ -874,12 +1277,45 @@ function normalizeSlides(request: LocalArtifactCreateRequest): PresentationSlide
     { title: '收益', bullets: ['减少等待', '降低返工', '形成可复用模板'] },
     { title: '下一步', bullets: ['接入团队素材', '沉淀标准工作流', '按场景持续优化'] },
   ];
-  return slides.map((slide, index) => ({
-    title: cleanText(slide.title) || (index === 0 ? title : `第 ${index + 1} 页`),
-    subtitle: cleanText(slide.subtitle),
-    body: cleanText(slide.body),
-    bullets: Array.isArray(slide.bullets) ? slide.bullets.map(cleanText).filter(Boolean) : [],
-  }));
+  return slides.map((slide, index) => {
+    const columns = Array.isArray(slide.columns)
+      ? slide.columns.map((column) => ({
+          title: cleanText(column.title),
+          body: cleanText(column.body),
+          bullets: Array.isArray(column.bullets) ? column.bullets.map(cleanText).filter(Boolean) : [],
+        }))
+        .filter((column) => Boolean(column.title || column.body || column.bullets.length > 0))
+        .slice(0, 2)
+      : [];
+    const metrics = Array.isArray(slide.metrics)
+      ? slide.metrics.map((metric) => ({
+          label: cleanText(metric.label),
+          value: cleanText(metric.value),
+          detail: cleanText(metric.detail),
+        }))
+        .filter((metric) => Boolean(metric.label && metric.value))
+        .slice(0, 4)
+      : [];
+    const timeline = Array.isArray(slide.timeline)
+      ? slide.timeline.map((item) => ({
+          period: cleanText(item.period),
+          title: cleanText(item.title),
+          body: cleanText(item.body),
+        }))
+        .filter((item) => Boolean(item.period || item.title || item.body))
+        .slice(0, 5)
+      : [];
+    return {
+      title: cleanText(slide.title) || (index === 0 ? title : `第 ${index + 1} 页`),
+      subtitle: cleanText(slide.subtitle),
+      body: cleanText(slide.body),
+      bullets: Array.isArray(slide.bullets) ? slide.bullets.map(cleanText).filter(Boolean) : [],
+      layout: presentationLayoutFromInput(slide),
+      columns,
+      metrics,
+      timeline,
+    };
+  });
 }
 
 async function createPptxBuffer(request: LocalArtifactCreateRequest): Promise<Buffer> {
@@ -927,6 +1363,26 @@ function columnName(index: number): string {
     current = Math.floor((current - 1) / 26);
   }
   return name;
+}
+
+function columnIndexFromName(value: string): number | undefined {
+  const name = value.trim().toUpperCase();
+  if (!/^[A-Z]{1,3}$/u.test(name)) return undefined;
+  const index = [...name].reduce((sum, character) => sum * 26 + character.charCodeAt(0) - 64, 0) - 1;
+  return index >= 0 ? index : undefined;
+}
+
+function spreadsheetConditionalColumnIndex(value: unknown, headers: string[], columnCount: number): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value)) {
+    const index = value === 0 ? 0 : value - 1;
+    return index >= 0 && index < columnCount ? index : undefined;
+  }
+  const text = cleanText(value);
+  if (!text) return undefined;
+  const headerIndex = headers.findIndex((header) => header.toLowerCase() === text.toLowerCase());
+  if (headerIndex >= 0) return headerIndex;
+  const index = columnIndexFromName(text);
+  return index !== undefined && index < columnCount ? index : undefined;
 }
 
 function sanitizeSheetName(value: unknown, fallback: string): string {
@@ -1010,12 +1466,36 @@ function normalizeSheets(request: LocalArtifactCreateRequest): NormalizedSheet[]
       : [];
     const columnCount = Math.max(headers.length, ...rows.map((row) => row.length), 1);
     const columnValues = Array.from({ length: columnCount }, (_, columnIndex) => rows.map((row) => row[columnIndex]));
+    const keyMetrics = Array.isArray(sheet.keyMetrics)
+      ? sheet.keyMetrics.map((metric) => ({
+          label: cleanText(metric.label),
+          value: metric.value,
+          detail: cleanText(metric.detail),
+        }))
+        .filter((metric) => Boolean(metric.label) && hasMeaningfulSpreadsheetValue(metric.value))
+        .slice(0, 8)
+      : [];
+    const conditionalFormatting = Array.isArray(sheet.conditionalFormatting)
+      ? sheet.conditionalFormatting.map((rule): NormalizedConditionalFormatting | undefined => {
+          const columnIndex = spreadsheetConditionalColumnIndex(rule.column, headers, columnCount);
+          const type = rule.type ?? 'color-scale';
+          if (columnIndex === undefined || !['color-scale', 'data-bar', 'cell-is'].includes(type)) return undefined;
+          if (type === 'cell-is') {
+            if (!rule.operator || typeof rule.value !== 'number' || !Number.isFinite(rule.value)) return undefined;
+            return { columnIndex, type, operator: rule.operator, value: rule.value };
+          }
+          return { columnIndex, type };
+        }).filter((rule): rule is NormalizedConditionalFormatting => Boolean(rule)).slice(0, 8)
+      : [];
     return {
       name: uniqueSheetName(sheet.name, `Sheet${index + 1}`, usedNames),
       headers,
       rows,
       columnFormats: columnValues.map((values, columnIndex) => spreadsheetColumnFormat(headers[columnIndex] ?? '', values)),
       columnWidths: columnValues.map((values, columnIndex) => spreadsheetColumnWidth(headers[columnIndex] ?? '', values)),
+      summary: cleanText(sheet.summary),
+      keyMetrics,
+      conditionalFormatting,
     };
   });
 }
@@ -1045,9 +1525,10 @@ function spreadsheetCellXml(
   format: SpreadsheetCellFormat,
   headerRow: boolean,
   totalRow: boolean,
+  styleOverride?: number,
 ): string {
   const ref = `${columnName(columnIndex)}${rowIndex + 1}`;
-  const styleId = headerRow ? 1 : spreadsheetStyleId(format, totalRow);
+  const styleId = styleOverride ?? (headerRow ? 1 : spreadsheetStyleId(format, totalRow));
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const record = value as { formula?: unknown; value?: unknown };
     const formula = typeof record.formula === 'string'
@@ -1106,32 +1587,107 @@ ${sheets.map((sheet, index) => `    <sheet name="${xml(sheet.name)}" sheetId="${
 </workbook>`;
 }
 
+function spreadsheetConditionalFormattingXml(sheet: NormalizedSheet, dataRowCount: number, hasHeader: boolean): string {
+  const startRow = hasHeader ? 2 : 1;
+  if (sheet.conditionalFormatting.length === 0 || dataRowCount < startRow) return '';
+  return sheet.conditionalFormatting.map((rule, index) => {
+    const range = `${columnName(rule.columnIndex)}${startRow}:${columnName(rule.columnIndex)}${dataRowCount}`;
+    const priority = index + 1;
+    if (rule.type === 'data-bar') {
+      return `  <conditionalFormatting sqref="${range}"><cfRule type="dataBar" priority="${priority}"><dataBar showValue="1"><cfvo type="min"/><cfvo type="max"/><color rgb="FF0F766E"/></dataBar></cfRule></conditionalFormatting>`;
+    }
+    if (rule.type === 'cell-is') {
+      return `  <conditionalFormatting sqref="${range}"><cfRule type="cellIs" dxfId="0" priority="${priority}" operator="${rule.operator}"><formula>${rule.value}</formula></cfRule></conditionalFormatting>`;
+    }
+    return `  <conditionalFormatting sqref="${range}"><cfRule type="colorScale" priority="${priority}"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/><color rgb="FFFEE2E2"/><color rgb="FFFFF1B8"/><color rgb="FF99D5CB"/></colorScale></cfRule></conditionalFormatting>`;
+  }).join('\n');
+}
+
 function worksheetXml(sheet: NormalizedSheet): string {
   const hasHeader = sheet.headers.length > 0;
   const rows = hasHeader ? [sheet.headers, ...sheet.rows] : sheet.rows;
   const safeRows = rows.length > 0 ? rows : [['项目', '数值'], ['示例', 1]];
-  const columnCount = Math.max(...safeRows.map((row) => row.length), 1);
-  const rowXml = safeRows.map((row, rowIndex) => {
+  const dataColumnCount = Math.max(...safeRows.map((row) => row.length), 1);
+  const hasSummaryPanel = Boolean(sheet.summary || sheet.keyMetrics.length > 0);
+  const summaryStartColumn = dataColumnCount + 1;
+  const summaryTitleRowIndex = 1;
+  const summaryBodyRowIndex = sheet.summary ? 2 : undefined;
+  const metricStartRowIndex = sheet.summary ? 3 : 2;
+  const summaryRowCount = hasSummaryPanel ? metricStartRowIndex + sheet.keyMetrics.length : 0;
+  const renderedRowCount = Math.max(safeRows.length, summaryRowCount);
+  const renderedColumnCount = hasSummaryPanel ? summaryStartColumn + 3 : dataColumnCount;
+  const summaryCells = new Map<number, string[]>();
+  const mergeRefs: string[] = [];
+  if (hasSummaryPanel) {
+    const title = sheet.summary && sheet.keyMetrics.length > 0
+      ? '摘要与关键指标'
+      : sheet.summary ? '摘要' : '关键指标';
+    summaryCells.set(summaryTitleRowIndex, [spreadsheetCellXml(
+      summaryTitleRowIndex,
+      summaryStartColumn,
+      title,
+      'text',
+      false,
+      false,
+      14,
+    )]);
+    mergeRefs.push(`${columnName(summaryStartColumn)}${summaryTitleRowIndex + 1}:${columnName(summaryStartColumn + 2)}${summaryTitleRowIndex + 1}`);
+    if (summaryBodyRowIndex !== undefined) {
+      summaryCells.set(summaryBodyRowIndex, [spreadsheetCellXml(
+        summaryBodyRowIndex,
+        summaryStartColumn,
+        sheet.summary,
+        'text',
+        false,
+        false,
+        15,
+      )]);
+      mergeRefs.push(`${columnName(summaryStartColumn)}${summaryBodyRowIndex + 1}:${columnName(summaryStartColumn + 2)}${summaryBodyRowIndex + 1}`);
+    }
+    sheet.keyMetrics.forEach((metric, metricIndex) => {
+      const rowIndex = metricStartRowIndex + metricIndex;
+      summaryCells.set(rowIndex, [
+        spreadsheetCellXml(rowIndex, summaryStartColumn, metric.label, 'text', false, false, 16),
+        spreadsheetCellXml(rowIndex, summaryStartColumn + 1, metric.value, 'text', false, false, 17),
+        spreadsheetCellXml(rowIndex, summaryStartColumn + 2, metric.detail, 'text', false, false, 18),
+      ]);
+    });
+  }
+  const rowXml = Array.from({ length: renderedRowCount }, (_, rowIndex) => {
+    const row = safeRows[rowIndex];
     const headerRow = hasHeader && rowIndex === 0;
-    const totalRow = !headerRow && /^(?:合计|总计|小计|汇总|total)$/iu.test(cleanText(row[0]));
-    const cells = Array.from({ length: columnCount }, (_, columnIndex) => spreadsheetCellXml(
-      rowIndex,
-      columnIndex,
-      row[columnIndex] ?? '',
-      sheet.columnFormats[columnIndex] ?? 'text',
-      headerRow,
-      totalRow,
-    )).join('');
-    return `    <row r="${rowIndex + 1}" ht="${headerRow ? 24 : 20}" customHeight="1">${cells}</row>`;
+    const totalRow = Boolean(row) && !headerRow && /^(?:合计|总计|小计|汇总|total)$/iu.test(cleanText(row?.[0]));
+    const dataCells = row
+      ? Array.from({ length: dataColumnCount }, (_, columnIndex) => spreadsheetCellXml(
+          rowIndex,
+          columnIndex,
+          row[columnIndex] ?? '',
+          sheet.columnFormats[columnIndex] ?? 'text',
+          headerRow,
+          totalRow,
+        )).join('')
+      : '';
+    const richCells = (summaryCells.get(rowIndex) ?? []).join('');
+    const height = headerRow ? 24 : rowIndex === summaryBodyRowIndex ? 38 : rowIndex === summaryTitleRowIndex && hasSummaryPanel ? 26 : 20;
+    return `    <row r="${rowIndex + 1}" ht="${height}" customHeight="1">${dataCells}${richCells}</row>`;
   }).join('\n');
-  const endRef = `${columnName(columnCount - 1)}${safeRows.length}`;
-  const columns = Array.from({ length: columnCount }, (_, columnIndex) => {
-    const width = sheet.columnWidths[columnIndex] ?? 12;
+  const endRef = `${columnName(renderedColumnCount - 1)}${renderedRowCount}`;
+  const dataEndRef = `${columnName(dataColumnCount - 1)}${safeRows.length}`;
+  const columns = Array.from({ length: renderedColumnCount }, (_, columnIndex) => {
+    const width = columnIndex < dataColumnCount
+      ? sheet.columnWidths[columnIndex] ?? 12
+      : columnIndex === dataColumnCount
+        ? 3
+        : [18, 16, 30][columnIndex - summaryStartColumn] ?? 14;
     return `    <col min="${columnIndex + 1}" max="${columnIndex + 1}" width="${width}" customWidth="1"/>`;
   }).join('\n');
   const frozenHeader = hasHeader
     ? '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/>'
     : '<selection activeCell="A1" sqref="A1"/>';
+  const mergedCells = mergeRefs.length > 0
+    ? `  <mergeCells count="${mergeRefs.length}">${mergeRefs.map((ref) => `<mergeCell ref="${ref}"/>`).join('')}</mergeCells>`
+    : '';
+  const conditionalFormatting = spreadsheetConditionalFormattingXml(sheet, safeRows.length, hasHeader);
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="A1:${endRef}"/>
@@ -1143,7 +1699,9 @@ ${columns}
   <sheetData>
 ${rowXml}
   </sheetData>
-  ${hasHeader ? `<autoFilter ref="A1:${endRef}"/>` : ''}
+  ${hasHeader ? `<autoFilter ref="A1:${dataEndRef}"/>` : ''}
+${mergedCells}
+${conditionalFormatting}
   <pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" header="0.3" footer="0.3"/>
 </worksheet>`;
 }
@@ -1165,18 +1723,26 @@ function spreadsheetStylesXml(): string {
   const totalFormats = baseFormats.slice(2).map(([numFmtId, _fontId, _fillId, borderId, alignment]) => (
     [numFmtId, 2, 3, borderId, alignment] as [number, number, number, number, string]
   ));
-  const xfs = [...baseFormats, ...totalFormats]
+  const richFormats: Array<[number, number, number, number, string]> = [
+    [0, 1, 4, 1, 'horizontal="left" vertical="center"'],
+    [0, 0, 5, 1, 'vertical="center" wrapText="1"'],
+    [0, 2, 5, 1, 'vertical="center" wrapText="1"'],
+    [0, 3, 5, 1, 'horizontal="center" vertical="center"'],
+    [0, 0, 5, 1, 'vertical="center" wrapText="1"'],
+  ];
+  const xfs = [...baseFormats, ...totalFormats, ...richFormats]
     .map(([numFmtId, fontId, fillId, borderId, alignment]) => cellXf(numFmtId, fontId, fillId, borderId, alignment))
     .join('');
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <numFmts count="4"><numFmt numFmtId="164" formatCode="0.0%"/><numFmt numFmtId="165" formatCode="¥#,##0.00;[Red]-¥#,##0.00"/><numFmt numFmtId="166" formatCode="#,##0.00;[Red]-#,##0.00"/><numFmt numFmtId="167" formatCode="yyyy-mm-dd"/></numFmts>
-  <fonts count="3"><font><sz val="11"/><color rgb="FF172033"/><name val="Microsoft YaHei"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font><font><b/><sz val="11"/><color rgb="FF172033"/><name val="Microsoft YaHei"/></font></fonts>
-  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F766E"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE6F4F1"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <fonts count="4"><font><sz val="11"/><color rgb="FF172033"/><name val="Microsoft YaHei"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Microsoft YaHei"/></font><font><b/><sz val="11"/><color rgb="FF172033"/><name val="Microsoft YaHei"/></font><font><b/><sz val="16"/><color rgb="FF0F766E"/><name val="Microsoft YaHei"/></font></fonts>
+  <fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF0F766E"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE6F4F1"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF172033"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF4F7FA"/><bgColor indexed="64"/></patternFill></fill></fills>
   <borders count="2"><border/><border><left style="thin"><color rgb="FFD9E2EA"/></left><right style="thin"><color rgb="FFD9E2EA"/></right><top style="thin"><color rgb="FFD9E2EA"/></top><bottom style="thin"><color rgb="FFD9E2EA"/></bottom><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="14">${xfs}</cellXfs>
+  <cellXfs count="19">${xfs}</cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+  <dxfs count="1"><dxf><font><color rgb="FF9F1239"/></font><fill><patternFill patternType="solid"><fgColor rgb="FFFFE4E6"/><bgColor indexed="64"/></patternFill></fill></dxf></dxfs>
 </styleSheet>`;
 }
 
@@ -1265,8 +1831,14 @@ function renderHtml(request: LocalArtifactCreateRequest): string {
     && (rawBodyText.length >= 4 || rawBodyElementCount >= 2);
   if (rawHtml && (!rawIsFullDocument || !hasStructuredParts || rawFullDocumentHasBody)) return rawHtml;
   const title = cleanText(request.title) || '灵感收集 Todo';
-  const body = (rawIsFullDocument ? '' : rawHtml) || rawText(request.body) || '<main><section class="panel"><h1>灵感收集 Todo</h1><form id="form"><input id="input" placeholder="写下一条任务或灵感" autocomplete="off"><button>添加</button></form><ul id="list"></ul></section></main>';
-  const css = rawText(request.css) || 'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f7fb;color:#111827}main{min-height:100vh;display:grid;place-items:center;padding:24px}.panel{width:min(720px,100%);background:white;border:1px solid #e5e7eb;border-radius:8px;padding:24px;box-shadow:0 12px 32px rgba(15,23,42,.08)}h1{font-size:24px;margin:0 0 16px}form{display:flex;gap:8px}input{flex:1;border:1px solid #d1d5db;border-radius:6px;padding:10px 12px;font-size:15px}button{border:0;border-radius:6px;background:#2563eb;color:white;padding:10px 14px;font-size:15px}ul{list-style:none;margin:18px 0 0;padding:0;display:grid;gap:8px}li{display:flex;justify-content:space-between;align-items:center;border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px}li.done span{text-decoration:line-through;color:#6b7280}.remove{background:#f3f4f6;color:#374151}';
+  const requestedBody = (rawIsFullDocument ? '' : rawHtml) || rawText(request.body) || '<main><section class="panel"><h1>灵感收集 Todo</h1><form id="form"><input id="input" placeholder="写下一条任务或灵感" autocomplete="off"><button>添加</button></form><ul id="list"></ul></section></main>';
+  const body = /<h1\b/iu.test(requestedBody)
+    ? requestedBody
+    : `<header class="uclaw-artifact-heading"><h1>${xml(title)}</h1></header>${requestedBody}`;
+  const requestedCss = rawText(request.css);
+  const css = requestedCss
+    ? `${COMPOSED_HTML_SCAFFOLD_CSS}${requestedCss}`
+    : `${COMPOSED_HTML_SCAFFOLD_CSS}main{min-height:calc(100vh - 96px);display:grid;place-items:center}.panel{width:min(720px,100%);background:white;border:1px solid #e5e7eb;border-radius:8px;padding:24px;box-shadow:0 12px 32px rgba(15,23,42,.08)}form{display:flex;gap:8px}input{flex:1;border:1px solid #d1d5db;border-radius:6px;padding:10px 12px;font-size:15px}button{border:0;border-radius:6px;background:#2563eb;color:white;padding:10px 14px;font-size:15px}ul{list-style:none;margin:18px 0 0;padding:0;display:grid;gap:8px}li{display:flex;justify-content:space-between;align-items:center;border:1px solid #e5e7eb;border-radius:6px;padding:10px 12px}li.done span{text-decoration:line-through;color:#6b7280}.remove{background:#f3f4f6;color:#374151}`;
   const js = rawText(request.js) || 'const form=document.querySelector("#form");const input=document.querySelector("#input");const list=document.querySelector("#list");const seed=["整理今天的三个灵感","给项目写一个开场文案","检查本周预算"];function add(text){const li=document.createElement("li");li.innerHTML=`<span>${text}</span><button class="remove" type="button">完成</button>`;li.querySelector(".remove").onclick=()=>li.classList.toggle("done");list.appendChild(li)}seed.forEach(add);form.onsubmit=e=>{e.preventDefault();const text=input.value.trim();if(!text)return;add(text);input.value=""};';
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1315,6 +1887,9 @@ function presentationRoleFromShapes(shapes: Array<{ name: string }>): Presentati
   if (names.some((name) => name === 'UClaw Cover Title')) return 'cover';
   if (names.some((name) => name.startsWith('UClaw Agenda Item'))) return 'agenda';
   if (names.some((name) => name === 'UClaw Section Accent')) return 'section';
+  if (names.some((name) => name.startsWith('UClaw Two Column '))) return 'two-column';
+  if (names.some((name) => name.startsWith('UClaw Metric '))) return 'metric';
+  if (names.some((name) => name.startsWith('UClaw Timeline Item '))) return 'timeline';
   if (names.some((name) => name === 'UClaw Content Accent')) return 'content';
   return undefined;
 }
@@ -1339,13 +1914,20 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
         || shape.name === 'UClaw Cover Summary'
         || shape.name === 'UClaw Section Summary'
         || shape.name === 'UClaw Content Lead'
+        || shape.name === 'UClaw Rich Lead'
         || /^UClaw Content \d+$/u.test(shape.name)
+        || /^UClaw Two Column \d+$/u.test(shape.name)
+        || /^UClaw Metric \d+$/u.test(shape.name)
+        || /^UClaw Timeline Item \d+$/u.test(shape.name)
         || shape.name.startsWith('UClaw Agenda Item')
       ));
       return {
         role,
         title: titleShape?.texts.join(' ') ?? '',
         contentLines: contentShapes.flatMap((shape) => shape.texts).filter((text) => !/^\d{2}$/u.test(text)),
+        columnCount: shapes.filter((shape) => /^UClaw Two Column \d+$/u.test(shape.name)).length,
+        metricCount: shapes.filter((shape) => /^UClaw Metric \d+$/u.test(shape.name)).length,
+        timelineCount: shapes.filter((shape) => /^UClaw Timeline Item \d+$/u.test(shape.name)).length,
       };
     }));
     const titles = slides.map((slide) => slide.title);
@@ -1364,10 +1946,24 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
     const agendaCount = slides.filter((slide) => slide.role === 'agenda').length;
     const sectionCount = slides.filter((slide) => slide.role === 'section').length;
     const contentCount = slides.filter((slide) => slide.role === 'content').length;
+    const twoColumnCount = slides.filter((slide) => slide.role === 'two-column').length;
+    const metricLayoutCount = slides.filter((slide) => slide.role === 'metric').length;
+    const timelineLayoutCount = slides.filter((slide) => slide.role === 'timeline').length;
+    const normalizedSlides = normalizeSlides(request);
+    const expectedColumnCount = normalizedSlides.reduce((sum, slide) => sum + slide.columns.length, 0);
+    const expectedMetricCount = normalizedSlides.reduce((sum, slide) => sum + slide.metrics.length, 0);
+    const expectedTimelineCount = normalizedSlides.reduce((sum, slide) => sum + slide.timeline.length, 0);
+    const renderedColumnCount = slides.reduce((sum, slide) => sum + slide.columnCount, 0);
+    const renderedMetricCount = slides.reduce((sum, slide) => sum + slide.metricCount, 0);
+    const renderedTimelineCount = slides.reduce((sum, slide) => sum + slide.timelineCount, 0);
+    const richContentIssues = presentationRichContentIssues(request);
+    const richFieldsComplete = renderedColumnCount >= expectedColumnCount
+      && renderedMetricCount >= expectedMetricCount
+      && renderedTimelineCount >= expectedTimelineCount;
     const allSlidesHaveLayout = slides.every((slide) => Boolean(slide.role));
     const hasHierarchy = slideEntries.length === 1
       ? slides[0]?.contentLines.join('').length >= 16
-      : coverCount === 1 && contentCount + agendaCount > 0;
+      : coverCount === 1 && contentCount + agendaCount + twoColumnCount + metricLayoutCount + timelineLayoutCount > 0;
     const passed = hasTaskContext(request)
       && slideEntries.length > 0
       && emptySlides === 0
@@ -1378,6 +1974,8 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
       && countMatches
       && coverCount === 1
       && allSlidesHaveLayout
+      && richContentIssues.length === 0
+      && richFieldsComplete
       && hasHierarchy;
     return {
       status: passed ? 'passed' : 'blocked',
@@ -1386,13 +1984,15 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
       severity: passed ? 'info' : 'blocking',
       detail: passed
         ? `PPT 成品验证通过：已读回 ${slideEntries.length} 页，封面、章节层次、内容密度和版式标记完整。`
-        : 'PPT 成品验证未通过：存在缺失版式、空泛内容、重复正文、文字过载或页数不匹配。',
+        : 'PPT 成品验证未通过：存在缺失版式、空的丰富字段、空泛内容、重复正文、文字过载或页数不匹配。',
       evidence: [
         `slides=${slideEntries.length}`,
         expectedSlides ? `expectedSlides=${expectedSlides}` : undefined,
         `emptySlides=${emptySlides}`,
-        `roles=cover:${coverCount},agenda:${agendaCount},section:${sectionCount},content:${contentCount}`,
+        `roles=cover:${coverCount},agenda:${agendaCount},section:${sectionCount},content:${contentCount},two-column:${twoColumnCount},metric:${metricLayoutCount},timeline:${timelineLayoutCount}`,
         `layoutComplete=${allSlidesHaveLayout}`,
+        `richItems=columns:${renderedColumnCount}/${expectedColumnCount},metrics:${renderedMetricCount}/${expectedMetricCount},timeline:${renderedTimelineCount}/${expectedTimelineCount}`,
+        `richContentIssues=${richContentIssues.join(', ') || 'none'}`,
         `hierarchy=${hasHierarchy}`,
         `placeholderLines=${placeholderLines.slice(0, 5).join(' / ') || 'none'}`,
         `overfullSlides=${overfullSlides}`,
@@ -1432,6 +2032,9 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
     let percentStyleCellCount = 0;
     let currencyStyleCellCount = 0;
     let dateStyleCellCount = 0;
+    let summaryPanelCount = 0;
+    let keyMetricVisualCount = 0;
+    let conditionalFormattingCount = 0;
     const formulaCells: string[] = [];
     const invalidFormulas: string[] = [];
     const placeholderCells: string[] = [];
@@ -1453,6 +2056,7 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
       const hasFrozenHeader = /<pane\b[^>]*\bySplit="1"[^>]*\bstate="frozen"/u.test(xmlText);
       const columnWidthCount = [...xmlText.matchAll(/<col\b[^>]*\bcustomWidth="1"/gu)].length;
       const hasAutoFilter = /<autoFilter\b[^>]*\bref="A1:/u.test(xmlText);
+      const autoFilterEndRow = Number.parseInt(xmlText.match(/<autoFilter\b[^>]*\bref="A1:[A-Z]+(\d+)"/u)?.[1] ?? '0', 10);
       if (headers.length >= 2
         && headers.every(Boolean)
         && uniqueHeaders === headers.length
@@ -1491,8 +2095,11 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
       percentStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:5|11)"/gu)].length;
       currencyStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:6|12)"/gu)].length;
       dateStyleCellCount += [...xmlText.matchAll(/<c\b[^>]*\bs="(?:7|13)"/gu)].length;
+      summaryPanelCount += /<c\b[^>]*\bs="14"/u.test(xmlText) ? 1 : 0;
+      keyMetricVisualCount += [...xmlText.matchAll(/<c\b[^>]*\bs="16"/gu)].length;
+      conditionalFormattingCount += [...xmlText.matchAll(/<conditionalFormatting\b/gu)].length;
       rowCount += rows.length;
-      dataRowCount += Math.max(0, rows.length - 1);
+      dataRowCount += autoFilterEndRow > 0 ? Math.max(0, autoFilterEndRow - 1) : Math.max(0, rows.length - 1);
     }
     const prompt = sourcePrompt(request);
     const requestHasFormula = (request.sheets ?? []).some((sheet) => (sheet.rows ?? []).some((row) => row.some((cell) => (
@@ -1513,6 +2120,14 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
     const hasStylesRelationship = /relationships\/styles/iu.test(workbookRelsText ?? '');
     const hasNumberFormats = /<numFmts\b[^>]*\bcount="4"/u.test(stylesText ?? '');
     const hasAutomaticCalculation = /<calcPr\b[^>]*\bcalcMode="auto"[^>]*\bfullCalcOnLoad="1"/u.test(workbookXmlText ?? '');
+    const normalizedSheets = normalizeSheets(request);
+    const expectedSummaryPanels = normalizedSheets.filter((sheet) => Boolean(sheet.summary || sheet.keyMetrics.length > 0)).length;
+    const expectedKeyMetrics = normalizedSheets.reduce((sum, sheet) => sum + sheet.keyMetrics.length, 0);
+    const expectedConditionalFormatting = normalizedSheets.reduce((sum, sheet) => sum + sheet.conditionalFormatting.length, 0);
+    const richContentIssues = spreadsheetRichContentIssues(request);
+    const richFeaturesComplete = summaryPanelCount >= expectedSummaryPanels
+      && keyMetricVisualCount >= expectedKeyMetrics
+      && conditionalFormattingCount >= expectedConditionalFormatting;
     const passed = hasTaskContext(request)
       && sheetNames.length > 0
       && worksheetEntries.length === sheetNames.length
@@ -1525,6 +2140,8 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
       && (formulaCount === 0 || hasAutomaticCalculation)
       && hasStylesRelationship
       && hasNumberFormats
+      && richContentIssues.length === 0
+      && richFeaturesComplete
       && (!expectsNumeric || numericStyleCellCount > 0)
       && (!expectsPercent || percentStyleCellCount > 0)
       && (!expectsCurrency || currencyStyleCellCount > 0)
@@ -1536,7 +2153,7 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
       severity: passed ? 'info' : 'blocking',
       detail: passed
         ? `Excel 成品验证通过：${sheetNames.length} 个 sheet 均具备有效表头、列宽、冻结窗格、数值格式和可重算公式。`
-        : 'Excel 成品验证未通过：表头/数据、列宽冻结、数值格式、公式引用或任务内容不满足要求。',
+        : 'Excel 成品验证未通过：表头/数据、空的丰富字段、摘要指标区、条件格式、公式引用或任务内容不满足要求。',
       evidence: [
         `sheets=${sheetNames.join(' / ')}`,
         `rows=${rowCount}`,
@@ -1552,6 +2169,10 @@ async function validateSpreadsheetBuffer(buffer: Buffer, request: LocalArtifactC
         `percentStyles=${percentStyleCellCount}`,
         `currencyStyles=${currencyStyleCellCount}`,
         `dateStyles=${dateStyleCellCount}`,
+        `summaryPanels=${summaryPanelCount}/${expectedSummaryPanels}`,
+        `keyMetrics=${keyMetricVisualCount}/${expectedKeyMetrics}`,
+        `conditionalFormatting=${conditionalFormattingCount}/${expectedConditionalFormatting}`,
+        `richContentIssues=${richContentIssues.join(', ') || 'none'}`,
         `stylesRelationship=${hasStylesRelationship}`,
         `automaticCalculation=${hasAutomaticCalculation}`,
         `placeholderCells=${placeholderCells.slice(0, 5).join(' / ') || 'none'}`,
@@ -1760,7 +2381,12 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
   const hasViewport = /<meta\b[^>]*\bname=["']viewport["'][^>]*>/iu.test(html);
   const hasBody = /<body[\s>]/iu.test(html);
   const hasHeading = /<h1\b[^>]*>[\s\S]*?<\/h1>/iu.test(bodyMarkup);
-  const hasMeaningfulBody = bodyMarkup.trim().length > 0 && bodyText.length >= 12 && bodyElementCount >= 5;
+  const hasDynamicBody = bodyElementCount >= 5
+    && /<(?:input|button|select|textarea|form|ul|ol)\b/iu.test(bodyMarkup)
+    && inlineScriptText.length >= 80;
+  const hasMeaningfulBody = bodyMarkup.trim().length > 0
+    && bodyElementCount >= 5
+    && (bodyText.length >= 12 || hasDynamicBody);
   const hasScript = /<script[\s>]/iu.test(html);
   const hasRunnableScript = inlineScriptText.length >= 80 && !scriptSyntaxError && missingElementReferences.length === 0;
   const hasInlineStyle = inlineCssText.length >= 120;
@@ -1769,7 +2395,7 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
   const controlCount = [...html.matchAll(/<(?:button|input|select|textarea)\b/giu)].length;
   const hasInteractiveControl = hasInput || buttonCount > 0 || /<(?:select|textarea)\b/iu.test(html);
   const hasEventBinding = /addEventListener\s*\(|\.(?:onclick|onsubmit|oninput|onchange)\s*=|\son(?:click|submit|input|change)\s*=/iu.test(html);
-  const hasDomMutation = /\.(?:textContent|innerHTML|className|value)\s*=|\.(?:appendChild|append|prepend|remove|classList\.)/u.test(inlineScriptText);
+  const hasDomMutation = /\.(?:textContent|innerHTML|className|value|hidden)\s*=|\.(?:appendChild|append|prepend|remove|classList\.)/u.test(inlineScriptText);
   const hasInteractiveBehavior = hasEventBinding && hasDomMutation;
   const hasPersistence = /localStorage|sessionStorage/iu.test(html);
   const expectsDelete = /删除|delete|移除|remove/iu.test(prompt);
@@ -1899,19 +2525,20 @@ function validateTextContent(text: string, request: LocalArtifactCreateRequest):
   const headingCount = [...text.matchAll(/^#{1,3}\s+/gmu)].length;
   const sectionHeadingCount = [...text.matchAll(/^##\s+/gmu)].length;
   const bulletCount = [...text.matchAll(/^- /gmu)].length;
-  const contentLines = text.split(/\r?\n/u)
+  const markdownLines = text.split(/\r?\n/u);
+  const contentLines = markdownLines
     .map((line) => cleanText(line.replace(/^#{1,3}\s+|^-\s+/u, '')))
     .filter(Boolean);
-  const headingLines = text.split(/\r?\n/u)
-    .filter((line) => /^#{1,3}\s+/u.test(line))
-    .map((line) => cleanText(line.replace(/^#{1,3}\s+/u, '')));
-  const bodyLines = contentLines.filter((line) => !headingLines.includes(line));
+  const bodyLines = markdownLines
+    .filter((line) => !/^#{1,3}\s+/u.test(line))
+    .map((line) => cleanText(line.replace(/^-\s+/u, '')))
+    .filter(Boolean);
   const placeholderLines = contentLines.filter(isPlaceholderLine);
   const substantiveLines = bodyLines.filter((line) => line.length >= 10 && !isPlaceholderLine(line));
   const repeatedLines = substantiveLines.length > 2 && uniqueCount(substantiveLines) / substantiveLines.length < 0.65;
   const bodyChars = cleanText(bodyLines.join(' ')).length;
   const expectedItems = parseRequestedCount(sourcePrompt(request), '条');
-  const itemCountMatches = expectedItems === undefined || Math.max(bulletCount, substantiveLines.length) >= expectedItems;
+  const itemCountMatches = expectedItems === undefined || bulletCount >= expectedItems;
   const hasEnoughSubstance = substantiveLines.length >= 2 || bodyChars >= 160;
   const passed = hasTaskContext(request)
     && cleanText(text).length >= 80
@@ -1956,7 +2583,7 @@ export async function createLocalArtifact(request: LocalArtifactCreateRequest): 
   };
   if (kind === 'presentation') {
     const title = cleanText(effectiveRequest.title) || 'AI 工作流效率提升';
-    const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'pptx', 'UClaw_PPT');
+    const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'pptx', 'UClaw_PPT', effectiveRequest.outputDir);
     const buffer = await createPptxBuffer({ ...effectiveRequest, title });
     await writeFile(filePath, buffer);
     const fileSize = statSync(filePath).size;
@@ -1965,7 +2592,7 @@ export async function createLocalArtifact(request: LocalArtifactCreateRequest): 
   }
   if (kind === 'spreadsheet') {
     const title = cleanText(effectiveRequest.title) || '月度预算表';
-    const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'xlsx', 'UClaw_XLSX');
+    const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'xlsx', 'UClaw_XLSX', effectiveRequest.outputDir);
     const buffer = await createXlsxBuffer({ ...effectiveRequest, title });
     await writeFile(filePath, buffer);
     const fileSize = statSync(filePath).size;
@@ -1974,7 +2601,7 @@ export async function createLocalArtifact(request: LocalArtifactCreateRequest): 
   }
   if (kind === 'mini_program') {
     const title = cleanText(effectiveRequest.title) || '灵感收集 Todo 小工具';
-    const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'html', 'UClaw_HTML_App');
+    const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'html', 'UClaw_HTML_App', effectiveRequest.outputDir);
     const html = renderHtml({ ...effectiveRequest, title });
     await writeFile(filePath, html, 'utf8');
     const fileSize = statSync(filePath).size;
@@ -1982,7 +2609,7 @@ export async function createLocalArtifact(request: LocalArtifactCreateRequest): 
     return { kind: 'webpage', title, fileName: filePath.split(/[\\/]/u).pop() || 'app.html', filePath, fileSize, mimeType: MIME.html, media: `MEDIA:${filePath}`, planning, verification };
   }
   const title = cleanText(effectiveRequest.title) || '产品宣传文案';
-  const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'md', 'UClaw_Text');
+  const filePath = await uniqueOutputPath(title, effectiveRequest.filename, 'md', 'UClaw_Text', effectiveRequest.outputDir);
   const text = renderText({ ...effectiveRequest, title });
   await writeFile(filePath, text, 'utf8');
   const fileSize = statSync(filePath).size;

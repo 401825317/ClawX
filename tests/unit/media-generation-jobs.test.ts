@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -101,6 +101,8 @@ describe('media generation jobs', () => {
     forkMock.mockReset();
     rmSync(testOpenClawConfigDir, { recursive: true, force: true });
     mkdirSync(join(testOpenClawConfigDir, 'agents', 'main', 'sessions'), { recursive: true });
+    mkdirSync('/tmp/generated', { recursive: true });
+    writeFileSync('/tmp/generated/city.png', 'fake image bytes');
     forkMock.mockImplementation(() => {
       const child = new MockUtilityProcess();
       queueMicrotask(() => child.emit('spawn'));

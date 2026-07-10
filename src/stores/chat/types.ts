@@ -145,6 +145,7 @@ export interface ChatSession {
   lastMessagePreview?: string;
   thinkingLevel?: string;
   model?: string;
+  cwd?: string;
   updatedAt?: number;
   status?: string;
   hasActiveRun?: boolean;
@@ -247,6 +248,7 @@ export interface ChatState {
   deleteSession: (key: string) => Promise<void>;
   renameSession: (key: string, label: string) => Promise<void>;
   updateSessionModel: (key: string, modelRef: string | null) => Promise<void>;
+  updateSessionCwd: (key: string, cwd: string | null) => Promise<void>;
   healManagedTextModels: () => void;
   cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;

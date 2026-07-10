@@ -19,7 +19,16 @@
         "currentAgent": "Talking to {{agent}}",
         "agentSwitcher": "Choose Agent",
         "agentRunning": "Running",
-        "workspace": "Workspace"
+        "workspace": "Workspace",
+        "projectWorkspace": "Current project directory",
+        "chooseProjectWorkspace": "Choose project folder",
+        "useAgentWorkspace": "Use Agent workspace",
+        "browseWorkspace": "Browse project files",
+        "closeWorkspaceBrowser": "Close file browser",
+        "workspaceLocked": "The project directory cannot change while a task is running.",
+        "workspaceUpdated": "Project directory updated",
+        "workspaceReset": "Agent workspace restored",
+        "workspaceUpdateFailed": "Could not update the project directory"
     },
     "generatedFiles": {
         "title": "File changes ({{count}})",

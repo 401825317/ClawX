@@ -1070,6 +1070,18 @@ export async function invokeIpcWithRetry<T>(
   throw normalizeAppError(lastError);
 }
 
+export interface SelectDirectoryResult {
+  canceled: boolean;
+  filePaths: string[];
+}
+
+export const selectDirectory = (options?: { title?: string; defaultPath?: string }): Promise<SelectDirectoryResult> =>
+  invokeIpc<SelectDirectoryResult>('dialog:open', {
+    title: options?.title,
+    defaultPath: options?.defaultPath,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+
 // ── File preview wrappers ─────────────────────────────────────────────
 //
 // Thin typed wrappers over the sandboxed file:* IPC channels exposed by

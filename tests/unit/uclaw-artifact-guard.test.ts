@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -223,7 +223,7 @@ describe('uclaw-artifact-guard', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
 
-    const result = toolHook!({
+    const result = await toolHook!({
       runId: 'run-media-question',
       sessionKey: 'session-media-question',
       toolName: 'image_generate',
@@ -260,7 +260,7 @@ describe('uclaw-artifact-guard', () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
-    const result = hooks.get('before_tool_call')!({
+    const result = await hooks.get('before_tool_call')!({
       runId: 'run-ordinary-chat',
       sessionKey: 'session-ordinary-chat',
       toolName: 'image_generate',
@@ -302,7 +302,7 @@ describe('uclaw-artifact-guard', () => {
       sessionKey: 'session-image-task',
     });
 
-    const result = hooks.get('before_tool_call')!({
+    const result = await hooks.get('before_tool_call')!({
       runId: 'run-image-task',
       sessionKey: 'session-image-task',
       toolName: 'image_generate',
@@ -318,7 +318,7 @@ describe('uclaw-artifact-guard', () => {
   it('allows read-only media tool actions without current-turn generation authorization', async () => {
     const pluginModule = await loadGuard();
     const hooks = registerHooks(pluginModule);
-    const result = hooks.get('before_tool_call')!({
+    const result = await hooks.get('before_tool_call')!({
       runId: 'run-media-status',
       sessionKey: 'session-media-status',
       toolName: 'image_generate',
@@ -331,11 +331,54 @@ describe('uclaw-artifact-guard', () => {
     expect(result).toBeUndefined();
   });
 
+  it('stages an authorized external reference video into a per-run managed directory', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-media-staging-'));
+    const stateDir = join(tempDir, 'state');
+    const sourceVideo = join(tempDir, 'desktop-reference.mp4');
+    writeFileSync(sourceVideo, 'reference-video');
+    vi.stubEnv('OPENCLAW_STATE_DIR', stateDir);
+
+    try {
+      const pluginModule = await loadGuard();
+      const hooks = registerHooks(pluginModule);
+      await hooks.get('before_prompt_build')!({
+        runId: 'run-stage-reference-video',
+        sessionKey: 'session-stage-reference-video',
+        prompt: '按照这个提示词生成一个 15 秒科技展厅推广视频',
+      }, {
+        runId: 'run-stage-reference-video',
+        sessionKey: 'session-stage-reference-video',
+      });
+
+      const result = await hooks.get('before_tool_call')!({
+        runId: 'run-stage-reference-video',
+        toolName: 'video_generate',
+        params: {
+          action: 'generate',
+          prompt: '科技展厅推广视频',
+          video: sourceVideo,
+        },
+      }, {
+        runId: 'run-stage-reference-video',
+        sessionKey: 'session-stage-reference-video',
+      }) as { params?: { video?: string } };
+
+      const stagedVideo = result.params?.video ?? '';
+      expect(stagedVideo).not.toBe(sourceVideo);
+      expect(stagedVideo).toContain(join(stateDir, 'media', 'outbound', 'uclaw-runs'));
+      expect(readFileSync(stagedVideo, 'utf8')).toBe('reference-video');
+      expect(readFileSync(sourceVideo, 'utf8')).toBe('reference-video');
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('media-input-staged'));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('emits native progress updates before a tool call starts', async () => {
     const pluginModule = await loadGuard();
     const { hooks, emitAgentEvent } = registerHooksWithRuntimeEvents(pluginModule);
 
-    const result = hooks.get('before_tool_call')!({
+    const result = await hooks.get('before_tool_call')!({
       runId: 'run-native-progress-start',
       sessionKey: 'session-native-progress-start',
       toolCallId: 'call-open-music',
@@ -586,6 +629,47 @@ describe('uclaw-artifact-guard', () => {
       shouldReviseHeartbeat: false,
       shouldRevise: false,
     });
+  });
+
+  it('stages external local video inputs into the managed media run directory', async () => {
+    const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-media-stage-'));
+    const stateDir = join(tempDir, 'state');
+    const desktopDir = join(tempDir, 'Desktop');
+    const sourceVideo = join(desktopDir, 'f9daec34417bb0204f826f65540f0d73.mp4');
+    mkdirSync(desktopDir, { recursive: true });
+    writeFileSync(sourceVideo, 'video-bytes');
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+
+    try {
+      const pluginModule = await loadGuard();
+      const staged = await pluginModule.__test.stageMediaToolInputs({
+        toolName: 'video_generate',
+        params: {
+          action: 'generate',
+          prompt: '生成科技型展厅推广视频',
+          video: sourceVideo,
+        },
+      }, {
+        runId: 'run-stage-desktop-video',
+      });
+
+      const stagedVideo = staged.params.video;
+      expect(staged).toMatchObject({
+        stagedCount: 1,
+        stagedParamKeys: ['video'],
+      });
+      expect(stagedVideo).not.toBe(sourceVideo);
+      expect(stagedVideo).toContain(join(stateDir, 'media', 'outbound', 'uclaw-runs'));
+      expect(readFileSync(stagedVideo, 'utf8')).toBe('video-bytes');
+    } finally {
+      if (previousStateDir === undefined) {
+        delete process.env.OPENCLAW_STATE_DIR;
+      } else {
+        process.env.OPENCLAW_STATE_DIR = previousStateDir;
+      }
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('treats artifact capability questions as chat instead of artifact delivery requests', async () => {
@@ -1452,6 +1536,179 @@ describe('uclaw-artifact-guard', () => {
     expect(emitAgentEvent).not.toHaveBeenCalledWith(expect.objectContaining({
       stream: 'artifact',
     }));
+  });
+
+  it('does not let a failed video tool, an extracted frame, or an old video satisfy the current run', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-failed-video-evidence-'));
+    const oldVideo = join(tempDir, 'reference-old.mp4');
+    const extractedFrame = join(tempDir, 'reference-frame.png');
+    writeFileSync(oldVideo, 'old-video');
+    writeFileSync(extractedFrame, 'frame');
+
+    try {
+      const { hooks, toolResultMiddlewares } = registerHooksWithRuntimeEvents(pluginModule);
+      const middleware = toolResultMiddlewares[0]?.handler;
+      expect(middleware).toBeTypeOf('function');
+
+      await middleware!({
+        toolCallId: 'call-video-failed',
+        toolName: 'video_generate',
+        args: { action: 'generate', video: oldVideo },
+        isError: true,
+        result: {
+          content: [{ type: 'text', text: `Local media path rejected: ${oldVideo}` }],
+          details: { status: 'error', message: 'Local media path is not under an allowed directory' },
+        },
+      }, {
+        runId: 'run-failed-video-current-evidence',
+        sessionKey: 'agent:main:main',
+      });
+      await middleware!({
+        toolCallId: 'call-extract-frame',
+        toolName: 'exec',
+        args: { command: 'ffmpeg -i input.mp4 -frames:v 1 reference-frame.png' },
+        result: {
+          outputPath: extractedFrame,
+          content: [{ type: 'text', text: `outputPath: "${extractedFrame}"` }],
+          details: { status: 'ok', outputPath: extractedFrame },
+        },
+      }, {
+        runId: 'run-failed-video-current-evidence',
+        sessionKey: 'agent:main:main',
+      });
+
+      const event = {
+        runId: 'run-failed-video-current-evidence',
+        messages: [
+          { role: 'user', content: '按照这个提示词生成一个 15 秒科技展厅推广视频，参考输入图像和视频。' },
+          {
+            role: 'toolresult',
+            toolName: 'video_generate',
+            content: `生成失败，参考文件是 ${oldVideo}`,
+            details: { status: 'error' },
+          },
+          {
+            role: 'toolresult',
+            toolName: 'exec',
+            content: `outputPath: "${extractedFrame}"`,
+            details: { status: 'ok' },
+          },
+          { role: 'assistant', content: `视频已完成。\n\nMEDIA:${oldVideo}` },
+        ],
+      };
+      const result = hooks.get('before_agent_finalize')!(event, {
+        runId: 'run-failed-video-current-evidence',
+        sessionKey: 'agent:main:main',
+      }) as { action?: string } | undefined;
+      const analysis = pluginModule.__test.analyzeArtifactFinal(event);
+
+      expect(result?.action).toBe('revise');
+      expect(analysis).toMatchObject({
+        currentRunToolAttemptCount: 2,
+        currentRunFailedToolCount: 1,
+        currentRunSuccessfulArtifactCount: 1,
+        requiredEffects: [expect.objectContaining({ kind: 'video' })],
+        missingRequiredArtifactCount: 1,
+        shouldRevise: true,
+      });
+      expect(analysis.effectResults[0]).toMatchObject({
+        satisfied: false,
+        reason: expect.stringContaining('成功工具结果'),
+      });
+      expect(pluginModule.__test.buildToolArtifactEvidence({
+        toolName: 'video_generate',
+        args: { action: 'generate', video: oldVideo },
+        result: { details: { status: 'ok' } },
+      })).toEqual([]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a matching video artifact from a successful tool result in the same run', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-successful-video-evidence-'));
+    const videoPath = join(tempDir, 'generated-current.mp4');
+    writeFileSync(videoPath, 'new-video');
+
+    try {
+      const { hooks, toolResultMiddlewares } = registerHooksWithRuntimeEvents(pluginModule);
+      await toolResultMiddlewares[0]!.handler({
+        toolCallId: 'call-video-success',
+        toolName: 'video_generate',
+        args: { action: 'generate', prompt: '科技展厅' },
+        result: {
+          outputPath: videoPath,
+          content: [{ type: 'text', text: `outputPath: "${videoPath}"` }],
+          details: { status: 'ok', outputPath: videoPath },
+        },
+      }, {
+        runId: 'run-successful-video-current-evidence',
+        sessionKey: 'agent:main:main',
+      });
+
+      const event = {
+        runId: 'run-successful-video-current-evidence',
+        messages: [
+          { role: 'user', content: '生成一个 15 秒科技展厅推广视频' },
+          { role: 'assistant', content: `视频已生成并验证。\n\nMEDIA:${videoPath}` },
+        ],
+      };
+
+      expect(hooks.get('before_agent_finalize')!(event, {
+        runId: 'run-successful-video-current-evidence',
+        sessionKey: 'agent:main:main',
+      })).toBeUndefined();
+      expect(pluginModule.__test.analyzeArtifactFinal(event)).toMatchObject({
+        currentRunToolAttemptCount: 1,
+        currentRunFailedToolCount: 0,
+        currentRunSuccessfulArtifactCount: 1,
+        requiredEffects: [expect.objectContaining({ kind: 'video' })],
+        missingRequiredArtifactCount: 0,
+        shouldRevise: false,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('requires tool-bound media in runtime hooks while accepting explicit async completion runs', async () => {
+    const pluginModule = await loadGuard();
+    const tempDir = mkdtempSync(join(tmpdir(), 'uclaw-runtime-media-binding-'));
+    const videoPath = join(tempDir, 'generated-async.mp4');
+    writeFileSync(videoPath, 'video');
+
+    try {
+      const finalizeHook = registerFinalizeHook(pluginModule);
+      const unboundEvent = {
+        runId: 'run-unbound-video-claim',
+        messages: [
+          { role: 'user', content: '生成一个科技展厅推广视频' },
+          { role: 'assistant', content: `视频已完成。\n\nMEDIA:${videoPath}` },
+        ],
+      };
+      expect(finalizeHook(unboundEvent, { runId: 'run-unbound-video-claim' })).toMatchObject({
+        action: 'revise',
+      });
+
+      const completionRunId = 'video_generate:558ddaa7-e22c-4161-850f-5ba2800c3ac2:ok';
+      const completionEvent = {
+        runId: completionRunId,
+        messages: [
+          { role: 'user', content: '生成一个科技展厅推广视频' },
+          { role: 'assistant', content: `视频已生成并验证。\n\nMEDIA:${videoPath}` },
+        ],
+      };
+      expect(finalizeHook(completionEvent, { runId: completionRunId })).toBeUndefined();
+      expect(pluginModule.__test.analyzeArtifactFinal(completionEvent, { runId: completionRunId })).toMatchObject({
+        enforceCurrentRunToolEvidence: true,
+        missingRequiredArtifactCount: 0,
+        shouldRevise: false,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('does not promote ordinary read-tool paths into artifacts', async () => {

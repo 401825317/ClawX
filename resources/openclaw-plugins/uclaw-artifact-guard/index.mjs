@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
+import { copyFile, mkdir, realpath as realpathAsync, stat as statAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
@@ -31,14 +32,23 @@ const MEDIA_INTENT_GATE_TIMEOUT_MS = 1_200;
 const MEDIA_INTENT_GATE_TTL_MS = 10 * 60 * 1000;
 const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate']);
 const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
+const MEDIA_INPUT_PARAM_KEYS = new Set(['image', 'images', 'mask', 'video', 'videos']);
+const IMAGE_INPUT_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/iu;
+const VIDEO_INPUT_EXT_RE = /\.(?:mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)$/iu;
+const RUN_TOOL_EVIDENCE_TTL_MS = 30 * 60 * 1000;
+const RUN_TOOL_EVIDENCE_MAX_ENTRIES = 256;
 const mediaIntentGateByRunId = new Map();
 const mediaIntentGateBySessionKey = new Map();
+const toolEvidenceByRunId = new Map();
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|video|html|script|zip))/iu;
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
 const ARTIFACT_CAPABILITY_TARGET_RE = /(?:文件(?:类)?产物|文件|文档|报告|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|小程序|代码文件|压缩包|zip|产物|artifact|file|document|report|presentation|slides?|spreadsheet|image|video|webpage|mini[-\s]?app)/iu;
 const ARTIFACT_CAPABILITY_QUESTION_RE = /(?:能做哪些|可以做哪些|支持哪些|支持生成哪些|能生成哪些|能创建哪些|能产出哪些|可以生成哪些|可以创建哪些|能(?:做|生成|创建|产出|导出|输出|制作)(?:什么|哪些|哪类|哪种)|可以(?:做|生成|创建|产出|导出|输出|制作)(?:什么|哪些|哪类|哪种)|支持(?:什么|哪些|哪类|哪种)|有哪些(?:能力|功能|文件|产物|类型|格式)|有什么(?:能力|功能)|能力(?:范围|列表|介绍)|(?:能|可以)做吗|能不能做|支不支持|what can you|which .{0,40} can|can you|support(?:ed)?|capabilit)/iu;
 const ARTIFACT_CREATE_COMMAND_RE = /(?:(?:帮我|给我|替我|直接).{0,20}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出)|(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|(?:create|make|generate|build|produce|export|write)\s+(?:a|an|one|some|the)\b)/iu;
+const ARTIFACT_CREATION_NEGATION_RE = /(?:不要|别|不用|无需|不需要|禁止|不得|do\s+not|don't|without)\s*.{0,18}?(?:写(?:入)?|改(?:动|写)?|修改|创建|生成|制作|保存|输出|导出)(?:任何)?(?:文件|文档|报告|PPT|Excel|图片|视频|网页|代码)?/giu;
+const ARTIFACT_READ_ONLY_OR_KNOWLEDGE_RE = /(?:只读|查看|检查|读取|搜索|查找|分析|诊断|解释|说明|告诉我|怎么|如何|为什么|inspect|read|review|analy[sz]e|diagnose|explain|how|why).{0,50}(?:文件|文档|报告|PPT|Word|Excel|表格|PDF|图片|视频|网页|HTML|脚本|代码|package\.json|\.tsx?\b|\.jsx?\b)|(?:文件|文档|报告|PPT|Word|Excel|表格|PDF|图片|视频|网页|HTML|脚本|代码|package\.json|\.tsx?\b|\.jsx?\b).{0,50}(?:只读|查看|检查|读取|分析|诊断|解释|说明|怎么|如何|为什么|inspect|read|review|analy[sz]e|diagnose|explain|how|why)/iu;
+const ARTIFACT_DIRECT_EXECUTION_RE = /(?:(?:帮我|给我|替我|直接|现在|马上|立即|立刻).{0,30}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出)|(?:然后|接着|随后|再).{0,12}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|^\s*(?:请)?\s*(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|(?:please\s+)?(?:create|make|generate|build|produce|export|write)\s+(?:a|an|one|some|the)\b)/iu;
 const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|不行|不对|太差|太简陋|占位|模板感|不够.{0,12}(?:高级|好看|精致|正式|苹果|产品|宣传)|重新(?:做|制作|生成|来|搞)|重做|再做|再来|换一版|改一版|美化|优化|润色|升级|高级一点|好看一点|精致一点|重新直接制作|make it better|too ugly|ugly|not good|redo|remake|regenerate|make another|improve|polish)/iu;
 const ARTIFACT_REVISION_NEGATION_RE = /(?:不要|别|不用|先别|无需|不需要|do not|don't|no need).{0,12}(?:重做|重新|修改|改|美化|优化|生成|制作|redo|remake|regenerate|improve|polish)/iu;
 const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
@@ -79,15 +89,27 @@ const RAW_COMPOSITE_SEPARATOR_RE = /[，、,；;]|(?:\s+(?:和|以及|还有|并
 const SCREENSHOT_COMMAND_RE = /(?:screencapture|gnome-screenshot|scrot|grim|spectacle|import\s+-window\s+root|xwd|desktop[_-]?screenshot|screen\s*capture|screenshot|截图|截屏)/iu;
 const TMP_SCREENSHOT_MEDIA_PATH_RE = /\/tmp\/((?:uclaw|clawx|desktop|screen|screenshot)[A-Za-z0-9._ -]*\.(?:png|jpe?g|webp|bmp))/giu;
 const TRANSCRIPT_BLOAT_TOOL_RE = /^(?:exec|exec_command|shell|bash|terminal|run_command|read)$/iu;
-const TRANSCRIPT_BLOAT_SESSION_RE = /(?:^|[\\/])sessions?(?:[\\/]|$)|\.jsonl(?:$|[?#\s])|\btranscript\b|\bsession(?:Key|Id)?\b/iu;
-const TRANSCRIPT_BLOAT_TRAJECTORY_RE = /(?:^|[\\/])trajectory(?:[\\/]|$)|\.trajectory(?:-path)?(?:\.jsonl|\.json)?(?:$|[?#\s])|\btrajectory(?:-path)?\b/iu;
-const TRANSCRIPT_BLOAT_LOG_RE = /(?:^|[\\/])logs?(?:[\\/]|$)|\.log(?:$|[?#\s])|\bstdout\b|\bstderr\b|\bconsole\b/iu;
+const TRANSCRIPT_PATH_BOUNDARY = String.raw`(?=$|[?#\s"'},\]])`;
+const TRANSCRIPT_BLOAT_SESSION_RE = new RegExp(
+  String.raw`(?:^|[\\/])sessions?(?:[\\/]|$)|\.jsonl${TRANSCRIPT_PATH_BOUNDARY}|(?:^|[\\/])transcripts?(?:[\\/]|$)`,
+  'iu',
+);
+const TRANSCRIPT_BLOAT_TRAJECTORY_RE = new RegExp(
+  String.raw`(?:^|[\\/])trajectory(?:[\\/]|$)|\.trajectory(?:-path)?(?:\.jsonl|\.json)?${TRANSCRIPT_PATH_BOUNDARY}|\btrajectory(?:-path)?\b`,
+  'iu',
+);
+const TRANSCRIPT_BLOAT_LOG_RE = new RegExp(
+  String.raw`(?:^|[\\/])logs?(?:[\\/]|$)|\.log${TRANSCRIPT_PATH_BOUNDARY}`,
+  'iu',
+);
 const TRANSCRIPT_BLOAT_MIN_CHARS = 1600;
 const TRANSCRIPT_BLOAT_MIN_LINES = 36;
 const TRANSCRIPT_BLOAT_EXTREME_CHARS = 5000;
 const TRANSCRIPT_BLOAT_EXTREME_LINES = 120;
 const TRANSCRIPT_BLOAT_MAX_HINTS = 3;
 const TRANSCRIPT_BLOAT_MAX_ARTIFACT_REFS = 4;
+const TRANSCRIPT_LARGE_OUTPUT_HEAD_CHARS = 8_000;
+const TRANSCRIPT_LARGE_OUTPUT_TAIL_CHARS = 4_000;
 const RAW_COMPOSITE_ARTIFACT_DETECTORS = [
   {
     id: 'image-generation',
@@ -158,6 +180,27 @@ function extractMessageText(message) {
     } catch {
       // ignore
     }
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
+function extractAssistantVisibleText(message) {
+  if (!message || typeof message !== 'object') return '';
+  const parts = [];
+  const content = message.content;
+  if (typeof content === 'string') {
+    parts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (typeof part === 'string') parts.push(part);
+      else if (part && typeof part === 'object') {
+        if (typeof part.text === 'string') parts.push(part.text);
+        else if (typeof part.content === 'string') parts.push(part.content);
+      }
+    }
+  }
+  for (const key of ['text', 'output', 'result']) {
+    if (typeof message[key] === 'string') parts.push(message[key]);
   }
   return parts.filter(Boolean).join('\n');
 }
@@ -242,8 +285,10 @@ function extractFinalAssistantText(event) {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       const message = messages[index];
       if (message && typeof message === 'object' && message.role === 'assistant') {
-        const text = extractMessageText(message);
-        if (text.trim()) return text;
+        // The newest assistant item is authoritative even when it is empty.
+        // Falling back to an earlier tool-call-only assistant makes an empty
+        // provider final look deliverable and bypasses the recovery revision.
+        return extractAssistantVisibleText(message);
       }
     }
   }
@@ -667,6 +712,121 @@ function resolveManagedScreenshotDir() {
   return join(resolveOpenClawConfigDirForPlugin(), 'media', 'outbound');
 }
 
+function isRemoteOrManagedMediaRef(value) {
+  return /^(?:https?:|data:|blob:|media:)/iu.test(String(value ?? '').trim());
+}
+
+function mediaInputExtensionAllowed(paramKey, filePath) {
+  if (paramKey === 'video' || paramKey === 'videos') return VIDEO_INPUT_EXT_RE.test(filePath);
+  return IMAGE_INPUT_EXT_RE.test(filePath);
+}
+
+function resolveLocalMediaInputPath(value) {
+  const input = normalizeOptionalString(value);
+  if (!input || isRemoteOrManagedMediaRef(input)) return undefined;
+  const expanded = expandOpenClawPathForPlugin(input);
+  if (!isAbsolute(expanded) && !expanded.startsWith('./') && !expanded.startsWith('../')) return undefined;
+  return resolve(expanded);
+}
+
+async function stageMediaInputFile({ sourceValue, paramKey, runDir }) {
+  const resolvedSource = resolveLocalMediaInputPath(sourceValue);
+  if (!resolvedSource || !mediaInputExtensionAllowed(paramKey, resolvedSource)) return undefined;
+
+  let sourcePath;
+  let sourceStat;
+  try {
+    sourcePath = await realpathAsync(resolvedSource);
+    sourceStat = await statAsync(sourcePath);
+  } catch {
+    return undefined;
+  }
+  if (!sourceStat.isFile()) return undefined;
+  const relativeToRunDir = relative(runDir, sourcePath);
+  if (!relativeToRunDir || (!relativeToRunDir.startsWith('..') && !isAbsolute(relativeToRunDir))) {
+    return sourcePath;
+  }
+
+  await mkdir(runDir, { recursive: true, mode: 0o700 });
+  const extension = extname(sourcePath).toLowerCase();
+  const fingerprint = hashString(`${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}`);
+  const stagedPath = join(runDir, `${fingerprint}${extension}`);
+  let stagedStat;
+  try {
+    stagedStat = await statAsync(stagedPath);
+  } catch {
+    stagedStat = undefined;
+  }
+  if (!stagedStat?.isFile() || stagedStat.size !== sourceStat.size) {
+    await copyFile(sourcePath, stagedPath);
+    stagedStat = await statAsync(stagedPath);
+  }
+  if (!stagedStat.isFile() || stagedStat.size !== sourceStat.size) {
+    throw new Error('staged media verification failed');
+  }
+  return stagedPath;
+}
+
+async function stageMediaToolInputs(event, ctx) {
+  const toolName = normalizeToolName(event);
+  const params = normalizeToolParams(event);
+  if (!MEDIA_SIDE_EFFECT_TOOLS.has(toolName) || isSafeMediaToolReadAction(params)) {
+    return { params, stagedCount: 0, stagedParamKeys: [] };
+  }
+
+  const runId = getRunId(event, ctx);
+  if (!runId) return { params, stagedCount: 0, stagedParamKeys: [] };
+  const runDir = join(resolveManagedScreenshotDir(), 'uclaw-runs', hashString(runId));
+  const nextParams = { ...params };
+  const stagedBySource = new Map();
+  const stagedParamKeys = new Set();
+  let stagedCount = 0;
+
+  try {
+    for (const paramKey of MEDIA_INPUT_PARAM_KEYS) {
+      const rawValue = params[paramKey];
+      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+      let changed = false;
+      const nextValues = [];
+      for (const value of values) {
+        if (typeof value !== 'string') {
+          nextValues.push(value);
+          continue;
+        }
+        let stagedPath = stagedBySource.get(`${paramKey}:${value}`);
+        if (!stagedPath) {
+          stagedPath = await stageMediaInputFile({ sourceValue: value, paramKey, runDir });
+          if (stagedPath) stagedBySource.set(`${paramKey}:${value}`, stagedPath);
+        }
+        if (stagedPath) {
+          nextValues.push(stagedPath);
+          changed = changed || stagedPath !== value;
+          stagedCount += stagedPath !== value ? 1 : 0;
+        } else {
+          nextValues.push(value);
+        }
+      }
+      if (!changed) continue;
+      nextParams[paramKey] = Array.isArray(rawValue) ? nextValues : nextValues[0];
+      stagedParamKeys.add(paramKey);
+    }
+  } catch (error) {
+    return {
+      params,
+      stagedCount: 0,
+      stagedParamKeys: [],
+      blockReason: '参考媒体无法安全复制到当前运行的受控目录，已阻止本次媒体生成。',
+      errorCode: normalizeOptionalString(error?.code) ?? 'stage_failed',
+    };
+  }
+
+  return {
+    params: nextParams,
+    stagedCount,
+    stagedParamKeys: [...stagedParamKeys],
+  };
+}
+
 function commandParamKey(params) {
   for (const key of ['command', 'cmd', 'script']) {
     if (typeof params?.[key] === 'string' && params[key].trim()) return key;
@@ -723,8 +883,17 @@ function isArtifactCapabilityQuestion(text) {
 }
 
 function isArtifactRequest(text) {
-  if (isArtifactCapabilityQuestion(text)) return false;
-  return ARTIFACT_REQUEST_RE.test(text) || PAGE_ARTIFACT_RE.test(text);
+  const value = String(text ?? '').trim();
+  if (!value) return false;
+  const actionableText = value.replace(ARTIFACT_CREATION_NEGATION_RE, ' ');
+  if (isArtifactCapabilityQuestion(actionableText)) return false;
+  if (
+    ARTIFACT_READ_ONLY_OR_KNOWLEDGE_RE.test(actionableText)
+    && !ARTIFACT_DIRECT_EXECUTION_RE.test(actionableText)
+  ) {
+    return false;
+  }
+  return ARTIFACT_REQUEST_RE.test(actionableText) || PAGE_ARTIFACT_RE.test(actionableText);
 }
 
 function isArtifactRevisionFeedback(text) {
@@ -934,8 +1103,8 @@ function inferRequestedArtifactKind(text) {
   if (/(?:Word|docx?|文档|报告|标书|投标书|招投标书|方案|稿子|文章|内容|文案|copy)/iu.test(source)) return 'document';
   if (/(?:Excel|xlsx?|表格|电子表格|工作簿|spreadsheet|workbook|csv|tsv)/iu.test(source)) return 'spreadsheet';
   if (/(?:PDF|pdf)/iu.test(source)) return 'pdf';
-  if (/(?:图片|图像|海报|插画|封面|照片|image|photo|png|jpe?g|webp|svg)/iu.test(source)) return 'image';
   if (/(?:视频|video|mp4|mov|webm)/iu.test(source)) return 'video';
+  if (/(?:图片|图像|海报|插画|封面|照片|image|photo|png|jpe?g|webp|svg)/iu.test(source)) return 'image';
   if (/(?:网页|HTML|html|页面|小程序|webpage|website|site|app|应用)/iu.test(source)) return 'webpage';
   if (/(?:脚本|代码|script|code|js|ts|python|py)/iu.test(source)) return 'code';
   if (/(?:压缩包|zip|archive)/iu.test(source)) return 'archive';
@@ -1269,6 +1438,25 @@ function extractToolResultText(result) {
   return parts.filter(Boolean).join('\n');
 }
 
+function extractPrimaryToolResultText(result) {
+  if (typeof result === 'string') return result;
+  if (!isRecord(result)) return '';
+
+  const parts = [];
+  if (Array.isArray(result.content)) {
+    for (const part of result.content) {
+      if (typeof part === 'string') parts.push(part);
+      else if (isRecord(part) && typeof part.text === 'string') parts.push(part.text);
+    }
+  }
+  if (parts.length > 0) return parts.filter(Boolean).join('\n');
+
+  for (const key of ['text', 'output', 'stdout']) {
+    if (typeof result[key] === 'string' && result[key].trim()) return result[key];
+  }
+  return '';
+}
+
 function countTextLines(value) {
   const text = String(value ?? '');
   if (!text) return 0;
@@ -1374,8 +1562,22 @@ function buildTranscriptBloatSummary(meta) {
   if (meta.failure) lines.push(`结果摘要：${meta.failure}`);
   if (meta.hints.length > 0) lines.push(`目标线索：${meta.hints.join(' | ')}`);
   if (meta.artifactRefs.length > 0) lines.push(`保留产物证据：${meta.artifactRefs.join(' | ')}`);
+  if (meta.excerpt) {
+    lines.push('以下保留原始结果的首尾摘录，供当前任务继续判断：');
+    lines.push(meta.excerpt);
+  }
   lines.push('原始大段输出已省略；如需逐行排查，请继续针对目标文件或日志做 read / rg。');
   return lines.join('\n');
+}
+
+function buildLargeOutputExcerpt(text) {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) return '';
+  const limit = TRANSCRIPT_LARGE_OUTPUT_HEAD_CHARS + TRANSCRIPT_LARGE_OUTPUT_TAIL_CHARS;
+  if (normalized.length <= limit) return normalized;
+  const head = normalized.slice(0, TRANSCRIPT_LARGE_OUTPUT_HEAD_CHARS);
+  const tail = normalized.slice(-TRANSCRIPT_LARGE_OUTPUT_TAIL_CHARS);
+  return `${head}\n\n... 已省略中间 ${normalized.length - limit} 个字符 ...\n\n${tail}`;
 }
 
 function compactToolResultDetailsForTranscript(rawDetails, meta) {
@@ -1445,10 +1647,13 @@ function summarizeToolResultForTranscript(event) {
   const lineCount = countTextLines(resultText);
   if (!resultText.trim()) return undefined;
 
+  // Classify from the invocation target only. Source code and configuration
+  // output commonly contain words such as sessionKey, stdout, or console;
+  // treating result text as a path signal discards the evidence the model just
+  // requested and can leave the following model turn with no usable context.
   const classificationText = [
     stringifyJson(event?.args),
     stringifyJson(event?.params),
-    resultText,
   ].filter(Boolean).join('\n');
   const kinds = collectTranscriptBloatKinds(classificationText);
   const hasTargetKind = kinds.length > 0;
@@ -1461,8 +1666,13 @@ function summarizeToolResultForTranscript(event) {
     params: event?.params,
     result: event?.result,
   }).slice(0, TRANSCRIPT_BLOAT_MAX_HINTS);
-  const artifactRefs = collectStructuredArtifactRefsForTranscript(resultText);
+  const artifactRefs = hasTargetKind
+    ? collectStructuredArtifactRefsForTranscript(resultText)
+    : [];
   const failure = summarizeToolFailure(event);
+  const excerpt = hasTargetKind
+    ? ''
+    : buildLargeOutputExcerpt(extractPrimaryToolResultText(event?.result) || resultText);
   const summaryText = buildTranscriptBloatSummary({
     toolName,
     kinds: hasTargetKind ? kinds : ['large-output'],
@@ -1471,6 +1681,7 @@ function summarizeToolResultForTranscript(event) {
     hints,
     artifactRefs,
     failure,
+    excerpt,
   });
 
   if (typeof event?.result === 'string') {
@@ -1527,13 +1738,22 @@ function hasGeneratedArtifactCue(text) {
 
 function buildToolArtifactEvidence(event) {
   const resultText = extractToolResultText(event?.result);
-  const argsText = isProducerToolName(event?.toolName) ? stringifyJson(event?.args) : '';
+  const toolName = normalizeToolName(event);
+  // Media-tool args are source inputs, never generated-output evidence. In the
+  // field failure, the rejected reference video was echoed in tool args and
+  // could otherwise be mistaken for a newly generated video.
+  const argsText = isProducerToolName(toolName) && !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
+    ? stringifyJson(event?.args)
+    : '';
   const text = [resultText, argsText].filter(Boolean).join('\n');
   if (!text.trim()) return [];
   return buildArtifactEvidence(
     { cwd: event?.cwd },
     text,
-    { allowRawPaths: isProducerToolName(event?.toolName) || hasGeneratedArtifactCue(text) },
+    {
+      allowRawPaths: !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
+        && (isProducerToolName(toolName) || hasGeneratedArtifactCue(text)),
+    },
   );
 }
 
@@ -1548,6 +1768,10 @@ function readToolStatus(result) {
 
 function isToolError(event) {
   if (event?.isError === true) return true;
+  if (typeof event?.error === 'string' && event.error.trim()) return true;
+  if (event?.result?.ok === false || event?.result?.success === false) return true;
+  if (typeof event?.result?.error === 'string' && event.result.error.trim()) return true;
+  if (event?.result?.details?.ok === false || event?.result?.details?.success === false) return true;
   const status = readToolStatus(event?.result);
   return typeof status === 'string' && TOOL_ERROR_STATUS_RE.test(status);
 }
@@ -1561,6 +1785,116 @@ function summarizeToolFailure(event) {
     readToolStatus(event?.result),
   ].find((value) => typeof value === 'string' && value.trim());
   return candidate ? truncateText(candidate, 180) : undefined;
+}
+
+function pruneToolEvidence(now = Date.now()) {
+  for (const [runId, evidence] of toolEvidenceByRunId.entries()) {
+    if (now - evidence.updatedAt > RUN_TOOL_EVIDENCE_TTL_MS) toolEvidenceByRunId.delete(runId);
+  }
+  while (toolEvidenceByRunId.size > RUN_TOOL_EVIDENCE_MAX_ENTRIES) {
+    const oldestRunId = toolEvidenceByRunId.keys().next().value;
+    if (!oldestRunId) break;
+    toolEvidenceByRunId.delete(oldestRunId);
+  }
+}
+
+function recordToolEvidence(event, ctx) {
+  const runId = getRunId(event, ctx);
+  const toolName = normalizeToolName(event);
+  if (!runId || !toolName) return undefined;
+  if (MEDIA_SIDE_EFFECT_TOOLS.has(toolName) && isSafeMediaToolReadAction(normalizeToolParams(event))) {
+    return undefined;
+  }
+
+  const failed = isToolError(event);
+  const artifacts = failed ? [] : buildToolArtifactEvidence(event).map((entry) => ({
+    ...entry,
+    artifact: {
+      ...entry.artifact,
+      sourceRunId: runId,
+      sourceToolCallId: normalizeOptionalString(event?.toolCallId),
+      sourceToolName: toolName,
+    },
+    successfulToolResult: true,
+    sourceRunId: runId,
+    sourceToolCallId: normalizeOptionalString(event?.toolCallId),
+    sourceToolName: toolName,
+  }));
+  if (!failed && artifacts.length === 0 && !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) return undefined;
+
+  const now = Date.now();
+  pruneToolEvidence(now);
+  const current = toolEvidenceByRunId.get(runId) ?? { updatedAt: now, attempts: [] };
+  const toolCallId = normalizeOptionalString(event?.toolCallId);
+  const attempt = {
+    runId,
+    toolName,
+    toolCallId,
+    failed,
+    artifacts,
+    updatedAt: now,
+  };
+  const duplicateIndex = current.attempts.findIndex((item) => (
+    toolCallId && item.toolCallId === toolCallId && item.toolName === toolName
+  ));
+  if (duplicateIndex >= 0) current.attempts[duplicateIndex] = attempt;
+  else current.attempts.push(attempt);
+  current.updatedAt = now;
+  toolEvidenceByRunId.delete(runId);
+  toolEvidenceByRunId.set(runId, current);
+  pruneToolEvidence(now);
+  return attempt;
+}
+
+function getToolEvidenceForRun(runId) {
+  if (!runId) return { updatedAt: 0, attempts: [] };
+  pruneToolEvidence();
+  return toolEvidenceByRunId.get(runId) ?? { updatedAt: 0, attempts: [] };
+}
+
+function findSuccessfulToolArtifact(entry, runToolEvidence) {
+  const entryKeys = new Set(artifactIdentityKeys(entry));
+  for (const attempt of runToolEvidence?.attempts ?? []) {
+    if (attempt.failed) continue;
+    for (const toolArtifact of attempt.artifacts ?? []) {
+      if (artifactIdentityKeys(toolArtifact).some((key) => entryKeys.has(key))) {
+        return toolArtifact;
+      }
+    }
+  }
+  return undefined;
+}
+
+function successfulMediaCompletionTool(runId) {
+  const match = /^(image_generate|video_generate):[^:]+:ok$/iu.exec(String(runId ?? ''));
+  return match?.[1]?.toLowerCase();
+}
+
+function bindArtifactsToCurrentRunToolEvidence(artifacts, runToolEvidence, runId) {
+  const completionTool = successfulMediaCompletionTool(runId);
+  return artifacts.map((entry) => {
+    const matched = findSuccessfulToolArtifact(entry, runToolEvidence);
+    const completionKindMatches = completionTool === 'video_generate'
+      ? entry?.artifact?.kind === 'video'
+      : completionTool === 'image_generate' && entry?.artifact?.kind === 'image';
+    if (!matched && !completionKindMatches) return entry;
+    const sourceRunId = matched?.sourceRunId ?? runId;
+    const sourceToolCallId = matched?.sourceToolCallId;
+    const sourceToolName = matched?.sourceToolName ?? completionTool;
+    return {
+      ...entry,
+      successfulToolResult: true,
+      sourceRunId,
+      sourceToolCallId,
+      sourceToolName,
+      artifact: {
+        ...entry.artifact,
+        sourceRunId,
+        sourceToolCallId,
+        sourceToolName,
+      },
+    };
+  });
 }
 
 function hasArtifactEvidence(event, finalText) {
@@ -1710,11 +2044,22 @@ function artifactKindSatisfies(requiredKind, actualKind) {
   return compatibleKinds[requiredKind]?.includes(actualKind) ?? false;
 }
 
-function artifactSatisfiesEffect(effect, entry, usedArtifactIds) {
+function effectRequiresCurrentRunToolEvidence(effect, evidence) {
+  if (effect?.kind !== 'image' && effect?.kind !== 'video') return false;
+  return Boolean(
+    evidence?.enforceCurrentRunToolEvidence
+    || (evidence?.runToolEvidence?.attempts ?? []).some((attempt) => MEDIA_SIDE_EFFECT_TOOLS.has(attempt.toolName)),
+  );
+}
+
+function artifactSatisfiesEffect(effect, entry, usedArtifactIds, evidence) {
   const artifact = entry?.artifact;
   if (!artifact?.id || usedArtifactIds.has(artifact.id)) return false;
   if (entry?.verification?.status !== 'passed') return false;
   if (!artifactKindSatisfies(effect.kind, artifact.kind)) return false;
+  if (effectRequiresCurrentRunToolEvidence(effect, evidence) && entry?.successfulToolResult !== true) {
+    return false;
+  }
   if (effect.mustBeNewArtifact) {
     const targetKeys = new Set(effect.targetArtifactKeys ?? []);
     if (artifactIdentityKeys(entry).some((key) => targetKeys.has(key))) return false;
@@ -1737,7 +2082,7 @@ function evaluateRequiredEffects(requiredEffects, evidence) {
 
     const matches = [];
     for (const entry of evidence.artifacts ?? []) {
-      if (!artifactSatisfiesEffect(effect, entry, usedArtifactIds)) continue;
+      if (!artifactSatisfiesEffect(effect, entry, usedArtifactIds, evidence)) continue;
       matches.push(entry);
       if (matches.length >= effect.minCount) break;
     }
@@ -1754,9 +2099,11 @@ function evaluateRequiredEffects(requiredEffects, evidence) {
       matchedArtifactIds: matches.map((entry) => entry.artifact.id),
       reason: satisfied
         ? '已找到满足 effect 的新产物证据。'
-        : effect.mustBeNewArtifact
-          ? '缺少 latest user 之后产生的非覆盖新产物证据。'
-          : '缺少满足 effect 的产物证据或可用性验证未通过。',
+        : effectRequiresCurrentRunToolEvidence(effect, evidence)
+          ? '当前运行缺少由成功工具结果产生的同类型产物证据。'
+          : effect.mustBeNewArtifact
+            ? '缺少 latest user 之后产生的非覆盖新产物证据。'
+            : '缺少满足 effect 的产物证据或可用性验证未通过。',
     };
   });
 }
@@ -1766,11 +2113,12 @@ function isExplicitBlocker(finalText) {
   return BLOCKER_RE.test(narrativeText) && !CONTINUATION_RE.test(narrativeText);
 }
 
-function analyzeArtifactFinal(event) {
+function analyzeArtifactFinal(event, ctx) {
   const userText = extractUserRequestText(event);
   const latestUserText = extractLatestUserRequestText(event);
   const activeUserText = latestUserText || userText;
   const finalText = extractFinalAssistantText(event);
+  const emptyFinal = !finalText.trim();
   const heartbeatPoll = isHeartbeatPoll(activeUserText);
   const heartbeatOk = isHeartbeatOk(finalText);
   const { before: eventBeforeLatestUser, after: eventAfterLatestUser } = splitEventMessagesAroundLatestUser(event);
@@ -1783,7 +2131,14 @@ function analyzeArtifactFinal(event) {
   const inferredRequiredArtifactCount = Math.max(compositeRequiredArtifactCount, rawCompositeRequiredArtifactCount);
   const artifactRequest = isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest;
   const desktopActionRequest = isDesktopActionRequest(activeUserText);
-  const artifacts = buildArtifactEvidence(eventAfterLatestUser, finalText);
+  const currentRunId = getRunId(event, ctx);
+  const runToolEvidence = getToolEvidenceForRun(currentRunId);
+  const enforceCurrentRunToolEvidence = Boolean(ctx && currentRunId);
+  const artifacts = bindArtifactsToCurrentRunToolEvidence(
+    buildArtifactEvidence(eventAfterLatestUser, finalText),
+    runToolEvidence,
+    currentRunId,
+  );
   const finalArtifacts = buildArtifactEvidence({ cwd: event?.cwd }, finalText);
   const artifactEvidence = artifacts.length > 0 || hasArtifactEvidence(eventAfterLatestUser, finalText);
   const finalArtifactEvidence = finalArtifacts.length > 0 || hasArtifactEvidence({ cwd: event?.cwd }, finalText);
@@ -1799,6 +2154,8 @@ function analyzeArtifactFinal(event) {
   const effectResults = evaluateRequiredEffects(requiredEffects, {
     artifacts,
     desktopActionEvidence,
+    runToolEvidence,
+    enforceCurrentRunToolEvidence,
   });
   const missingRequiredEffects = effectResults.filter((result) => !result.satisfied);
   const satisfiedRequiredEffects = effectResults.filter((result) => result.satisfied);
@@ -1847,20 +2204,36 @@ function analyzeArtifactFinal(event) {
   );
   const shouldReviseHeartbeat = Boolean(
     heartbeatPoll
-    && finalText.trim()
     && !heartbeatOk,
   );
-  const shouldRevise = shouldReviseHeartbeat || shouldReviseArtifact || shouldReviseDesktopAction;
+  const shouldReviseEmptyFinal = Boolean(
+    activeUserText.trim()
+    && !heartbeatPoll
+    && emptyFinal,
+  );
+  const shouldRevise = shouldReviseHeartbeat
+    || shouldReviseEmptyFinal
+    || shouldReviseArtifact
+    || shouldReviseDesktopAction;
   return {
     userText,
     latestUserText,
     activeUserText,
     finalText,
+    emptyFinal,
     heartbeatPoll,
     heartbeatOk,
     artifactRequest,
     artifactRevisionFeedback,
     artifactRevisionRequest,
+    currentRunId,
+    enforceCurrentRunToolEvidence,
+    currentRunToolAttemptCount: runToolEvidence.attempts.length,
+    currentRunFailedToolCount: runToolEvidence.attempts.filter((attempt) => attempt.failed).length,
+    currentRunSuccessfulArtifactCount: runToolEvidence.attempts.reduce(
+      (total, attempt) => total + (attempt.failed ? 0 : attempt.artifacts.length),
+      0,
+    ),
     priorArtifactEvidence,
     priorArtifactCount: priorArtifacts.length,
     desktopActionRequest,
@@ -1888,6 +2261,7 @@ function analyzeArtifactFinal(event) {
     unfinishedArtifactPromise,
     unresolvedFinalVerificationBlock,
     shouldReviseHeartbeat,
+    shouldReviseEmptyFinal,
     shouldReviseArtifact,
     shouldReviseDesktopAction,
     shouldRevise,
@@ -1910,6 +2284,22 @@ function buildRevision(analysis) {
           '最新用户消息是内部心跳 `[OpenClaw heartbeat poll]`，不是用户的新任务。',
           '不要继续历史任务、不要评价上一轮、不要承诺补做，也不要输出任何产物说明。',
           '本轮最终回复必须只包含：HEARTBEAT_OK',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.shouldReviseEmptyFinal) {
+    return {
+      action: 'revise',
+      reason: 'UClaw run ended without a user-visible final response.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:empty-final`,
+        maxAttempts: 1,
+        instruction: [
+          '上一轮已经结束，但没有生成任何用户可见的最终回复。现在只补写最终交付，不要沉默。',
+          '优先依据本轮已有工具结果、产物和验证事实作答；不要重复执行已经成功的外部动作、文件生成、图片生成或视频生成。',
+          '如果已有证据足够，直接用简体中文给出结论、完成项和必要限制。',
+          '如果已有工具结果不足或失败，明确说明实际尝试、失败点和下一步，不要假装完成。',
         ].join('\n'),
       },
     };
@@ -2376,6 +2766,7 @@ function emitToolResultRuntimeEvents(api, event, ctx) {
 function registerToolResultMiddleware(api) {
   if (typeof api.registerAgentToolResultMiddleware !== 'function') return;
   api.registerAgentToolResultMiddleware((event, ctx) => {
+    recordToolEvidence(event, ctx);
     emitToolResultRuntimeEvents(api, event, ctx);
     const summarized = summarizeToolResultForTranscript(event);
     if (!summarized) return undefined;
@@ -2452,7 +2843,7 @@ function registerArtifactGuard(api) {
       description: 'Ensure UClaw artifact delivery, media-intent gating, and Chinese language rules are present before workspace context is ready.',
       timeoutMs: MEDIA_INTENT_GATE_TIMEOUT_MS + 2_000,
     });
-    registerLifecycleHook(api, 'before_tool_call', (event, ctx) => {
+    registerLifecycleHook(api, 'before_tool_call', async (event, ctx) => {
       const screenshotRewrite = rewriteExecScreenshotParams(event);
       const effectiveEvent = screenshotRewrite
         ? {
@@ -2491,10 +2882,33 @@ function registerArtifactGuard(api) {
         }
       }
 
-      emitToolCallProgress(api, effectiveEvent, ctx);
-      if (screenshotRewrite) {
+      const staging = await stageMediaToolInputs(effectiveEvent, ctx);
+      if (staging.blockReason) {
+        logDiagnostic('media-input-staging-failed', {
+          eventId: eventId(event, ctx),
+          toolName: decision.toolName,
+          errorCode: staging.errorCode,
+        });
         return {
-          params: screenshotRewrite.params,
+          block: true,
+          blockReason: staging.blockReason,
+          reason: staging.blockReason,
+        };
+      }
+      if (staging.stagedCount > 0) {
+        effectiveEvent.params = staging.params;
+        logDiagnostic('media-input-staged', {
+          eventId: eventId(event, ctx),
+          toolName: decision.toolName,
+          stagedCount: staging.stagedCount,
+          stagedParamKeys: staging.stagedParamKeys,
+        });
+      }
+
+      emitToolCallProgress(api, effectiveEvent, ctx);
+      if (screenshotRewrite || staging.stagedCount > 0) {
+        return {
+          params: effectiveEvent.params,
         };
       }
       return undefined;
@@ -2504,16 +2918,21 @@ function registerArtifactGuard(api) {
       priority: 100,
     });
     registerLifecycleHook(api, 'before_agent_finalize', (event, ctx) => {
-      const analysis = analyzeArtifactFinal(event);
+      const analysis = analyzeArtifactFinal(event, ctx);
       logDiagnostic('finalize-check', {
         eventId: eventId(event, ctx),
         userTextChars: analysis.userText.length,
         finalTextChars: analysis.finalText.length,
+        emptyFinal: analysis.emptyFinal,
         heartbeatPoll: analysis.heartbeatPoll,
         heartbeatOk: analysis.heartbeatOk,
         artifactRequest: analysis.artifactRequest,
         artifactRevisionFeedback: analysis.artifactRevisionFeedback,
         artifactRevisionRequest: analysis.artifactRevisionRequest,
+        enforceCurrentRunToolEvidence: analysis.enforceCurrentRunToolEvidence,
+        currentRunToolAttemptCount: analysis.currentRunToolAttemptCount,
+        currentRunFailedToolCount: analysis.currentRunFailedToolCount,
+        currentRunSuccessfulArtifactCount: analysis.currentRunSuccessfulArtifactCount,
         priorArtifactEvidence: analysis.priorArtifactEvidence,
         priorArtifactCount: analysis.priorArtifactCount,
         compositeRequiredArtifactCount: analysis.compositeRequiredArtifactCount,
@@ -2540,6 +2959,7 @@ function registerArtifactGuard(api) {
         desktopActionRequest: analysis.desktopActionRequest,
         desktopActionEvidence: analysis.desktopActionEvidence,
         shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
+        shouldReviseEmptyFinal: analysis.shouldReviseEmptyFinal,
         shouldRevise: analysis.shouldRevise,
       });
       emitRuntimeContractEvents(api, event, analysis);
@@ -2555,7 +2975,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.6',
+  version: '0.1.7',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -2576,6 +2996,8 @@ export const __test = {
   emitRuntimeEvent,
   rewriteTmpScreenshotMediaPaths,
   rewriteExecScreenshotParams,
+  stageMediaToolInputs,
+  recordToolEvidence,
   buildLocalMediaIntentPlan,
   isInternalTranscriptMessage,
   classifyInternalTranscriptMessage,

@@ -1,7 +1,7 @@
 /**
  * Inline workspace browser body — left tree + right preview.
  *
- * Strictly scoped to the current agent's `agent.workspace` directory.
+ * Scoped to the current session project cwd, falling back to the Agent workspace.
  * Used by `ArtifactPanel`'s browser tab (split-pane on the chat page).
  */
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
@@ -46,6 +46,7 @@ const RICH_PREVIEW_MAX_BYTES = 50 * 1024 * 1024;
 
 export interface WorkspaceBrowserBodyProps {
   agent: AgentSummary | null;
+  workspaceRoot?: string;
   /** Used to mark "Added this run" badges on the tree. */
   runStartedAt?: number | null;
   /** Bumping this number triggers a tree reload (e.g. after AI run idles). */
@@ -75,6 +76,7 @@ type FileState =
 
 export function WorkspaceBrowserBody({
   agent,
+  workspaceRoot,
   runStartedAt,
   refreshSignal,
   compact = false,
@@ -89,17 +91,17 @@ export function WorkspaceBrowserBody({
   const [refreshTick, setRefreshTick] = useState(0);
   const [showHidden, setShowHidden] = useState(false);
 
-  const workspace = agent?.workspace ?? '';
+  const workspace = workspaceRoot?.trim() || agent?.workspace || '';
 
   const reload = useCallback(() => setRefreshTick((v) => v + 1), []);
 
-  // Reset selection when the agent changes.
+  // Reset selection when the Agent or current session project changes.
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect -- intentional reset on agent switch */
     setSelectedRel(null);
     setFileState({ status: 'idle' });
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [agent?.id]);
+  }, [agent?.id, workspace]);
 
   useEffect(() => {
     if (!workspace) return;

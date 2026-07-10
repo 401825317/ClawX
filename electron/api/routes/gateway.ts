@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../../shared/chat-timeouts';
-import { isArtifactCreationRequest } from '../../../shared/artifact-intent';
+import { isArtifactCapabilityQuestion, isArtifactCreationRequest } from '../../../shared/artifact-intent';
 import { PORTS } from '../../utils/config';
 import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-device-pairing';
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
@@ -23,6 +23,7 @@ type ChatSendRpcParams = {
   message: string;
   deliver: boolean;
   idempotencyKey: string;
+  thinking?: string;
   attachments?: Array<{ content: string; mimeType: string; fileName: string }>;
 };
 
@@ -40,6 +41,11 @@ const chatAbortSettleUntil = new Map<string, number>();
 const chatAbortSessionVersions = new Map<string, number>();
 const inFlightChatSendByIdempotencyKey = new Map<string, Promise<{ runId?: string }>>();
 const CJK_RE = /[\u3400-\u9fff]/u;
+const SIMPLE_GREETING_RE = /^(?:hi|hello|hey|yo|嗨|哈喽|你好|您好|在吗|在不在|你在吗|早上好|早|下午好|晚上好|hi[,， ]*codex|hello[,， ]*codex)[.!?。！？~～\s]*$/iu;
+const SIMPLE_IDENTITY_RE = /^(?:你是谁|你是啥|你是什么|介绍一下你自己|who are you|what are you)[?？.!。！\s]*$/iu;
+const SIMPLE_CAPABILITY_RE = /^(?:你|uclaw|clawx|codex|助手|这个)?\s*(?:能|可以|会|支持|能不能|可不可以|会不会).{0,24}(?:做什么|干什么|帮我什么|帮忙做什么|有什么(?:能力|功能|用)|有哪些(?:能力|功能)|什么(?:能力|功能)|what can you do|what do you do)[?？.!。！\s]*$/iu;
+const LIGHTWEIGHT_CHAT_MAX_CHARS = 80;
+const CHAT_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'adaptive']);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,6 +61,39 @@ function buildChatSendDiagnostic(message: string, options: { media: boolean; med
     mediaCount: options.mediaCount ?? 0,
     deliver: options.deliver ?? false,
   };
+}
+
+function normalizeThinkingLevelOverride(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  return CHAT_THINKING_LEVELS.has(normalized) ? normalized : undefined;
+}
+
+function resolveChatSendThinkingOverride(message: string, explicitThinking?: unknown): { thinking: string; reason: string } | null {
+  const explicit = normalizeThinkingLevelOverride(explicitThinking);
+  if (explicit) {
+    return { thinking: explicit, reason: 'explicit' };
+  }
+
+  const normalized = String(message ?? '').replace(/\s+/gu, ' ').trim();
+  if (!normalized || Array.from(normalized).length > LIGHTWEIGHT_CHAT_MAX_CHARS) {
+    return null;
+  }
+  if (isArtifactCreationRequest(normalized)) {
+    return null;
+  }
+
+  if (SIMPLE_GREETING_RE.test(normalized)) {
+    return { thinking: 'off', reason: 'simple_greeting' };
+  }
+  if (SIMPLE_IDENTITY_RE.test(normalized)) {
+    return { thinking: 'off', reason: 'simple_identity' };
+  }
+  if (SIMPLE_CAPABILITY_RE.test(normalized) || isArtifactCapabilityQuestion(normalized)) {
+    return { thinking: 'off', reason: 'capability_question' };
+  }
+
+  return null;
 }
 
 function isChatSessionInitializationConflict(error: unknown): boolean {
@@ -315,27 +354,45 @@ export async function handleGatewayRoutes(
         message: string;
         deliver?: boolean;
         idempotencyKey: string;
+        thinking?: string | null;
       }>(req);
       sessionKeyForLog = body.sessionKey;
       const sendDiagnostic = buildChatSendDiagnostic(body.message, {
         media: false,
         deliver: body.deliver ?? false,
       });
+      const thinkingOverride = resolveChatSendThinkingOverride(body.message, body.thinking);
       logger.info('[diagnostic] chat.send.request', {
         sessionKey: sessionKeyForLog,
         ...sendDiagnostic,
+        ...(thinkingOverride
+          ? {
+              thinkingOverride: thinkingOverride.thinking,
+              thinkingOverrideReason: thinkingOverride.reason,
+            }
+          : {}),
       });
-      const result = await runSerializedChatSendRpc(ctx, {
+      const rpcParams: ChatSendRpcParams = {
         sessionKey: body.sessionKey,
         message: body.message,
         deliver: body.deliver ?? false,
         idempotencyKey: body.idempotencyKey,
-      });
+      };
+      if (thinkingOverride) {
+        rpcParams.thinking = thinkingOverride.thinking;
+      }
+      const result = await runSerializedChatSendRpc(ctx, rpcParams);
       logger.info('[metric] chat.send.rpc', {
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,
         runId: result.runId ?? null,
         ...sendDiagnostic,
+        ...(thinkingOverride
+          ? {
+              thinkingOverride: thinkingOverride.thinking,
+              thinkingOverrideReason: thinkingOverride.reason,
+            }
+          : {}),
       });
       sendJson(res, 200, { success: true, result });
     } catch (error) {
