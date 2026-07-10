@@ -107,6 +107,76 @@ describe('ClawX OpenAI image plugin request shape', () => {
     }
   }, 15_000);
 
+  it('logs sanitized upstream diagnostics for failed image responses', async () => {
+    const server = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          error: {
+            message: 'xAI upstream returned status 400',
+            type: 'invalid_request_error',
+            code: 'bad_request',
+            param: 'size',
+          },
+          debug: 'Authorization: Bearer sk-secret-test-token',
+        }));
+      });
+    });
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const plugin = await import('../../resources/openclaw-plugins/clawx-openai-image/index.mjs');
+      let provider: { generateImage: (req: Record<string, unknown>) => Promise<{ images: unknown[] }> } | undefined;
+      plugin.default.register({
+        registerImageGenerationProvider(nextProvider: typeof provider) {
+          provider = nextProvider;
+        },
+      });
+
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Test server failed to bind to a port');
+
+      await expect(provider?.generateImage({
+        provider: 'clawx-openai-image',
+        model: 'gpt-image-2',
+        prompt: 'paint a fox',
+        cfg: {
+          models: {
+            providers: {
+              'clawx-openai-image': {
+                apiKey: 'test-key',
+                baseUrl: `http://127.0.0.1:${address.port}/v1`,
+              },
+            },
+          },
+        },
+        agentDir: '/tmp/clawx-openai-image-test-agent',
+        ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+      })).rejects.toThrow('UClaw OpenAI image generation failed: xAI upstream returned status 400');
+
+      const responseErrorLine = consoleErrorSpy.mock.calls
+        .map((call) => String(call[0] || ''))
+        .find((line) => line.includes('[clawx-openai-image] response_error '));
+      expect(responseErrorLine).toBeTruthy();
+      const details = JSON.parse(String(responseErrorLine).replace(/^\[clawx-openai-image\] response_error /u, ''));
+      expect(details).toMatchObject({
+        status: 400,
+        upstreamMessage: 'xAI upstream returned status 400',
+        upstreamType: 'invalid_request_error',
+        upstreamCode: 'bad_request',
+        upstreamParam: 'size',
+      });
+      expect(details.responseBody).toContain('xAI upstream returned status 400');
+      expect(details.responseBody).toContain('Authorization: [REDACTED]');
+      expect(details.responseBody).not.toContain('sk-secret-test-token');
+    } finally {
+      consoleErrorSpy.mockRestore();
+      server.close();
+    }
+  }, 15_000);
+
   it('uses bundled undici fetch with the matching dispatcher implementation', async () => {
     const pluginSource = await readFile(
       join(repoRoot, 'resources/openclaw-plugins/clawx-openai-image/index.mjs'),

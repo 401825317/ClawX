@@ -10,6 +10,7 @@ const DEFAULT_SIZE = '1024x1024';
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MIME_TYPE = 'image/png';
 const MAX_INPUT_IMAGES = 5;
+const MAX_UPSTREAM_DIAGNOSTIC_CHARS = 1000;
 const imageFetchDispatcher = new Agent({
   headersTimeout: DEFAULT_TIMEOUT_MS,
   bodyTimeout: DEFAULT_TIMEOUT_MS,
@@ -88,6 +89,26 @@ function durationSince(startedAt) {
 function sanitizeErrorMessage(error) {
   if (error instanceof Error) return error.message;
   return String(error || 'unknown error');
+}
+
+function sanitizeDiagnosticText(value, maxChars = MAX_UPSTREAM_DIAGNOSTIC_CHARS) {
+  const text = String(value || '')
+    .replace(/(authorization["'\s:=]+)(?:bearer\s+)?[^"',\s}]+/giu, '$1[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/giu, 'Bearer [REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/giu, 'sk-[REDACTED]')
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|password|secret|token)["'\s:=]+)([^"',\s}]+)/giu,
+      '$1[REDACTED]',
+    )
+    .replace(/https?:\/\/[^\s"']*(?:access_token|api_key|token|signature|x-amz-signature)[^\s"']*/giu, '[REDACTED_URL]');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...[truncated ${text.length - maxChars} chars]`;
+}
+
+function optionalDiagnosticText(value, maxChars) {
+  if (value === undefined || value === null) return null;
+  const text = sanitizeDiagnosticText(value, maxChars).trim();
+  return text || null;
 }
 
 function logImageTiming(event, details = {}) {
@@ -285,17 +306,38 @@ async function parseImagesResponse(payload, context = {}) {
   return parsedImages;
 }
 
-async function readJsonResponse(response, failureLabel) {
+function logUpstreamResponseError(response, text, payload, context = {}) {
+  const errorPayload = payload && typeof payload === 'object' ? payload.error : null;
+  const errorRecord = errorPayload && typeof errorPayload === 'object' ? errorPayload : {};
+  logImageTiming('response_error', {
+    requestId: context.requestId || null,
+    mode: context.mode || null,
+    status: response.status,
+    statusText: response.statusText || null,
+    upstreamMessage: optionalDiagnosticText(errorRecord.message || payload?.message, 500),
+    upstreamType: optionalDiagnosticText(errorRecord.type || payload?.type, 160),
+    upstreamCode: optionalDiagnosticText(errorRecord.code || payload?.code, 160),
+    upstreamParam: optionalDiagnosticText(errorRecord.param || payload?.param, 160),
+    responseBody: optionalDiagnosticText(text, MAX_UPSTREAM_DIAGNOSTIC_CHARS),
+  });
+}
+
+async function readJsonResponse(response, failureLabel, context = {}) {
   const text = await response.text();
   let payload = null;
   if (text.trim()) {
     try {
       payload = JSON.parse(text);
     } catch {
+      if (!response.ok) {
+        logUpstreamResponseError(response, text, null, context);
+        throw new Error(`${failureLabel}: HTTP ${response.status}`);
+      }
       throw new Error(`${failureLabel}: invalid JSON response`);
     }
   }
   if (!response.ok) {
+    logUpstreamResponseError(response, text, payload, context);
     const message = payload?.error?.message || payload?.message || text || `HTTP ${response.status}`;
     throw new Error(`${failureLabel}: ${message}`);
   }
@@ -467,6 +509,7 @@ function buildProvider() {
         const payload = await readJsonResponse(
           response,
           mode === 'edit' ? 'UClaw OpenAI image edit failed' : 'UClaw OpenAI image generation failed',
+          { requestId, mode },
         );
         logImageTiming('response_json_parsed', {
           requestId,

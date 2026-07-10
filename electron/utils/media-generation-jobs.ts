@@ -48,7 +48,10 @@ const MAX_WORKER_OUTPUT_CHARS = 4096;
 const MAX_WORKER_LOG_CHARS = 1024;
 const MAX_JOB_ERROR_CHARS = 12_000;
 const MAX_JOB_PROGRESS_EVENTS = 80;
-const USER_FACING_UPSTREAM_MEDIA_ERROR = '上游渠道报错，生成失败了，请稍后重试。';
+const USER_FACING_UPSTREAM_MEDIA_ERROR: Record<MediaGenerationKind, string> = {
+  image: '图片生成暂时没成功，请稍后再试。',
+  video: '视频生成暂时没成功，请稍后再试。',
+};
 const MEDIA_GENERATION_CONCURRENCY: Record<MediaGenerationKind, number> = {
   image: 5,
   video: 5,
@@ -792,7 +795,7 @@ function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
   job.status = 'failed';
   job.updatedAt = now;
   job.completedAt = now;
-  job.error = normalizeUserFacingMediaGenerationError(error);
+  job.error = normalizeUserFacingMediaGenerationError(job.kind, error);
   job.deliveryStatus = 'skipped';
   job.deliveryError = undefined;
   job.recoverable = false;
@@ -923,6 +926,8 @@ function truncateText(text: string, maxChars: number): string {
 function isUpstreamMediaGenerationError(error: string): boolean {
   const normalized = error.toLowerCase();
   return normalized.includes('providerhttperror')
+    || normalized.includes('uclaw openai image generation failed')
+    || normalized.includes('uclaw openai image edit failed')
     || normalized.includes('upstream')
     || normalized.includes('rate_limit')
     || normalized.includes('rate limit')
@@ -930,9 +935,9 @@ function isUpstreamMediaGenerationError(error: string): boolean {
     || normalized.includes('http 5');
 }
 
-function normalizeUserFacingMediaGenerationError(error: string): string {
+function normalizeUserFacingMediaGenerationError(kind: MediaGenerationKind, error: string): string {
   if (isUpstreamMediaGenerationError(error)) {
-    return USER_FACING_UPSTREAM_MEDIA_ERROR;
+    return USER_FACING_UPSTREAM_MEDIA_ERROR[kind];
   }
   return truncateText(error, MAX_JOB_ERROR_CHARS);
 }

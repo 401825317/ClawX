@@ -296,7 +296,7 @@ describe('media generation jobs', () => {
     });
 
     const failed = await waitForJobStatus(queued.id, 'failed') as { error?: string };
-    expect(failed.error).toBe('上游渠道报错，生成失败了，请稍后重试。');
+    expect(failed.error).toBe('图片生成暂时没成功，请稍后再试。');
     expect(failed.error).not.toContain('ProviderHttpError');
     expect(failed.error).not.toContain('stack');
   });
