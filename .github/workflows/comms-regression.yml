@@ -14,7 +14,6 @@ on:
       - 'electron/main/ipc-handlers.ts'
       - 'electron/utils/logger.ts'
       - 'scripts/comms/**'
-      - 'tests/unit/gateway-events.test.ts'
       - '.github/workflows/comms-regression.yml'
 
 jobs:

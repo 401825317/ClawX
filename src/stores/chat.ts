@@ -238,6 +238,26 @@ type MediaIntentRecentMessage = {
   images?: MediaIntentImageRef[];
 };
 
+type MediaIntentArtifactRef = {
+  id?: string;
+  kind?: string;
+  title?: string;
+  filePath?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  verificationStatus?: 'passed' | 'failed' | 'blocked' | 'skipped';
+};
+
+type MediaIntentArtifactContext = {
+  runId?: string;
+  kind?: MediaIntentCompositeTaskKind;
+  status?: 'planned' | 'queued' | 'running' | 'finalizing' | 'completed' | 'partial' | 'blocked' | 'failed' | 'error' | 'cancelled' | 'aborted';
+  objective?: string;
+  deliveryStatus?: 'pending' | 'writing' | 'succeeded' | 'failed' | 'skipped' | 'missing';
+  artifactRefs?: Array<MediaIntentArtifactRef | string>;
+};
+
 type MediaIntentPlan = {
   action?: MediaIntentAction;
   source?: 'planner' | 'fallback';
@@ -249,6 +269,7 @@ type MediaIntentPlan = {
   prompt?: string;
   imageSize?: string;
   imageQuality?: 'low' | 'medium' | 'high';
+  requestedImageCount?: number;
   videoMode?: 'text_to_video' | 'image_to_video' | 'edit_image_then_video';
   videoSize?: string;
   videoDurationSeconds?: number;
@@ -256,6 +277,7 @@ type MediaIntentPlan = {
   imageEditPrompt?: string;
   clarification?: string;
   compositeTasks?: MediaIntentCompositeTask[];
+  artifactContinuationAction?: 'retry_delivery' | 'resume_task' | 'inspect_result' | 'none';
 };
 
 type MediaIntentPlanResponse = {
@@ -380,6 +402,148 @@ function buildRecentMessagesForMediaPlanner(messages: RawMessage[]): MediaIntent
   });
 }
 
+function mediaIntentArtifactKind(kind: string | undefined): MediaIntentCompositeTaskKind | undefined {
+  if (kind === 'presentation' || kind === 'spreadsheet' || kind === 'video_generate'
+    || kind === 'image_generate' || kind === 'image_edit' || kind === 'mini_program'
+    || kind === 'copywriting') return kind;
+  if (kind === 'document' || kind === 'pdf') return 'copywriting';
+  if (kind === 'webpage' || kind === 'code' || kind === 'archive') return 'mini_program';
+  if (kind === 'video') return 'video_generate';
+  if (kind === 'image') return 'image_generate';
+  return undefined;
+}
+
+function verificationStatusForArtifact(
+  verifications: CompositeRunRecord['verifications'],
+  artifactId: string,
+): MediaIntentArtifactRef['verificationStatus'] {
+  const verification = [...verifications].reverse().find((item) => item.artifactId === artifactId);
+  if (!verification) return undefined;
+  return verification.status === 'passed' || verification.status === 'failed'
+    || verification.status === 'blocked' || verification.status === 'skipped'
+    ? verification.status
+    : undefined;
+}
+
+function compositeRunArtifactContext(run: CompositeRunRecord): MediaIntentArtifactContext {
+  const taskKinds = [...new Set(run.tasks.map((task) => task.kind))];
+  return {
+    runId: run.runId,
+    ...(taskKinds.length === 1 ? { kind: taskKinds[0] } : {}),
+    status: run.status,
+    objective: run.prompt,
+    deliveryStatus: run.delivery.status,
+    artifactRefs: run.artifacts.map((artifact) => ({
+      id: artifact.id,
+      kind: artifact.kind,
+      title: artifact.title,
+      filePath: artifact.filePath,
+      url: artifact.url,
+      mimeType: artifact.mimeType,
+      sizeBytes: artifact.sizeBytes,
+      verificationStatus: verificationStatusForArtifact(run.verifications, artifact.id),
+    })),
+  };
+}
+
+function fallbackRuntimeArtifactContext(
+  sessionKey: string,
+  runtimeRuns: ChatState['runtimeRuns'],
+  messages: RawMessage[],
+): MediaIntentArtifactContext | undefined {
+  const manifestByRunId = new Map(
+    messages
+      .map((message) => message.compositeArtifactManifest)
+      .filter((manifest): manifest is NonNullable<RawMessage['compositeArtifactManifest']> => Boolean(manifest?.runId))
+      .map((manifest) => [manifest.runId, manifest]),
+  );
+  const candidates = Object.values(runtimeRuns)
+    .filter((run) => run.sessionKey === sessionKey)
+    .filter((run) => (
+      (run.artifacts?.length ?? 0) > 0
+      || (run.planSteps ?? []).some((step) => step.requiresArtifact)
+      || (run.checkpoints ?? []).some((checkpoint) => checkpoint.recoverable)
+    ))
+    .sort((left, right) => (
+      (right.lastEventAt ?? right.endedAt ?? right.startedAt ?? 0)
+      - (left.lastEventAt ?? left.endedAt ?? left.startedAt ?? 0)
+    ));
+  const run = candidates[0];
+  if (!run) return undefined;
+
+  const manifest = manifestByRunId.get(run.runId);
+  const manifestKinds = [...new Set((manifest?.tasks ?? [])
+    .map((task) => mediaIntentArtifactKind(task.kind))
+    .filter((kind): kind is MediaIntentCompositeTaskKind => Boolean(kind)))];
+  const artifactKinds = [...new Set((run.artifacts ?? [])
+    .map((artifact) => mediaIntentArtifactKind(artifact.kind))
+    .filter((kind): kind is MediaIntentCompositeTaskKind => Boolean(kind)))];
+  const kinds = manifestKinds.length > 0 ? manifestKinds : artifactKinds;
+  const deliveryFailed = (run.checkpoints ?? []).some((checkpoint) => (
+    /delivery|交付|会话/u.test(`${checkpoint.id} ${checkpoint.summary} ${checkpoint.reason ?? ''}`)
+    && checkpoint.recoverable
+  ));
+  const compositeOwned = run.events.some((event) => event.producer === 'composite-coordinator');
+  const deliveryStatus: MediaIntentArtifactContext['deliveryStatus'] = manifest
+    ? 'succeeded'
+    : deliveryFailed
+      ? 'failed'
+      : run.status === 'running'
+        ? 'pending'
+        : run.status === 'aborted'
+          ? 'skipped'
+          : run.status === 'completed' && !compositeOwned
+            ? 'succeeded'
+            : 'missing';
+  return {
+    runId: run.runId,
+    ...(kinds.length === 1 ? { kind: kinds[0] } : {}),
+    status: run.status,
+    objective: run.objective,
+    deliveryStatus,
+    artifactRefs: (run.artifacts ?? []).map((artifact) => {
+      const verification = [...(run.verifications ?? [])].reverse().find((item) => item.artifactId === artifact.id);
+      return {
+        id: artifact.id,
+        kind: artifact.kind,
+        title: artifact.title,
+        filePath: artifact.filePath,
+        url: artifact.url,
+        mimeType: artifact.mimeType,
+        sizeBytes: artifact.sizeBytes,
+        verificationStatus: verification?.status === 'passed' || verification?.status === 'failed'
+          || verification?.status === 'blocked' || verification?.status === 'skipped'
+          ? verification.status
+          : undefined,
+      };
+    }),
+  };
+}
+
+async function resolveMediaIntentArtifactContext(params: {
+  sessionKey: string;
+  runtimeRuns: ChatState['runtimeRuns'];
+  messages: RawMessage[];
+}): Promise<MediaIntentArtifactContext | undefined> {
+  const fallback = fallbackRuntimeArtifactContext(params.sessionKey, params.runtimeRuns, params.messages);
+  const fallbackRun = fallback?.runId ? params.runtimeRuns[fallback.runId] : undefined;
+  const fallbackUpdatedAt = fallbackRun?.lastEventAt ?? fallbackRun?.endedAt ?? fallbackRun?.startedAt ?? 0;
+  try {
+    const response = await hostApiFetch<CompositeRunApiResponse>(
+      `/api/composite-runs?sessionKey=${encodeURIComponent(params.sessionKey)}`,
+    );
+    const latest = (response.runs ?? [])
+      .filter((run) => run.tasks.length > 0)
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+    if (latest && (latest.runId === fallback?.runId || latest.updatedAt >= fallbackUpdatedAt)) {
+      return compositeRunArtifactContext(latest);
+    }
+  } catch (error) {
+    console.warn('[media-intent] failed to load structured artifact context:', error);
+  }
+  return fallback;
+}
+
 function planSourceImageInputs(plan: MediaIntentPlan): PendingImageInput[] {
   return (plan.sourceImages ?? [])
     .filter((image) => typeof image.filePath === 'string' && image.filePath.trim())
@@ -492,15 +656,6 @@ function strongestSize(sizes: string[] | undefined, fallback: string): string {
   ), candidates[0]!);
 }
 
-function strongestQuality(qualities: string[] | undefined, fallback: string): string {
-  const rank: Record<string, number> = { low: 1, medium: 2, high: 3 };
-  const candidates = (qualities ?? []).filter(Boolean);
-  if (candidates.length === 0) return fallback;
-  return candidates.reduce((best, current) => (
-    (rank[current] ?? 0) > (rank[best] ?? 0) ? current : best
-  ), candidates[0]!);
-}
-
 function strongestDuration(durations: number[] | undefined, fallback: number): number {
   const candidates = (durations ?? []).filter((value) => Number.isFinite(value) && value > 0);
   if (candidates.length === 0) return fallback;
@@ -513,6 +668,17 @@ function normalizeOptionValue<T extends string | number>(
   fallback: T,
 ): T {
   return requested !== undefined && (allowed ?? []).includes(requested) ? requested : fallback;
+}
+
+function preferredOptionValue<T extends string | number>(
+  requested: T | undefined,
+  allowed: T[] | undefined,
+  fallback: T,
+): T {
+  const options = allowed ?? [];
+  if (requested !== undefined && options.includes(requested)) return requested;
+  if (options.includes(fallback)) return fallback;
+  return options[0] ?? fallback;
 }
 
 function parseExplicitDimension(prompt: string): string | undefined {
@@ -579,12 +745,12 @@ function parseVideoDurationHint(prompt: string, allowedDurations: number[], fall
 function resolveDefaultChatImageOptions(): ChatImageSendOptions {
   const options = useClientConfigStore.getState().modelOptions.image;
   const model = options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const size = strongestSize(model?.sizes, model?.defaultSize ?? options.defaultSize);
-  const quality = strongestQuality(model?.qualities, model?.defaultQuality ?? options.defaultQuality);
+  const size = preferredOptionValue(model?.defaultSize ?? options.defaultSize, model?.sizes, options.defaultSize);
+  const quality = preferredOptionValue(model?.defaultQuality ?? options.defaultQuality, model?.qualities, options.defaultQuality);
   return {
     model: model?.id ?? options.defaultModel,
-    size: model?.sizes.includes(size) ? size : options.defaultSize,
-    quality: model?.qualities.includes(quality) ? quality : options.defaultQuality,
+    size,
+    quality,
   };
 }
 
@@ -619,6 +785,24 @@ function resolveChatImageOptions(prompt: string, plan: MediaIntentPlan, override
   };
 }
 
+function resolveRequestedImageCount(plan: MediaIntentPlan): number {
+  const count = typeof plan.requestedImageCount === 'number' && Number.isFinite(plan.requestedImageCount)
+    ? Math.floor(plan.requestedImageCount)
+    : 1;
+  return Math.max(1, Math.min(MAX_IMAGE_GENERATION_BATCH_COUNT, count));
+}
+
+function buildImageBatchPrompt(prompt: string, batchIndex: number, batchTotal: number): string {
+  const trimmed = prompt.trim();
+  if (batchTotal <= 1) return trimmed;
+  return [
+    `用户要求生成 ${batchTotal} 张图片。请完成第 ${batchIndex}/${batchTotal} 张。`,
+    '本次只生成 1 张独立图片，不要拼图、网格或把多张图合在一张里；同一批次内构图和细节要有自然差异。',
+    '',
+    `原始要求：${trimmed}`,
+  ].join('\n');
+}
+
 function resolveChatVideoOptions(
   prompt: string,
   plan: MediaIntentPlan,
@@ -647,6 +831,7 @@ async function planMediaIntentForSend(params: {
   explicitImages: PendingImageInput[];
   candidateImages: PendingImageInput[];
   recentMessages: RawMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 }): Promise<MediaIntentPlan> {
   const response = await hostApiFetch<MediaIntentPlanResponse>(
     '/api/media/intent-plan',
@@ -658,6 +843,7 @@ async function planMediaIntentForSend(params: {
         explicitImages: params.explicitImages.map(pendingImageToIntentRef),
         candidateImages: params.candidateImages.map(pendingImageToIntentRef),
         recentMessages: buildRecentMessagesForMediaPlanner(params.recentMessages),
+        artifactContext: params.artifactContext,
       }),
     },
   );
@@ -1652,6 +1838,7 @@ type MediaGenerationSendResponse = {
   job?: MediaGenerationJobSnapshot;
 };
 
+const MAX_IMAGE_GENERATION_BATCH_COUNT = 10;
 const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
 const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
 const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
@@ -2071,6 +2258,89 @@ async function startCompositeRunInMain(params: {
   settleCompositeRunLifecycle(params.set, params.get, completed);
 }
 
+async function retryCompositeDeliveryInMain(params: {
+  set: ChatSet;
+  get: ChatGet;
+  runId: string;
+  sessionKey: string;
+  sendGeneration: number;
+}): Promise<boolean> {
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  const response = await hostApiFetch<CompositeRunApiResponse>(
+    `/api/composite-runs/${encodeURIComponent(params.runId)}/retry`,
+    { method: 'POST', body: '{}' },
+  );
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  if (response.outcome !== 'retry_started' || !response.run) return false;
+
+  applyCompositeRunSnapshot(params.set, params.get, response.run);
+  commitSessionRunState(params.set, params.get, params.sessionKey, {
+    sending: true,
+    activeRunId: params.runId,
+    pendingFinal: true,
+  });
+  const completed = await waitForCompositeRun({
+    set: params.set,
+    get: params.get,
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    isCancelled: () => !activeSendGenerationMatches(params.sessionKey, params.sendGeneration),
+  });
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  settleCompositeRunLifecycle(params.set, params.get, completed);
+  return true;
+}
+
+async function inspectCompositeRunResultInMain(params: {
+  set: ChatSet;
+  get: ChatGet;
+  runId: string;
+  sessionKey: string;
+  sendGeneration: number;
+}): Promise<boolean> {
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  const response = await hostApiFetch<CompositeRunApiResponse>(
+    `/api/composite-runs/${encodeURIComponent(params.runId)}`,
+  );
+  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
+  if (!response.success || !response.run || response.run.sessionKey !== params.sessionKey) return false;
+
+  const run = response.run;
+  const attachedFiles = compositeRunAttachedFiles(run);
+  if (run.delivery.status !== 'succeeded' || attachedFiles.length === 0) return false;
+
+  params.set((state) => ({
+    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, run.runtimeEvents ?? []),
+  }));
+  appendLocalMessageForSession(params.set, params.get, params.sessionKey, {
+    role: 'assistant',
+    content: compositeRunDeliveryMessage(run),
+    timestamp: Date.now() / 1000,
+    id: `composite-inspect:${run.runId}:${crypto.randomUUID()}`,
+    localArtifactResultKind: 'composite',
+    ...(run.manifest ? { compositeArtifactManifest: run.manifest } : {}),
+    _attachedFiles: attachedFiles,
+  });
+  commitSessionRunState(params.set, params.get, params.sessionKey, {
+    sending: false,
+    pendingImageGenerationLocal: false,
+    pendingVideoGenerationLocal: false,
+    activeRunId: null,
+    streamingText: '',
+    streamingMessage: null,
+    streamingTools: [],
+    pendingFinal: false,
+    lastUserMessageAt: null,
+    pendingToolImages: [],
+  });
+  if (params.get().currentSessionKey === params.sessionKey) {
+    params.set({ runError: null });
+  }
+  markSessionRunIdle(params.sessionKey);
+  clearPendingRuntimeIntent(params.sessionKey);
+  return true;
+}
+
 async function resumeCompositeRunsForSession(
   set: ChatSet,
   get: ChatGet,
@@ -2450,6 +2720,7 @@ function applyMediaRuntimeSuccess(params: {
   completeRun?: boolean;
 }): { decision?: string; artifacts: ChatRuntimeArtifact[] } {
   const ts = Date.now();
+  const completedAt = optionalToMs(params.job?.completedAt) ?? ts;
   const attachedFiles = attachedFilesFromMediaGenerationJob(params.job, params.kind);
   let artifacts: ChatRuntimeArtifact[] = [];
   let decision: string | undefined;
@@ -2491,12 +2762,23 @@ function applyMediaRuntimeSuccess(params: {
     if (params.completeRun !== false) {
       runtimeRuns = applyRuntimeContractEvents(
         runtimeRuns,
-        buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
-          runId: params.runId,
-          sessionKey: params.sessionKey,
-          ts,
-          status: 'completed',
-        }),
+        [
+          ...buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
+            runId: params.runId,
+            sessionKey: params.sessionKey,
+            ts: completedAt,
+            status: 'completed',
+          }),
+          {
+            runId: params.runId,
+            sessionKey: params.sessionKey,
+            producer: 'media',
+            ts: completedAt,
+            type: 'run.ended' as const,
+            endedAt: completedAt,
+            status: 'completed' as const,
+          },
+        ],
       );
     }
     decision = runtimeRuns[params.runId]?.gateResult?.decision;
@@ -5412,6 +5694,7 @@ async function sendChatMessageViaHostApi(params: {
   message: string;
   deliver?: boolean;
   idempotencyKey: string;
+  thinking?: string | null;
 }): Promise<{ runId?: string }> {
   try {
     const response = await hostApiFetch<{
@@ -7883,6 +8166,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
+    const artifactContext = await resolveMediaIntentArtifactContext({
+      sessionKey: currentSessionKey,
+      runtimeRuns: get().runtimeRuns,
+      messages: currentMessages,
+    });
+    if (!sendGenerationIsCurrent()) return;
+
     let mediaPlan: MediaIntentPlan;
     try {
       mediaPlan = await planMediaIntentForSend({
@@ -7891,6 +8181,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         explicitImages: explicitPendingImages,
         candidateImages: candidateImageInputs,
         recentMessages: currentMessages,
+        artifactContext,
       });
     } catch (error) {
       if (!sendGenerationIsCurrent()) return;
@@ -7917,6 +8208,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clarification: mediaPlan.clarification || '你想编辑哪张图片？请上传或选中一张图片。',
       };
       plannedSourceImages = [];
+    }
+    if (mediaPlan.artifactContinuationAction === 'retry_delivery' && artifactContext?.runId) {
+      try {
+        const retried = await retryCompositeDeliveryInMain({
+          set,
+          get,
+          runId: artifactContext.runId,
+          sessionKey: currentSessionKey,
+          sendGeneration,
+        });
+        if (retried) {
+          clearSendGenerationIfCurrent();
+          return;
+        }
+      } catch (error) {
+        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
+        console.warn('[composite-run] structured delivery retry failed; falling back to planner route:', error);
+      }
+    }
+    if (mediaPlan.artifactContinuationAction === 'inspect_result' && artifactContext?.runId) {
+      try {
+        const inspected = await inspectCompositeRunResultInMain({
+          set,
+          get,
+          runId: artifactContext.runId,
+          sessionKey: currentSessionKey,
+          sendGeneration,
+        });
+        if (inspected) {
+          clearSendGenerationIfCurrent();
+          return;
+        }
+      } catch (error) {
+        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
+        console.warn('[composite-run] structured result inspection failed; falling back to planner route:', error);
+      }
     }
     const compositeTasks = hasCompositeTasks(mediaPlan) ? mediaPlan.compositeTasks : undefined;
     const runtimeMessage = compositeTasks
@@ -8141,75 +8468,87 @@ export const useChatStore = create<ChatState>((set, get) => ({
       commitSessionRunState(set, get, currentSessionKey, { activeRunId: mediaRunId });
       try {
         const effectiveImageOptions = resolveChatImageOptions(trimmed, mediaPlan, imageOptions);
-        const result = await hostApiFetch<MediaGenerationSendResponse>(
-          '/api/media/image-generation/chat-send',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionKey: currentSessionKey,
-              runId: mediaRunId,
-              originalPrompt: trimmed,
-              prompt: mediaPlan.prompt?.trim() || trimmed,
-              model: effectiveImageOptions.model,
-              size: effectiveImageOptions.size,
-              quality: effectiveImageOptions.quality,
-              inputImages: imageReferenceInputs.map((file) => ({
-                fileName: file.fileName,
-                mimeType: file.mimeType,
-                filePath: file.stagedPath,
-              })),
-              userInputImages: explicitPendingImages.map((file) => ({
-                fileName: file.fileName,
-                mimeType: file.mimeType,
-                filePath: file.stagedPath,
-              })),
-              userMessageTimestampMs: nowMs,
-            }),
-          },
-        );
-        if (!sendGenerationIsCurrent() && result.jobId) {
-          void cancelMediaGenerationJobs({ jobId: result.jobId }).catch((error) => {
-            console.warn('[media-generation] failed to cancel stale image job:', error);
+        const requestedImageCount = resolveRequestedImageCount(mediaPlan);
+        let finalDecision: string | undefined;
+        const basePrompt = mediaPlan.prompt?.trim() || trimmed;
+        for (let imageIndex = 0; imageIndex < requestedImageCount; imageIndex += 1) {
+          assertActiveSendGeneration(currentSessionKey, sendGeneration);
+          const batchIndex = imageIndex + 1;
+          const result = await hostApiFetch<MediaGenerationSendResponse>(
+            '/api/media/image-generation/chat-send',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                sessionKey: currentSessionKey,
+                runId: mediaRunId,
+                clientRequestId: `${mediaRunId}:image:${batchIndex}`,
+                originalPrompt: trimmed,
+                prompt: buildImageBatchPrompt(basePrompt, batchIndex, requestedImageCount),
+                model: effectiveImageOptions.model,
+                size: effectiveImageOptions.size,
+                quality: effectiveImageOptions.quality,
+                batchIndex,
+                batchTotal: requestedImageCount,
+                inputImages: imageReferenceInputs.map((file) => ({
+                  fileName: file.fileName,
+                  mimeType: file.mimeType,
+                  filePath: file.stagedPath,
+                })),
+                userInputImages: explicitPendingImages.map((file) => ({
+                  fileName: file.fileName,
+                  mimeType: file.mimeType,
+                  filePath: file.stagedPath,
+                })),
+                userMessageTimestampMs: nowMs,
+              }),
+            },
+          );
+          if (!sendGenerationIsCurrent() && result.jobId) {
+            void cancelMediaGenerationJobs({ jobId: result.jobId }).catch((error) => {
+              console.warn('[media-generation] failed to cancel stale image job:', error);
+            });
+          }
+          if (!sendGenerationIsCurrent()) return;
+          if (result.success === false) {
+            throw new Error(result.error || 'Failed to generate image');
+          }
+          let completedJob = result.job;
+          applyMediaRuntimeProgress({
+            runId: mediaRunId,
+            sessionKey: currentSessionKey,
+            job: completedJob,
+          });
+          if (result.jobId) {
+            completedJob = await waitForMediaGenerationJob(result.jobId, {
+              onProgress: (job) => applyMediaRuntimeProgress({
+                runId: mediaRunId,
+                sessionKey: currentSessionKey,
+                job,
+              }),
+              isCancelled: () => !sendGenerationIsCurrent(),
+            });
+          }
+          if (!sendGenerationIsCurrent()) return;
+          const { decision, artifacts } = applyMediaRuntimeSuccess({
+            runId: mediaRunId,
+            sessionKey: currentSessionKey,
+            job: completedJob,
+            kind: 'image',
+            completeRun: batchIndex === requestedImageCount,
+          });
+          finalDecision = decision;
+          if (artifacts.length > 0) {
+            scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
+          }
+          appendMediaGenerationResultMessage({
+            set,
+            get,
+            sessionKey: currentSessionKey,
+            job: completedJob,
+            kind: 'image',
           });
         }
-        if (!sendGenerationIsCurrent()) return;
-        if (result.success === false) {
-          throw new Error(result.error || 'Failed to generate image');
-        }
-        let completedJob = result.job;
-        applyMediaRuntimeProgress({
-          runId: mediaRunId,
-          sessionKey: currentSessionKey,
-          job: completedJob,
-        });
-        if (result.jobId) {
-          completedJob = await waitForMediaGenerationJob(result.jobId, {
-            onProgress: (job) => applyMediaRuntimeProgress({
-              runId: mediaRunId,
-              sessionKey: currentSessionKey,
-              job,
-            }),
-            isCancelled: () => !sendGenerationIsCurrent(),
-          });
-        }
-        if (!sendGenerationIsCurrent()) return;
-        const { decision, artifacts } = applyMediaRuntimeSuccess({
-          runId: mediaRunId,
-          sessionKey: currentSessionKey,
-          job: completedJob,
-          kind: 'image',
-        });
-        if (artifacts.length > 0) {
-          scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
-        }
-        appendMediaGenerationResultMessage({
-          set,
-          get,
-          sessionKey: currentSessionKey,
-          job: completedJob,
-          kind: 'image',
-        });
-        const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
+        const shouldIdle = gateDecisionAllowsTerminalIdle(finalDecision);
         commitSessionRunState(set, get, currentSessionKey, {
           sending: !shouldIdle,
           pendingImageGenerationLocal: false,
@@ -8570,6 +8909,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     try {
       const idempotencyKey = crypto.randomUUID();
+      const thinkingLevel = get().thinkingLevel ?? undefined;
       const chatMediaAttachments: PendingImageInput[] = attachments && attachments.length > 0
         ? (compositeTasks ? [] : attachments)
         : (effectiveMode === 'chat' ? plannedSourceImages : []);
@@ -8602,6 +8942,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               message: runtimeMessage || 'Process the attached file(s).',
               deliver: false,
               idempotencyKey,
+              ...(thinkingLevel ? { thinking: thinkingLevel } : {}),
               inlineAttachments: Boolean(attachments?.length),
               media: chatMediaAttachments.map((a) => ({
                 filePath: a.stagedPath,
@@ -8617,6 +8958,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           message: runtimeMessage,
           deliver: false,
           idempotencyKey,
+          thinking: thinkingLevel,
         });
         result = { success: true, result: rpcResult };
       }
@@ -8736,7 +9078,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (activeRunId) {
         await hostApiFetch<CompositeRunApiResponse>(
           `/api/composite-runs/${encodeURIComponent(activeRunId)}/cancel`,
-          { method: 'POST', body: '{}' },
+          { method: 'POST', body: JSON.stringify({ source: 'chat_composer_stop' }) },
         ).catch((err) => {
           console.warn('[abortRun] Failed to cancel composite run:', err);
         });

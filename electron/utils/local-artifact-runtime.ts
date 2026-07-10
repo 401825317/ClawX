@@ -3,13 +3,31 @@ import { existsSync, statSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import JSZip from 'jszip';
+import type { CompositeRunTextLengthRequirement } from '../../shared/composite-run';
 import { getOpenClawConfigDir } from './paths';
 
 export type LocalArtifactKind = 'presentation' | 'spreadsheet' | 'mini_program' | 'copywriting';
 
 export type LocalArtifactPlanningMode = 'model' | 'provided' | 'prompt-heuristic' | 'fallback-template';
 
-type PresentationRichLayout = 'two-column' | 'metric' | 'timeline';
+export type PresentationThemeFamily =
+  | 'product-launch'
+  | 'travel-editorial'
+  | 'executive-report'
+  | 'training-workshop'
+  | 'creative-editorial';
+
+type PresentationDensity = 'airy' | 'balanced' | 'dense';
+
+type PresentationDesign = {
+  themeFamily?: PresentationThemeFamily;
+  audience?: string;
+  purpose?: string;
+  visualTone?: string;
+  density?: PresentationDensity;
+};
+
+type PresentationRichLayout = 'two-column' | 'metric' | 'timeline' | 'statement';
 
 type PresentationColumn = {
   title?: string;
@@ -60,6 +78,8 @@ export type LocalArtifactCreateRequest = {
   outputDir?: string;
   planningMode?: LocalArtifactPlanningMode;
   planningSummary?: string;
+  textLengthRequirement?: CompositeRunTextLengthRequirement;
+  presentationDesign?: PresentationDesign;
   slides?: Array<{
     title?: string;
     subtitle?: string;
@@ -127,6 +147,124 @@ type PresentationSlide = {
 };
 
 type PresentationSlideRole = 'cover' | 'agenda' | 'section' | 'content' | PresentationRichLayout;
+
+type PresentationTheme = {
+  family: PresentationThemeFamily;
+  name: string;
+  coverStyle: 'stage' | 'editorial' | 'report' | 'workshop' | 'minimal';
+  contentStyle: 'rail' | 'band' | 'grid' | 'notebook' | 'minimal';
+  coverBackground: string;
+  coverTitle: string;
+  coverMuted: string;
+  bodyBackground: string;
+  sectionBackground: string;
+  sectionTitle: string;
+  primary: string;
+  secondary: string;
+  text: string;
+  muted: string;
+  surface: string;
+  surfaceAlt: string;
+  line: string;
+};
+
+const PRESENTATION_THEMES: Record<PresentationThemeFamily, PresentationTheme> = {
+  'product-launch': {
+    family: 'product-launch',
+    name: 'Product Launch',
+    coverStyle: 'stage',
+    contentStyle: 'rail',
+    coverBackground: '09090B',
+    coverTitle: 'FAFAFA',
+    coverMuted: 'C4C7D1',
+    bodyBackground: 'F7F8FA',
+    sectionBackground: '111827',
+    sectionTitle: 'FFFFFF',
+    primary: '00A7C4',
+    secondary: '7C3AED',
+    text: '171923',
+    muted: '5A6475',
+    surface: 'FFFFFF',
+    surfaceAlt: 'E8F7FA',
+    line: 'CBD5E1',
+  },
+  'travel-editorial': {
+    family: 'travel-editorial',
+    name: 'Travel Editorial',
+    coverStyle: 'editorial',
+    contentStyle: 'band',
+    coverBackground: 'E7EFE8',
+    coverTitle: '173B2C',
+    coverMuted: '476252',
+    bodyBackground: 'FFFDF7',
+    sectionBackground: '2F6B4F',
+    sectionTitle: 'FFFDF7',
+    primary: '2F6B4F',
+    secondary: 'D96C4C',
+    text: '20362B',
+    muted: '65766B',
+    surface: 'FFFDF7',
+    surfaceAlt: 'E4EFE7',
+    line: 'B7CDBE',
+  },
+  'executive-report': {
+    family: 'executive-report',
+    name: 'Executive Report',
+    coverStyle: 'report',
+    contentStyle: 'grid',
+    coverBackground: 'F1F1ED',
+    coverTitle: '191919',
+    coverMuted: '5B5B57',
+    bodyBackground: 'FFFFFF',
+    sectionBackground: '1F4E5F',
+    sectionTitle: 'FFFFFF',
+    primary: 'B8423A',
+    secondary: '1F4E5F',
+    text: '202124',
+    muted: '62666C',
+    surface: 'FFFFFF',
+    surfaceAlt: 'F2F3F4',
+    line: 'D4D6D8',
+  },
+  'training-workshop': {
+    family: 'training-workshop',
+    name: 'Training Workshop',
+    coverStyle: 'workshop',
+    contentStyle: 'notebook',
+    coverBackground: 'FFF4C7',
+    coverTitle: '25314C',
+    coverMuted: '59647A',
+    bodyBackground: 'FFFDF6',
+    sectionBackground: '315C8C',
+    sectionTitle: 'FFFFFF',
+    primary: 'E79C13',
+    secondary: '315C8C',
+    text: '25314C',
+    muted: '667085',
+    surface: 'FFFFFF',
+    surfaceAlt: 'EAF2F8',
+    line: 'C8D6E3',
+  },
+  'creative-editorial': {
+    family: 'creative-editorial',
+    name: 'Creative Editorial',
+    coverStyle: 'minimal',
+    contentStyle: 'minimal',
+    coverBackground: 'F1EEFA',
+    coverTitle: '2A2040',
+    coverMuted: '665D76',
+    bodyBackground: 'FBFAFF',
+    sectionBackground: '4C3F6D',
+    sectionTitle: 'FFFFFF',
+    primary: '6D5BD0',
+    secondary: 'C84B5A',
+    text: '2A2633',
+    muted: '6B6575',
+    surface: 'FFFFFF',
+    surfaceAlt: 'EEEAFB',
+    line: 'D8D1E6',
+  },
+};
 
 type SpreadsheetCellFormat = 'text' | 'integer' | 'decimal' | 'percent' | 'currency' | 'date';
 
@@ -213,7 +351,7 @@ function hasTaskContext(request: LocalArtifactCreateRequest): boolean {
 }
 
 function presentationLayoutFromInput(slide: NonNullable<LocalArtifactCreateRequest['slides']>[number]): PresentationRichLayout | undefined {
-  if (slide.layout === 'two-column' || slide.layout === 'metric' || slide.layout === 'timeline') return slide.layout;
+  if (slide.layout === 'two-column' || slide.layout === 'metric' || slide.layout === 'timeline' || slide.layout === 'statement') return slide.layout;
   if (Array.isArray(slide.columns) && slide.columns.length > 0) return 'two-column';
   if (Array.isArray(slide.metrics) && slide.metrics.length > 0) return 'metric';
   if (Array.isArray(slide.timeline) && slide.timeline.length > 0) return 'timeline';
@@ -225,7 +363,7 @@ function presentationRichContentIssues(request: LocalArtifactCreateRequest): str
   (request.slides ?? []).forEach((slide, slideIndex) => {
     const record = slide as Record<string, unknown>;
     const rawLayout = cleanText(record.layout);
-    if (rawLayout && !['two-column', 'metric', 'timeline'].includes(rawLayout)) {
+    if (rawLayout && !['two-column', 'metric', 'timeline', 'statement'].includes(rawLayout)) {
       issues.push(`slides[${slideIndex}].layout`);
     }
 
@@ -354,14 +492,200 @@ function planningContextPrompt(request: LocalArtifactCreateRequest): string {
   return batchPrompt || taskPrompt || cleanText(request.title);
 }
 
+function normalizePresentationThemeFamily(value: unknown): PresentationThemeFamily | undefined {
+  const normalized = cleanText(value).toLowerCase();
+  if (
+    normalized === 'product-launch'
+    || normalized === 'travel-editorial'
+    || normalized === 'executive-report'
+    || normalized === 'training-workshop'
+    || normalized === 'creative-editorial'
+  ) {
+    return normalized;
+  }
+  return undefined;
+}
+
+function inferPresentationThemeFamily(request: LocalArtifactCreateRequest): PresentationThemeFamily {
+  const design = request.presentationDesign;
+  const prompt = [
+    planningContextPrompt(request),
+    request.title,
+    design?.audience,
+    design?.purpose,
+    design?.visualTone,
+  ].map(cleanText).filter(Boolean).join('\n');
+  if (/旅游|旅行|目的地|景区|景点|城市漫游|酒店|度假|民宿|线路|行程|张家界|山水|自然风光/u.test(prompt)) {
+    return 'travel-editorial';
+  }
+  if (/培训|课程|教学|课堂|练习题|工作坊|学习|教案|学员|知识点/u.test(prompt)) {
+    return 'training-workshop';
+  }
+  if (/老板|高管|管理层|经营|汇报|周报|月报|复盘|预算|ROI|指标|销售|财务|决策|战略/u.test(prompt)) {
+    return 'executive-report';
+  }
+  if (/发布会|新品|产品|手机|电脑|汽车|科技|品牌|营销|宣传|概念|iPhone|Apple|体验升级/iu.test(prompt)) {
+    return 'product-launch';
+  }
+  return 'creative-editorial';
+}
+
+export function resolvePresentationThemeFamily(request: LocalArtifactCreateRequest): PresentationThemeFamily {
+  return normalizePresentationThemeFamily(request.presentationDesign?.themeFamily)
+    ?? inferPresentationThemeFamily(request);
+}
+
+function presentationTheme(request: LocalArtifactCreateRequest): PresentationTheme {
+  return PRESENTATION_THEMES[resolvePresentationThemeFamily(request)];
+}
+
+function presentationDensity(request: LocalArtifactCreateRequest): PresentationDensity {
+  const density = request.presentationDesign?.density;
+  return density === 'airy' || density === 'dense' ? density : 'balanced';
+}
+
+const ARTIFACT_LABEL_PATTERN = '(?:PPT|PowerPoint|演示文稿|演示稿|幻灯片|Excel|电子表格|表格|小程序|网页|页面|文案|文章|小说|报告)';
+
+function normalizeInferredTopic(value: string): string {
+  const normalized = cleanText(value)
+    .replace(/^(?:(?:请|麻烦|劳驾|帮我|帮忙|给我|替我)\s*)+/u, '')
+    .replace(/^(?:(?:制作|生成|创建|设计|整理|输出|产出|撰写|写|做|来)\s*)+/u, '')
+    .replace(/^(?:(?:一份|一个|一套|一篇|一张|一部)\s*)+/u, '')
+    .replace(/(?:约|大约|至少|不少于|不低于)?\s*(?:\d+(?:\.\d+)?\s*(?:万|千|k)?|[零〇一二两三四五六七八九十百千万]+)\s*(?:页|条|字|字符)/giu, '')
+    .replace(/^(?:关于|围绕|以)\s*/u, '')
+    .replace(/\s*(?:为主题|主题)$|^[的，,：:\s]+|[的，,：:\s]+$/gu, '')
+    .trim();
+  if (normalized.length < 2 || normalized.length > 80) return '';
+  if (new RegExp(`^(?:${ARTIFACT_LABEL_PATTERN}|介绍|内容|方案|主题)$`, 'iu').test(normalized)) return '';
+  return normalized;
+}
+
 function extractQuotedTopic(prompt: string, fallback: string): string {
   const quoted = prompt.match(/《([^》]{2,80})》/u)
-    ?? prompt.match(/["“]([^"”]{2,80})["”]/u)
-    ?? prompt.match(/主题(?:是|为|：|:)?\s*([^，。；;,.]{2,80})/u);
+    ?? prompt.match(/["“]([^"”]{2,80})["”]/u);
   if (quoted?.[1]) return cleanText(quoted[1]);
-  const afterColon = prompt.match(/[：:]\s*([^，。；;,.]{2,80})/u);
-  if (afterColon?.[1]) return cleanText(afterColon[1]);
-  return fallback;
+
+  const explicit = prompt.match(new RegExp(
+    `(?:主题|题目|标题)(?:是|为|：|:)?\\s*([^，。；;,.!?！？]{2,80}?)(?=(?:的)?\\s*${ARTIFACT_LABEL_PATTERN}|[，。；;,.!?！？]|$)`,
+    'iu',
+  ));
+  const aboutArtifact = prompt.match(new RegExp(
+    `(?:关于|围绕|以)\\s*([^，。；;,.!?！？]{2,80}?)(?:为主题)?(?:的)?\\s*${ARTIFACT_LABEL_PATTERN}`,
+    'iu',
+  ));
+  const beforeArtifact = prompt.match(new RegExp(
+    `([^，。；;,.!?！？]{2,100}?)(?:的)?\\s*${ARTIFACT_LABEL_PATTERN}`,
+    'iu',
+  ));
+  const afterArtifact = prompt.match(new RegExp(
+    `${ARTIFACT_LABEL_PATTERN}(?:的)?(?:主题|内容)?(?:是|为|关于|：|:)?\\s*([^，。；;,.!?！？]{2,80})`,
+    'iu',
+  ));
+  for (const candidate of [explicit?.[1], aboutArtifact?.[1], beforeArtifact?.[1], afterArtifact?.[1]]) {
+    const inferred = normalizeInferredTopic(candidate ?? '');
+    if (inferred) return inferred;
+  }
+
+  const afterColon = prompt.match(/[：:]\s*([^，。；;,.!?！？]{2,80})/u);
+  const colonTopic = normalizeInferredTopic(afterColon?.[1] ?? '');
+  return colonTopic || fallback;
+}
+
+function parseChineseInteger(value: string): number | undefined {
+  const digits: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  };
+  if (/^[零〇一二两三四五六七八九]+$/u.test(value)) {
+    const parsed = Number.parseInt([...value].map((character) => digits[character]).join(''), 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  const units: Record<string, number> = { 十: 10, 百: 100, 千: 1_000 };
+  let total = 0;
+  let section = 0;
+  let current = 0;
+  for (const character of value) {
+    if (Object.prototype.hasOwnProperty.call(digits, character)) {
+      current = digits[character]!;
+      continue;
+    }
+    if (character === '万') {
+      section += current;
+      total += Math.max(1, section) * 10_000;
+      section = 0;
+      current = 0;
+      continue;
+    }
+    const unit = units[character];
+    if (!unit) return undefined;
+    section += Math.max(1, current) * unit;
+    current = 0;
+  }
+  const parsed = total + section + current;
+  return parsed > 0 ? parsed : undefined;
+}
+
+export function resolveRequestedTextLength(prompt: string): CompositeRunTextLengthRequirement | undefined {
+  const normalized = cleanText(prompt);
+  const match = normalized.match(/(约|大约|大概|近|至少|最少|不少于|不低于|最多|不超过)?\s*((?:\d+(?:\.\d+)?\s*(?:万|千|[kK]))|(?:\d{2,7})|(?:[零〇一二两三四五六七八九十百千万]{2,}))\s*(字|字符)\s*(左右|上下|以上|以内)?/u);
+  if (!match?.[2]) return undefined;
+  const qualifier = `${match[1] ?? ''}${match[4] ?? ''}`;
+  if (/最多|不超过|以内/u.test(qualifier)) return undefined;
+  const rawValue = match[2].replace(/\s+/gu, '');
+  const numeric = rawValue.match(/^(\d+(?:\.\d+)?)(万|千|[kK])?$/u);
+  const multiplier = numeric?.[2] === '万'
+    ? 10_000
+    : numeric?.[2] === '千' || /[kK]/u.test(numeric?.[2] ?? '')
+      ? 1_000
+      : 1;
+  const parsed = numeric?.[1]
+    ? Number.parseFloat(numeric[1]) * multiplier
+    : parseChineseInteger(rawValue);
+  if (!parsed || !Number.isFinite(parsed) || parsed < 20) return undefined;
+  const targetCharacters = Math.min(1_000_000, Math.floor(parsed));
+  const approximate = /约|大约|大概|近|左右|上下/u.test(qualifier);
+  const strictMinimum = /至少|最少|不少于|不低于|以上/u.test(qualifier);
+  const minimumCharacters = strictMinimum
+    ? targetCharacters
+    : Math.max(20, Math.floor(targetCharacters * (approximate ? 0.85 : 0.95)));
+  return {
+    unit: 'characters',
+    targetCharacters,
+    minimumCharacters,
+    approximate,
+  };
+}
+
+function normalizeTextLengthRequirement(request: LocalArtifactCreateRequest): CompositeRunTextLengthRequirement | undefined {
+  const requirement = request.textLengthRequirement;
+  if (
+    requirement?.unit === 'characters'
+    && Number.isFinite(requirement.targetCharacters)
+    && Number.isFinite(requirement.minimumCharacters)
+    && requirement.targetCharacters >= 20
+    && requirement.minimumCharacters >= 20
+  ) {
+    return {
+      unit: 'characters',
+      targetCharacters: Math.floor(requirement.targetCharacters),
+      minimumCharacters: Math.min(
+        Math.floor(requirement.targetCharacters),
+        Math.floor(requirement.minimumCharacters),
+      ),
+      approximate: requirement.approximate === true,
+    };
+  }
+  return resolveRequestedTextLength(planningContextPrompt(request));
 }
 
 function parseRequestedCount(prompt: string, unit: '页' | '条' | '个'): number | undefined {
@@ -385,15 +709,6 @@ function parseRequestedCount(prompt: string, unit: '页' | '条' | '个'): numbe
   };
   const chinese = prompt.match(new RegExp(`([一二两三四五六七八九十])\\s*${unit}`, 'u'));
   return chinese?.[1] ? chineseDigits[chinese[1]] : undefined;
-}
-
-function splitRequestedTopics(prompt: string): string[] {
-  const afterNeed = prompt.match(/(?:要有|包含|包括|需要|覆盖)([^。.!?！？]*)/u)?.[1] ?? '';
-  return afterNeed
-    .split(/[、,，;；/]/u)
-    .map((item) => cleanText(item.replace(/和$/u, '')))
-    .filter((item) => item.length >= 2)
-    .slice(0, 12);
 }
 
 function ensureLength<T>(items: T[], target: number, factory: (index: number) => T): T[] {
@@ -505,11 +820,11 @@ ${slideIds}
 </p:presentation>`;
 }
 
-function themeXml(): string {
+function themeXml(theme: PresentationTheme): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UClaw">
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UClaw ${xml(theme.name)}">
   <a:themeElements>
-    <a:clrScheme name="UClaw"><a:dk1><a:sysClr val="windowText" lastClr="111827"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="0F172A"/></a:dk2><a:lt2><a:srgbClr val="F8FAFC"/></a:lt2><a:accent1><a:srgbClr val="2563EB"/></a:accent1><a:accent2><a:srgbClr val="16A34A"/></a:accent2><a:accent3><a:srgbClr val="F97316"/></a:accent3><a:accent4><a:srgbClr val="9333EA"/></a:accent4><a:accent5><a:srgbClr val="0EA5E9"/></a:accent5><a:accent6><a:srgbClr val="DC2626"/></a:accent6><a:hlink><a:srgbClr val="2563EB"/></a:hlink><a:folHlink><a:srgbClr val="9333EA"/></a:folHlink></a:clrScheme>
+    <a:clrScheme name="UClaw ${xml(theme.name)}"><a:dk1><a:sysClr val="windowText" lastClr="${theme.text}"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="${theme.surface}"/></a:lt1><a:dk2><a:srgbClr val="${theme.sectionBackground}"/></a:dk2><a:lt2><a:srgbClr val="${theme.bodyBackground}"/></a:lt2><a:accent1><a:srgbClr val="${theme.primary}"/></a:accent1><a:accent2><a:srgbClr val="${theme.secondary}"/></a:accent2><a:accent3><a:srgbClr val="${theme.coverMuted}"/></a:accent3><a:accent4><a:srgbClr val="${theme.sectionBackground}"/></a:accent4><a:accent5><a:srgbClr val="${theme.surfaceAlt}"/></a:accent5><a:accent6><a:srgbClr val="${theme.muted}"/></a:accent6><a:hlink><a:srgbClr val="${theme.primary}"/></a:hlink><a:folHlink><a:srgbClr val="${theme.secondary}"/></a:folHlink></a:clrScheme>
     <a:fontScheme name="UClaw"><a:majorFont><a:latin typeface="Aptos Display"/><a:ea typeface="Microsoft YaHei"/></a:majorFont><a:minorFont><a:latin typeface="Aptos"/><a:ea typeface="Microsoft YaHei"/></a:minorFont></a:fontScheme>
     <a:fmtScheme name="UClaw"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme>
   </a:themeElements>
@@ -610,8 +925,7 @@ function estimatedPresentationLines(values: string[], charsPerLine: number): num
 
 function presentationBodyFontSize(values: string[], charsPerLine = 34): number {
   const lines = estimatedPresentationLines(values, charsPerLine);
-  if (lines > 24) return 1400;
-  if (lines > 18) return 1550;
+  if (lines > 18) return 1600;
   if (lines > 12) return 1700;
   return 1900;
 }
@@ -620,8 +934,42 @@ function slideBackgroundXml(fill: string): string {
   return `<p:bg><p:bgPr><a:solidFill><a:srgbClr val="${fill}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>`;
 }
 
-function presentationSlideXml(slide: PresentationSlide, index: number, slideCount: number, deckTitle: string): string {
+type PresentationPageFrame = {
+  x: number;
+  width: number;
+  labelY: number;
+  titleY: number;
+  titleHeight: number;
+  ruleY: number;
+  contentY: number;
+};
+
+function presentationPageFrame(theme: PresentationTheme): PresentationPageFrame {
+  if (theme.contentStyle === 'band') {
+    return { x: 650000, width: 10892000, labelY: 360000, titleY: 760000, titleHeight: 720000, ruleY: 1580000, contentY: 1880000 };
+  }
+  if (theme.contentStyle === 'grid') {
+    return { x: 914400, width: 10100000, labelY: 420000, titleY: 820000, titleHeight: 720000, ruleY: 1640000, contentY: 1940000 };
+  }
+  if (theme.contentStyle === 'notebook') {
+    return { x: 700000, width: 10800000, labelY: 430000, titleY: 850000, titleHeight: 720000, ruleY: 1680000, contentY: 1980000 };
+  }
+  if (theme.contentStyle === 'minimal') {
+    return { x: 1000000, width: 10192000, labelY: 500000, titleY: 930000, titleHeight: 760000, ruleY: 1800000, contentY: 2100000 };
+  }
+  return { x: 762000, width: 10600000, labelY: 430000, titleY: 760000, titleHeight: 720000, ruleY: 1530000, contentY: 1850000 };
+}
+
+function presentationSlideXml(
+  slide: PresentationSlide,
+  index: number,
+  slideCount: number,
+  deckTitle: string,
+  theme: PresentationTheme,
+  density: PresentationDensity,
+): string {
   const role = presentationSlideRole(slide, index);
+  const frame = presentationPageFrame(theme);
   const shapes: string[] = [];
   let nextId = 2;
   const addShape = (shape: string): void => { shapes.push(shape); };
@@ -631,203 +979,357 @@ function presentationSlideXml(slide: PresentationSlide, index: number, slideCoun
     return value;
   };
   let background: string;
+  const addRegularChrome = (label: string): void => {
+    if (theme.contentStyle === 'rail') {
+      addShape(presentationShape(id(), 'UClaw Page Accent', 0, 0, 160000, 6858000, theme.primary));
+    } else if (theme.contentStyle === 'band') {
+      addShape(presentationShape(id(), 'UClaw Page Accent', 0, 0, 12192000, 260000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Page Secondary Accent', 10600000, 260000, 1592000, 210000, theme.secondary));
+    } else if (theme.contentStyle === 'grid') {
+      addShape(presentationShape(id(), 'UClaw Page Accent', 0, 0, 12192000, 90000, theme.primary));
+      addShape(presentationTextBox(id(), 'UClaw Page Number', 11200000, 500000, 650000, 650000, [
+        { text: String(index).padStart(2, '0'), size: 1900, color: theme.surface, bold: true, align: 'ctr' },
+      ], { fill: theme.secondary, line: theme.secondary, vertical: 'ctr' }));
+    } else if (theme.contentStyle === 'notebook') {
+      addShape(presentationShape(id(), 'UClaw Page Accent', 0, 0, 280000, 6858000, theme.secondary));
+      [900000, 2050000, 3200000, 4350000, 5500000].forEach((y, markerIndex) => {
+        addShape(presentationShape(id(), `UClaw Notebook Marker ${markerIndex + 1}`, 105000, y, 70000, 70000, theme.bodyBackground));
+      });
+      addShape(presentationShape(id(), 'UClaw Page Secondary Accent', 700000, 1750000, 2600000, 90000, theme.primary));
+    } else {
+      addShape(presentationShape(id(), 'UClaw Page Accent', frame.x, 330000, 2100000, 90000, theme.primary));
+    }
+    addShape(presentationTextBox(id(), 'UClaw Section Label', frame.x, frame.labelY, 3800000, 280000, [
+      { text: label, size: 1050, color: theme.primary, bold: true },
+    ]));
+    addShape(presentationTextBox(id(), 'UClaw Title', frame.x, frame.titleY, frame.width, frame.titleHeight, [
+      { text: slide.title, size: slide.title.length > 30 ? 2900 : density === 'airy' ? 3700 : 3400, color: theme.text, bold: true },
+    ]));
+    addShape(presentationShape(id(), 'UClaw Title Rule', frame.x, frame.ruleY, frame.width, theme.contentStyle === 'notebook' ? 28000 : 17000, theme.line));
+  };
 
   if (role === 'cover') {
-    background = '172033';
-    addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 0, 190500, 6858000, '14B8A6'));
-    addShape(presentationTextBox(id(), 'UClaw Cover Label', 914400, 640000, 4600000, 350000, [
-      { text: 'UCLAW PRESENTATION', size: 1200, color: '5EEAD4', bold: true },
-    ]));
-    addShape(presentationTextBox(id(), 'UClaw Cover Title', 914400, 1500000, 9300000, 1900000, [
-      { text: slide.title, size: slide.title.length > 24 ? 3600 : 4400, color: 'FFFFFF', bold: true },
-    ], { vertical: 'ctr' }));
     const coverLead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
-    if (coverLead.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 914400, 3550000, 8500000, 900000, coverLead.map((text) => ({
-        text,
-        size: 1900,
-        color: 'CBD5E1',
-        spaceAfter: 600,
-      }))));
+    const coverBullets = slide.bullets.slice(0, 3);
+    background = theme.coverBackground;
+    if (theme.coverStyle === 'stage') {
+      addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 0, 190500, 6858000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Cover Stage', 9690000, 0, 2502000, 6858000, '111827'));
+      addShape(presentationShape(id(), 'UClaw Cover Stage Accent', 10300000, 850000, 1892000, 150000, theme.secondary));
+      addShape(presentationTextBox(id(), 'UClaw Cover Stage Number', 10100000, 1900000, 1800000, 2300000, [
+        { text: '01', size: 7600, color: theme.primary, bold: true, align: 'ctr' },
+      ], { vertical: 'ctr' }));
+      addShape(presentationTextBox(id(), 'UClaw Cover Label', 914400, 640000, 4600000, 350000, [
+        { text: 'PRODUCT / LAUNCH', size: 1200, color: theme.primary, bold: true },
+      ]));
+      addShape(presentationTextBox(id(), 'UClaw Cover Title', 914400, 1500000, 8200000, 1900000, [
+        { text: slide.title, size: slide.title.length > 24 ? 4200 : 5200, color: theme.coverTitle, bold: true },
+      ], { vertical: 'ctr' }));
+      if (coverLead.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 914400, 3650000, 7600000, 900000, coverLead.map((text) => ({
+          text, size: 1850, color: theme.coverMuted, spaceAfter: 600,
+        }))));
+      }
+      if (coverBullets.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Summary', 914400, 5000000, 7600000, 800000, coverBullets.map((text) => ({
+          text, size: 1350, color: theme.coverMuted, bullet: true, spaceAfter: 400,
+        }))));
+      }
+    } else if (theme.coverStyle === 'editorial') {
+      addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 0, 12192000, 360000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Cover Editorial Panel', 9250000, 360000, 2942000, 6498000, theme.secondary));
+      addShape(presentationTextBox(id(), 'UClaw Cover Label', 762000, 760000, 4500000, 340000, [
+        { text: 'DESTINATION / STORY', size: 1150, color: theme.primary, bold: true },
+      ]));
+      addShape(presentationTextBox(id(), 'UClaw Cover Title', 762000, 1450000, 7750000, 2300000, [
+        { text: slide.title, size: slide.title.length > 24 ? 3900 : 4900, color: theme.coverTitle, bold: true },
+      ], { vertical: 'ctr' }));
+      if (coverLead.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 762000, 4000000, 7600000, 1050000, coverLead.map((text) => ({
+          text, size: 1850, color: theme.coverMuted, spaceAfter: 550,
+        }))));
+      }
+      addShape(presentationTextBox(id(), 'UClaw Cover Summary', 9550000, 950000, 2300000, 5000000, (coverBullets.length > 0 ? coverBullets : ['看见地方', '理解风景', '抵达体验']).map((text, bulletIndex) => ({
+        text: `${String(bulletIndex + 1).padStart(2, '0')}  ${text}`,
+        size: 1450,
+        color: 'FFFFFF',
+        bold: true,
+        spaceAfter: 950,
+      })), { vertical: 'ctr' }));
+    } else if (theme.coverStyle === 'report') {
+      addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 0, 12192000, 180000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Cover Report Panel', 8800000, 180000, 3392000, 6678000, theme.sectionBackground));
+      addShape(presentationTextBox(id(), 'UClaw Cover Label', 914400, 720000, 4500000, 340000, [
+        { text: 'EXECUTIVE BRIEF', size: 1150, color: theme.primary, bold: true },
+      ]));
+      addShape(presentationTextBox(id(), 'UClaw Cover Title', 914400, 1500000, 7100000, 2200000, [
+        { text: slide.title, size: slide.title.length > 24 ? 3800 : 4700, color: theme.coverTitle, bold: true },
+      ], { vertical: 'ctr' }));
+      if (coverLead.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 914400, 4050000, 6900000, 1050000, coverLead.map((text) => ({
+          text, size: 1750, color: theme.coverMuted, spaceAfter: 500,
+        }))));
+      }
+      addShape(presentationTextBox(id(), 'UClaw Cover Summary', 9200000, 1250000, 2550000, 4200000, (coverBullets.length > 0 ? coverBullets : ['关键结论', '经营判断', '决策建议']).map((text) => ({
+        text, size: 1550, color: 'FFFFFF', bullet: true, spaceAfter: 800,
+      })), { vertical: 'ctr' }));
+    } else if (theme.coverStyle === 'workshop') {
+      addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 6150000, 12192000, 708000, theme.secondary));
+      addShape(presentationShape(id(), 'UClaw Cover Workshop Block 1', 10000000, 0, 2192000, 1550000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Cover Workshop Block 2', 10950000, 1550000, 1242000, 1200000, theme.secondary));
+      addShape(presentationTextBox(id(), 'UClaw Cover Label', 762000, 700000, 4500000, 340000, [
+        { text: 'LEARN / PRACTICE / APPLY', size: 1150, color: theme.secondary, bold: true },
+      ]));
+      addShape(presentationTextBox(id(), 'UClaw Cover Title', 762000, 1450000, 8500000, 2200000, [
+        { text: slide.title, size: slide.title.length > 24 ? 3900 : 4900, color: theme.coverTitle, bold: true },
+      ], { vertical: 'ctr' }));
+      if (coverLead.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 762000, 3900000, 8200000, 1000000, coverLead.map((text) => ({
+          text, size: 1800, color: theme.coverMuted, spaceAfter: 550,
+        }))));
+      }
+      if (coverBullets.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Summary', 762000, 5100000, 8500000, 650000, coverBullets.map((text) => ({
+          text, size: 1350, color: theme.text, bullet: true, spaceAfter: 300,
+        }))));
+      }
+    } else {
+      addShape(presentationShape(id(), 'UClaw Cover Accent', 0, 0, 240000, 6858000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Cover Minimal Block', 9200000, 900000, 2200000, 2200000, theme.secondary));
+      addShape(presentationTextBox(id(), 'UClaw Cover Label', 1000000, 760000, 4500000, 340000, [
+        { text: 'IDEA / NARRATIVE', size: 1150, color: theme.primary, bold: true },
+      ]));
+      addShape(presentationTextBox(id(), 'UClaw Cover Title', 1000000, 1600000, 7800000, 2200000, [
+        { text: slide.title, size: slide.title.length > 24 ? 3900 : 4900, color: theme.coverTitle, bold: true },
+      ], { vertical: 'ctr' }));
+      if (coverLead.length > 0) {
+        addShape(presentationTextBox(id(), 'UClaw Cover Subtitle', 1000000, 4100000, 7600000, 1050000, coverLead.map((text) => ({
+          text, size: 1800, color: theme.coverMuted, spaceAfter: 550,
+        }))));
+      }
     }
-    if (slide.bullets.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Cover Summary', 914400, 5000000, 9800000, 800000, slide.bullets.slice(0, 3).map((text) => ({
-        text,
-        size: 1400,
-        color: 'E2E8F0',
-        bullet: true,
-        spaceAfter: 400,
-      }))));
-    }
-    addShape(presentationTextBox(id(), 'UClaw Cover Footer', 914400, 6200000, 9800000, 250000, [
-      { text: `${new Date().getFullYear()} · 可编辑演示文稿`, size: 1000, color: '94A3B8' },
+    addShape(presentationTextBox(id(), 'UClaw Cover Footer', theme.coverStyle === 'editorial' ? 762000 : 914400, 6280000, theme.coverStyle === 'editorial' ? 8000000 : 7600000, 250000, [
+      { text: `${new Date().getFullYear()} · ${theme.name} · 可编辑演示文稿`, size: 950, color: theme.coverStyle === 'stage' ? '8F98A8' : theme.coverMuted },
     ]));
   } else if (role === 'agenda') {
-    background = 'F7F9FC';
-    addShape(presentationShape(id(), 'UClaw Agenda Accent', 0, 0, 12192000, 145000, '0F766E'));
-    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 520000, 2400000, 300000, [
-      { text: '内容导航 / OUTLINE', size: 1100, color: '0F766E', bold: true },
-    ]));
-    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 850000, 10600000, 700000, [
-      { text: slide.title, size: 3000, color: '172033', bold: true },
-    ]));
+    background = theme.bodyBackground;
+    addRegularChrome('内容导航 / OUTLINE');
     const agendaItems = slide.bullets.length > 0
       ? slide.bullets.slice(0, 8)
       : [slide.body || slide.subtitle || '内容待补充'];
     agendaItems.forEach((item, itemIndex) => {
-      const column = itemIndex % 2;
-      const row = Math.floor(itemIndex / 2);
-      const x = column === 0 ? 762000 : 6250000;
-      const y = 1850000 + row * 1030000;
-      addShape(presentationTextBox(id(), `UClaw Agenda Item ${itemIndex + 1}`, x, y, 5100000, 760000, [
-        { text: String(itemIndex + 1).padStart(2, '0'), size: 1200, color: 'D97706', bold: true, spaceAfter: 300 },
-        { text: item, size: 1700, color: '243247', bold: true },
-      ], { fill: 'FFFFFF', line: 'DCE4EE', margin: 170000, vertical: 'ctr' }));
+      const editorialList = theme.contentStyle === 'band' || theme.contentStyle === 'minimal';
+      const column = editorialList ? 0 : itemIndex % 2;
+      const row = editorialList ? itemIndex : Math.floor(itemIndex / 2);
+      const gap = editorialList ? 0 : 260000;
+      const width = editorialList ? frame.width : Math.floor((frame.width - gap) / 2);
+      const x = frame.x + column * (width + gap);
+      const y = frame.contentY + row * (editorialList ? 540000 : 960000);
+      const height = editorialList ? 430000 : 720000;
+      addShape(presentationTextBox(id(), `UClaw Agenda Item ${itemIndex + 1}`, x, y, width, height, [
+        { text: String(itemIndex + 1).padStart(2, '0'), size: editorialList ? 1050 : 1200, color: itemIndex % 2 === 0 ? theme.primary : theme.secondary, bold: true, spaceAfter: editorialList ? 120 : 280 },
+        { text: item, size: editorialList ? 1500 : 1650, color: theme.text, bold: true },
+      ], { fill: editorialList && itemIndex % 2 === 1 ? theme.surfaceAlt : theme.surface, line: theme.line, margin: editorialList ? 130000 : 170000, vertical: 'ctr' }));
     });
   } else if (role === 'section') {
-    background = '0F3D3A';
-    addShape(presentationShape(id(), 'UClaw Section Accent', 0, 0, 220000, 6858000, 'F59E0B'));
-    addShape(presentationTextBox(id(), 'UClaw Section Label', 914400, 1100000, 3600000, 360000, [
-      { text: `章节 ${String(index).padStart(2, '0')} / SECTION`, size: 1200, color: '99F6E4', bold: true },
+    background = theme.sectionBackground;
+    if (theme.contentStyle === 'band') {
+      addShape(presentationShape(id(), 'UClaw Section Accent', 0, 0, 12192000, 300000, theme.secondary));
+      addShape(presentationTextBox(id(), 'UClaw Section Number', 9200000, 850000, 2200000, 1800000, [
+        { text: String(index).padStart(2, '0'), size: 6200, color: theme.secondary, bold: true, align: 'ctr' },
+      ], { vertical: 'ctr' }));
+    } else if (theme.contentStyle === 'grid') {
+      addShape(presentationShape(id(), 'UClaw Section Accent', 0, 0, 2400000, 6858000, theme.primary));
+      addShape(presentationTextBox(id(), 'UClaw Section Number', 520000, 1850000, 1400000, 1800000, [
+        { text: String(index).padStart(2, '0'), size: 5600, color: 'FFFFFF', bold: true, align: 'ctr' },
+      ], { vertical: 'ctr' }));
+    } else if (theme.contentStyle === 'notebook') {
+      addShape(presentationShape(id(), 'UClaw Section Accent', 0, 6000000, 12192000, 858000, theme.primary));
+      addShape(presentationShape(id(), 'UClaw Section Secondary Accent', 10000000, 0, 2192000, 1650000, theme.secondary));
+    } else {
+      addShape(presentationShape(id(), 'UClaw Section Accent', 0, 0, 220000, 6858000, theme.secondary));
+    }
+    const sectionX = theme.contentStyle === 'grid' ? 2900000 : frame.x;
+    const sectionWidth = theme.contentStyle === 'grid' ? 8200000 : frame.width;
+    addShape(presentationTextBox(id(), 'UClaw Section Label', sectionX, 1100000, 4200000, 360000, [
+      { text: `章节 ${String(index).padStart(2, '0')} / SECTION`, size: 1200, color: theme.contentStyle === 'grid' ? 'D8E7EC' : theme.coverMuted, bold: true },
     ]));
-    addShape(presentationTextBox(id(), 'UClaw Title', 914400, 2050000, 9400000, 1500000, [
-      { text: slide.title, size: slide.title.length > 24 ? 3400 : 4200, color: 'FFFFFF', bold: true },
+    addShape(presentationTextBox(id(), 'UClaw Title', sectionX, 2050000, sectionWidth, 1500000, [
+      { text: slide.title, size: slide.title.length > 24 ? 3500 : 4200, color: theme.sectionTitle, bold: true },
     ], { vertical: 'ctr' }));
     const summary = [slide.subtitle, slide.body, ...slide.bullets].map(cleanText).filter(Boolean);
     if (summary.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Section Summary', 914400, 4150000, 8200000, 900000, summary.slice(0, 3).map((text) => ({
+      addShape(presentationTextBox(id(), 'UClaw Section Summary', sectionX, 4150000, Math.min(sectionWidth, 8200000), 900000, summary.slice(0, 3).map((text) => ({
         text,
         size: 1750,
-        color: 'CCFBF1',
+        color: theme.contentStyle === 'grid' ? 'D8E7EC' : theme.coverMuted,
         bullet: summary.length > 1,
         spaceAfter: 500,
       }))));
     }
   } else if (role === 'two-column') {
-    background = 'FFFFFF';
-    addShape(presentationShape(id(), 'UClaw Two Column Accent', 0, 0, 160000, 6858000, '2563EB'));
-    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 3200000, 260000, [
-      { text: `章节 ${String(index).padStart(2, '0')} / COMPARISON`, size: 1050, color: '2563EB', bold: true },
-    ]));
-    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
-      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
-    ]));
-    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    background = theme.bodyBackground;
+    addRegularChrome(`章节 ${String(index).padStart(2, '0')} / COMPARISON`);
     const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
-    let cardY = 1850000;
+    let cardY = frame.contentY;
     if (lead.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Rich Lead', 762000, cardY, 10600000, 620000, lead.map((text) => ({
+      addShape(presentationTextBox(id(), 'UClaw Rich Lead', frame.x, cardY, frame.width, 620000, lead.map((text) => ({
         text,
         size: 1500,
-        color: '405166',
+        color: theme.muted,
         spaceAfter: 250,
-      })), { fill: 'EFF6FF', line: 'BFDBFE', margin: 160000, vertical: 'ctr' }));
-      cardY = 2650000;
+      })), { fill: theme.surfaceAlt, line: theme.line, margin: 160000, vertical: 'ctr' }));
+      cardY += 800000;
     }
-    const gap = 260000;
-    const cardWidth = Math.floor((10600000 - gap) / 2);
+    const editorialColumns = theme.contentStyle === 'band';
+    const gap = editorialColumns ? 360000 : 260000;
+    const firstCardWidth = editorialColumns
+      ? Math.floor((frame.width - gap) * 0.38)
+      : Math.floor((frame.width - gap) / 2);
+    const cardWidths = [firstCardWidth, frame.width - gap - firstCardWidth];
+    const cardXs = [frame.x, frame.x + firstCardWidth + gap];
     slide.columns.slice(0, 2).forEach((column, columnIndex) => {
       const bodyValues = [column.body, ...column.bullets].filter(Boolean);
-      addShape(presentationTextBox(id(), `UClaw Two Column ${columnIndex + 1}`, 762000 + columnIndex * (cardWidth + gap), cardY, cardWidth, 5900000 - cardY, [
-        { text: column.title, size: 1900, color: columnIndex === 0 ? '1D4ED8' : 'B45309', bold: true, spaceAfter: 650 },
+      const bodyFontSize = Math.max(density === 'dense' ? 1450 : 1600, Math.min(1750, presentationBodyFontSize(bodyValues, 22)));
+      addShape(presentationTextBox(id(), `UClaw Two Column ${columnIndex + 1}`, cardXs[columnIndex] ?? frame.x, cardY, cardWidths[columnIndex] ?? firstCardWidth, 6150000 - cardY, [
+        { text: column.title, size: 2400, color: columnIndex === 0 ? theme.primary : theme.secondary, bold: true, spaceAfter: 450 },
         ...bodyValues.map((text, bodyIndex) => ({
           text,
-          size: presentationBodyFontSize(bodyValues, 24),
-          color: '243247',
+          size: bodyFontSize,
+          color: theme.text,
           bullet: bodyIndex > 0 || column.bullets.includes(text),
-          spaceAfter: 550,
+          spaceAfter: 350,
         })),
-      ], { fill: columnIndex === 0 ? 'F4F8FF' : 'FFFAF0', line: columnIndex === 0 ? 'BFDBFE' : 'FDE3B0', margin: 230000 }));
+      ], { fill: columnIndex === 0 ? theme.surface : theme.surfaceAlt, line: theme.line, margin: 230000 }));
     });
   } else if (role === 'metric') {
-    background = 'F7F9FC';
-    addShape(presentationShape(id(), 'UClaw Metric Accent', 0, 0, 160000, 6858000, 'D97706'));
-    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 3200000, 260000, [
-      { text: `章节 ${String(index).padStart(2, '0')} / METRICS`, size: 1050, color: 'B45309', bold: true },
-    ]));
-    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
-      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
-    ]));
-    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    background = theme.bodyBackground;
+    addRegularChrome(`章节 ${String(index).padStart(2, '0')} / METRICS`);
     const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
-    let metricY = 1800000;
+    let metricY = frame.contentY;
     if (lead.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Rich Lead', 762000, metricY, 10600000, 600000, lead.map((text) => ({
+      addShape(presentationTextBox(id(), 'UClaw Rich Lead', frame.x, metricY, frame.width, 600000, lead.map((text) => ({
         text,
         size: 1450,
-        color: '405166',
+        color: theme.muted,
         spaceAfter: 220,
       })), { margin: 100000, vertical: 'ctr' }));
-      metricY = 2500000;
+      metricY += 700000;
     }
-    const metricGap = 220000;
-    const metricWidth = Math.floor((10600000 - metricGap) / 2);
-    const availableHeight = 5900000 - metricY;
-    const metricRows = Math.max(1, Math.ceil(slide.metrics.length / 2));
-    const metricHeight = Math.floor((availableHeight - metricGap * (metricRows - 1)) / metricRows);
-    slide.metrics.slice(0, 4).forEach((metric, metricIndex) => {
-      const column = metricIndex % 2;
-      const row = Math.floor(metricIndex / 2);
-      addShape(presentationTextBox(id(), `UClaw Metric ${metricIndex + 1}`, 762000 + column * (metricWidth + metricGap), metricY + row * (metricHeight + metricGap), metricWidth, metricHeight, [
-        { text: metric.label, size: 1200, color: '64748B', bold: true, spaceAfter: 350 },
-        { text: metric.value, size: metric.value.length > 16 ? 2200 : 3000, color: metricIndex % 2 === 0 ? '0F766E' : 'B45309', bold: true, spaceAfter: 450 },
-        { text: metric.detail, size: 1250, color: '475569' },
-      ], { fill: 'FFFFFF', line: 'DCE4EE', margin: 230000, vertical: 'ctr' }));
-    });
+    if (theme.contentStyle === 'band') {
+      const metrics = slide.metrics.slice(0, 4);
+      const metricGap = 120000;
+      const availableHeight = 5900000 - metricY;
+      const metricHeight = Math.floor((availableHeight - metricGap * Math.max(0, metrics.length - 1)) / Math.max(1, metrics.length));
+      metrics.forEach((metric, metricIndex) => {
+        const y = metricY + metricIndex * (metricHeight + metricGap);
+        const fill = metricIndex % 2 === 0 ? theme.surface : theme.surfaceAlt;
+        addShape(presentationShape(id(), `UClaw Metric Row ${metricIndex + 1}`, frame.x, y, frame.width, metricHeight, fill, theme.line));
+        addShape(presentationShape(id(), `UClaw Metric Row Accent ${metricIndex + 1}`, frame.x, y, 90000, metricHeight, metricIndex % 2 === 0 ? theme.primary : theme.secondary));
+        addShape(presentationTextBox(id(), `UClaw Metric Label ${metricIndex + 1}`, frame.x + 250000, y, 2100000, metricHeight, [
+          { text: metric.label, size: 1250, color: theme.text, bold: true },
+        ], { margin: 100000, vertical: 'ctr' }));
+        addShape(presentationTextBox(id(), `UClaw Metric Value ${metricIndex + 1}`, frame.x + 2500000, y, 2600000, metricHeight, [
+          { text: metric.value, size: metric.value.length > 16 ? 2100 : 2850, color: metricIndex % 2 === 0 ? theme.primary : theme.secondary, bold: true },
+        ], { margin: 100000, vertical: 'ctr' }));
+        addShape(presentationTextBox(id(), `UClaw Metric Detail ${metricIndex + 1}`, frame.x + 5350000, y, frame.width - 5600000, metricHeight, [
+          { text: metric.detail, size: 1250, color: theme.muted },
+        ], { margin: 100000, vertical: 'ctr' }));
+      });
+    } else {
+      const metricGap = 220000;
+      const metricWidth = Math.floor((frame.width - metricGap) / 2);
+      const availableHeight = 5900000 - metricY;
+      const metricRows = Math.max(1, Math.ceil(slide.metrics.length / 2));
+      const metricHeight = Math.floor((availableHeight - metricGap * (metricRows - 1)) / metricRows);
+      slide.metrics.slice(0, 4).forEach((metric, metricIndex) => {
+        const column = metricIndex % 2;
+        const row = Math.floor(metricIndex / 2);
+        addShape(presentationTextBox(id(), `UClaw Metric ${metricIndex + 1}`, frame.x + column * (metricWidth + metricGap), metricY + row * (metricHeight + metricGap), metricWidth, metricHeight, [
+          { text: metric.label, size: 1200, color: theme.muted, bold: true, spaceAfter: 350 },
+          { text: metric.value, size: metric.value.length > 16 ? 2200 : 3000, color: metricIndex % 2 === 0 ? theme.primary : theme.secondary, bold: true, spaceAfter: 450 },
+          { text: metric.detail, size: 1250, color: theme.muted },
+        ], { fill: metricIndex % 2 === 0 ? theme.surface : theme.surfaceAlt, line: theme.line, margin: 230000, vertical: 'ctr' }));
+      });
+    }
   } else if (role === 'timeline') {
-    background = 'FFFFFF';
-    addShape(presentationShape(id(), 'UClaw Timeline Accent', 0, 0, 160000, 6858000, '0F766E'));
-    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 3200000, 260000, [
-      { text: `章节 ${String(index).padStart(2, '0')} / TIMELINE`, size: 1050, color: '0F766E', bold: true },
-    ]));
-    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
-      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
-    ]));
-    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    background = theme.bodyBackground;
+    addRegularChrome(`章节 ${String(index).padStart(2, '0')} / TIMELINE`);
     const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
-    let timelineY = 2050000;
+    let timelineY = frame.contentY + 250000;
     if (lead.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Rich Lead', 762000, 1780000, 10600000, 560000, lead.map((text) => ({
+      addShape(presentationTextBox(id(), 'UClaw Rich Lead', frame.x, frame.contentY, frame.width, 560000, lead.map((text) => ({
         text,
         size: 1450,
-        color: '405166',
+        color: theme.muted,
       })), { margin: 80000, vertical: 'ctr' }));
-      timelineY = 2700000;
+      timelineY = frame.contentY + 820000;
     }
     const timelineItems = slide.timeline.slice(0, 5);
-    const timelineGap = 140000;
-    const timelineWidth = Math.floor((10600000 - timelineGap * Math.max(0, timelineItems.length - 1)) / Math.max(1, timelineItems.length));
-    addShape(presentationShape(id(), 'UClaw Timeline Rail', 950000, timelineY + 290000, 10200000, 30000, '99D5CB'));
-    timelineItems.forEach((item, itemIndex) => {
-      const x = 762000 + itemIndex * (timelineWidth + timelineGap);
-      addShape(presentationShape(id(), `UClaw Timeline Marker ${itemIndex + 1}`, x + Math.floor(timelineWidth / 2) - 70000, timelineY + 220000, 140000, 140000, itemIndex % 2 === 0 ? '0F766E' : 'D97706'));
-      addShape(presentationTextBox(id(), `UClaw Timeline Item ${itemIndex + 1}`, x, timelineY + 520000, timelineWidth, 5900000 - timelineY - 520000, [
-        { text: item.period || String(itemIndex + 1).padStart(2, '0'), size: 1150, color: itemIndex % 2 === 0 ? '0F766E' : 'B45309', bold: true, align: 'ctr', spaceAfter: 400 },
-        { text: item.title, size: 1550, color: '172033', bold: true, align: 'ctr', spaceAfter: 450 },
-        { text: item.body, size: timelineItems.length > 4 ? 1100 : 1250, color: '475569', align: 'ctr' },
-      ], { fill: 'F7F9FC', line: 'DCE4EE', margin: 150000 }));
-    });
+    if (theme.contentStyle === 'band') {
+      const timelineGap = 100000;
+      const availableHeight = 5950000 - timelineY;
+      const timelineHeight = Math.floor((availableHeight - timelineGap * Math.max(0, timelineItems.length - 1)) / Math.max(1, timelineItems.length));
+      const railX = frame.x + 650000;
+      addShape(presentationShape(id(), 'UClaw Timeline Rail', railX, timelineY + 120000, 30000, Math.max(30000, availableHeight - 240000), theme.line));
+      timelineItems.forEach((item, itemIndex) => {
+        const y = timelineY + itemIndex * (timelineHeight + timelineGap);
+        addShape(presentationShape(id(), `UClaw Timeline Marker ${itemIndex + 1}`, railX - 75000, y + Math.floor(timelineHeight / 2) - 60000, 150000, 120000, itemIndex % 2 === 0 ? theme.primary : theme.secondary));
+        addShape(presentationTextBox(id(), `UClaw Timeline Period ${itemIndex + 1}`, frame.x, y, 520000, timelineHeight, [
+          { text: item.period || String(itemIndex + 1).padStart(2, '0'), size: 1250, color: itemIndex % 2 === 0 ? theme.primary : theme.secondary, bold: true, align: 'ctr' },
+        ], { vertical: 'ctr' }));
+        addShape(presentationTextBox(id(), `UClaw Timeline Item ${itemIndex + 1}`, frame.x + 1050000, y, frame.width - 1050000, timelineHeight, [
+          { text: item.title, size: 1550, color: theme.text, bold: true, spaceAfter: 220 },
+          { text: item.body, size: 1200, color: theme.muted },
+        ], { fill: itemIndex % 2 === 0 ? theme.surface : theme.surfaceAlt, line: theme.line, margin: 150000, vertical: 'ctr' }));
+      });
+    } else {
+      const timelineGap = 140000;
+      const timelineWidth = Math.floor((frame.width - timelineGap * Math.max(0, timelineItems.length - 1)) / Math.max(1, timelineItems.length));
+      addShape(presentationShape(id(), 'UClaw Timeline Rail', frame.x + 160000, timelineY + 290000, frame.width - 320000, 30000, theme.line));
+      timelineItems.forEach((item, itemIndex) => {
+        const x = frame.x + itemIndex * (timelineWidth + timelineGap);
+        addShape(presentationShape(id(), `UClaw Timeline Marker ${itemIndex + 1}`, x + Math.floor(timelineWidth / 2) - 70000, timelineY + 220000, 140000, 140000, itemIndex % 2 === 0 ? theme.primary : theme.secondary));
+        addShape(presentationTextBox(id(), `UClaw Timeline Item ${itemIndex + 1}`, x, timelineY + 520000, timelineWidth, 5900000 - timelineY - 520000, [
+          { text: item.period || String(itemIndex + 1).padStart(2, '0'), size: 1150, color: itemIndex % 2 === 0 ? theme.primary : theme.secondary, bold: true, align: 'ctr', spaceAfter: 400 },
+          { text: item.title, size: 1550, color: theme.text, bold: true, align: 'ctr', spaceAfter: 450 },
+          { text: item.body, size: timelineItems.length > 4 ? 1100 : 1250, color: theme.muted, align: 'ctr' },
+        ], { fill: itemIndex % 2 === 0 ? theme.surface : theme.surfaceAlt, line: theme.line, margin: 150000 }));
+      });
+    }
+  } else if (role === 'statement') {
+    background = theme.bodyBackground;
+    addRegularChrome(`章节 ${String(index).padStart(2, '0')} / BIG IDEA`);
+    const statement = cleanText(slide.body) || cleanText(slide.subtitle) || cleanText(slide.bullets[0]);
+    const supporting = slide.bullets.filter((item) => item !== statement).slice(0, 3);
+    const statementHeight = supporting.length > 0 ? 2200000 : 3300000;
+    addShape(presentationTextBox(id(), 'UClaw Statement Lead', frame.x, frame.contentY + 180000, frame.width, statementHeight, [
+      { text: statement, size: statement.length > 90 ? 2600 : statement.length > 50 ? 3200 : 3900, color: 'FFFFFF', bold: true, align: theme.contentStyle === 'band' ? 'l' : 'ctr' },
+    ], { fill: theme.primary, line: theme.primary, margin: 420000, vertical: 'ctr' }));
+    if (supporting.length > 0) {
+      const gap = 180000;
+      const cardWidth = Math.floor((frame.width - gap * (supporting.length - 1)) / supporting.length);
+      supporting.forEach((text, itemIndex) => {
+        addShape(presentationTextBox(id(), `UClaw Statement Point ${itemIndex + 1}`, frame.x + itemIndex * (cardWidth + gap), frame.contentY + 2640000, cardWidth, 1500000, [
+          { text: String(itemIndex + 1).padStart(2, '0'), size: 1050, color: itemIndex % 2 === 0 ? theme.primary : theme.secondary, bold: true, spaceAfter: 300 },
+          { text, size: density === 'dense' ? 1350 : 1500, color: theme.text, bold: true },
+        ], { fill: itemIndex % 2 === 0 ? theme.surface : theme.surfaceAlt, line: theme.line, margin: 210000, vertical: 'ctr' }));
+      });
+    }
   } else {
-    background = 'FFFFFF';
-    addShape(presentationShape(id(), 'UClaw Content Accent', 0, 0, 160000, 6858000, '0F766E'));
-    addShape(presentationTextBox(id(), 'UClaw Section Label', 762000, 430000, 2800000, 260000, [
-      { text: `章节 ${String(index).padStart(2, '0')} / KEY POINT`, size: 1050, color: '0F766E', bold: true },
-    ]));
-    addShape(presentationTextBox(id(), 'UClaw Title', 762000, 760000, 10600000, 720000, [
-      { text: slide.title, size: slide.title.length > 30 ? 2600 : 3100, color: '172033', bold: true },
-    ]));
-    addShape(presentationShape(id(), 'UClaw Title Rule', 762000, 1530000, 10600000, 17000, 'D7E0E8'));
+    background = theme.bodyBackground;
+    addRegularChrome(`章节 ${String(index).padStart(2, '0')} / KEY POINT`);
     const lead = [slide.subtitle, slide.body].map(cleanText).filter(Boolean);
-    let contentY = 1850000;
+    let contentY = frame.contentY;
     if (lead.length > 0) {
-      addShape(presentationTextBox(id(), 'UClaw Content Lead', 762000, contentY, 10600000, 760000, lead.map((text) => ({
+      addShape(presentationTextBox(id(), 'UClaw Content Lead', frame.x, contentY, frame.width, 760000, lead.map((text) => ({
         text,
         size: 1650,
-        color: '405166',
+        color: theme.muted,
         bold: lead.length === 1,
         spaceAfter: 350,
-      })), { fill: 'EEF7F5', line: 'C8E7E1', margin: 180000, vertical: 'ctr' }));
-      contentY = 2820000;
+      })), { fill: theme.surfaceAlt, line: theme.line, margin: 180000, vertical: 'ctr' }));
+      contentY += 970000;
     }
     const bullets = slide.bullets.length > 0 ? slide.bullets : (lead.length > 0 ? [] : ['内容待补充']);
     if (bullets.length > 0) {
@@ -836,25 +1338,26 @@ function presentationSlideXml(slide: PresentationSlide, index: number, slideCoun
         ? [bullets.slice(0, Math.ceil(bullets.length / 2)), bullets.slice(Math.ceil(bullets.length / 2))]
         : [bullets];
       const gap = 260000;
-      const width = useColumns ? Math.floor((10600000 - gap) / 2) : 10600000;
+      const width = useColumns ? Math.floor((frame.width - gap) / 2) : frame.width;
       groups.filter((group) => group.length > 0).forEach((group, groupIndex) => {
         const fontSize = presentationBodyFontSize(group, useColumns ? 23 : 40);
-        addShape(presentationTextBox(id(), `UClaw Content ${groupIndex + 1}`, 762000 + groupIndex * (width + gap), contentY, width, 5900000 - contentY, group.map((text) => ({
+        addShape(presentationTextBox(id(), `UClaw Content ${groupIndex + 1}`, frame.x + groupIndex * (width + gap), contentY, width, 5900000 - contentY, group.map((text) => ({
           text,
-          size: fontSize,
-          color: '243247',
+          size: density === 'dense' ? Math.max(1450, fontSize - 150) : fontSize,
+          color: theme.text,
           bullet: true,
           spaceAfter: 650,
-        })), { fill: 'F7F9FC', line: 'E1E7EF', margin: 230000 }));
+        })), { fill: groupIndex % 2 === 0 ? theme.surface : theme.surfaceAlt, line: theme.line, margin: 230000 }));
       });
     }
   }
 
   if (role !== 'cover') {
-    addShape(presentationTextBox(id(), 'UClaw Footer', 762000, 6350000, 10600000, 220000, [
-      { text: `${deckTitle}    ${String(index + 1).padStart(2, '0')} / ${String(slideCount).padStart(2, '0')}`, size: 900, color: role === 'section' ? '99B8B4' : '7A8798', align: 'r' },
+    addShape(presentationTextBox(id(), 'UClaw Footer', frame.x, 6350000, frame.width, 220000, [
+      { text: `${deckTitle}    ${String(index + 1).padStart(2, '0')} / ${String(slideCount).padStart(2, '0')}`, size: 900, color: role === 'section' ? theme.coverMuted : theme.muted, align: 'r' },
     ]));
   }
+  addShape(presentationShape(id(), `UClaw Theme ${theme.family}`, 12180000, 6840000, 1000, 1000, background));
 
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
@@ -863,91 +1366,6 @@ function presentationSlideXml(slide: PresentationSlide, index: number, slideCoun
     ${shapes.join('\n    ')}
   </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
 </p:sld>`;
-}
-
-function buildPlannedPresentation(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
-  const prompt = planningContextPrompt(request);
-  const taskPrompt = sourcePrompt(request);
-  const topic = extractQuotedTopic(prompt, cleanText(request.title) || 'AI 工作流效率提升');
-  const requestedTopics = splitRequestedTopics(taskPrompt);
-  const slideCount = parseRequestedCount(taskPrompt, '页') ?? Math.max(6, Math.min(10, requestedTopics.length + 2));
-  const outline = requestedTopics.length > 0
-    ? requestedTopics
-    : ['目录', '现状痛点', '解决方案', '示例场景', '价值与 ROI', '落地计划', '风险与下一步'];
-  const slides = ensureLength([
-    {
-      title: topic,
-      subtitle: '由 UClaw 根据当前任务自动规划的可编辑演示稿',
-      bullets: ['目标清晰', '结构完整', '可继续编辑'],
-    },
-    {
-      title: '目录',
-      bullets: outline.slice(0, 6).map((item, index) => `${index + 1}. ${item}`),
-    },
-    ...outline
-      .filter((item) => item !== '目录')
-      .map((item) => ({
-        title: item,
-        bullets: presentationBulletsForTopic(topic, item),
-      })),
-  ], slideCount, (index) => ({
-    title: index === slideCount - 1 ? '下一步行动' : `补充分析 ${index + 1}`,
-    bullets: index === slideCount - 1
-      ? ['确认目标用户与交付标准', '拆解试点场景与负责人', '按周复盘数据和体验反馈']
-      : ['围绕业务目标补充事实依据', '明确执行动作和衡量指标', '沉淀可复用检查清单'],
-  }));
-
-  return {
-    ...request,
-    title: topic,
-    slides,
-  };
-}
-
-function presentationBulletsForTopic(topic: string, item: string): string[] {
-  const normalized = item.toLowerCase();
-  const isHospitality = /咖啡|餐饮|门店|开业|菜单|茶饮/u.test(topic);
-  if (isHospitality && /痛点|问题|现状/u.test(item)) {
-    return ['新店首月自然客流不稳定，需要明确引流抓手', '菜单卖点过多会分散记忆点，需要建立主推产品', '高峰时段出品与服务承压，容易影响首次体验'];
-  }
-  if (isHospitality && /方案|路径|架构|设计/u.test(item)) {
-    return ['用限定饮品、经典常驻和轻食组合形成清晰菜单层级', '围绕通勤、午后和好友小聚设计分时段到店理由', '把预热、开业周活动和会员沉淀串成连续运营节奏'];
-  }
-  if (isHospitality && /案例|场景|示例/u.test(item)) {
-    return ['早高峰：外带套餐缩短选择与等待时间', '午后：主题饮品与甜品组合提升客单和分享意愿', '周末：双人套餐和小型活动承接社交场景'];
-  }
-  if (isHospitality && /roi|收益|价值|指标/u.test(normalized)) {
-    return ['跟踪到店人数、下单转化率和平均客单价', '用主推单品销量与套餐占比判断菜单效率', '通过会员新增、二次到店和评价反馈衡量长期价值'];
-  }
-  if (isHospitality && /落地|计划|推进|里程碑/u.test(item)) {
-    return ['开业前 7 天：完成菜单试饮、物料上线和周边预热', '开业首周：按日复盘客流、出品时长和热销组合', '开业后 30 天：保留高转化活动并迭代低效单品'];
-  }
-  if (isHospitality && /风险|trade|取舍/u.test(normalized)) {
-    return ['活动强度要匹配门店产能，避免排队透支体验', '限定原料准备安全库存，同时控制临期损耗', '优惠结束前明确会员承接，避免只形成一次性低价流量'];
-  }
-  if (/痛点|问题|现状/u.test(item)) {
-    return ['重复工作分散在多个工具里，交接成本高', '关键产物缺少统一验证，返工难以及时发现', '多人协作时上下文容易丢失或被误用'];
-  }
-  if (/方案|路径|架构|设计/u.test(item)) {
-    return [`围绕「${topic}」建立统一任务入口`, '把任务拆成可追踪子任务和产物清单', '在最终回复前执行内容、文件和可用性验证'];
-  }
-  if (/案例|场景|示例/u.test(item)) {
-    return ['从一个真实业务请求开始，自动拆解资料、数据和展示物', '让每个子任务形成独立文件或媒体产物', '通过验证证据降低交付不确定性'];
-  }
-  if (/roi|收益|价值|指标/u.test(normalized)) {
-    return ['减少反复追问和人工整理时间', '降低文件打不开、公式缺失、页面不可用等返工', '把交付质量从个人经验变成可检查证据'];
-  }
-  if (/落地|计划|推进|里程碑/u.test(item)) {
-    return ['第 1 周：选定高频场景和验收 prompt', '第 2-3 周：接入产物生成与验证链路', '第 4 周：灰度发布并收集失败样本'];
-  }
-  if (/风险|trade|取舍/u.test(normalized)) {
-    return ['模型规划失败时必须有可恢复 fallback', '长任务需要明确进度和取消路径', '历史恢复必须以结构化 manifest 为准'];
-  }
-  return [
-    `明确「${item}」在「${topic}」中的范围、对象与成功标准`,
-    `梳理${item}阶段的已知事实、关键约束和优先级`,
-    `为${item}结论保留数据、文件与责任人三类核验依据`,
-  ];
 }
 
 function buildPlannedSpreadsheet(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
@@ -1170,9 +1588,48 @@ function buildSignupHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactC
   return { ...request, title, body, css, js };
 }
 
-function buildCoffeeMenuHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
+function hasCommerceIntent(prompt: string): boolean {
+  const hasCommerceObject = /商品|产品|货品|菜品|餐品|饮品|奶茶|茶饮|果茶|咖啡|甜品|菜单|商城|商店|店铺|零售|外卖/u.test(prompt);
+  const hasCommerceAction = /点单|下单|购买|选购|加购|购物车|结算|订单|总价|数量|规格|分类|价格/u.test(prompt);
+  const hasCatalogSurface = /目录|清单|列表|展示|小程序|网页|页面|应用|app/iu.test(prompt);
+  return hasCommerceAction || (hasCommerceObject && hasCatalogSurface);
+}
+
+function commerceCatalog(prompt: string): Array<{ name: string; category: string; price: number }> {
+  if (/奶茶|茶饮|果茶|饮品|咖啡|拿铁|冷萃/u.test(prompt)) {
+    return [
+      { name: '黑糖珍珠奶茶', category: '奶茶', price: 22 },
+      { name: '茉莉鲜奶茶', category: '奶茶', price: 24 },
+      { name: '青提柠檬茶', category: '果茶', price: 23 },
+      { name: '百香双响炮', category: '果茶', price: 25 },
+      { name: '燕麦拿铁', category: '咖啡', price: 28 },
+      { name: '巴斯克蛋糕', category: '甜品', price: 32 },
+    ];
+  }
+  if (/餐饮|餐厅|外卖|菜品|餐品|小吃|烘焙|甜品/u.test(prompt)) {
+    return [
+      { name: '招牌双人套餐', category: '套餐', price: 88 },
+      { name: '经典主食', category: '主食', price: 32 },
+      { name: '时蔬小食', category: '小食', price: 18 },
+      { name: '季节甜品', category: '甜品', price: 26 },
+      { name: '鲜榨果汁', category: '饮品', price: 20 },
+      { name: '气泡水', category: '饮品', price: 12 },
+    ];
+  }
+  return [
+    { name: '轻量随行杯', category: '生活', price: 59 },
+    { name: '桌面收纳盒', category: '家居', price: 39 },
+    { name: '便携充电线', category: '数码', price: 29 },
+    { name: '旅行整理袋', category: '出行', price: 49 },
+    { name: '经典帆布包', category: '出行', price: 69 },
+    { name: '组合优惠套装', category: '套餐', price: 99 },
+  ];
+}
+
+function buildCommerceHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
   const prompt = planningContextPrompt(request);
-  const title = extractQuotedTopic(prompt, cleanText(request.title) || '咖啡店菜单小程序');
+  const title = extractQuotedTopic(prompt, cleanText(request.title) || '商品点单小程序');
+  const items = commerceCatalog(prompt);
   const body = `<main class="shell">
   <header><h1>${xml(title)}</h1><strong id="cartTotal">¥0</strong></header>
   <nav id="categoryBar" class="filters"></nav>
@@ -1180,7 +1637,7 @@ function buildCoffeeMenuHtmlApp(request: LocalArtifactCreateRequest): LocalArtif
   <aside><h2>购物车</h2><ul id="cartList"></ul></aside>
 </main>`;
   const css = `body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7f9;color:#182230}.shell{width:min(980px,calc(100vw - 32px));margin:24px auto;display:grid;grid-template-columns:1fr 280px;gap:16px}header{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;background:#fff;border:1px solid #dfe5ee;border-radius:8px;padding:16px}h1,h2{margin:0;font-size:24px}.filters{display:flex;flex-wrap:wrap;gap:8px;grid-column:1/-1}.filters button,.card button{border:1px solid #244f3f;border-radius:6px;background:#244f3f;color:#fff;padding:9px 12px;cursor:pointer}.filters button{background:#fff;color:#244f3f}.filters button.active{background:#244f3f;color:#fff}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card,aside{background:#fff;border:1px solid #dfe5ee;border-radius:8px;padding:14px}.price{color:#b54708;font-weight:700}ul{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:8px}@media(max-width:760px){.shell{grid-template-columns:1fr}aside{order:3}}`;
-  const js = `const items=[{name:'燕麦拿铁',category:'咖啡',price:28},{name:'冷萃咖啡',category:'咖啡',price:30},{name:'抹茶拿铁',category:'茶饮',price:26},{name:'柠檬红茶',category:'茶饮',price:22},{name:'巴斯克蛋糕',category:'甜品',price:32},{name:'可颂',category:'甜品',price:18}];let category='全部';let cart=[];const categoryBar=document.getElementById('categoryBar');const menuGrid=document.getElementById('menuGrid');const cartList=document.getElementById('cartList');const cartTotal=document.getElementById('cartTotal');function renderCategories(){categoryBar.innerHTML='';['全部',...new Set(items.map(item=>item.category))].forEach(name=>{const button=document.createElement('button');button.type='button';button.textContent=name;button.className=name===category?'active':'';button.onclick=()=>{category=name;render()};categoryBar.appendChild(button)})}function add(item){const found=cart.find(row=>row.name===item.name);if(found)found.qty+=1;else cart.push({...item,qty:1});renderCart()}function renderMenu(){menuGrid.innerHTML='';items.filter(item=>category==='全部'||item.category===category).forEach(item=>{const card=document.createElement('article');card.className='card';card.innerHTML='<h3></h3><p></p><p class="price"></p><button type="button">加入购物车</button>';card.querySelector('h3').textContent=item.name;card.querySelector('p').textContent=item.category;card.querySelector('.price').textContent='¥'+item.price;card.querySelector('button').onclick=()=>add(item);menuGrid.appendChild(card)})}function renderCart(){cartList.innerHTML='';let total=0;cart.forEach(item=>{total+=item.price*item.qty;const li=document.createElement('li');li.textContent=item.name+' × '+item.qty+' = ¥'+item.price*item.qty;cartList.appendChild(li)});cartTotal.textContent='¥'+total}function render(){renderCategories();renderMenu();renderCart()}render();`;
+  const js = `const items=${JSON.stringify(items)};let category='全部';let cart=[];const categoryBar=document.getElementById('categoryBar');const menuGrid=document.getElementById('menuGrid');const cartList=document.getElementById('cartList');const cartTotal=document.getElementById('cartTotal');function renderCategories(){categoryBar.innerHTML='';['全部',...new Set(items.map(item=>item.category))].forEach(name=>{const button=document.createElement('button');button.type='button';button.textContent=name;button.className=name===category?'active':'';button.onclick=()=>{category=name;render()};categoryBar.appendChild(button)})}function add(item){const found=cart.find(row=>row.name===item.name);if(found)found.qty+=1;else cart.push({...item,qty:1});renderCart()}function renderMenu(){menuGrid.innerHTML='';items.filter(item=>category==='全部'||item.category===category).forEach(item=>{const card=document.createElement('article');card.className='card';card.innerHTML='<h3></h3><p></p><p class="price"></p><button type="button">加入购物车</button>';card.querySelector('h3').textContent=item.name;card.querySelector('p').textContent=item.category;card.querySelector('.price').textContent='¥'+item.price;card.querySelector('button').onclick=()=>add(item);menuGrid.appendChild(card)})}function renderCart(){cartList.innerHTML='';let total=0;cart.forEach(item=>{total+=item.price*item.qty;const li=document.createElement('li');li.textContent=item.name+' × '+item.qty+' = ¥'+item.price*item.qty;cartList.appendChild(li)});cartTotal.textContent='¥'+total}function render(){renderCategories();renderMenu();renderCart()}render();`;
   return { ...request, title, body, css, js };
 }
 
@@ -1198,7 +1655,7 @@ function buildKanbanHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactC
 
 function buildPlannedHtmlApp(request: LocalArtifactCreateRequest): LocalArtifactCreateRequest {
   const prompt = planningContextPrompt(request);
-  if (/咖啡|菜单|购物车|总价|分类/u.test(prompt)) return buildCoffeeMenuHtmlApp(request);
+  if (hasCommerceIntent(prompt)) return buildCommerceHtmlApp(request);
   if (/报名|表单|校验|成功状态/u.test(prompt)) return buildSignupHtmlApp(request);
   if (/kanban|看板|线索|拖动|切换状态|状态/u.test(prompt)) return buildKanbanHtmlApp(request);
   if (/灵感|标签|搜索|本地保存/u.test(prompt)) return buildIdeaCollectorHtmlApp(request);
@@ -1252,11 +1709,11 @@ function planLocalArtifactRequest(request: LocalArtifactCreateRequest): { reques
     };
   }
   const prompt = sourcePrompt(request);
+  if (request.kind === 'presentation') {
+    throw new Error('PPT 内容规划未返回可执行页面内容，已阻止通用模板交付。请重试本任务。');
+  }
   if (!prompt) {
     return { request, mode: 'fallback-template', summary: '没有可用 prompt，使用内置保底模板。' };
-  }
-  if (request.kind === 'presentation') {
-    return { request: buildPlannedPresentation(request), mode: 'prompt-heuristic', summary: '已根据 prompt 规划 PPT 页纲与要点。' };
   }
   if (request.kind === 'spreadsheet') {
     return { request: buildPlannedSpreadsheet(request), mode: 'prompt-heuristic', summary: '已根据 prompt 规划工作表、字段、样例数据和公式。' };
@@ -1270,14 +1727,7 @@ function planLocalArtifactRequest(request: LocalArtifactCreateRequest): { reques
 function normalizeSlides(request: LocalArtifactCreateRequest): PresentationSlide[] {
   const title = cleanText(request.title) || 'AI 工作流效率提升';
   const inputSlides = Array.isArray(request.slides) ? request.slides : [];
-  const slides = inputSlides.length > 0 ? inputSlides : [
-    { title, subtitle: '未来城市里的个人效率工作台' },
-    { title: '目标', bullets: ['把重复工作交给自动化', '让创意、数据和交付流转更顺畅'] },
-    { title: '核心流程', bullets: ['输入目标', '拆解任务', '生成产物', '验证并交付'] },
-    { title: '收益', bullets: ['减少等待', '降低返工', '形成可复用模板'] },
-    { title: '下一步', bullets: ['接入团队素材', '沉淀标准工作流', '按场景持续优化'] },
-  ];
-  return slides.map((slide, index) => {
+  return inputSlides.map((slide, index) => {
     const columns = Array.isArray(slide.columns)
       ? slide.columns.map((column) => ({
           title: cleanText(column.title),
@@ -1305,15 +1755,16 @@ function normalizeSlides(request: LocalArtifactCreateRequest): PresentationSlide
         .filter((item) => Boolean(item.period || item.title || item.body))
         .slice(0, 5)
       : [];
+    const layout = presentationLayoutFromInput(slide);
     return {
       title: cleanText(slide.title) || (index === 0 ? title : `第 ${index + 1} 页`),
       subtitle: cleanText(slide.subtitle),
       body: cleanText(slide.body),
       bullets: Array.isArray(slide.bullets) ? slide.bullets.map(cleanText).filter(Boolean) : [],
-      layout: presentationLayoutFromInput(slide),
-      columns,
-      metrics,
-      timeline,
+      layout,
+      columns: layout === 'two-column' ? columns : [],
+      metrics: layout === 'metric' ? metrics : [],
+      timeline: layout === 'timeline' ? timeline : [],
     };
   });
 }
@@ -1321,6 +1772,8 @@ function normalizeSlides(request: LocalArtifactCreateRequest): PresentationSlide
 async function createPptxBuffer(request: LocalArtifactCreateRequest): Promise<Buffer> {
   const slides = normalizeSlides(request);
   const deckTitle = cleanText(request.title) || slides[0]?.title || 'UClaw PPT';
+  const theme = presentationTheme(request);
+  const density = presentationDensity(request);
   const zip = new JSZip();
   zip.file('[Content_Types].xml', presentationContentTypesXml(slides.length));
   zip.file('_rels/.rels', relsXml([
@@ -1344,9 +1797,9 @@ async function createPptxBuffer(request: LocalArtifactCreateRequest): Promise<Bu
   zip.file('ppt/slideLayouts/_rels/slideLayout1.xml.rels', relsXml([
     { id: 'rId1', type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster', target: '../slideMasters/slideMaster1.xml' },
   ]));
-  zip.file('ppt/theme/theme1.xml', themeXml());
+  zip.file('ppt/theme/theme1.xml', themeXml(theme));
   slides.forEach((slide, index) => {
-    zip.file(`ppt/slides/slide${index + 1}.xml`, presentationSlideXml(slide, index, slides.length, deckTitle));
+    zip.file(`ppt/slides/slide${index + 1}.xml`, presentationSlideXml(slide, index, slides.length, deckTitle, theme, density));
     zip.file(`ppt/slides/_rels/slide${index + 1}.xml.rels`, relsXml([
       { id: 'rId1', type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout', target: '../slideLayouts/slideLayout1.xml' },
     ]));
@@ -1890,13 +2343,17 @@ function presentationRoleFromShapes(shapes: Array<{ name: string }>): Presentati
   if (names.some((name) => name.startsWith('UClaw Two Column '))) return 'two-column';
   if (names.some((name) => name.startsWith('UClaw Metric '))) return 'metric';
   if (names.some((name) => name.startsWith('UClaw Timeline Item '))) return 'timeline';
-  if (names.some((name) => name === 'UClaw Content Accent')) return 'content';
+  if (names.some((name) => name === 'UClaw Statement Lead')) return 'statement';
+  if (names.some((name) => name === 'UClaw Page Accent')) return 'content';
   return undefined;
 }
 
 async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifactCreateRequest): Promise<LocalArtifactVerificationResult> {
   try {
     const zip = await JSZip.loadAsync(buffer);
+    const expectedTheme = presentationTheme(request);
+    const themeText = await zip.file('ppt/theme/theme1.xml')?.async('string') ?? '';
+    const renderedThemeName = decodeXmlText(themeText.match(/<a:theme\b[^>]*\bname="([^"]*)"/u)?.[1] ?? '');
     const slideEntries = Object.keys(zip.files)
       .filter((name) => /^ppt\/slides\/slide\d+\.xml$/u.test(name))
       .sort((left, right) => {
@@ -1918,15 +2375,23 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
         || /^UClaw Content \d+$/u.test(shape.name)
         || /^UClaw Two Column \d+$/u.test(shape.name)
         || /^UClaw Metric \d+$/u.test(shape.name)
+        || /^UClaw Metric (?:Label|Value|Detail) \d+$/u.test(shape.name)
         || /^UClaw Timeline Item \d+$/u.test(shape.name)
+        || shape.name === 'UClaw Statement Lead'
+        || /^UClaw Statement Point \d+$/u.test(shape.name)
         || shape.name.startsWith('UClaw Agenda Item')
       ));
+      const themeMarker = shapes.find((shape) => shape.name.startsWith('UClaw Theme '));
       return {
         role,
+        themeFamily: themeMarker?.name.replace(/^UClaw Theme /u, '') ?? '',
         title: titleShape?.texts.join(' ') ?? '',
         contentLines: contentShapes.flatMap((shape) => shape.texts).filter((text) => !/^\d{2}$/u.test(text)),
         columnCount: shapes.filter((shape) => /^UClaw Two Column \d+$/u.test(shape.name)).length,
-        metricCount: shapes.filter((shape) => /^UClaw Metric \d+$/u.test(shape.name)).length,
+        metricCount: shapes.filter((shape) => (
+          /^UClaw Metric \d+$/u.test(shape.name)
+          || /^UClaw Metric Label \d+$/u.test(shape.name)
+        )).length,
         timelineCount: shapes.filter((shape) => /^UClaw Timeline Item \d+$/u.test(shape.name)).length,
       };
     }));
@@ -1949,6 +2414,7 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
     const twoColumnCount = slides.filter((slide) => slide.role === 'two-column').length;
     const metricLayoutCount = slides.filter((slide) => slide.role === 'metric').length;
     const timelineLayoutCount = slides.filter((slide) => slide.role === 'timeline').length;
+    const statementLayoutCount = slides.filter((slide) => slide.role === 'statement').length;
     const normalizedSlides = normalizeSlides(request);
     const expectedColumnCount = normalizedSlides.reduce((sum, slide) => sum + slide.columns.length, 0);
     const expectedMetricCount = normalizedSlides.reduce((sum, slide) => sum + slide.metrics.length, 0);
@@ -1960,10 +2426,13 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
     const richFieldsComplete = renderedColumnCount >= expectedColumnCount
       && renderedMetricCount >= expectedMetricCount
       && renderedTimelineCount >= expectedTimelineCount;
+    const themeMarkersComplete = slides.every((slide) => slide.themeFamily === expectedTheme.family);
+    const themeXmlMatches = renderedThemeName === `UClaw ${expectedTheme.name}`;
     const allSlidesHaveLayout = slides.every((slide) => Boolean(slide.role));
     const hasHierarchy = slideEntries.length === 1
       ? slides[0]?.contentLines.join('').length >= 16
-      : coverCount === 1 && contentCount + agendaCount + twoColumnCount + metricLayoutCount + timelineLayoutCount > 0;
+      : coverCount === 1 && contentCount + agendaCount + twoColumnCount + metricLayoutCount + timelineLayoutCount + statementLayoutCount > 0;
+    const layoutKinds = [...new Set(slides.map((slide) => slide.role).filter(Boolean))];
     const passed = hasTaskContext(request)
       && slideEntries.length > 0
       && emptySlides === 0
@@ -1974,6 +2443,8 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
       && countMatches
       && coverCount === 1
       && allSlidesHaveLayout
+      && themeMarkersComplete
+      && themeXmlMatches
       && richContentIssues.length === 0
       && richFieldsComplete
       && hasHierarchy;
@@ -1983,13 +2454,17 @@ async function validatePresentationBuffer(buffer: Buffer, request: LocalArtifact
       required: true,
       severity: passed ? 'info' : 'blocking',
       detail: passed
-        ? `PPT 成品验证通过：已读回 ${slideEntries.length} 页，封面、章节层次、内容密度和版式标记完整。`
-        : 'PPT 成品验证未通过：存在缺失版式、空的丰富字段、空泛内容、重复正文、文字过载或页数不匹配。',
+        ? `PPT 成品验证通过：已读回 ${slideEntries.length} 页，主题族、章节层次、内容密度和版式标记完整。`
+        : 'PPT 成品验证未通过：存在主题签名不一致、缺失版式、空的丰富字段、空泛内容、重复正文、文字过载或页数不匹配。',
       evidence: [
         `slides=${slideEntries.length}`,
         expectedSlides ? `expectedSlides=${expectedSlides}` : undefined,
         `emptySlides=${emptySlides}`,
-        `roles=cover:${coverCount},agenda:${agendaCount},section:${sectionCount},content:${contentCount},two-column:${twoColumnCount},metric:${metricLayoutCount},timeline:${timelineLayoutCount}`,
+        `theme=${expectedTheme.family}`,
+        `themeXml=${renderedThemeName || 'missing'}`,
+        `themeMarkersComplete=${themeMarkersComplete}`,
+        `roles=cover:${coverCount},agenda:${agendaCount},section:${sectionCount},content:${contentCount},two-column:${twoColumnCount},metric:${metricLayoutCount},timeline:${timelineLayoutCount},statement:${statementLayoutCount}`,
+        `layoutKinds=${layoutKinds.join(',') || 'none'}`,
         `layoutComplete=${allSlidesHaveLayout}`,
         `richItems=columns:${renderedColumnCount}/${expectedColumnCount},metrics:${renderedMetricCount}/${expectedMetricCount},timeline:${renderedTimelineCount}/${expectedTimelineCount}`,
         `richContentIssues=${richContentIssues.join(', ') || 'none'}`,
@@ -2364,7 +2839,7 @@ function detectHiddenDisplayOverrides(html: string): string[] {
 }
 
 function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, fileSize: number): LocalArtifactVerificationResult {
-  const prompt = sourcePrompt(request);
+  const prompt = planningContextPrompt(request);
   const normalizedHtml = cleanText(html);
   const bodyMarkup = extractHtmlBody(html);
   const bodyText = textFromMarkup(bodyMarkup);
@@ -2405,7 +2880,7 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
   const expectsPersistence = /本地保存|保存|localStorage|local storage/u.test(prompt);
   const expectsValidation = /校验|验证|表单/u.test(prompt);
   const expectsSuccess = /成功状态|报名成功|成功/u.test(prompt);
-  const expectsCart = /购物车|总价|cart/u.test(prompt);
+  const expectsCart = hasCommerceIntent(prompt);
   const expectsKanban = /kanban|看板|拖动|切换状态/u.test(prompt);
   const expectsList = /列表|清单|list/u.test(prompt);
   const hasDelete = !expectsDelete || /删除|delete|remove/iu.test(html);
@@ -2415,7 +2890,7 @@ function validateHtmlContent(html: string, request: LocalArtifactCreateRequest, 
   const hasRequiredPersistence = !expectsPersistence || hasPersistence;
   const hasValidation = !expectsValidation || /role="alert"|error\.textContent|onsubmit|preventDefault/iu.test(html);
   const hasSuccess = !expectsSuccess || /role="status"|success\.textContent|报名成功/iu.test(html);
-  const hasCart = !expectsCart || /cartTotal|cartList|购物车|price|total/iu.test(html);
+  const hasCart = !expectsCart || /cartTotal|cartList|购物车|订单|结算|总价|price|total/iu.test(html);
   const hasKanban = !expectsKanban || /board|column|statuses|move\(|切换|跟进中/iu.test(html);
   const hasList = !expectsList || /<ul\b|List|列表|list/iu.test(html);
   const hiddenDisplaySafe = hiddenDisplayOverrides.length === 0;
@@ -2537,8 +3012,12 @@ function validateTextContent(text: string, request: LocalArtifactCreateRequest):
   const substantiveLines = bodyLines.filter((line) => line.length >= 10 && !isPlaceholderLine(line));
   const repeatedLines = substantiveLines.length > 2 && uniqueCount(substantiveLines) / substantiveLines.length < 0.65;
   const bodyChars = cleanText(bodyLines.join(' ')).length;
+  const bodyCharacterCount = [...bodyLines.join('\n').replace(/\s+/gu, '')].length;
   const expectedItems = parseRequestedCount(sourcePrompt(request), '条');
   const itemCountMatches = expectedItems === undefined || bulletCount >= expectedItems;
+  const textLengthRequirement = normalizeTextLengthRequirement(request);
+  const textLengthMatches = textLengthRequirement === undefined
+    || bodyCharacterCount >= textLengthRequirement.minimumCharacters;
   const hasEnoughSubstance = substantiveLines.length >= 2 || bodyChars >= 160;
   const passed = hasTaskContext(request)
     && cleanText(text).length >= 80
@@ -2547,24 +3026,35 @@ function validateTextContent(text: string, request: LocalArtifactCreateRequest):
     && hasEnoughSubstance
     && placeholderLines.length === 0
     && !repeatedLines
-    && itemCountMatches;
+    && itemCountMatches
+    && textLengthMatches;
+  const failedLengthDetail = textLengthRequirement && !textLengthMatches
+    ? `正文共 ${bodyCharacterCount} 个字符，未达到要求的至少 ${textLengthRequirement.minimumCharacters} 个字符（目标 ${textLengthRequirement.targetCharacters} 个字符）。`
+    : undefined;
   return {
     status: passed ? 'passed' : 'blocked',
     kind: 'artifact.content',
     required: true,
     severity: passed ? 'info' : 'blocking',
     detail: passed
-      ? '文案成品验证通过：标题层级、正文密度、条目数量和非模板化内容均满足要求。'
-      : '文案成品验证未通过：结构不完整、正文过短、内容重复、条目不足或仍含占位模板。',
+      ? textLengthRequirement
+        ? `文案成品验证通过：正文 ${bodyCharacterCount} 个字符，满足目标长度和内容结构要求。`
+        : '文案成品验证通过：标题层级、正文密度、条目数量和非模板化内容均满足要求。'
+      : failedLengthDetail
+        || '文案成品验证未通过：结构不完整、正文过短、内容重复、条目不足或仍含占位模板。',
     evidence: [
       `chars=${cleanText(text).length}`,
       `bodyChars=${bodyChars}`,
+      `bodyCharacterCount=${bodyCharacterCount}`,
       `headings=${headingCount}`,
       `sectionHeadings=${sectionHeadingCount}`,
       `bullets=${bulletCount}`,
       `substantiveLines=${substantiveLines.length}`,
       expectedItems ? `expectedItems=${expectedItems}` : undefined,
       `itemCountMatches=${itemCountMatches}`,
+      textLengthRequirement ? `targetCharacters=${textLengthRequirement.targetCharacters}` : undefined,
+      textLengthRequirement ? `minimumCharacters=${textLengthRequirement.minimumCharacters}` : undefined,
+      `textLengthMatches=${textLengthMatches}`,
       `repeatedLines=${repeatedLines}`,
       `placeholderLines=${placeholderLines.join(' / ') || 'none'}`,
       `taskContext=${hasTaskContext(request)}`,

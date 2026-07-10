@@ -1,4 +1,4 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { copyFile, mkdir, realpath as realpathAsync, stat as statAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -20,6 +20,7 @@ const ARTIFACT_PROMPT_CONTEXT = [
   '- 用户要求生成、创建、导出、美化或打开 PPT/PPTX、Word/DOCX、Excel/XLSX、PDF、文档、报告、表格、图片、网页、脚本或压缩包时，必须交付真实本地产物，不能只回复计划、承诺、大纲或说明。',
   '- 用户对上一轮已生成的产物给出负反馈或修改意图（例如太丑、不满意、不行、重做、换一版、美化、优化）时，应视为新的产物修订任务：必须直接制作一个新的非覆盖改进版，不能只评价或承诺。',
   '- 如果专用产物工具不可用，继续使用可用的 skill、exec、Node、Python 或 uv 路径创建文件；只有完成并验证、遇到具体阻塞点、或需要用户确认时才能结束。',
+  '- 用户明确要求文章、小说、故事、剧本等长文本及目标字数/词数时，目标长度属于完成条件；必须读取最终文本核验，不足时继续补写和复核，不能把提纲、序章或片段当成完整交付。',
   '- 文件任务最终回复必须包含 MEDIA:<absolute-path> 或已验证的绝对文件路径。',
   '- 旧的 uclaw-computer-use 插件不属于可靠执行面；不要把启用它当作恢复路径，也不要假装存在 computer_* 桌面工具。',
   '- 如果确实需要用 shell 生成临时截图或图片供后续视觉/图片工具读取，必须写入 OpenClaw media/workspace 目录，例如 `~/.openclaw/media/outbound/`；不要写入裸 `/tmp/*.png`，因为本地媒体读取会拒绝非受管目录。',
@@ -51,6 +52,16 @@ const ARTIFACT_READ_ONLY_OR_KNOWLEDGE_RE = /(?:只读|查看|检查|读取|搜�
 const ARTIFACT_DIRECT_EXECUTION_RE = /(?:(?:帮我|给我|替我|直接|现在|马上|立即|立刻).{0,30}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出)|(?:然后|接着|随后|再).{0,12}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|^\s*(?:请)?\s*(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|(?:please\s+)?(?:create|make|generate|build|produce|export|write)\s+(?:a|an|one|some|the)\b)/iu;
 const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|不行|不对|太差|太简陋|占位|模板感|不够.{0,12}(?:高级|好看|精致|正式|苹果|产品|宣传)|重新(?:做|制作|生成|来|搞)|重做|再做|再来|换一版|改一版|美化|优化|润色|升级|高级一点|好看一点|精致一点|重新直接制作|make it better|too ugly|ugly|not good|redo|remake|regenerate|make another|improve|polish)/iu;
 const ARTIFACT_REVISION_NEGATION_RE = /(?:不要|别|不用|先别|无需|不需要|do not|don't|no need).{0,12}(?:重做|重新|修改|改|美化|优化|生成|制作|redo|remake|regenerate|improve|polish)/iu;
+const LONG_FORM_CONTENT_TARGET_RE = /(?:小说|故事|长文|文章|剧本|稿件|正文|章节|novel|story|article|screenplay|manuscript|long[-\s]?form)/iu;
+const LONG_FORM_CONTENT_REQUEST_RE = /(?:(?:写|创作|生成|制作|续写|扩写|补写|完成|输出|起草).{0,48}(?:小说|故事|长文|文章|剧本|稿件|正文|章节)|(?:小说|故事|长文|文章|剧本|稿件|正文|章节).{0,48}(?:写|创作|生成|制作|续写|扩写|补写|完成|输出|起草)|(?:write|create|generate|continue|expand|complete|draft).{0,48}(?:novel|story|article|screenplay|manuscript|long[-\s]?form))/iu;
+const LONG_FORM_KNOWLEDGE_QUESTION_RE = /(?:(?:如何|怎么|怎样|为什么|为何|技巧|教程|方法|建议|分析|评价|点评).{0,32}(?:写|创作|续写|小说|故事|长文|文章|剧本)|(?:how|why|tips?|tutorial|guide|advice|review).{0,48}(?:write|novel|story|article|screenplay))/iu;
+const TEXT_LENGTH_ARABIC_RE = /(?:至少|不少于|不低于|最少|超过|大于|约|大约|左右|不超过|至多|最多|控制在)?\s*(\d[\d,_]*(?:\.\d+)?)\s*(万|千|[kw])?\s*(字|字符|汉字|词|单词|characters?|words?)(?:\s*(?:左右|上下))?/iu;
+const TEXT_LENGTH_CHINESE_RE = /(?:至少|不少于|不低于|最少|超过|大于|约|大约|左右|不超过|至多|最多|控制在)?\s*([零〇一二两三四五六七八九十百千万]+)\s*(字|字符|汉字|词|单词)(?:\s*(?:左右|上下))?/u;
+const TEXT_LENGTH_MINIMUM_RE = /(?:至少|不少于|不低于|最少|超过|大于)/u;
+const TEXT_LENGTH_MAXIMUM_RE = /(?:不超过|至多|最多|控制在)/u;
+const TEXT_LENGTH_APPROXIMATE_RE = /(?:约|大约|左右)/u;
+const TEXT_CONTENT_EXT_RE = /\.(?:md|markdown|txt|html?|json|js|mjs|cjs|ts|tsx|jsx|css|py|xml|ya?ml)$/iu;
+const MAX_TEXT_CONTENT_BYTES = 16 * 1024 * 1024;
 const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
 const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
 const INTERNAL_SENTINEL_RE = /^\s*(?:HEARTBEAT_OK|NO_REPLY)\s*$/iu;
@@ -59,9 +70,9 @@ const GATEWAY_RESTART_CONTINUATION_BLOCK_RE = /\n{0,2}\[System\]\s+Your previous
 const GATEWAY_RESTART_CAPTURED_REPLY_NOTE_RE = /^\s*Note:\s+The interrupted final reply was captured:\s+"[^"]*"\s*$/giu;
 const QUEUED_USER_MESSAGE_MARKER_RE = /^\s*\[Queued user message that arrived while the previous turn was still active\]\s*\n?/iu;
 const RUNTIME_EVENT_CONTINUATION_RE = /^Continue the OpenClaw runtime event\.?\s*$/iu;
-const MEDIA_KEYWORD_RE = /(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|动起来|截图|截屏|image|photo|picture|poster|illustration|cover|video|animate|screenshot)/iu;
-const MEDIA_INFO_OR_CAPABILITY_RE = /(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why).{0,36}(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|poster|video|screenshot)|(?:生图|图片|图像|照片|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|poster|video|screenshot).{0,36}(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why)/iu;
-const IMAGE_GENERATE_REQUEST_RE = /(?:生图|画(?:一张|张|个)?|绘制|生成.{0,16}(?:图片|图像|照片|海报|插画|封面)|(?:图片|图像|照片|海报|插画|封面).{0,16}(?:生成|制作|做|画)|(?:generate|create|make|draw).{0,24}(?:image|photo|picture|poster|illustration|cover))/iu;
+const MEDIA_KEYWORD_RE = /(?:生图|图片|图像|照片|写真|肖像|海报|插画|封面|修图|改图|视频|动画|动起来|截图|截屏|image|photo|picture|portrait|poster|illustration|cover|video|animate|screenshot)/iu;
+const MEDIA_INFO_OR_CAPABILITY_RE = /(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why).{0,36}(?:生图|图片|图像|照片|写真|肖像|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|portrait|poster|video|screenshot)|(?:生图|图片|图像|照片|写真|肖像|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|portrait|poster|video|screenshot).{0,36}(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why)/iu;
+const IMAGE_GENERATE_REQUEST_RE = /(?:生图|画(?:一张|张|个)?|绘制|生成.{0,16}(?:图片|图像|照片|写真|肖像|海报|插画|封面)|(?:想要|要|需要|给我|帮我|请|来).{0,18}(?:图片|图像|照片|写真|肖像|海报|插画|封面)|(?:图片|图像|照片|写真|肖像|海报|插画|封面).{0,16}(?:生成|制作|做|画)|(?:generate|create|make|draw).{0,24}(?:image|photo|picture|portrait|poster|illustration|cover))/iu;
 const IMAGE_EDIT_REQUEST_RE = /(?:修图|改图|编辑图片|图片编辑|图像编辑|美化图片|(?:把|将|给|帮).{0,30}(?:图片|图像|照片|这张图|上一张).{0,40}(?:改|换|去掉|去除|加|添加|美化|编辑)|(?:edit|modify|retouch|remove|add).{0,40}(?:image|photo|picture))/iu;
 const VIDEO_GENERATE_REQUEST_RE = /(?:生视频|生成.{0,16}视频|视频.{0,16}(?:生成|制作|做)|动起来|动画化|转成视频|(?:generate|create|make|animate).{0,24}video|image[-\s]?to[-\s]?video)/iu;
 const DESKTOP_SCREENSHOT_REQUEST_RE = /(?:截图|截屏|屏幕截图|当前桌面|当前屏幕|screenshot|screen capture)/iu;
@@ -882,6 +893,83 @@ function isArtifactCapabilityQuestion(text) {
     && !ARTIFACT_CREATE_COMMAND_RE.test(value);
 }
 
+function parseChineseInteger(value) {
+  const digits = {
+    '零': 0,
+    '〇': 0,
+    '一': 1,
+    '二': 2,
+    '两': 2,
+    '三': 3,
+    '四': 4,
+    '五': 5,
+    '六': 6,
+    '七': 7,
+    '八': 8,
+    '九': 9,
+  };
+  const units = { '十': 10, '百': 100, '千': 1_000 };
+  let total = 0;
+  let section = 0;
+  let number = 0;
+  for (const character of String(value ?? '')) {
+    if (Object.prototype.hasOwnProperty.call(digits, character)) {
+      number = digits[character];
+      continue;
+    }
+    if (character === '万') {
+      section += number;
+      total += Math.max(1, section) * 10_000;
+      section = 0;
+      number = 0;
+      continue;
+    }
+    const unit = units[character];
+    if (!unit) return undefined;
+    section += Math.max(1, number) * unit;
+    number = 0;
+  }
+  const parsed = total + section + number;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function normalizeTextLengthUnit(value) {
+  return /(?:词|单词|words?)/iu.test(String(value ?? '')) ? 'words' : 'characters';
+}
+
+function requestedTextLength(text) {
+  const source = String(text ?? '');
+  const arabicMatch = TEXT_LENGTH_ARABIC_RE.exec(source);
+  const chineseMatch = arabicMatch ? null : TEXT_LENGTH_CHINESE_RE.exec(source);
+  if (!arabicMatch && !chineseMatch) return undefined;
+
+  const matchedText = (arabicMatch?.[0] ?? chineseMatch?.[0] ?? '').trim();
+  const suffix = arabicMatch?.[2]?.toLowerCase();
+  const base = arabicMatch
+    ? Number(String(arabicMatch[1]).replace(/[,_]/gu, ''))
+    : parseChineseInteger(chineseMatch?.[1]);
+  const multiplier = suffix === '万' || suffix === 'w'
+    ? 10_000
+    : suffix === '千' || suffix === 'k'
+      ? 1_000
+      : 1;
+  const target = Math.round(Number(base) * multiplier);
+  if (!Number.isFinite(target) || target <= 0) return undefined;
+
+  const unit = normalizeTextLengthUnit(arabicMatch?.[3] ?? chineseMatch?.[2]);
+  const maximumOnly = TEXT_LENGTH_MAXIMUM_RE.test(matchedText);
+  const minimumExplicit = TEXT_LENGTH_MINIMUM_RE.test(matchedText);
+  const approximate = TEXT_LENGTH_APPROXIMATE_RE.test(matchedText);
+  return {
+    unit,
+    target,
+    min: maximumOnly ? undefined : minimumExplicit ? target : Math.max(1, Math.floor(target * 0.9)),
+    max: maximumOnly ? target : approximate ? Math.ceil(target * 1.1) : undefined,
+    qualifier: maximumOnly ? 'maximum' : minimumExplicit ? 'minimum' : approximate ? 'approximate' : 'target',
+    source: matchedText,
+  };
+}
+
 function isArtifactRequest(text) {
   const value = String(text ?? '').trim();
   if (!value) return false;
@@ -893,7 +981,10 @@ function isArtifactRequest(text) {
   ) {
     return false;
   }
-  return ARTIFACT_REQUEST_RE.test(actionableText) || PAGE_ARTIFACT_RE.test(actionableText);
+  const longFormRequest = LONG_FORM_CONTENT_TARGET_RE.test(actionableText)
+    && LONG_FORM_CONTENT_REQUEST_RE.test(actionableText)
+    && !LONG_FORM_KNOWLEDGE_QUESTION_RE.test(actionableText);
+  return ARTIFACT_REQUEST_RE.test(actionableText) || PAGE_ARTIFACT_RE.test(actionableText) || longFormRequest;
 }
 
 function isArtifactRevisionFeedback(text) {
@@ -1100,7 +1191,7 @@ function sanitizePromptHistoryMessages(event) {
 function inferRequestedArtifactKind(text) {
   const source = String(text ?? '');
   if (/(?:PPT|pptx?|演示文稿|幻灯片|deck|slides?)/iu.test(source)) return 'presentation';
-  if (/(?:Word|docx?|文档|报告|标书|投标书|招投标书|方案|稿子|文章|内容|文案|copy)/iu.test(source)) return 'document';
+  if (/(?:Word|docx?|文档|报告|标书|投标书|招投标书|方案|稿子|文章|内容|文案|小说|故事|长文|剧本|正文|novel|story|screenplay|manuscript|copy)/iu.test(source)) return 'document';
   if (/(?:Excel|xlsx?|表格|电子表格|工作簿|spreadsheet|workbook|csv|tsv)/iu.test(source)) return 'spreadsheet';
   if (/(?:PDF|pdf)/iu.test(source)) return 'pdf';
   if (/(?:视频|video|mp4|mov|webm)/iu.test(source)) return 'video';
@@ -1210,13 +1301,6 @@ function stripArtifactRef(value) {
     .trim();
 }
 
-function artifactRefDedupeKey(value) {
-  return stripArtifactRef(value)
-    .replace(/\\\\/gu, '\\')
-    .replace(/\\/gu, '/')
-    .toLowerCase();
-}
-
 function isUrlRef(value) {
   return /^https?:\/\//iu.test(value);
 }
@@ -1228,6 +1312,62 @@ function normalizeLocalPath(value, cwd) {
     return resolve(typeof cwd === 'string' && cwd.trim() ? cwd : process.cwd(), value);
   }
   return value;
+}
+
+function canonicalLocalPath(value, cwd) {
+  const normalized = normalizeLocalPath(stripArtifactRef(value), cwd);
+  if (!normalized) return undefined;
+  const absolute = isAbsolute(normalized)
+    ? resolve(normalized)
+    : resolve(typeof cwd === 'string' && cwd.trim() ? cwd : process.cwd(), normalized);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+function artifactRefDedupeKey(value, cwd) {
+  const stripped = stripArtifactRef(value);
+  if (isUrlRef(stripped)) {
+    try {
+      const url = new URL(stripped);
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return stripped;
+    }
+  }
+  return (canonicalLocalPath(stripped, cwd) ?? stripped).replace(/\\/gu, '/');
+}
+
+function countTextContentUnits(text) {
+  const normalized = String(text ?? '')
+    .replace(/<[^>]*>/gu, ' ')
+    .replace(/^[\t ]{0,3}(?:#{1,6}|>|[-+*]\s|\d+[.)]\s)/gmu, '')
+    .replace(/[`*_~\[\](){}]/gu, ' ');
+  const characters = Array.from(normalized.replace(/\s+/gu, '')).length;
+  const words = normalized
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean).length;
+  return { characters, words };
+}
+
+function readArtifactTextMetrics(filePath) {
+  if (!filePath || !TEXT_CONTENT_EXT_RE.test(filePath)) return undefined;
+  try {
+    const stat = statSync(filePath);
+    if (!stat.isFile() || stat.size > MAX_TEXT_CONTENT_BYTES) return undefined;
+    return {
+      ...countTextContentUnits(readFileSync(filePath, 'utf8')),
+      sizeBytes: stat.size,
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function inferArtifactKind(ref) {
@@ -1388,7 +1528,7 @@ function extractArtifactRefs(event, finalText, options = {}) {
   ];
   const seen = new Set();
   return refs.filter((ref) => {
-    const key = ref.toLowerCase();
+    const key = artifactRefDedupeKey(ref, event?.cwd);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1398,7 +1538,7 @@ function extractArtifactRefs(event, finalText, options = {}) {
 function buildArtifactEvidence(event, finalText, options = {}) {
   return extractArtifactRefs(event, finalText, options).map((ref) => {
     const url = isUrlRef(ref) ? ref : undefined;
-    const filePath = normalizeLocalPath(ref, event?.cwd);
+    const filePath = canonicalLocalPath(ref, event?.cwd);
     const idSource = filePath ?? url ?? ref;
     const artifact = {
       id: `artifact:${hashString(idSource)}`,
@@ -1414,7 +1554,12 @@ function buildArtifactEvidence(event, finalText, options = {}) {
       const sizeMatch = /sizeBytes=(\d+)/u.exec(verification.evidence ?? '');
       artifact.sizeBytes = sizeMatch ? Number(sizeMatch[1]) : undefined;
     }
-    return { ref, artifact, verification };
+    return {
+      ref,
+      artifact,
+      verification,
+      textMetrics: readArtifactTextMetrics(filePath),
+    };
   });
 }
 
@@ -1957,6 +2102,7 @@ function makeRequiredEffect(params) {
     targetArtifactId: params.targetArtifactId,
     targetArtifactRef: params.targetArtifactRef,
     targetArtifactKeys: params.targetArtifactKeys,
+    textLength: params.textLength,
     required: true,
     source: RUNTIME_EVENT_SOURCE,
   };
@@ -1966,11 +2112,13 @@ function deriveRequiredEffects({
   activeUserText,
   artifactRequest,
   artifactRevisionRequest,
+  textLengthRequirement,
   priorArtifacts,
   desktopActionRequest,
   compositeRequiredArtifactCount,
 }) {
   const effects = [];
+  const textLength = textLengthRequirement ?? requestedTextLength(activeUserText);
   const rawCompositeDetectors = matchRawCompositeArtifactDetectors(activeUserText);
   const compositeCount = Math.max(compositeRequiredArtifactCount, rawCompositeDetectors.length);
 
@@ -1986,6 +2134,7 @@ function deriveRequiredEffects({
       targetArtifactId: target?.artifact?.id,
       targetArtifactRef: target?.ref,
       targetArtifactKeys: target ? artifactIdentityKeys(target) : undefined,
+      textLength,
     }));
   } else if (artifactRequest) {
     if (compositeCount > 1) {
@@ -1997,6 +2146,7 @@ function deriveRequiredEffects({
           title: detector.title,
           index: index + 1,
           minCount: 1,
+          textLength: detector.kind === 'document' ? textLength : undefined,
         }));
       });
       for (let index = effects.length; index < compositeCount; index += 1) {
@@ -2015,6 +2165,7 @@ function deriveRequiredEffects({
         kind: inferRequestedArtifactKind(activeUserText),
         title: '产物交付',
         minCount: 1,
+        textLength,
       }));
     }
   }
@@ -2057,6 +2208,12 @@ function artifactSatisfiesEffect(effect, entry, usedArtifactIds, evidence) {
   if (!artifact?.id || usedArtifactIds.has(artifact.id)) return false;
   if (entry?.verification?.status !== 'passed') return false;
   if (!artifactKindSatisfies(effect.kind, artifact.kind)) return false;
+  if (effect.textLength) {
+    const actual = entry?.textMetrics?.[effect.textLength.unit];
+    if (!Number.isFinite(actual)) return false;
+    if (effect.textLength.min !== undefined && actual < effect.textLength.min) return false;
+    if (effect.textLength.max !== undefined && actual > effect.textLength.max) return false;
+  }
   if (effectRequiresCurrentRunToolEvidence(effect, evidence) && entry?.successfulToolResult !== true) {
     return false;
   }
@@ -2099,6 +2256,8 @@ function evaluateRequiredEffects(requiredEffects, evidence) {
       matchedArtifactIds: matches.map((entry) => entry.artifact.id),
       reason: satisfied
         ? '已找到满足 effect 的新产物证据。'
+        : effect.textLength
+          ? `缺少满足文本长度要求的可读产物证据（${effect.textLength.unit}，目标 ${effect.textLength.target}）。`
         : effectRequiresCurrentRunToolEvidence(effect, evidence)
           ? '当前运行缺少由成功工具结果产生的同类型产物证据。'
           : effect.mustBeNewArtifact
@@ -2130,6 +2289,7 @@ function analyzeArtifactFinal(event, ctx) {
   const rawCompositeRequiredArtifactCount = countRawCompositeRequiredArtifacts(activeUserText);
   const inferredRequiredArtifactCount = Math.max(compositeRequiredArtifactCount, rawCompositeRequiredArtifactCount);
   const artifactRequest = isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest;
+  const textLengthRequirement = requestedTextLength(activeUserText);
   const desktopActionRequest = isDesktopActionRequest(activeUserText);
   const currentRunId = getRunId(event, ctx);
   const runToolEvidence = getToolEvidenceForRun(currentRunId);
@@ -2147,6 +2307,7 @@ function analyzeArtifactFinal(event, ctx) {
     activeUserText,
     artifactRequest,
     artifactRevisionRequest,
+    textLengthRequirement,
     priorArtifacts,
     desktopActionRequest,
     compositeRequiredArtifactCount,
@@ -2321,6 +2482,7 @@ function buildRevision(analysis) {
     };
   }
   if (analysis?.artifactRevisionRequest) {
+    const lengthEffect = analysis.requiredEffects?.find((effect) => effect.textLength)?.textLength;
     return {
       action: 'revise',
       reason: 'UClaw artifact revision final reply had no new completed artifact evidence.',
@@ -2332,11 +2494,13 @@ function buildRevision(analysis) {
           '不要只说“我会重做/我直接重做/我来优化”；现在必须继续执行，定位上一轮 MEDIA 路径或最近产物，创建一个新的非覆盖改进版。',
           '优先使用可用的 create_* 文件工具或相关 skill；如果没有专用工具，就用 exec 结合 Node/Python/uv 读取旧产物信息并重新生成。',
           '生成后必须用可用工具验证新文件存在，并在最终回复中返回新的 MEDIA:<absolute-path> 或新的绝对文件路径。',
+          ...(lengthEffect ? [`最终文本必须读取复核，${lengthEffect.unit === 'words' ? '词数' : '字符数'}不得低于 ${lengthEffect.min ?? 1}${lengthEffect.max ? `，且不得超过 ${lengthEffect.max}` : ''}；不足时继续补写，不能只交付提纲、序章或片段。`] : []),
           '如果确实无法继续，最终回复必须说明已经尝试的路径、具体缺失能力或阻塞点。',
         ].join('\n'),
       },
     };
   }
+  const lengthEffect = analysis?.requiredEffects?.find((effect) => effect.textLength)?.textLength;
   return {
     action: 'revise',
     reason: REVISION_REASON,
@@ -2347,6 +2511,7 @@ function buildRevision(analysis) {
         '用户要的是真实本地产物，不要用“我会生成/我将处理/接下来我会”这类未来承诺结束。',
         '现在继续执行：优先使用可用的 create_* 文件工具或相关 skill；如果没有专用工具，就用 exec 结合 Node/Python/uv 临时构造执行路径。',
         '生成后必须用可用工具验证文件存在，并在最终回复中返回 MEDIA:<absolute-path> 或绝对文件路径。',
+        ...(lengthEffect ? [`最终文本必须读取复核，${lengthEffect.unit === 'words' ? '词数' : '字符数'}不得低于 ${lengthEffect.min ?? 1}${lengthEffect.max ? `，且不得超过 ${lengthEffect.max}` : ''}；不足时继续补写，不能只交付提纲、序章或片段。`] : []),
         '如果确实无法继续，最终回复必须说明已经尝试的路径、具体缺失能力或阻塞点。',
       ].join('\n'),
     },
@@ -2929,6 +3094,7 @@ function registerArtifactGuard(api) {
         artifactRequest: analysis.artifactRequest,
         artifactRevisionFeedback: analysis.artifactRevisionFeedback,
         artifactRevisionRequest: analysis.artifactRevisionRequest,
+        textLengthRequirement: analysis.textLengthRequirement,
         enforceCurrentRunToolEvidence: analysis.enforceCurrentRunToolEvidence,
         currentRunToolAttemptCount: analysis.currentRunToolAttemptCount,
         currentRunFailedToolCount: analysis.currentRunFailedToolCount,
@@ -2975,7 +3141,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.7',
+  version: '0.1.8',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -2986,6 +3152,8 @@ export const __test = {
   analyzeArtifactFinal,
   isArtifactCapabilityQuestion,
   isArtifactRequest,
+  requestedTextLength,
+  countTextContentUnits,
   deriveRequiredEffects,
   evaluateRequiredEffects,
   buildRevision,

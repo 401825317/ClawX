@@ -38,6 +38,7 @@ import {
 } from '../../utils/media-generation-jobs';
 import {
   planMediaIntent,
+  type MediaIntentArtifactContext,
   type MediaIntentRecentMessage,
 } from '../../utils/media-intent-planner';
 import { logger } from '../../utils/logger';
@@ -68,6 +69,7 @@ import {
   compositeRunCoordinator,
 } from '../../utils/composite-run-coordinator';
 import type {
+  CompositeRunCancelRequest,
   CompositeRunRetryRequest,
   CompositeRunStartRequest,
 } from '../../../shared/composite-run';
@@ -215,7 +217,10 @@ export async function handleMediaRoutes(
     }
 
     if (runId && action === 'cancel' && req.method === 'POST') {
-      const result = await compositeRunCoordinator.cancel(runId);
+      const body = await parseJsonBody<CompositeRunCancelRequest>(req).catch(() => ({}));
+      const source = body.source?.trim().slice(0, 80) || 'unknown';
+      logger.info('[composite-run-route] cancel received', { runId, source });
+      const result = await compositeRunCoordinator.cancel(runId, { source });
       sendJson(res, result.outcome === 'not_found' ? 404 : 200, {
         success: result.outcome !== 'not_found',
         ...result,
@@ -374,6 +379,7 @@ export async function handleMediaRoutes(
           filePath?: string;
         }>;
         recentMessages?: MediaIntentRecentMessage[];
+        artifactContext?: MediaIntentArtifactContext;
       }>(req);
       const plan = await planMediaIntent({
         prompt: body.prompt?.trim() || '',
@@ -381,6 +387,7 @@ export async function handleMediaRoutes(
         explicitImages: normalizeMediaInputImageRefs(body.explicitImages),
         candidateImages: normalizeMediaInputImageRefs(body.candidateImages),
         recentMessages: Array.isArray(body.recentMessages) ? body.recentMessages : undefined,
+        artifactContext: body.artifactContext,
       });
       logger.info('[media-intent-route] planned', {
         requestedMode: body.requestedMode || 'chat',
@@ -391,6 +398,10 @@ export async function handleMediaRoutes(
         selectedImageIndex: plan.selectedImageIndex,
         sourceImageCount: plan.sourceImages?.length ?? 0,
         compositeTaskCount: plan.compositeTasks?.length ?? 0,
+        artifactContinuationAction: plan.artifactContinuationAction,
+        artifactContextRunId: body.artifactContext?.runId,
+        artifactContextStatus: body.artifactContext?.status,
+        artifactContextDeliveryStatus: body.artifactContext?.deliveryStatus,
       });
       sendJson(res, 200, { success: true, plan });
     } catch (error) {
@@ -588,6 +599,8 @@ export async function handleMediaRoutes(
         model?: string;
         size?: string;
         quality?: 'low' | 'medium' | 'high';
+        batchIndex?: number;
+        batchTotal?: number;
         inputImages?: Array<{
           fileName?: string;
           mimeType?: string;
@@ -627,6 +640,12 @@ export async function handleMediaRoutes(
       const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
         ? Math.floor(body.userMessageTimestampMs)
         : undefined;
+      const batchIndex = typeof body.batchIndex === 'number' && Number.isFinite(body.batchIndex) && body.batchIndex >= 1
+        ? Math.floor(body.batchIndex)
+        : undefined;
+      const batchTotal = typeof body.batchTotal === 'number' && Number.isFinite(body.batchTotal) && body.batchTotal >= 1
+        ? Math.floor(body.batchTotal)
+        : undefined;
       const runId = body.runId?.trim();
       const clientRequestId = body.clientRequestId?.trim()
         || (body.suppressConversationAppend !== true ? runId : undefined)
@@ -642,6 +661,8 @@ export async function handleMediaRoutes(
         model: body.model?.trim(),
         size: body.size?.trim(),
         quality: body.quality,
+        ...(batchIndex !== undefined ? { batchIndex } : {}),
+        ...(batchTotal !== undefined ? { batchTotal } : {}),
         inputImages,
         ...(originalPrompt ? { originalPrompt } : {}),
         ...(userInputImages ? { userInputImages } : {}),

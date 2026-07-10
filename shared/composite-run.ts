@@ -40,6 +40,13 @@ export type CompositeRunImageRef = {
   filePath: string;
 };
 
+export type CompositeRunTextLengthRequirement = {
+  unit: 'characters';
+  targetCharacters: number;
+  minimumCharacters: number;
+  approximate: boolean;
+};
+
 export type CompositeRunTaskInput = {
   id: string;
   kind: CompositeRunTaskKind;
@@ -48,6 +55,7 @@ export type CompositeRunTaskInput = {
   requiresArtifact?: boolean;
   dependsOn?: string[];
   fallback?: string;
+  textLengthRequirement?: CompositeRunTextLengthRequirement;
   selectedImageSource?: 'explicit' | 'candidate' | 'none';
   selectedImageIndex?: number;
   sourceImages?: CompositeRunImageRef[];
@@ -174,6 +182,10 @@ export type CompositeRunJournalEvent = {
 
 export type CompositeRunRetryRequest = {
   taskIds?: string[];
+};
+
+export type CompositeRunCancelRequest = {
+  source?: string;
 };
 
 export type CompositeRunCancelOutcome = 'cancelled' | 'already_terminal' | 'not_found';

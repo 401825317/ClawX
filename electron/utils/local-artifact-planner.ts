@@ -5,14 +5,18 @@ import {
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_PROVIDER_ID,
 } from './junfeiai-distribution';
-import type { LocalArtifactCreateRequest, LocalArtifactKind } from './local-artifact-runtime';
+import {
+  resolveRequestedTextLength,
+  type LocalArtifactCreateRequest,
+  type LocalArtifactKind,
+} from './local-artifact-runtime';
 import { logger } from './logger';
 import { proxyAwareFetch } from './proxy-fetch';
 
-const LOCAL_ARTIFACT_PLANNER_TIMEOUT_MS = 18_000;
+const LOCAL_ARTIFACT_PLANNER_TIMEOUT_MS = 300_000;
+const LOCAL_ARTIFACT_LONG_TEXT_TIMEOUT_MS = 600_000;
 const MAX_BATCH_ITEMS = 8;
 const MAX_TEXT_CHARS = 36_000;
-const SINGLE_INITIAL_ARTIFACT_FAST_PATH_ERROR = 'artifact_planner_single_artifact_fast_path';
 
 export type LocalArtifactPlanItem = {
   id: string;
@@ -188,25 +192,29 @@ function normalizeSlides(value: unknown): LocalArtifactCreateRequest['slides'] {
     const columns = normalizePresentationColumns(item.columns);
     const metrics = normalizePresentationMetrics(item.metrics);
     const timeline = normalizePresentationTimeline(item.timeline);
-    const requestedLayout = item.layout === 'two-column' || item.layout === 'metric' || item.layout === 'timeline'
+    const requestedLayout = item.layout === 'two-column' || item.layout === 'metric' || item.layout === 'timeline' || item.layout === 'statement'
       ? item.layout
       : undefined;
-    const layout = requestedLayout === 'two-column' && columns
-      ? requestedLayout
-      : requestedLayout === 'metric' && metrics
-        ? requestedLayout
-        : requestedLayout === 'timeline' && timeline
-          ? requestedLayout
-          : undefined;
+    const inferredLayout = requestedLayout
+      ?? (columns ? 'two-column' : metrics ? 'metric' : timeline ? 'timeline' : undefined);
+    const layout = inferredLayout === 'two-column'
+      ? (columns ? 'two-column' : undefined)
+      : inferredLayout === 'metric'
+        ? (metrics ? 'metric' : undefined)
+        : inferredLayout === 'timeline'
+          ? (timeline ? 'timeline' : undefined)
+          : inferredLayout === 'statement'
+            ? 'statement'
+            : undefined;
     return {
       title: text(item.title, 160),
       subtitle: text(item.subtitle, 280),
       body: text(item.body, 1_600),
       bullets: textArray(item.bullets, 7, 360),
       ...(layout ? { layout } : {}),
-      ...(columns ? { columns } : {}),
-      ...(metrics ? { metrics } : {}),
-      ...(timeline ? { timeline } : {}),
+      ...(layout === 'two-column' && columns ? { columns } : {}),
+      ...(layout === 'metric' && metrics ? { metrics } : {}),
+      ...(layout === 'timeline' && timeline ? { timeline } : {}),
     };
   }).filter((slide) => (
     slide.title
@@ -218,6 +226,25 @@ function normalizeSlides(value: unknown): LocalArtifactCreateRequest['slides'] {
     || (slide.timeline?.length ?? 0) > 0
   ));
   return slides.length > 0 ? slides : undefined;
+}
+
+function normalizePresentationDesign(value: unknown): LocalArtifactCreateRequest['presentationDesign'] {
+  const item = record(value);
+  const themeFamily = item.themeFamily === 'product-launch'
+    || item.themeFamily === 'travel-editorial'
+    || item.themeFamily === 'executive-report'
+    || item.themeFamily === 'training-workshop'
+    || item.themeFamily === 'creative-editorial'
+    ? item.themeFamily
+    : undefined;
+  const density = item.density === 'airy' || item.density === 'balanced' || item.density === 'dense'
+    ? item.density
+    : undefined;
+  const audience = text(item.audience, 160);
+  const purpose = text(item.purpose, 160);
+  const visualTone = text(item.visualTone, 160);
+  if (!themeFamily && !density && !audience && !purpose && !visualTone) return undefined;
+  return { themeFamily, density, audience, purpose, visualTone };
 }
 
 function normalizeSheets(value: unknown): LocalArtifactCreateRequest['sheets'] {
@@ -322,7 +349,12 @@ function normalizePlannedRequest(
     planningSummary: text(raw.summary, 500) ?? '已由当前文本模型生成结构化内容计划。',
   };
   if (original.kind === 'presentation') {
-    return { ...common, slides: normalizeSlides(raw.slides) };
+    return {
+      ...common,
+      presentationDesign: normalizePresentationDesign(raw.presentationDesign ?? raw.design)
+        ?? original.presentationDesign,
+      slides: normalizeSlides(raw.slides),
+    };
   }
   if (original.kind === 'spreadsheet') {
     return { ...common, sheets: normalizeSheets(raw.sheets) };
@@ -417,10 +449,10 @@ function plannerMessages(items: LocalArtifactPlanItem[]): Array<{ role: 'system'
         '你是 UClaw 的产物内容规划器。只返回严格 JSON，不解释，不使用 Markdown 代码块。',
         '一次为多个产物做统一主题但各自独立可交付的内容计划，不能返回空泛模板。',
         '返回 {"items":[...]}，每项保留 id、kind，并提供 title、summary。',
-        'presentation: 提供 slides，每页含 title 及 bullets/body；页数和章节必须遵守用户要求，内容具体、有数据感、避免重复标题。可选丰富字段：layout 只能是 two-column/metric/timeline；two-column 搭配恰好 2 个 columns（title/body/bullets），metric 搭配 metrics（label/value/detail），timeline 搭配 timeline（period/title/body）。',
+        'presentation: 必须提供 presentationDesign（themeFamily 只能是 product-launch/travel-editorial/executive-report/training-workshop/creative-editorial，并给出 audience、purpose、visualTone、density=airy/balanced/dense）和 slides。主题族必须根据受众、场景和内容语义选择，不能随机换色。每页含 title 及 bullets/body；页数和章节必须遵守用户要求，内容具体、有数据感、避免重复标题。所有正文必须直接服务于用户主题；除非主题明确要求，否则禁止把 UClaw、任务拆解、产物验证、fallback、manifest 等内部执行过程写进成品。可选丰富字段：每页最多选择一种 layout，只能是 two-column/metric/timeline/statement；two-column 搭配恰好 2 个 columns（title/body/bullets），metric 只搭配 metrics（label/value/detail），timeline 只搭配 timeline（period/title/body），statement 用 body 或首条 bullet 表达核心主张。5 页以上且内容允许时至少组合 2 种正文 layout，不要把每页都做成同一种卡片。',
         'spreadsheet: 提供 sheets，每张含 name、headers、rows；需要计算时，单元格使用 {"formula":"SUM(B2:B5)","value":0}，公式不带等号。可选丰富字段：summary、keyMetrics（label/value/detail）、conditionalFormatting（column、type=color-scale/data-bar/cell-is；cell-is 还需 operator 和数值 value）。',
         'mini_program: 提供 body、css、js，必须是可直接运行的交互页面；实现用户要求的新增、删除、筛选、搜索、校验、持久化等实际行为。',
-        'copywriting: 提供 content 或 sections；sections 的每一项必须包含 paragraphs 或 bullets，禁止只返回标题；正文至少包含 2 条实质内容或 160 个字符，并匹配主题、受众和用途，不写系统能力说明。',
+        'copywriting: 提供 content 或 sections；sections 的每一项必须包含 paragraphs 或 bullets，禁止只返回标题；正文至少包含 2 条实质内容或 160 个字符，并匹配主题、受众和用途，不写系统能力说明。若存在 text_length_requirement，必须生成接近 targetCharacters 且不少于 minimumCharacters 的完整正文；长文应分章节承载真实正文，不能只返回序章、提纲或后续创作承诺。',
         '出现 verification_feedback 时，必须基于 previous_planned_request 重新规划，直接修复 detail/evidence 指出的问题，并实质替换会影响产物的内容或结构，禁止原样返回。',
         '没有指定主题时，为整批随机样例选择一个清晰、可视觉化的统一主题。',
       ].join('\n'),
@@ -434,6 +466,12 @@ function plannerMessages(items: LocalArtifactPlanItem[]): Array<{ role: 'system'
           title: item.request.title,
           prompt: item.request.sourcePrompt || item.request.originalPrompt || item.request.title || '',
           batch_context: item.request.originalPrompt || '',
+          ...(item.request.kind === 'presentation' && item.request.presentationDesign ? {
+            presentationDesign: item.request.presentationDesign,
+          } : {}),
+          ...(item.request.textLengthRequirement ? {
+            text_length_requirement: item.request.textLengthRequirement,
+          } : {}),
           ...(hasVerificationFeedback(item) ? {
             previous_planned_request: item.request,
             verification_feedback: {
@@ -447,6 +485,37 @@ function plannerMessages(items: LocalArtifactPlanItem[]): Array<{ role: 'system'
   ];
 }
 
+function itemTextLengthRequirement(item: LocalArtifactPlanItem) {
+  return item.request.textLengthRequirement
+    ?? resolveRequestedTextLength([
+      item.request.sourcePrompt,
+      item.request.originalPrompt,
+      item.request.title,
+    ].filter(Boolean).join('\n'));
+}
+
+function plannerOutputTokenBudget(items: LocalArtifactPlanItem[]): number {
+  const requestedCharacters = items.reduce((sum, item) => (
+    sum + (itemTextLengthRequirement(item)?.targetCharacters ?? 0)
+  ), 0);
+  const normalBudget = Math.max(2_400, items.length * 1_400);
+  const longTextBudget = requestedCharacters > 0
+    ? Math.ceil(requestedCharacters * 1.35) + items.length * 800
+    : 0;
+  return Math.min(16_000, Math.max(normalBudget, longTextBudget));
+}
+
+function plannerTimeoutMs(items: LocalArtifactPlanItem[]): number {
+  const requestedCharacters = items.reduce((sum, item) => (
+    sum + (itemTextLengthRequirement(item)?.targetCharacters ?? 0)
+  ), 0);
+  if (requestedCharacters === 0) return LOCAL_ARTIFACT_PLANNER_TIMEOUT_MS;
+  return Math.min(
+    LOCAL_ARTIFACT_LONG_TEXT_TIMEOUT_MS,
+    Math.max(LOCAL_ARTIFACT_PLANNER_TIMEOUT_MS, LOCAL_ARTIFACT_PLANNER_TIMEOUT_MS + requestedCharacters * 12),
+  );
+}
+
 function fallback(items: LocalArtifactPlanItem[], startedAt: number, error: string): LocalArtifactBatchPlanResult {
   return {
     source: 'fallback',
@@ -456,36 +525,35 @@ function fallback(items: LocalArtifactPlanItem[], startedAt: number, error: stri
   };
 }
 
-function shouldUseSingleInitialArtifactFastPath(items: LocalArtifactPlanItem[]): boolean {
-  if (items.length !== 1) return false;
-  const [item] = items;
-  if (!item || hasVerificationFeedback(item)) return false;
-  return isLocalArtifactKind(item.request.kind);
-}
-
-export async function planLocalArtifactBatch(rawItems: LocalArtifactPlanItem[]): Promise<LocalArtifactBatchPlanResult> {
+export async function planLocalArtifactBatch(
+  rawItems: LocalArtifactPlanItem[],
+  options: Readonly<{ signal?: AbortSignal }> = {},
+): Promise<LocalArtifactBatchPlanResult> {
   const startedAt = Date.now();
+  let abortCause: 'caller' | 'timeout' | undefined;
   const items = rawItems
     .filter((item) => item.id?.trim() && item.request && typeof item.request === 'object')
-    .map((item) => ({
-      id: item.id.trim(),
-      request: item.request,
-      ...(item.verificationFeedback ? {
-        verificationFeedback: {
-          detail: text(item.verificationFeedback.detail, 4_000),
-          evidence: text(item.verificationFeedback.evidence, 8_000),
-        },
-      } : {}),
-    }));
-  if (items.length === 0) return fallback([], startedAt, 'artifact_planner_empty_batch');
-  if (shouldUseSingleInitialArtifactFastPath(items)) {
-    logger.info('[local-artifact-planner] single_initial_fast_path', {
-      durationMs: Date.now() - startedAt,
-      kind: items[0]!.request.kind,
+    .map((item) => {
+      const inferredTextLength = item.request.kind === 'copywriting'
+        ? itemTextLengthRequirement(item)
+        : undefined;
+      return {
+        id: item.id.trim(),
+        request: inferredTextLength && !item.request.textLengthRequirement
+          ? { ...item.request, textLengthRequirement: inferredTextLength }
+          : item.request,
+        ...(item.verificationFeedback ? {
+          verificationFeedback: {
+            detail: text(item.verificationFeedback.detail, 4_000),
+            evidence: text(item.verificationFeedback.evidence, 8_000),
+          },
+        } : {}),
+      };
     });
-    return fallback(items, startedAt, SINGLE_INITIAL_ARTIFACT_FAST_PATH_ERROR);
-  }
+  if (items.length === 0) return fallback([], startedAt, 'artifact_planner_empty_batch');
   const modelItems = items.slice(0, MAX_BATCH_ITEMS);
+  const maxTokens = plannerOutputTokenBudget(modelItems);
+  const timeoutMs = plannerTimeoutMs(modelItems);
 
   try {
     const secret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
@@ -495,7 +563,16 @@ export async function planLocalArtifactBatch(rawItems: LocalArtifactPlanItem[]):
     const endpoint = toChatCompletionsEndpoint(account?.baseUrl || getJunFeiAIProviderBaseUrl());
     const model = account?.model?.trim() || JUNFEIAI_DEFAULT_MODEL;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), LOCAL_ARTIFACT_PLANNER_TIMEOUT_MS);
+    const abortFromCaller = () => {
+      abortCause = 'caller';
+      controller.abort();
+    };
+    if (options.signal?.aborted) abortFromCaller();
+    else options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    const timeout = setTimeout(() => {
+      abortCause = 'timeout';
+      controller.abort();
+    }, timeoutMs);
     try {
       const response = await proxyAwareFetch(endpoint, {
         method: 'POST',
@@ -509,7 +586,7 @@ export async function planLocalArtifactBatch(rawItems: LocalArtifactPlanItem[]):
           messages: plannerMessages(modelItems),
           temperature: 0.25,
           reasoning_effort: 'low',
-          max_tokens: Math.min(6_000, Math.max(2_400, modelItems.length * 1_400)),
+          max_tokens: maxTokens,
         }),
         signal: controller.signal,
       });
@@ -542,15 +619,26 @@ export async function planLocalArtifactBatch(rawItems: LocalArtifactPlanItem[]):
         durationMs: Date.now() - startedAt,
         itemCount: items.length,
         modelPlanCount,
+        maxTokens,
+        timeoutMs,
         kinds: items.map((item) => item.request.kind),
       });
       return { source: 'model', durationMs: Date.now() - startedAt, items: plannedItems };
     } finally {
       clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abortFromCaller);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.warn('[local-artifact-planner] fallback', { durationMs: Date.now() - startedAt, error: message });
+    const message = abortCause === 'caller'
+      ? 'artifact_planner_cancelled'
+      : abortCause === 'timeout'
+        ? `artifact_planner_timeout_${plannerTimeoutMs(items)}ms`
+        : error instanceof Error ? error.message : String(error);
+    logger.warn('[local-artifact-planner] fallback', {
+      durationMs: Date.now() - startedAt,
+      error: message,
+      abortCause,
+    });
     return fallback(items, startedAt, message);
   }
 }

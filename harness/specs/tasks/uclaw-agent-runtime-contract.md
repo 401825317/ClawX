@@ -5,7 +5,20 @@ scenario: gateway-backend-communication
 taskType: runtime-bridge
 intent: Give the desktop client a durable execution-layer contract for objective, plan, step progress, produced artifacts, verification results, and recoverable checkpoints so agent work can be shown and audited as product state instead of inferred from chat text.
 touchedAreas:
+  - .github/workflows/comms-regression.yml
+  - .github/workflows/harness.yml
+  - AGENTS.md
   - harness/specs/tasks/uclaw-agent-runtime-contract.md
+  - harness/specs/tasks/uclaw-codex-experience-benchmark.md
+  - harness/specs/scenarios/gateway-backend-communication.md
+  - harness/specs/rules/presentation-artifact-quality.md
+  - harness/src/profiles.mjs
+  - README.md
+  - README.zh-CN.md
+  - README.ja-JP.md
+  - package.json
+  - pnpm-lock.yaml
+  - electron/api/routes/gateway.ts
   - electron/api/routes/media.ts
   - electron/utils/composite-run-coordinator.ts
   - electron/utils/openclaw-auth.ts
@@ -14,6 +27,7 @@ touchedAreas:
   - electron/utils/local-artifact-runtime.ts
   - electron/utils/media-generation-jobs.ts
   - electron/utils/media-generation-types.ts
+  - electron/utils/media-generation-worker-entry.ts
   - electron/utils/media-intent-planner.ts
   - shared/chat-runtime-events.ts
   - shared/composite-run.ts
@@ -22,6 +36,11 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-artifact-guard/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - resources/openclaw-plugins/uclaw-artifact-guard/package.json
+  - resources/openclaw-plugins/uclaw-local-artifacts/index.mjs
+  - resources/openclaw-plugins/uclaw-local-artifacts/openclaw.plugin.json
+  - resources/openclaw-plugins/uclaw-local-artifacts/package.json
+  - resources/openclaw-skill-shims/presentation-maker/SKILL.md
+  - resources/openclaw-skill-shims/presentation-maker/scripts/make-pptx.mjs
   - scripts/openclaw-model-request-contract-patch.mjs
   - scripts/openclaw-streaming-runtime-patch.mjs
   - scripts/openclaw-tool-directory-i18n-patch.mjs
@@ -40,17 +59,13 @@ touchedAreas:
   - src/stores/chat/runtime-contract.ts
   - src/stores/chat/history-transcript-merge.ts
   - src/stores/chat.ts
+  - src/stores/client-config.ts
   - src/stores/gateway.ts
   - src/pages/Chat/RunProgressCard.tsx
   - src/pages/Chat/task-visualization.ts
-  - tests/unit/uclaw-artifact-guard.test.ts
-  - tests/unit/chat-page-execution-graph.test.tsx
-  - tests/unit/gateway-event-dispatch.test.ts
-  - tests/unit/gateway-events.test.ts
-  - tests/unit/task-visualization.test.ts
-  - tests/unit/chat-input.test.tsx
-  - tests/unit/chat-target-routing.test.ts
-  - tests/unit/media-generation-jobs.test.ts
+  - tests/setup.ts
+  - tests/unit/**
+  - vitest.config.ts
 expectedUserBehavior:
   - Agent runs can expose a structured objective and plan in the active execution graph.
   - Step progress updates replace prior state by stable identifiers instead of creating duplicate timeline noise.
@@ -77,11 +92,11 @@ requiredRules:
   - api-client-transport-policy
   - host-events-fallback-policy
   - comms-regression
+  - presentation-artifact-quality
 requiredTests:
-  - pnpm exec vitest run tests/unit/uclaw-artifact-guard.test.ts tests/unit/uclaw-context-routing.test.ts
-  - pnpm exec vitest run tests/unit/task-visualization.test.ts tests/unit/gateway-event-dispatch.test.ts tests/unit/gateway-events.test.ts tests/unit/chat-runtime-event-handlers.test.ts
-  - pnpm exec vitest run tests/unit/chat-input.test.tsx tests/unit/chat-target-routing.test.ts
-  - pnpm run typecheck
+  - pnpm exec tsc --noEmit --pretty false
+  - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
+  - pnpm harness validate --spec harness/specs/tasks/uclaw-agent-runtime-contract.md --since HEAD
   - pnpm run comms:replay
   - pnpm run comms:compare
 acceptance:
@@ -89,6 +104,7 @@ acceptance:
   - Composite DAG recovery blocks downstream tasks when a dependency fails, resumes pending local work, and never automatically duplicates an unconfirmed media generation after Main restart.
   - Main-owned composite tasks reuse the existing local artifact planner/runtime and media queues while preserving standalone chat, image, and video routing.
   - Composite final delivery persists one canonical manifest only after the Main-owned completion gate allows delivery, using a stable assistant message id for idempotency.
+  - A local artifact run remains non-terminal while its canonical conversation delivery is pending or failed; only a successful transcript append can publish completed delivery state.
   - Media cancellation resolves by job id, then composite run id, then session id so stopping one composite run cannot cancel unrelated standalone media work.
   - Safe recoverable composite failures receive at most one automatic retry; exhausted or unsafe failures always produce a partial final manifest, while restart-uncertain media is never automatically resubmitted.
   - Partial composite delivery keeps completed artifacts, marks unresolved tasks for user action, and ends the runtime with an error status instead of reporting the whole batch as completed.
@@ -114,6 +130,12 @@ acceptance:
   - Dev and packaged OpenClaw runtimes apply the CJK tool-directory and streaming cadence patches idempotently.
   - Composite results persist structured task, artifact, verification, gate, and progress state instead of reconstructing success from localized summary text.
   - Composite routing requires explicit execution intent, while single and multi-artifact execution requests use the same planner and verification contract.
+  - Single local artifacts use the current text model for semantic content planning; deterministic prompt heuristics are only an observable degraded fallback after planner failure, never the default speed path.
+  - Presentation and local web artifacts preserve the requested subject and interaction domain, and semantic verification rejects unrelated generic templates.
+  - Presentation plans carry a deterministic design specification; product, travel, executive, training, and editorial themes render different visible cover and page frameworks across the composite runtime, direct PPT tool, and bundled fallback.
+  - Explicit long-form character or word targets are carried as structured task requirements, receive sufficient planning budget, and fail completion verification when the final readable text is short.
+  - Terse follow-ups resolve against the latest structured artifact run and delivery state instead of relying on a phrase-specific local rule or losing the prior objective.
+  - A high-confidence current-turn image-to-video plan can retain its selected current-session candidate image, while ordinary chat remains unable to reuse stale media implicitly.
   - Async completion evidence can resolve accepted tasks by task id, child session key, or child session id without treating generic continuations as completion.
   - Local media availability passes only after Main verifies a readable, non-empty output file.
   - Chat run completion and artifact delivery completion remain separate lifecycle facts so delayed persistence cannot produce a false successful terminal state.

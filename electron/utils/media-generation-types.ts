@@ -37,6 +37,8 @@ export type ImageGenerationJobPayload = {
   model?: string;
   size?: string;
   quality?: 'low' | 'medium' | 'high';
+  batchIndex?: number;
+  batchTotal?: number;
   inputImages?: MediaGenerationInputImageRef[];
   userInputImages?: MediaGenerationInputImageRef[];
   userMessageTimestampMs?: number;

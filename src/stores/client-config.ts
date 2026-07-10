@@ -130,17 +130,25 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
   },
   image: {
     defaultModel: 'gpt-image-2',
-    defaultSize: '3840x2160',
-    defaultQuality: 'high',
+    defaultSize: '2048x2048',
+    defaultQuality: 'medium',
     models: [
       {
         id: 'gpt-image-2',
         label: 'Image 2',
         description: 'Image generation and editing.',
-        sizes: ['1024x1024', '2048x2048', '3840x2160'],
+        sizes: [
+          '1024x1024',
+          '1536x1024',
+          '1024x1536',
+          '2048x2048',
+          '2048x1152',
+          '3840x2160',
+          '2160x3840',
+        ],
         qualities: ['low', 'medium', 'high'],
-        defaultSize: '3840x2160',
-        defaultQuality: 'high',
+        defaultSize: '2048x2048',
+        defaultQuality: 'medium',
         supportsEditing: true,
         enabled: true,
       },
@@ -365,10 +373,10 @@ function normalizeImageModels(
       const qualities = normalizeStringList(record.qualities, defaultFallback.qualities);
       const defaultSize = typeof record.defaultSize === 'string' && sizes.includes(record.defaultSize.trim())
         ? record.defaultSize.trim()
-        : sizes[0];
+        : (defaultFallback.defaultSize && sizes.includes(defaultFallback.defaultSize) ? defaultFallback.defaultSize : sizes[0]);
       const defaultQuality = typeof record.defaultQuality === 'string' && qualities.includes(record.defaultQuality.trim())
         ? record.defaultQuality.trim()
-        : qualities[0];
+        : (defaultFallback.defaultQuality && qualities.includes(defaultFallback.defaultQuality) ? defaultFallback.defaultQuality : qualities[0]);
       return {
         id,
         label: typeof record.label === 'string' && record.label.trim() ? record.label.trim() : id,

@@ -53,11 +53,11 @@ const USER_FACING_UPSTREAM_MEDIA_ERROR: Record<MediaGenerationKind, string> = {
   video: '视频生成暂时没成功，请稍后再试。',
 };
 const MEDIA_GENERATION_CONCURRENCY: Record<MediaGenerationKind, number> = {
-  image: 5,
+  image: 1,
   video: 5,
 };
 const MEDIA_GENERATION_WATCHDOG_MS: Record<MediaGenerationKind, number> = {
-  image: 5 * 60 * 1000,
+  image: 30 * 60 * 1000,
   video: 20 * 60 * 1000,
 };
 
@@ -789,6 +789,9 @@ function markJobFailed(job: InternalMediaGenerationJob, error: string): void {
     jobId: job.id,
     kind: job.kind,
     sessionKey: job.sessionKey,
+    ...(job.payload.kind === 'image' && job.payload.batchTotal
+      ? { batchIndex: job.payload.batchIndex, batchTotal: job.payload.batchTotal }
+      : {}),
     queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
     runDurationMs: job.startedAt ? now - job.startedAt : undefined,
   });
@@ -840,6 +843,9 @@ function markJobSucceeded(job: InternalMediaGenerationJob): void {
     jobId: job.id,
     kind: job.kind,
     sessionKey: job.sessionKey,
+    ...(job.payload.kind === 'image' && job.payload.batchTotal
+      ? { batchIndex: job.payload.batchIndex, batchTotal: job.payload.batchTotal }
+      : {}),
     queueWaitMs: job.startedAt ? job.startedAt - job.createdAt : undefined,
     runDurationMs: job.startedAt ? completedAt - job.startedAt : undefined,
     outputs: outputCount,
@@ -1188,6 +1194,9 @@ async function runJob(job: InternalMediaGenerationJob): Promise<void> {
     jobId: job.id,
     kind: job.kind,
     sessionKey: job.sessionKey,
+    ...(job.payload.kind === 'image' && job.payload.batchTotal
+      ? { batchIndex: job.payload.batchIndex, batchTotal: job.payload.batchTotal }
+      : {}),
     queueWaitMs: now - job.createdAt,
     activeJobs: activeJobIds[job.kind].size,
     queuedJobs: queues[job.kind].length,
@@ -1503,6 +1512,9 @@ export function enqueueMediaGenerationJobWithResult(
     jobId: job.id,
     kind: job.kind,
     sessionKey: job.sessionKey,
+    ...(normalizedPayload.kind === 'image' && normalizedPayload.batchTotal
+      ? { batchIndex: normalizedPayload.batchIndex, batchTotal: normalizedPayload.batchTotal }
+      : {}),
     queuePosition: queues[normalizedPayload.kind].length,
     activeJobs: activeJobIds[normalizedPayload.kind].size,
     maxActiveJobs: MEDIA_GENERATION_CONCURRENCY[normalizedPayload.kind],

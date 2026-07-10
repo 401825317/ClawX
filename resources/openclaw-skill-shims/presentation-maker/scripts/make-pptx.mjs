@@ -14,7 +14,7 @@ function usage() {
   return [
     'Usage: node make-pptx.mjs --input deck.json --out deck.pptx',
     '',
-    'Input JSON: { "title": "...", "subtitle": "...", "slides": [{ "title": "...", "bullets": ["..."] }] }',
+    'Input JSON: { "title": "...", "subtitle": "...", "slides": [{ "title": "cover", "subtitle": "..." }, { "title": "...", "bullets": ["..."] }] }',
   ].join('\n');
 }
 
@@ -74,17 +74,16 @@ function normalizeDeck(spec) {
   const subtitle = cleanText(spec?.subtitle);
   const footer = cleanText(spec?.footer);
   const inputSlides = Array.isArray(spec?.slides) ? spec.slides : [];
-  const slides = [];
+  if (inputSlides.length === 0) throw new Error('presentation-maker requires slides with the first slide as the cover');
+  const slides = inputSlides.map((slide, index) => ({
+    kind: index === 0 ? 'title' : 'content',
+    ...normalizeSlide(slide, index),
+    ...(index === 0 && !cleanText(slide?.title) ? { title } : {}),
+    ...(index === 0 && !cleanText(slide?.subtitle) && subtitle ? { subtitle } : {}),
+  }));
 
-  slides.push({ kind: 'title', title, subtitle, bullets: [] });
-  for (let i = 0; i < inputSlides.length; i += 1) {
-    slides.push({ kind: 'content', ...normalizeSlide(inputSlides[i], i) });
-  }
-  if (slides.length === 1) {
-    slides.push({ kind: 'content', title: '核心内容', bullets: ['请根据需求补充要点。'] });
-  }
-
-  return { title, footer, slides };
+  const themeFamily = presentationThemeFamily(spec);
+  return { title, footer, slides, themeFamily, theme: PRESENTATION_THEMES[themeFamily] };
 }
 
 function relsXml(relationships) {
@@ -165,21 +164,21 @@ ${slideIds}
 
 function themeXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UClaw">
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UClaw ${xml(ACTIVE_THEME.name)}">
   <a:themeElements>
-    <a:clrScheme name="UClaw">
-      <a:dk1><a:srgbClr val="111827"/></a:dk1>
-      <a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
-      <a:dk2><a:srgbClr val="1F2937"/></a:dk2>
-      <a:lt2><a:srgbClr val="F8FAFC"/></a:lt2>
-      <a:accent1><a:srgbClr val="2563EB"/></a:accent1>
-      <a:accent2><a:srgbClr val="10B981"/></a:accent2>
-      <a:accent3><a:srgbClr val="F59E0B"/></a:accent3>
-      <a:accent4><a:srgbClr val="EF4444"/></a:accent4>
-      <a:accent5><a:srgbClr val="8B5CF6"/></a:accent5>
-      <a:accent6><a:srgbClr val="06B6D4"/></a:accent6>
-      <a:hlink><a:srgbClr val="2563EB"/></a:hlink>
-      <a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink>
+    <a:clrScheme name="UClaw ${xml(ACTIVE_THEME.name)}">
+      <a:dk1><a:srgbClr val="${PALETTE.slate}"/></a:dk1>
+      <a:lt1><a:srgbClr val="${PALETTE.white}"/></a:lt1>
+      <a:dk2><a:srgbClr val="${PALETTE.navy2}"/></a:dk2>
+      <a:lt2><a:srgbClr val="${PALETTE.bg}"/></a:lt2>
+      <a:accent1><a:srgbClr val="${PALETTE.blue}"/></a:accent1>
+      <a:accent2><a:srgbClr val="${PALETTE.green}"/></a:accent2>
+      <a:accent3><a:srgbClr val="${PALETTE.amber}"/></a:accent3>
+      <a:accent4><a:srgbClr val="${PALETTE.red}"/></a:accent4>
+      <a:accent5><a:srgbClr val="${PALETTE.purple}"/></a:accent5>
+      <a:accent6><a:srgbClr val="${PALETTE.cyan}"/></a:accent6>
+      <a:hlink><a:srgbClr val="${PALETTE.blue}"/></a:hlink>
+      <a:folHlink><a:srgbClr val="${PALETTE.purple}"/></a:folHlink>
     </a:clrScheme>
     <a:fontScheme name="UClaw">
       <a:majorFont><a:latin typeface="Arial"/><a:ea typeface="Microsoft YaHei"/><a:cs typeface="Arial"/></a:majorFont>
@@ -224,24 +223,37 @@ function slideLayoutXml() {
 </p:sldLayout>`;
 }
 
-const PALETTE = {
-  navy: '0B1220',
-  navy2: '111827',
-  blue: '2563EB',
-  cyan: '06B6D4',
-  green: '10B981',
-  amber: 'F59E0B',
-  red: 'EF4444',
-  purple: '8B5CF6',
-  slate: '0F172A',
-  body: '334155',
-  muted: '64748B',
-  line: 'E2E8F0',
-  bg: 'F8FAFC',
-  white: 'FFFFFF',
+const PRESENTATION_THEMES = {
+  'product-launch': { name: 'Product Launch', coverStyle: 'stage', contentStyle: 'rail', navy: '09090B', navy2: '111827', blue: '00A7C4', cyan: '22D3EE', green: '00A7C4', amber: '7C3AED', red: 'E11D48', purple: '7C3AED', slate: '171923', body: '333849', muted: '5A6475', line: 'CBD5E1', bg: 'F7F8FA', white: 'FFFFFF' },
+  'travel-editorial': { name: 'Travel Editorial', coverStyle: 'editorial', contentStyle: 'band', navy: 'E7EFE8', navy2: '2F6B4F', blue: '2F6B4F', cyan: '8FB8A0', green: '2F6B4F', amber: 'D96C4C', red: 'B44D3B', purple: '7B6F9B', slate: '173B2C', body: '304D3D', muted: '65766B', line: 'B7CDBE', bg: 'FFFDF7', white: 'FFFFFF' },
+  'executive-report': { name: 'Executive Report', coverStyle: 'report', contentStyle: 'grid', navy: 'F1F1ED', navy2: '1F4E5F', blue: 'B8423A', cyan: '5B8190', green: '1F4E5F', amber: 'B8423A', red: '9F2F2A', purple: '6D5B7B', slate: '191919', body: '303236', muted: '62666C', line: 'D4D6D8', bg: 'FFFFFF', white: 'FFFFFF' },
+  'training-workshop': { name: 'Training Workshop', coverStyle: 'workshop', contentStyle: 'notebook', navy: 'FFF4C7', navy2: '315C8C', blue: '315C8C', cyan: '6B9AC4', green: '4C8B6B', amber: 'E79C13', red: 'C75146', purple: '765D9E', slate: '25314C', body: '3E4A63', muted: '667085', line: 'C8D6E3', bg: 'FFFDF6', white: 'FFFFFF' },
+  'creative-editorial': { name: 'Creative Editorial', coverStyle: 'minimal', contentStyle: 'minimal', navy: 'F1EEFA', navy2: '4C3F6D', blue: '6D5BD0', cyan: '719FB0', green: '4D8B72', amber: 'D59A3A', red: 'C84B5A', purple: '6D5BD0', slate: '2A2040', body: '40394C', muted: '6B6575', line: 'D8D1E6', bg: 'FBFAFF', white: 'FFFFFF' },
 };
 
-const ACCENTS = [PALETTE.blue, PALETTE.green, PALETTE.amber, PALETTE.purple, PALETTE.cyan, PALETTE.red];
+function presentationThemeFamily(spec) {
+  const explicit = cleanText(spec?.presentationDesign?.themeFamily).toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(PRESENTATION_THEMES, explicit)) return explicit;
+  const prompt = [spec?.title, spec?.subtitle, spec?.presentationDesign?.audience, spec?.presentationDesign?.purpose, spec?.presentationDesign?.visualTone, ...(Array.isArray(spec?.slides) ? spec.slides.flatMap((slide) => [slide?.title, slide?.subtitle]) : [])]
+    .map(cleanText).filter(Boolean).join('\n');
+  if (/旅游|旅行|目的地|景区|景点|城市漫游|酒店|度假|民宿|线路|行程|张家界|山水|自然风光/u.test(prompt)) return 'travel-editorial';
+  if (/培训|课程|教学|课堂|练习题|工作坊|学习|教案|学员|知识点/u.test(prompt)) return 'training-workshop';
+  if (/老板|高管|管理层|经营|汇报|周报|月报|复盘|预算|ROI|指标|销售|财务|决策|战略/u.test(prompt)) return 'executive-report';
+  if (/发布会|新品|产品|手机|电脑|汽车|科技|品牌|营销|宣传|概念|iPhone|Apple|体验升级/iu.test(prompt)) return 'product-launch';
+  return 'creative-editorial';
+}
+
+let ACTIVE_THEME = PRESENTATION_THEMES['creative-editorial'];
+let ACTIVE_THEME_FAMILY = 'creative-editorial';
+let PALETTE = ACTIVE_THEME;
+let ACCENTS = [PALETTE.blue, PALETTE.green, PALETTE.amber, PALETTE.purple, PALETTE.cyan, PALETTE.red];
+
+function activateTheme(theme, themeFamily) {
+  ACTIVE_THEME = theme;
+  ACTIVE_THEME_FAMILY = themeFamily;
+  PALETTE = theme;
+  ACCENTS = [theme.blue, theme.green, theme.amber, theme.purple, theme.cyan, theme.red];
+}
 
 function rectShape(id, x, y, w, h, color, options = {}) {
   const prst = options.prst || 'rect';
@@ -286,26 +298,41 @@ function footerShape(id, footer, slideNo) {
 function buildTitleSlideShapes(slide, nextId) {
   const shapes = [];
   shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, SLIDE_H, PALETTE.navy));
-  shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.18), SLIDE_H, PALETTE.blue));
-  shapes.push(rectShape(nextId++, inch(0.18), inch(0), inch(0.08), SLIDE_H, PALETTE.green));
-  shapes.push(rectShape(nextId++, inch(10.4), inch(0.65), inch(2.35), inch(0.16), PALETTE.cyan));
-  shapes.push(rectShape(nextId++, inch(11.45), inch(0.9), inch(1.1), inch(0.16), PALETTE.green));
-  shapes.push(rectShape(nextId++, inch(0.95), inch(1.0), inch(1.35), inch(0.36), PALETTE.blue, { prst: 'roundRect' }));
-  shapes.push(textShape(nextId++, 'Deck Label', inch(1.05), inch(1.075), inch(1.15), inch(0.22), [
-    { text: 'UClaw Deck', size: 10, bold: true, color: PALETTE.white, align: 'ctr' },
-  ], { anchor: 'mid' }));
-  shapes.push(textShape(nextId++, 'Title', inch(0.92), inch(2.12), inch(11.4), inch(1.15), [
-    { text: slide.title, size: slide.title.length > 22 ? 32 : 40, bold: true, color: PALETTE.white },
+  const darkCover = ACTIVE_THEME.coverStyle === 'stage';
+  if (ACTIVE_THEME.coverStyle === 'stage') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.18), SLIDE_H, PALETTE.blue));
+    shapes.push(rectShape(nextId++, inch(10.35), inch(0), inch(2.99), SLIDE_H, PALETTE.navy2));
+    shapes.push(textShape(nextId++, 'Stage Number', inch(10.65), inch(2.0), inch(2.2), inch(1.8), [
+      { text: '01', size: 66, bold: true, color: PALETTE.blue, align: 'ctr' },
+    ], { anchor: 'mid' }));
+  } else if (ACTIVE_THEME.coverStyle === 'editorial') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.34), PALETTE.blue));
+    shapes.push(rectShape(nextId++, inch(10.05), inch(0.34), inch(3.29), inch(7.16), PALETTE.amber));
+  } else if (ACTIVE_THEME.coverStyle === 'report') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.16), PALETTE.blue));
+    shapes.push(rectShape(nextId++, inch(9.55), inch(0.16), inch(3.79), inch(7.34), PALETTE.navy2));
+  } else if (ACTIVE_THEME.coverStyle === 'workshop') {
+    shapes.push(rectShape(nextId++, inch(0), inch(6.65), SLIDE_W, inch(0.85), PALETTE.navy2));
+    shapes.push(rectShape(nextId++, inch(10.75), inch(0), inch(2.59), inch(1.55), PALETTE.amber));
+  } else {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.24), SLIDE_H, PALETTE.blue));
+    shapes.push(rectShape(nextId++, inch(10.1), inch(0.85), inch(2.35), inch(2.35), PALETTE.red));
+  }
+  const titleWidth = ACTIVE_THEME.coverStyle === 'editorial' || ACTIVE_THEME.coverStyle === 'report' ? 8.1 : 8.9;
+  const titleColor = darkCover ? PALETTE.white : PALETTE.slate;
+  shapes.push(textShape(nextId++, 'Deck Label', inch(0.92), inch(0.82), inch(4.4), inch(0.3), [
+    { text: ACTIVE_THEME.name.toUpperCase(), size: 10, bold: true, color: PALETTE.blue },
+  ]));
+  shapes.push(textShape(nextId++, 'Title', inch(0.92), inch(1.65), inch(titleWidth), inch(1.8), [
+    { text: slide.title, size: slide.title.length > 22 ? 32 : 40, bold: true, color: titleColor },
   ], { anchor: 'mid' }));
   if (slide.subtitle) {
-    shapes.push(textShape(nextId++, 'Subtitle', inch(0.98), inch(3.34), inch(10.85), inch(0.72), [
-      { text: slide.subtitle, size: 17, color: 'CBD5E1' },
+    shapes.push(textShape(nextId++, 'Subtitle', inch(0.98), inch(3.8), inch(Math.min(titleWidth, 8.4)), inch(0.9), [
+      { text: slide.subtitle, size: 17, color: darkCover ? 'C4C7D1' : PALETTE.muted },
     ]));
   }
-  shapes.push(rectShape(nextId++, inch(0.98), inch(4.42), inch(2.8), inch(0.07), PALETTE.green));
-  shapes.push(rectShape(nextId++, inch(0.98), inch(4.64), inch(1.55), inch(0.07), PALETTE.amber));
-  shapes.push(textShape(nextId++, 'Tagline', inch(0.98), inch(5.62), inch(6.8), inch(0.35), [
-    { text: '自动生成 · 可编辑 · 本地文件', size: 12, color: '94A3B8' },
+  shapes.push(textShape(nextId++, `UClaw Theme ${ACTIVE_THEME_FAMILY}`, inch(12.9), inch(7.35), inch(0.1), inch(0.1), [
+    { text: ACTIVE_THEME_FAMILY, size: 1, color: PALETTE.navy },
   ]));
   return { shapes, nextId };
 }
@@ -314,13 +341,15 @@ function bulletCardShapes(startId, bullets, options = {}) {
   const shapes = [];
   let nextId = startId;
   const count = Math.min(Math.max(bullets.length, 1), 8);
-  const cols = count <= 3 ? 1 : 2;
+  const cols = ACTIVE_THEME.contentStyle === 'band' || ACTIVE_THEME.contentStyle === 'minimal'
+    ? 1
+    : count <= 3 ? 1 : 2;
   const rows = Math.ceil(count / cols);
   const x0 = inch(0.78);
   const y0 = inch(options.y ?? 1.55);
   const gapX = inch(0.28);
   const gapY = inch(0.22);
-  const cardW = cols === 1 ? inch(11.78) : inch(5.75);
+  const cardW = cols === 1 ? inch(ACTIVE_THEME.contentStyle === 'minimal' ? 10.8 : 11.78) : inch(5.75);
   const cardH = Math.min(inch(1.18), Math.floor((inch(5.1) - gapY * (rows - 1)) / rows));
   const textSize = rows >= 4 ? 13 : rows === 3 ? 15 : 17;
 
@@ -330,7 +359,7 @@ function bulletCardShapes(startId, bullets, options = {}) {
     const x = x0 + col * (cardW + gapX);
     const y = y0 + row * (cardH + gapY);
     const accent = ACCENTS[index % ACCENTS.length];
-    shapes.push(rectShape(nextId++, x, y, cardW, cardH, PALETTE.white, { prst: 'roundRect', lineColor: PALETTE.line }));
+    shapes.push(rectShape(nextId++, x, y, cardW, cardH, index % 2 === 0 ? PALETTE.white : PALETTE.bg, { prst: 'roundRect', lineColor: PALETTE.line }));
     shapes.push(rectShape(nextId++, x, y, inch(0.10), cardH, accent, { prst: 'rect' }));
     shapes.push(rectShape(nextId++, x + inch(0.34), y + inch(0.28), inch(0.46), inch(0.46), accent, { prst: 'ellipse' }));
     shapes.push(textShape(nextId++, `No ${index + 1}`, x + inch(0.34), y + inch(0.35), inch(0.46), inch(0.20), [
@@ -346,12 +375,24 @@ function bulletCardShapes(startId, bullets, options = {}) {
 function buildContentSlideShapes(slide, index, nextId) {
   const shapes = [];
   shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, SLIDE_H, PALETTE.bg));
-  shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.12), ACCENTS[index % ACCENTS.length]));
-  shapes.push(rectShape(nextId++, inch(12.65), inch(0.12), inch(0.18), inch(6.55), ACCENTS[(index + 2) % ACCENTS.length]));
+  if (ACTIVE_THEME.contentStyle === 'rail') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.16), SLIDE_H, PALETTE.blue));
+  } else if (ACTIVE_THEME.contentStyle === 'band') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.26), PALETTE.blue));
+    shapes.push(rectShape(nextId++, inch(11.2), inch(0.26), inch(2.14), inch(0.2), PALETTE.amber));
+  } else if (ACTIVE_THEME.contentStyle === 'grid') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), SLIDE_W, inch(0.1), PALETTE.blue));
+    shapes.push(rectShape(nextId++, inch(11.85), inch(0.42), inch(0.72), inch(0.58), PALETTE.navy2));
+  } else if (ACTIVE_THEME.contentStyle === 'notebook') {
+    shapes.push(rectShape(nextId++, inch(0), inch(0), inch(0.3), SLIDE_H, PALETTE.navy2));
+    shapes.push(rectShape(nextId++, inch(0.7), inch(1.45), inch(2.4), inch(0.1), PALETTE.amber));
+  } else {
+    shapes.push(rectShape(nextId++, inch(0.95), inch(0.32), inch(2.2), inch(0.1), PALETTE.blue));
+  }
   shapes.push(textShape(nextId++, 'Section', inch(0.66), inch(0.34), inch(1.25), inch(0.25), [
-    { text: `/${String(index).padStart(2, '0')}`, size: 11, bold: true, color: ACCENTS[index % ACCENTS.length] },
+    { text: `/${String(index).padStart(2, '0')}`, size: 11, bold: true, color: PALETTE.blue },
   ]));
-  shapes.push(textShape(nextId++, 'Slide Title', inch(0.65), inch(0.66), inch(11.35), inch(0.52), [
+  shapes.push(textShape(nextId++, 'Slide Title', inch(ACTIVE_THEME.contentStyle === 'minimal' ? 0.95 : 0.65), inch(0.66), inch(11.35), inch(0.52), [
     { text: slide.title, size: slide.title.length > 24 ? 22 : 25, bold: true, color: PALETTE.slate },
   ]));
   if (slide.subtitle) {
@@ -364,6 +405,9 @@ function buildContentSlideShapes(slide, index, nextId) {
   const cardResult = bulletCardShapes(nextId, bullets, { y: slide.subtitle ? 1.62 : 1.45 });
   shapes.push(...cardResult.shapes);
   nextId = cardResult.nextId;
+  shapes.push(textShape(nextId++, `UClaw Theme ${ACTIVE_THEME_FAMILY}`, inch(12.9), inch(7.35), inch(0.1), inch(0.1), [
+    { text: ACTIVE_THEME_FAMILY, size: 1, color: PALETTE.bg },
+  ]));
   return { shapes, nextId };
 }
 
@@ -406,6 +450,7 @@ async function main() {
   const outPath = resolve(args.out);
   const spec = JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, ''));
   const deck = normalizeDeck(spec);
+  activateTheme(deck.theme, deck.themeFamily);
   const zip = new JSZip();
 
   zip.file('[Content_Types].xml', contentTypesXml(deck.slides.length));

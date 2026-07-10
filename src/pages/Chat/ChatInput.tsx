@@ -158,6 +158,12 @@ function optionValue<T>(value: T | undefined, options: T[], fallback: T): T {
   return value !== undefined && options.includes(value) ? value : fallback;
 }
 
+function preferredOptionValue<T>(value: T | undefined, options: T[], fallback: T): T {
+  if (value !== undefined && options.includes(value)) return value;
+  if (options.includes(fallback)) return fallback;
+  return options[0] ?? fallback;
+}
+
 function dimensionArea(value: string): number {
   const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
   if (!match) return 0;
@@ -172,15 +178,6 @@ function strongestSizeOption(options: string[] | undefined, fallback: string): s
   ), candidates[0]!);
 }
 
-function strongestQualityOption(options: string[] | undefined, fallback: string): string {
-  const rank: Record<string, number> = { low: 1, medium: 2, high: 3 };
-  const candidates = (options ?? []).filter(Boolean);
-  if (candidates.length === 0) return fallback;
-  return candidates.reduce((best, current) => (
-    (rank[current] ?? 0) > (rank[best] ?? 0) ? current : best
-  ), candidates[0]!);
-}
-
 function strongestDurationOption(options: number[] | undefined, fallback: number): number {
   const candidates = (options ?? []).filter((value) => Number.isFinite(value) && value > 0);
   return candidates.length > 0 ? Math.max(...candidates) : fallback;
@@ -189,11 +186,19 @@ function strongestDurationOption(options: number[] | undefined, fallback: number
 function formatImageSizeLabel(value: string): string {
   switch (value) {
     case '1024x1024':
-      return '1K';
+      return '1K 1:1';
+    case '1536x1024':
+      return '1.5K 3:2';
+    case '1024x1536':
+      return '1.5K 2:3';
     case '2048x2048':
-      return '2K';
+      return '2K 1:1';
+    case '2048x1152':
+      return '2K 16:9';
     case '3840x2160':
-      return '4K';
+      return '4K 16:9';
+    case '2160x3840':
+      return '4K 9:16';
     default:
       return value;
   }
@@ -427,12 +432,12 @@ export function ChatInput({
     const model = configuredDefault ?? firstEnabled(imageModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.models[0];
     const configuredFallbackSize = model?.defaultSize ?? clientModelOptions.image.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize;
     const configuredFallbackQuality = model?.defaultQuality ?? clientModelOptions.image.defaultQuality ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality;
-    const fallbackSize = strongestSizeOption(model?.sizes, configuredFallbackSize);
-    const fallbackQuality = strongestQualityOption(model?.qualities, configuredFallbackQuality);
+    const fallbackSize = preferredOptionValue(configuredFallbackSize, model?.sizes ?? [], DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize);
+    const fallbackQuality = preferredOptionValue(configuredFallbackQuality, model?.qualities ?? [], DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality);
     return {
       model: model?.id ?? clientModelOptions.image.defaultModel,
-      size: optionValue(fallbackSize, model?.sizes ?? [], fallbackSize),
-      quality: optionValue(fallbackQuality, model?.qualities ?? [], fallbackQuality),
+      size: fallbackSize,
+      quality: fallbackQuality,
     };
   }, [
     clientModelOptions.image.defaultModel,
@@ -1552,7 +1557,7 @@ export function ChatInput({
                 <Select
                   value={imageOptions.size}
                   onChange={(event) => updateImageOptions({ size: event.target.value })}
-                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[74px]')}
+                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[96px]')}
                   data-testid="chat-image-size"
                   aria-label={t('composer.imageSizeLabel')}
                 >

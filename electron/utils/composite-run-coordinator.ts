@@ -15,6 +15,7 @@ import {
   isSupportedCompositeRunTaskSet,
   isCompositeRunTerminal,
   type CompositeRunApiResponse,
+  type CompositeRunCancelRequest,
   type CompositeRunCancelResult,
   type CompositeRunJournalEvent,
   type CompositeRunManifest,
@@ -24,6 +25,7 @@ import {
   type CompositeRunStartRequest,
   type CompositeRunTaskInput,
   type CompositeRunTaskRecord,
+  type CompositeRunTextLengthRequirement,
 } from '../../shared/composite-run';
 import { appendCompositeArtifactConversation } from './chat-session-image-message';
 import {
@@ -38,6 +40,7 @@ import type {
 } from './media-generation-types';
 import {
   createLocalArtifact,
+  resolveRequestedTextLength,
   type LocalArtifactCreateRequest,
   type LocalArtifactCreateResult,
 } from './local-artifact-runtime';
@@ -144,6 +147,7 @@ function localTaskRequest(task: CompositeRunTaskInput, originalPrompt: string, c
     title: task.title,
     sourcePrompt: task.prompt,
     originalPrompt,
+    ...(task.textLengthRequirement ? { textLengthRequirement: task.textLengthRequirement } : {}),
     ...(cwd ? { outputDir: path.join(cwd, 'outputs') } : {}),
   };
   if (task.kind === 'presentation') return { kind: 'presentation', ...common };
@@ -181,7 +185,34 @@ function terminalTask(task: CompositeRunTaskRecord): boolean {
     || task.status === 'cancelled';
 }
 
-function normalizeTask(task: CompositeRunTaskInput, index: number): CompositeRunTaskRecord {
+function normalizeTextLengthRequirement(
+  task: CompositeRunTaskInput,
+  originalPrompt: string,
+): CompositeRunTextLengthRequirement | undefined {
+  if (task.kind !== 'copywriting') return undefined;
+  const requirement = task.textLengthRequirement;
+  if (
+    requirement?.unit === 'characters'
+    && Number.isFinite(requirement.targetCharacters)
+    && Number.isFinite(requirement.minimumCharacters)
+    && requirement.targetCharacters >= 20
+    && requirement.minimumCharacters >= 20
+  ) {
+    return {
+      unit: 'characters',
+      targetCharacters: Math.floor(requirement.targetCharacters),
+      minimumCharacters: Math.min(
+        Math.floor(requirement.targetCharacters),
+        Math.floor(requirement.minimumCharacters),
+      ),
+      approximate: requirement.approximate === true,
+    };
+  }
+  return resolveRequestedTextLength(`${originalPrompt}\n${task.prompt}`);
+}
+
+function normalizeTask(task: CompositeRunTaskInput, index: number, originalPrompt: string): CompositeRunTaskRecord {
+  const textLengthRequirement = normalizeTextLengthRequirement(task, originalPrompt);
   return {
     id: task.id.trim() || `task-${index + 1}`,
     kind: task.kind,
@@ -190,6 +221,7 @@ function normalizeTask(task: CompositeRunTaskInput, index: number): CompositeRun
     requiresArtifact: task.requiresArtifact !== false,
     dependsOn: [...new Set((task.dependsOn ?? []).map((item) => item.trim()).filter(Boolean))],
     fallback: task.fallback?.trim() || undefined,
+    ...(textLengthRequirement ? { textLengthRequirement } : {}),
     selectedImageSource: task.selectedImageSource,
     selectedImageIndex: task.selectedImageIndex,
     sourceImages: task.sourceImages?.filter((image) => image.filePath?.trim()).map((image) => ({ ...image, filePath: image.filePath.trim() })),
@@ -349,7 +381,7 @@ function buildManifest(run: CompositeRunRecord, trailingEvents: ChatRuntimeEvent
 function deliveryText(run: CompositeRunRecord): string {
   const completed = run.tasks.filter((task) => task.status === 'completed');
   const incomplete = run.tasks.filter((task) => task.status !== 'completed');
-  const lines = [`已完成 ${completed.length}/${run.tasks.length} 项，产物已整理如下。`];
+  const lines = [`已交付 ${completed.length}/${run.tasks.length} 项，产物如下。`];
   if (incomplete.length > 0) {
     lines.push('', '需要补充处理：', ...incomplete.map((task) => `- ${task.title}：${task.error || '未完成'}`));
   }
@@ -367,6 +399,7 @@ export class CompositeRunCoordinator {
   private readonly pendingDriverKicks = new Set<string>();
   private readonly activeTasks = new Set<string>();
   private readonly localPlanning = new Map<string, Promise<void>>();
+  private readonly localPlanningControllers = new Map<string, AbortController>();
   private initializePromise: Promise<void> | null = null;
   private createLock: Promise<void> = Promise.resolve();
   private publisher: RuntimePublisher | null = null;
@@ -416,7 +449,7 @@ export class CompositeRunCoordinator {
         imageOptions: request.imageOptions ? { ...request.imageOptions } : undefined,
         videoOptions: request.videoOptions ? { ...request.videoOptions } : undefined,
         status: 'planned',
-        tasks: request.tasks.map(normalizeTask),
+        tasks: request.tasks.map((task, index) => normalizeTask(task, index, request.prompt)),
         artifacts: [],
         verifications: [],
         delivery: {
@@ -486,8 +519,13 @@ export class CompositeRunCoordinator {
       .map((run) => clone(run));
   }
 
-  async cancel(runId: string): Promise<CompositeRunCancelResult> {
+  async cancel(runId: string, request: CompositeRunCancelRequest = {}): Promise<CompositeRunCancelResult> {
     await this.initialize();
+    const source = request.source?.trim().slice(0, 80) || 'unknown';
+    const cancellationMessage = source === 'chat_composer_stop'
+      ? '用户通过停止按钮终止了本轮任务。'
+      : '本轮任务收到取消请求。';
+    logger.info('[composite-run] cancel requested', { runId, source });
     const outcome = await this.mutate(runId, async (current) => {
       if (isCompositeRunTerminal(current.status)) return 'already_terminal' as const;
       current.status = 'cancelled';
@@ -496,20 +534,24 @@ export class CompositeRunCoordinator {
           task.status = 'cancelled';
           task.recoverable = false;
           task.autoRetrySafe = false;
-          task.error = '用户已停止本轮任务。';
+          task.error = cancellationMessage;
           task.completedAt = Date.now();
         }
       }
       current.delivery.status = 'skipped';
       current.delivery.error = undefined;
-      await this.emitRuntime(current, { type: 'run.ended', status: 'aborted', error: '用户已停止本轮任务。' });
+      await this.emitRuntime(current, { type: 'run.ended', status: 'aborted', error: cancellationMessage });
       current.manifest = buildManifest(current);
-      await this.record(current, 'run.cancelled');
+      await this.record(current, 'run.cancelled', { source });
       return 'cancelled' as const;
     });
     if (outcome === null) return { outcome: 'not_found' };
     const run = this.runs.get(runId)!;
-    if (outcome === 'cancelled') cancelMediaGenerationJobsForRun(runId, run.sessionKey);
+    if (outcome === 'cancelled') {
+      this.localPlanningControllers.get(runId)?.abort();
+      cancelMediaGenerationJobsForRun(runId, run.sessionKey);
+    }
+    logger.info('[composite-run] cancel handled', { runId, source, outcome });
     return { outcome, run: clone(run) };
   }
 
@@ -882,14 +924,17 @@ export class CompositeRunCoordinator {
   private async ensureLocalPlans(runId: string): Promise<void> {
     const existing = this.localPlanning.get(runId);
     if (existing) return await existing;
+    const controller = new AbortController();
+    this.localPlanningControllers.set(runId, controller);
     const promise = (async () => {
       const run = this.runs.get(runId);
-      if (!run) return;
+      if (!run || isCompositeRunTerminal(run.status)) return;
       const items: LocalArtifactPlanItem[] = run.tasks
         .filter((task) => isLocalTask(task) && !task.plannedRequest)
         .map((task) => ({ id: task.id, request: localTaskRequest(task, run.prompt, run.cwd) }));
       if (items.length === 0) return;
-      await this.mutate(runId, async (current) => {
+      const planningStarted = await this.mutate(runId, async (current) => {
+        if (isCompositeRunTerminal(current.status)) return false;
         await this.record(current, 'local.plan.started', { plannedItemCount: items.length });
         await this.emitRuntime(current, {
           type: 'progress.update',
@@ -903,9 +948,20 @@ export class CompositeRunCoordinator {
             source: 'native',
           },
         });
+        return true;
       });
-      const result = await planLocalArtifactBatch(items);
+      if (planningStarted !== true) return;
+      const result = await planLocalArtifactBatch(items, { signal: controller.signal });
       await this.mutate(runId, async (current) => {
+        if (isCompositeRunTerminal(current.status)) {
+          logger.info('[composite-run] discarded late local plan', {
+            runId,
+            status: current.status,
+            source: result.source,
+            durationMs: result.durationMs,
+          });
+          return;
+        }
         const plannedById = new Map(result.items.map((item) => [item.id, item.request]));
         for (const item of items) {
           const task = current.tasks.find((candidate) => candidate.id === item.id);
@@ -927,15 +983,16 @@ export class CompositeRunCoordinator {
             status: 'completed',
             detail: result.source === 'model'
               ? '已生成可执行内容计划。'
-              : result.error === 'artifact_planner_single_artifact_fast_path'
-                ? '已使用本地可执行快路径生成内容计划。'
-                : '模型规划不可用，已切换本地可执行保底方案。',
+              : '模型规划不可用，已切换本地可执行保底方案。',
             stepId: 'uclaw.composite',
             source: 'native',
           },
         });
       });
-    })().finally(() => this.localPlanning.delete(runId));
+    })().finally(() => {
+      if (this.localPlanning.get(runId) === promise) this.localPlanning.delete(runId);
+      if (this.localPlanningControllers.get(runId) === controller) this.localPlanningControllers.delete(runId);
+    });
     this.localPlanning.set(runId, promise);
     await promise;
   }
@@ -1042,7 +1099,12 @@ export class CompositeRunCoordinator {
       await this.emitVerification(run, contentVerification);
       await this.emitVerification(run, openabilityVerification);
       await this.emitTaskStep(run, task);
-      await this.emitProgress(run, task, task.status === 'completed' ? `${task.title}已完成` : `${task.title}验证未通过`, task.status === 'completed' ? 'completed' : 'error');
+      await this.emitProgress(
+        run,
+        task,
+        task.status === 'completed' ? `${task.title}已生成并通过验证，等待写入会话` : `${task.title}验证未通过`,
+        task.status === 'completed' ? 'running' : 'error',
+      );
     });
   }
 
@@ -1208,7 +1270,12 @@ export class CompositeRunCoordinator {
       for (const artifact of run.artifacts.filter((candidate) => task.artifactIds.includes(candidate.id))) await this.emitArtifact(run, artifact);
       for (const verification of taskVerifications) await this.emitVerification(run, verification);
       await this.emitTaskStep(run, task);
-      await this.emitProgress(run, task, passed ? `${task.title}已完成` : `${task.title}验证未通过`, passed ? 'completed' : 'error');
+      await this.emitProgress(
+        run,
+        task,
+        passed ? `${task.title}已生成并通过验证，等待写入会话` : `${task.title}验证未通过`,
+        passed ? 'running' : 'error',
+      );
     });
   }
 
@@ -1294,6 +1361,26 @@ export class CompositeRunCoordinator {
       run.delivery.attempts += 1;
       run.delivery.text = deliveryText(run);
       run.delivery.error = undefined;
+      await this.emitRuntime(run, {
+        type: 'run.step.updated',
+        step: {
+          id: 'uclaw.deliver',
+          title: '交付组合结果',
+          status: 'running',
+          detail: '产物已通过完成门禁，正在写入当前会话。',
+          kind: 'delivery',
+        },
+      });
+      await this.emitRuntime(run, {
+        type: 'progress.update',
+        entry: {
+          id: `progress:${run.runId}:delivery`,
+          kind: 'status',
+          text: '产物已验证，正在写入会话',
+          status: 'running',
+          source: 'native',
+        },
+      });
       const terminalEvent: ChatRuntimeEvent = {
         contractVersion: 1,
         producer: 'composite-coordinator',
@@ -1314,15 +1401,38 @@ export class CompositeRunCoordinator {
       await this.appendConversationWithRetry(runId, deliveryManifest);
       await this.mutate(runId, async (current) => {
         if (current.status === 'cancelled') return;
+        current.delivery.status = 'succeeded';
+        current.delivery.persistedAt = Date.now();
+        current.delivery.error = undefined;
+        for (const task of current.tasks.filter((candidate) => candidate.status === 'completed')) {
+          await this.emitProgress(current, task, `${task.title}已交付`, 'completed');
+        }
+        await this.emitRuntime(current, {
+          type: 'run.step.updated',
+          step: {
+            id: 'uclaw.deliver',
+            title: '交付组合结果',
+            status: 'completed',
+            detail: '产物和验证摘要已写入当前会话。',
+            kind: 'delivery',
+          },
+        });
+        await this.emitRuntime(current, {
+          type: 'progress.update',
+          entry: {
+            id: `progress:${current.runId}:delivery`,
+            kind: 'status',
+            text: '产物已写入会话',
+            status: 'completed',
+            source: 'native',
+          },
+        });
         await this.emitRuntime(current, {
           type: 'run.ended',
           status: partialDelivery ? 'error' : 'completed',
           ...(partialDelivery ? { error: '部分任务未完成，已交付当前可用产物和待处理项。' } : {}),
         });
         current.status = partialDelivery ? 'partial' : 'completed';
-        current.delivery.status = 'succeeded';
-        current.delivery.persistedAt = Date.now();
-        current.delivery.error = undefined;
         current.manifest = buildManifest(current);
         await this.record(current, 'run.delivery_succeeded');
       });

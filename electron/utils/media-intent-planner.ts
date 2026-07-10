@@ -18,6 +18,7 @@ const MAX_PLANNER_IMAGES = 5;
 const MAX_RECENT_MESSAGES = 8;
 const MAX_LOG_TEXT_CHARS = 800;
 const MAX_COMPOSITE_TASKS_PER_KIND = 5;
+const MAX_IMAGE_GENERATION_BATCH_COUNT = 10;
 
 export type MediaIntentAction =
   | 'chat'
@@ -64,6 +65,32 @@ export type MediaIntentRecentMessage = {
   images?: MediaGenerationInputImageRef[];
 };
 
+export type MediaIntentArtifactRef = {
+  id?: string;
+  kind?: string;
+  title?: string;
+  filePath?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  verificationStatus?: 'passed' | 'failed' | 'blocked' | 'skipped';
+};
+
+export type MediaIntentArtifactContext = {
+  runId?: string;
+  kind?: MediaIntentCompositeTaskKind;
+  status?: 'planned' | 'queued' | 'running' | 'finalizing' | 'completed' | 'partial' | 'blocked' | 'failed' | 'error' | 'cancelled' | 'aborted';
+  objective?: string;
+  deliveryStatus?: 'pending' | 'writing' | 'succeeded' | 'failed' | 'skipped' | 'missing';
+  artifactRefs?: Array<MediaIntentArtifactRef | string>;
+};
+
+export type MediaIntentArtifactContinuationAction =
+  | 'retry_delivery'
+  | 'resume_task'
+  | 'inspect_result'
+  | 'none';
+
 export type MediaIntentPlan = {
   action: MediaIntentAction;
   source: 'planner' | 'fallback';
@@ -77,12 +104,15 @@ export type MediaIntentPlan = {
   prompt?: string;
   imageSize?: string;
   imageQuality?: 'low' | 'medium' | 'high';
+  requestedImageCount?: number;
   videoMode?: VideoGenerationRouteMode;
   videoSize?: string;
   videoDurationSeconds?: number;
   videoPrompt?: string;
   imageEditPrompt?: string;
   clarification?: string;
+  artifactContinuationAction?: MediaIntentArtifactContinuationAction;
+  artifactContext?: MediaIntentArtifactContext;
   compositeTasks?: MediaIntentCompositeTask[];
 };
 
@@ -105,6 +135,7 @@ type MediaIntentPlannerParams = {
   explicitImages?: MediaGenerationInputImageRef[];
   candidateImages?: MediaGenerationInputImageRef[];
   recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 };
 
 type PlannerImageSource = Exclude<MediaIntentImageSource, 'none'>;
@@ -171,12 +202,15 @@ function summarizePlanForLog(plan: MediaIntentPlan): Record<string, unknown> {
     prompt: plan.prompt ? truncateForLog(plan.prompt) : undefined,
     imageSize: plan.imageSize,
     imageQuality: plan.imageQuality,
+    requestedImageCount: plan.requestedImageCount,
     videoMode: plan.videoMode,
     videoSize: plan.videoSize,
     videoDurationSeconds: plan.videoDurationSeconds,
     videoPrompt: plan.videoPrompt ? truncateForLog(plan.videoPrompt) : undefined,
     imageEditPrompt: plan.imageEditPrompt ? truncateForLog(plan.imageEditPrompt) : undefined,
     clarification: plan.clarification ? truncateForLog(plan.clarification, 300) : undefined,
+    artifactContinuationAction: plan.artifactContinuationAction,
+    artifactContext: describeArtifactContext(plan.artifactContext),
     compositeTasks: plan.compositeTasks?.map((task) => ({
       id: task.id,
       kind: task.kind,
@@ -205,6 +239,7 @@ function summarizeRawPlannerJsonForLog(raw: Record<string, unknown>): Record<str
     prompt: typeof prompt === 'string' ? truncateForLog(prompt) : prompt,
     image_size: raw.image_size ?? raw.imageSize,
     image_quality: raw.image_quality ?? raw.imageQuality,
+    requested_image_count: raw.requested_image_count ?? raw.requestedImageCount ?? raw.image_count ?? raw.imageCount,
     video_mode: raw.video_mode ?? raw.videoMode,
     video_size: raw.video_size ?? raw.videoSize,
     video_duration_seconds: raw.video_duration_seconds ?? raw.videoDurationSeconds,
@@ -213,6 +248,7 @@ function summarizeRawPlannerJsonForLog(raw: Record<string, unknown>): Record<str
     clarification: typeof raw.clarification === 'string'
       ? truncateForLog(raw.clarification, 300)
       : raw.clarification,
+    artifact_continuation_action: raw.artifact_continuation_action ?? raw.artifactContinuationAction,
     reason: typeof raw.reason === 'string' ? truncateForLog(raw.reason, 300) : raw.reason,
     composite_tasks: Array.isArray(rawCompositeTasks)
       ? rawCompositeTasks.slice(0, 35).map((task) => {
@@ -379,6 +415,37 @@ function describeRecentMessages(messages: MediaIntentRecentMessage[] | undefined
   }));
 }
 
+function describeArtifactContext(context: MediaIntentArtifactContext | undefined): Record<string, unknown> | null {
+  if (!context) return null;
+  return {
+    run_id: context.runId?.trim() || null,
+    kind: context.kind ?? null,
+    status: context.status ?? null,
+    objective: context.objective?.trim() ? context.objective.trim().slice(0, 1200) : null,
+    delivery_status: context.deliveryStatus ?? null,
+    artifact_refs: (context.artifactRefs ?? []).slice(0, 20).map((artifact) => {
+      if (typeof artifact === 'string') {
+        const reference = artifact.trim();
+        return {
+          id: /^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,159}$/u.test(reference) ? reference : null,
+          file_name: reference.split(/[\\/]/u).pop() || null,
+          reference_present: Boolean(reference),
+        };
+      }
+      return {
+        id: artifact.id ?? null,
+        kind: artifact.kind ?? null,
+        title: artifact.title ?? null,
+        file_name: artifact.filePath?.split(/[\\/]/u).pop() ?? null,
+        has_url: Boolean(artifact.url?.trim()),
+        mime_type: artifact.mimeType ?? null,
+        size_bytes: artifact.sizeBytes ?? null,
+        verification_status: artifact.verificationStatus ?? null,
+      };
+    }),
+  };
+}
+
 function fallbackPlan(
   reason: string,
   prompt = '',
@@ -425,6 +492,8 @@ function compositePlan(
     source?: 'planner' | 'fallback';
     confidence?: number;
     reason?: string;
+    artifactContinuationAction?: MediaIntentArtifactContinuationAction;
+    artifactContext?: MediaIntentArtifactContext;
   } = {},
 ): MediaIntentPlan {
   const hasMediaTask = tasks.some((task) => (
@@ -440,6 +509,8 @@ function compositePlan(
     confidence: options.confidence ?? 1,
     reason: options.reason ?? 'composite_intent_local',
     selectedImageSource: 'none',
+    artifactContinuationAction: options.artifactContinuationAction,
+    artifactContext: options.artifactContext,
     compositeTasks: tasks,
   };
 }
@@ -563,19 +634,34 @@ function isCompositeKnowledgeQuestion(prompt: string): boolean {
 }
 
 function hasImmediateExecutionDirective(prompt: string): boolean {
-  return /(?:帮我|给我|请|直接|现在|马上|立刻|替我|来)(?:.{0,20})(?:生成|生图|出图|画|做|制作|创建|开发|搭建|修图|改图|加|换|去掉|删除|调整|优化|写|撰写|整理)/iu.test(prompt)
-    || /^(?:生成|生图|出图|画|做|制作|创建|开发|搭建|修图|改图|加|换|去掉|删除|调整|优化|写|撰写|整理)(?:.{0,24})/iu.test(prompt.trim())
+  return /(?:帮我|给我|请|直接|现在|马上|立刻|替我|来)(?:.{0,20})(?:生成|生图|出图|画|做|制作|创建|开发|搭建|修图|改图|加|换|去掉|删除|调整|优化|写|撰写|创作|续写|扩写|补全|整理)/iu.test(prompt)
+    || /^(?:生成|生图|出图|画|做|制作|创建|开发|搭建|修图|改图|加|换|去掉|删除|调整|优化|写|撰写|创作|续写|扩写|补全|整理)(?:.{0,24})/iu.test(prompt.trim())
     || /(?:please|now|directly|go ahead and).{0,20}(?:generate|create|make|build|edit|write)/iu.test(prompt)
     || /^(?:generate|create|make|build|edit|write)\b/iu.test(prompt.trim());
 }
 
 function isCapabilityOrKnowledgeOnlyPrompt(prompt: string): boolean {
-  const mentionsPlannableCapability = /(?:图|图片|图像|照片|生图|修图|视频|动画|ppt|powerpoint|slides?|幻灯片|excel|xlsx|spreadsheet|表格|小程序|文案|截图|image|picture|photo|video|mini\s*program|copywriting|screenshot)/iu.test(prompt);
+  const mentionsPlannableCapability = /(?:图|图片|图像|照片|生图|修图|视频|动画|ppt|powerpoint|slides?|幻灯片|excel|xlsx|spreadsheet|表格|小程序|文案|小说|故事|文章|长文|散文|传记|报告|白皮书|剧本|截图|image|picture|photo|video|mini\s*program|copywriting|novel|story|article|essay|report|screenplay|screenshot)/iu.test(prompt);
   if (!mentionsPlannableCapability) return false;
   const explicitlyAsksCapability = /(?:你|当前|现在|目前)?(?:能不能|能否|是否|可不可以|可以吗|支持吗|会不会|会吗)|你(?:能|会|可以).{0,30}(?:吗|么|？|\?)|(?:能力|功能|支持).{0,16}(?:哪些|什么|吗|么)|\b(?:can|could|would)\s+you\b|\bdo\s+you\s+support\b|\bare\s+you\s+able\b/iu.test(prompt);
   const politelyRequestsExistingImageEdit = promptReferencesExistingImage(prompt) && isImageEditPrompt(prompt);
   if (explicitlyAsksCapability) return !hasImmediateExecutionDirective(prompt) && !politelyRequestsExistingImageEdit;
   return isCompositeKnowledgeQuestion(prompt) && !hasImmediateExecutionDirective(prompt);
+}
+
+function isExplicitLongFormArtifactRequest(prompt: string): boolean {
+  const mentionsLongForm = /(?:小说|故事|文章|长文|散文|传记|报告|白皮书|剧本|novel|story|article|essay|report|white\s*paper|screenplay)/iu.test(prompt);
+  if (!mentionsLongForm || isCapabilityOrKnowledgeOnlyPrompt(prompt)) return false;
+
+  const hasLengthOrCompletenessConstraint = /(?:(?:\d[\d,]*(?:\.\d+)?|[零一二两三四五六七八九十百千万]+)\s*(?:字|词|words?))|(?:\d+(?:\.\d+)?\s*[千k万w]\s*字)|(?:(?:不少于|至少|不低于|超过|约|大约|控制在|达到).{0,12}(?:字|词|words?))|(?:长篇|完整(?:版|全文)?|全文)/iu.test(prompt);
+  if (!hasLengthOrCompletenessConstraint) return false;
+
+  const asksForDelivery = hasImmediateExecutionDirective(prompt)
+    || /(?:给我|我要|我需要|请提供|直接给出|deliver|provide).{0,28}(?:小说|故事|文章|长文|散文|传记|报告|白皮书|剧本|novel|story|article|essay|report|white\s*paper|screenplay)/iu.test(prompt);
+  if (!asksForDelivery) return false;
+
+  const asksForGuidanceOnly = /(?:教程|技巧|方法|思路|怎么写|如何写|写作建议|大纲怎么|outline tips?|how to write)/iu.test(prompt);
+  return !asksForGuidanceOnly;
 }
 
 function normalizeExplicitTaskCount(value: string): number | undefined {
@@ -595,6 +681,45 @@ function normalizeExplicitTaskCount(value: string): number | undefined {
   const parsed = chineseCounts[normalized] ?? Number.parseInt(normalized, 10);
   if (!Number.isFinite(parsed) || parsed < 2) return undefined;
   return Math.min(MAX_COMPOSITE_TASKS_PER_KIND, parsed);
+}
+
+function normalizeRequestedImageCount(value: unknown): number | undefined {
+  const token = typeof value === 'string' || typeof value === 'number'
+    ? String(value).trim().toLowerCase()
+    : '';
+  if (!token) return undefined;
+  const chineseCounts: Record<string, number> = {
+    '一': 1,
+    '二': 2,
+    '两': 2,
+    '三': 3,
+    '四': 4,
+    '五': 5,
+    '六': 6,
+    '七': 7,
+    '八': 8,
+    '九': 9,
+    '十': 10,
+  };
+  const parsed = chineseCounts[token] ?? Number.parseInt(token, 10);
+  if (!Number.isFinite(parsed) || parsed < 2) return undefined;
+  return Math.min(MAX_IMAGE_GENERATION_BATCH_COUNT, parsed);
+}
+
+function requestedImageCountFromPrompt(prompt: string): number | undefined {
+  const countToken = '([1-9][0-9]*|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])';
+  const imageTarget = '(?:\u56fe\u7247|\u56fe\u50cf|\u7167\u7247|\u6d77\u62a5|\u63d2\u753b|\u5934\u50cf|\u58c1\u7eb8|\u4e3b\u89c6\u89c9|\u56fe|images?|pictures?|photos?|posters?|illustrations?)';
+  const imageUnit = '(?:\u5f20|\u5e45|\u4e2a)?';
+  const patterns = [
+    new RegExp(`${countToken}\\s*${imageUnit}\\s*[^，,、。；;\\n]{0,12}${imageTarget}`, 'iu'),
+    new RegExp(`${imageTarget}\\s*${countToken}\\s*${imageUnit}`, 'iu'),
+  ];
+  for (const pattern of patterns) {
+    const match = prompt.match(pattern)?.[1];
+    const count = normalizeRequestedImageCount(match);
+    if (count) return count;
+  }
+  return undefined;
 }
 
 function explicitCompositeTaskCount(
@@ -650,7 +775,8 @@ function explicitlyRequestsCompositeTask(prompt: string, kind: MediaIntentCompos
   if (kind === 'mini_program') {
     return /(?:帮我|给我|请|直接|现在|马上|立刻|来|做|制作|生成|创建|开发|搭建).{0,18}(?:小程序|mini\s*program|wechat mini)|(?:小程序|mini\s*program|wechat mini).{0,18}(?:来|做|制作|生成|创建|开发|搭建)(?:一个|一份|一版)?/iu.test(prompt);
   }
-  return /(?:帮我|给我|请|直接|现在|马上|立刻|来|写|撰写|生成|创作|出).{0,18}(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|ad copy)|(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|ad copy).{0,18}(?:来|写|撰写|生成|创作|出)(?:一个|一份|一版)?/iu.test(prompt);
+  return isExplicitLongFormArtifactRequest(prompt)
+    || /(?:帮我|给我|请|直接|现在|马上|立刻|来|写|撰写|生成|创作|出).{0,18}(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|ad copy)|(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|ad copy).{0,18}(?:来|写|撰写|生成|创作|出)(?:一个|一份|一版)?/iu.test(prompt);
 }
 
 function isNegatedCompositeTaskPrompt(prompt: string, kind: MediaIntentCompositeTaskKind): boolean {
@@ -732,6 +858,7 @@ function prioritizeCompositeImageSources(params: {
   prompt: string;
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
+  preservePlannerCandidateSelection?: boolean;
 }): MediaIntentCompositeTask[] {
   const taskOrdinals = new Map<MediaIntentCompositeTaskKind, number>();
 
@@ -772,6 +899,14 @@ function prioritizeCompositeImageSources(params: {
       task.fallback = task.fallback || (task.kind === 'video_generate'
         ? '优先使用最近的本轮前序图片生成或修图子任务结果作为视频输入；仍不可用时按文本生成视频。'
         : '优先使用最近的本轮前序图片生成或修图子任务结果作为修图输入；仍不可用时标记该子任务待补输入。');
+      continue;
+    }
+
+    if (
+      params.preservePlannerCandidateSelection
+      && task.selectedImageSource === 'candidate'
+      && task.sourceImages?.length
+    ) {
       continue;
     }
 
@@ -852,8 +987,8 @@ function detectCompositeTasks(params: {
     },
     {
       kind: 'copywriting',
-      title: '撰写文案',
-      pattern: /(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|copywriter|write copy|ad copy)/i,
+      title: isExplicitLongFormArtifactRequest(prompt) ? '撰写长篇内容' : '撰写文案',
+      pattern: /(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|小说|故事|文章|长文|散文|传记|报告|白皮书|剧本|copywriting|copywriter|write copy|ad copy|novel|story|article|essay|report|white\s*paper|screenplay)/i,
       prompt: taskPrompt(prompt, '撰写文案'),
     },
   ];
@@ -946,6 +1081,20 @@ function canUseCandidateImagesForVisualPrompt(prompt: string): boolean {
   return canUseCandidateImagesForPrompt(prompt) || isVisualQuestionCuePrompt(prompt);
 }
 
+function plannerCandidateSelectionIsAuthorized(params: {
+  action: MediaIntentAction;
+  intentKind: MediaIntentKind | undefined;
+  currentTurnMediaRequest: boolean | undefined;
+}): boolean {
+  return (
+    params.action === 'vision_chat'
+    || params.action === 'image_edit'
+    || params.action === 'video_generate'
+  )
+    && params.intentKind === 'current_media_task'
+    && params.currentTurnMediaRequest === true;
+}
+
 function isImageEditPrompt(prompt: string): boolean {
   return /(?:修图|改图|精修|编辑图片|图片编辑|调整图片|优化图片|换背景|去背景|抠图|加上|去掉|删除|移除|把.+改成|把.+换成|logo|remove|edit image|image edit|retouch|modify)/i.test(prompt)
     || (promptReferencesExistingImage(prompt) && /(?:改|修|换|加|去|删|调整|优化|编辑|变成|edit|modify|remove|replace|add)/i.test(prompt));
@@ -1035,7 +1184,8 @@ function isLookupOrResearchPrompt(prompt: string): boolean {
 function isGeneralQuestionPrompt(prompt: string): boolean {
   const normalized = prompt.trim();
   return /[?？]\s*$/.test(normalized)
-    || /^(?:什么|啥|哪个|哪些|怎么|如何|为什么|为啥|谁|哪里|哪儿|是否|能不能|可不可以|what|which|how|why|who|where|can|could|is|are)\b/i.test(normalized);
+    || /^(?:什么|啥|哪个|哪些|怎么|如何|为什么|为啥|谁|哪里|哪儿|是否|能不能|可不可以|what|which|how|why|who|where|can|could|is|are)\b/i.test(normalized)
+    || /(?:是什么|有什么|能做什么|可以做什么|会什么|怎么用|如何使用|能不能|能否|可不可以|支持(?:吗|什么|哪些)|吗|么)\s*$/iu.test(normalized);
 }
 
 function isPotentialCurrentMediaSideEffectPrompt(prompt: string): boolean {
@@ -1046,12 +1196,31 @@ function isPotentialCurrentMediaSideEffectPrompt(prompt: string): boolean {
     || (!isImageLookupPrompt(prompt) && isImageGenerationPrompt(prompt));
 }
 
+function shouldDefaultImageModeToGeneration(prompt: string): boolean {
+  return !isPlainConversationalPrompt(prompt)
+    && !isLookupOrResearchPrompt(prompt)
+    && !isImageLookupPrompt(prompt)
+    && !isMediaMetaQuestionPrompt(prompt)
+    && !isCapabilityOrKnowledgeOnlyPrompt(prompt)
+    && !isNegatedMediaGenerationPrompt(prompt)
+    && !isMediaPromptDraftingPrompt(prompt)
+    && !isTextOnlyRequestInMediaMode(prompt)
+    && !isGeneralQuestionPrompt(prompt);
+}
+
 function needsRemoteMediaPlanner(params: {
   prompt: string;
   requestedMode: 'chat' | 'image' | 'video';
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
+  recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 }): boolean {
+  if (shouldDeferArtifactFollowUpToPlanner({
+    prompt: params.prompt,
+    recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
+  })) return true;
   if (params.requestedMode !== 'chat') return true;
   if (params.explicitImages.length > 0) return true;
   if (params.candidateImages.length > 0 && canUseCandidateImagesForPrompt(params.prompt)) return true;
@@ -1078,15 +1247,226 @@ function isMetaLookupContinuationPrompt(prompt: string): boolean {
     || /^(?:好|好的|嗯|可以|行|对|是|ok|okay|yes)(?:吧|一下|下)?[\s。！!？?~～,.，]*$/i.test(prompt.trim());
 }
 
+function isShortEllipticalTurn(prompt: string): boolean {
+  const normalized = prompt.trim().replace(/[\s。！!？?~～,.，;；:：]+$/gu, '').trim();
+  if (!normalized || hasImmediateExecutionDirective(prompt)) return false;
+  const characterCount = [...normalized].length;
+  const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
+  const clauseCount = prompt.split(/[。！!？?;；\n]+/u).filter((clause) => clause.trim()).length;
+  return clauseCount <= 1
+    && (characterCount <= 12 || (wordCount <= 5 && characterCount <= 36));
+}
+
+function hasStructuredArtifactContext(context: MediaIntentArtifactContext | undefined): context is MediaIntentArtifactContext {
+  return Boolean(
+    context
+    && (
+      context.runId?.trim()
+      || context.kind
+      || context.status
+      || context.objective?.trim()
+      || context.deliveryStatus
+      || (context.artifactRefs?.length ?? 0) > 0
+    )
+  );
+}
+
+function artifactContextHasUsableArtifact(context: MediaIntentArtifactContext): boolean {
+  return (context.artifactRefs ?? []).some((artifact) => {
+    if (typeof artifact === 'string') return Boolean(artifact.trim());
+    const hasReference = Boolean(artifact.id?.trim() || artifact.filePath?.trim() || artifact.url?.trim());
+    return hasReference && artifact.verificationStatus !== 'failed' && artifact.verificationStatus !== 'blocked';
+  });
+}
+
+function isArtifactResultInspectionPrompt(prompt: string): boolean {
+  if (!isShortEllipticalTurn(prompt)) return false;
+  const normalized = prompt
+    .trim()
+    .replace(/[\s。！!？?~～,.，;；:：]+$/gu, '')
+    .trim();
+  if (!normalized) return false;
+  if (/(?:重做|重新|修改|改一下|调整|优化|续写|补全|不对|错了|太短|太长|不好|有问题)/iu.test(normalized)) {
+    return false;
+  }
+
+  const standaloneLookup = /^(?:在哪(?:里|儿)?|哪(?:里|儿)|给我(?:看)?|发我|再发(?:我)?(?:一遍|一次|一下)?|打开(?:看看)?|展示(?:一下)?|显示(?:一下)?|做好了吗|完成了吗|做完了吗|弄好了吗|出来了吗|好了吗|where\s+is\s+it|show\s+it|send\s+it|open\s+it|is\s+it\s+(?:done|finished|ready)|done|finished|ready)$/iu;
+  if (standaloneLookup.test(normalized)) return true;
+
+  const mentionsArtifact = /(?:东西|结果|产物|文件|附件|链接|页面|文档|ppt|powerpoint|幻灯片|excel|表格|小程序|小说|故事|文章|报告|刚才(?:那个|这个|的)?|上次(?:那个|这个|的)?|上一个|前面(?:那个|这个|的)?|它|这个|那个|result|artifact|file|attachment|link|page|document|deck|slides?|spreadsheet|report|story|novel|it)/iu.test(normalized);
+  const asksToInspect = /(?:呢|在哪|哪里|哪儿|找不到|没看到|看不到|给我|发我|再发|重发|拿来|展示|显示|打开|看看|查看|做好了吗|完成了吗|做完了吗|弄好了吗|出来了吗|where|show|open|send|give|missing|can't\s+find|cannot\s+find|done|finished|ready)/iu.test(normalized);
+  return mentionsArtifact && asksToInspect;
+}
+
+function localArtifactResultInspectionPlan(
+  prompt: string,
+  context: MediaIntentArtifactContext | undefined,
+): MediaIntentPlan | null {
+  if (!hasStructuredArtifactContext(context) || !context.runId?.trim()) return null;
+  if (context.deliveryStatus !== 'succeeded' || !artifactContextHasUsableArtifact(context)) return null;
+  if (context.status && context.status !== 'completed') return null;
+  if (!isArtifactResultInspectionPrompt(prompt)) return null;
+  return {
+    action: 'chat',
+    source: 'fallback',
+    intentKind: 'current_non_media_task',
+    currentTurnMediaRequest: false,
+    confidence: 1,
+    reason: 'local_artifact_result_inspection',
+    selectedImageSource: 'none',
+    prompt: prompt.trim(),
+    artifactContinuationAction: 'inspect_result',
+    artifactContext: context,
+  };
+}
+
+function artifactContextNeedsPlannerFollowUp(context: MediaIntentArtifactContext): boolean {
+  const hasUsableArtifact = artifactContextHasUsableArtifact(context);
+  if (
+    context.deliveryStatus === 'succeeded'
+    && hasUsableArtifact
+    && (context.status === 'completed' || !context.status)
+  ) return false;
+  if (
+    context.status === 'completed'
+    && hasUsableArtifact
+    && context.deliveryStatus !== 'pending'
+    && context.deliveryStatus !== 'writing'
+    && context.deliveryStatus !== 'failed'
+    && context.deliveryStatus !== 'missing'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function artifactContextAllowsContinuationTask(context: MediaIntentArtifactContext): boolean {
+  if (!artifactContextNeedsPlannerFollowUp(context)) return false;
+  if (
+    context.status === 'planned'
+    || context.status === 'queued'
+    || context.status === 'running'
+    || context.status === 'finalizing'
+    || context.deliveryStatus === 'pending'
+    || context.deliveryStatus === 'writing'
+  ) {
+    return false;
+  }
+  return context.status === 'partial'
+    || context.status === 'blocked'
+    || context.status === 'failed'
+    || context.status === 'error'
+    || context.status === 'cancelled'
+    || context.status === 'aborted'
+    || context.status === 'completed'
+    || context.deliveryStatus === 'failed'
+    || context.deliveryStatus === 'missing';
+}
+
+function normalizeArtifactContinuationAction(
+  value: unknown,
+  context: MediaIntentArtifactContext | undefined,
+): MediaIntentArtifactContinuationAction | undefined {
+  if (!hasStructuredArtifactContext(context)) return undefined;
+  if (value === 'none') return 'none';
+  if (value === 'resume_task') {
+    return artifactContextAllowsContinuationTask(context) ? 'resume_task' : 'none';
+  }
+  if (value === 'retry_delivery') {
+    const canRetryDelivery = Boolean(context.runId?.trim())
+      && artifactContextHasUsableArtifact(context)
+      && (
+        context.deliveryStatus === 'failed'
+        || context.deliveryStatus === 'missing'
+        || (
+          context.status === 'completed'
+          && artifactContextHasUsableArtifact(context)
+          && context.deliveryStatus !== 'succeeded'
+          && context.deliveryStatus !== 'pending'
+          && context.deliveryStatus !== 'writing'
+        )
+      );
+    return canRetryDelivery ? 'retry_delivery' : 'none';
+  }
+  if (value === 'inspect_result') {
+    return context.runId?.trim() || (context.artifactRefs?.length ?? 0) > 0
+      ? 'inspect_result'
+      : 'none';
+  }
+  return undefined;
+}
+
+function contextualArtifactFollowUpKinds(params: {
+  prompt: string;
+  recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
+  requireRunnableTask?: boolean;
+}): Set<MediaIntentCompositeTaskKind> {
+  const kinds = new Set<MediaIntentCompositeTaskKind>();
+  if (!isShortEllipticalTurn(params.prompt)) return kinds;
+
+  if (hasStructuredArtifactContext(params.artifactContext)) {
+    if (!artifactContextNeedsPlannerFollowUp(params.artifactContext)) return kinds;
+    if (params.requireRunnableTask && !artifactContextAllowsContinuationTask(params.artifactContext)) return kinds;
+    if (params.artifactContext.kind && isSingleLocalArtifactCompositeKind(params.artifactContext.kind)) {
+      kinds.add(params.artifactContext.kind);
+      return kinds;
+    }
+    const objective = params.artifactContext.objective?.trim() || '';
+    for (const kind of ['presentation', 'spreadsheet', 'mini_program', 'copywriting'] as const) {
+      if (objective && explicitlyRequestsCompositeTask(objective, kind)) kinds.add(kind);
+    }
+    return kinds;
+  }
+
+  let skippedCurrentPrompt = false;
+  const localArtifactKinds: MediaIntentCompositeTaskKind[] = [
+    'presentation',
+    'spreadsheet',
+    'mini_program',
+    'copywriting',
+  ];
+  for (const message of [...(params.recentMessages ?? [])].reverse()) {
+    if (message.role !== 'user' || !message.text?.trim()) continue;
+    const text = message.text.trim();
+    if (!skippedCurrentPrompt && text === params.prompt.trim()) {
+      skippedCurrentPrompt = true;
+      continue;
+    }
+    for (const kind of localArtifactKinds) {
+      if (explicitlyRequestsCompositeTask(text, kind)) kinds.add(kind);
+    }
+  }
+  return kinds;
+}
+
+function shouldDeferArtifactFollowUpToPlanner(params: {
+  prompt: string;
+  recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
+}): boolean {
+  // This gate only preserves thread context for model judgment; it never authorizes a tool by itself.
+  if (hasStructuredArtifactContext(params.artifactContext)) {
+    return isShortEllipticalTurn(params.prompt);
+  }
+  return contextualArtifactFollowUpKinds(params).size > 0;
+}
+
 function localNonMediaChatPlan(params: {
   prompt: string;
   requestedMode: 'chat' | 'image' | 'video';
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
   recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 }): MediaIntentPlan | null {
   const prompt = params.prompt.trim();
   if (!prompt) return null;
+  if (shouldDeferArtifactFollowUpToPlanner({
+    prompt,
+    recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
+  })) return null;
 
   if (isPreferenceOnlyPrompt(prompt, params.requestedMode)) {
     return localChatPlan('local_non_media_preference_update', prompt, 'preference_or_memory_update');
@@ -1173,9 +1553,16 @@ function localFastPathPlan(params: {
   requestedMode: 'chat' | 'image' | 'video';
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
+  recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 }): MediaIntentPlan | null {
   const prompt = params.prompt.trim();
   if (!prompt) return null;
+  if (shouldDeferArtifactFollowUpToPlanner({
+    prompt,
+    recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
+  })) return null;
 
   if (params.requestedMode === 'image') {
     const visualQuestion = isVisualQuestionPrompt(prompt)
@@ -1237,6 +1624,7 @@ function localFastPathPlan(params: {
           isUseDefaultSettingsExecutionPrompt(prompt, params.requestedMode)
           && !isVideoGenerationPrompt(prompt)
         )
+        || shouldDefaultImageModeToGeneration(prompt)
       )
       && !isNegatedCompositeTaskPrompt(prompt, 'image_generate')
     ) {
@@ -1250,6 +1638,7 @@ function localFastPathPlan(params: {
         selectedImageSource: 'none',
         sourceImages: [],
         prompt,
+        requestedImageCount: requestedImageCountFromPrompt(prompt),
       };
     }
     return null;
@@ -1419,10 +1808,19 @@ function normalizePlannerCompositeTasks(params: {
   prompt: string;
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
+  recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
+  preservePlannerCandidateSelection?: boolean;
 }): MediaIntentCompositeTask[] {
   const rawTasks = params.raw.composite_tasks ?? params.raw.compositeTasks;
   if (!Array.isArray(rawTasks)) return [];
   const batchExecutionRequested = hasCompositeBatchExecutionDirective(params.prompt);
+  const contextualFollowUpKinds = contextualArtifactFollowUpKinds({
+    prompt: params.prompt,
+    recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
+    requireRunnableTask: true,
+  });
 
   const kindCounts = new Map<MediaIntentCompositeTaskKind, number>();
   const usedIds = new Set<string>();
@@ -1436,7 +1834,8 @@ function normalizePlannerCompositeTasks(params: {
     if (!rawTask || typeof rawTask !== 'object' || Array.isArray(rawTask)) continue;
     const record = rawTask as Record<string, unknown>;
     if (!isCompositeTaskKind(record.kind)) continue;
-    const explicitlyRequested = explicitlyRequestsCompositeTask(params.prompt, record.kind);
+    const explicitlyRequested = explicitlyRequestsCompositeTask(params.prompt, record.kind)
+      || contextualFollowUpKinds.has(record.kind);
     if (isMediaCompositeTaskKind(record.kind) ? !explicitlyRequested : (!batchExecutionRequested && !explicitlyRequested)) {
       continue;
     }
@@ -1470,6 +1869,7 @@ function normalizePlannerCompositeTasks(params: {
       : { selectedImageSource: 'none' as const };
     if (
       imageSelection.selectedImageSource === 'candidate'
+      && !params.preservePlannerCandidateSelection
       && !canUseCandidateImagesForPrompt(params.prompt)
     ) {
       imageSelection = { selectedImageSource: 'none' };
@@ -1515,6 +1915,7 @@ function normalizePlannerCompositeTasks(params: {
     prompt: params.prompt,
     explicitImages: params.explicitImages,
     candidateImages: params.candidateImages,
+    preservePlannerCandidateSelection: params.preservePlannerCandidateSelection,
   });
 }
 
@@ -1524,6 +1925,8 @@ function normalizePlannerDecision(params: {
   requestedMode: 'chat' | 'image' | 'video';
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
+  recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 }): MediaIntentPlan | null {
   if (isPreferenceOnlyPrompt(params.prompt, params.requestedMode)) {
     return localChatPlan('planner_guard_preference_update', params.prompt, 'preference_or_memory_update');
@@ -1551,6 +1954,12 @@ function normalizePlannerDecision(params: {
   );
   const imageSize = normalizeOptionalText(params.raw.image_size ?? params.raw.imageSize);
   const imageQuality = normalizeImageQuality(params.raw.image_quality ?? params.raw.imageQuality);
+  const requestedImageCount = normalizeRequestedImageCount(
+    params.raw.requested_image_count
+      ?? params.raw.requestedImageCount
+      ?? params.raw.image_count
+      ?? params.raw.imageCount,
+  ) ?? requestedImageCountFromPrompt(prompt);
   const videoSize = normalizeOptionalText(params.raw.video_size ?? params.raw.videoSize);
   const videoDurationSeconds = normalizePositiveInteger(
     params.raw.video_duration_seconds ?? params.raw.videoDurationSeconds,
@@ -1561,12 +1970,26 @@ function normalizePlannerDecision(params: {
     params.raw.image_edit_prompt ?? params.raw.imageEditPrompt,
     prompt,
   );
+  const artifactContinuationAction = normalizeArtifactContinuationAction(
+    params.raw.artifact_continuation_action ?? params.raw.artifactContinuationAction,
+    params.artifactContext,
+  );
 
   const plannerAuthorizesCurrentMedia = intentKind === 'current_media_task'
     && currentTurnMediaRequest === true;
-  const compositeTasks = normalizePlannerCompositeTasks(params);
-  const hasRunnableComposite = compositeTasks.length >= 2
-    || (compositeTasks.length === 1 && isSingleLocalArtifactCompositeKind(compositeTasks[0]!.kind));
+  const compositeTasks = normalizePlannerCompositeTasks({
+    ...params,
+    preservePlannerCandidateSelection: plannerAuthorizesCurrentMedia,
+  });
+  const continuationSuppressesComposite = hasStructuredArtifactContext(params.artifactContext)
+    && isShortEllipticalTurn(params.prompt)
+    && artifactContinuationAction !== undefined
+    && artifactContinuationAction !== 'resume_task';
+  const hasRunnableComposite = !continuationSuppressesComposite
+    && (
+      compositeTasks.length >= 2
+      || (compositeTasks.length === 1 && isSingleLocalArtifactCompositeKind(compositeTasks[0]!.kind))
+    );
   if (hasRunnableComposite) {
     const hasMediaTask = compositeTasks.some((task) => (
       task.kind === 'image_generate'
@@ -1580,6 +2003,10 @@ function normalizePlannerDecision(params: {
       source: 'planner',
       confidence,
       reason: reason || 'composite_intent_planner',
+      artifactContinuationAction: artifactContinuationAction === 'resume_task'
+        ? 'resume_task'
+        : undefined,
+      artifactContext: params.artifactContext,
     });
   }
   if (isMediaSideEffectAction(action) && !plannerAuthorizesCurrentMedia) {
@@ -1605,7 +2032,10 @@ function normalizePlannerDecision(params: {
     if (!imageSelection.sourceImages?.length) {
       return clarificationPlan('vision_chat_missing_input_image', normalizeOptionalText(params.raw.clarification));
     }
-    if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForVisualPrompt(params.prompt)) {
+    if (
+      imageSelection.selectedImageSource === 'candidate'
+      && !plannerCandidateSelectionIsAuthorized({ action, intentKind, currentTurnMediaRequest })
+    ) {
       return {
         action: 'chat',
         source: 'planner',
@@ -1641,7 +2071,10 @@ function normalizePlannerDecision(params: {
     if (!imageSelection.sourceImages?.length) {
       return clarificationPlan('image_edit_missing_input_image', normalizeOptionalText(params.raw.clarification));
     }
-    if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForPrompt(params.prompt)) {
+    if (
+      imageSelection.selectedImageSource === 'candidate'
+      && !plannerCandidateSelectionIsAuthorized({ action, intentKind, currentTurnMediaRequest })
+    ) {
       return clarificationPlan('image_edit_candidate_not_explicitly_referenced', normalizeOptionalText(params.raw.clarification));
     }
     return {
@@ -1672,7 +2105,10 @@ function normalizePlannerDecision(params: {
     if (videoMode !== 'text_to_video' && !imageSelection.sourceImages?.length) {
       return clarificationPlan('video_generate_missing_input_image', normalizeOptionalText(params.raw.clarification));
     }
-    if (imageSelection.selectedImageSource === 'candidate' && !canUseCandidateImagesForPrompt(params.prompt)) {
+    if (
+      imageSelection.selectedImageSource === 'candidate'
+      && !plannerCandidateSelectionIsAuthorized({ action, intentKind, currentTurnMediaRequest })
+    ) {
       return {
         action,
         source: 'planner',
@@ -1768,8 +2204,13 @@ function normalizePlannerDecision(params: {
     prompt,
     imageSize,
     imageQuality,
+    requestedImageCount: action === 'image_generate' ? requestedImageCount : undefined,
     videoSize,
     videoDurationSeconds,
+    artifactContinuationAction: artifactContinuationAction === 'resume_task'
+      ? 'none'
+      : artifactContinuationAction,
+    artifactContext: params.artifactContext,
   };
 }
 
@@ -1779,6 +2220,7 @@ function buildPlannerMessages(params: {
   explicitImages: MediaGenerationInputImageRef[];
   candidateImages: MediaGenerationInputImageRef[];
   recentMessages?: MediaIntentRecentMessage[];
+  artifactContext?: MediaIntentArtifactContext;
 }): Array<{ role: 'system' | 'user'; content: string }> {
   return [
     {
@@ -1799,10 +2241,11 @@ function buildPlannerMessages(params: {
         'A request to generate now using the default model, size, or parameters is a current media task, not a preference update. The image/video UI mode determines the media family only when the prompt does not name one.',
         'Use vision_chat when the user asks to inspect, evaluate, describe, compare, rate, or suggest improvements for an existing image. vision_chat MUST select exactly one explicit_images or candidate_images item.',
         'Use image_generate only when the user wants a new still image from text.',
+        'For image_generate, when the user asks for multiple separate still images in one turn, set requested_image_count to the requested count capped at 10. Leave it null for a single image.',
         'Use image_edit only when the user wants to change an existing image. image_edit MUST select exactly one explicit_images or candidate_images item.',
         'If the user asks to edit "this image", "it", "the previous image", or similar but no usable image exists, use clarify. Never downgrade image_edit to image_generate.',
         'Use explicit_images before current-turn dependent image artifacts, then candidate_images. In composite tasks, express a current-turn artifact through depends_on instead of candidate_images.',
-        'Use candidate_images when the user clearly refers to current/recent/previous image context using words like this image, previous image, 上一张, 这张图, 图片上, or 刚生成. A short visual follow-up such as 好看吗 or 你觉得美嘛 may use the most recent assistant image even without repeating the image noun. Do not use candidate_images merely because the user says this page, this client, this UI, design, ugly, or pretty.',
+        'Use candidate_images only when the current turn semantically refers to an image in recent_messages and the selected action needs that image. Resolve the reference from context rather than requiring an exact phrase: descriptions such as a previously generated subject may identify the recent image. A short visual follow-up may use the most recent assistant image without repeating the image noun. Never select candidate_images for ordinary chat, unrelated UI/design discussion, or when current_turn_media_request is false.',
         'Use video_generate only when the user wants video creation, animation, or image-to-video.',
         'Words such as prompt, script, copy, 提示词, 脚本, or 文案 are contextual inputs when the same turn explicitly asks to generate media now. Immediate media execution takes precedence over prompt-drafting heuristics.',
         'For video_generate, also choose video_mode: text_to_video, image_to_video, or edit_image_then_video.',
@@ -1814,6 +2257,10 @@ function buildPlannerMessages(params: {
         'Allowed composite task kinds: image_generate, presentation, spreadsheet, video_generate, image_edit, mini_program, copywriting.',
         'When the user explicitly requests 2-5 outputs of the same kind, emit that many independent tasks. Never emit more than 5 tasks of one kind. For quantities above 5, emit only 5.',
         'For a single explicit presentation, spreadsheet, mini_program, or copywriting artifact request, return action=chat with exactly one composite_task so the deterministic local artifact runtime can deliver it. Keep single image/video requests on their direct media action.',
+        'Treat an explicit long-form novel, story, article, essay, report, or screenplay request with a word-count, minimum-length, full-version, or long-form constraint as one copywriting artifact task with requires_artifact=true. Preserve every length and completeness constraint in the task prompt. Capability questions or requests for writing advice remain chat.',
+        'artifact_context is authoritative thread-scoped run state when present. For a short or elliptical current turn, use its kind, objective, status, delivery_status, and artifact_refs before inferring anything from recent_messages. If status is planned, queued, running, or finalizing, use chat to report or explain the active run; never start a duplicate task. Continue the same local artifact kind only from a recoverable partial, blocked, failed, cancelled, or completed-but-undelivered state, and carry the original constraints into the task prompt.',
+        'When artifact_context is absent, use recent_messages only as a compatibility fallback for a short or elliptical turn. Do not invent a continuation when context does not establish the objective. A completed run with successful delivery and usable artifact refs is evidence of completion: inspect or explain that result instead of regenerating it.',
+        'When artifact_context is present, set artifact_continuation_action to exactly one of retry_delivery, resume_task, inspect_result, or none. Use retry_delivery only when verified artifacts exist but delivery failed or is missing, and return no composite tasks. Use resume_task only when the task itself is incomplete and recoverable, and return the same local artifact kind as a composite task. Use inspect_result for an active run status check or an already delivered result. Use none when the current turn is unrelated. Leave this field null when artifact_context is absent.',
         'depends_on may reference only task ids that appear earlier in composite_tasks. Use it only when a task consumes an earlier task output, such as editing a generated image or animating it into a video.',
         'When a composite video consumes a current-turn image, depend on the nearest compatible earlier image_edit or image_generate task, preferring the edited image.',
         'For image_edit or image-based video tasks, set selected_image_source to explicit or candidate and select an index only when that input really comes from the supplied image lists. Otherwise use none and express an earlier generated-image dependency through depends_on.',
@@ -1822,7 +2269,7 @@ function buildPlannerMessages(params: {
         'Extract media parameters only when the user explicitly asks for them: image_size, image_quality, video_size, video_duration_seconds. Leave them null otherwise.',
         'Never invent model names. Use only the user-requested size/quality/duration values you can infer from the text.',
         'requested_mode is a UI hint, not a substitute for reasoning. Respect image/video mode when it is compatible with the prompt; otherwise choose clarify or chat.',
-        'Return JSON schema: {"action":"chat|vision_chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","intent_kind":"current_media_task|current_non_media_task|preference_or_memory_update|ordinary_chat|clarification","current_turn_media_request":boolean,"confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"image_size":string|null,"image_quality":"low|medium|high|null,"video_mode":"text_to_video|image_to_video|edit_image_then_video|null,"video_size":string|null,"video_duration_seconds":number|null,"video_prompt":string|null,"image_edit_prompt":string|null,"clarification":string|null,"reason":string,"composite_tasks":[{"id":string,"kind":"image_generate|presentation|spreadsheet|video_generate|image_edit|mini_program|copywriting","title":string,"prompt":string,"requires_artifact":boolean,"depends_on":string[],"fallback":string|null,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null}]}',
+        'Return JSON schema: {"action":"chat|vision_chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","intent_kind":"current_media_task|current_non_media_task|preference_or_memory_update|ordinary_chat|clarification","current_turn_media_request":boolean,"confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"image_size":string|null,"image_quality":"low|medium|high|null,"requested_image_count":number|null,"video_mode":"text_to_video|image_to_video|edit_image_then_video|null,"video_size":string|null,"video_duration_seconds":number|null,"video_prompt":string|null,"image_edit_prompt":string|null,"clarification":string|null,"artifact_continuation_action":"retry_delivery|resume_task|inspect_result|none|null","reason":string,"composite_tasks":[{"id":string,"kind":"image_generate|presentation|spreadsheet|video_generate|image_edit|mini_program|copywriting","title":string,"prompt":string,"requires_artifact":boolean,"depends_on":string[],"fallback":string|null,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null}]}',
       ].join('\n'),
     },
     {
@@ -1833,6 +2280,7 @@ function buildPlannerMessages(params: {
         explicit_images: describeImages(params.explicitImages),
         candidate_images: describeImages(params.candidateImages),
         recent_messages: describeRecentMessages(params.recentMessages),
+        artifact_context: describeArtifactContext(params.artifactContext),
       }),
     },
   ];
@@ -1856,7 +2304,17 @@ export async function planMediaIntent(
     prompt: truncateForLog(prompt),
     explicitImages: summarizeImagesForLog(explicitImages),
     candidateImages: summarizeImagesForLog(candidateImages),
+    artifactContext: describeArtifactContext(params.artifactContext),
   });
+
+  const localArtifactInspectionPlan = localArtifactResultInspectionPlan(prompt, params.artifactContext);
+  if (localArtifactInspectionPlan) {
+    logger.info('[media-intent-planner] artifact_inspection_local', {
+      durationMs: Date.now() - startedAt,
+      plan: summarizePlanForLog(localArtifactInspectionPlan),
+    });
+    return localArtifactInspectionPlan;
+  }
 
   const preCompositeNonMediaPlan = isPreferenceOnlyPrompt(prompt, requestedMode) || isLookupOrResearchPrompt(prompt)
     ? localNonMediaChatPlan({
@@ -1865,6 +2323,7 @@ export async function planMediaIntent(
         explicitImages,
         candidateImages,
         recentMessages: params.recentMessages,
+        artifactContext: params.artifactContext,
       })
     : null;
   if (preCompositeNonMediaPlan) {
@@ -1896,6 +2355,7 @@ export async function planMediaIntent(
     explicitImages,
     candidateImages,
     recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
   });
   if (localNonMediaPlan) {
     logger.info('[media-intent-planner] local_non_media', {
@@ -1910,6 +2370,8 @@ export async function planMediaIntent(
     requestedMode,
     explicitImages,
     candidateImages,
+    recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
   });
   if (localPlan) {
     logger.info('[media-intent-planner] local_fast_path', {
@@ -1924,6 +2386,8 @@ export async function planMediaIntent(
     requestedMode,
     explicitImages,
     candidateImages,
+    recentMessages: params.recentMessages,
+    artifactContext: params.artifactContext,
   })) {
     const plan = localChatPlan('local_no_media_planning_signal', prompt, 'ordinary_chat');
     logger.info('[media-intent-planner] local_chat', {
@@ -1975,6 +2439,7 @@ export async function planMediaIntent(
             explicitImages,
             candidateImages,
             recentMessages: params.recentMessages,
+            artifactContext: params.artifactContext,
           }),
           temperature: 0,
           max_tokens: 1200,
@@ -2019,6 +2484,8 @@ export async function planMediaIntent(
         requestedMode,
         explicitImages,
         candidateImages,
+        recentMessages: params.recentMessages,
+        artifactContext: params.artifactContext,
       });
       if (!planned) {
         const plan = fallbackPlan('planner_low_confidence_or_invalid_action', prompt);

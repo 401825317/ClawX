@@ -254,6 +254,8 @@ async function runImagePayload(payload: ImageGenerationJobPayload): Promise<unkn
     model: payload.model,
     size: payload.size,
     quality: payload.quality,
+    batchIndex: payload.batchIndex,
+    batchTotal: payload.batchTotal,
     inputImages: summarizeInputImagesForLog(payload.inputImages),
   });
   const result = await generateImageForChatSession({
@@ -267,6 +269,8 @@ async function runImagePayload(payload: ImageGenerationJobPayload): Promise<unkn
   logWorkerEvent('image_done', {
     sessionKey: payload.sessionKey,
     durationMs: Date.now() - startedAt,
+    batchIndex: payload.batchIndex,
+    batchTotal: payload.batchTotal,
   });
   return result;
 }

@@ -141,7 +141,7 @@ function maybeOpenFile(filePath, openAfterCreate) {
   }
 }
 
-function artifactResult(filePath, mimeType, kind, title, openAfterCreate = false) {
+function artifactResult(filePath, mimeType, kind, title, openAfterCreate = false, extra = {}) {
   const size = statSync(filePath).size;
   maybeOpenFile(filePath, openAfterCreate);
   const payload = {
@@ -153,6 +153,7 @@ function artifactResult(filePath, mimeType, kind, title, openAfterCreate = false
     sizeBytes: size,
     mimeType,
     media: `MEDIA:${filePath}`,
+    ...extra,
   };
   return {
     content: [{
@@ -191,6 +192,26 @@ function inch(value) {
   return Math.round(value * EMU_PER_INCH);
 }
 
+const PRESENTATION_THEMES = {
+  'product-launch': { name: 'Product Launch', coverStyle: 'stage', contentStyle: 'rail', cover: '09090B', coverTitle: 'FAFAFA', coverMuted: 'C4C7D1', background: 'F7F8FA', primary: '00A7C4', secondary: '7C3AED', text: '171923', muted: '5A6475', surface: 'FFFFFF', surfaceAlt: 'E8F7FA', line: 'CBD5E1' },
+  'travel-editorial': { name: 'Travel Editorial', coverStyle: 'editorial', contentStyle: 'band', cover: 'E7EFE8', coverTitle: '173B2C', coverMuted: '476252', background: 'FFFDF7', primary: '2F6B4F', secondary: 'D96C4C', text: '20362B', muted: '65766B', surface: 'FFFDF7', surfaceAlt: 'E4EFE7', line: 'B7CDBE' },
+  'executive-report': { name: 'Executive Report', coverStyle: 'report', contentStyle: 'grid', cover: 'F1F1ED', coverTitle: '191919', coverMuted: '5B5B57', background: 'FFFFFF', primary: 'B8423A', secondary: '1F4E5F', text: '202124', muted: '62666C', surface: 'FFFFFF', surfaceAlt: 'F2F3F4', line: 'D4D6D8' },
+  'training-workshop': { name: 'Training Workshop', coverStyle: 'workshop', contentStyle: 'notebook', cover: 'FFF4C7', coverTitle: '25314C', coverMuted: '59647A', background: 'FFFDF6', primary: 'E79C13', secondary: '315C8C', text: '25314C', muted: '667085', surface: 'FFFFFF', surfaceAlt: 'EAF2F8', line: 'C8D6E3' },
+  'creative-editorial': { name: 'Creative Editorial', coverStyle: 'minimal', contentStyle: 'minimal', cover: 'F1EEFA', coverTitle: '2A2040', coverMuted: '665D76', background: 'FBFAFF', primary: '6D5BD0', secondary: 'C84B5A', text: '2A2633', muted: '6B6575', surface: 'FFFFFF', surfaceAlt: 'EEEAFB', line: 'D8D1E6' },
+};
+
+function presentationThemeFamily(spec) {
+  const explicit = cleanText(spec?.presentationDesign?.themeFamily).toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(PRESENTATION_THEMES, explicit)) return explicit;
+  const prompt = [spec?.title, spec?.subtitle, spec?.presentationDesign?.audience, spec?.presentationDesign?.purpose, spec?.presentationDesign?.visualTone, ...(Array.isArray(spec?.slides) ? spec.slides.flatMap((slide) => [slide?.title, slide?.subtitle]) : [])]
+    .map(cleanText).filter(Boolean).join('\n');
+  if (/旅游|旅行|目的地|景区|景点|城市漫游|酒店|度假|民宿|线路|行程|张家界|山水|自然风光/u.test(prompt)) return 'travel-editorial';
+  if (/培训|课程|教学|课堂|练习题|工作坊|学习|教案|学员|知识点/u.test(prompt)) return 'training-workshop';
+  if (/老板|高管|管理层|经营|汇报|周报|月报|复盘|预算|ROI|指标|销售|财务|决策|战略/u.test(prompt)) return 'executive-report';
+  if (/发布会|新品|产品|手机|电脑|汽车|科技|品牌|营销|宣传|概念|iPhone|Apple|体验升级/iu.test(prompt)) return 'product-launch';
+  return 'creative-editorial';
+}
+
 function normalizeSlide(raw, index) {
   if (typeof raw === 'string') {
     return { title: `第 ${index + 1} 页`, bullets: [cleanText(raw)] };
@@ -210,19 +231,15 @@ function normalizeDeck(spec) {
   const subtitle = cleanText(spec?.subtitle);
   const footer = cleanText(spec?.footer) || 'UClaw';
   const inputSlides = Array.isArray(spec?.slides) ? spec.slides : [];
-  const slides = [{ kind: 'title', title, subtitle, bullets: [] }];
-  if (inputSlides.length > 0) {
-    for (let i = 0; i < inputSlides.length; i += 1) {
-      slides.push({ kind: 'content', ...normalizeSlide(inputSlides[i], i) });
-    }
-  } else {
-    slides.push({
-      kind: 'content',
-      title: '核心亮点',
-      bullets: ['主题明确', '内容结构完整', '适合直接预览和继续编辑'],
-    });
-  }
-  return { title, footer, slides };
+  if (inputSlides.length === 0) throw new Error('create_pptx_file requires slides with the first slide as the cover');
+  const slides = inputSlides.map((slide, index) => ({
+    kind: index === 0 ? 'title' : 'content',
+    ...normalizeSlide(slide, index),
+    ...(index === 0 && !cleanText(slide?.title) ? { title } : {}),
+    ...(index === 0 && !cleanText(slide?.subtitle) && subtitle ? { subtitle } : {}),
+  }));
+  const themeFamily = presentationThemeFamily(spec);
+  return { title, footer, slides, themeFamily, theme: PRESENTATION_THEMES[themeFamily] };
 }
 
 function pptContentTypesXml(slideCount) {
@@ -280,17 +297,17 @@ ${slideIds}
 </p:presentation>`;
 }
 
-function themeXml() {
+function themeXml(theme) {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UClaw">
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="UClaw ${xml(theme.name)}">
   <a:themeElements>
-    <a:clrScheme name="UClaw">
-      <a:dk1><a:srgbClr val="0F172A"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
-      <a:dk2><a:srgbClr val="1E293B"/></a:dk2><a:lt2><a:srgbClr val="F8FAFC"/></a:lt2>
-      <a:accent1><a:srgbClr val="2563EB"/></a:accent1><a:accent2><a:srgbClr val="10B981"/></a:accent2>
-      <a:accent3><a:srgbClr val="F59E0B"/></a:accent3><a:accent4><a:srgbClr val="EF4444"/></a:accent4>
-      <a:accent5><a:srgbClr val="8B5CF6"/></a:accent5><a:accent6><a:srgbClr val="06B6D4"/></a:accent6>
-      <a:hlink><a:srgbClr val="2563EB"/></a:hlink><a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink>
+    <a:clrScheme name="UClaw ${xml(theme.name)}">
+      <a:dk1><a:srgbClr val="${theme.text}"/></a:dk1><a:lt1><a:srgbClr val="${theme.surface}"/></a:lt1>
+      <a:dk2><a:srgbClr val="${theme.secondary}"/></a:dk2><a:lt2><a:srgbClr val="${theme.background}"/></a:lt2>
+      <a:accent1><a:srgbClr val="${theme.primary}"/></a:accent1><a:accent2><a:srgbClr val="${theme.secondary}"/></a:accent2>
+      <a:accent3><a:srgbClr val="${theme.coverMuted}"/></a:accent3><a:accent4><a:srgbClr val="${theme.cover}"/></a:accent4>
+      <a:accent5><a:srgbClr val="${theme.surfaceAlt}"/></a:accent5><a:accent6><a:srgbClr val="${theme.muted}"/></a:accent6>
+      <a:hlink><a:srgbClr val="${theme.primary}"/></a:hlink><a:folHlink><a:srgbClr val="${theme.secondary}"/></a:folHlink>
     </a:clrScheme>
     <a:fontScheme name="UClaw"><a:majorFont><a:latin typeface="Arial"/><a:ea typeface="Microsoft YaHei"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/><a:ea typeface="Microsoft YaHei"/></a:minorFont></a:fontScheme>
     <a:fmtScheme name="UClaw"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme>
@@ -333,28 +350,80 @@ function shapeXml(id, name, x, y, w, h, fill, lines, fontSize, color = '111827')
 </p:sp>`;
 }
 
-function titleSlideXml(slide, footer) {
+function titleSlideXml(slide, footer, theme, themeFamily) {
+  const shapes = [emptyGroupShapeXml()];
+  let id = 2;
+  shapes.push(shapeXml(id++, 'Cover Background', 0, 0, 13.34, 7.5, theme.cover, [''], 100, theme.cover));
+  if (theme.coverStyle === 'stage') {
+    shapes.push(shapeXml(id++, 'Cover Accent', 0, 0, 0.18, 7.5, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Cover Stage', 10.45, 0, 2.89, 7.5, theme.secondary, ['01'], 5600, 'FFFFFF'));
+    shapes.push(shapeXml(id++, 'Title', 0.9, 1.45, 8.95, 2.0, theme.cover, [slide.title], slide.title.length > 24 ? 3800 : 4700, theme.coverTitle));
+    shapes.push(shapeXml(id++, 'Subtitle', 0.9, 3.8, 8.3, 1.0, theme.cover, [slide.subtitle || '产品、体验与价值主张'], 1750, theme.coverMuted));
+  } else if (theme.coverStyle === 'editorial') {
+    shapes.push(shapeXml(id++, 'Cover Accent', 0, 0, 13.34, 0.35, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Cover Editorial Panel', 10.0, 0.35, 3.34, 7.15, theme.secondary, slide.bullets.slice(0, 3).map((item, index) => `${String(index + 1).padStart(2, '0')}  ${item}`), 1450, 'FFFFFF'));
+    shapes.push(shapeXml(id++, 'Title', 0.72, 1.4, 8.65, 2.15, theme.cover, [slide.title], slide.title.length > 24 ? 3600 : 4500, theme.coverTitle));
+    shapes.push(shapeXml(id++, 'Subtitle', 0.72, 4.0, 8.5, 1.15, theme.cover, [slide.subtitle || '地方、风景与体验叙事'], 1750, theme.coverMuted));
+  } else if (theme.coverStyle === 'report') {
+    shapes.push(shapeXml(id++, 'Cover Accent', 0, 0, 13.34, 0.16, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Cover Report Panel', 9.55, 0.16, 3.79, 7.34, theme.secondary, (slide.bullets.length > 0 ? slide.bullets : ['关键结论', '经营判断', '决策建议']).slice(0, 3).map((item) => `• ${item}`), 1450, 'FFFFFF'));
+    shapes.push(shapeXml(id++, 'Title', 0.88, 1.45, 7.95, 2.15, theme.cover, [slide.title], slide.title.length > 24 ? 3500 : 4400, theme.coverTitle));
+    shapes.push(shapeXml(id++, 'Subtitle', 0.88, 4.05, 7.9, 1.15, theme.cover, [slide.subtitle || '面向决策者的核心事实与行动建议'], 1650, theme.coverMuted));
+  } else if (theme.coverStyle === 'workshop') {
+    shapes.push(shapeXml(id++, 'Cover Footer Block', 0, 6.65, 13.34, 0.85, theme.secondary, [''], 100));
+    shapes.push(shapeXml(id++, 'Cover Workshop Block', 10.75, 0, 2.59, 1.55, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Title', 0.72, 1.4, 9.25, 2.1, theme.cover, [slide.title], slide.title.length > 24 ? 3600 : 4500, theme.coverTitle));
+    shapes.push(shapeXml(id++, 'Subtitle', 0.72, 3.9, 8.9, 1.1, theme.cover, [slide.subtitle || '理解、练习、反馈与应用'], 1750, theme.coverMuted));
+  } else {
+    shapes.push(shapeXml(id++, 'Cover Accent', 0, 0, 0.24, 7.5, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Cover Minimal Block', 10.1, 0.85, 2.35, 2.35, theme.secondary, [''], 100));
+    shapes.push(shapeXml(id++, 'Title', 0.95, 1.5, 8.45, 2.1, theme.cover, [slide.title], slide.title.length > 24 ? 3600 : 4500, theme.coverTitle));
+    shapes.push(shapeXml(id++, 'Subtitle', 0.95, 4.0, 8.2, 1.1, theme.cover, [slide.subtitle || '清晰叙事与可编辑表达'], 1750, theme.coverMuted));
+  }
+  shapes.push(shapeXml(id++, 'Footer', 0.9, 6.75, 7.6, 0.28, theme.cover, [footer], 950, theme.coverMuted));
+  shapes.push(shapeXml(id++, `UClaw Theme ${themeFamily}`, 13.32, 7.48, 0.01, 0.01, theme.cover, [''], 100));
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${OFFICE_REL}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="F8FAFC"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>${emptyGroupShapeXml()}
-    ${shapeXml(2, 'Accent', 0.45, 0.45, 1.1, 0.12, '10B981', [''], 100)}
-    ${shapeXml(3, 'Title', 0.8, 1.65, 11.6, 1.35, 'FFFFFF', [slide.title], 4200, '0F172A')}
-    ${shapeXml(4, 'Subtitle', 1.1, 3.25, 10.9, 0.9, 'E0F2FE', [slide.subtitle || '由 UClaw 自动生成的可编辑演示稿'], 2200, '155E75')}
-    ${shapeXml(5, 'Footer', 9.7, 6.55, 2.7, 0.35, 'F1F5F9', [footer], 1100, '64748B')}
+  <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="${theme.cover}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>${shapes.join('\n')}
   </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
 </p:sld>`;
 }
 
-function contentSlideXml(slide, index, footer) {
+function contentSlideXml(slide, index, footer, theme, themeFamily) {
   const bullets = slide.bullets.length > 0 ? slide.bullets.map((item) => `• ${item}`) : ['• 可继续编辑补充内容'];
+  const shapes = [emptyGroupShapeXml()];
+  let id = 2;
+  if (theme.contentStyle === 'rail') {
+    shapes.push(shapeXml(id++, 'Page Accent', 0, 0, 0.16, 7.5, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Slide Number', 0.72, 0.5, 0.72, 0.45, theme.secondary, [String(index).padStart(2, '0')], 1250, 'FFFFFF'));
+    shapes.push(shapeXml(id++, 'Title', 1.55, 0.48, 10.9, 0.75, theme.background, [slide.title], 2900, theme.text));
+    shapes.push(shapeXml(id++, 'Body', 0.82, 1.72, 11.55, 4.7, theme.surface, bullets, 1750, theme.text));
+  } else if (theme.contentStyle === 'band') {
+    shapes.push(shapeXml(id++, 'Page Accent', 0, 0, 13.34, 0.26, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Title', 0.68, 0.65, 11.3, 0.8, theme.background, [slide.title], 3000, theme.text));
+    const split = Math.ceil(bullets.length / 2);
+    shapes.push(shapeXml(id++, 'Body A', 0.68, 1.85, 6.0, 4.35, theme.surface, bullets.slice(0, split), 1650, theme.text));
+    shapes.push(shapeXml(id++, 'Body B', 6.92, 1.85, 5.72, 4.35, theme.surfaceAlt, bullets.slice(split), 1650, theme.text));
+  } else if (theme.contentStyle === 'grid') {
+    shapes.push(shapeXml(id++, 'Page Accent', 0, 0, 13.34, 0.1, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Slide Number', 11.85, 0.45, 0.72, 0.58, theme.secondary, [String(index).padStart(2, '0')], 1350, 'FFFFFF'));
+    shapes.push(shapeXml(id++, 'Title', 0.92, 0.62, 10.25, 0.75, theme.background, [slide.title], 2850, theme.text));
+    shapes.push(shapeXml(id++, 'Body', 0.92, 1.82, 11.65, 4.45, theme.surfaceAlt, bullets, 1700, theme.text));
+  } else if (theme.contentStyle === 'notebook') {
+    shapes.push(shapeXml(id++, 'Page Accent', 0, 0, 0.3, 7.5, theme.secondary, [''], 100));
+    shapes.push(shapeXml(id++, 'Title', 0.72, 0.7, 11.25, 0.78, theme.background, [slide.title], 2950, theme.text));
+    shapes.push(shapeXml(id++, 'Title Marker', 0.72, 1.55, 2.4, 0.1, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Body', 0.72, 1.95, 11.7, 4.25, theme.surface, bullets, 1700, theme.text));
+  } else {
+    shapes.push(shapeXml(id++, 'Page Accent', 0.95, 0.32, 2.2, 0.1, theme.primary, [''], 100));
+    shapes.push(shapeXml(id++, 'Title', 0.95, 0.82, 10.5, 0.8, theme.background, [slide.title], 3000, theme.text));
+    shapes.push(shapeXml(id++, 'Body', 0.95, 2.0, 10.9, 4.1, theme.surfaceAlt, bullets, 1750, theme.text));
+  }
+  shapes.push(shapeXml(id++, 'Footer', 9.7, 6.65, 2.7, 0.3, theme.background, [footer], 950, theme.muted));
+  shapes.push(shapeXml(id++, `UClaw Theme ${themeFamily}`, 13.32, 7.48, 0.01, 0.01, theme.background, [''], 100));
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${OFFICE_REL}" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>${emptyGroupShapeXml()}
-    ${shapeXml(2, 'Slide Number', 0.75, 0.55, 0.7, 0.45, 'DBEAFE', [String(index).padStart(2, '0')], 1300, '1D4ED8')}
-    ${shapeXml(3, 'Title', 1.55, 0.5, 10.9, 0.75, 'FFFFFF', [slide.title], 3000, '0F172A')}
-    ${slide.subtitle ? shapeXml(4, 'Subtitle', 1.65, 1.28, 10.3, 0.45, 'F8FAFC', [slide.subtitle], 1300, '475569') : ''}
-    ${shapeXml(5, 'Body', 1.05, 1.95, 11.1, 4.1, 'F8FAFC', bullets, 1850, '1E293B')}
-    ${shapeXml(6, 'Footer', 9.7, 6.55, 2.7, 0.35, 'FFFFFF', [footer], 1050, '94A3B8')}
+  <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="${theme.background}"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>${shapes.join('\n')}
   </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
 </p:sld>`;
 }
@@ -384,16 +453,37 @@ async function createPptxBuffer(spec) {
   zip.file('ppt/slideLayouts/_rels/slideLayout1.xml.rels', relsXml([
     { id: 'rId1', type: `${OFFICE_REL}/slideMaster`, target: '../slideMasters/slideMaster1.xml' },
   ]));
-  zip.file('ppt/theme/theme1.xml', themeXml());
+  zip.file('ppt/theme/theme1.xml', themeXml(deck.theme));
   deck.slides.forEach((slide, idx) => {
     zip.file(`ppt/slides/slide${idx + 1}.xml`, slide.kind === 'title'
-      ? titleSlideXml(slide, deck.footer)
-      : contentSlideXml(slide, idx + 1, deck.footer));
+      ? titleSlideXml(slide, deck.footer, deck.theme, deck.themeFamily)
+      : contentSlideXml(slide, idx + 1, deck.footer, deck.theme, deck.themeFamily));
     zip.file(`ppt/slides/_rels/slide${idx + 1}.xml.rels`, relsXml([
       { id: 'rId1', type: `${OFFICE_REL}/slideLayout`, target: '../slideLayouts/slideLayout1.xml' },
     ]));
   });
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
+async function verifyPptxBuffer(buffer, spec) {
+  const deck = normalizeDeck(spec);
+  const zip = await JSZip.loadAsync(buffer);
+  const slideNames = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/u.test(name));
+  const themeText = await zip.file('ppt/theme/theme1.xml')?.async('string') ?? '';
+  const marker = `UClaw Theme ${deck.themeFamily}`;
+  const slideTexts = await Promise.all(slideNames.map((name) => zip.file(name)?.async('string') ?? ''));
+  const themeMatches = themeText.includes(`name="UClaw ${deck.theme.name}"`);
+  const markersComplete = slideTexts.every((text) => text.includes(marker));
+  if (slideNames.length !== deck.slides.length || !themeMatches || !markersComplete) {
+    throw new Error(`PPT verification failed: slides=${slideNames.length}/${deck.slides.length}, theme=${themeMatches}, markers=${markersComplete}`);
+  }
+  return {
+    status: 'passed',
+    themeFamily: deck.themeFamily,
+    slideCount: slideNames.length,
+    themeMatches,
+    markersComplete,
+  };
 }
 
 function normalizeDoc(spec) {
@@ -698,6 +788,20 @@ const slideSchema = Type.Object({
   bullets: Type.Optional(Type.Array(Type.String())),
 });
 
+const presentationDesignSchema = Type.Object({
+  themeFamily: Type.Optional(Type.Union([
+    Type.Literal('product-launch'),
+    Type.Literal('travel-editorial'),
+    Type.Literal('executive-report'),
+    Type.Literal('training-workshop'),
+    Type.Literal('creative-editorial'),
+  ])),
+  audience: Type.Optional(Type.String()),
+  purpose: Type.Optional(Type.String()),
+  visualTone: Type.Optional(Type.String()),
+  density: Type.Optional(Type.Union([Type.Literal('airy'), Type.Literal('balanced'), Type.Literal('dense')])),
+});
+
 const sectionSchema = Type.Object({
   title: Type.Optional(Type.String()),
   paragraphs: Type.Optional(Type.Array(Type.String())),
@@ -715,20 +819,23 @@ function createTools() {
     {
       name: 'create_pptx_file',
       label: 'Create PPTX',
-      description: 'Create a real local .pptx presentation file. Use this for PPT, slides, deck, and presentation artifacts. Return the file path; do not substitute with an outline.',
-      promptSnippet: 'create_pptx_file: create a real local PPTX presentation artifact and return MEDIA:<absolute-path>.',
+      description: 'Create a real local .pptx presentation file from a complete slide plan. Select a semantic presentationDesign theme; slides[0] is the cover. Return the file path; do not substitute with an outline.',
+      promptSnippet: 'create_pptx_file: create a real local PPTX from a complete slide plan, use presentationDesign for a semantic theme, keep slides[0] as the cover, and return MEDIA:<absolute-path>.',
       parameters: Type.Object({
         ...baseFileSchema,
         title: Type.Optional(Type.String()),
         subtitle: Type.Optional(Type.String()),
         footer: Type.Optional(Type.String()),
-        slides: Type.Optional(Type.Array(slideSchema)),
+        presentationDesign: Type.Optional(presentationDesignSchema),
+        slides: Type.Array(slideSchema, { minItems: 1 }),
       }),
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const safeParams = normalizeBrandValue(params);
         const filePath = await uniqueOutputPath(ctx, safeParams, 'pptx', 'UClaw_PPT');
-        await writeFile(filePath, await createPptxBuffer(safeParams));
-        return artifactResult(filePath, MIME.pptx, 'presentation', cleanText(safeParams?.title), safeParams?.openAfterCreate === true);
+        const buffer = await createPptxBuffer(safeParams);
+        const verification = await verifyPptxBuffer(buffer, safeParams);
+        await writeFile(filePath, buffer);
+        return artifactResult(filePath, MIME.pptx, 'presentation', cleanText(safeParams?.title), safeParams?.openAfterCreate === true, { verification });
       },
     },
     {

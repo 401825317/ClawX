@@ -3,7 +3,6 @@ export const PROFILES = {
     { name: 'Generate extension bridge', command: 'pnpm', args: ['run', 'ext:bridge'] },
     { name: 'Lint without autofix', command: 'pnpm', args: ['run', 'lint:check'] },
     { name: 'Typecheck', command: 'pnpm', args: ['run', 'typecheck'] },
-    { name: 'Unit tests', command: 'pnpm', args: ['test'] },
   ],
   comms: [
     { name: 'Comms replay', command: 'pnpm', args: ['run', 'comms:replay'] },

@@ -107,6 +107,9 @@ Communicate with AI agents through a modern chat experience. Support for multipl
 Skills you insert from the composer appear as `/skill-name` chips; click a chip to open the preview sidebar and read that skill's `SKILL.md`.
 When you target another agent with `@agent`, ClawX switches into that agent's own conversation context directly instead of relaying through the default agent. Agent workspaces stay separate by default, and stronger isolation depends on OpenClaw sandbox settings.
 Each conversation can select its own project directory from the chat toolbar. ClawX restores that directory with the session, uses it for agent and tool work, and writes composite local file artifacts to its `outputs/` folder; without an override, the Agent workspace remains the default, and the directory cannot be changed while that session is running.
+
+Local artifact work follows a review-repair-validate loop: the current text model produces the semantic plan, explicit subject/length/interaction constraints remain in the typed run contract, and a run is completed only after the real artifact passes verification and its canonical conversation delivery succeeds. Follow-up turns receive the latest structured artifact and delivery state, so recovery does not depend on matching a particular phrase.
+Presentation plans also carry a deterministic design specification. Product launches, travel stories, executive reports, training decks, and general editorial narratives select different theme families, cover compositions, page frames, and content layouts; the composite runtime, direct `create_pptx_file` tool, and bundled fallback use the same semantic theme vocabulary instead of one fixed visual template.
 Each agent can also override its own `provider/model` runtime setting; agents without overrides continue inheriting the global default model.
 From the Agents page, you can create a persona-style agent by entering a rough role and responsibility, choosing a built-in avatar, letting the model generate a polished profile and opening message, and then jumping straight into that agent's dedicated chat.
 
@@ -340,8 +343,7 @@ Chain multiple skills together to create sophisticated automation pipelines. Pro
 │   ├── i18n/                # Localization resources
 │   └── types/               # TypeScript type definitions
 ├── tests/
-│   ├── e2e/                 # Playwright Electron end-to-end smoke tests
-│   └── unit/                # Vitest unit/integration-like tests
+│   └── e2e/                 # Playwright Electron end-to-end smoke tests
 ├── resources/                # Static assets (icons/images)
 └── scripts/                  # Build and utility scripts
 ```
@@ -357,12 +359,14 @@ pnpm lint                 # Run ESLint
 pnpm typecheck            # TypeScript validation
 
 # Testing
-pnpm test                 # Run unit tests
 pnpm run test:e2e         # Run Electron E2E smoke tests with Playwright
 pnpm run test:e2e:headed  # Run Electron E2E tests with a visible window
 pnpm run comms:replay     # Compute communication replay metrics
 pnpm run comms:baseline   # Refresh communication baseline snapshot
 pnpm run comms:compare    # Compare replay metrics against baseline thresholds
+
+# Unit tests
+# Unit tests are intentionally not maintained; product behavior is verified manually by the project owner.
 
 # Build & Package
 pnpm run build:vite       # Build frontend only

@@ -12,8 +12,14 @@ touchedAreas:
   - src/pages/Chat/ChatMessage.tsx
   - electron/utils/media-intent-planner.ts
   - electron/utils/media-generation-jobs.ts
+  - electron/utils/local-artifact-planner.ts
   - electron/utils/local-artifact-runtime.ts
   - electron/api/routes/media.ts
+  - resources/openclaw-plugins/uclaw-local-artifacts/index.mjs
+  - resources/openclaw-plugins/uclaw-local-artifacts/package.json
+  - resources/openclaw-plugins/uclaw-local-artifacts/openclaw.plugin.json
+  - resources/openclaw-skill-shims/presentation-maker/SKILL.md
+  - resources/openclaw-skill-shims/presentation-maker/scripts/make-pptx.mjs
 expectedUserBehavior:
   - Same prompt can be run in Codex desktop and UClaw with comparable evidence.
   - UClaw should not expose internal routing limitations, raw execution graph details, or mode conflicts to normal users.
@@ -29,10 +35,12 @@ requiredRules:
   - backend-communication-boundary
   - api-client-transport-policy
   - comms-regression
+  - presentation-artifact-quality
 acceptance:
   - Prompt suite covers ordinary chat, preference/memory, image, image edit, video, composite multi-deliverable work, PPT, Excel, mini-program/web app, history recovery, concurrency, failure recovery, performance, and process display.
   - Each prompt declares priority, exact text, Codex expected visible behavior, and UClaw observation focus.
   - PPT, Excel, and mini-program/web app prompts include a quality bar that rejects fixed-template-only artifacts.
+  - PPT evidence records the selected semantic theme family, visible page-frame diversity, layout kinds, and cross-topic theme signatures.
   - Result log template records Codex actual behavior, UClaw actual behavior, scores, gap classification, required implementation, and evidence.
 docs:
   required: false
@@ -140,6 +148,7 @@ Do not turn Codex behavior into a claimed internal architecture unless the sourc
 | B08 | P1 | `把这个 logo 放到图片右下角` with two images attached | Image edit with multiple sources, maybe ask if ambiguous. | Correct reference handling. |
 | B09 | P1 | `给我 3 张不同风格的封面图` | Either generate 3 or clearly batch them. | Image queue/concurrency, per-image delivery. |
 | B10 | P2 | `生成一个竖屏短视频，适合朋友圈` | Choose portrait video params if supported. | Param selection and final display. |
+| B11 | P0 | After generating an image: `根据生成的图片制作一个 15 秒视频` | Use the generated image selected by the current-turn planner. | Must remain image-to-video; no normalization downgrade to text-to-video. |
 
 ### C. Composite Multi-Deliverable Work
 
@@ -163,9 +172,11 @@ PPT must be judged by content structure, visual hierarchy, page count, readable 
 | D01 | P0 | `做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划` | Real 8-page deck, each page has meaningful content and layout. | Not a fixed 5-page template. Validate pptx opens. |
 | D02 | P0 | `把这个主题做成适合老板看的汇报 PPT：为什么我们要投入 UClaw 执行层产品化` | Executive tone, decision-oriented structure. | Business framing, not generic AI workflow text. |
 | D03 | P1 | `做一个销售培训 PPT，主题是“如何跟进企业客户”，要有练习题` | Includes training structure and exercises. | Content specificity. |
-| D04 | P1 | `做一个发布会风格 PPT，主题是“个人 AI 工作台”，页面要高级一点` | Visual polish and coherent theme. | Layout quality, no huge text overflow. |
+| D04 | P1 | `做一个发布会风格 PPT，主题是“个人 AI 工作台”，页面要高级一点` | Product-launch theme with stage-style cover, high-impact statement pages, coherent hierarchy, and no text overflow. | Semantic `product-launch` selection and visible structure, not random recoloring. |
 | D05 | P1 | `根据下面要点做 PPT：目标用户、小红书投放、转化路径、预算、风险` | Uses provided outline faithfully. | Does it preserve user input, not replace with template. |
 | D06 | P2 | `生成 PPT 后帮我检查每页标题是否重复、是否有空页` | Create and verify. | Verification output tied to actual deck. |
+| D07 | P0 | `生成一个苹果18的宣传介绍 PPT` | Plan and produce an Apple 18-specific product-launch deck. | `product-launch` theme signature, stage cover/page frame, subject-specific content, and no generic fixed-template fast path. |
+| D08 | P0 | `生成一个张家界旅游介绍 PPT` after D07 in a fresh run | Plan and produce a Zhangjiajie-specific travel-editorial deck. | `travel-editorial` theme signature and page frame differ materially from D07, not only content or accent color. |
 
 ### E. Excel Quality: Data, Formulas, Formatting, Validation
 
@@ -192,6 +203,7 @@ Mini-program can be HTML prototype or actual mini-program depending current prod
 | F04 | P1 | `做一个咖啡店菜单小程序，可以按分类筛选并计算购物车总价` | Interactive menu/cart. | Cart logic and UI density. |
 | F05 | P1 | `做一个销售线索 Kanban，小卡片可以拖动或至少切换状态` | Kanban interaction. | Does generated app actually work? |
 | F06 | P2 | `做完后自己检查一下页面有没有明显重叠或按钮没反应` | Visual/interaction verification. | Playwright/manual verification evidence. |
+| F07 | P0 | `做一个奶茶点单小程序` | Runnable drink menu with categories, cart, quantity, and total. | Must not fall back to an unrelated Todo template. |
 
 ### G. History, Follow-Up, And Context Recovery
 
@@ -204,6 +216,7 @@ Mini-program can be HTML prototype or actual mini-program depending current prod
 | G05 | P1 | After F01: `给这个小程序加一个深色模式` | Modifies app artifact. | Prior file lookup and edit. |
 | G06 | P1 | Reset session then ask about prior media | Should only recover intended family context if product says so. | Reset/family transcript policy. |
 | G07 | P2 | Delete conversation and check sidebar/token history | Deleted conversation should disappear consistently. | Cleanup consistency. |
+| G08 | P0 | After F07 has generated but delivery is pending/failed: `东西呢？` | Resume or retry the structured artifact delivery contract. | Uses run/manifest state, not phrase matching or ordinary-chat fallback. |
 
 ### H. Concurrency And Multi-Run Isolation
 
@@ -307,6 +320,14 @@ These prompts catch the difference between a UI mode hint and the user's actual 
 | Q02 | P0 | `随便生成一张图片，不要展示技术细节` | Lightweight progress and final image. | No raw branch/gate spam. |
 | Q03 | P1 | `生成失败的话，别卡住，告诉我失败原因和下一步` with forced provider failure | Friendly failure summary and retry path. | No permanent "进行中" or raw stack/code leak. |
 
+### R. Long-Form Content Completion
+
+| ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
+| --- | --- | --- | --- | --- |
+| R01 | P0 | `生成10000字的灵异类小说` | Plan, generate, save, read back, and iteratively repair until the requested length is satisfied. | A preface or opening chapter cannot pass; one canonical artifact card only. |
+| R02 | P0 | After an interrupted or short R01 result: `完整的呢？` | Continue the unresolved structured length contract without restarting blindly. | Non-retriable parameter errors are surfaced precisely; no repeated blind 502 retries. |
+| R03 | P1 | `如何写一篇10000字小说？` | Answer as knowledge guidance without creating a file. | Length wording alone must not authorize an artifact side effect. |
+
 ### X. External-Data Web Artifacts
 
 These prompts cover front-end/demo requests that need external data, live fetch fallbacks, preview validation, and clean artifact gates.
@@ -323,12 +344,16 @@ These artifacts should move from "template-level" to "agent/skill-level".
 
 - The content must be planned by the agent from the prompt or supplied material.
 - Prompt-specific outline, not fixed generic sections.
+- Deterministic design specification with semantic theme family, audience, purpose, visual tone, and density.
+- Product, travel, executive, training, and editorial decks use visibly different cover composition and page frames, not one template with alternate colors.
+- Five-page-or-longer decks combine multiple semantic content layouts when the material supports them; layout selection is content-driven rather than random.
 - Correct requested page count or clear reason if adjusted.
 - Meaningful Chinese page titles and bullets.
 - No empty pages, no duplicated titles unless intentional.
 - Layout readable at normal slide size.
 - File opens in PowerPoint/Keynote or a verifier.
 - Verification reads the generated deck metadata/content, not just "file exists".
+- Verification reads the theme signature and rendered layout markers; cross-topic regression compares at least one product deck with one travel deck.
 - Final reply states file created and verification result.
 
 ### Excel Must Have

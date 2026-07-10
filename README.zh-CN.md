@@ -108,6 +108,9 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 从输入框插入的技能会以 `/技能名` 卡片形式显示；点击卡片可在右侧预览栏打开并阅读该技能的 `SKILL.md`。
 当你使用 `@agent` 选择其他智能体时，ClawX 会直接切换到该智能体自己的对话上下文，而不是经过默认智能体转发。各 Agent 工作区默认彼此分离，但更强的运行时隔离仍取决于 OpenClaw 的 sandbox 配置。
 每个会话都可以在聊天工具栏中选择独立的项目目录。ClawX 会随会话恢复该目录，将其用于 Agent 和工具执行，并把组合任务生成的本地文件产物写入其中的 `outputs/`；未设置时继续使用 Agent 工作空间，且该会话运行期间不能切换目录。
+
+本地产物执行采用“审查、修复、验证”闭环：由当前文本模型优先完成语义规划，主题、长度、交互等明确约束保存在类型化运行契约中；只有真实产物通过验证且规范会话交付写入成功，任务才进入完成状态。后续追问会获得最近一次结构化产物与交付状态，不依赖命中特定话术。
+PPT 规划还会携带可复现的设计规格。产品发布、旅行叙事、老板汇报、培训课件和通用编辑叙事会选择不同主题族、封面构图、页面框架与内容版式；组合运行时、直接 `create_pptx_file` 工具和内置降级 skill 使用同一套语义主题口径，不再把不同主题塞进一套固定视觉模板。
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
@@ -341,8 +344,7 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 │   ├── i18n/                # 国际化资源
 │   └── types/               # TypeScript 类型定义
 ├── tests/
-│   ├── e2e/                 # Playwright Electron 端到端冒烟测试
-│   └── unit/                # Vitest 单元/集成型测试
+│   └── e2e/                 # Playwright Electron 端到端冒烟测试
 ├── resources/                # 静态资源（图标、图片）
 └── scripts/                  # 构建与工具脚本
 ```
@@ -358,12 +360,14 @@ pnpm lint                 # 运行 ESLint 检查
 pnpm typecheck            # TypeScript 类型检查
 
 # 测试
-pnpm test                 # 运行单元测试
 pnpm run test:e2e         # 运行 Electron E2E 冒烟测试
 pnpm run test:e2e:headed  # 以可见窗口运行 Electron E2E 测试
 pnpm run comms:replay     # 计算通信回放指标
 pnpm run comms:baseline   # 刷新通信基线快照
 pnpm run comms:compare    # 将回放指标与基线阈值对比
+
+# 单元测试
+# 本项目不再维护单元测试；产品行为由项目负责人本地手动验收。
 
 # 构建与打包
 pnpm run build:vite       # 仅构建前端

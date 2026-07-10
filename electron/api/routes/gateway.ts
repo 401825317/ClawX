@@ -427,6 +427,7 @@ export async function handleGatewayRoutes(
         message: string;
         deliver?: boolean;
         idempotencyKey: string;
+        thinking?: string | null;
         inlineAttachments?: boolean;
         media?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       }>(req);
@@ -478,10 +479,17 @@ export async function handleGatewayRoutes(
         mediaCount: body.media?.length ?? 0,
         deliver: body.deliver ?? false,
       });
+      const thinkingOverride = resolveChatSendThinkingOverride(message, body.thinking);
       logger.info('[diagnostic] chat.send.request', {
         sessionKey: sessionKeyForLog,
         ...sendDiagnostic,
         inlineAttachments: shouldInlineAttachments,
+        ...(thinkingOverride
+          ? {
+              thinkingOverride: thinkingOverride.thinking,
+              thinkingOverrideReason: thinkingOverride.reason,
+            }
+          : {}),
       });
       const rpcParams: Record<string, unknown> = {
         sessionKey: body.sessionKey,
@@ -489,6 +497,9 @@ export async function handleGatewayRoutes(
         deliver: body.deliver ?? false,
         idempotencyKey: body.idempotencyKey,
       };
+      if (thinkingOverride) {
+        rpcParams.thinking = thinkingOverride.thinking;
+      }
       if (imageAttachments.length > 0) {
         rpcParams.attachments = imageAttachments;
       }
@@ -498,6 +509,12 @@ export async function handleGatewayRoutes(
         elapsedMs: Date.now() - startedAt,
         runId: result.runId ?? null,
         ...sendDiagnostic,
+        ...(thinkingOverride
+          ? {
+              thinkingOverride: thinkingOverride.thinking,
+              thinkingOverrideReason: thinkingOverride.reason,
+            }
+          : {}),
       });
       sendJson(res, 200, { success: true, result });
     } catch (error) {

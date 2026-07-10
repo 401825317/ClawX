@@ -7,7 +7,6 @@ on:
       - main
     paths:
       - 'harness/**'
-      - 'tests/unit/harness-specs.test.ts'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
