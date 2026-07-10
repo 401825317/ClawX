@@ -2000,6 +2000,110 @@ describe('useChatStore startup history retry', () => {
     expect(run?.gateResult?.decision).toBe('deliverable');
   });
 
+  it('restores historical media run elapsed time from the media generation snapshot', async () => {
+    const startedAt = 1_783_683_395_000;
+    const completedAt = startedAt + 16_000;
+    gatewayRpcMock.mockImplementation((method: string) => {
+      if (method === 'chat.history') {
+        return {
+          messages: [
+            {
+              id: 'user-image',
+              role: 'user',
+              content: '我想要一张风景照',
+              timestamp: startedAt / 1000,
+            },
+            {
+              id: 'media-result:image-job-1',
+              role: 'assistant',
+              localArtifactResultKind: 'image',
+              content: '图片已生成。',
+              _attachedFiles: [
+                {
+                  fileName: 'uclaw-image.png',
+                  mimeType: 'image/png',
+                  fileSize: 4096,
+                  preview: null,
+                  filePath: '/tmp/uclaw-image.png',
+                  source: 'tool-result',
+                },
+              ],
+              mediaGenerationSnapshot: {
+                id: 'image-job-1',
+                kind: 'image',
+                sessionKey: 'agent:main:main',
+                status: 'succeeded',
+                createdAt: startedAt - 500,
+                startedAt,
+                completedAt,
+                updatedAt: completedAt,
+                runDurationMs: completedAt - startedAt,
+                outputs: [
+                  {
+                    path: '/tmp/uclaw-image.png',
+                    mimeType: 'image/png',
+                    size: 4096,
+                    fileName: 'uclaw-image.png',
+                  },
+                ],
+                progressEvents: [
+                  {
+                    id: 'job:started',
+                    source: 'job',
+                    event: 'completed',
+                    label: '图片任务执行完成',
+                    status: 'completed',
+                    timestampMs: completedAt,
+                    detail: '执行：16s，产物：1',
+                    durationMs: completedAt - startedAt,
+                  },
+                ],
+              },
+              timestamp: completedAt / 1000,
+            },
+          ],
+        };
+      }
+      return { messages: [] };
+    });
+
+    const { useChatStore } = await import('@/stores/chat');
+    const { deriveRuntimeTaskSteps } = await import('@/pages/Chat/task-visualization');
+    useChatStore.setState({
+      currentSessionKey: 'agent:main:main',
+      currentAgentId: 'main',
+      sessions: [{ key: 'agent:main:main' }],
+      messages: [],
+      sessionLabels: {},
+      sessionLastActivity: {},
+      runtimeRuns: {},
+      sending: false,
+      activeRunId: null,
+      streamingText: '',
+      streamingMessage: null,
+      streamingTools: [],
+      pendingFinal: false,
+      lastUserMessageAt: null,
+      pendingToolImages: [],
+      error: null,
+      loading: false,
+      thinkingLevel: null,
+    });
+
+    await useChatStore.getState().loadHistory(true);
+
+    const run = Object.values(useChatStore.getState().runtimeRuns)
+      .find((candidate) => candidate.objective === '我想要一张风景照');
+    expect(run).toBeTruthy();
+    expect(run?.startedAt).toBe(startedAt);
+    expect(run?.endedAt).toBe(completedAt);
+    expect((run?.endedAt ?? 0) - (run?.startedAt ?? 0)).toBe(16_000);
+    expect(deriveRuntimeTaskSteps(run).find((step) => step.id === 'run-duration')).toEqual(expect.objectContaining({
+      durationMs: 16_000,
+      detail: '耗时：16s',
+    }));
+  });
+
   it('drops superseded split artifact replies when the same turn already has a unified composite manifest', async () => {
     gatewayRpcMock.mockImplementation((method: string) => {
       if (method === 'chat.history') {

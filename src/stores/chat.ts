@@ -1283,6 +1283,8 @@ function applyHistoricalRuntimeRunsFromMessages(
       && typeof mediaResultMessage.mediaGenerationSnapshot === 'object'
       ? mediaResultMessage.mediaGenerationSnapshot as MediaGenerationJobSnapshot
       : undefined;
+    const mediaRunStartedAt = optionalToMs(mediaGenerationSnapshot?.startedAt) ?? null;
+    const mediaRunCompletedAt = optionalToMs(mediaGenerationSnapshot?.completedAt) ?? null;
     const artifactFiles = compositeResultMessage
       ? extractMessageArtifactFiles(compositeResultMessage)
       : segment
@@ -1359,7 +1361,7 @@ function applyHistoricalRuntimeRunsFromMessages(
       sessionKey,
       objective,
       mode,
-      ts,
+      ts: mediaRunStartedAt ?? ts,
       producer: 'history',
     });
     const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
@@ -1408,8 +1410,9 @@ function applyHistoricalRuntimeRunsFromMessages(
         producer: 'history',
         runId,
         sessionKey,
-        ts,
+        ts: mediaRunCompletedAt ?? ts,
         type: 'run.ended',
+        ...(mediaRunCompletedAt != null ? { endedAt: mediaRunCompletedAt } : {}),
         status: 'completed',
       },
     ]);
@@ -1419,7 +1422,7 @@ function applyHistoricalRuntimeRunsFromMessages(
       buildRuntimeCompletionGateEvents(nextRuns[runId], {
         runId,
         sessionKey,
-        ts,
+        ts: mediaRunCompletedAt ?? ts,
         status: 'completed',
       }),
     );
@@ -1627,6 +1630,8 @@ type MediaGenerationJobSnapshot = {
   ownerKind?: 'standalone' | 'composite';
   status: MediaGenerationJobStatus;
   createdAt?: number;
+  startedAt?: number;
+  completedAt?: number;
   queuePosition?: number;
   activeJobs?: number;
   maxActiveJobs?: number;
