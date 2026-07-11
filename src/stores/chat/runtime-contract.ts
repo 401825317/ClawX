@@ -201,10 +201,100 @@ function approvalFailed(event: ChatRuntimeEvent): event is Extract<ChatRuntimeEv
 
 function toolRecoveryFamily(name: string): string {
   const normalized = name.trim().toLowerCase();
-  if (normalized === 'create_designed_pptx_file' || normalized === 'repair_designed_pptx_file') {
+  if (normalized.includes('create_designed_pptx_file') || normalized.includes('repair_designed_pptx_file')) {
     return 'designed_pptx_file';
   }
-  return normalized;
+  // OpenClaw's directory wrapper uses ids such as
+  // openclaw:plugin:tool_name. Retry recovery must compare tool_name rather
+  // than the shared wrapper name tool_call.
+  return normalized.split(':').filter(Boolean).at(-1) ?? normalized;
+}
+
+type DesignedPptxOperation = 'create' | 'repair';
+
+function asRuntimeRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function appendRuntimeToolNames(value: unknown, names: Set<string>, depth = 0): void {
+  if (depth > 3 || value == null) return;
+  if (typeof value === 'string') {
+    const normalized = value.trim();
+    if (normalized) names.add(normalized);
+    return;
+  }
+
+  const record = asRuntimeRecord(value);
+  if (!record) return;
+  for (const key of ['id', 'name', 'toolName', 'tool_name', 'toolId', 'tool_id']) {
+    const candidate = record[key];
+    if (typeof candidate === 'string' && candidate.trim()) names.add(candidate.trim());
+  }
+  // OpenClaw's directory wrapper keeps the actual tool identity in args.id,
+  // while direct calls expose it on the tool-completed event itself.
+  for (const key of ['tool', 'args', 'input', 'params']) {
+    appendRuntimeToolNames(record[key], names, depth + 1);
+  }
+}
+
+function designedPptxOperationFromName(name: string): DesignedPptxOperation | undefined {
+  const normalized = name.trim().toLowerCase();
+  if (normalized.includes('create_designed_pptx_file')) return 'create';
+  if (normalized.includes('repair_designed_pptx_file')) return 'repair';
+  return undefined;
+}
+
+function runtimeToolNameCandidates(
+  events: ChatRuntimeEvent[],
+  eventIndex: number,
+): string[] {
+  const event = events[eventIndex];
+  if (!event || (event.type !== 'tool.started' && event.type !== 'tool.completed')) return [];
+
+  const names = new Set<string>();
+  names.add(event.name);
+  if (event.type === 'tool.started') {
+    appendRuntimeToolNames(event.args, names);
+  } else {
+    appendRuntimeToolNames(event.result, names);
+    appendRuntimeToolNames(event.meta, names);
+  }
+
+  // A completion emitted by tool_call carries the real selected tool on the
+  // matching start event. Do not infer it from arbitrary result prose.
+  if (event.type === 'tool.completed' && event.toolCallId) {
+    for (let index = eventIndex - 1; index >= 0; index -= 1) {
+      const candidate = events[index];
+      if (candidate?.type !== 'tool.started' || candidate.toolCallId !== event.toolCallId) continue;
+      names.add(candidate.name);
+      appendRuntimeToolNames(candidate.args, names);
+      break;
+    }
+  }
+  return [...names];
+}
+
+function runtimeToolOperation(
+  events: ChatRuntimeEvent[],
+  eventIndex: number,
+): DesignedPptxOperation | undefined {
+  return runtimeToolNameCandidates(events, eventIndex)
+    .map((name) => designedPptxOperationFromName(name))
+    .find((operation): operation is DesignedPptxOperation => operation != null);
+}
+
+function runtimeToolRecoveryFamily(events: ChatRuntimeEvent[], eventIndex: number): string {
+  const event = events[eventIndex];
+  const candidates = runtimeToolNameCandidates(events, eventIndex);
+  const families = candidates.map((name) => toolRecoveryFamily(name));
+  const designedPptxFamily = families
+    .find((family) => family === 'designed_pptx_file');
+  if (designedPptxFamily) return designedPptxFamily;
+  const actualToolFamily = families.find((family) => family !== 'tool_call' && family !== 'tool_describe');
+  return actualToolFamily
+    ?? toolRecoveryFamily(event?.type === 'tool.started' || event?.type === 'tool.completed' ? event.name : '');
 }
 
 function toolFailureRecoveredByLaterSuccess(
@@ -213,45 +303,117 @@ function toolFailureRecoveredByLaterSuccess(
 ): boolean {
   const failedEvent = events[failedEventIndex];
   if (failedEvent?.type !== 'tool.completed' || failedEvent.isError !== true) return false;
-  const failedToolFamily = toolRecoveryFamily(failedEvent.name);
+  const failedToolFamily = runtimeToolRecoveryFamily(events, failedEventIndex);
   if (!failedToolFamily) return false;
-  return events.slice(failedEventIndex + 1).some((event) => (
-    event.type === 'tool.completed'
+  return events.some((event, eventIndex) => (
+    eventIndex > failedEventIndex
+    && event.type === 'tool.completed'
     && event.isError !== true
-    && toolRecoveryFamily(event.name) === failedToolFamily
+    && runtimeToolRecoveryFamily(events, eventIndex) === failedToolFamily
   ));
+}
+
+function isPresentationArtifact(artifact: ChatRuntimeArtifact): boolean {
+  return artifact.kind === 'presentation'
+    || artifact.mimeType?.includes('presentation') === true
+    || /\.pptx?(?:$|[?#])/i.test(artifact.filePath ?? artifact.url ?? '');
+}
+
+function recoveredDesignedPptxAttemptIds(run: ChatRuntimeRunState | undefined): Set<string> {
+  const events = run?.events ?? [];
+  const artifacts = run?.artifacts ?? [];
+  const verifications = run?.verifications ?? [];
+  const recovered = new Set<string>();
+  const unresolvedAttemptIds: string[] = [];
+
+  const hasPassedPresentationArtifact = (toolCallId: string): boolean => {
+    const artifactIds = new Set(
+      artifacts
+        .filter((artifact) => artifact.sourceToolCallId === toolCallId && isPresentationArtifact(artifact))
+        .map((artifact) => artifact.id),
+    );
+    return artifactIds.size > 0 && verifications.some((verification) => (
+      verification.required !== false
+      && verification.status === 'passed'
+      && Boolean(verification.artifactId && artifactIds.has(verification.artifactId))
+    ));
+  };
+
+  for (const [eventIndex, event] of events.entries()) {
+    if (event.type !== 'tool.completed' || !event.toolCallId) continue;
+    const operation = runtimeToolOperation(events, eventIndex);
+    if (!operation) continue;
+
+    // A new create begins a new deck chain. Failed calls before it belong to
+    // an earlier deck and are not silently hidden by this deck's repair.
+    if (operation === 'create') unresolvedAttemptIds.length = 0;
+
+    if (event.isError === true) {
+      unresolvedAttemptIds.push(event.toolCallId);
+      continue;
+    }
+
+    if (hasPassedPresentationArtifact(event.toolCallId)) {
+      unresolvedAttemptIds.forEach((toolCallId) => recovered.add(toolCallId));
+      unresolvedAttemptIds.length = 0;
+    }
+  }
+
+  return recovered;
+}
+
+function isSupersededToolStep(step: ChatRuntimePlanStep, recoveredAttemptIds: Set<string>): boolean {
+  if (step.toolCallId && recoveredAttemptIds.has(step.toolCallId)) return true;
+  return typeof step.id === 'string'
+    && step.id.startsWith('tool:')
+    && recoveredAttemptIds.has(step.id.slice('tool:'.length));
+}
+
+function effectiveRuntimeEvidence(
+  run: ChatRuntimeRunState | undefined,
+  pendingVerifications: ChatRuntimeVerification[],
+): {
+  artifacts: ChatRuntimeArtifact[];
+  verifications: ChatRuntimeVerification[];
+  steps: ChatRuntimePlanStep[];
+} {
+  const allArtifacts = run?.artifacts ?? [];
+  const recoveredAttemptIds = recoveredDesignedPptxAttemptIds(run);
+  if (recoveredAttemptIds.size === 0) {
+    return {
+      artifacts: allArtifacts,
+      verifications: [...(run?.verifications ?? []), ...pendingVerifications],
+      steps: run?.planSteps ?? [],
+    };
+  }
+
+  const supersededArtifactIds = new Set(
+    allArtifacts
+      .filter((artifact) => artifact.sourceToolCallId && recoveredAttemptIds.has(artifact.sourceToolCallId))
+      .map((artifact) => artifact.id),
+  );
+  const targetsSupersededArtifact = (verification: ChatRuntimeVerification): boolean => (
+    Boolean(verification.artifactId && supersededArtifactIds.has(verification.artifactId))
+    || Boolean(verification.targetId && supersededArtifactIds.has(verification.targetId))
+  );
+
+  return {
+    artifacts: allArtifacts.filter((artifact) => !supersededArtifactIds.has(artifact.id)),
+    verifications: [...(run?.verifications ?? []), ...pendingVerifications]
+      .filter((verification) => !targetsSupersededArtifact(verification)),
+    steps: (run?.planSteps ?? []).filter((step) => !isSupersededToolStep(step, recoveredAttemptIds)),
+  };
 }
 
 function isMediaObservationStep(step: ChatRuntimePlanStep): boolean {
   return typeof step.kind === 'string' && step.kind.trim().toLowerCase().startsWith('media.');
 }
 
-const ACTIONABLE_OBJECTIVE_RE = /(?:打开|启动|播放|发送|查找|搜索|运行|执行|尝试|点开|操作|打开.*并|帮我.*(?:打开|启动|播放|发送|查找|搜索|运行|执行)|open|launch|play|send|search|find|run|execute|click|operate)/iu;
-
-function runNeedsConcreteAttempt(run: ChatRuntimeRunState | undefined): boolean {
-  const objective = normalizeText(run?.objective);
-  if (!objective) return false;
-  return ACTIONABLE_OBJECTIVE_RE.test(objective);
-}
-
-function runHasConcreteExecutionEvidence(run: ChatRuntimeRunState | undefined): boolean {
-  return (run?.events ?? []).some((event) =>
-    event.type === 'tool.started'
-    || event.type === 'tool.completed'
-    || event.type === 'command.output'
-    || event.type === 'patch.completed'
-    || event.type === 'artifact.produced'
-    || event.type === 'approval.updated',
-  );
-}
-
 export function buildRuntimeCompletionGateReport(
   run: ChatRuntimeRunState | undefined,
   pendingVerifications: ChatRuntimeVerification[] = [],
 ): CompletionGateReport {
-  const artifacts = run?.artifacts ?? [];
-  const verifications = [...(run?.verifications ?? []), ...pendingVerifications];
-  const steps = run?.planSteps ?? [];
+  const { artifacts, verifications, steps } = effectiveRuntimeEvidence(run, pendingVerifications);
   const checkpoints = run?.checkpoints ?? [];
 
   const issues: ChatRuntimeGateIssue[] = [];
@@ -273,19 +435,6 @@ export function buildRuntimeCompletionGateReport(
       targetId: run?.runId,
       recoverable: true,
       suggestedRecovery: '继续执行实际生成步骤，并在最终回复前落地 artifact.produced 与 verification.completed。',
-    });
-  }
-
-  if (runNeedsConcreteAttempt(run) && !runHasConcreteExecutionEvidence(run) && artifacts.length === 0) {
-    issues.push({
-      id: gateIssueId(run?.runId, 'execution.unattempted', run?.objective ?? run?.runId ?? 'objective'),
-      code: 'execution.unattempted',
-      severity: 'blocking',
-      title: '当前回复还没有进入实际执行',
-      detail: '用户请求已经明确要求执行动作，但本轮运行里没有看到实际工具调用、命令执行、文件修改或产物落地。',
-      targetId: run?.runId,
-      recoverable: true,
-      suggestedRecovery: '不要只停在能力说明或下一步建议，先沿当前可行路径执行一轮，再交付结果。',
     });
   }
 
