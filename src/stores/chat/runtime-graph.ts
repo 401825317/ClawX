@@ -258,17 +258,27 @@ export function applyRuntimeEventToRuns(
   };
 }
 
-function collectRuntimeResultTexts(result: unknown): string[] {
+function collectRuntimeResultTexts(result: unknown, depth = 0, seen = new Set<object>()): string[] {
   const texts: string[] = [];
+  if (depth > 4) return texts;
   if (typeof result === 'string' && result.trim()) {
     texts.push(result);
   }
   if (Array.isArray(result)) {
     const text = getMessageText(result);
     if (text.trim()) texts.push(text);
+    for (const item of result) texts.push(...collectRuntimeResultTexts(item, depth + 1, seen));
   }
   const record = asRecord(result);
   if (!record) return texts;
+  if (seen.has(record)) return texts;
+  seen.add(record);
+  try {
+    const serialized = JSON.stringify(record);
+    if (/(?:MEDIA:\s*|"(?:filePath|outputPath|media)"\s*:)/iu.test(serialized)) texts.push(serialized);
+  } catch {
+    // Continue with structured fields when a runtime result is not JSON-safe.
+  }
 
   const candidates = [record.content, record.output, record.summary, record.error, record.stdout, record.stderr];
   for (const candidate of candidates) {
@@ -279,8 +289,11 @@ function collectRuntimeResultTexts(result: unknown): string[] {
     const text = getMessageText(candidate);
     if (text.trim()) texts.push(text);
   }
+  for (const candidate of [record.result, record.details, record.meta]) {
+    texts.push(...collectRuntimeResultTexts(candidate, depth + 1, seen));
+  }
 
-  return texts;
+  return [...new Set(texts)];
 }
 
 function isTranscriptCompactionResult(value: unknown, depth = 0): boolean {
@@ -307,7 +320,7 @@ export function extractToolCompletedFiles(event: ChatRuntimeEvent): AttachedFile
   const seenPaths = new Set(files.map((file) => file.filePath).filter(Boolean));
   const resultTexts = collectRuntimeResultTexts(event.result);
   const allowRawPaths = RAW_PATH_PRODUCER_TOOLS.test(event.name)
-    || resultTexts.some((text) => EXPLICIT_OUTPUT_CUE_RE.test(text));
+    || resultTexts.some((text) => EXPLICIT_OUTPUT_CUE_RE.test(text) || /\bMEDIA\s*:/iu.test(text));
   for (const text of resultTexts) {
     const mediaRefs = extractMediaRefs(text);
     const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));

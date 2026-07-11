@@ -1080,6 +1080,21 @@ function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void
   }
 }
 
+function selectExplicitlyDeliveredToolFiles(
+  pending: AttachedFileMeta[],
+  assistantMessage: RawMessage,
+): AttachedFileMeta[] {
+  const text = getMessageText(assistantMessage.content);
+  if (!text) return pending;
+  const deliveredPaths = new Set([
+    ...extractMediaRefs(text).map((ref) => ref.filePath),
+    ...extractRawFilePaths(text).map((ref) => ref.filePath),
+  ]);
+  if (deliveredPaths.size === 0) return pending;
+  const explicitlyDelivered = pending.filter((file) => file.filePath && deliveredPaths.has(file.filePath));
+  return explicitlyDelivered.length > 0 ? explicitlyDelivered : pending;
+}
+
 /**
  * Before filtering tool_result messages from history, scan them for any file/image
  * content and attach those to the immediately following assistant message.
@@ -1149,7 +1164,7 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
       if ((isInternalMessage(msg) && !messageHasToolUse(msg)) || hasPendingToolUse(msg) || isToolOnlyMessage(msg)) {
         return msg;
       }
-      const toAttach = pending.splice(0);
+      const toAttach = selectExplicitlyDeliveredToolFiles(pending.splice(0), msg);
       const existingFiles = msg._attachedFiles || [];
       const attachedFiles = dedupeAttachedFiles([...existingFiles, ...toAttach]);
       if (attachedFiles.length === existingFiles.length) return msg;

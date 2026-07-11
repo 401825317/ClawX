@@ -617,6 +617,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
   const steps: TaskStep[] = [];
   const stepIndexById = new Map<string, number>();
   const toolStartedAt = new Map<string, number>();
+  const failedToolStepIdsByFamily = new Map<string, Set<string>>();
   const elapsedMs = runElapsedMs(runState);
   const upsertStep = (step: TaskStep): void => {
     const existingIndex = stepIndexById.get(step.id);
@@ -727,6 +728,9 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           ? completedAt - startedAt
           : undefined;
         const normalizedToolName = event.name.trim().toLowerCase();
+        const recoveryFamily = normalizedToolName === 'create_designed_pptx_file' || normalizedToolName === 'repair_designed_pptx_file'
+          ? 'designed_pptx_file'
+          : normalizedToolName;
         const nextDetail = event.isError
           ? getToolErrorDetail(event.result)
           : normalizedToolName === 'exec'
@@ -741,6 +745,26 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           durationMs: event.durationMs ?? inferredDurationMs,
           depth: 1,
         });
+        if (event.isError) {
+          const failedIds = failedToolStepIdsByFamily.get(recoveryFamily) ?? new Set<string>();
+          failedIds.add(event.toolCallId);
+          failedToolStepIdsByFamily.set(recoveryFamily, failedIds);
+        } else {
+          for (const failedId of failedToolStepIdsByFamily.get(recoveryFamily) ?? []) {
+            const failedIndex = stepIndexById.get(failedId);
+            if (failedIndex == null) continue;
+            const failedStep = steps[failedIndex];
+            if (!failedStep) continue;
+            steps[failedIndex] = {
+              ...failedStep,
+              status: 'completed',
+              detail: recoveryFamily === 'designed_pptx_file'
+                ? '版式问题已由增量修复恢复，并通过完整质量检查。'
+                : '后续重试已恢复该步骤。',
+            };
+          }
+          failedToolStepIdsByFamily.delete(recoveryFamily);
+        }
         break;
       }
       case 'artifact.produced': {

@@ -199,6 +199,29 @@ function approvalFailed(event: ChatRuntimeEvent): event is Extract<ChatRuntimeEv
     || event.status === 'error';
 }
 
+function toolRecoveryFamily(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  if (normalized === 'create_designed_pptx_file' || normalized === 'repair_designed_pptx_file') {
+    return 'designed_pptx_file';
+  }
+  return normalized;
+}
+
+function toolFailureRecoveredByLaterSuccess(
+  events: ChatRuntimeEvent[],
+  failedEventIndex: number,
+): boolean {
+  const failedEvent = events[failedEventIndex];
+  if (failedEvent?.type !== 'tool.completed' || failedEvent.isError !== true) return false;
+  const failedToolFamily = toolRecoveryFamily(failedEvent.name);
+  if (!failedToolFamily) return false;
+  return events.slice(failedEventIndex + 1).some((event) => (
+    event.type === 'tool.completed'
+    && event.isError !== true
+    && toolRecoveryFamily(event.name) === failedToolFamily
+  ));
+}
+
 function isMediaObservationStep(step: ChatRuntimePlanStep): boolean {
   return typeof step.kind === 'string' && step.kind.trim().toLowerCase().startsWith('media.');
 }
@@ -352,8 +375,13 @@ export function buildRuntimeCompletionGateReport(
     });
   }
 
-  for (const [index, event] of (run?.events ?? []).entries()) {
-    if (event.type === 'tool.completed' && event.isError) {
+  const runtimeEvents = run?.events ?? [];
+  for (const [index, event] of runtimeEvents.entries()) {
+    if (
+      event.type === 'tool.completed'
+      && event.isError
+      && !toolFailureRecoveredByLaterSuccess(runtimeEvents, index)
+    ) {
       issues.push({
         id: gateIssueId(run?.runId, 'tool.failed', event.toolCallId, index),
         code: 'tool.failed',

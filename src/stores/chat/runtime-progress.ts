@@ -150,6 +150,51 @@ function toolActionStatus(event: Extract<ChatRuntimeEvent, { type: 'tool.started
   return event.isError ? 'error' : 'completed';
 }
 
+function toolRecoveryFamily(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  if (normalized === 'create_designed_pptx_file' || normalized === 'repair_designed_pptx_file') {
+    return 'designed_pptx_file';
+  }
+  return normalized;
+}
+
+function recoveredToolProgressEvents(
+  run: ChatRuntimeRunState | undefined,
+  event: Extract<ChatRuntimeEvent, { type: 'tool.completed' }>,
+): ChatRuntimeEvent[] {
+  if (event.isError) return [];
+  const family = toolRecoveryFamily(event.name);
+  if (!family) return [];
+  const recovered = (run?.events ?? []).filter((candidate): candidate is Extract<ChatRuntimeEvent, { type: 'tool.completed' }> => (
+    candidate.type === 'tool.completed'
+    && candidate.isError === true
+    && toolRecoveryFamily(candidate.name) === family
+    && candidate.toolCallId !== event.toolCallId
+  ));
+  return recovered.flatMap((failedEvent) => {
+    const existing = findProgressEntry(run, `progress:tool:${failedEvent.toolCallId}`);
+    return [
+      buildProgressEntryEvent(event, {
+        id: `progress:tool:${failedEvent.toolCallId}`,
+        kind: 'action',
+        text: family === 'designed_pptx_file' ? '版式问题已修复' : '重试已成功',
+        status: 'completed',
+        command: existing?.command,
+        toolCallId: failedEvent.toolCallId,
+        source: 'derived',
+      }),
+      buildProgressEntryEvent(event, {
+        id: `progress:tool:${failedEvent.toolCallId}:status`,
+        kind: 'status',
+        text: family === 'designed_pptx_file' ? '增量修复已通过完整质量检查' : '后续重试已恢复该步骤',
+        status: 'completed',
+        toolCallId: failedEvent.toolCallId,
+        source: 'derived',
+      }),
+    ];
+  });
+}
+
 function buildToolActionText(
   name: string,
   status: ChatRuntimeProgressEntry['status'],
@@ -220,7 +265,10 @@ export function buildRuntimeProgressEvents(
   if (event.type === 'progress.update') return [];
 
   if (event.type === 'tool.started' || event.type === 'tool.completed') {
-    if (hasNativeToolProgress(run, event.toolCallId)) return [];
+    const recoveryEvents = event.type === 'tool.completed'
+      ? recoveredToolProgressEvents(run, event)
+      : [];
+    if (hasNativeToolProgress(run, event.toolCallId)) return recoveryEvents;
     const command = extractCommandPreviewFromUnknown(
       event.type === 'tool.started'
         ? event.args
@@ -260,7 +308,7 @@ export function buildRuntimeProgressEvents(
         source: 'derived',
       }));
     }
-    return nextEvents;
+    return [...recoveryEvents, ...nextEvents];
   }
 
   if (event.type === 'command.output' && !event.toolCallId) {

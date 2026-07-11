@@ -278,6 +278,7 @@ type MediaIntentPlan = {
   clarification?: string;
   compositeTasks?: MediaIntentCompositeTask[];
   artifactContinuationAction?: 'retry_delivery' | 'resume_task' | 'inspect_result' | 'none';
+  executionContract?: 'designed_presentation';
 };
 
 type MediaIntentPlanResponse = {
@@ -1614,6 +1615,54 @@ function applyHistoricalRuntimeRunsFromMessages(
     );
   }
   return nextRuns;
+}
+
+function applyActiveRunArtifactEvidenceFromHistory(
+  runtimeRuns: ChatState['runtimeRuns'],
+  params: {
+    runId: string | null;
+    sessionKey: string;
+    messages: RawMessage[];
+    lastUserMessageAt: number | null;
+  },
+): ChatState['runtimeRuns'] {
+  if (!params.runId || params.lastUserMessageAt == null || !runtimeRuns[params.runId]) return runtimeRuns;
+  const segment = getOpenRunSegmentFromHistory(params.messages, params.lastUserMessageAt);
+  const files = dedupeAttachedFiles(
+    segment
+      .filter((message) => message.role === 'assistant' && !hasPendingToolUse(message))
+      .flatMap((message) => extractMessageArtifactFiles(message)),
+  );
+  if (files.length === 0) return runtimeRuns;
+
+  const ts = Date.now();
+  const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
+    runId: params.runId,
+    sessionKey: params.sessionKey,
+    ts,
+    producer: 'history',
+    verificationDetail: '从当前轮持久化最终回复回填的产物。',
+  }, files);
+  const artifacts = artifactEvents
+    .filter((event): event is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> => (
+      event.type === 'artifact.produced'
+    ))
+    .map((event) => event.artifact);
+  const verificationEvents = artifacts.map((artifact) => buildRuntimeArtifactVerificationEvent({
+    runId: params.runId!,
+    sessionKey: params.sessionKey,
+    ts,
+    producer: 'history',
+  }, {
+    artifact,
+    status: 'passed',
+    kind: 'artifact.availability',
+    required: true,
+    severity: 'info',
+    detail: '当前轮最终回复已持久化该产物引用。',
+    evidence: artifact.filePath ?? artifact.url,
+  }));
+  return applyRuntimeContractEvents(runtimeRuns, [...artifactEvents, ...verificationEvents]);
 }
 
 /** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
@@ -4880,6 +4929,21 @@ function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void
   }
 }
 
+function selectExplicitlyDeliveredToolFiles(
+  pending: AttachedFileMeta[],
+  assistantMessage: RawMessage,
+): AttachedFileMeta[] {
+  const text = getMessageText(assistantMessage.content);
+  if (!text) return pending;
+  const deliveredPaths = new Set([
+    ...extractMediaRefs(text).map((ref) => ref.filePath),
+    ...extractRawFilePaths(text).map((ref) => ref.filePath),
+  ]);
+  if (deliveredPaths.size === 0) return pending;
+  const explicitlyDelivered = pending.filter((file) => file.filePath && deliveredPaths.has(file.filePath));
+  return explicitlyDelivered.length > 0 ? explicitlyDelivered : pending;
+}
+
 /**
  * Before filtering tool_result messages from history, scan them for any file/image
  * content and attach those to the immediately following assistant message.
@@ -4954,7 +5018,7 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
       if (hasPendingToolUse(msg) || isToolOnlyMessage(msg) || isInternalMessage(msg)) {
         return msg;
       }
-      const toAttach = pending.splice(0);
+      const toAttach = selectExplicitlyDeliveredToolFiles(pending.splice(0), msg);
       const existingFiles = msg._attachedFiles || [];
       const attachedFiles = dedupeAttachedFiles([...existingFiles, ...toAttach]);
       if (attachedFiles.length === existingFiles.length) return msg;
@@ -6198,6 +6262,9 @@ function isTextOnlyAssistantFinal(message: RawMessage): boolean {
   if (message.role !== 'assistant') return false;
   if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
   if (!messageHasDeliverableContent(message)) return false;
+  if ((message._attachedFiles ?? []).length > 0) return false;
+  const text = getMessageText(message.content);
+  if (extractMediaRefs(text).length > 0 || extractRawFilePaths(text).length > 0) return false;
   return !messageHasImageContent(message);
 }
 
@@ -7388,6 +7455,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         currentSessionKey,
         runtimeHistoryMessages,
       );
+      nextRuntimeRuns = applyActiveRunArtifactEvidenceFromHistory(nextRuntimeRuns, {
+        runId: stateBeforeHistoryCommit.activeRunId,
+        sessionKey: currentSessionKey,
+        messages: finalMessages,
+        lastUserMessageAt: stateBeforeHistoryCommit.lastUserMessageAt,
+      });
       if (backendSessionCanClose) {
         nextRuntimeRuns = alignRuntimeRunsWithBackendSessionTerminalState(
           nextRuntimeRuns,

@@ -54,3 +54,26 @@ Example slide fragments:
 ```
 
 Do not emulate presentation layout by creating a grid of rounded rectangles. Start from the content's visual hierarchy and use shapes sparingly for structure or emphasis.
+
+## Incremental quality-gate repair
+
+When `create_designed_pptx_file` is blocked, its result includes a `repairToken`, `baseRevision`, and structured zero-based issue indexes. Keep the original deck server-side and call `repair_designed_pptx_file`; do not resend the full `slides` array.
+
+Replace only an affected element:
+
+```json
+{
+  "repairToken": "returned-token",
+  "baseRevision": 0,
+  "patches": [
+    {
+      "op": "replace_element",
+      "slideIndex": 1,
+      "elementIndex": 4,
+      "element": { "type": "text", "text": "Adjusted copy", "role": "body", "x": 8, "y": 38, "w": 36, "h": 12, "fontSize": 20, "color": "FFFFFF" }
+    }
+  ]
+}
+```
+
+Use `replace_slide` only when the issue is about the whole composition, visual coverage, or layout variety. Every repair reruns the complete original studio quality gate before the PPTX is rendered.

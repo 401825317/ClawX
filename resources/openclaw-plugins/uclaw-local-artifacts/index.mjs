@@ -31,6 +31,9 @@ const MIME = {
   html: 'text/html',
 };
 const BASE_HTML_APP_CSS = '[hidden]{display:none!important}';
+const STUDIO_REPAIR_TTL_MS = 30 * 60 * 1000;
+const STUDIO_REPAIR_DRAFT_LIMIT = 20;
+const studioRepairDrafts = new Map();
 
 function xml(value) {
   return String(value ?? '')
@@ -88,6 +91,119 @@ function normalizeStudioParams(params) {
       }))
     : normalized.slides;
   return normalized;
+}
+
+function cloneJsonValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function cleanupStudioRepairDrafts(now = Date.now()) {
+  for (const [token, draft] of studioRepairDrafts) {
+    if (draft.expiresAt <= now) studioRepairDrafts.delete(token);
+  }
+  while (studioRepairDrafts.size >= STUDIO_REPAIR_DRAFT_LIMIT) {
+    studioRepairDrafts.delete(studioRepairDrafts.keys().next().value);
+  }
+}
+
+function studioIssueDetail(issue) {
+  const text = String(issue ?? '');
+  let match = /^slide (\d+) text elements (\d+) and (\d+) overlap$/u.exec(text);
+  if (match) {
+    return {
+      code: 'text_overlap',
+      slideIndex: Number(match[1]) - 1,
+      elementIndexes: [Number(match[2]) - 1, Number(match[3]) - 1],
+      message: text,
+    };
+  }
+  match = /^slide (\d+) (?:text )?element (\d+) (.+)$/u.exec(text);
+  if (match) {
+    return {
+      code: /outside the canvas/u.test(match[3]) ? 'element_outside_canvas'
+        : /unreadable/u.test(match[3]) ? 'text_contrast'
+          : /empty/u.test(match[3]) ? 'empty_text'
+            : /placeholder/u.test(match[3]) ? 'placeholder_text'
+              : 'element_invalid',
+      slideIndex: Number(match[1]) - 1,
+      elementIndexes: [Number(match[2]) - 1],
+      message: text,
+    };
+  }
+  match = /^slide (\d+) (.+)$/u.exec(text);
+  if (match) {
+    return {
+      code: 'slide_invalid',
+      slideIndex: Number(match[1]) - 1,
+      message: text,
+    };
+  }
+  return {
+    code: /layoutSignatures/u.test(text) ? 'layout_variety'
+      : /needs visuals/u.test(text) ? 'visual_coverage'
+        : 'deck_invalid',
+    message: text,
+  };
+}
+
+function createStudioRepairDraft(params, validation, ctx) {
+  cleanupStudioRepairDrafts();
+  const repairToken = randomUUID();
+  const now = Date.now();
+  const draft = {
+    repairToken,
+    revision: 0,
+    workspaceDir: resolveWorkspaceDir(ctx),
+    expiresAt: now + STUDIO_REPAIR_TTL_MS,
+    params: cloneJsonValue(params),
+  };
+  studioRepairDrafts.set(repairToken, draft);
+  return studioRepairResult(draft, validation);
+}
+
+function studioRepairResult(draft, validation) {
+  return {
+    toolName: 'repair_designed_pptx_file',
+    repairToken: draft.repairToken,
+    baseRevision: draft.revision,
+    expiresAt: new Date(draft.expiresAt).toISOString(),
+    issues: validation.issues.map(studioIssueDetail),
+    allowedPatchOps: ['replace_element', 'replace_slide'],
+    instruction: 'Call repair_designed_pptx_file with this token and only the failed element or slide replacements. Do not resend the full deck.',
+  };
+}
+
+function loadStudioRepairDraft(params, ctx) {
+  cleanupStudioRepairDrafts();
+  const repairToken = cleanText(params?.repairToken);
+  const draft = studioRepairDrafts.get(repairToken);
+  if (!draft) throw new Error('PPT repair token is missing or expired; rerun create_designed_pptx_file once to create a new repair draft');
+  if (draft.workspaceDir !== resolveWorkspaceDir(ctx)) throw new Error('PPT repair token belongs to a different workspace');
+  if (params?.baseRevision !== draft.revision) {
+    throw new Error(`PPT repair revision mismatch: expected ${draft.revision}, received ${params?.baseRevision}`);
+  }
+  return draft;
+}
+
+function applyStudioRepairPatches(draft, patches) {
+  const nextParams = cloneJsonValue(draft.params);
+  for (const patch of patches ?? []) {
+    const slideIndex = Number(patch?.slideIndex);
+    if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= nextParams.slides.length) {
+      throw new Error(`PPT repair slideIndex is invalid: ${patch?.slideIndex}`);
+    }
+    if (patch.op === 'replace_slide') {
+      nextParams.slides[slideIndex] = cloneJsonValue(patch.slide);
+      continue;
+    }
+    const elementIndex = Number(patch?.elementIndex);
+    const elements = nextParams.slides[slideIndex]?.elements;
+    if (!Array.isArray(elements) || !Number.isInteger(elementIndex) || elementIndex < 0 || elementIndex >= elements.length) {
+      throw new Error(`PPT repair elementIndex is invalid on slide ${slideIndex}: ${patch?.elementIndex}`);
+    }
+    elements[elementIndex] = cloneJsonValue(patch.element);
+  }
+  return normalizeStudioParams(nextParams);
 }
 
 function textList(value) {
@@ -980,6 +1096,9 @@ function studioSolidTextBackground(slide, elements, textElement) {
 function validateStudioDeck(params, ctx) {
   const slides = Array.isArray(params?.slides) ? params.slides : [];
   const issues = [];
+  if (!cleanText(params?.title)) issues.push('deck title is required');
+  if (!cleanText(params?.designIntent)) issues.push('deck designIntent is required');
+  if (slides.length === 0) issues.push('deck must contain at least one slide');
   let imageCount = 0;
   let chartCount = 0;
   let tableCount = 0;
@@ -1226,6 +1345,9 @@ async function verifyStudioPptxBuffer(buffer, params, validation) {
   const mediaNames = Object.keys(zip.files).filter((name) => /^ppt\/media\/[^/]+$/u.test(name));
   const chartNames = Object.keys(zip.files).filter((name) => /^ppt\/charts\/chart\d+\.xml$/u.test(name));
   const expectedSlides = Array.isArray(params?.slides) ? params.slides.length : 0;
+  if (expectedSlides < 1 || slideNames.length < 1) {
+    throw new Error(`Studio PPT verification failed: a non-empty deck is required (slides=${slideNames.length}/${expectedSlides})`);
+  }
   if (slideNames.length !== expectedSlides) {
     throw new Error(`Studio PPT verification failed: slides=${slideNames.length}/${expectedSlides}`);
   }
@@ -1353,17 +1475,31 @@ const studioTableElementSchema = Type.Object({
   margin: Type.Optional(Type.Number({ minimum: 0, maximum: 12 })),
   columnWidths: Type.Optional(Type.Array(Type.Number({ exclusiveMinimum: 0, maximum: 100 }), { minItems: 1 })),
 });
+const studioElementSchema = Type.Union([
+  studioTextElementSchema,
+  studioImageElementSchema,
+  studioShapeElementSchema,
+  studioChartElementSchema,
+  studioTableElementSchema,
+]);
 const studioSlideSchema = Type.Object({
   background: Type.Optional(studioColorSchema),
   speakerNotes: Type.Optional(Type.String()),
-  elements: Type.Array(Type.Union([
-    studioTextElementSchema,
-    studioImageElementSchema,
-    studioShapeElementSchema,
-    studioChartElementSchema,
-    studioTableElementSchema,
-  ]), { minItems: 1 }),
+  elements: Type.Array(studioElementSchema, { minItems: 1 }),
 });
+const studioRepairPatchSchema = Type.Union([
+  Type.Object({
+    op: Type.Literal('replace_element'),
+    slideIndex: Type.Integer({ minimum: 0 }),
+    elementIndex: Type.Integer({ minimum: 0 }),
+    element: studioElementSchema,
+  }),
+  Type.Object({
+    op: Type.Literal('replace_slide'),
+    slideIndex: Type.Integer({ minimum: 0 }),
+    slide: studioSlideSchema,
+  }),
+]);
 
 const sectionSchema = Type.Object({
   title: Type.Optional(Type.String()),
@@ -1376,6 +1512,35 @@ const baseFileSchema = {
   outputDir: Type.Optional(Type.String({ description: 'Optional output directory. Relative paths resolve under the OpenClaw workspace.' })),
   openAfterCreate: Type.Optional(Type.Boolean({ description: 'Open the generated file after creation. Default false.' })),
 };
+
+async function renderValidatedStudioDeck(safeParams, validation, ctx) {
+  if (!safeParams || !Array.isArray(safeParams.slides) || safeParams.slides.length === 0) {
+    return toolErrorResult('PPT studio render blocked: at least one slide is required', {
+      kind: 'presentation',
+      title: cleanText(safeParams?.title),
+      verification: {
+        status: 'blocked',
+        kind: 'artifact.content',
+        required: true,
+        severity: 'blocking',
+        detail: 'PPT studio render blocked: at least one slide is required',
+      },
+    });
+  }
+  const filePath = await uniqueOutputPath(ctx, safeParams, 'pptx', 'UClaw_Studio_PPT');
+  const output = await createStudioPptxBuffer(safeParams, ctx);
+  const buffer = Buffer.isBuffer(output) ? output : Buffer.from(output);
+  const verification = await verifyStudioPptxBuffer(buffer, safeParams, validation);
+  await writeFile(filePath, buffer);
+  return artifactResult(
+    filePath,
+    MIME.pptx,
+    'presentation',
+    cleanText(safeParams?.title),
+    safeParams?.openAfterCreate === true,
+    { verification, designIntent: cleanText(safeParams?.designIntent) },
+  );
+}
 
 function createTools() {
   return [
@@ -1402,9 +1567,11 @@ function createTools() {
         const validation = validateStudioDeck(safeParams, ctx);
         if (!validation.ok) {
           const detail = `PPT studio quality gate blocked: ${validation.issues.join('; ')}`;
+          const repair = createStudioRepairDraft(safeParams, validation, ctx);
           return toolErrorResult(detail, {
             kind: 'presentation',
             title: cleanText(safeParams?.title),
+            repair,
             verification: {
               status: 'blocked',
               kind: 'artifact.content',
@@ -1415,19 +1582,54 @@ function createTools() {
             },
           });
         }
-        const filePath = await uniqueOutputPath(ctx, safeParams, 'pptx', 'UClaw_Studio_PPT');
-        const output = await createStudioPptxBuffer(safeParams, ctx);
-        const buffer = Buffer.isBuffer(output) ? output : Buffer.from(output);
-        const verification = await verifyStudioPptxBuffer(buffer, safeParams, validation);
-        await writeFile(filePath, buffer);
-        return artifactResult(
-          filePath,
-          MIME.pptx,
-          'presentation',
-          cleanText(safeParams?.title),
-          safeParams?.openAfterCreate === true,
-          { verification, designIntent: cleanText(safeParams?.designIntent) },
-        );
+        return renderValidatedStudioDeck(safeParams, validation, ctx);
+      },
+    },
+    {
+      name: 'repair_designed_pptx_file',
+      label: 'Repair Designed PPTX',
+      description: 'Repair a blocked high-design PPTX draft by replacing only failed elements or slides. Requires the repair token returned by create_designed_pptx_file and reruns the complete studio quality gate before rendering.',
+      promptSnippet: 'repair_designed_pptx_file: after a designed PPT quality-gate failure, reuse its repairToken and replace only the reported element(s) or slide(s). Never resend the full deck. A successful repair returns MEDIA:<absolute-path>.',
+      parameters: Type.Object({
+        repairToken: Type.String(),
+        baseRevision: Type.Integer({ minimum: 0 }),
+        patches: Type.Array(studioRepairPatchSchema, { minItems: 1, maxItems: 20 }),
+      }),
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        let draft;
+        let safeParams;
+        try {
+          draft = loadStudioRepairDraft(params, ctx);
+          safeParams = applyStudioRepairPatches(draft, params?.patches);
+        } catch (error) {
+          return toolErrorResult(error instanceof Error ? error.message : String(error), {
+            kind: 'presentation',
+            repairToken: cleanText(params?.repairToken),
+          });
+        }
+        const validation = validateStudioDeck(safeParams, ctx);
+        if (!validation.ok) {
+          draft.params = cloneJsonValue(safeParams);
+          draft.revision += 1;
+          draft.expiresAt = Date.now() + STUDIO_REPAIR_TTL_MS;
+          const detail = `PPT studio quality gate blocked after repair: ${validation.issues.join('; ')}`;
+          return toolErrorResult(detail, {
+            kind: 'presentation',
+            title: cleanText(safeParams?.title),
+            repair: studioRepairResult(draft, validation),
+            verification: {
+              status: 'blocked',
+              kind: 'artifact.content',
+              required: true,
+              severity: 'blocking',
+              detail,
+              evidence: JSON.stringify(validation.evidence),
+            },
+          });
+        }
+        const result = await renderValidatedStudioDeck(safeParams, validation, ctx);
+        studioRepairDrafts.delete(draft.repairToken);
+        return result;
       },
     },
     {
@@ -1572,6 +1774,9 @@ export const __test = {
   createPptxBuffer,
   createStudioPptxBuffer,
   validateStudioDeck,
+  studioIssueDetail,
+  studioRepairDrafts,
+  applyStudioRepairPatches,
   verifyStudioPptxBuffer,
   createDocxBuffer,
   createXlsxBuffer,

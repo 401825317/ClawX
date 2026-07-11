@@ -6,7 +6,6 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
 const REVISION_REASON = 'UClaw artifact delivery final reply had no completed artifact evidence.';
-const PRESENTATION_FORCE_TOOL_CHOICE_MARKER = 'UClaw force artifact tool choice: create_designed_pptx_file.';
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
 const MEDIA_INTENT_TOOL_GATE_HOOK_ID = `${PLUGIN_ID}:media-intent-tool-gate`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
@@ -67,6 +66,7 @@ const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
 const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
 const INTERNAL_SENTINEL_RE = /^\s*(?:HEARTBEAT_OK|NO_REPLY)\s*$/iu;
 const GATEWAY_RESTART_CONTINUATION_RE = /\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\./iu;
+const DESIGNED_PRESENTATION_CONTRACT_RE = /\s*(?:【UClaw designed presentation execution contract v1\.】|\[UClaw designed presentation execution contract v1\.\])[\s\S]*$/iu;
 const GATEWAY_RESTART_CONTINUATION_BLOCK_RE = /\n{0,2}\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\.(?:\n\nNote:\s+The interrupted final reply was captured:\s+"[^"]*")?/giu;
 const GATEWAY_RESTART_CAPTURED_REPLY_NOTE_RE = /^\s*Note:\s+The interrupted final reply was captured:\s+"[^"]*"\s*$/giu;
 const QUEUED_USER_MESSAGE_MARKER_RE = /^\s*\[Queued user message that arrived while the previous turn was still active\]\s*\n?/iu;
@@ -1152,6 +1152,15 @@ function sanitizeInternalTranscriptMessage(message) {
   const originalText = extractMessageText(message).trim();
   if (!originalText) return { action: 'keep', message };
 
+  resetRegex(DESIGNED_PRESENTATION_CONTRACT_RE);
+  if (role === 'user' && DESIGNED_PRESENTATION_CONTRACT_RE.test(originalText)) {
+    const rewritten = rewriteMessageText(message, (value) => value.replace(DESIGNED_PRESENTATION_CONTRACT_RE, '').trim());
+    if (extractMessageText(rewritten).trim()) {
+      return { action: 'rewrite', message: rewritten, reason: 'designed_presentation_contract_suffix' };
+    }
+    return { action: 'block', message, reason: 'designed_presentation_contract' };
+  }
+
   resetRegex(GATEWAY_RESTART_CONTINUATION_RE);
   if ((role === 'user' || role === 'system') && GATEWAY_RESTART_CONTINUATION_RE.test(originalText)) {
     const rewritten = rewriteMessageText(message, (value) => stripGatewayRestartContinuationText(value).text);
@@ -1183,6 +1192,95 @@ function sanitizePromptHistoryMessages(event) {
       } else {
         messages[index] = decision.message;
         result.rewritten += 1;
+      }
+    }
+  }
+  return result;
+}
+
+const DESIGNED_PRESENTATION_TOOL_RE = /(?:^|:)(?:create_designed_pptx_file|repair_designed_pptx_file)$/iu;
+
+function compactPresentationInvocationArgs(toolName, rawArgs) {
+  const wasString = typeof rawArgs === 'string';
+  let args = rawArgs;
+  if (wasString) {
+    try {
+      args = JSON.parse(rawArgs);
+    } catch {
+      return { value: rawArgs, omittedChars: 0 };
+    }
+  }
+  if (!isPlainRecord(args)) return { value: rawArgs, omittedChars: 0 };
+
+  const directoryTarget = String(args.id ?? '');
+  const effectiveToolName = DESIGNED_PRESENTATION_TOOL_RE.test(directoryTarget)
+    ? directoryTarget
+    : String(toolName ?? '');
+  if (!DESIGNED_PRESENTATION_TOOL_RE.test(effectiveToolName)) {
+    return { value: rawArgs, omittedChars: 0 };
+  }
+
+  const payload = isPlainRecord(args.args) ? args.args : args;
+  const slides = Array.isArray(payload.slides) ? payload.slides : [];
+  const patches = Array.isArray(payload.patches) ? payload.patches : [];
+  if (slides.length === 0 && patches.length === 0) return { value: rawArgs, omittedChars: 0 };
+
+  const compactPayload = { ...payload };
+  delete compactPayload.slides;
+  delete compactPayload.patches;
+  compactPayload.summarizedForModel = true;
+  compactPayload.summaryKind = 'designed_presentation_invocation';
+  if (slides.length > 0) {
+    compactPayload.slideCount = slides.length;
+    compactPayload.elementCount = slides.reduce(
+      (count, slide) => count + (Array.isArray(slide?.elements) ? slide.elements.length : 0),
+      0,
+    );
+  }
+  if (patches.length > 0) compactPayload.patchCount = patches.length;
+
+  const compactArgs = payload === args ? compactPayload : { ...args, args: compactPayload };
+  const serialized = JSON.stringify(compactArgs);
+  const omittedChars = Math.max(0, JSON.stringify(args).length - serialized.length);
+  return { value: wasString ? serialized : compactArgs, omittedChars };
+}
+
+function compactHistoricalPresentationToolCalls(event) {
+  const result = { compacted: 0, omittedChars: 0 };
+  const visited = new Set();
+  for (const messages of extractMessageLists(event)) {
+    if (visited.has(messages)) continue;
+    visited.add(messages);
+    const latestUserIndex = latestUserMessageIndex(messages);
+    const latestUserText = latestUserIndex >= 0 ? extractMessageText(messages[latestUserIndex]).trim() : '';
+    const promptText = String(event?.prompt ?? '').trim();
+    const currentPromptAlreadyInMessages = Boolean(
+      latestUserText
+      && promptText
+      && (latestUserText === promptText || promptText.includes(latestUserText)),
+    );
+    const isFinalizeRevision = /Before accepting the previous final answer|UClaw artifact delivery final reply/iu.test(promptText);
+    const historyEnd = latestUserIndex < 0
+      ? messages.length
+      : (currentPromptAlreadyInMessages || isFinalizeRevision ? latestUserIndex : messages.length);
+    for (let index = 0; index < historyEnd; index += 1) {
+      const message = messages[index];
+      if (!isPlainRecord(message) || String(message.role ?? '').toLowerCase() !== 'assistant') continue;
+      const containers = [];
+      if (Array.isArray(message.content)) containers.push(...message.content.filter(isPlainRecord));
+      const topLevelCalls = Array.isArray(message.tool_calls) ? message.tool_calls : message.toolCalls;
+      if (Array.isArray(topLevelCalls)) containers.push(...topLevelCalls.filter(isPlainRecord));
+      for (const container of containers) {
+        const fn = isPlainRecord(container.function) ? container.function : container;
+        const toolName = String(fn.name ?? container.name ?? '');
+        for (const key of ['arguments', 'input']) {
+          if (!(key in fn)) continue;
+          const compacted = compactPresentationInvocationArgs(toolName, fn[key]);
+          if (compacted.omittedChars <= 0) continue;
+          fn[key] = compacted.value;
+          result.compacted += 1;
+          result.omittedChars += compacted.omittedChars;
+        }
       }
     }
   }
@@ -1564,7 +1662,13 @@ function buildArtifactEvidence(event, finalText, options = {}) {
   });
 }
 
-function extractToolResultText(result) {
+function extractToolResultText(result, depth = 0, seen = new Set()) {
+  if (depth > 4 || result === null || result === undefined) return '';
+  if (typeof result === 'string') return result;
+  if (typeof result === 'object') {
+    if (seen.has(result)) return '';
+    seen.add(result);
+  }
   const parts = [];
   appendStructuredResultText(parts, result);
   if (Array.isArray(result?.content)) {
@@ -1581,6 +1685,8 @@ function extractToolResultText(result) {
     }
   }
   parts.push(stringifyJson(result?.details));
+  if (isRecord(result?.result)) parts.push(extractToolResultText(result.result, depth + 1, seen));
+  if (isRecord(result?.meta)) parts.push(extractToolResultText(result.meta, depth + 1, seen));
   return parts.filter(Boolean).join('\n');
 }
 
@@ -2512,11 +2618,10 @@ function buildRevision(analysis) {
       idempotencyKey: REVISION_ID,
       maxAttempts: 3,
       instruction: [
-        ...(forcePresentationTool ? [PRESENTATION_FORCE_TOOL_CHOICE_MARKER] : []),
         '用户要的是真实本地产物，不要用“我会生成/我将处理/接下来我会”这类未来承诺结束。',
         '现在继续执行：优先使用可用的 create_* 文件工具或相关 skill；如果没有专用工具，就用 exec 结合 Node/Python/uv 临时构造执行路径。',
-        ...(forcePresentationTool ? ['本次补偿轮必须调用顶层 tool_call，id 固定为 openclaw:uclaw-local-artifacts:create_designed_pptx_file，并在 args 中一次性提交完整 PPT 参数。'] : []),
-        '如果当前任务是 PPT/PPTX，本次修订必须实际调用 create_designed_pptx_file；禁止再次只做工具搜索、素材搜索、读取说明或描述“即将渲染”。已有素材应直接复用，缺少素材也要在本次修订内完成准备并紧接着调用生成工具。',
+        ...(forcePresentationTool ? ['本次补偿轮优先直接调用 create_designed_pptx_file；如果质量门禁已经返回 repairToken，则调用 repair_designed_pptx_file 并只提交出错元素或页面的替换补丁。如果当前只暴露目录工具，先用 tool_describe 获取准确 schema，再通过 tool_call 执行，禁止猜测参数名。'] : []),
+        '如果当前任务是 PPT/PPTX，本次修订必须实际调用 create_designed_pptx_file 或 repair_designed_pptx_file；禁止再次只做工具搜索、素材搜索、读取说明或描述“即将渲染”。已有素材应直接复用，缺少素材也要在本次修订内完成准备并紧接着调用生成工具。',
         '生成后必须用可用工具验证文件存在，并在最终回复中返回 MEDIA:<absolute-path> 或绝对文件路径。',
         ...(lengthEffect ? [`最终文本必须读取复核，${lengthEffect.unit === 'words' ? '词数' : '字符数'}不得低于 ${lengthEffect.min ?? 1}${lengthEffect.max ? `，且不得超过 ${lengthEffect.max}` : ''}；不足时继续补写，不能只交付提纲、序章或片段。`] : []),
         '如果确实无法继续，最终回复必须说明已经尝试的路径、具体缺失能力或阻塞点。',
@@ -2998,6 +3103,13 @@ function registerArtifactGuard(api) {
           ...historySanitization,
         });
       }
+      const presentationCompaction = compactHistoricalPresentationToolCalls(event);
+      if (presentationCompaction.compacted > 0) {
+        logDiagnostic('presentation-prompt-history-compact', {
+          eventId: eventId(event, ctx),
+          ...presentationCompaction,
+        });
+      }
       const gate = await buildMediaIntentGate(event, ctx);
       const promptContext = buildPromptContextForEvent(event, gate);
       logDiagnostic('prompt-context', {
@@ -3178,5 +3290,6 @@ export const __test = {
   classifyInternalTranscriptMessage,
   sanitizeInternalTranscriptMessage,
   sanitizePromptHistoryMessages,
+  compactHistoricalPresentationToolCalls,
   PROMPT_CONTEXT,
 };

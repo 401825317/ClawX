@@ -97,6 +97,8 @@ export type MediaIntentArtifactContinuationAction =
   | 'inspect_result'
   | 'none';
 
+export type MediaIntentExecutionContract = 'designed_presentation';
+
 export type MediaIntentPlan = {
   action: MediaIntentAction;
   source: 'planner' | 'fallback';
@@ -118,6 +120,7 @@ export type MediaIntentPlan = {
   imageEditPrompt?: string;
   clarification?: string;
   artifactContinuationAction?: MediaIntentArtifactContinuationAction;
+  executionContract?: MediaIntentExecutionContract;
   artifactContext?: MediaIntentArtifactContext;
   compositeTasks?: MediaIntentCompositeTask[];
   promptPlanning?: {
@@ -223,6 +226,7 @@ function summarizePlanForLog(plan: MediaIntentPlan): Record<string, unknown> {
     imageEditPrompt: plan.imageEditPrompt ? truncateForLog(plan.imageEditPrompt) : undefined,
     clarification: plan.clarification ? truncateForLog(plan.clarification, 300) : undefined,
     artifactContinuationAction: plan.artifactContinuationAction,
+    executionContract: plan.executionContract,
     artifactContext: describeArtifactContext(plan.artifactContext),
     compositeTasks: plan.compositeTasks?.map((task) => ({
       id: task.id,
@@ -2564,11 +2568,14 @@ export async function planMediaIntent(
     !isCapabilityOrKnowledgeOnlyPrompt(prompt)
     && explicitlyRequestsCompositeTask(prompt, 'presentation')
   ) {
-    const plan = localChatPlan(
-      'local_standalone_presentation_agent_skill',
-      prompt,
-      'current_non_media_task',
-    );
+    const plan = {
+      ...localChatPlan(
+        'local_standalone_presentation_agent_skill',
+        prompt,
+        'current_non_media_task',
+      ),
+      executionContract: 'designed_presentation',
+    } satisfies MediaIntentPlan;
     logger.info('[media-intent-planner] standalone_presentation_skill', {
       durationMs: Date.now() - startedAt,
       plan: summarizePlanForLog(plan),

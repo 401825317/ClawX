@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { patchArtifactRevisionToolChoiceContent } from './openclaw-finalize-local-action-patch.mjs';
+import {
+  hasSuccessfulDesignedPresentationArtifact,
+  patchArtifactRevisionToolChoiceContent,
+} from './openclaw-finalize-local-action-patch.mjs';
 
 const fixture = `
 \t\t\tlet nextAttemptPromptOverride = null;
@@ -20,16 +23,14 @@ const fixture = `
 \t\t\tif (codeModeControlsEnabledForRun)
 `;
 
-test('forces the designed PPT tool only on marked artifact retry attempts', () => {
+test('does not force a schema-less tool on artifact retry attempts', () => {
   const once = patchArtifactRevisionToolChoiceContent(fixture);
-  assert.equal(once.changed, true);
-  assert.match(once.content, /nextAttemptToolChoiceOverride/);
-  assert.match(once.content, /beforeAgentFinalizeRevisionReason\.includes\("UClaw force artifact tool choice: create_designed_pptx_file\."\)/);
-  assert.match(once.content, /toolChoice: nextAttemptToolChoiceOverride/);
-  assert.match(once.content, /function: \{ name: "tool_call" \}/);
-  assert.match(once.content, /streamParams: attemptStreamParams/);
-  assert.match(once.content, /toolChoice: forcedToolChoice/);
-  assert.match(once.content, /let forceToolChoiceOnNextCall = true/);
+  assert.equal(once.changed, false);
+  assert.doesNotMatch(once.content, /nextAttemptToolChoiceOverride/);
+  assert.doesNotMatch(once.content, /toolChoice: forcedToolChoice/);
+  assert.doesNotMatch(once.content, /presentationExecutionContractActive/);
+  assert.doesNotMatch(once.content, /persistentPresentationToolChoice/);
+  assert.doesNotMatch(once.content, /hasSuccessfulPresentationArtifact/);
 
   const twice = patchArtifactRevisionToolChoiceContent(once.content);
   assert.equal(twice.changed, false);
@@ -41,13 +42,41 @@ test('leaves unrelated runtime bundles unchanged', () => {
   assert.equal(result.changed, false);
 });
 
-test('upgrades the legacy hidden-tool pin to the visible directory executor', () => {
-  const current = patchArtifactRevisionToolChoiceContent(fixture).content;
-  const legacy = current.replace(
-    'function: { name: "tool_call" }',
-    'function: { name: "create_designed_pptx_file" }',
-  );
-  const upgraded = patchArtifactRevisionToolChoiceContent(legacy);
-  assert.equal(upgraded.changed, true);
-  assert.match(upgraded.content, /function: \{ name: "tool_call" \}/);
+test('only a passed designed or repaired PPT after the latest user releases the tool requirement', () => {
+  const passed = (toolId) => ({
+    role: 'toolResult',
+    content: JSON.stringify({
+      tool: { id: toolId },
+      result: {
+        ok: true,
+        kind: 'presentation',
+        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        verification: { status: 'passed' },
+      },
+    }),
+  });
+  assert.equal(hasSuccessfulDesignedPresentationArtifact([
+    { role: 'user', content: 'make a PPT' },
+    passed('openclaw:uclaw-local-artifacts:create_pptx_file'),
+  ]), false);
+  assert.equal(hasSuccessfulDesignedPresentationArtifact([
+    { role: 'user', content: 'make a PPT' },
+    {
+      role: 'toolResult',
+      content: JSON.stringify({
+        tool: { id: 'openclaw:uclaw-local-artifacts:create_designed_pptx_file' },
+        result: { ok: false, verification: { status: 'blocked' } },
+      }),
+    },
+    passed('openclaw:uclaw-local-artifacts:create_pptx_file'),
+  ]), false);
+  assert.equal(hasSuccessfulDesignedPresentationArtifact([
+    passed('openclaw:uclaw-local-artifacts:create_designed_pptx_file'),
+    { role: 'user', content: 'make another PPT' },
+    { role: 'toolResult', content: '{"ok":false,"verification":{"status":"blocked"}}' },
+  ]), false);
+  assert.equal(hasSuccessfulDesignedPresentationArtifact([
+    { role: 'user', content: 'make a PPT' },
+    passed('openclaw:uclaw-local-artifacts:repair_designed_pptx_file'),
+  ]), true);
 });

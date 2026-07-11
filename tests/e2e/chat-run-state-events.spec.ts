@@ -1,4 +1,5 @@
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import type { ElectronApplication } from '@playwright/test';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 
@@ -9,6 +10,59 @@ function stableStringify(value: unknown): string {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`);
   return `{${entries.join(',')}}`;
+}
+
+async function installHistoryMocks(app: ElectronApplication, history: unknown[]): Promise<void> {
+  await installIpcMocks(app, {
+    gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+    gatewayRpc: {
+      [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
+        success: true,
+        result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
+      },
+      [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+        success: true,
+        result: { messages: history },
+      },
+    },
+    hostApi: {
+      [stableStringify(['/api/gateway/status', 'GET'])]: {
+        ok: true,
+        data: {
+          status: 200,
+          ok: true,
+          json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+        },
+      },
+      [stableStringify(['/api/chat/sessions', 'GET'])]: {
+        ok: true,
+        data: {
+          status: 200,
+          ok: true,
+          json: {
+            success: true,
+            result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
+          },
+        },
+      },
+      [stableStringify(['/api/chat/history', 'POST'])]: {
+        ok: true,
+        data: {
+          status: 200,
+          ok: true,
+          json: { success: true, result: { messages: history } },
+        },
+      },
+      [stableStringify(['/api/agents', 'GET'])]: {
+        ok: true,
+        data: {
+          status: 200,
+          ok: true,
+          json: { success: true, agents: [{ id: 'main', name: 'Main' }] },
+        },
+      },
+    },
+  });
 }
 
 test.describe('ClawX chat run state events', () => {
@@ -268,6 +322,90 @@ test.describe('ClawX chat run state events', () => {
       await expect(page.getByText('我先查看相关内容。')).toBeVisible();
       await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
       await expect(page.getByText('我现在可以生成文档、表格和演示文稿。')).toBeVisible();
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('shows a verified artifact after an earlier tool attempt failed', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const historyTimestamp = Math.floor(Date.now() / 1000);
+    const history = [
+      {
+        id: 'user-ppt-retry',
+        role: 'user',
+        content: [{ type: 'text', text: '帮我做一个主题 PPT' }],
+        timestamp: historyTimestamp,
+      },
+      {
+        id: 'assistant-ppt-attempt-1',
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'ppt-attempt-1',
+          name: 'create_designed_pptx_file',
+          arguments: { title: '深海探索' },
+        }],
+        timestamp: historyTimestamp + 1,
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'ppt-attempt-1',
+        toolName: 'create_designed_pptx_file',
+        content: [{ type: 'text', text: 'slide 2 text elements overlap' }],
+        details: { status: 'error', error: 'slide 2 text elements overlap' },
+        isError: true,
+        timestamp: historyTimestamp + 2,
+      },
+      {
+        id: 'assistant-ppt-attempt-2',
+        role: 'assistant',
+        content: [{
+          type: 'toolCall',
+          id: 'ppt-attempt-2',
+          name: 'repair_designed_pptx_file',
+          arguments: { repairToken: 'repair-token', baseRevision: 0, patches: [] },
+        }],
+        timestamp: historyTimestamp + 3,
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'ppt-attempt-2',
+        toolName: 'repair_designed_pptx_file',
+        content: [{ type: 'text', text: 'PPT created successfully' }],
+        details: { status: 'completed', filePath: '/tmp/深海探索.pptx' },
+        isError: false,
+        timestamp: historyTimestamp + 4,
+      },
+      {
+        id: 'assistant-ppt-final',
+        role: 'assistant',
+        content: [{ type: 'text', text: '已经做好，共 8 页并通过版式与内容质检。' }],
+        _attachedFiles: [{
+          fileName: '深海探索.pptx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          fileSize: 11_595_364,
+          preview: null,
+          filePath: '/tmp/深海探索.pptx',
+          source: 'tool-result',
+        }],
+        timestamp: historyTimestamp + 5,
+      },
+    ];
+
+    try {
+      await installHistoryMocks(app, history);
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      await expect(page.getByText('已经做好，共 8 页并通过版式与内容质检。')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('深海探索.pptx')).toBeVisible();
+      await expect(page.getByText(/任务需要补充处理/)).toHaveCount(0);
+      await expect(page.getByText(/任务执行失败/)).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
