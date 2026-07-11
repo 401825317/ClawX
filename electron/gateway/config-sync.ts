@@ -35,7 +35,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
+import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureUClawDesktopControlPluginInstalled, ensureUClawBlenderPluginInstalled, ensureUClawTaskBridgePluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -104,6 +104,24 @@ function ensureCoreUClawPluginsInstalled(): boolean {
     logger.warn(`[plugin] UClaw Local Artifacts: ${localArtifactsResult.warning}`);
   }
   installed = localArtifactsResult.installed || installed;
+
+  const desktopControlResult = ensureUClawDesktopControlPluginInstalled();
+  if (desktopControlResult.warning) {
+    logger.warn(`[plugin] UClaw Desktop Control: ${desktopControlResult.warning}`);
+  }
+  installed = desktopControlResult.installed || installed;
+
+  const blenderResult = ensureUClawBlenderPluginInstalled();
+  if (blenderResult.warning) {
+    logger.warn(`[plugin] UClaw Blender: ${blenderResult.warning}`);
+  }
+  installed = blenderResult.installed || installed;
+
+  const taskBridgeResult = ensureUClawTaskBridgePluginInstalled();
+  if (taskBridgeResult.warning) {
+    logger.warn(`[plugin] UClaw Task Bridge: ${taskBridgeResult.warning}`);
+  }
+  installed = taskBridgeResult.installed || installed;
 
   return installed;
 }

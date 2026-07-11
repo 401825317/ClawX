@@ -15,6 +15,12 @@ export type ChatRuntimeEventBase = {
   producer?: ChatRuntimeEventProducer;
   runId: string;
   sessionKey?: string;
+  /** Stable OpenClaw background-task identity when this event belongs to a detached task. */
+  taskId?: string;
+  /** Optional parent task for native task-flow and subagent projections. */
+  parentTaskId?: string;
+  /** Native task lifecycle state when OpenClaw emits a detached-task projection. */
+  taskStatus?: 'pending' | 'running' | 'completed' | 'error' | 'waiting_approval' | 'partial' | string;
   seq?: number;
   ts?: number;
 };
@@ -30,6 +36,8 @@ export type ChatRuntimePlanStep = {
   kind?: string;
   order?: number;
   parentId?: string;
+  taskId?: string;
+  toolCallId?: string;
   requiresArtifact?: boolean;
   requiredArtifact?: boolean;
   artifactRequired?: boolean;
@@ -45,6 +53,7 @@ export type ChatRuntimeArtifact = {
   mimeType?: string;
   sizeBytes?: number;
   stepId?: string;
+  taskId?: string;
   sourceToolCallId?: string;
   source?: string;
 };
@@ -89,6 +98,7 @@ export type ChatRuntimeVerification = {
   detail?: string;
   targetId?: string;
   artifactId?: string;
+  taskId?: string;
   evidence?: string;
   source?: string;
 };
@@ -97,6 +107,8 @@ export type ChatRuntimeCheckpoint = {
   id: string;
   summary: string;
   reason?: string;
+  taskId?: string;
+  kind?: 'approval' | 'partial' | 'recovery' | string;
   recoverable?: boolean;
   issues?: ChatRuntimeGateIssue[];
 };
@@ -134,6 +146,7 @@ export type ChatRuntimeProgressEntry = {
   dedupeKey?: string;
   toolCallId?: string;
   stepId?: string;
+  taskId?: string;
   source?: 'native' | 'derived' | 'history' | string;
 };
 

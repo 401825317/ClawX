@@ -57,6 +57,14 @@
         "edited": "内容を更新しました",
         "ran": "ツールを実行しました"
     },
+    "desktopApproval": {
+        "title": "デスクトップ操作を許可",
+        "description": "この操作はローカルアプリですぐに実行されます。対象アプリと意図が正しい場合にのみ許可してください。",
+        "privacy": "プライバシー保護のため、入力または変更される具体的な内容はこの確認画面に表示されません。",
+        "approve": "実行を許可",
+        "deny": "拒否",
+        "actions": { "click": "クリック", "drag": "ドラッグ", "scroll": "スクロール", "press_key": "キーを押す", "type_text": "テキストを入力", "set_value": "フィールド値を設定", "select_text": "テキストを選択", "perform_secondary_action": "補助操作を実行" }
+    },
     "runtimeDelivery": {
         "compositeStart": "この依頼を複数のタスクに分け、独立した作業は並列で、依存関係のある作業は順番に進めます。",
         "taskRunning": "{{task}}を処理中",
@@ -95,6 +103,12 @@
         }
     },
     "filePreview": {
+        "model3d": {
+            "loading": "3Dモデルを読み込んでいます...",
+            "externalOnly": "この形式は外部の3Dアプリケーションで開く必要があります。",
+            "loadFailed": "3Dモデルを読み込めませんでした: {{error}}",
+            "reset": "カメラをリセット"
+        },
         "tabs": {
             "source": "ソース",
             "preview": "プレビュー",

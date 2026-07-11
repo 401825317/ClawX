@@ -160,9 +160,10 @@ function scheduleManagedAuthBackgroundVerify(refreshStatus: () => Promise<unknow
 function ensureManagedAuthReadyForSend(): Promise<void> | null {
   const store = useManagedAuthStore.getState();
   const providerState = useProviderStore.getState();
+  const providerAccounts = Array.isArray(providerState.accounts) ? providerState.accounts : [];
   const shouldEnforce = store.status?.managed === true
     || providerState.defaultAccountId === 'lingzhiwuxian'
-    || providerState.accounts.some((account) => account.id === 'lingzhiwuxian');
+    || providerAccounts.some((account) => account.id === 'lingzhiwuxian');
   if (!shouldEnforce) {
     return null;
   }
@@ -193,19 +194,6 @@ function ensureManagedAuthReadyForSend(): Promise<void> | null {
   })();
 }
 
-type DesktopScreenshotResponse = {
-  success?: boolean;
-  screenshot?: {
-    fileName: string;
-    filePath: string;
-    mimeType: string;
-    fileSize: number;
-    preview: string | null;
-    sourceName?: string;
-  };
-  error?: string;
-};
-
 type PendingImageInput = {
   fileName: string;
   mimeType: string;
@@ -214,77 +202,22 @@ type PendingImageInput = {
   preview: string | null;
 };
 
-type MediaIntentAction =
-  | 'chat'
-  | 'vision_chat'
-  | 'image_generate'
-  | 'image_edit'
-  | 'video_generate'
-  | 'desktop_screenshot'
-  | 'clarify';
-
-type MediaIntentImageRef = {
-  fileName?: string;
-  mimeType?: string;
-  filePath: string;
-};
-
 type MediaIntentCompositeTaskKind = CompositeRunTaskKind;
 type MediaIntentCompositeTask = CompositeRunTaskInput;
 
-type MediaIntentRecentMessage = {
-  role: RawMessage['role'];
-  text?: string;
-  images?: MediaIntentImageRef[];
-};
-
-type MediaIntentArtifactRef = {
-  id?: string;
-  kind?: string;
-  title?: string;
-  filePath?: string;
-  url?: string;
-  mimeType?: string;
-  sizeBytes?: number;
-  verificationStatus?: 'passed' | 'failed' | 'blocked' | 'skipped';
-};
-
-type MediaIntentArtifactContext = {
-  runId?: string;
-  kind?: MediaIntentCompositeTaskKind;
-  status?: 'planned' | 'queued' | 'running' | 'finalizing' | 'completed' | 'partial' | 'blocked' | 'failed' | 'error' | 'cancelled' | 'aborted';
-  objective?: string;
-  deliveryStatus?: 'pending' | 'writing' | 'succeeded' | 'failed' | 'skipped' | 'missing';
-  artifactRefs?: Array<MediaIntentArtifactRef | string>;
-};
-
-type MediaIntentPlan = {
-  action?: MediaIntentAction;
-  source?: 'planner' | 'fallback';
-  confidence?: number;
-  reason?: string;
-  selectedImageSource?: 'explicit' | 'candidate' | 'none';
-  selectedImageIndex?: number;
-  sourceImages?: MediaIntentImageRef[];
-  prompt?: string;
-  imageSize?: string;
-  imageQuality?: 'low' | 'medium' | 'high';
-  requestedImageCount?: number;
-  videoMode?: 'text_to_video' | 'image_to_video' | 'edit_image_then_video';
-  videoSize?: string;
-  videoDurationSeconds?: number;
-  videoPrompt?: string;
-  imageEditPrompt?: string;
-  clarification?: string;
-  compositeTasks?: MediaIntentCompositeTask[];
-  artifactContinuationAction?: 'retry_delivery' | 'resume_task' | 'inspect_result' | 'none';
-  executionContract?: 'designed_presentation';
-};
-
-type MediaIntentPlanResponse = {
-  success?: boolean;
-  plan?: MediaIntentPlan;
-  error?: string;
+type GatewayTurnPreferences = {
+  mode: ChatSendMode;
+  image?: {
+    model?: string;
+    size?: string;
+    quality?: 'low' | 'medium' | 'high';
+  };
+  video?: ChatVideoSendOptions;
+  selectedArtifacts?: Array<{
+    filePath: string;
+    mimeType: string;
+    title: string;
+  }>;
 };
 
 function isImageAttachmentFile(
@@ -373,199 +306,21 @@ async function loadFamilyImageReferenceInputs(
   }
 }
 
-function pendingImageToIntentRef(file: PendingImageInput): MediaIntentImageRef {
-  return {
-    fileName: file.fileName,
-    mimeType: file.mimeType,
-    filePath: file.stagedPath,
-  };
-}
-
-function attachedImageToIntentRef(file: AttachedFileMeta): MediaIntentImageRef | null {
-  if (!file.filePath || !file.mimeType.startsWith('image/')) return null;
-  return {
-    fileName: file.fileName,
-    mimeType: file.mimeType,
-    filePath: file.filePath,
-  };
-}
-
-function buildRecentMessagesForMediaPlanner(messages: RawMessage[]): MediaIntentRecentMessage[] {
-  return messages.slice(-8).map((message) => {
-    const images = (message._attachedFiles ?? [])
-      .map(attachedImageToIntentRef)
-      .filter((image): image is MediaIntentImageRef => image !== null);
-    return {
-      role: message.role,
-      text: getMessageText(message.content).trim().slice(0, 600),
-      ...(images.length > 0 ? { images } : {}),
-    };
-  });
-}
-
-function mediaIntentArtifactKind(kind: string | undefined): MediaIntentCompositeTaskKind | undefined {
-  if (kind === 'presentation' || kind === 'spreadsheet' || kind === 'video_generate'
-    || kind === 'image_generate' || kind === 'image_edit' || kind === 'mini_program'
-    || kind === 'copywriting') return kind;
-  if (kind === 'document' || kind === 'pdf') return 'copywriting';
-  if (kind === 'webpage' || kind === 'code' || kind === 'archive') return 'mini_program';
-  if (kind === 'video') return 'video_generate';
-  if (kind === 'image') return 'image_generate';
-  return undefined;
-}
-
-function verificationStatusForArtifact(
-  verifications: CompositeRunRecord['verifications'],
-  artifactId: string,
-): MediaIntentArtifactRef['verificationStatus'] {
-  const verification = [...verifications].reverse().find((item) => item.artifactId === artifactId);
-  if (!verification) return undefined;
-  return verification.status === 'passed' || verification.status === 'failed'
-    || verification.status === 'blocked' || verification.status === 'skipped'
-    ? verification.status
-    : undefined;
-}
-
-function compositeRunArtifactContext(run: CompositeRunRecord): MediaIntentArtifactContext {
-  const taskKinds = [...new Set(run.tasks.map((task) => task.kind))];
-  return {
-    runId: run.runId,
-    ...(taskKinds.length === 1 ? { kind: taskKinds[0] } : {}),
-    status: run.status,
-    objective: run.prompt,
-    deliveryStatus: run.delivery.status,
-    artifactRefs: run.artifacts.map((artifact) => ({
-      id: artifact.id,
-      kind: artifact.kind,
-      title: artifact.title,
-      filePath: artifact.filePath,
-      url: artifact.url,
-      mimeType: artifact.mimeType,
-      sizeBytes: artifact.sizeBytes,
-      verificationStatus: verificationStatusForArtifact(run.verifications, artifact.id),
-    })),
-  };
-}
-
-function fallbackRuntimeArtifactContext(
-  sessionKey: string,
-  runtimeRuns: ChatState['runtimeRuns'],
-  messages: RawMessage[],
-): MediaIntentArtifactContext | undefined {
-  const manifestByRunId = new Map(
-    messages
-      .map((message) => message.compositeArtifactManifest)
-      .filter((manifest): manifest is NonNullable<RawMessage['compositeArtifactManifest']> => Boolean(manifest?.runId))
-      .map((manifest) => [manifest.runId, manifest]),
-  );
-  const candidates = Object.values(runtimeRuns)
-    .filter((run) => run.sessionKey === sessionKey)
-    .filter((run) => (
-      (run.artifacts?.length ?? 0) > 0
-      || (run.planSteps ?? []).some((step) => step.requiresArtifact)
-      || (run.checkpoints ?? []).some((checkpoint) => checkpoint.recoverable)
-    ))
-    .sort((left, right) => (
-      (right.lastEventAt ?? right.endedAt ?? right.startedAt ?? 0)
-      - (left.lastEventAt ?? left.endedAt ?? left.startedAt ?? 0)
-    ));
-  const run = candidates[0];
-  if (!run) return undefined;
-
-  const manifest = manifestByRunId.get(run.runId);
-  const manifestKinds = [...new Set((manifest?.tasks ?? [])
-    .map((task) => mediaIntentArtifactKind(task.kind))
-    .filter((kind): kind is MediaIntentCompositeTaskKind => Boolean(kind)))];
-  const artifactKinds = [...new Set((run.artifacts ?? [])
-    .map((artifact) => mediaIntentArtifactKind(artifact.kind))
-    .filter((kind): kind is MediaIntentCompositeTaskKind => Boolean(kind)))];
-  const kinds = manifestKinds.length > 0 ? manifestKinds : artifactKinds;
-  const deliveryFailed = (run.checkpoints ?? []).some((checkpoint) => (
-    /delivery|交付|会话/u.test(`${checkpoint.id} ${checkpoint.summary} ${checkpoint.reason ?? ''}`)
-    && checkpoint.recoverable
-  ));
-  const compositeOwned = run.events.some((event) => event.producer === 'composite-coordinator');
-  const deliveryStatus: MediaIntentArtifactContext['deliveryStatus'] = manifest
-    ? 'succeeded'
-    : deliveryFailed
-      ? 'failed'
-      : run.status === 'running'
-        ? 'pending'
-        : run.status === 'aborted'
-          ? 'skipped'
-          : run.status === 'completed' && !compositeOwned
-            ? 'succeeded'
-            : 'missing';
-  return {
-    runId: run.runId,
-    ...(kinds.length === 1 ? { kind: kinds[0] } : {}),
-    status: run.status,
-    objective: run.objective,
-    deliveryStatus,
-    artifactRefs: (run.artifacts ?? []).map((artifact) => {
-      const verification = [...(run.verifications ?? [])].reverse().find((item) => item.artifactId === artifact.id);
-      return {
-        id: artifact.id,
-        kind: artifact.kind,
-        title: artifact.title,
-        filePath: artifact.filePath,
-        url: artifact.url,
-        mimeType: artifact.mimeType,
-        sizeBytes: artifact.sizeBytes,
-        verificationStatus: verification?.status === 'passed' || verification?.status === 'failed'
-          || verification?.status === 'blocked' || verification?.status === 'skipped'
-          ? verification.status
-          : undefined,
-      };
-    }),
-  };
-}
-
-async function resolveMediaIntentArtifactContext(params: {
-  sessionKey: string;
-  runtimeRuns: ChatState['runtimeRuns'];
-  messages: RawMessage[];
-}): Promise<MediaIntentArtifactContext | undefined> {
-  const fallback = fallbackRuntimeArtifactContext(params.sessionKey, params.runtimeRuns, params.messages);
-  const fallbackRun = fallback?.runId ? params.runtimeRuns[fallback.runId] : undefined;
-  const fallbackUpdatedAt = fallbackRun?.lastEventAt ?? fallbackRun?.endedAt ?? fallbackRun?.startedAt ?? 0;
-  try {
-    const response = await hostApiFetch<CompositeRunApiResponse>(
-      `/api/composite-runs?sessionKey=${encodeURIComponent(params.sessionKey)}`,
-    );
-    const latest = (response.runs ?? [])
-      .filter((run) => run.tasks.length > 0)
-      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
-    if (latest && (latest.runId === fallback?.runId || latest.updatedAt >= fallbackUpdatedAt)) {
-      return compositeRunArtifactContext(latest);
+function mergeGatewayImageReferences(
+  explicitAttachments: ChatSendAttachment[] | undefined,
+  references: PendingImageInput[],
+): ChatSendAttachment[] {
+  const byPath = new Map<string, ChatSendAttachment>();
+  for (const attachment of explicitAttachments ?? []) {
+    if (attachment.stagedPath.trim()) {
+      byPath.set(attachment.stagedPath, attachment);
     }
-  } catch (error) {
-    console.warn('[media-intent] failed to load structured artifact context:', error);
   }
-  return fallback;
-}
-
-function planSourceImageInputs(plan: MediaIntentPlan): PendingImageInput[] {
-  return (plan.sourceImages ?? [])
-    .filter((image) => typeof image.filePath === 'string' && image.filePath.trim())
-    .map((image) => ({
-      fileName: image.fileName || image.filePath.split(/[\\/]/).pop() || 'image',
-      mimeType: image.mimeType || 'image/png',
-      fileSize: 0,
-      stagedPath: image.filePath,
-      preview: null,
-    }));
-}
-
-function mediaPlanToMode(plan: MediaIntentPlan): ChatSendMode {
-  if ((plan.compositeTasks?.length ?? 0) > 0) return 'chat';
-  if (plan.action === 'image_generate' || plan.action === 'image_edit') return 'image';
-  if (plan.action === 'video_generate') return 'video';
-  return 'chat';
-}
-
-function hasCompositeTasks(plan: MediaIntentPlan): plan is MediaIntentPlan & { compositeTasks: MediaIntentCompositeTask[] } {
-  return (plan.compositeTasks?.length ?? 0) > 0;
+  for (const reference of references) {
+    if (!reference.stagedPath.trim() || byPath.has(reference.stagedPath)) continue;
+    byPath.set(reference.stagedPath, reference);
+  }
+  return [...byPath.values()];
 }
 
 function sanitizeCompositeTaskId(value: string, index: number): string {
@@ -605,42 +360,6 @@ function describeCompositeTaskImages(task: MediaIntentCompositeTask): string {
     const name = image.fileName?.trim() || `image-${index + 1}`;
     return `${name} (${image.filePath})`;
   }).join('；')}`;
-}
-
-function describeCompositeTaskDependency(task: MediaIntentCompositeTask): string | null {
-  const dependencies = (task.dependsOn ?? []).filter(Boolean);
-  if (dependencies.length === 0 && !task.fallback) return null;
-  return [
-    dependencies.length > 0 ? `依赖：${dependencies.join('、')}` : null,
-    task.fallback ? `兜底：${task.fallback}` : null,
-  ].filter((item): item is string => Boolean(item)).join('；');
-}
-
-function buildCompositeChatContractMessage(originalPrompt: string, tasks: MediaIntentCompositeTask[]): string {
-  const taskLines = tasks.map((task, index) => [
-    `${index + 1}. [${compositeTaskKindLabel(task.kind)}] ${task.title || `子任务 ${index + 1}`}`,
-    `   - 执行要求：${task.prompt}`,
-    task.requiresArtifact === false
-      ? '   - 产物要求：该子任务可以只落地为最终回复中的结构化结果。'
-      : '   - 产物要求：必须为这个子任务生成一个可见、可追踪的产物，并在回复或运行事件中给出产物路径/链接/卡片。',
-    `   - ${describeCompositeTaskImages(task)}`,
-    describeCompositeTaskDependency(task) ? `   - ${describeCompositeTaskDependency(task)}` : '',
-  ].join('\n')).join('\n');
-
-  return [
-    originalPrompt,
-    '',
-    '【UClaw composite execution contract】',
-    '这是一个组合任务，请按下面合同执行：',
-    '- 自动确定一个简洁主题/标题，不要反问用户主题。',
-    '- 按子任务顺序推进；不要询问用户先做哪个，也不要把选择权交回给用户。',
-    '- 每个子任务都必须产生自己的可交付产物；不能只给说明或计划。',
-    '- 如果图片编辑子任务没有显式输入图，可以使用本轮前序子任务刚生成的图片；如果仍无可用图片，明确标记该子任务为待补输入，并继续执行其他不依赖该输入的子任务。',
-    '- 最终回复必须包含产物清单、每项验证结果、完成项与待补输入项；不能用“我一次只能执行一种类型”来结束。',
-    '',
-    '子任务清单：',
-    taskLines,
-  ].join('\n');
 }
 
 function dimensionArea(value: string): number {
@@ -769,8 +488,7 @@ function resolveDefaultChatVideoOptions(hasSourceImage = false): ChatVideoSendOp
   };
 }
 
-function resolveChatImageOptions(prompt: string, plan: MediaIntentPlan, overrides?: ChatImageSendOptions): ChatImageSendOptions {
-  void plan;
+function resolveChatImageOptions(prompt: string, overrides?: ChatImageSendOptions): ChatImageSendOptions {
   const base = { ...resolveDefaultChatImageOptions(), ...overrides };
   const options = useClientConfigStore.getState().modelOptions.image;
   const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
@@ -786,31 +504,11 @@ function resolveChatImageOptions(prompt: string, plan: MediaIntentPlan, override
   };
 }
 
-function resolveRequestedImageCount(plan: MediaIntentPlan): number {
-  const count = typeof plan.requestedImageCount === 'number' && Number.isFinite(plan.requestedImageCount)
-    ? Math.floor(plan.requestedImageCount)
-    : 1;
-  return Math.max(1, Math.min(MAX_IMAGE_GENERATION_BATCH_COUNT, count));
-}
-
-function buildImageBatchPrompt(prompt: string, batchIndex: number, batchTotal: number): string {
-  const trimmed = prompt.trim();
-  if (batchTotal <= 1) return trimmed;
-  return [
-    `用户要求生成 ${batchTotal} 张图片。请完成第 ${batchIndex}/${batchTotal} 张。`,
-    '本次只生成 1 张独立图片，不要拼图、网格或把多张图合在一张里；同一批次内构图和细节要有自然差异。',
-    '',
-    `原始要求：${trimmed}`,
-  ].join('\n');
-}
-
 function resolveChatVideoOptions(
   prompt: string,
-  plan: MediaIntentPlan,
   hasSourceImage: boolean,
   overrides?: ChatVideoSendOptions,
 ): ChatVideoSendOptions {
-  void plan;
   const base = { ...resolveDefaultChatVideoOptions(hasSourceImage), ...overrides };
   const options = useClientConfigStore.getState().modelOptions.video;
   const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
@@ -826,32 +524,43 @@ function resolveChatVideoOptions(
   };
 }
 
-async function planMediaIntentForSend(params: {
+function buildGatewayTurnPreferences(params: {
+  mode: ChatSendMode;
   prompt: string;
-  requestedMode: ChatSendMode;
-  explicitImages: PendingImageInput[];
-  candidateImages: PendingImageInput[];
-  recentMessages: RawMessage[];
-  artifactContext?: MediaIntentArtifactContext;
-}): Promise<MediaIntentPlan> {
-  const response = await hostApiFetch<MediaIntentPlanResponse>(
-    '/api/media/intent-plan',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        prompt: params.prompt,
-        requestedMode: params.requestedMode,
-        explicitImages: params.explicitImages.map(pendingImageToIntentRef),
-        candidateImages: params.candidateImages.map(pendingImageToIntentRef),
-        recentMessages: buildRecentMessagesForMediaPlanner(params.recentMessages),
-        artifactContext: params.artifactContext,
-      }),
-    },
-  );
-  if (response.success === false) {
-    throw new Error(response.error || 'Media intent planner failed');
+  hasSourceImage: boolean;
+  imageOptions?: ChatImageSendOptions;
+  videoOptions?: ChatVideoSendOptions;
+  selectedArtifacts?: PendingImageInput[];
+}): GatewayTurnPreferences {
+  const selectedArtifacts = (params.selectedArtifacts ?? []).map((artifact) => ({
+    filePath: artifact.stagedPath,
+    mimeType: artifact.mimeType,
+    title: artifact.fileName,
+  }));
+  if (params.mode === 'image') {
+    const image = resolveChatImageOptions(params.prompt, params.imageOptions);
+    return {
+      mode: 'image',
+      image: {
+        model: image.model,
+        size: image.size,
+        quality: image.quality === 'low' || image.quality === 'medium' || image.quality === 'high'
+          ? image.quality
+          : undefined,
+      },
+      ...(selectedArtifacts.length > 0 ? { selectedArtifacts } : {}),
+    };
   }
-  return response.plan?.action ? response.plan : { action: 'chat', source: 'fallback', reason: 'planner_response_missing_plan' };
+  if (params.mode === 'video') {
+    return {
+      mode: 'video',
+      video: resolveChatVideoOptions(params.prompt, params.hasSourceImage, params.videoOptions),
+      ...(selectedArtifacts.length > 0 ? { selectedArtifacts } : {}),
+    };
+  }
+  return selectedArtifacts.length > 0
+    ? { mode: 'chat', selectedArtifacts }
+    : { mode: 'chat' };
 }
 
 function historicalRunIdFromKey(sessionKey: string, key: string | number): string {
@@ -864,10 +573,6 @@ function historicalTimestampKeys(timestamp: number | undefined): Array<string | 
   const timestampMs = toMs(timestamp);
   if (timestampMs !== timestamp) keys.push(timestampMs);
   return keys;
-}
-
-function buildTimestampHistoricalRunId(sessionKey: string, timestampMs: number): string {
-  return historicalRunIdFromKey(sessionKey, Math.floor(timestampMs));
 }
 
 function buildHistoricalRunIds(sessionKey: string, triggerMessage: RawMessage, index: number): string[] {
@@ -1880,14 +1585,6 @@ type MediaGenerationJobSnapshot = {
   outputs?: Array<Record<string, unknown>>;
   result?: unknown;
 };
-type MediaGenerationSendResponse = {
-  success: boolean;
-  error?: string;
-  jobId?: string;
-  job?: MediaGenerationJobSnapshot;
-};
-
-const MAX_IMAGE_GENERATION_BATCH_COUNT = 10;
 const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
 const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
 const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
@@ -1907,12 +1604,6 @@ function isLocalRunCancelledError(error: unknown): error is LocalRunCancelledErr
 
 function activeSendGenerationMatches(sessionKey: string, sendGeneration: number): boolean {
   return _activeSendGenerationBySession.get(sessionKey) === sendGeneration;
-}
-
-function assertActiveSendGeneration(sessionKey: string, sendGeneration: number): void {
-  if (!activeSendGenerationMatches(sessionKey, sendGeneration)) {
-    throw new LocalRunCancelledError();
-  }
 }
 
 async function cancelMediaGenerationJobs(params: { jobId?: string; sessionKey?: string; runId?: string }): Promise<void> {
@@ -2255,139 +1946,6 @@ function settleCompositeRunLifecycle(
       markSessionNeedsTerminalHistoryRefresh(run.sessionKey);
     }
   }
-}
-
-async function startCompositeRunInMain(params: {
-  set: ChatSet;
-  get: ChatGet;
-  sessionKey: string;
-  prompt: string;
-  cwd?: string;
-  nowMs: number;
-  tasks: MediaIntentCompositeTask[];
-  imageOptions?: ChatImageSendOptions;
-  videoOptions?: ChatVideoSendOptions;
-  sendGeneration: number;
-  clientRequestId: string;
-}): Promise<void> {
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  const response = await hostApiFetch<CompositeRunApiResponse>('/api/composite-runs', {
-    method: 'POST',
-    body: JSON.stringify({
-      clientRequestId: params.clientRequestId,
-      sessionKey: params.sessionKey,
-      prompt: params.prompt,
-      ...(params.cwd ? { cwd: params.cwd } : {}),
-      requestedMode: 'chat',
-      userMessageTimestampMs: params.nowMs,
-      tasks: params.tasks,
-      imageOptions: params.imageOptions,
-      videoOptions: params.videoOptions,
-    }),
-  });
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  if (!response.success || !response.run) {
-    throw new Error(response.error || 'Failed to start composite run');
-  }
-  const run = response.run;
-  applyCompositeRunSnapshot(params.set, params.get, run);
-  commitSessionRunState(params.set, params.get, params.sessionKey, {
-    sending: true,
-    activeRunId: run.runId,
-    pendingFinal: true,
-  });
-  const completed = await waitForCompositeRun({
-    set: params.set,
-    get: params.get,
-    runId: run.runId,
-    sessionKey: params.sessionKey,
-    isCancelled: () => !activeSendGenerationMatches(params.sessionKey, params.sendGeneration),
-  });
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  settleCompositeRunLifecycle(params.set, params.get, completed);
-}
-
-async function retryCompositeDeliveryInMain(params: {
-  set: ChatSet;
-  get: ChatGet;
-  runId: string;
-  sessionKey: string;
-  sendGeneration: number;
-}): Promise<boolean> {
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  const response = await hostApiFetch<CompositeRunApiResponse>(
-    `/api/composite-runs/${encodeURIComponent(params.runId)}/retry`,
-    { method: 'POST', body: '{}' },
-  );
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  if (response.outcome !== 'retry_started' || !response.run) return false;
-
-  applyCompositeRunSnapshot(params.set, params.get, response.run);
-  commitSessionRunState(params.set, params.get, params.sessionKey, {
-    sending: true,
-    activeRunId: params.runId,
-    pendingFinal: true,
-  });
-  const completed = await waitForCompositeRun({
-    set: params.set,
-    get: params.get,
-    runId: params.runId,
-    sessionKey: params.sessionKey,
-    isCancelled: () => !activeSendGenerationMatches(params.sessionKey, params.sendGeneration),
-  });
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  settleCompositeRunLifecycle(params.set, params.get, completed);
-  return true;
-}
-
-async function inspectCompositeRunResultInMain(params: {
-  set: ChatSet;
-  get: ChatGet;
-  runId: string;
-  sessionKey: string;
-  sendGeneration: number;
-}): Promise<boolean> {
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  const response = await hostApiFetch<CompositeRunApiResponse>(
-    `/api/composite-runs/${encodeURIComponent(params.runId)}`,
-  );
-  assertActiveSendGeneration(params.sessionKey, params.sendGeneration);
-  if (!response.success || !response.run || response.run.sessionKey !== params.sessionKey) return false;
-
-  const run = response.run;
-  const attachedFiles = compositeRunAttachedFiles(run);
-  if (run.delivery.status !== 'succeeded' || attachedFiles.length === 0) return false;
-
-  params.set((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, run.runtimeEvents ?? []),
-  }));
-  appendLocalMessageForSession(params.set, params.get, params.sessionKey, {
-    role: 'assistant',
-    content: compositeRunDeliveryMessage(run),
-    timestamp: Date.now() / 1000,
-    id: `composite-inspect:${run.runId}:${crypto.randomUUID()}`,
-    localArtifactResultKind: 'composite',
-    ...(run.manifest ? { compositeArtifactManifest: run.manifest } : {}),
-    _attachedFiles: attachedFiles,
-  });
-  commitSessionRunState(params.set, params.get, params.sessionKey, {
-    sending: false,
-    pendingImageGenerationLocal: false,
-    pendingVideoGenerationLocal: false,
-    activeRunId: null,
-    streamingText: '',
-    streamingMessage: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-  });
-  if (params.get().currentSessionKey === params.sessionKey) {
-    params.set({ runError: null });
-  }
-  markSessionRunIdle(params.sessionKey);
-  clearPendingRuntimeIntent(params.sessionKey);
-  return true;
 }
 
 async function resumeCompositeRunsForSession(
@@ -5655,24 +5213,6 @@ async function persistSessionModelSelection(
   return buildEffectiveSessionModelRef(patched) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
 }
 
-async function ensurePendingLocalSessionRegistered(
-  sessionKey: string,
-): Promise<string | null> {
-  if (!_pendingLocalSessionKeys.has(sessionKey)) {
-    return null;
-  }
-
-  const modelRef = resolveEffectiveAgentModelRefForSession(sessionKey);
-  const normalizedModelRef = normalizeChatManagedModelRef(modelRef, { fallbackEmpty: true });
-  const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
-    key: sessionKey,
-    agentId: getAgentIdFromSessionKey(sessionKey),
-    ...(normalizedModelRef ? { model: normalizedModelRef } : {}),
-  });
-  _pendingLocalSessionKeys.delete(sessionKey);
-  return buildEffectiveSessionModelRef(created) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
-}
-
 function mergeSessionRowWithLocalState(
   nextSession: ChatSession,
   localSession: ChatSession | undefined,
@@ -5759,6 +5299,7 @@ async function sendChatMessageViaHostApi(params: {
   deliver?: boolean;
   idempotencyKey: string;
   thinking?: string | null;
+  clientPreferences?: GatewayTurnPreferences;
 }): Promise<{ runId?: string }> {
   try {
     const response = await hostApiFetch<{
@@ -8090,6 +7631,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!attachments?.length && isInternalMessage({ role: 'user', content: trimmed })) {
       console.info('[sendMessage] Dropping internal user message before gateway send', {
         sessionKey: targetSessionKey,
+        text: trimmed,
       });
       return;
     }
@@ -8215,11 +7757,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     };
 
-    let candidateImageInputs = resolveImageModeReferenceInputs([], currentMessages);
-    if (mode === 'chat' && !shouldLoadFamilyImageReferences(trimmed, mode)) {
-      candidateImageInputs = [];
-    }
-    if (candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
+    const referencesPriorImage = mode === 'image' || mode === 'video';
+    let candidateImageInputs = referencesPriorImage
+      ? resolveImageModeReferenceInputs([], currentMessages)
+      : [];
+    if (referencesPriorImage && candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
       candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
     }
     if (!sendGenerationIsCurrent()) return;
@@ -8239,23 +7781,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
-    const artifactContext = await resolveMediaIntentArtifactContext({
-      sessionKey: currentSessionKey,
-      runtimeRuns: get().runtimeRuns,
-      messages: currentMessages,
+    // Every new turn belongs to the native OpenClaw agent loop. The legacy
+    // planner/composite coordinator remains only for already-started jobs;
+    // it must not turn a fresh user message into a synthetic user contract.
+    const gatewayReferenceImages = referencesPriorImage ? candidateImageInputs : [];
+    const compositeTasks: MediaIntentCompositeTask[] | undefined = undefined;
+    const runtimeMessage = trimmed;
+    const effectiveMode: ChatSendMode = mode;
+    rememberPendingRuntimeIntent(currentSessionKey, {
+      objective: trimmed,
+      mode: effectiveMode,
+      compositeTasks,
     });
-    if (!sendGenerationIsCurrent()) return;
+    commitSessionRunState(set, get, currentSessionKey, {
+      pendingImageGenerationLocal: false,
+      pendingVideoGenerationLocal: false,
+    });
 
-    let mediaPlan: MediaIntentPlan;
     try {
-      mediaPlan = await planMediaIntentForSend({
-        prompt: trimmed,
-        requestedMode: mode,
-        explicitImages: explicitPendingImages,
-        candidateImages: candidateImageInputs,
-        recentMessages: currentMessages,
-        artifactContext,
-      });
+      await ensureSessionManagedTextModelAllowed(get, currentSessionKey);
     } catch (error) {
       if (!sendGenerationIsCurrent()) return;
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -8264,575 +7808,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       commitSessionRunState(set, get, currentSessionKey, {
         sending: false,
-        pendingImageGenerationLocal: false,
-        pendingVideoGenerationLocal: false,
       });
       clearSendGenerationIfCurrent();
       return;
     }
     if (!sendGenerationIsCurrent()) return;
-
-    let plannedSourceImages = planSourceImageInputs(mediaPlan);
-    if (mediaPlan.action === 'image_edit' && plannedSourceImages.length === 0) {
-      mediaPlan = {
-        action: 'clarify',
-        source: 'planner',
-        reason: 'image_edit_missing_input_image',
-        clarification: mediaPlan.clarification || '你想编辑哪张图片？请上传或选中一张图片。',
-      };
-      plannedSourceImages = [];
-    }
-    if (mediaPlan.artifactContinuationAction === 'retry_delivery' && artifactContext?.runId) {
-      try {
-        const retried = await retryCompositeDeliveryInMain({
-          set,
-          get,
-          runId: artifactContext.runId,
-          sessionKey: currentSessionKey,
-          sendGeneration,
-        });
-        if (retried) {
-          clearSendGenerationIfCurrent();
-          return;
-        }
-      } catch (error) {
-        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
-        console.warn('[composite-run] structured delivery retry failed; falling back to planner route:', error);
-      }
-    }
-    if (mediaPlan.artifactContinuationAction === 'inspect_result' && artifactContext?.runId) {
-      try {
-        const inspected = await inspectCompositeRunResultInMain({
-          set,
-          get,
-          runId: artifactContext.runId,
-          sessionKey: currentSessionKey,
-          sendGeneration,
-        });
-        if (inspected) {
-          clearSendGenerationIfCurrent();
-          return;
-        }
-      } catch (error) {
-        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
-        console.warn('[composite-run] structured result inspection failed; falling back to planner route:', error);
-      }
-    }
-    const compositeTasks = hasCompositeTasks(mediaPlan) ? mediaPlan.compositeTasks : undefined;
-    const runtimeMessage = compositeTasks
-      ? buildCompositeChatContractMessage(trimmed, compositeTasks)
-      : trimmed;
-    const effectiveMode = mediaPlanToMode(mediaPlan);
-    rememberPendingRuntimeIntent(currentSessionKey, {
-      objective: mediaPlan.prompt?.trim() || trimmed,
-      mode: effectiveMode,
-      compositeTasks,
-    });
-    commitSessionRunState(set, get, currentSessionKey, {
-      pendingImageGenerationLocal: effectiveMode === 'image',
-      pendingVideoGenerationLocal: effectiveMode === 'video',
-    });
-
-    if (compositeTasks) {
-      const compositeClientRequestId = retriedCompositeClientRequestId
-        ?? `composite:${currentSessionKey}:${crypto.randomUUID()}`;
-      const attemptedSend = _lastAttemptedChatSendBySession.get(currentSessionKey);
-      if (attemptedSend) {
-        _lastAttemptedChatSendBySession.set(currentSessionKey, {
-          ...attemptedSend,
-          compositeClientRequestId,
-        });
-      }
-      try {
-        await startCompositeRunInMain({
-          set,
-          get,
-          sessionKey: currentSessionKey,
-          prompt: trimmed,
-          cwd: get().sessions.find((session) => session.key === currentSessionKey)?.cwd,
-          nowMs,
-          tasks: compositeTasks,
-          imageOptions,
-          videoOptions,
-          sendGeneration,
-          clientRequestId: compositeClientRequestId,
-        });
-        clearSendGenerationIfCurrent();
-      } catch (error) {
-        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (get().currentSessionKey === currentSessionKey) {
-          set({ error: errorMessage });
-        }
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-        });
-        markSessionRunIdle(currentSessionKey);
-        clearPendingRuntimeIntent(currentSessionKey);
-        clearSendGenerationIfCurrent();
-      }
-      return;
-    }
-
-    if (effectiveMode === 'image' || effectiveMode === 'video') {
-      try {
-        const registeredModelRef = await ensurePendingLocalSessionRegistered(currentSessionKey);
-        if (registeredModelRef) {
-          set((state) => ({
-            sessions: upsertSessionWithModel(state.sessions, currentSessionKey, registeredModelRef, Date.now()),
-          }));
-        }
-      } catch (error) {
-        if (!sendGenerationIsCurrent()) return;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (get().currentSessionKey === currentSessionKey) {
-          set({ error: errorMessage });
-        }
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-        });
-        clearSendGenerationIfCurrent();
-        return;
-      }
-      if (!sendGenerationIsCurrent()) return;
-    }
-
-    if (effectiveMode === 'chat' && mediaPlan.action !== 'desktop_screenshot' && mediaPlan.action !== 'clarify') {
-      try {
-        await ensureSessionManagedTextModelAllowed(get, currentSessionKey);
-      } catch (error) {
-        if (!sendGenerationIsCurrent()) return;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (get().currentSessionKey === currentSessionKey) {
-          set({ error: errorMessage });
-        }
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-        });
-        clearSendGenerationIfCurrent();
-        return;
-      }
-      if (!sendGenerationIsCurrent()) return;
-    }
-
-    const imageReferenceInputs = mediaPlan.action === 'image_edit'
-      ? plannedSourceImages
-      : [];
-    const videoReferenceInputs = effectiveMode === 'video'
-      ? plannedSourceImages
-      : [];
-    if (mediaPlan.action === 'clarify') {
-      const assistantMsg: RawMessage = {
-        role: 'assistant',
-        content: mediaPlan.clarification || '我需要再确认一下你想处理的对象。',
-        timestamp: Date.now() / 1000,
-        id: crypto.randomUUID(),
-      };
-      appendLocalMessageForSession(set, get, currentSessionKey, assistantMsg);
-      commitSessionRunState(set, get, currentSessionKey, {
-        sending: false,
-        pendingImageGenerationLocal: false,
-        pendingVideoGenerationLocal: false,
-        activeRunId: null,
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
-      });
-      markSessionRunIdle(currentSessionKey);
-      clearSendGenerationIfCurrent();
-      return;
-    }
-
-    if (mediaPlan.action === 'desktop_screenshot') {
-      try {
-        const result = await hostApiFetch<DesktopScreenshotResponse>(
-          '/api/computer/desktop-screenshot',
-          {
-            method: 'POST',
-            body: JSON.stringify({}),
-          },
-        );
-        if (!sendGenerationIsCurrent()) return;
-        if (result.success === false || !result.screenshot) {
-          throw new Error(result.error || 'Failed to capture desktop screenshot');
-        }
-        const screenshot = result.screenshot;
-        const assistantMsg: RawMessage = {
-          role: 'assistant',
-          content: '已截取当前桌面。',
-          timestamp: Date.now() / 1000,
-          id: crypto.randomUUID(),
-          _attachedFiles: [{
-            fileName: screenshot.fileName,
-            mimeType: screenshot.mimeType,
-            fileSize: screenshot.fileSize,
-            preview: screenshot.preview,
-            filePath: screenshot.filePath,
-            source: 'tool-result',
-          }],
-        };
-        appendLocalMessageForSession(set, get, currentSessionKey, assistantMsg);
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-        });
-        markSessionRunIdle(currentSessionKey);
-        clearSendGenerationIfCurrent();
-      } catch (error) {
-        if (!sendGenerationIsCurrent()) return;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        if (get().currentSessionKey === currentSessionKey) {
-          set({ error: errorMessage });
-        }
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-        });
-        markSessionRunIdle(currentSessionKey);
-        clearSendGenerationIfCurrent();
-      }
-      return;
-    }
-
-    if (effectiveMode === 'image') {
-      const mediaRunId = buildTimestampHistoricalRunId(currentSessionKey, nowMs);
-      set((state) => ({
-        runtimeRuns: applyRuntimeContractEvents(
-          state.runtimeRuns,
-          buildRuntimeStartEventsForRun(state.runtimeRuns, {
-            runId: mediaRunId,
-            sessionKey: currentSessionKey,
-            objective: mediaPlan.prompt?.trim() || trimmed,
-            mode: 'image',
-            ts: Date.now(),
-          }),
-        ),
-      }));
-      commitSessionRunState(set, get, currentSessionKey, { activeRunId: mediaRunId });
-      try {
-        const effectiveImageOptions = resolveChatImageOptions(trimmed, mediaPlan, imageOptions);
-        const requestedImageCount = resolveRequestedImageCount(mediaPlan);
-        let finalDecision: string | undefined;
-        const basePrompt = mediaPlan.prompt?.trim() || trimmed;
-        for (let imageIndex = 0; imageIndex < requestedImageCount; imageIndex += 1) {
-          assertActiveSendGeneration(currentSessionKey, sendGeneration);
-          const batchIndex = imageIndex + 1;
-          const result = await hostApiFetch<MediaGenerationSendResponse>(
-            '/api/media/image-generation/chat-send',
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                sessionKey: currentSessionKey,
-                runId: mediaRunId,
-                clientRequestId: `${mediaRunId}:image:${batchIndex}`,
-                originalPrompt: trimmed,
-                prompt: buildImageBatchPrompt(basePrompt, batchIndex, requestedImageCount),
-                model: effectiveImageOptions.model,
-                size: effectiveImageOptions.size,
-                quality: effectiveImageOptions.quality,
-                batchIndex,
-                batchTotal: requestedImageCount,
-                inputImages: imageReferenceInputs.map((file) => ({
-                  fileName: file.fileName,
-                  mimeType: file.mimeType,
-                  filePath: file.stagedPath,
-                })),
-                userInputImages: explicitPendingImages.map((file) => ({
-                  fileName: file.fileName,
-                  mimeType: file.mimeType,
-                  filePath: file.stagedPath,
-                })),
-                userMessageTimestampMs: nowMs,
-              }),
-            },
-          );
-          if (!sendGenerationIsCurrent() && result.jobId) {
-            void cancelMediaGenerationJobs({ jobId: result.jobId }).catch((error) => {
-              console.warn('[media-generation] failed to cancel stale image job:', error);
-            });
-          }
-          if (!sendGenerationIsCurrent()) return;
-          if (result.success === false) {
-            throw new Error(result.error || 'Failed to generate image');
-          }
-          let completedJob = result.job;
-          applyMediaRuntimeProgress({
-            runId: mediaRunId,
-            sessionKey: currentSessionKey,
-            job: completedJob,
-          });
-          if (result.jobId) {
-            completedJob = await waitForMediaGenerationJob(result.jobId, {
-              onProgress: (job) => applyMediaRuntimeProgress({
-                runId: mediaRunId,
-                sessionKey: currentSessionKey,
-                job,
-              }),
-              isCancelled: () => !sendGenerationIsCurrent(),
-            });
-          }
-          if (!sendGenerationIsCurrent()) return;
-          const { decision, artifacts } = applyMediaRuntimeSuccess({
-            runId: mediaRunId,
-            sessionKey: currentSessionKey,
-            job: completedJob,
-            kind: 'image',
-            completeRun: batchIndex === requestedImageCount,
-          });
-          finalDecision = decision;
-          if (artifacts.length > 0) {
-            scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
-          }
-          appendMediaGenerationResultMessage({
-            set,
-            get,
-            sessionKey: currentSessionKey,
-            job: completedJob,
-            kind: 'image',
-          });
-        }
-        const shouldIdle = gateDecisionAllowsTerminalIdle(finalDecision);
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: !shouldIdle,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: shouldIdle ? null : mediaRunId,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: !shouldIdle,
-          lastUserMessageAt: shouldIdle ? null : nowMs,
-          pendingToolImages: [],
-        });
-        if (get().currentSessionKey === currentSessionKey) {
-          void get().loadHistory(true);
-        } else {
-          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
-        }
-        if (shouldIdle) {
-          markSessionRunIdle(currentSessionKey);
-        }
-        clearSendGenerationIfCurrent();
-      } catch (error) {
-        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        applyMediaRuntimeFailure({
-          runId: mediaRunId,
-          sessionKey: currentSessionKey,
-          error: errorMessage,
-        });
-        if (get().currentSessionKey === currentSessionKey) {
-          set({ error: errorMessage });
-        } else {
-          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
-        }
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-        });
-        markSessionRunIdle(currentSessionKey);
-        clearSendGenerationIfCurrent();
-      }
-      return;
-    }
-
-    if (effectiveMode === 'video') {
-      const mediaRunId = buildTimestampHistoricalRunId(currentSessionKey, nowMs);
-      set((state) => ({
-        runtimeRuns: applyRuntimeContractEvents(
-          state.runtimeRuns,
-          buildRuntimeStartEventsForRun(state.runtimeRuns, {
-            runId: mediaRunId,
-            sessionKey: currentSessionKey,
-            objective: mediaPlan.videoPrompt?.trim() || mediaPlan.prompt?.trim() || trimmed,
-            mode: 'video',
-            ts: Date.now(),
-          }),
-        ),
-      }));
-      commitSessionRunState(set, get, currentSessionKey, { activeRunId: mediaRunId });
-      try {
-        const videoMode = mediaPlan.videoMode
-          ?? (videoReferenceInputs.length > 0 ? 'image_to_video' : 'text_to_video');
-        const effectiveVideoPrompt = mediaPlan.videoPrompt?.trim()
-          || mediaPlan.prompt?.trim()
-          || trimmed;
-        const effectiveVideoOptions = resolveChatVideoOptions(
-          trimmed,
-          mediaPlan,
-          videoReferenceInputs.length > 0,
-          videoOptions,
-        );
-        const routeSourceImages = videoReferenceInputs.map((file) => ({
-          fileName: file.fileName,
-          mimeType: file.mimeType,
-          filePath: file.stagedPath,
-        }));
-        const result = await hostApiFetch<MediaGenerationSendResponse>(
-          '/api/media/video-generation/chat-send',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              sessionKey: currentSessionKey,
-              runId: mediaRunId,
-              originalPrompt: trimmed,
-              prompt: effectiveVideoPrompt,
-              model: effectiveVideoOptions.model,
-              size: effectiveVideoOptions.size,
-              durationSeconds: effectiveVideoOptions.durationSeconds,
-              inputImages: routeSourceImages,
-              userInputImages: explicitPendingImages.map((file) => ({
-                fileName: file.fileName,
-                mimeType: file.mimeType,
-                filePath: file.stagedPath,
-              })),
-              userMessageTimestampMs: nowMs,
-              route: {
-                mode: videoMode,
-                source: mediaPlan.source === 'fallback' ? 'fallback' : 'router',
-                confidence: mediaPlan.confidence,
-                reason: mediaPlan.reason,
-                selectedImageSource: mediaPlan.selectedImageSource,
-                selectedImageIndex: mediaPlan.selectedImageIndex,
-                videoPrompt: effectiveVideoPrompt,
-                imageEditPrompt: mediaPlan.imageEditPrompt,
-                sourceImages: routeSourceImages,
-              },
-            }),
-          },
-        );
-        if (!sendGenerationIsCurrent() && result.jobId) {
-          void cancelMediaGenerationJobs({ jobId: result.jobId }).catch((error) => {
-            console.warn('[media-generation] failed to cancel stale video job:', error);
-          });
-        }
-        if (!sendGenerationIsCurrent()) return;
-        if (result.success === false) {
-          throw new Error(result.error || 'Failed to generate video');
-        }
-        let completedJob = result.job;
-        applyMediaRuntimeProgress({
-          runId: mediaRunId,
-          sessionKey: currentSessionKey,
-          job: completedJob,
-        });
-        if (result.jobId) {
-          completedJob = await waitForMediaGenerationJob(result.jobId, {
-            onProgress: (job) => applyMediaRuntimeProgress({
-              runId: mediaRunId,
-              sessionKey: currentSessionKey,
-              job,
-            }),
-            isCancelled: () => !sendGenerationIsCurrent(),
-          });
-        }
-        if (!sendGenerationIsCurrent()) return;
-        const { decision, artifacts } = applyMediaRuntimeSuccess({
-          runId: mediaRunId,
-          sessionKey: currentSessionKey,
-          job: completedJob,
-          kind: 'video',
-        });
-        if (artifacts.length > 0) {
-          scheduleRuntimeArtifactVerification(mediaRunId, currentSessionKey, artifacts);
-        }
-        appendMediaGenerationResultMessage({
-          set,
-          get,
-          sessionKey: currentSessionKey,
-          job: completedJob,
-          kind: 'video',
-        });
-        const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: !shouldIdle,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: shouldIdle ? null : mediaRunId,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: !shouldIdle,
-          lastUserMessageAt: shouldIdle ? null : nowMs,
-          pendingToolImages: [],
-        });
-        if (get().currentSessionKey === currentSessionKey) {
-          void get().loadHistory(true);
-        } else {
-          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
-        }
-        if (shouldIdle) {
-          markSessionRunIdle(currentSessionKey);
-        }
-        clearSendGenerationIfCurrent();
-      } catch (error) {
-        if (isLocalRunCancelledError(error) || !sendGenerationIsCurrent()) return;
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        applyMediaRuntimeFailure({
-          runId: mediaRunId,
-          sessionKey: currentSessionKey,
-          error: errorMessage,
-        });
-        if (get().currentSessionKey === currentSessionKey) {
-          set({ error: errorMessage });
-        } else {
-          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
-        }
-        commitSessionRunState(set, get, currentSessionKey, {
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          streamingText: '',
-          streamingMessage: null,
-          streamingTools: [],
-          pendingFinal: false,
-          lastUserMessageAt: null,
-          pendingToolImages: [],
-        });
-        markSessionRunIdle(currentSessionKey);
-        clearSendGenerationIfCurrent();
-      }
-      return;
-    }
 
     // Runtime progress now comes from Main-owned streamed events. We still
     // keep the no-response safety timeout, but history polling is no longer
@@ -8983,10 +7963,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const idempotencyKey = crypto.randomUUID();
       const thinkingLevel = get().thinkingLevel ?? undefined;
-      const chatMediaAttachments: PendingImageInput[] = attachments && attachments.length > 0
-        ? (compositeTasks ? [] : attachments)
-        : (effectiveMode === 'chat' ? plannedSourceImages : []);
+      const chatMediaAttachments = compositeTasks
+        ? []
+        : mergeGatewayImageReferences(attachments, gatewayReferenceImages);
       const hasMedia = chatMediaAttachments.length > 0;
+      const clientPreferences = buildGatewayTurnPreferences({
+        mode: effectiveMode,
+        prompt: trimmed,
+        hasSourceImage: chatMediaAttachments.some((attachment) => attachment.mimeType.startsWith('image/')),
+        imageOptions,
+        videoOptions,
+        selectedArtifacts: gatewayReferenceImages,
+      });
 
       // Cache image attachments BEFORE the IPC call to avoid race condition:
       // history may reload (via Gateway event) before the RPC returns.
@@ -9016,6 +8004,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               deliver: false,
               idempotencyKey,
               ...(thinkingLevel ? { thinking: thinkingLevel } : {}),
+              clientPreferences,
               inlineAttachments: Boolean(attachments?.length),
               media: chatMediaAttachments.map((a) => ({
                 filePath: a.stagedPath,
@@ -9032,6 +8021,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           deliver: false,
           idempotencyKey,
           thinking: thinkingLevel,
+          clientPreferences,
         });
         result = { success: true, result: rpcResult };
       }

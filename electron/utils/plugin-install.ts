@@ -779,6 +779,30 @@ export function ensureUClawLocalArtifactsPluginInstalled(): { installed: boolean
   );
 }
 
+export function ensureUClawDesktopControlPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-desktop-control',
+    buildCandidateSources('uclaw-desktop-control'),
+    'UClaw Desktop Control',
+  );
+}
+
+export function ensureUClawBlenderPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-blender',
+    buildCandidateSources('uclaw-blender'),
+    'UClaw Blender',
+  );
+}
+
+export function ensureUClawTaskBridgePluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-task-bridge',
+    buildCandidateSources('uclaw-task-bridge'),
+    'UClaw Task Bridge',
+  );
+}
+
 export function ensureParallelPluginInstalled(): { installed: boolean; warning?: string } {
   return ensurePluginInstalled(
     'parallel',
@@ -803,6 +827,9 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureClawXOpenAiImagePluginInstalled, label: 'UClaw OpenAI Image' },
   { fn: ensureUClawArtifactGuardPluginInstalled, label: 'UClaw Artifact Guard' },
   { fn: ensureUClawLocalArtifactsPluginInstalled, label: 'UClaw Local Artifacts' },
+  { fn: ensureUClawDesktopControlPluginInstalled, label: 'UClaw Desktop Control' },
+  { fn: ensureUClawBlenderPluginInstalled, label: 'UClaw Blender' },
+  { fn: ensureUClawTaskBridgePluginInstalled, label: 'UClaw Task Bridge' },
 ] as const;
 
 /**

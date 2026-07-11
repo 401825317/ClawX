@@ -51,6 +51,7 @@ const MonacoViewerLazy = lazy(() => import('./MonacoViewer'));
 const MonacoDiffViewerLazy = lazy(() => import('./MonacoDiffViewer'));
 const PdfViewerLazy = lazy(() => import('./PdfViewer'));
 const SheetViewerLazy = lazy(() => import('./SheetViewer'));
+const ThreeModelViewerLazy = lazy(() => import('./ThreeModelViewer').then((m) => ({ default: m.ThreeModelViewer })));
 
 /**
  * Files past this ceiling get the direct-open fallback instead of the
@@ -113,6 +114,8 @@ function tabsForFile(file: FilePreviewTarget, mode: FilePreviewBodyMode): Tab[] 
   } else if (file.contentType === 'snapshot') {
     tabs.push('preview');
   } else if (file.contentType === 'video' || file.contentType === 'audio') {
+    tabs.push('preview');
+  } else if (file.contentType === 'model3d') {
     tabs.push('preview');
   } else if (file.contentType === 'code') {
     tabs.push('source');
@@ -293,7 +296,7 @@ export function FilePreviewBody({
       };
     }
 
-    if (file.contentType === 'snapshot' || file.contentType === 'video' || file.contentType === 'audio') {
+    if (file.contentType === 'snapshot' || file.contentType === 'video' || file.contentType === 'audio' || file.contentType === 'model3d') {
       setState({ status: 'ready', content: '', readOnly: enforcedReadOnly });
       setDraft(null);
       return () => {
@@ -561,6 +564,16 @@ export function FilePreviewBody({
             <TabsContent value="preview" className="m-0 h-full overflow-auto">
               {file.contentType === 'snapshot' ? (
                 <ImageViewer filePath={file.filePath} fileName={file.fileName} />
+              ) : file.contentType === 'model3d' ? (
+                <Suspense
+                  fallback={
+                    <div className="flex h-full items-center justify-center">
+                      <LoadingSpinner />
+                    </div>
+                  }
+                >
+                  <ThreeModelViewerLazy filePath={file.filePath} fileName={file.fileName} />
+                </Suspense>
               ) : isPdfPreviewExt(file.ext) ? (
                 <Suspense
                   fallback={

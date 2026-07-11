@@ -91,6 +91,7 @@ import { validateApiKeyWithProvider } from '../services/providers/provider-valid
 import { appUpdater } from './updater';
 import { GatewayRpcBackpressure } from '../gateway/rpc-backpressure';
 import { registerHostApiProxyHandlers } from './ipc/host-api-proxy';
+import { desktopRunCoordinator } from '../services/computer';
 import {
   isLaunchAtStartupKey,
   isProxyKey,
@@ -286,6 +287,20 @@ export function registerIpcHandlers(
 
   // File preview handlers (sandboxed read/write/list for inline viewer)
   registerFilePreviewHandlers();
+
+  // The renderer is the only approval surface allowed to execute a pending
+  // desktop action. OpenClaw tools can create/read requests but cannot resolve them.
+  registerDesktopApprovalHandlers();
+}
+
+function registerDesktopApprovalHandlers(): void {
+  ipcMain.handle('desktop:approve', async (_, approvalId: unknown) => {
+    if (typeof approvalId !== 'string' || !/^[a-zA-Z0-9-]{16,128}$/u.test(approvalId)) {
+      return { success: false, error: 'Invalid desktop approval id' };
+    }
+    const result = await desktopRunCoordinator.approveAndExecuteFromUserInterface(approvalId);
+    return { success: result.status === 'completed', result };
+  });
 }
 
 function registerUnifiedRequestHandlers(gatewayManager: GatewayManager): void {

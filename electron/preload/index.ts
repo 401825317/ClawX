@@ -24,6 +24,7 @@ const electronAPI = {
         'gateway:httpProxy',
         'hostapi:fetch',
         'hostapi:token',
+        'desktop:approve',
         'gateway:health',
         'gateway:getControlUiUrl',
         // OpenClaw

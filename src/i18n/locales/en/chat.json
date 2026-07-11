@@ -57,6 +57,14 @@
         "edited": "Updated content",
         "ran": "Ran tool"
     },
+    "desktopApproval": {
+        "title": "Allow desktop action",
+        "description": "This action will execute immediately in a local application. Approve only when the target app and intent are correct.",
+        "privacy": "To protect privacy, the exact text being entered or changed is not shown in this confirmation.",
+        "approve": "Allow action",
+        "deny": "Deny",
+        "actions": { "click": "Click", "drag": "Drag", "scroll": "Scroll", "press_key": "Press key", "type_text": "Type text", "set_value": "Set field value", "select_text": "Select text", "perform_secondary_action": "Perform secondary action" }
+    },
     "runtimeDelivery": {
         "compositeStart": "I will split this request into tasks, run independent work in parallel, and preserve required dependencies.",
         "taskRunning": "Working on {{task}}",
@@ -95,6 +103,12 @@
         }
     },
     "filePreview": {
+        "model3d": {
+            "loading": "Loading 3D model...",
+            "externalOnly": "This format needs to be opened in an external 3D application.",
+            "loadFailed": "Could not load 3D model: {{error}}",
+            "reset": "Reset camera"
+        },
         "tabs": {
             "source": "Source",
             "preview": "Preview",

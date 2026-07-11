@@ -7,7 +7,7 @@ const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
 const REVISION_REASON = 'UClaw artifact delivery final reply had no completed artifact evidence.';
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
-const MEDIA_INTENT_TOOL_GATE_HOOK_ID = `${PLUGIN_ID}:media-intent-tool-gate`;
+const MEDIA_TOOL_PREPARATION_HOOK_ID = `${PLUGIN_ID}:media-tool-preparation`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
 let runtimeEventSeq = 0;
 const BASE_PROMPT_CONTEXT = [
@@ -30,16 +30,13 @@ const ARTIFACT_PROMPT_CONTEXT = [
 const PROMPT_CONTEXT = `${BASE_PROMPT_CONTEXT}\n\n${ARTIFACT_PROMPT_CONTEXT}`;
 
 const MEDIA_INTENT_GATE_TIMEOUT_MS = 1_200;
-const MEDIA_INTENT_GATE_TTL_MS = 10 * 60 * 1000;
-const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate']);
+const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate', 'create_blender_scene', 'repair_blender_scene']);
 const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
 const MEDIA_INPUT_PARAM_KEYS = new Set(['image', 'images', 'mask', 'video', 'videos']);
 const IMAGE_INPUT_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/iu;
 const VIDEO_INPUT_EXT_RE = /\.(?:mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)$/iu;
 const RUN_TOOL_EVIDENCE_TTL_MS = 30 * 60 * 1000;
 const RUN_TOOL_EVIDENCE_MAX_ENTRIES = 256;
-const mediaIntentGateByRunId = new Map();
-const mediaIntentGateBySessionKey = new Map();
 const toolEvidenceByRunId = new Map();
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|video|html|script|zip))/iu;
@@ -71,16 +68,10 @@ const GATEWAY_RESTART_CONTINUATION_BLOCK_RE = /\n{0,2}\[System\]\s+Your previous
 const GATEWAY_RESTART_CAPTURED_REPLY_NOTE_RE = /^\s*Note:\s+The interrupted final reply was captured:\s+"[^"]*"\s*$/giu;
 const QUEUED_USER_MESSAGE_MARKER_RE = /^\s*\[Queued user message that arrived while the previous turn was still active\]\s*\n?/iu;
 const RUNTIME_EVENT_CONTINUATION_RE = /^Continue the OpenClaw runtime event\.?\s*$/iu;
-const MEDIA_KEYWORD_RE = /(?:生图|图片|图像|照片|写真|肖像|海报|插画|封面|修图|改图|视频|动画|动起来|截图|截屏|image|photo|picture|portrait|poster|illustration|cover|video|animate|screenshot)/iu;
-const MEDIA_INFO_OR_CAPABILITY_RE = /(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why).{0,36}(?:生图|图片|图像|照片|写真|肖像|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|portrait|poster|video|screenshot)|(?:生图|图片|图像|照片|写真|肖像|海报|插画|封面|修图|改图|视频|动画|截图|image|photo|picture|portrait|poster|video|screenshot).{0,36}(?:模型|model|能力|支持|能不能|可不可以|可以吗|是什么|哪些|怎么|如何|为什么|为何|价格|费用|额度|状态|进度|结果|查看|查询|list|status|inspect|describe|what|which|how|why)/iu;
-const IMAGE_GENERATE_REQUEST_RE = /(?:生图|画(?:一张|张|个)?|绘制|生成.{0,16}(?:图片|图像|照片|写真|肖像|海报|插画|封面)|(?:想要|要|需要|给我|帮我|请|来).{0,18}(?:图片|图像|照片|写真|肖像|海报|插画|封面)|(?:图片|图像|照片|写真|肖像|海报|插画|封面).{0,16}(?:生成|制作|做|画)|(?:generate|create|make|draw).{0,24}(?:image|photo|picture|portrait|poster|illustration|cover))/iu;
-const IMAGE_EDIT_REQUEST_RE = /(?:修图|改图|编辑图片|图片编辑|图像编辑|美化图片|(?:把|将|给|帮).{0,30}(?:图片|图像|照片|这张图|上一张).{0,40}(?:改|换|去掉|去除|加|添加|美化|编辑)|(?:edit|modify|retouch|remove|add).{0,40}(?:image|photo|picture))/iu;
-const VIDEO_GENERATE_REQUEST_RE = /(?:生视频|生成.{0,16}视频|视频.{0,16}(?:生成|制作|做)|动起来|动画化|转成视频|(?:generate|create|make|animate).{0,24}video|image[-\s]?to[-\s]?video)/iu;
-const DESKTOP_SCREENSHOT_REQUEST_RE = /(?:截图|截屏|屏幕截图|当前桌面|当前屏幕|screenshot|screen capture)/iu;
 const PROMISE_ONLY_RE = /(?:(?:^|[。！？!?；;\n\r]\s*)(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在|继续|直接|随后|稍后)|(?:接下来|下一步|随后|稍后|现在|马上|继续).{0,12}(?:我)?(?:会|将|来|准备|可以|马上|先|继续|直接)?|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成|校验|验证|测试|检查)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|修(?:复|掉|正|改)?|修改|调整|补(?:做|齐|上)|校验|验证|测试|检查|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish|fix|repair|validate|verify|test|continue))/iu;
 const ARTIFACT_REPAIR_PROMISE_CUE_RE = /(?:发现.{0,80}(?:问题|不对|不符合|未通过|失败|bug|错误)|实际.{0,40}(?:生成|只有|多了|少了|不符合)|(?:多了|少了|额外).{0,30}(?:页|项|个|张|条)|首屏可见|验证未通过|校验未通过|测试未通过|不符合(?:交互|预期|要求)|空页|页数不(?:对|符)|公式(?:缺失|错误)|交互(?:异常|错误)|bug|错误)/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
-const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm';
+const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm|blend|glb|gltf|obj|fbx';
 const ARTIFACT_EVIDENCE_RE = new RegExp(`(?:MEDIA:\\s*(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+|(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|https?://[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|(?:filePath|outputPath|output_path|mediaUrl|media_url|url)["']?\\s*:\\s*["'][^"']+|(?:^|[\\s"'\`])out["']?\\s*:\\s*["'][^"']+)`, 'iu');
 const MEDIA_ARTIFACT_PATH_RE = new RegExp(`MEDIA:\\s*((?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})(?:\\?[^\\s\`"'<>]+)?)`, 'giu');
 const ARTIFACT_PATH_RE = new RegExp(`((?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})(?:\\?[^\\s\`"'<>]+)?)`, 'giu');
@@ -335,293 +326,90 @@ function normalizeOptionalString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function boundedText(value, maxChars = 600) {
-  const text = typeof value === 'string' ? value.trim() : '';
-  if (!text) return '';
-  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
-}
-
-function normalizePlannerRole(role) {
-  if (role === 'user' || role === 'assistant' || role === 'system' || role === 'toolresult') return role;
-  if (role === 'tool') return 'toolresult';
-  return undefined;
-}
-
-function buildRecentMessagesForMediaIntent(event) {
-  const messages = extractMessageLists(event)[0] ?? [];
-  return messages
-    .slice(-8)
-    .map((message) => {
-      if (!isPlainRecord(message)) return null;
-      const role = normalizePlannerRole(message.role);
-      if (!role) return null;
-      const text = boundedText(extractMessageText(message));
-      return text ? { role, text } : { role };
-    })
-    .filter(Boolean);
-}
-
-function isCurrentTurnMediaSideEffectAuthorized(plan) {
-  return isPlainRecord(plan)
-    && plan.intentKind === 'current_media_task'
-    && plan.currentTurnMediaRequest === true
-    && (
-      plan.action === 'image_generate'
-      || plan.action === 'image_edit'
-      || plan.action === 'video_generate'
-      || plan.action === 'desktop_screenshot'
-    );
-}
-
-function allowedMediaToolsForPlan(plan) {
-  if (!isCurrentTurnMediaSideEffectAuthorized(plan)) return [];
-  if (plan.action === 'image_generate' || plan.action === 'image_edit') return ['image_generate'];
-  if (plan.action === 'video_generate') return ['video_generate'];
-  return [];
-}
-
-function summarizeMediaIntentPlan(plan) {
-  if (!isPlainRecord(plan)) return {};
-  return {
-    action: plan.action,
-    source: plan.source,
-    intentKind: plan.intentKind,
-    currentTurnMediaRequest: plan.currentTurnMediaRequest,
-    confidence: plan.confidence,
-    reason: typeof plan.reason === 'string' ? boundedText(plan.reason, 160) : undefined,
-  };
-}
-
-function buildLocalMediaIntentPlan(prompt) {
-  const text = String(prompt ?? '').trim();
-  if (!text) return undefined;
-  if (isHeartbeatPoll(text) || isInternalTranscriptText(text)) {
-    return {
-      action: 'chat',
-      source: 'local',
-      intentKind: 'current_non_media_task',
-      currentTurnMediaRequest: false,
-      confidence: 1,
-      reason: 'local_internal_or_runtime_message',
-    };
-  }
-  if (MEDIA_INFO_OR_CAPABILITY_RE.test(text)) {
-    return {
-      action: 'chat',
-      source: 'local',
-      intentKind: 'current_non_media_task',
-      currentTurnMediaRequest: false,
-      confidence: 0.95,
-      reason: 'local_media_info_or_capability_question',
-    };
-  }
-  if (VIDEO_GENERATE_REQUEST_RE.test(text)) {
-    return {
-      action: 'video_generate',
-      source: 'local',
-      intentKind: 'current_media_task',
-      currentTurnMediaRequest: true,
-      confidence: 0.9,
-      reason: 'local_video_generation_request',
-    };
-  }
-  if (IMAGE_EDIT_REQUEST_RE.test(text)) {
-    return {
-      action: 'image_edit',
-      source: 'local',
-      intentKind: 'current_media_task',
-      currentTurnMediaRequest: true,
-      confidence: 0.85,
-      reason: 'local_image_edit_request',
-    };
-  }
-  if (IMAGE_GENERATE_REQUEST_RE.test(text)) {
-    return {
-      action: 'image_generate',
-      source: 'local',
-      intentKind: 'current_media_task',
-      currentTurnMediaRequest: true,
-      confidence: 0.9,
-      reason: 'local_image_generation_request',
-    };
-  }
-  if (DESKTOP_SCREENSHOT_REQUEST_RE.test(text)) {
-    return {
-      action: 'desktop_screenshot',
-      source: 'local',
-      intentKind: 'current_media_task',
-      currentTurnMediaRequest: true,
-      confidence: 0.85,
-      reason: 'local_desktop_screenshot_request',
-    };
-  }
-  if (!MEDIA_KEYWORD_RE.test(text)) {
-    return {
-      action: 'chat',
-      source: 'local',
-      intentKind: 'ordinary_chat',
-      currentTurnMediaRequest: false,
-      confidence: 0.9,
-      reason: 'local_no_media_terms',
-    };
-  }
-  return undefined;
-}
-
-function rememberMediaIntentGate(event, ctx, gate) {
-  const runId = getRunId(event, ctx);
-  const sessionKey = getSessionKey(event, ctx);
-  const record = {
-    ...gate,
-    runId,
-    sessionKey,
-    updatedAt: Date.now(),
-  };
-  if (runId) mediaIntentGateByRunId.set(runId, record);
-  if (sessionKey) mediaIntentGateBySessionKey.set(sessionKey, record);
-  pruneMediaIntentGateCache();
-  return record;
-}
-
-function pruneMediaIntentGateCache(now = Date.now()) {
-  for (const [runId, record] of mediaIntentGateByRunId.entries()) {
-    if (!record?.updatedAt || now - record.updatedAt > MEDIA_INTENT_GATE_TTL_MS) {
-      mediaIntentGateByRunId.delete(runId);
-    }
-  }
-  for (const [sessionKey, record] of mediaIntentGateBySessionKey.entries()) {
-    if (!record?.updatedAt || now - record.updatedAt > MEDIA_INTENT_GATE_TTL_MS) {
-      mediaIntentGateBySessionKey.delete(sessionKey);
-    }
-  }
-}
-
-function resolveMediaIntentGate(event, ctx) {
-  pruneMediaIntentGateCache();
-  const runId = getRunId(event, ctx);
-  if (runId && mediaIntentGateByRunId.has(runId)) return mediaIntentGateByRunId.get(runId);
-  const sessionKey = getSessionKey(event, ctx);
-  if (sessionKey && mediaIntentGateBySessionKey.has(sessionKey)) return mediaIntentGateBySessionKey.get(sessionKey);
-  return undefined;
-}
-
 function normalizeHostApiOrigin() {
   const origin = normalizeOptionalString(process.env.CLAWX_HOST_API_ORIGIN);
   return origin ? origin.replace(/\/+$/, '') : undefined;
 }
 
-async function requestMediaIntentPlanFromHost(event) {
-  const prompt = extractLatestUserRequestText(event).trim();
-  if (!prompt) {
-    return {
-      ok: false,
-      reason: 'missing_prompt',
-      promptChars: 0,
-    };
-  }
-
-  const localPlan = buildLocalMediaIntentPlan(prompt);
-  if (localPlan) {
-    return {
-      ok: true,
-      source: 'local',
-      plan: localPlan,
-      promptChars: prompt.length,
-    };
-  }
-
+async function requestTurnPreferencesFromHost(event, ctx) {
+  const sessionKey = getSessionKey(event, ctx);
+  const message = extractLatestUserRequestText(event).trim();
   const origin = normalizeHostApiOrigin();
   const token = normalizeOptionalString(process.env.CLAWX_HOST_API_TOKEN);
-  if (!origin || !token || typeof fetch !== 'function') {
-    return {
-      ok: false,
-      reason: !origin ? 'missing_host_api_origin' : !token ? 'missing_host_api_token' : 'fetch_unavailable',
-      promptChars: prompt.length,
-    };
-  }
-
+  if (!sessionKey || !message || !origin || !token || typeof fetch !== 'function') return undefined;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MEDIA_INTENT_GATE_TIMEOUT_MS);
   try {
-    const response = await fetch(`${origin}/api/media/intent-plan`, {
+    const response = await fetch(`${origin}/api/runtime/turn-preferences/consume`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        prompt,
-        requestedMode: 'chat',
-        recentMessages: buildRecentMessagesForMediaIntent(event),
-      }),
+      body: JSON.stringify({ sessionKey, message }),
       signal: controller.signal,
     });
-    if (!response.ok) {
-      return {
-        ok: false,
-        reason: `host_api_http_${response.status}`,
-        promptChars: prompt.length,
-      };
-    }
+    if (!response.ok) return undefined;
     const payload = await response.json();
-    if (!payload || payload.success === false || !payload.plan) {
-      return {
-        ok: false,
-        reason: 'host_api_missing_plan',
-        promptChars: prompt.length,
-      };
-    }
-    return {
-      ok: true,
-      plan: payload.plan,
-      promptChars: prompt.length,
-    };
+    return isPlainRecord(payload?.preferences) ? payload.preferences : undefined;
   } catch (error) {
-    return {
-      ok: false,
+    logDiagnostic('turn-preferences-unavailable', {
+      eventId: eventId(event, ctx),
       reason: error?.name === 'AbortError' ? 'host_api_timeout' : 'host_api_exception',
-      promptChars: prompt.length,
-    };
+    });
+    return undefined;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-async function buildMediaIntentGate(event, ctx) {
-  const result = await requestMediaIntentPlanFromHost(event);
-  const plan = result.ok ? result.plan : undefined;
-  const allowedMediaTools = allowedMediaToolsForPlan(plan);
-  const gate = rememberMediaIntentGate(event, ctx, {
-    source: result.ok ? (result.source || 'host-planner') : 'fallback',
-    reason: result.ok ? (plan?.reason || 'host_planner') : result.reason,
-    promptChars: result.promptChars,
-    plan: summarizeMediaIntentPlan(plan),
-    allowedMediaTools,
-    currentTurnMediaRequest: Boolean(plan?.currentTurnMediaRequest),
-    authorized: allowedMediaTools.length > 0,
-  });
-  logDiagnostic('media-intent-gate', {
-    eventId: eventId(event, ctx),
-    promptChars: gate.promptChars,
-    source: gate.source,
-    action: gate.plan?.action,
-    intentKind: gate.plan?.intentKind,
-    currentTurnMediaRequest: gate.currentTurnMediaRequest,
-    authorized: gate.authorized,
-    allowedMediaTools: gate.allowedMediaTools,
-    reason: gate.reason,
-  });
-  return gate;
+function turnPreferencePromptContext(preferences) {
+  if (!isPlainRecord(preferences)) return '';
+  const mode = normalizeOptionalString(preferences.mode);
+  const image = isPlainRecord(preferences.image) ? preferences.image : undefined;
+  const video = isPlainRecord(preferences.video) ? preferences.video : undefined;
+  const selectedArtifacts = Array.isArray(preferences.selectedArtifacts)
+    ? preferences.selectedArtifacts.filter(isPlainRecord).slice(0, 8)
+    : [];
+  const lines = [
+    'UClaw 本轮 UI 偏好（不是用户消息，也不替代你的工具选择）：',
+  ];
+  if (mode) lines.push(`- 当前模式偏好：${mode}`);
+  if (image) {
+    const details = [
+      normalizeOptionalString(image.model) ? `model=${normalizeOptionalString(image.model)}` : '',
+      normalizeOptionalString(image.size) ? `size=${normalizeOptionalString(image.size)}` : '',
+      normalizeOptionalString(image.quality) ? `quality=${normalizeOptionalString(image.quality)}` : '',
+    ].filter(Boolean);
+    if (details.length > 0) lines.push(`- 图片默认参数：${details.join(', ')}`);
+  }
+  if (video) {
+    const details = [
+      normalizeOptionalString(video.model) ? `model=${normalizeOptionalString(video.model)}` : '',
+      normalizeOptionalString(video.size) ? `size=${normalizeOptionalString(video.size)}` : '',
+      Number.isFinite(video.durationSeconds) ? `durationSeconds=${Math.floor(video.durationSeconds)}` : '',
+    ].filter(Boolean);
+    if (details.length > 0) lines.push(`- 视频默认参数：${details.join(', ')}`);
+  }
+  if (selectedArtifacts.length > 0) {
+    lines.push('- 用户已选中的候选产物：');
+    for (const artifact of selectedArtifacts) {
+      const filePath = normalizeOptionalString(artifact.filePath);
+      const title = normalizeOptionalString(artifact.title);
+      if (filePath) lines.push(`  - ${title || 'artifact'}: ${filePath}`);
+    }
+  }
+  lines.push('- 只有在完整会话上下文确实需要媒体能力时才调用原生工具；不要因模式偏好自动生成。');
+  return lines.join('\n');
 }
 
-function shouldInjectArtifactPromptContext(event, gate) {
+function shouldInjectArtifactPromptContext(event, preferences) {
   const latest = extractLatestUserRequestText(event);
   const allUserText = extractUserRequestText(event);
   const text = latest || allUserText;
   if (!text.trim()) return false;
   return Boolean(
-    gate?.authorized
-    || gate?.currentTurnMediaRequest
+    preferences
     || isArtifactRequest(text)
     || isArtifactRevisionFeedback(text)
     || isDesktopActionRequest(text)
@@ -629,12 +417,13 @@ function shouldInjectArtifactPromptContext(event, gate) {
   );
 }
 
-function buildPromptContextForEvent(event, gate) {
-  const includeArtifactContext = shouldInjectArtifactPromptContext(event, gate);
+function buildPromptContextForEvent(event, preferences) {
+  const includeArtifactContext = shouldInjectArtifactPromptContext(event, preferences);
+  const preferenceContext = turnPreferencePromptContext(preferences);
   return {
-    text: includeArtifactContext
+    text: [includeArtifactContext
       ? `${BASE_PROMPT_CONTEXT}\n\n${ARTIFACT_PROMPT_CONTEXT}`
-      : BASE_PROMPT_CONTEXT,
+      : BASE_PROMPT_CONTEXT, preferenceContext].filter(Boolean).join('\n\n'),
     includeArtifactContext,
   };
 }
@@ -691,6 +480,9 @@ function shouldBlockMediaToolCall(event, ctx) {
 function buildMediaToolBlockReason(decision) {
   if (decision.toolName === 'video_generate') {
     return '当前用户消息没有授权生成视频，已阻止 video_generate 执行。';
+  }
+  if (decision.toolName === 'create_blender_scene' || decision.toolName === 'repair_blender_scene') {
+    return '当前用户消息没有授权创建或修改 Blender 三维场景，已阻止该工具执行。';
   }
   return '当前用户消息没有授权生成图片，已阻止 image_generate 执行。';
 }
@@ -1473,6 +1265,7 @@ function inferArtifactKind(ref) {
   const clean = ref.toLowerCase().split('?')[0] ?? ref.toLowerCase();
   if (/\.(png|jpe?g|webp|svg)$/iu.test(clean)) return 'image';
   if (/\.(mp4|mov|webm)$/iu.test(clean)) return 'video';
+  if (/\.(blend|glb|gltf|obj|fbx)$/iu.test(clean)) return 'model3d';
   if (/\.pdf$/iu.test(clean)) return 'pdf';
   if (/\.(xlsx?|csv|tsv)$/iu.test(clean)) return 'spreadsheet';
   if (/\.pptx?$/iu.test(clean)) return 'presentation';
@@ -1491,6 +1284,11 @@ function inferMimeType(ref) {
   if (/\.svg$/iu.test(clean)) return 'image/svg+xml';
   if (/\.mp4$/iu.test(clean)) return 'video/mp4';
   if (/\.webm$/iu.test(clean)) return 'video/webm';
+  if (/\.blend$/iu.test(clean)) return 'application/x-blender';
+  if (/\.glb$/iu.test(clean)) return 'model/gltf-binary';
+  if (/\.gltf$/iu.test(clean)) return 'model/gltf+json';
+  if (/\.obj$/iu.test(clean)) return 'model/obj';
+  if (/\.fbx$/iu.test(clean)) return 'model/fbx';
   if (/\.pdf$/iu.test(clean)) return 'application/pdf';
   if (/\.pptx$/iu.test(clean)) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   if (/\.docx$/iu.test(clean)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -3110,8 +2908,8 @@ function registerArtifactGuard(api) {
           ...presentationCompaction,
         });
       }
-      const gate = await buildMediaIntentGate(event, ctx);
-      const promptContext = buildPromptContextForEvent(event, gate);
+      const preferences = await requestTurnPreferencesFromHost(event, ctx);
+      const promptContext = buildPromptContextForEvent(event, preferences);
       logDiagnostic('prompt-context', {
         eventId: eventId(event, ctx),
         injected: true,
@@ -3124,7 +2922,7 @@ function registerArtifactGuard(api) {
       };
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
-      description: 'Ensure UClaw artifact delivery, media-intent gating, and Chinese language rules are present before workspace context is ready.',
+      description: 'Inject UClaw artifact delivery, turn preferences, and Chinese language context before workspace context is ready.',
       timeoutMs: MEDIA_INTENT_GATE_TIMEOUT_MS + 2_000,
     });
     registerLifecycleHook(api, 'before_tool_call', async (event, ctx) => {
@@ -3144,33 +2942,20 @@ function registerArtifactGuard(api) {
         });
       }
 
-      const decision = shouldBlockMediaToolCall(effectiveEvent, ctx);
-      if (decision.toolName && MEDIA_SIDE_EFFECT_TOOLS.has(decision.toolName)) {
-        logDiagnostic('media-tool-gate', {
+      const toolName = normalizeToolName(effectiveEvent);
+      if (toolName && MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) {
+        logDiagnostic('native-media-tool-call', {
           eventId: eventId(event, ctx),
-          toolName: decision.toolName,
-          blocked: decision.block,
-          reason: decision.reason,
-          gateSource: decision.gate?.source,
-          gateAction: decision.gate?.plan?.action,
-          gateIntentKind: decision.gate?.plan?.intentKind,
-          gateAuthorized: decision.gate?.authorized,
+          toolName,
+          authorization: 'native_agent_tool_selection',
         });
-        if (decision.block) {
-          const blockReason = buildMediaToolBlockReason(decision);
-          return {
-            block: true,
-            blockReason,
-            reason: blockReason,
-          };
-        }
       }
 
       const staging = await stageMediaToolInputs(effectiveEvent, ctx);
       if (staging.blockReason) {
         logDiagnostic('media-input-staging-failed', {
           eventId: eventId(event, ctx),
-          toolName: decision.toolName,
+          toolName,
           errorCode: staging.errorCode,
         });
         return {
@@ -3183,7 +2968,7 @@ function registerArtifactGuard(api) {
         effectiveEvent.params = staging.params;
         logDiagnostic('media-input-staged', {
           eventId: eventId(event, ctx),
-          toolName: decision.toolName,
+          toolName,
           stagedCount: staging.stagedCount,
           stagedParamKeys: staging.stagedParamKeys,
         });
@@ -3197,8 +2982,8 @@ function registerArtifactGuard(api) {
       }
       return undefined;
     }, {
-      name: MEDIA_INTENT_TOOL_GATE_HOOK_ID,
-      description: 'Block image/video generation tools unless the current turn has structured media intent authorization.',
+      name: MEDIA_TOOL_PREPARATION_HOOK_ID,
+      description: 'Stage media inputs, rewrite managed screenshot paths, and project native media tool progress.',
       priority: 100,
     });
     registerLifecycleHook(api, 'before_agent_finalize', (event, ctx) => {
@@ -3260,7 +3045,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.8',
+  version: '0.1.11',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -3285,7 +3070,6 @@ export const __test = {
   rewriteExecScreenshotParams,
   stageMediaToolInputs,
   recordToolEvidence,
-  buildLocalMediaIntentPlan,
   isInternalTranscriptMessage,
   classifyInternalTranscriptMessage,
   sanitizeInternalTranscriptMessage,

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UClaw Blender SceneSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "title", "objects"],
+  "properties": {
+    "schema": { "const": "uclaw.blender.scene/v1" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "objects": { "type": "array", "minItems": 1, "maxItems": 250 },
+    "materials": { "type": "array", "maxItems": 128 },
+    "assets": { "type": "array", "maxItems": 64 },
+    "lights": { "type": "array", "maxItems": 24 },
+    "cameras": { "type": "array", "maxItems": 8 },
+    "render": { "type": "object" },
+    "deliverables": { "type": "object" },
+    "budgets": { "type": "object" }
+  }
+}

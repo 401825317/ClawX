@@ -3,7 +3,7 @@
  * dialog) and the workspace tree, so all panels render with consistent
  * iconography.
  */
-import { File, FileArchive, FileCode, FileText, Film, ImageIcon, Music } from 'lucide-react';
+import { Box, File, FileArchive, FileCode, FileText, Film, ImageIcon, Music } from 'lucide-react';
 import type { FileContentType } from '@/lib/generated-files';
 
 export interface FilePreviewIconProps {
@@ -22,6 +22,9 @@ export function FilePreviewIcon({ contentType, mimeType, ext, className }: FileP
   }
   if (contentType === 'audio' || (mimeType && mimeType.startsWith('audio/'))) {
     return <Music className={className} />;
+  }
+  if (contentType === 'model3d' || mimeType === 'model/gltf-binary' || mimeType === 'model/gltf+json') {
+    return <Box className={className} />;
   }
   if (contentType === 'document') {
     return <FileText className={className} />;

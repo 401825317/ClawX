@@ -1,0 +1,22 @@
+{
+  "id": "uclaw-desktop-control",
+  "name": "UClaw Desktop Control",
+  "description": "Cross-platform desktop observation and approval-gated action tools owned by the UClaw Electron host.",
+  "version": "0.1.1",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": [
+      "desktop_get_capabilities",
+      "desktop_list_apps",
+      "desktop_get_app_state",
+      "desktop_request_action"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

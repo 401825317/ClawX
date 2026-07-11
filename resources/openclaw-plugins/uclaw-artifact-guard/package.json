@@ -1,6 +1,6 @@
 {
   "name": "uclaw-artifact-guard-plugin",
-  "version": "0.1.8",
+  "version": "0.1.11",
   "description": "UClaw artifact delivery completion guard for OpenClaw",
   "private": true,
   "type": "module",

@@ -11,6 +11,7 @@ import type {
 } from '../../shared/chat-runtime-events';
 import {
   COMPOSITE_RUN_SCHEMA_VERSION,
+  isBlenderSceneTaskKind,
   isLocalArtifactTaskKind,
   isSupportedCompositeRunTaskSet,
   isCompositeRunTerminal,
@@ -38,6 +39,10 @@ import type {
   MediaGenerationJobOutput,
   MediaGenerationJobSnapshot,
 } from './media-generation-types';
+import {
+  blenderJobService,
+  type BlenderJobSnapshot,
+} from '../services/blender';
 import {
   createLocalArtifact,
   resolveRequestedTextLength,
@@ -71,6 +76,7 @@ const COMPOSITE_TASK_KINDS = new Set([
   'image_edit',
   'mini_program',
   'copywriting',
+  'blender_scene',
 ]);
 
 type RuntimePublisher = (event: ChatRuntimeEvent) => void;
@@ -162,6 +168,10 @@ function isLocalTask(task: CompositeRunTaskRecord): boolean {
 
 function isMediaTask(task: CompositeRunTaskRecord): boolean {
   return task.kind === 'image_generate' || task.kind === 'image_edit' || task.kind === 'video_generate';
+}
+
+function isBlenderTask(task: CompositeRunTaskRecord): boolean {
+  return isBlenderSceneTaskKind(task.kind);
 }
 
 function failedLocalRepairableVerification(
@@ -550,6 +560,9 @@ export class CompositeRunCoordinator {
     if (outcome === 'cancelled') {
       this.localPlanningControllers.get(runId)?.abort();
       cancelMediaGenerationJobsForRun(runId, run.sessionKey);
+      await Promise.all(run.tasks
+        .filter((task) => isBlenderTask(task) && task.jobId)
+        .map((task) => blenderJobService.cancel(task.jobId!, `composite:${source}`)));
     }
     logger.info('[composite-run] cancel handled', { runId, source, outcome });
     return { outcome, run: clone(run) };
@@ -912,6 +925,7 @@ export class CompositeRunCoordinator {
       if (!task) return;
       try {
         if (isLocalTask(task)) await this.executeLocalTask(runId, taskId);
+        else if (isBlenderTask(task)) await this.executeBlenderTask(runId, taskId);
         else await this.executeMediaTask(runId, taskId);
       } catch (error) {
         await this.failTask(runId, taskId, error instanceof Error ? error.message : String(error));
@@ -1122,6 +1136,153 @@ export class CompositeRunCoordinator {
       }
     }
     return [];
+  }
+
+  private async executeBlenderTask(runId: string, taskId: string): Promise<void> {
+    const run = this.runs.get(runId);
+    const task = run?.tasks.find((candidate) => candidate.id === taskId);
+    if (!run || !task || task.status !== 'running') return;
+    const { job } = await blenderJobService.create({
+      clientRequestId: `composite:${run.runId}:${task.id}:attempt:${task.attempt}`,
+      sessionKey: run.sessionKey,
+      runId: run.runId,
+      taskId: task.id,
+      cwd: run.cwd,
+      prompt: task.prompt,
+      sceneSpec: task.sceneSpec,
+    });
+    await this.mutate(runId, async (current) => {
+      const currentTask = current.tasks.find((candidate) => candidate.id === taskId);
+      if (!currentTask || currentTask.status !== 'running') {
+        await blenderJobService.cancel(job.jobId, 'composite-task-no-longer-active');
+        return;
+      }
+      currentTask.jobId = job.jobId;
+      currentTask.plannedRequest = clone(job.sceneSpec) as Record<string, unknown>;
+      await this.record(current, 'task.blender_enqueued', { jobId: job.jobId, stage: job.stage }, taskId);
+    });
+    await this.monitorBlenderJob(runId, taskId, job.jobId);
+  }
+
+  private async monitorBlenderJob(runId: string, taskId: string, jobId: string): Promise<void> {
+    let lastSignature = '';
+    for (;;) {
+      const run = this.runs.get(runId);
+      const task = run?.tasks.find((candidate) => candidate.id === taskId);
+      if (!run || !task || task.status !== 'running' || run.status === 'cancelled') return;
+      const job = await blenderJobService.get(jobId);
+      if (!job) {
+        await this.blockTask(runId, taskId, 'Blender 任务状态不可确认；为避免重复渲染，已暂停并等待显式重试。', true);
+        return;
+      }
+      const signature = `${job.status}:${job.stage}:${job.revision}:${job.progress?.completed ?? 0}:${job.progress?.total ?? 0}`;
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        await this.mutate(runId, async (current) => {
+          const currentTask = current.tasks.find((candidate) => candidate.id === taskId);
+          if (!currentTask || currentTask.status !== 'running') return;
+          await this.record(current, 'task.blender_progress', {
+            jobId,
+            status: job.status,
+            stage: job.stage,
+            progress: job.progress,
+          }, taskId);
+          await this.emitProgress(
+            current,
+            currentTask,
+            job.progress?.message || `正在${job.stage} ${currentTask.title}`,
+            job.status === 'failed' ? 'error' : job.status === 'blocked' ? 'blocked' : 'running',
+          );
+        });
+      }
+      if (job.status === 'succeeded') {
+        await this.completeBlenderTask(runId, taskId, job);
+        return;
+      }
+      if (job.status === 'blocked') {
+        await this.blockTask(runId, taskId, job.error || 'Blender 当前不可用。', job.recoverable !== false);
+        return;
+      }
+      if (job.status === 'failed') throw new Error(job.error || 'Blender 场景生成失败。');
+      if (job.status === 'cancelled') throw new Error('Blender 场景任务已取消。');
+      await blenderJobService.waitForTerminal(jobId, MEDIA_JOB_POLL_MS * 2);
+    }
+  }
+
+  private async completeBlenderTask(runId: string, taskId: string, job: BlenderJobSnapshot): Promise<void> {
+    await this.mutate(runId, async (run) => {
+      const task = run.tasks.find((candidate) => candidate.id === taskId);
+      if (!task || task.status !== 'running' || run.status === 'cancelled') return;
+      if (job.artifacts.length === 0) throw new Error('Blender 任务完成但没有返回产物。');
+      const runtimeArtifactIds = new Map<string, string>();
+      const artifacts: ChatRuntimeArtifact[] = job.artifacts.map((output, index) => {
+        const artifact: ChatRuntimeArtifact = {
+          id: artifactId(run.runId, task.id, task.artifactIds.length + index),
+          kind: output.role,
+          title: output.fileName || output.title,
+          filePath: output.filePath,
+          mimeType: output.mimeType,
+          sizeBytes: output.sizeBytes,
+          stepId: taskStepId(task.id),
+          sourceToolCallId: job.jobId,
+          source: 'blender-runtime',
+        };
+        runtimeArtifactIds.set(output.id, artifact.id);
+        return artifact;
+      });
+      const availability = artifacts.map((artifact): ChatRuntimeVerification => ({
+        id: verificationId(artifact, 'artifact.availability'),
+        status: artifact.filePath && (artifact.sizeBytes ?? 0) > 0 ? 'passed' : 'failed',
+        kind: 'artifact.availability',
+        required: true,
+        severity: artifact.filePath && (artifact.sizeBytes ?? 0) > 0 ? 'info' : 'blocking',
+        title: `验证 ${artifact.title || artifact.id}`,
+        detail: artifact.filePath && (artifact.sizeBytes ?? 0) > 0 ? 'Blender 产物文件可用性验证已通过。' : 'Blender 产物文件不可用。',
+        evidence: artifact.filePath,
+        targetId: artifact.id,
+        artifactId: artifact.id,
+        source: 'blender-runtime',
+      }));
+      const blenderVerifications = job.verifications.map((item): ChatRuntimeVerification => {
+        const runtimeArtifactId = item.artifactId ? runtimeArtifactIds.get(item.artifactId) : undefined;
+        return {
+          id: `verification:blender:${safeId(job.jobId)}:${safeId(item.id)}`,
+          status: item.status,
+          kind: item.kind,
+          required: item.required,
+          severity: item.severity,
+          title: item.title,
+          detail: item.detail,
+          evidence: item.evidence,
+          ...(runtimeArtifactId ? { targetId: runtimeArtifactId, artifactId: runtimeArtifactId } : {}),
+          source: 'blender-runtime',
+        };
+      });
+      const taskVerifications = [...availability, ...blenderVerifications];
+      run.artifacts.push(...artifacts);
+      run.verifications.push(...taskVerifications);
+      task.artifactIds.push(...artifacts.map((artifact) => artifact.id));
+      const passed = taskVerifications.every((verification) => (
+        verification.required === false || verification.status === 'passed'
+      ));
+      task.status = passed ? 'completed' : 'failed';
+      task.recoverable = !passed;
+      task.autoRetrySafe = false;
+      task.error = passed ? undefined : taskVerifications.find((verification) => (
+        verification.required !== false && verification.status !== 'passed'
+      ))?.detail;
+      task.completedAt = Date.now();
+      await this.record(run, 'task.completed', { status: task.status, jobId: job.jobId }, task.id);
+      for (const artifact of artifacts) await this.emitArtifact(run, artifact);
+      for (const verification of taskVerifications) await this.emitVerification(run, verification);
+      await this.emitTaskStep(run, task);
+      await this.emitProgress(
+        run,
+        task,
+        passed ? `${task.title}已生成并通过验证，等待写入会话` : `${task.title}验证未通过`,
+        passed ? 'running' : 'error',
+      );
+    });
   }
 
   private async executeMediaTask(runId: string, taskId: string): Promise<void> {

@@ -937,6 +937,9 @@ const OPTIONAL_PROVIDER_LIKE_BUNDLED_PLUGIN_IDS = new Set([
 const UCLAW_COMPUTER_USE_PLUGIN_ID = 'uclaw-computer-use';
 const UCLAW_ARTIFACT_GUARD_PLUGIN_ID = 'uclaw-artifact-guard';
 const UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID = 'uclaw-local-artifacts';
+const UCLAW_DESKTOP_CONTROL_PLUGIN_ID = 'uclaw-desktop-control';
+const UCLAW_BLENDER_PLUGIN_ID = 'uclaw-blender';
+const UCLAW_TASK_BRIDGE_PLUGIN_ID = 'uclaw-task-bridge';
 const ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
@@ -3201,6 +3204,15 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
     if (ensurePluginEntryEnabled(config, UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID)) {
+      modified = true;
+    }
+    if (ensurePluginEntryEnabled(config, UCLAW_DESKTOP_CONTROL_PLUGIN_ID)) {
+      modified = true;
+    }
+    if (ensurePluginEntryEnabled(config, UCLAW_BLENDER_PLUGIN_ID)) {
+      modified = true;
+    }
+    if (ensurePluginEntryEnabled(config, UCLAW_TASK_BRIDGE_PLUGIN_ID)) {
       modified = true;
     }
     if (ensureParallelWebSearchPluginRegistration(config)) {

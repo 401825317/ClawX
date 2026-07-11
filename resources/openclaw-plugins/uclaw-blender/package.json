@@ -1,0 +1,9 @@
+{
+  "name": "uclaw-blender-plugin",
+  "version": "0.1.3",
+  "type": "module",
+  "main": "index.mjs",
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.48"
+  }
+}

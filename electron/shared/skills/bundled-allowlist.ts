@@ -7,6 +7,7 @@
  */
 export const UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS = [
   'browser-automation',
+  'blender-maker',
   'diagram-maker',
   'document-maker',
   'healthcheck',

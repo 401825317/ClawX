@@ -6,6 +6,7 @@ import { scheduleControlUiDeviceAutoApproval } from '../../utils/control-ui-devi
 import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../utils/store';
 import { logger } from '../../utils/logger';
+import { agentTurnPreferenceStore, normalizeUClawTurnPreferences } from '../../services/agent-runtime/turn-preference-store';
 import {
   buildOpenClawInlineImageAttachment,
   OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
@@ -355,6 +356,7 @@ export async function handleGatewayRoutes(
         deliver?: boolean;
         idempotencyKey: string;
         thinking?: string | null;
+        clientPreferences?: unknown;
       }>(req);
       sessionKeyForLog = body.sessionKey;
       const sendDiagnostic = buildChatSendDiagnostic(body.message, {
@@ -381,7 +383,22 @@ export async function handleGatewayRoutes(
       if (thinkingOverride) {
         rpcParams.thinking = thinkingOverride.thinking;
       }
-      const result = await runSerializedChatSendRpc(ctx, rpcParams);
+      const preferences = normalizeUClawTurnPreferences(body.clientPreferences);
+      const preferenceEntry = preferences
+        ? agentTurnPreferenceStore.enqueue({
+            sessionKey: body.sessionKey,
+            idempotencyKey: body.idempotencyKey,
+            message: body.message,
+            preferences,
+          })
+        : undefined;
+      let result: { runId?: string };
+      try {
+        result = await runSerializedChatSendRpc(ctx, rpcParams);
+      } catch (error) {
+        agentTurnPreferenceStore.discard(preferenceEntry?.id);
+        throw error;
+      }
       logger.info('[metric] chat.send.rpc', {
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,
@@ -393,6 +410,7 @@ export async function handleGatewayRoutes(
               thinkingOverrideReason: thinkingOverride.reason,
             }
           : {}),
+        ...(preferences?.mode ? { clientPreferenceMode: preferences.mode } : {}),
       });
       sendJson(res, 200, { success: true, result });
     } catch (error) {
@@ -429,6 +447,7 @@ export async function handleGatewayRoutes(
         idempotencyKey: string;
         thinking?: string | null;
         inlineAttachments?: boolean;
+        clientPreferences?: unknown;
         media?: Array<{ filePath: string; mimeType: string; fileName: string }>;
       }>(req);
       sessionKeyForLog = body.sessionKey;
@@ -503,7 +522,22 @@ export async function handleGatewayRoutes(
       if (imageAttachments.length > 0) {
         rpcParams.attachments = imageAttachments;
       }
-      const result = await runSerializedChatSendRpc(ctx, rpcParams as ChatSendRpcParams);
+      const preferences = normalizeUClawTurnPreferences(body.clientPreferences);
+      const preferenceEntry = preferences
+        ? agentTurnPreferenceStore.enqueue({
+            sessionKey: body.sessionKey,
+            idempotencyKey: body.idempotencyKey,
+            message,
+            preferences,
+          })
+        : undefined;
+      let result: { runId?: string };
+      try {
+        result = await runSerializedChatSendRpc(ctx, rpcParams as ChatSendRpcParams);
+      } catch (error) {
+        agentTurnPreferenceStore.discard(preferenceEntry?.id);
+        throw error;
+      }
       logger.info('[metric] chat.send.rpc', {
         sessionKey: sessionKeyForLog,
         elapsedMs: Date.now() - startedAt,
@@ -515,6 +549,7 @@ export async function handleGatewayRoutes(
               thinkingOverrideReason: thinkingOverride.reason,
             }
           : {}),
+        ...(preferences?.mode ? { clientPreferenceMode: preferences.mode } : {}),
       });
       sendJson(res, 200, { success: true, result });
     } catch (error) {

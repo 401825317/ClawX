@@ -25,18 +25,90 @@ function readBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function readFirstString(records: Array<Record<string, unknown> | null | undefined>, keys: string[]): string | undefined {
+  for (const record of records) {
+    if (!record) continue;
+    for (const key of keys) {
+      const value = readString(record[key]);
+      if (value) return value;
+    }
+  }
+  return undefined;
+}
+
+function nestedRecord(record: Record<string, unknown> | null | undefined, key: string): Record<string, unknown> | null {
+  return record ? asRecord(record[key]) : null;
+}
+
+type RuntimeTaskContext = {
+  data: Record<string, unknown>;
+  task: Record<string, unknown> | null;
+  taskId?: string;
+  parentTaskId?: string;
+  runId?: string;
+  sessionKey?: string;
+};
+
+function resolveRuntimeTaskContext(payload: Record<string, unknown>): RuntimeTaskContext {
+  const data = asRecord(payload.data) ?? payload;
+  const details = nestedRecord(data, 'details');
+  const result = nestedRecord(data, 'result');
+  const resultDetails = nestedRecord(result, 'details');
+  const meta = nestedRecord(data, 'meta');
+  const task = nestedRecord(data, 'task')
+    ?? nestedRecord(data, 'taskRun')
+    ?? nestedRecord(data, 'task_run')
+    ?? nestedRecord(details, 'task')
+    ?? nestedRecord(resultDetails, 'task')
+    ?? nestedRecord(meta, 'task')
+    ?? nestedRecord(payload, 'task');
+  const records = [payload, data, task, details, result, resultDetails, meta];
+  const explicitTaskId = readFirstString(records, ['taskId', 'task_id']);
+  const taskLooksNative = Boolean(task && (
+    readString(task.taskKind)
+    || readString(task.task_kind)
+    || readString(task.deliveryStatus)
+    || readString(task.delivery_status)
+    || readString(task.requesterSessionKey)
+    || readString(task.requester_session_key)
+  ));
+  const taskId = explicitTaskId ?? (taskLooksNative ? readString(task?.id) : undefined);
+  return {
+    data,
+    task,
+    taskId,
+    parentTaskId: readFirstString(records, ['parentTaskId', 'parent_task_id']),
+    runId: readFirstString(records, ['runId', 'run_id']),
+    sessionKey: readFirstString(records, [
+      'sessionKey',
+      'session_key',
+      'requesterSessionKey',
+      'requester_session_key',
+      'ownerKey',
+      'owner_key',
+    ]),
+  };
+}
+
 function withBase(
   type: ChatRuntimeEvent['type'],
   payload: Record<string, unknown>,
-): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'type' | 'runId' | 'sessionKey' | 'seq' | 'ts'> | null {
-  const runId = readString(payload.runId);
+): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'type' | 'runId' | 'sessionKey' | 'taskId' | 'parentTaskId' | 'taskStatus' | 'seq' | 'ts'> | null {
+  const taskContext = resolveRuntimeTaskContext(payload);
+  const runId = taskContext.runId ?? (taskContext.taskId ? `task:${taskContext.taskId}` : undefined);
   if (!runId) return null;
   return {
     contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
-    producer: readString(payload.producer) ?? readString(payload.source) ?? 'gateway',
+    producer: readFirstString([payload, taskContext.data, taskContext.task], ['producer', 'source']) ?? 'gateway',
     type,
     runId,
-    sessionKey: readString(payload.sessionKey),
+    sessionKey: taskContext.sessionKey,
+    taskId: taskContext.taskId,
+    parentTaskId: taskContext.parentTaskId,
+    taskStatus: (() => {
+      const task = resolveNativeTaskRecord(payload);
+      return task ? nativeTaskLifecycle(task, taskContext.data) : undefined;
+    })(),
     seq: readNumber(payload.seq),
     ts: readNumber(payload.ts),
   };
@@ -132,6 +204,8 @@ function normalizePlanStep(value: unknown, index: number): NonNullable<Extract<C
     kind: readString(record.kind),
     order: readNumber(record.order) ?? index,
     parentId: readString(record.parentId) ?? readString(record.parentStepId),
+    taskId: readString(record.taskId) ?? readString(record.task_id),
+    toolCallId: readString(record.toolCallId) ?? readString(record.tool_call_id),
   };
   const requiresArtifact = readBoolean(record.requiresArtifact);
   const requiredArtifact = readBoolean(record.requiredArtifact);
@@ -164,6 +238,7 @@ function normalizeProgressEntry(value: unknown): ChatRuntimeProgressEntry | null
     dedupeKey: readString(record.dedupeKey),
     toolCallId: readString(record.toolCallId),
     stepId: readString(record.stepId),
+    taskId: readString(record.taskId) ?? readString(record.task_id),
     source: readString(record.source),
   };
 }
@@ -189,6 +264,7 @@ function normalizeArtifact(value: unknown): Extract<ChatRuntimeEvent, { type: 'a
     mimeType: readString(record.mimeType) ?? readString(record.mediaType),
     sizeBytes: readNumber(record.sizeBytes) ?? readNumber(record.fileSize),
     stepId: readString(record.stepId) ?? readString(record.requiredStepId) ?? readString(record.compositeTaskId),
+    taskId: readString(record.taskId) ?? readString(record.task_id),
     sourceToolCallId: readString(record.sourceToolCallId) ?? readString(record.toolCallId),
     source: readString(record.source),
   };
@@ -214,6 +290,7 @@ function normalizeVerification(value: unknown): Extract<ChatRuntimeEvent, { type
     detail: readString(record.detail) ?? readString(record.summary) ?? readString(record.message),
     targetId,
     artifactId,
+    taskId: readString(record.taskId) ?? readString(record.task_id),
     evidence: readString(record.evidence),
     source: readString(record.source),
   };
@@ -322,12 +399,372 @@ function normalizeCommandVerificationEvents(event: ChatRuntimeEvent): ChatRuntim
   ];
 }
 
+type NativeTaskLifecycle = 'pending' | 'running' | 'completed' | 'error' | 'waiting_approval' | 'partial';
+
+function normalizeMarker(value: unknown): string {
+  return typeof value === 'string'
+    ? value.trim().toLowerCase().replace(/[\s.-]+/g, '_')
+    : '';
+}
+
+function isNativeTaskRecord(record: Record<string, unknown> | null): record is Record<string, unknown> {
+  if (!record) return false;
+  const taskId = readString(record.taskId) ?? readString(record.task_id);
+  if (taskId) return true;
+  const hasTaskShape = Boolean(
+    readString(record.taskKind)
+    || readString(record.task_kind)
+    || readString(record.deliveryStatus)
+    || readString(record.delivery_status)
+    || readString(record.requesterSessionKey)
+    || readString(record.requester_session_key),
+  );
+  return hasTaskShape && Boolean(readString(record.id) ?? readString(record.runId) ?? readString(record.run_id));
+}
+
+function resolveNativeTaskRecord(payload: Record<string, unknown>): Record<string, unknown> | null {
+  const context = resolveRuntimeTaskContext(payload);
+  if (isNativeTaskRecord(context.task)) return context.task;
+  if (isNativeTaskRecord(context.data)) return context.data;
+  return null;
+}
+
+function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string, unknown>): NativeTaskLifecycle {
+  const records = [task, data];
+  const status = normalizeMarker(readFirstString(records, ['status', 'state', 'phase']));
+  const deliveryStatus = normalizeMarker(readFirstString(records, ['deliveryStatus', 'delivery_status']));
+  const terminalOutcome = normalizeMarker(readFirstString(records, ['terminalOutcome', 'terminal_outcome']));
+  const approvalStatus = normalizeMarker(readFirstString(records, [
+    'approvalStatus',
+    'approval_status',
+    'approvalState',
+    'approval_state',
+  ]));
+
+  if (
+    ['waiting_approval', 'approval_required', 'requires_approval', 'pending_approval'].includes(status)
+    || ['waiting', 'pending', 'required'].includes(approvalStatus)
+  ) return 'waiting_approval';
+  if (
+    ['partial', 'partially_completed', 'partial_failure'].includes(status)
+    || ['partial', 'blocked'].includes(terminalOutcome)
+    || ['partial', 'failed'].includes(deliveryStatus)
+  ) return 'partial';
+  if (['failed', 'failure', 'error', 'aborted', 'cancelled', 'canceled', 'lost'].includes(status)) return 'error';
+  if (['succeeded', 'success', 'completed', 'complete', 'done', 'finished'].includes(status)) {
+    return ['pending', 'queued', 'running'].includes(deliveryStatus) ? 'running' : 'completed';
+  }
+  if (['running', 'started', 'active', 'processing'].includes(status)) return 'running';
+  return 'pending';
+}
+
+function nativeTaskStepStatus(lifecycle: NativeTaskLifecycle): NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']>['status'] {
+  if (lifecycle === 'completed') return 'completed';
+  if (lifecycle === 'error') return 'error';
+  if (lifecycle === 'waiting_approval' || lifecycle === 'partial') return 'blocked';
+  return lifecycle === 'running' ? 'running' : 'pending';
+}
+
+function nativeTaskProgressStatus(lifecycle: NativeTaskLifecycle): ChatRuntimeProgressEntry['status'] {
+  if (lifecycle === 'completed') return 'completed';
+  if (lifecycle === 'error') return 'error';
+  if (lifecycle === 'waiting_approval' || lifecycle === 'partial') return 'blocked';
+  return 'running';
+}
+
+function nativeTaskTitle(task: Record<string, unknown>, data: Record<string, unknown>, taskId: string): string {
+  return readFirstString([task, data], [
+    'label',
+    'title',
+    'task',
+    'taskLabel',
+    'task_label',
+    'progressSummary',
+    'progress_summary',
+    'terminalSummary',
+    'terminal_summary',
+    'toolName',
+    'tool_name',
+    'taskKind',
+    'task_kind',
+    'sourceId',
+    'source_id',
+  ]) ?? taskId;
+}
+
+function nativeTaskDetail(task: Record<string, unknown>, data: Record<string, unknown>): string | undefined {
+  return readFirstString([task, data], [
+    'progressSummary',
+    'progress_summary',
+    'terminalSummary',
+    'terminal_summary',
+    'error',
+    'message',
+    'summary',
+  ]);
+}
+
+function nativeTaskArtifactEntries(value: unknown): unknown[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => nativeTaskArtifactEntries(item));
+  if (typeof value === 'string') {
+    return [{
+      ...(value.startsWith('http://') || value.startsWith('https://') ? { url: value } : { filePath: value }),
+    }];
+  }
+  return [value];
+}
+
+function collectNativeTaskArtifactEntries(task: Record<string, unknown>, data: Record<string, unknown>): unknown[] {
+  const result = asRecord(data.result);
+  const resultDetails = nestedRecord(result, 'details');
+  const internalEvents = [data.internalEvents, data.internal_events, result?.internalEvents, result?.internal_events]
+    .flatMap((value) => Array.isArray(value) ? value : [])
+    .map((value) => asRecord(value))
+    .filter((value): value is Record<string, unknown> => value != null);
+  const mediaRecords = [
+    nestedRecord(task, 'media'),
+    nestedRecord(data, 'media'),
+    nestedRecord(result, 'media'),
+    nestedRecord(resultDetails, 'media'),
+  ];
+  const entries: unknown[] = [];
+  const records = [task, data, result, resultDetails, ...internalEvents];
+  for (const record of records) {
+    if (!record) continue;
+    for (const key of ['artifact', 'artifacts', 'attachment', 'attachments', 'paths', 'mediaUrls', 'media_urls', 'outputPath', 'output_path', 'filePath', 'path']) {
+      entries.push(...nativeTaskArtifactEntries(record[key]));
+    }
+  }
+  for (const media of mediaRecords) {
+    if (!media) continue;
+    for (const key of ['artifact', 'artifacts', 'attachment', 'attachments', 'paths', 'mediaUrls', 'media_urls', 'url']) {
+      entries.push(...nativeTaskArtifactEntries(media[key]));
+    }
+  }
+  return entries;
+}
+
+function collectNativeTaskVerifications(task: Record<string, unknown>, data: Record<string, unknown>): unknown[] {
+  const result = asRecord(data.result);
+  const resultDetails = nestedRecord(result, 'details');
+  const internalEvents = [data.internalEvents, data.internal_events, result?.internalEvents, result?.internal_events]
+    .flatMap((value) => Array.isArray(value) ? value : [])
+    .map((value) => asRecord(value))
+    .filter((value): value is Record<string, unknown> => value != null);
+  const entries: unknown[] = [];
+  for (const record of [task, data, result, resultDetails, ...internalEvents]) {
+    if (!record) continue;
+    for (const key of ['verification', 'verifications']) {
+      const value = record[key];
+      if (Array.isArray(value)) entries.push(...value);
+      else if (value != null) entries.push(value);
+    }
+  }
+  return entries;
+}
+
+function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] {
+  const raw = asRecord(payload);
+  if (!raw) return [];
+  const context = resolveRuntimeTaskContext(raw);
+  const task = resolveNativeTaskRecord(raw);
+  if (!task || !context.taskId) return [];
+
+  const base = withBase('run.step.updated', raw);
+  if (!base) return [];
+  const lifecycle = nativeTaskLifecycle(task, context.data);
+  const nativeBase = { ...base, taskStatus: lifecycle };
+  const taskId = context.taskId;
+  const title = nativeTaskTitle(task, context.data, taskId);
+  const detail = nativeTaskDetail(task, context.data);
+  const toolCallId = readFirstString([task, context.data], ['toolCallId', 'tool_call_id']);
+  const stepId = `task:${taskId}`;
+  const events: ChatRuntimeEvent[] = [{
+    ...nativeBase,
+    type: 'run.step.updated',
+    step: {
+      id: stepId,
+      title,
+      status: nativeTaskStepStatus(lifecycle),
+      detail,
+      kind: readFirstString([task, context.data], ['taskKind', 'task_kind']),
+      parentId: context.parentTaskId ? `task:${context.parentTaskId}` : undefined,
+      taskId,
+      toolCallId,
+    },
+  }];
+
+  if (detail) {
+    events.push({
+      ...nativeBase,
+      type: 'progress.update',
+      entry: {
+        id: `task:${taskId}:progress`,
+        kind: lifecycle === 'error' || lifecycle === 'waiting_approval' || lifecycle === 'partial' ? 'status' : 'action',
+        text: detail,
+        status: nativeTaskProgressStatus(lifecycle),
+        toolCallId,
+        stepId,
+        taskId,
+        source: 'native',
+      },
+    });
+  }
+
+  const artifactMap = new Map<string, Extract<ChatRuntimeEvent, { type: 'artifact.produced' }>['artifact']>();
+  for (const entry of collectNativeTaskArtifactEntries(task, context.data)) {
+    const artifact = normalizeArtifact(entry);
+    if (!artifact) continue;
+    const normalized = {
+      ...artifact,
+      taskId: artifact.taskId ?? taskId,
+      stepId: artifact.stepId ?? stepId,
+      sourceToolCallId: artifact.sourceToolCallId ?? toolCallId,
+      source: artifact.source ?? 'openclaw.task',
+    };
+    artifactMap.set(normalized.id, normalized);
+  }
+  for (const artifact of artifactMap.values()) {
+    events.push({
+      ...nativeBase,
+      type: 'artifact.produced',
+      artifact,
+      toolCallId,
+      itemId: taskId,
+    });
+  }
+
+  const verificationIds = new Set<string>();
+  for (const entry of collectNativeTaskVerifications(task, context.data)) {
+    const verification = normalizeVerification(entry);
+    if (!verification) continue;
+    verificationIds.add(verification.id);
+    events.push({
+      ...nativeBase,
+      type: 'verification.completed',
+      verification: {
+        ...verification,
+        taskId: verification.taskId ?? taskId,
+        targetId: verification.targetId ?? verification.artifactId,
+        source: verification.source ?? 'openclaw.task',
+      },
+      toolCallId,
+      itemId: taskId,
+    });
+  }
+
+  if (lifecycle === 'completed') {
+    for (const artifact of artifactMap.values()) {
+      const verificationId = `verification:task:${taskId}:${artifact.id}`;
+      if (verificationIds.has(verificationId)) continue;
+      events.push({
+        ...nativeBase,
+        type: 'verification.completed',
+        verification: {
+          id: verificationId,
+          status: 'passed',
+          kind: 'artifact.availability',
+          required: true,
+          title: artifact.title ?? artifact.id,
+          targetId: artifact.id,
+          artifactId: artifact.id,
+          taskId,
+          evidence: context.runId,
+          source: 'openclaw.task',
+        },
+        toolCallId,
+        itemId: taskId,
+      });
+    }
+  }
+
+  if (lifecycle === 'waiting_approval' || lifecycle === 'partial') {
+    events.push({
+      ...nativeBase,
+      type: 'run.checkpoint',
+      checkpoint: {
+        id: `checkpoint:task:${taskId}:${lifecycle}`,
+        summary: detail ?? title,
+        reason: detail,
+        taskId,
+        kind: lifecycle === 'waiting_approval' ? 'approval' : 'partial',
+        recoverable: true,
+      },
+    });
+  }
+
+  if (lifecycle === 'waiting_approval') {
+    const approval = nestedRecord(task, 'approval') ?? nestedRecord(context.data, 'approval');
+    events.push({
+      ...nativeBase,
+      type: 'approval.updated',
+      itemId: taskId,
+      toolCallId,
+      title: readFirstString([approval, task, context.data], ['title', 'label', 'kind']) ?? title,
+      kind: readFirstString([approval, task, context.data], ['kind', 'approvalKind', 'approval_kind']),
+      phase: readFirstString([approval, task, context.data], ['phase', 'status', 'state']) ?? 'waiting',
+      status: readFirstString([approval, task, context.data], ['status', 'state']) ?? 'pending',
+      message: readFirstString([approval, task, context.data], ['message', 'reason', 'summary', 'progressSummary']) ?? detail,
+    });
+  }
+
+  if (lifecycle === 'partial') {
+    events.push({
+      ...nativeBase,
+      type: 'gate.issue',
+      issue: {
+        id: `issue:task:${taskId}:partial`,
+        code: 'task.partial',
+        severity: 'blocking',
+        title,
+        detail,
+        targetId: taskId,
+        stepId,
+        recoverable: true,
+      },
+    });
+  }
+
+  if (lifecycle === 'completed' || lifecycle === 'error' || lifecycle === 'partial') {
+    events.push({
+      ...nativeBase,
+      type: 'run.ended',
+      status: lifecycle === 'completed' ? 'completed' : 'error',
+      endedAt: readNumber(task.endedAt) ?? readNumber(context.data.endedAt),
+      error: lifecycle === 'completed' ? undefined : detail,
+      stopReason: lifecycle === 'partial' ? 'partial_task_completion' : undefined,
+    });
+  }
+
+  return events;
+}
+
+function runtimeEventIdentity(event: ChatRuntimeEvent): string {
+  if (event.type === 'run.step.updated') return `${event.type}:${event.runId}:${event.step.id}:${event.step.status}`;
+  if (event.type === 'progress.update') return `${event.type}:${event.runId}:${event.entry.id}:${event.entry.status}`;
+  if (event.type === 'artifact.produced') return `${event.type}:${event.runId}:${event.artifact.id}`;
+  if (event.type === 'verification.completed') return `${event.type}:${event.runId}:${event.verification.id}:${event.verification.status}`;
+  if (event.type === 'run.checkpoint') return `${event.type}:${event.runId}:${event.checkpoint.id}`;
+  if (event.type === 'gate.issue') return `${event.type}:${event.runId}:${event.issue.id}`;
+  if (event.type === 'approval.updated') return `${event.type}:${event.runId}:${event.itemId ?? ''}:${event.status ?? ''}:${event.phase ?? ''}`;
+  if (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed') return `${event.type}:${event.runId}:${event.toolCallId}`;
+  return `${event.type}:${event.runId}:${event.seq ?? event.ts ?? ''}`;
+}
+
 export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeEvent | null {
   const raw = asRecord(payload);
   if (!raw) return null;
 
-  const stream = readString(raw.stream);
   const data = asRecord(raw.data) ?? raw;
+  const stream = normalizeMarker(
+    readString(raw.stream)
+      ?? readString(data.stream)
+      ?? readString(raw.eventType)
+      ?? readString(data.eventType)
+      ?? readString(raw.type)
+      ?? readString(data.event),
+  );
 
   if (stream === 'lifecycle') {
     const phase = readString(data.phase);
@@ -387,7 +824,7 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
     return null;
   }
 
-  if (stream === 'plan' || stream === 'run.plan') {
+  if (stream === 'plan' || stream === 'run_plan') {
     const stepsRaw = Array.isArray(data.steps) ? data.steps : [];
     const steps = stepsRaw
       .map((step, index) => normalizePlanStep(step, index))
@@ -403,7 +840,7 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
       : null;
   }
 
-  if (stream === 'step' || stream === 'run.step') {
+  if (stream === 'step' || stream === 'run_step') {
     const step = normalizePlanStep(data.step ?? data, 0);
     const base = withBase('run.step.updated', raw);
     return base && step ? { ...base, step } : null;
@@ -415,7 +852,10 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
     return base && artifact
       ? {
           ...base,
-          artifact,
+          artifact: {
+            ...artifact,
+            taskId: artifact.taskId ?? base.taskId,
+          },
           toolCallId: readString(data.toolCallId),
           itemId: readString(data.itemId),
         }
@@ -428,14 +868,17 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
     return base && verification
       ? {
           ...base,
-          verification,
+          verification: {
+            ...verification,
+            taskId: verification.taskId ?? base.taskId,
+          },
           toolCallId: readString(data.toolCallId),
           itemId: readString(data.itemId),
         }
       : null;
   }
 
-  if (stream === 'issue' || stream === 'gate.issue') {
+  if (stream === 'issue' || stream === 'gate_issue') {
     const issue = normalizeGateIssue(data.issue ?? data, 0);
     const base = withBase('gate.issue', raw);
     return base && issue
@@ -446,7 +889,7 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
       : null;
   }
 
-  if (stream === 'gate' || stream === 'run.gate' || stream === 'gate.evaluated') {
+  if (stream === 'gate' || stream === 'run_gate' || stream === 'gate_evaluated') {
     const gate = normalizeGateEvaluation(data.gate ?? data);
     const base = withBase('gate.evaluated', raw);
     return base && gate
@@ -501,7 +944,7 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
       : null;
   }
 
-  if (stream === 'progress' || stream === 'progress.update') {
+  if (stream === 'progress' || stream === 'progress_update') {
     const base = withBase('progress.update', raw);
     const entry = normalizeProgressEntry(data.entry ?? data);
     return base && entry
@@ -601,5 +1044,13 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
 
 export function normalizeGatewayChatRuntimeEvents(payload: unknown): ChatRuntimeEvent[] {
   const event = normalizeGatewayChatRuntimeEvent(payload);
-  return event ? [event, ...normalizeCommandVerificationEvents(event)] : [];
+  const nativeTaskEvents = normalizeNativeTaskRuntimeEvents(payload);
+  const events = event ? [event, ...normalizeCommandVerificationEvents(event), ...nativeTaskEvents] : nativeTaskEvents;
+  const seen = new Set<string>();
+  return events.filter((candidate) => {
+    const identity = runtimeEventIdentity(candidate);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
 }

@@ -6,6 +6,7 @@ import {
   stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
+import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
 import type {
   AsyncTaskEvidence,
   AsyncTaskLedgerEntry,
@@ -1894,9 +1895,9 @@ function normalizeAsyncTaskStatus(
   fallback: AsyncTaskEvidence['status'],
 ): AsyncTaskEvidence['status'] {
   const status = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (['error', 'failed', 'failure', 'aborted', 'cancelled', 'canceled'].includes(status)) return 'error';
+  if (['error', 'failed', 'failure', 'aborted', 'cancelled', 'canceled', 'partial', 'partial_failure'].includes(status)) return 'error';
   if (['completed', 'complete', 'done', 'success', 'succeeded', 'finished'].includes(status)) return 'completed';
-  if (['pending', 'running', 'started', 'accepted', 'queued', 'waiting'].includes(status)) return 'pending';
+  if (['pending', 'running', 'started', 'accepted', 'queued', 'waiting', 'waiting_approval', 'approval_required'].includes(status)) return 'pending';
   return fallback;
 }
 
@@ -1915,7 +1916,9 @@ function asyncTaskEvidenceFromRecord(
     ?? (fallbackRecord ? pickNonEmptyString(fallbackRecord, ['childSessionKey', 'child_session_key']) : undefined);
   const childSessionId = pickNonEmptyString(record, ['childSessionId', 'child_session_id', 'sessionId', 'session_id'])
     ?? (fallbackRecord ? pickNonEmptyString(fallbackRecord, ['childSessionId', 'child_session_id']) : undefined);
-  if (!taskId && !runId && !childSessionKey && !childSessionId) return null;
+  // A normal runId is present on every runtime event. Treat it as async
+  // evidence only when OpenClaw also supplied a task or child-session handle.
+  if (!taskId && !childSessionKey && !childSessionId) return null;
   const status = normalizeAsyncTaskStatus(
     record.status ?? record.state ?? fallbackRecord?.status ?? fallbackRecord?.state,
     fallbackStatus,
@@ -1944,6 +1947,70 @@ function normalizeEvidenceMarker(value: unknown): string {
     : '';
 }
 
+function asyncTaskEvidenceFromRuntimeEvent(value: ChatRuntimeEvent | unknown, now: number): AsyncTaskEvidence | null {
+  const event = asRecord(value);
+  if (!event) return null;
+  const type = pickNonEmptyString(event, ['type']);
+  if (!type) return null;
+
+  const step = asRecord(event.step);
+  const entry = asRecord(event.entry);
+  const artifact = asRecord(event.artifact);
+  const verification = asRecord(event.verification);
+  const checkpoint = asRecord(event.checkpoint);
+  const result = asRecord(event.result);
+  const details = result ? asRecord(result.details) : null;
+  const task = details ? asRecord(details.task) : null;
+  const records = [event, step, entry, artifact, verification, checkpoint, result, details, task]
+    .filter((record): record is Record<string, unknown> => record != null);
+  const taskId = records
+    .map((record) => pickNonEmptyString(record, ['taskId', 'task_id']))
+    .find(Boolean);
+  const runId = records
+    .map((record) => pickNonEmptyString(record, ['runId', 'run_id']))
+    .find(Boolean);
+  const childSessionKey = records
+    .map((record) => pickNonEmptyString(record, ['childSessionKey', 'child_session_key']))
+    .find(Boolean);
+  const childSessionId = records
+    .map((record) => pickNonEmptyString(record, ['childSessionId', 'child_session_id', 'sessionId', 'session_id']))
+    .find(Boolean);
+  if (!taskId && !childSessionKey && !childSessionId) return null;
+
+  const nativeStatus = records
+    .map((record) => record.taskStatus ?? record.task_status ?? record.status ?? record.state)
+    .find((status) => typeof status === 'string');
+  let status = normalizeAsyncTaskStatus(nativeStatus, 'pending');
+  if (type === 'approval.updated' || checkpoint?.kind === 'approval') {
+    status = 'pending';
+  } else if (type === 'gate.issue' || checkpoint?.kind === 'partial') {
+    status = 'error';
+  } else if (type === 'tool.completed' && event.isError === true) {
+    status = 'error';
+  } else if (type === 'tool.completed' && normalizeAsyncTaskStatus(nativeStatus, 'pending') === 'pending') {
+    status = 'pending';
+  } else if (type === 'tool.completed' && nativeStatus == null) {
+    status = 'completed';
+  }
+
+  return {
+    id: taskId
+      ? `task:${taskId}`
+      : runId
+        ? `run:${runId}`
+        : childSessionKey
+          ? `child:${childSessionKey}`
+          : `child-id:${childSessionId}`,
+    ...(taskId ? { taskId } : {}),
+    ...(runId ? { runId } : {}),
+    ...(childSessionKey ? { childSessionKey } : {}),
+    ...(childSessionId ? { childSessionId } : {}),
+    status,
+    source: type.startsWith('tool.') ? 'tool-result' : 'task-completion',
+    updatedAt: now,
+  };
+}
+
 /** Extracts async task state only from structured runtime/tool metadata. */
 function extractAsyncTaskEvidence(value: unknown): AsyncTaskEvidence[] {
   const evidence = new Map<string, AsyncTaskEvidence>();
@@ -1956,9 +2023,14 @@ function extractAsyncTaskEvidence(value: unknown): AsyncTaskEvidence[] {
     evidence.set(key, entry);
   };
 
+  const directRuntimeEvidence = asyncTaskEvidenceFromRuntimeEvent(value, now);
+  if (directRuntimeEvidence) return [directRuntimeEvidence];
+
   const visit = (current: unknown, parent: Record<string, unknown> | null, depth: number): void => {
     if (depth > 7 || !current) return;
     if (typeof current === 'string') {
+      // Legacy transcript fallback only. Native OpenClaw task events now carry
+      // task/run state through ChatRuntimeEvent and take precedence above.
       const startedTaskId = current.match(/Background task started for (?:image|video) generation \(([0-9a-f-]{36})\)/iu)?.[1];
       if (startedTaskId) {
         add({

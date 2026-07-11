@@ -51,6 +51,9 @@ const LOCAL_PLUGINS = [
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'), pluginId: 'clawx-openai-image' },
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-artifact-guard'), pluginId: 'uclaw-artifact-guard' },
   { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-local-artifacts'), pluginId: 'uclaw-local-artifacts' },
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-desktop-control'), pluginId: 'uclaw-desktop-control' },
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-blender'), pluginId: 'uclaw-blender' },
+  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-task-bridge'), pluginId: 'uclaw-task-bridge' },
 ];
 
 function getVirtualStoreNodeModules(realPkgPath) {

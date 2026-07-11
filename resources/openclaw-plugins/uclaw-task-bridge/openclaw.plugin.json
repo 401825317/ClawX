@@ -1,0 +1,24 @@
+{
+  "id": "uclaw-task-bridge",
+  "name": "UClaw Task Bridge",
+  "description": "Bridges recoverable UClaw Host jobs into OpenClaw tools and the originating session without creating a second agent loop.",
+  "version": "0.1.1",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": [
+      "uclaw_get_task_bridge_capabilities",
+      "uclaw_start_host_task",
+      "uclaw_get_host_task",
+      "uclaw_list_host_tasks",
+      "uclaw_cancel_host_task",
+      "uclaw_recover_host_task"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

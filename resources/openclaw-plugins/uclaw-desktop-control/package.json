@@ -1,0 +1,19 @@
+{
+  "name": "uclaw-desktop-control-plugin",
+  "version": "0.1.1",
+  "description": "Approval-gated UClaw desktop control tools",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.48"
+  }
+}

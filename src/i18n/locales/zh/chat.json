@@ -57,6 +57,14 @@
         "edited": "已修改相关内容",
         "ran": "已运行"
     },
+    "desktopApproval": {
+        "title": "允许桌面操作",
+        "description": "此操作将立即在本机应用中执行。请仅在确认目标应用和操作意图正确时批准。",
+        "privacy": "为保护隐私，待输入或待修改的具体内容不会显示在此确认框中。",
+        "approve": "允许执行",
+        "deny": "拒绝",
+        "actions": { "click": "点击", "drag": "拖拽", "scroll": "滚动", "press_key": "按键", "type_text": "输入文字", "set_value": "设置字段值", "select_text": "选择文字", "perform_secondary_action": "执行辅助操作" }
+    },
     "runtimeDelivery": {
         "compositeStart": "我先把这组需求拆开，能并行的同时处理，有依赖的按顺序完成。",
         "taskRunning": "正在{{task}}",
@@ -95,6 +103,12 @@
         }
     },
     "filePreview": {
+        "model3d": {
+            "loading": "正在加载三维模型...",
+            "externalOnly": "此格式需要在外部三维软件中打开。",
+            "loadFailed": "无法加载三维模型：{{error}}",
+            "reset": "重置视角"
+        },
         "tabs": {
             "source": "源码",
             "preview": "预览",

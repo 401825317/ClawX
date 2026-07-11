@@ -50,7 +50,8 @@ export type MediaIntentCompositeTaskKind =
   | 'video_generate'
   | 'image_edit'
   | 'mini_program'
-  | 'copywriting';
+  | 'copywriting'
+  | 'blender_scene';
 
 export type MediaIntentCompositeTask = {
   id: string;
@@ -63,6 +64,7 @@ export type MediaIntentCompositeTask = {
   selectedImageSource?: MediaIntentImageSource;
   selectedImageIndex?: number;
   sourceImages?: MediaGenerationInputImageRef[];
+  sceneSpec?: Record<string, unknown>;
 };
 
 export type MediaIntentRecentMessage = {
@@ -280,6 +282,7 @@ function summarizeRawPlannerJsonForLog(raw: Record<string, unknown>): Record<str
           requires_artifact: record.requires_artifact ?? record.requiresArtifact,
           depends_on: record.depends_on ?? record.dependsOn,
           fallback: record.fallback,
+          scene_spec_present: Boolean(record.scene_spec ?? record.sceneSpec),
           selected_image_source: record.selected_image_source ?? record.selectedImageSource,
           selected_image_index: record.selected_image_index ?? record.selectedImageIndex,
         };
@@ -356,6 +359,12 @@ function normalizeOptionalBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function normalizeSceneSpec(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? structuredClone(value as Record<string, unknown>)
+    : undefined;
+}
+
 function isCompositeTaskKind(value: unknown): value is MediaIntentCompositeTaskKind {
   return value === 'image_generate'
     || value === 'presentation'
@@ -363,18 +372,23 @@ function isCompositeTaskKind(value: unknown): value is MediaIntentCompositeTaskK
     || value === 'video_generate'
     || value === 'image_edit'
     || value === 'mini_program'
-    || value === 'copywriting';
+    || value === 'copywriting'
+    || value === 'blender_scene';
 }
 
 function isMediaCompositeTaskKind(kind: MediaIntentCompositeTaskKind): boolean {
-  return kind === 'image_generate' || kind === 'image_edit' || kind === 'video_generate';
+  return kind === 'image_generate'
+    || kind === 'image_edit'
+    || kind === 'video_generate'
+    || kind === 'blender_scene';
 }
 
-function isSingleLocalArtifactCompositeKind(kind: MediaIntentCompositeTaskKind): boolean {
+function isSingleDeterministicArtifactCompositeKind(kind: MediaIntentCompositeTaskKind): boolean {
   return kind === 'presentation'
     || kind === 'spreadsheet'
     || kind === 'mini_program'
-    || kind === 'copywriting';
+    || kind === 'copywriting'
+    || kind === 'blender_scene';
 }
 
 function isVisualQuestionCuePrompt(prompt: string): boolean {
@@ -529,6 +543,7 @@ function compositePlan(
     task.kind === 'image_generate'
     || task.kind === 'image_edit'
     || task.kind === 'video_generate'
+    || task.kind === 'blender_scene'
   ));
   return {
     action: 'chat',
@@ -764,6 +779,7 @@ function explicitCompositeTaskCount(
     video_generate: '(?:\u89c6\u9891|\u52a8\u753b|videos?|animations?)',
     mini_program: '(?:\u5c0f\u7a0b\u5e8f|mini\\s*programs?|wechat\\s+mini)',
     copywriting: '(?:\u6587\u6848|\u5ba3\u4f20\u8bed|\u6807\u9898|slogans?|copywriting|ad\\s+cop(?:y|ies))',
+    blender_scene: '(?:3d|3d\u6a21\u578b|\u4e09\u7ef4|\u5efa\u6a21|blender|\u6e32\u67d3\u56fe|\u4ea7\u54c1\u6e32\u67d3|three[- ]?dimensional)',
   };
   const unitsByKind: Record<MediaIntentCompositeTaskKind, string> = {
     image_generate: '(?:\u5f20|\u5e45|\u4e2a)?',
@@ -773,6 +789,7 @@ function explicitCompositeTaskCount(
     video_generate: '(?:\u4e2a|\u6bb5|\u6761)?',
     mini_program: '(?:\u4e2a|\u5957)?',
     copywriting: '(?:\u4efd|\u7248|\u6761|\u7bc7|\u4e2a)?',
+    blender_scene: '(?:\u4e2a|\u5957|\u7248)?',
   };
   const pattern = new RegExp(`${countToken}\\s*${unitsByKind[match.spec.kind]}\\s*${nounByKind[match.spec.kind]}`, 'iu');
   const matchTextCount = match.matchText.match(pattern)?.[1];
@@ -804,6 +821,9 @@ function explicitlyRequestsCompositeTask(prompt: string, kind: MediaIntentCompos
   if (kind === 'mini_program') {
     return /(?:帮我|给我|请|直接|现在|马上|立刻|来|做|制作|生成|创建|开发|搭建).{0,18}(?:小程序|mini\s*program|wechat mini)|(?:小程序|mini\s*program|wechat mini).{0,18}(?:来|做|制作|生成|创建|开发|搭建)(?:一个|一份|一版)?/iu.test(prompt);
   }
+  if (kind === 'blender_scene') {
+    return /(?:帮我|给我|请|直接|现在|马上|立刻|来|做|制作|生成|创建|建模|渲染|出).{0,24}(?:3d|3d模型|三维|建模|blender|渲染图|产品渲染|three[- ]?dimensional)|(?:3d|3d模型|三维|建模|blender|渲染图|产品渲染|three[- ]?dimensional).{0,24}(?:来|做|制作|生成|创建|建模|渲染|出)(?:一个|一份|一版)?/iu.test(prompt);
+  }
   return isExplicitLongFormArtifactRequest(prompt)
     || /(?:帮我|给我|请|直接|现在|马上|立刻|来|写|撰写|生成|创作|出).{0,18}(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|ad copy)|(?:文案|宣传语|标题|slogan|海报词|卖点|推广语|营销文|广告语|copywriting|ad copy).{0,18}(?:来|写|撰写|生成|创作|出)(?:一个|一份|一版)?/iu.test(prompt);
 }
@@ -814,6 +834,9 @@ function isNegatedCompositeTaskPrompt(prompt: string, kind: MediaIntentComposite
   }
   if (kind === 'video_generate') {
     return /(?:先)?(?:别|不要|不用|无需|不想|不是要|不是让你|暂时不|现在不).{0,18}(?:生视频|生成(?:一段|一个|个)?视频|做(?:一段|一个|个)?视频|视频生成|图生视频|generate.{0,12}video|create.{0,12}video)/i.test(prompt);
+  }
+  if (kind === 'blender_scene') {
+    return /(?:先)?(?:别|不要|不用|无需|不想|不是要|不是让你|暂时不|现在不).{0,20}(?:3d|3d模型|三维|建模|blender|渲染图|产品渲染|three[- ]?dimensional)/iu.test(prompt);
   }
   return false;
 }
@@ -1009,6 +1032,12 @@ function detectCompositeTasks(params: {
       prompt: taskPrompt(prompt, '生成视频'),
     },
     {
+      kind: 'blender_scene',
+      title: '制作 Blender 三维场景',
+      pattern: /(?:3d模型|3d建模|三维(?:模型|建模|场景|设计)|blender(?:模型|场景|渲染)?|产品渲染|3d render|three[- ]?dimensional(?: model| scene| design)?)/i,
+      prompt: taskPrompt(prompt, '制作 Blender 三维场景'),
+    },
+    {
       kind: 'mini_program',
       title: '制作小程序',
       pattern: /(?:小程序|微信小程序|支付宝小程序|mini\s*program|wechat mini)/i,
@@ -1058,7 +1087,7 @@ function detectCompositeTasks(params: {
           candidateImages: [],
         })
       : undefined;
-    const basePrompt = expandedMatches.length === 1 && isSingleLocalArtifactCompositeKind(match.spec.kind)
+    const basePrompt = expandedMatches.length === 1 && isSingleDeterministicArtifactCompositeKind(match.spec.kind)
       ? taskPrompt(prompt, match.spec.prompt)
       : compositePromptClause(prompt, match, matches);
     return buildCompositeTask({
@@ -1085,7 +1114,7 @@ function detectCompositeTasks(params: {
   if (tasks.length === 0) return [];
   if (tasks.length === 1) {
     if (tasks[0]!.kind === 'presentation') return [];
-    return isSingleLocalArtifactCompositeKind(tasks[0]!.kind) ? tasks : [];
+    return isSingleDeterministicArtifactCompositeKind(tasks[0]!.kind) ? tasks : [];
   }
   return hasExplicitMultiplicity || containsCompositeSeparator(prompt) ? tasks : [];
 }
@@ -1442,12 +1471,12 @@ function contextualArtifactFollowUpKinds(params: {
   if (hasStructuredArtifactContext(params.artifactContext)) {
     if (!artifactContextNeedsPlannerFollowUp(params.artifactContext)) return kinds;
     if (params.requireRunnableTask && !artifactContextAllowsContinuationTask(params.artifactContext)) return kinds;
-    if (params.artifactContext.kind && isSingleLocalArtifactCompositeKind(params.artifactContext.kind)) {
+    if (params.artifactContext.kind && isSingleDeterministicArtifactCompositeKind(params.artifactContext.kind)) {
       kinds.add(params.artifactContext.kind);
       return kinds;
     }
     const objective = params.artifactContext.objective?.trim() || '';
-    for (const kind of ['presentation', 'spreadsheet', 'mini_program', 'copywriting'] as const) {
+    for (const kind of ['presentation', 'spreadsheet', 'mini_program', 'copywriting', 'blender_scene'] as const) {
       if (objective && explicitlyRequestsCompositeTask(objective, kind)) kinds.add(kind);
     }
     return kinds;
@@ -1459,6 +1488,7 @@ function contextualArtifactFollowUpKinds(params: {
     'spreadsheet',
     'mini_program',
     'copywriting',
+    'blender_scene',
   ];
   for (const message of [...(params.recentMessages ?? [])].reverse()) {
     if (message.role !== 'user' || !message.text?.trim()) continue;
@@ -1833,6 +1863,7 @@ function defaultCompositeTaskTitle(kind: MediaIntentCompositeTaskKind): string {
     image_edit: '根据图片修图',
     mini_program: '制作小程序',
     copywriting: '撰写文案',
+    blender_scene: '制作 Blender 三维场景',
   };
   return titles[kind];
 }
@@ -1908,6 +1939,9 @@ function normalizePlannerCompositeTasks(params: {
     ) {
       imageSelection = { selectedImageSource: 'none' };
     }
+    const sceneSpec = record.kind === 'blender_scene'
+      ? normalizeSceneSpec(record.scene_spec ?? record.sceneSpec)
+      : undefined;
 
     const task: MediaIntentCompositeTask = {
       id,
@@ -1923,6 +1957,7 @@ function normalizePlannerCompositeTasks(params: {
           sourceImages: imageSelection.sourceImages,
         }
         : {}),
+      ...(sceneSpec ? { sceneSpec } : {}),
     };
     const rawDependsOn = record.depends_on ?? record.dependsOn;
     const rawDependencies = Array.isArray(rawDependsOn)
@@ -2023,13 +2058,14 @@ function normalizePlannerDecision(params: {
   const hasRunnableComposite = !continuationSuppressesComposite
     && (
       compositeTasks.length >= 2
-      || (compositeTasks.length === 1 && isSingleLocalArtifactCompositeKind(compositeTasks[0]!.kind))
+      || (compositeTasks.length === 1 && isSingleDeterministicArtifactCompositeKind(compositeTasks[0]!.kind))
     );
   if (hasRunnableComposite) {
     const hasMediaTask = compositeTasks.some((task) => (
       task.kind === 'image_generate'
       || task.kind === 'image_edit'
       || task.kind === 'video_generate'
+      || task.kind === 'blender_scene'
     ));
     if (hasMediaTask && !plannerAuthorizesCurrentMedia) {
       return localChatPlan('planner_composite_missing_current_media_authorization', params.prompt, intentKind);
@@ -2262,7 +2298,7 @@ function buildPlannerMessages(params: {
       role: 'system',
       content: [
         'You are UClaw media/tool intent planner. Return strict JSON only.',
-        'Your job is to decide whether the next step should be normal chat, visual chat about an existing image, still-image generation, still-image editing, video generation, desktop screenshot capture, a clarification question, or a structured multi-deliverable task DAG.',
+        'Your job is to decide whether the next step should be normal chat, visual chat about an existing image, still-image generation, still-image editing, video generation, desktop screenshot capture, Blender 3D artifact creation, a clarification question, or a structured multi-deliverable task DAG.',
         'Do not answer the user. Do not execute tools. Only produce the route plan.',
         'First decide whether the user is requesting an immediate media side effect in this current turn.',
         'Set intent_kind to one of: current_media_task, current_non_media_task, preference_or_memory_update, ordinary_chat, clarification.',
@@ -2289,10 +2325,11 @@ function buildPlannerMessages(params: {
         'Use desktop_screenshot only for a direct request to capture the current desktop/screen. Use chat for broader browser automation or local workflow tasks.',
         'For a current-turn request containing two or more deliverables, return action=chat plus composite_tasks in execution order. Each task must contain id, kind, title, prompt, requires_artifact, depends_on, fallback, selected_image_source, and selected_image_index.',
         'Every composite media task must correspond to an explicitly requested media deliverable. Context phrases such as video frames, image content, reference picture, 视频画面, or 图片内容 do not authorize an extra image_generate or video_generate task.',
-        'Allowed composite task kinds: image_generate, presentation, spreadsheet, video_generate, image_edit, mini_program, copywriting.',
+        'Allowed composite task kinds: image_generate, presentation, spreadsheet, video_generate, image_edit, mini_program, copywriting, blender_scene.',
         'When the user explicitly requests 2-5 outputs of the same kind, emit that many independent tasks. Never emit more than 5 tasks of one kind. For quantities above 5, emit only 5.',
         'For a single explicit presentation request, return action=chat with no composite_tasks so the ordinary OpenClaw agent can use the presentation-maker skill and its designed free-canvas PPTX tool.',
-        'For a single explicit spreadsheet, mini_program, or copywriting artifact request, return action=chat with exactly one composite_task so the deterministic local artifact runtime can deliver it. Keep single image/video requests on their direct media action.',
+        'For a single explicit spreadsheet, mini_program, copywriting, or Blender 3D artifact request, return action=chat with exactly one composite_task so the deterministic artifact runtime can deliver it. A blender_scene task must be an explicit current-turn request and delivers a Blender source scene, portable GLB, and preview render. Keep single image/video requests on their direct media action.',
+        'Every blender_scene task MUST include scene_spec as declarative JSON, never code. Use schema="uclaw.blender.scene/v1", a concise title, 3-12 objects (primitive is cube, sphere, cylinder, cone, torus, plane, or text), materials, 2-5 lights, at least one camera with activeCameraId, world, render, and deliverables. Use only numeric vectors [x,y,z], RGBA colors [r,g,b,a] in [0,1], and local asset paths only when an allowed input artifact was supplied. Aim for a distinct art direction, layered silhouette, intentional lighting, and a product-quality hero composition. Include deliverables {blend:true,glb:true,heroImage:true,turntable:false}; do not include Python, scripts, URLs to fetch, add-ons, modifiers, geometry nodes, or fields outside this schema.',
         'Treat an explicit long-form novel, story, article, essay, report, or screenplay request with a word-count, minimum-length, full-version, or long-form constraint as one copywriting artifact task with requires_artifact=true. Preserve every length and completeness constraint in the task prompt. Capability questions or requests for writing advice remain chat.',
         'artifact_context is authoritative thread-scoped run state when present. For a short or elliptical current turn, use its kind, objective, status, delivery_status, and artifact_refs before inferring anything from recent_messages. If status is planned, queued, running, or finalizing, use chat to report or explain the active run; never start a duplicate task. Continue the same local artifact kind only from a recoverable partial, blocked, failed, cancelled, or completed-but-undelivered state, and carry the original constraints into the task prompt.',
         'When artifact_context is absent, use recent_messages only as a compatibility fallback for a short or elliptical turn. Do not invent a continuation when context does not establish the objective. A completed run with successful delivery and usable artifact refs is evidence of completion: inspect or explain that result instead of regenerating it.',
@@ -2301,7 +2338,7 @@ function buildPlannerMessages(params: {
         'When a composite video consumes a current-turn image, depend on the nearest compatible earlier image_edit or image_generate task, preferring the edited image.',
         'For image_edit or image-based video tasks, set selected_image_source to explicit or candidate and select an index only when that input really comes from the supplied image lists. Otherwise use none and express an earlier generated-image dependency through depends_on.',
         'Never emit composite_tasks for capability questions, explanations, comparisons, planning-only requests, future/default preferences, memory updates, or hypothetical examples.',
-        'If any composite task creates or edits media, intent_kind must be current_media_task and current_turn_media_request must be true. Otherwise no media composite task is authorized.',
+        'If any composite task creates or edits media, including blender_scene, intent_kind must be current_media_task and current_turn_media_request must be true. Otherwise no media composite task is authorized.',
         'Extract media parameters only when the user explicitly asks for them: image_size, image_quality, video_size, video_duration_seconds. Leave them null otherwise.',
         'For an authorized image_generate or image_edit action, rewrite prompt into a concise production-ready visual prompt while preserving every explicit user constraint.',
         `For an authorized video_generate action, rewrite video_prompt into a production-ready prompt of no more than ${MAX_VIDEO_GENERATION_PROMPT_CHARS} Unicode characters. This applies to both text-to-video and image-to-video.`,

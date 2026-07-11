@@ -14,7 +14,8 @@ export type CompositeRunTaskKind =
   | 'video_generate'
   | 'image_edit'
   | 'mini_program'
-  | 'copywriting';
+  | 'copywriting'
+  | 'blender_scene';
 
 const LOCAL_ARTIFACT_TASK_KINDS = new Set<CompositeRunTaskKind>([
   'presentation',
@@ -27,11 +28,23 @@ export function isLocalArtifactTaskKind(kind: CompositeRunTaskKind): boolean {
   return LOCAL_ARTIFACT_TASK_KINDS.has(kind);
 }
 
+/**
+ * Blender is a deterministic artifact producer, but it owns a separate
+ * Main-process queue because rendering competes for GPU and memory.
+ */
+export function isBlenderSceneTaskKind(kind: CompositeRunTaskKind): boolean {
+  return kind === 'blender_scene';
+}
+
+export function isDeterministicArtifactTaskKind(kind: CompositeRunTaskKind): boolean {
+  return isLocalArtifactTaskKind(kind) || isBlenderSceneTaskKind(kind);
+}
+
 export function isSupportedCompositeRunTaskSet(
   tasks: ReadonlyArray<Pick<CompositeRunTaskInput, 'kind'>>,
 ): boolean {
   if (tasks.length >= 2) return true;
-  return tasks.length === 1 && isLocalArtifactTaskKind(tasks[0].kind);
+  return tasks.length === 1 && isDeterministicArtifactTaskKind(tasks[0].kind);
 }
 
 export type CompositeRunImageRef = {
@@ -59,6 +72,8 @@ export type CompositeRunTaskInput = {
   selectedImageSource?: 'explicit' | 'candidate' | 'none';
   selectedImageIndex?: number;
   sourceImages?: CompositeRunImageRef[];
+  /** Untrusted planner output; the Blender Main-process validator is authoritative. */
+  sceneSpec?: Record<string, unknown>;
 };
 
 export type CompositeRunImageOptions = {

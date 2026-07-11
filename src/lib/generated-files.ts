@@ -16,6 +16,7 @@ export type FileContentType =
   | 'document'
   | 'video'
   | 'audio'
+  | 'model3d'
   | 'other';
 
 /** A single (old_string -> new_string) replacement extracted from an edit tool. */
@@ -111,6 +112,7 @@ const SNAPSHOT_EXTS = new Set([
 ]);
 const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov', '.avi', '.mkv']);
 const AUDIO_EXTS = new Set(['.mp3', '.wav', '.ogg', '.flac', '.m4a']);
+const MODEL_3D_EXTS = new Set(['.glb', '.gltf', '.blend', '.obj', '.fbx']);
 const DOCUMENT_EXTS = new Set([
   '.md', '.markdown', '.txt', '.rst', '.adoc', '.html', '.htm',
   '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
@@ -165,6 +167,11 @@ const EXT_MIME_MAP: Record<string, string> = {
   '.wav': 'audio/wav',
   '.ogg': 'audio/ogg',
   '.flac': 'audio/flac',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.blend': 'application/x-blender',
+  '.obj': 'model/obj',
+  '.fbx': 'model/fbx',
   '.pdf': 'application/pdf',
   '.csv': 'text/csv',
 };
@@ -178,6 +185,7 @@ export function classifyFileExt(ext: string): FileContentType {
   if (SNAPSHOT_EXTS.has(lower)) return 'snapshot';
   if (VIDEO_EXTS.has(lower)) return 'video';
   if (AUDIO_EXTS.has(lower)) return 'audio';
+  if (MODEL_3D_EXTS.has(lower)) return 'model3d';
   if (DOCUMENT_EXTS.has(lower)) return 'document';
   if (CODE_EXTS.has(lower)) return 'code';
   return 'other';
@@ -219,7 +227,7 @@ export function supportsInlineDiff(file: Pick<GeneratedFile, 'ext' | 'contentTyp
     if (supportsRichDocumentPreview(file.ext)) return false;
     return supportsInlineDocumentPreview(file.ext);
   }
-  if (file.contentType === 'snapshot' || file.contentType === 'video' || file.contentType === 'audio') return false;
+  if (file.contentType === 'snapshot' || file.contentType === 'video' || file.contentType === 'audio' || file.contentType === 'model3d') return false;
   return true;
 }
 
