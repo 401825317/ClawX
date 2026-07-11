@@ -4,7 +4,7 @@ import type {
   ChatRuntimeGateIssue,
   ChatRuntimePlanStep,
 } from '../../../shared/chat-runtime-events';
-import { isArtifactCapabilityQuestion, isArtifactCreationRequest } from '../../../shared/artifact-intent';
+import { turnContractRequiresArtifact } from '../../../shared/agent-turn-contract';
 import type { ChatRuntimeRunState } from './types';
 
 export type CompletionGateReport = {
@@ -24,8 +24,6 @@ export type CompletionGateReport = {
   reasons: string[];
   issues: ChatRuntimeGateIssue[];
 };
-
-const EXECUTE_STEP_ARTIFACT_RE = /(?:图片|视频|产物|文件|文档|报告|导出|生成)/iu;
 
 export type ArtifactRequiredPlanStep = ChatRuntimePlanStep & {
   requiresArtifact?: boolean;
@@ -58,25 +56,9 @@ export function gateIssueId(runId: string | undefined, code: string, target: str
 
 export function runRequiresArtifact(run: ChatRuntimeRunState | undefined): boolean {
   if (!run) return false;
-  const objective = `${run.objective ?? ''}\n${run.events
-    .filter((event) => event.type === 'run.started' || event.type === 'run.plan.updated')
-    .map((event) => {
-      if (event.type === 'run.started') return event.objective ?? '';
-      return `${event.objective ?? ''}\n${event.summary ?? ''}`;
-    })
-    .join('\n')}`;
-  if (isArtifactCapabilityQuestion(objective)) return false;
+  if (turnContractRequiresArtifact(run.turnContract)) return true;
   if (artifactRequiredPlanSteps(run).length > 0) return true;
-  if ((run.artifacts ?? []).length > 0) return false;
-  if ((run.planSteps ?? []).some((step) => {
-    const stepText = `${step.title}\n${step.detail ?? ''}`;
-    return step.id === 'uclaw.execute'
-      && EXECUTE_STEP_ARTIFACT_RE.test(stepText)
-      && !isArtifactCapabilityQuestion(stepText);
-  })) {
-    return true;
-  }
-  return isArtifactCreationRequest(objective);
+  return false;
 }
 
 export function summarizeCompletionGateReport(report: CompletionGateReport): string | undefined {

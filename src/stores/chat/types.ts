@@ -8,6 +8,7 @@ import type {
   ChatRuntimeProgressEntry,
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
+import type { AgentTurnContract } from '../../../shared/agent-turn-contract';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -169,6 +170,7 @@ export interface ChatRuntimeRunState {
   lastEventAt?: number;
   endedAt?: number;
   objective?: string;
+  turnContract?: AgentTurnContract;
   planSummary?: string;
   planSteps?: ChatRuntimePlanStep[];
   artifacts?: ChatRuntimeArtifact[];

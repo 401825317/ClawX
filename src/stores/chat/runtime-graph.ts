@@ -32,6 +32,7 @@ function cloneRunState(runId: string, event: ChatRuntimeEvent): ChatRuntimeRunSt
     lastEventAt: eventTs,
     endedAt: event.type === 'run.ended' ? event.endedAt : undefined,
     objective: event.type === 'run.started' ? event.objective : undefined,
+    turnContract: undefined,
     planSummary: undefined,
     planSteps: [],
     artifacts: [],
@@ -112,6 +113,10 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
       && right.summary === left.summary
       && stableRuntimeFingerprint(right.steps) === stableRuntimeFingerprint(left.steps);
   }
+  if (left.type === 'run.contract.updated') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.contract) === stableRuntimeFingerprint(left.contract);
+  }
   if (left.type === 'run.step.updated') {
     return right.type === left.type
       && stableRuntimeFingerprint(right.step) === stableRuntimeFingerprint(left.step);
@@ -189,6 +194,9 @@ export function applyRuntimeEventToRuns(
       nextRun.objective = event.objective ?? nextRun.objective;
       nextRun.planSummary = event.summary ?? nextRun.planSummary;
       nextRun.planSteps = sortPlanSteps(event.steps);
+      break;
+    case 'run.contract.updated':
+      nextRun.turnContract = event.contract;
       break;
     case 'run.step.updated':
       nextRun.planSteps = sortPlanSteps(upsertById(nextRun.planSteps ?? [], event.step));

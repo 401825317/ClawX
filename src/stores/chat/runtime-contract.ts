@@ -7,6 +7,11 @@ import type {
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
 import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../../shared/chat-runtime-events';
+import {
+  turnContractRequiresApproval,
+  turnContractRequiresToolEvidence,
+  turnContractRequiresVerification,
+} from '../../../shared/agent-turn-contract';
 import type { AttachedFileMeta, ChatRuntimeRunState, ChatSendMode } from './types';
 import {
   type CompletionGateReport,
@@ -199,6 +204,12 @@ function approvalFailed(event: ChatRuntimeEvent): event is Extract<ChatRuntimeEv
     || event.status === 'error';
 }
 
+function approvalGranted(event: ChatRuntimeEvent): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> {
+  if (event.type !== 'approval.updated') return false;
+  const status = event.status?.trim().toLowerCase();
+  return status === 'approved' || status === 'accepted' || status === 'allowed' || status === 'granted';
+}
+
 function toolRecoveryFamily(name: string): string {
   const normalized = name.trim().toLowerCase();
   if (normalized.includes('create_designed_pptx_file') || normalized.includes('repair_designed_pptx_file')) {
@@ -274,6 +285,26 @@ function runtimeToolNameCandidates(
     }
   }
   return [...names];
+}
+
+function isTurnMetadataTool(events: ChatRuntimeEvent[], eventIndex: number): boolean {
+  const metadataTools = new Set([
+    'uclaw_declare_turn_contract',
+    'uclaw_get_runtime_capabilities',
+    'uclaw_get_task_bridge_capabilities',
+    'uclaw_get_host_task',
+    'uclaw_list_host_tasks',
+  ]);
+  return runtimeToolNameCandidates(events, eventIndex)
+    .some((name) => metadataTools.has(name.trim().toLowerCase()));
+}
+
+function hasActualExecutionEvidence(events: ChatRuntimeEvent[]): boolean {
+  return events.some((event, index) => {
+    if (event.type === 'artifact.produced' || event.type === 'command.output' || event.type === 'patch.completed') return true;
+    if (event.type !== 'tool.started' && event.type !== 'tool.completed') return false;
+    return !isTurnMetadataTool(events, index);
+  });
 }
 
 function runtimeToolOperation(
@@ -415,6 +446,8 @@ export function buildRuntimeCompletionGateReport(
 ): CompletionGateReport {
   const { artifacts, verifications, steps } = effectiveRuntimeEvidence(run, pendingVerifications);
   const checkpoints = run?.checkpoints ?? [];
+  const turnContract = run?.turnContract;
+  const runtimeEvents = run?.events ?? [];
 
   const issues: ChatRuntimeGateIssue[] = [];
   const artifactRequiredSteps = artifactRequiredPlanSteps(run);
@@ -424,6 +457,59 @@ export function buildRuntimeCompletionGateReport(
       .filter((verification) => verification.artifactId && verification.required !== false && verification.status === 'passed')
       .map((verification) => verification.artifactId as string),
   );
+
+  if (turnContract && turnContract.sideEffect !== 'none' && !turnContract.sideEffectAuthorized) {
+    issues.push({
+      id: gateIssueId(run?.runId, 'side_effect.unauthorized', turnContract.sideEffect),
+      code: 'side_effect.unauthorized',
+      severity: 'blocking',
+      title: '副作用尚未获得用户授权',
+      detail: `本轮声明了 ${turnContract.sideEffect}，但合同没有记录用户授权。`,
+      targetId: run?.runId,
+      recoverable: false,
+      suggestedRecovery: '先向用户明确说明将执行的副作用并取得确认，再重新执行。',
+    });
+  }
+
+  if (turnContractRequiresToolEvidence(turnContract) && !hasActualExecutionEvidence(runtimeEvents)) {
+    issues.push({
+      id: gateIssueId(run?.runId, 'execution.unattempted', run?.runId ?? 'turn-contract'),
+      code: 'execution.unattempted',
+      severity: 'blocking',
+      title: '当前合同要求实际执行，但没有执行证据',
+      detail: '合同声明需要工具执行，但本轮只有合同或能力查询等元数据事件，未看到实际工具、命令、补丁或产物事件。',
+      targetId: run?.runId,
+      recoverable: true,
+      suggestedRecovery: '沿已声明的能力继续执行，并在交付前产生真实工具、命令、补丁或产物证据。',
+    });
+  }
+
+  if (turnContractRequiresApproval(turnContract) && !runtimeEvents.some(approvalGranted)) {
+    issues.push({
+      id: gateIssueId(run?.runId, 'approval.required.missing', run?.runId ?? 'turn-contract'),
+      code: 'approval.required.missing',
+      severity: 'blocking',
+      title: '外部操作缺少本机审批证据',
+      detail: '合同要求审批，但运行事件中没有已批准的 approval.updated。',
+      targetId: run?.runId,
+      recoverable: false,
+      suggestedRecovery: '请用户在本机审批界面确认操作，再继续执行。',
+    });
+  }
+
+  if (turnContractRequiresVerification(turnContract)
+    && !verifications.some((verification) => verification.required !== false && verification.status === 'passed')) {
+    issues.push({
+      id: gateIssueId(run?.runId, 'verification.required.missing', run?.runId ?? 'turn-contract'),
+      code: 'verification.required.missing',
+      severity: 'blocking',
+      title: '当前合同要求验证，但没有通过的验证证据',
+      detail: '合同要求在交付前验证结果，但运行事实中没有 required=true 且 status=passed 的 verification.completed。',
+      targetId: run?.runId,
+      recoverable: true,
+      suggestedRecovery: '完成所需校验并提交 verification.completed 后再交付。',
+    });
+  }
 
   if (artifactRequiredSteps.length === 0 && runRequiresArtifact(run) && artifacts.length === 0) {
     issues.push({
@@ -524,7 +610,6 @@ export function buildRuntimeCompletionGateReport(
     });
   }
 
-  const runtimeEvents = run?.events ?? [];
   for (const [index, event] of runtimeEvents.entries()) {
     if (
       event.type === 'tool.completed'

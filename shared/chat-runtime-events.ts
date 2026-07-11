@@ -1,3 +1,5 @@
+import type { AgentTurnContract } from './agent-turn-contract';
+
 export const CHAT_RUNTIME_CONTRACT_VERSION = 1;
 
 export type ChatRuntimeEventProducer =
@@ -161,6 +163,10 @@ export type ChatRuntimeEvent =
       objective?: string;
       summary?: string;
       steps: ChatRuntimePlanStep[];
+    })
+  | (ChatRuntimeEventBase & {
+      type: 'run.contract.updated';
+      contract: AgentTurnContract;
     })
   | (ChatRuntimeEventBase & {
       type: 'run.step.updated';

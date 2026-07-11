@@ -463,6 +463,59 @@ function createBridge(api, options = {}) {
         },
       },
       {
+        name: 'uclaw_declare_turn_contract',
+        label: 'Declare UClaw turn contract',
+        description: 'Before a turn that must actually create an artifact, invoke a remote generation, or perform an external desktop action, declare the intended side effect and its completion evidence. Do not use for pure answers, explanations, or drafting-only requests. This declaration is metadata only and never proves the work completed.',
+        promptSnippet: 'uclaw_declare_turn_contract: before a side-effecting task, declare intent, required evidence, and user authorization. It is not a substitute for executing the task or verifying the output.',
+        parameters: Type.Object({
+          intent: Type.Union([
+            Type.Literal('chat'),
+            Type.Literal('research'),
+            Type.Literal('artifact'),
+            Type.Literal('media'),
+            Type.Literal('desktop'),
+            Type.Literal('workflow'),
+          ]),
+          toolRequirement: Type.Union([
+            Type.Literal('none'),
+            Type.Literal('optional'),
+            Type.Literal('required'),
+          ]),
+          sideEffect: Type.Union([
+            Type.Literal('none'),
+            Type.Literal('local_artifact'),
+            Type.Literal('remote_generation'),
+            Type.Literal('external_action'),
+          ]),
+          sideEffectAuthorized: Type.Optional(Type.Boolean()),
+          capabilityRefs: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 32 })),
+          acceptance: Type.Optional(Type.Object({
+            requiresArtifact: Type.Optional(Type.Boolean()),
+            requiresVerification: Type.Optional(Type.Boolean()),
+            requiresApproval: Type.Optional(Type.Boolean()),
+            requiresToolEvidence: Type.Optional(Type.Boolean()),
+          }, { additionalProperties: false })),
+        }, { additionalProperties: false }),
+        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+          try {
+            const correlation = correlationFromContext(ctx, toolCallId);
+            const payload = await request('/api/runtime/turn-contracts', {
+              method: 'POST',
+              body: JSON.stringify({ correlation, contract: params }),
+            });
+            const result = {
+              schema: 'uclaw.turn-contract.result/v1',
+              ok: true,
+              contract: payload?.contract ?? payload,
+              next: 'Continue with the declared work. Do not claim completion until the declared artifact, verification, approval, and real execution evidence exist.',
+            };
+            return { content: [{ type: 'text', text: safeJson(result) }], details: result };
+          } catch (error) {
+            return buildBridgeErrorResult('declare_turn_contract', error);
+          }
+        },
+      },
+      {
         name: 'uclaw_get_task_bridge_capabilities',
         label: 'UClaw task bridge capabilities',
         description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task.',

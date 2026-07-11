@@ -1,6 +1,8 @@
 import type { GatewayManager } from '../../gateway/manager';
 import { blenderJobService } from '../blender';
 import { desktopRunCoordinator } from '../computer';
+import { ensureDefaultHostCapabilities } from './host-capability-defaults';
+import { hostCapabilityRegistry } from './host-capability-registry';
 import { getImageGenerationSettingsSnapshot } from '../../utils/openclaw-image-generation';
 import { getVideoGenerationSettingsSnapshot } from '../../utils/openclaw-video-generation';
 
@@ -153,8 +155,9 @@ export async function buildRuntimeCapabilityCatalog(params: {
   gatewayManager: GatewayManager;
   sessionKey?: string;
 }): Promise<RuntimeCapabilityCatalog> {
+  ensureDefaultHostCapabilities();
   const sessionKey = params.sessionKey?.trim() || undefined;
-  const [tools, skills, image, video, desktop, blender] = await Promise.all([
+  const [tools, skills, image, video, desktop, blender, hostTasks] = await Promise.all([
     sessionKey
       ? probe(() => params.gatewayManager.rpc('tools.effective', { sessionKey }, 5_000))
       : Promise.resolve({ error: 'A sessionKey is required to inspect the effective OpenClaw tool set.' }),
@@ -163,6 +166,7 @@ export async function buildRuntimeCapabilityCatalog(params: {
     probe(() => getVideoGenerationSettingsSnapshot()),
     probe(() => desktopRunCoordinator.getCapabilities()),
     probe(() => blenderJobService.capabilities()),
+    probe(() => hostCapabilityRegistry.list()),
   ]);
 
   const capabilities: RuntimeCapabilityEntry[] = [
@@ -221,16 +225,23 @@ export async function buildRuntimeCapabilityCatalog(params: {
       blender.value ? 'available' : 'unknown',
       { sideEffect: 'local_artifact', description: 'Create and validate a Blender scene through the UClaw host runtime.', reason: blender.error },
     ),
-    hostCapability(
-      'host-task:generic',
-      'Recoverable host tasks',
-      'unavailable',
+    ...(hostTasks.value ?? []).map((capability) => hostCapability(
+      `host-task:${capability.kind}`,
+      capability.label,
+      capability.availability,
       {
-        sideEffect: 'none',
-        description: 'The task ledger is available, but no generic Host executor is registered yet.',
-        reason: 'A capability must register an idempotent executor before the Host task bridge can start it.',
+        sideEffect: capability.sideEffect,
+        requiresApproval: capability.requiresApproval,
+        description: capability.description,
+        reason: capability.reason,
       },
-    ),
+    )),
+    ...(hostTasks.error ? [hostCapability(
+      'host-task:catalog',
+      'Recoverable host tasks',
+      'unknown',
+      { sideEffect: 'none', reason: hostTasks.error },
+    )] : []),
   ];
 
   return {

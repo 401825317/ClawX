@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ChatRuntimeArtifact, ChatRuntimeEvent, ChatRuntimeVerification } from '../../../shared/chat-runtime-events';
+import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../../shared/chat-runtime-events';
+import { normalizeAgentTurnContract, type AgentTurnContractInput } from '../../../shared/agent-turn-contract';
 import { hostTaskService, type HostTaskCreateRequest, type HostTaskSnapshot, type HostTaskUpdateRequest } from '../../services/agent-runtime/host-task-service';
+import { ensureDefaultHostCapabilities } from '../../services/agent-runtime/host-capability-defaults';
+import { hostCapabilityRegistry } from '../../services/agent-runtime/host-capability-registry';
 import { buildRuntimeCapabilityCatalog } from '../../services/agent-runtime/runtime-capability-catalog';
 import { agentTurnPreferenceStore } from '../../services/agent-runtime/turn-preference-store';
 import type { HostApiContext } from '../context';
@@ -28,6 +32,44 @@ function waitMs(value: unknown): number {
 
 function bridgeStatus(status: HostTaskSnapshot['status']): string {
   return status === 'waiting' ? 'blocked' : status;
+}
+
+function requiredCorrelationValue(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`${label} is required`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 300) throw new Error(`Invalid ${label}`);
+  return normalized;
+}
+
+function requiredTaskKind(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('kind is required');
+  const normalized = value.trim();
+  if (!/^[a-zA-Z0-9._-]{1,240}$/u.test(normalized)) throw new Error('Invalid kind');
+  return normalized;
+}
+
+function requiredTaskTitle(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('title is required');
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 500) throw new Error('Invalid title');
+  return normalized;
+}
+
+function startRegisteredHostTask(params: {
+  task: HostTaskSnapshot;
+  input: unknown;
+  executor: NonNullable<Awaited<ReturnType<typeof hostCapabilityRegistry.get>>>['executor'];
+}): void {
+  void params.executor.start({
+    task: params.task,
+    input: params.input,
+    update: async (update) => await hostTaskService.update(params.task.taskId, update),
+  }).catch(async (error) => {
+    await hostTaskService.update(params.task.taskId, {
+      status: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    }).catch(() => undefined);
+  });
 }
 
 function bridgeTask(task: HostTaskSnapshot) {
@@ -79,6 +121,7 @@ export async function handleRuntimeRoutes(
   ctx: HostApiContext,
 ): Promise<boolean> {
   hostTaskService.setPublisher((event) => publishHostTaskEvent(ctx, event));
+  ensureDefaultHostCapabilities();
 
   if (url.pathname === '/api/runtime/capabilities' && req.method === 'GET') {
     const sessionKey = url.searchParams.get('sessionKey')?.trim() || undefined;
@@ -94,14 +137,48 @@ export async function handleRuntimeRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/runtime/turn-contracts' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{
+        correlation?: { sessionKey?: unknown; runId?: unknown; toolCallId?: unknown };
+        contract?: AgentTurnContractInput;
+      }>(req);
+      const sessionKey = requiredCorrelationValue(body.correlation?.sessionKey, 'correlation.sessionKey');
+      const runId = requiredCorrelationValue(body.correlation?.runId, 'correlation.runId');
+      if (body.correlation?.toolCallId !== undefined) {
+        requiredCorrelationValue(body.correlation.toolCallId, 'correlation.toolCallId');
+      }
+      const contract = normalizeAgentTurnContract(body.contract ?? {});
+      const event: ChatRuntimeEvent = {
+        contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
+        producer: 'plugin',
+        runId,
+        sessionKey,
+        ts: Date.now(),
+        type: 'run.contract.updated',
+        contract,
+      };
+      publishHostTaskEvent(ctx, event);
+      sendJson(res, 200, {
+        success: true,
+        result: {
+          schema: 'uclaw.turn-contract.result/v1',
+          contract,
+          note: 'This records delivery requirements only. It is not execution or completion evidence.',
+        },
+      });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/task-bridge/capabilities' && req.method === 'GET') {
+    const capabilities = await hostCapabilityRegistry.list();
     sendJson(res, 200, {
       success: true,
       schema: 'uclaw.host-task.capabilities/v1',
-      // Executors register concrete task kinds when they can provide an
-      // idempotent start/cancel/recover implementation. An empty registry is
-      // intentionally safer than accepting a task that no Host can run.
-      capabilities: [],
+      capabilities,
     });
     return true;
   }
@@ -111,12 +188,38 @@ export async function handleRuntimeRoutes(
       const body = await parseJsonBody<{
         kind?: string;
         title?: string;
+        input?: unknown;
         correlation?: Partial<HostTaskCreateRequest>;
       }>(req);
-      sendJson(res, 409, {
-        success: false,
-        error: `No registered Host executor for task kind ${body.kind?.trim() || '(missing)'}. Use a capability-specific OpenClaw tool instead.`,
+      const kind = requiredTaskKind(body.kind);
+      const registration = await hostCapabilityRegistry.get(kind);
+      if (!registration) {
+        sendJson(res, 409, {
+          success: false,
+          error: `No registered Host executor for task kind ${kind}. Use a capability-specific OpenClaw tool instead.`,
+        });
+        return true;
+      }
+      if (registration.capability.availability !== 'available') {
+        sendJson(res, 409, {
+          success: false,
+          error: registration.capability.reason ?? `Host capability ${kind} is ${registration.capability.availability}.`,
+        });
+        return true;
+      }
+      const correlation = body.correlation ?? {};
+      const result = await hostTaskService.create({
+        sessionKey: requiredCorrelationValue(correlation.sessionKey, 'correlation.sessionKey'),
+        runId: requiredCorrelationValue(correlation.runId, 'correlation.runId'),
+        toolCallId: requiredCorrelationValue(correlation.toolCallId, 'correlation.toolCallId'),
+        idempotencyKey: requiredCorrelationValue(correlation.idempotencyKey, 'correlation.idempotencyKey'),
+        capability: kind,
+        title: requiredTaskTitle(body.title),
       });
+      if (!result.idempotent) {
+        startRegisteredHostTask({ task: result.task, input: body.input ?? {}, executor: registration.executor });
+      }
+      sendJson(res, result.idempotent ? 200 : 202, { success: true, idempotent: result.idempotent, task: bridgeTask(result.task) });
     } catch (error) {
       sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
     }

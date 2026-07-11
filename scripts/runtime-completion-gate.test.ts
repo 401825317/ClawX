@@ -6,6 +6,22 @@ import {
   buildRuntimeCompletionGateReport,
 } from '../src/stores/chat/runtime-contract.ts';
 import type { ChatRuntimeRunState } from '../src/stores/chat/types.ts';
+import type { AgentTurnContract } from '../shared/agent-turn-contract.ts';
+
+const pptxTurnContract: AgentTurnContract = {
+  version: 1,
+  intent: 'artifact',
+  toolRequirement: 'required',
+  sideEffect: 'local_artifact',
+  sideEffectAuthorized: true,
+  capabilityRefs: ['presentation-maker'],
+  acceptance: {
+    requiresArtifact: true,
+    requiresVerification: true,
+    requiresApproval: false,
+    requiresToolEvidence: true,
+  },
+};
 
 function artifactRunWithToolAttempts(attempts: Array<{ id: string; isError: boolean; name?: string }>): ChatRuntimeRunState {
   const runId = 'run-ppt-retry';
@@ -119,6 +135,7 @@ test('a requested PPTX without an artifact remains blocked', () => {
     sessionKey: 'agent:main:main',
     status: 'completed',
     objective: '请生成一份 8 页可编辑 PPTX。',
+    turnContract: pptxTurnContract,
     assistantText: '我会生成 PPTX。',
     thinkingText: '',
     artifacts: [],
@@ -129,6 +146,7 @@ test('a requested PPTX without an artifact remains blocked', () => {
   const report = buildRuntimeCompletionGateReport(run);
   assert.equal(report.hasBlockingIssues, true);
   assert.equal(report.issues.some((issue) => issue.code === 'artifact.required.missing'), true);
+  assert.equal(report.issues.some((issue) => issue.code === 'execution.unattempted'), true);
 
   const gateEvent = buildRuntimeCompletionGateEvents(run, {
     runId: run.runId,
@@ -137,6 +155,62 @@ test('a requested PPTX without an artifact remains blocked', () => {
   }).find((event) => event.type === 'gate.evaluated');
   assert.ok(gateEvent && gateEvent.type === 'gate.evaluated');
   assert.equal(gateEvent.gate.decision, 'continue_required');
+});
+
+test('declaring a contract or reading capabilities does not count as actual execution', () => {
+  const run: ChatRuntimeRunState = {
+    runId: 'run-metadata-only',
+    sessionKey: 'agent:main:main',
+    status: 'completed',
+    objective: '生成一份文件。',
+    turnContract: pptxTurnContract,
+    assistantText: '已声明合同。',
+    thinkingText: '',
+    artifacts: [],
+    verifications: [],
+    events: [
+      {
+        contractVersion: 1,
+        producer: 'plugin',
+        runId: 'run-metadata-only',
+        sessionKey: 'agent:main:main',
+        type: 'tool.completed',
+        toolCallId: 'contract',
+        name: 'uclaw_declare_turn_contract',
+        isError: false,
+      },
+      {
+        contractVersion: 1,
+        producer: 'plugin',
+        runId: 'run-metadata-only',
+        sessionKey: 'agent:main:main',
+        type: 'tool.completed',
+        toolCallId: 'capabilities',
+        name: 'uclaw_get_runtime_capabilities',
+        isError: false,
+      },
+    ],
+  };
+
+  const report = buildRuntimeCompletionGateReport(run);
+  assert.equal(report.issues.some((issue) => issue.code === 'execution.unattempted'), true);
+});
+
+test('an undeclared text-only turn remains deliverable even when it mentions an artifact', () => {
+  const run: ChatRuntimeRunState = {
+    runId: 'run-undeclared-ppt-copy',
+    sessionKey: 'agent:main:main',
+    status: 'completed',
+    objective: '给我一页发布会 PPT 的文案，不要生成文件。',
+    assistantText: '标题：个人 AI 工作台。',
+    thinkingText: '',
+    artifacts: [],
+    verifications: [],
+    events: [],
+  };
+
+  const report = buildRuntimeCompletionGateReport(run);
+  assert.equal(report.hasBlockingIssues, false);
 });
 
 function wrappedDesignedPptxRepairRun(options: {
