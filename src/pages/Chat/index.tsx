@@ -111,6 +111,7 @@ type RunCompactKind = 'composite' | 'image' | 'video' | 'artifact' | 'generic';
 
 const PROBLEM_STEP_STATUSES = new Set<TaskStep['status']>(['error', 'blocked', 'failed', 'aborted']);
 const USER_FACING_RUNTIME_TOOLS = new Set([
+  'create_designed_pptx_file',
   'create_docx_file',
   'create_html_app_file',
   'create_pptx_file',

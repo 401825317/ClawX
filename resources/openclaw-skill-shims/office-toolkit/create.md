@@ -4,11 +4,12 @@ This file keeps older agents and cached instructions that request
 `office-toolkit/create.md` on the supported path. The canonical instructions
 remain in [`references/create.md`](references/create.md).
 
-For a PPT or PPTX creation request, prefer the built-in
-`create_pptx_file` tool when it is available. It creates a real local PPTX
-without Python setup and returns a `MEDIA:<absolute-path>` result. Do not finish
-after generating only supporting images, an outline, or Markdown.
+For a PPT or PPTX creation request, use the bundled `presentation-maker` skill
+and prefer `create_designed_pptx_file`. It renders a model-authored free canvas
+with local images, charts, tables, and per-slide composition, then returns a
+`MEDIA:<absolute-path>` result. Do not finish after generating only supporting
+images, an outline, or Markdown.
 
-If `create_pptx_file` is unavailable, use the bundled `presentation-maker`
-skill before falling back to Python. For DOCX and XLSX creation details, read
-`references/create.md` now.
+Use `create_pptx_file` only as the lightweight fallback if the designed tool is
+unavailable. For DOCX and XLSX creation details, read `references/create.md`
+now.

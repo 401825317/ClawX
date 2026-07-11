@@ -1,5 +1,6 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
 import { Type } from '@sinclair/typebox';
+import PptxGenJS from 'pptxgenjs';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import { spawn } from 'node:child_process';
@@ -11,6 +12,8 @@ import path from 'node:path';
 
 const PLUGIN_ID = 'uclaw-local-artifacts';
 const DEFAULT_OUTPUT_DIR = 'outputs';
+const STUDIO_SLIDE_WIDTH = 13.333;
+const STUDIO_SLIDE_HEIGHT = 7.5;
 const EMU_PER_INCH = 914400;
 const SLIDE_W = 12192000;
 const SLIDE_H = 6858000;
@@ -42,6 +45,15 @@ function cleanText(value) {
   return normalizeBrandText(value).replace(/\s+/gu, ' ').trim();
 }
 
+function studioText(value) {
+  return normalizeBrandText(value)
+    .replace(/\r\n?/gu, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[\t ]+/gu, ' ').trim())
+    .join('\n')
+    .trim();
+}
+
 function normalizeBrandText(value) {
   return String(value ?? '').replace(/clawx/giu, 'UClaw');
 }
@@ -55,6 +67,26 @@ function normalizeBrandValue(value) {
     );
   }
   return value;
+}
+
+function normalizeStudioParams(params) {
+  const normalized = normalizeBrandValue(params);
+  if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) return normalized;
+  normalized.filename = params?.filename;
+  normalized.outputDir = params?.outputDir;
+  normalized.slides = Array.isArray(normalized.slides)
+    ? normalized.slides.map((slide, slideIndex) => ({
+        ...slide,
+        elements: Array.isArray(slide?.elements)
+          ? slide.elements.map((element, elementIndex) => (
+              element?.type === 'image'
+                ? { ...element, path: params?.slides?.[slideIndex]?.elements?.[elementIndex]?.path }
+                : element
+            ))
+          : slide?.elements,
+      }))
+    : normalized.slides;
+  return normalized;
 }
 
 function textList(value) {
@@ -781,6 +813,347 @@ function validateHtmlAppContent(html) {
   return { ok: true, evidence: `sizeBytes=${size}; visibleChars=${visibleBodyText.length}; hasScript=${hasScript}` };
 }
 
+function studioNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function studioColor(value, fallback = '000000') {
+  const normalized = String(value ?? '').replace(/^#/u, '').trim().toUpperCase();
+  return /^[0-9A-F]{6}$/u.test(normalized) ? normalized : fallback;
+}
+
+function studioBox(element) {
+  const xPercent = Math.max(0, Math.min(100, studioNumber(element?.x)));
+  const yPercent = Math.max(0, Math.min(100, studioNumber(element?.y)));
+  const widthPercent = Math.max(0.1, Math.min(100 - xPercent, studioNumber(element?.w, 10)));
+  const heightPercent = Math.max(0.1, Math.min(100 - yPercent, studioNumber(element?.h, 10)));
+  return {
+    x: xPercent / 100 * STUDIO_SLIDE_WIDTH,
+    y: yPercent / 100 * STUDIO_SLIDE_HEIGHT,
+    w: widthPercent / 100 * STUDIO_SLIDE_WIDTH,
+    h: heightPercent / 100 * STUDIO_SLIDE_HEIGHT,
+  };
+}
+
+function studioFill(color, transparency = 0) {
+  if (!color) return { color: 'FFFFFF', transparency: 100 };
+  return {
+    color: studioColor(color, 'FFFFFF'),
+    transparency: Math.max(0, Math.min(100, studioNumber(transparency))),
+  };
+}
+
+function studioLine(color, width = 1, transparency = 0) {
+  if (!color || width === 0) return { color: 'FFFFFF', transparency: 100, width: 0 };
+  return {
+    color: studioColor(color, '000000'),
+    width: Math.max(0.25, Math.min(12, studioNumber(width, 1))),
+    transparency: Math.max(0, Math.min(100, studioNumber(transparency))),
+  };
+}
+
+function studioShadow(enabled) {
+  return enabled === true
+    ? { type: 'outer', color: '000000', opacity: 0.2, blur: 3, angle: 45, distance: 2 }
+    : undefined;
+}
+
+function studioAssetPath(ctx, value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) throw new Error('Studio image element requires a local path');
+  const expanded = expandHome(raw);
+  const resolved = path.isAbsolute(expanded)
+    ? path.resolve(expanded)
+    : path.resolve(resolveWorkspaceDir(ctx), expanded);
+  if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+    throw new Error(`Studio image file does not exist: ${resolved}`);
+  }
+  return resolved;
+}
+
+function studioTextOptions(element) {
+  const role = element?.role || 'body';
+  const roleMinimums = { title: 28, subtitle: 20, body: 16, caption: 10, metric: 24 };
+  const minimum = roleMinimums[role] ?? 16;
+  return {
+    ...studioBox(element),
+    fontFace: cleanText(element?.fontFace) || 'Aptos',
+    fontSize: Math.max(minimum, Math.min(96, studioNumber(element?.fontSize, minimum))),
+    color: studioColor(element?.color, '171717'),
+    bold: element?.bold === true,
+    italic: element?.italic === true,
+    breakLine: false,
+    margin: Math.max(0, Math.min(20, studioNumber(element?.margin, 0))),
+    align: ['left', 'center', 'right', 'justify'].includes(element?.align) ? element.align : 'left',
+    valign: ['top', 'mid', 'bottom'].includes(element?.valign) ? element.valign : 'top',
+    fit: 'shrink',
+    rotate: Math.max(-360, Math.min(360, studioNumber(element?.rotate))),
+    transparency: Math.max(0, Math.min(100, studioNumber(element?.transparency))),
+    ...(element?.fill ? { fill: studioFill(element.fill, element.fillTransparency) } : {}),
+    ...(element?.line ? { line: studioLine(element.line, element.lineWidth, element.lineTransparency) } : {}),
+    ...(studioShadow(element?.shadow) ? { shadow: studioShadow(true) } : {}),
+  };
+}
+
+function studioShapeType(pptx, value) {
+  const key = cleanText(value);
+  const allowed = new Set(['rect', 'roundRect', 'ellipse', 'line', 'chevron', 'hexagon', 'arc', 'triangle', 'diamond']);
+  return allowed.has(key) && pptx.ShapeType[key] ? pptx.ShapeType[key] : pptx.ShapeType.rect;
+}
+
+function studioChartType(pptx, value) {
+  if (value === 'line') return { type: pptx.ChartType.line, options: {} };
+  if (value === 'pie') return { type: pptx.ChartType.pie, options: {} };
+  if (value === 'doughnut') return { type: pptx.ChartType.doughnut, options: { holeSize: 58 } };
+  if (value === 'area') return { type: pptx.ChartType.area, options: {} };
+  if (value === 'bar') return { type: pptx.ChartType.bar, options: { barDir: 'bar' } };
+  return { type: pptx.ChartType.bar, options: { barDir: 'col' } };
+}
+
+function studioLayoutSignature(slide) {
+  return (slide?.elements ?? []).map((element) => {
+    const x = Math.round(studioNumber(element?.x) / 20);
+    const y = Math.round(studioNumber(element?.y) / 20);
+    const w = Math.round(studioNumber(element?.w) / 20);
+    const h = Math.round(studioNumber(element?.h) / 20);
+    return `${element?.type}:${x},${y},${w},${h}`;
+  }).sort().join('|');
+}
+
+function overlapRatio(left, right) {
+  const x1 = Math.max(studioNumber(left.x), studioNumber(right.x));
+  const y1 = Math.max(studioNumber(left.y), studioNumber(right.y));
+  const x2 = Math.min(studioNumber(left.x) + studioNumber(left.w), studioNumber(right.x) + studioNumber(right.w));
+  const y2 = Math.min(studioNumber(left.y) + studioNumber(left.h), studioNumber(right.y) + studioNumber(right.h));
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const intersection = (x2 - x1) * (y2 - y1);
+  const smaller = Math.min(
+    Math.max(0.01, studioNumber(left.w) * studioNumber(left.h)),
+    Math.max(0.01, studioNumber(right.w) * studioNumber(right.h)),
+  );
+  return intersection / smaller;
+}
+
+function validateStudioDeck(params, ctx) {
+  const slides = Array.isArray(params?.slides) ? params.slides : [];
+  const issues = [];
+  let imageCount = 0;
+  let chartCount = 0;
+  let tableCount = 0;
+  let visualSlideCount = 0;
+  let contentVisualSlideCount = 0;
+  const signatures = new Set();
+  const usedImagePaths = new Set();
+  slides.forEach((slide, slideIndex) => {
+    const elements = Array.isArray(slide?.elements) ? slide.elements : [];
+    if (elements.length === 0) issues.push(`slide ${slideIndex + 1} has no elements`);
+    let hasEvidenceVisual = false;
+    const textElements = [];
+    elements.forEach((element, elementIndex) => {
+      const x = studioNumber(element?.x, -1);
+      const y = studioNumber(element?.y, -1);
+      const w = studioNumber(element?.w, -1);
+      const h = studioNumber(element?.h, -1);
+      if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 100.001 || y + h > 100.001) {
+        issues.push(`slide ${slideIndex + 1} element ${elementIndex + 1} is outside the canvas`);
+      }
+      if (element?.type === 'text') {
+        const text = studioText(element.text);
+        textElements.push({ ...element, elementIndex });
+        if (!text) issues.push(`slide ${slideIndex + 1} text element ${elementIndex + 1} is empty`);
+        if (/(?:lorem ipsum|placeholder|tbd|todo|待补充|可继续编辑)/iu.test(text)) {
+          issues.push(`slide ${slideIndex + 1} text element ${elementIndex + 1} contains placeholder copy`);
+        }
+      }
+      if (element?.type === 'image') {
+        imageCount += 1;
+        hasEvidenceVisual = true;
+        try {
+          const assetPath = studioAssetPath(ctx, element.path);
+          if (usedImagePaths.has(assetPath) && element.allowReuse !== true) {
+            issues.push(`slide ${slideIndex + 1} reuses image ${assetPath}; set allowReuse only for intentional brand assets`);
+          }
+          usedImagePaths.add(assetPath);
+        } catch (error) {
+          issues.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      if (element?.type === 'chart') {
+        chartCount += 1;
+        hasEvidenceVisual = true;
+        const categoryCount = Array.isArray(element.categories) ? element.categories.length : 0;
+        for (const series of element.series ?? []) {
+          if (!Array.isArray(series?.values) || series.values.length !== categoryCount) {
+            issues.push(`slide ${slideIndex + 1} chart series must match its ${categoryCount} categories`);
+          }
+        }
+      }
+      if (element?.type === 'table') {
+        tableCount += 1;
+        hasEvidenceVisual = true;
+        const widths = (element.rows ?? []).map((row) => Array.isArray(row) ? row.length : 0);
+        if (widths.length === 0 || widths.some((width) => width === 0 || width !== widths[0])) {
+          issues.push(`slide ${slideIndex + 1} table rows must have the same non-zero column count`);
+        }
+      }
+    });
+    for (let leftIndex = 0; leftIndex < textElements.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < textElements.length; rightIndex += 1) {
+        const left = textElements[leftIndex];
+        const right = textElements[rightIndex];
+        if (left.allowOverlap || right.allowOverlap) continue;
+        if (overlapRatio(left, right) > 0.12) {
+          issues.push(`slide ${slideIndex + 1} text elements ${left.elementIndex + 1} and ${right.elementIndex + 1} overlap`);
+        }
+      }
+    }
+    if (hasEvidenceVisual) {
+      visualSlideCount += 1;
+      if (slideIndex > 0) contentVisualSlideCount += 1;
+    }
+    signatures.add(studioLayoutSignature(slide));
+  });
+  const contentSlideCount = Math.max(0, slides.length - 1);
+  const minimumVisualSlides = slides.length >= 5 ? Math.max(2, Math.ceil(contentSlideCount * 0.4)) : 0;
+  if (contentVisualSlideCount < minimumVisualSlides) {
+    issues.push(`studio deck needs visuals on at least ${minimumVisualSlides} content slides; found ${contentVisualSlideCount}`);
+  }
+  const minimumSignatures = slides.length >= 5 ? 3 : Math.min(slides.length, 2);
+  if (signatures.size < minimumSignatures) {
+    issues.push(`studio deck repeats one composition too often; layoutSignatures=${signatures.size}, required=${minimumSignatures}`);
+  }
+  return {
+    ok: issues.length === 0,
+    issues,
+    evidence: {
+      slideCount: slides.length,
+      elementCount: slides.reduce((sum, slide) => sum + (slide?.elements?.length ?? 0), 0),
+      imageCount,
+      chartCount,
+      tableCount,
+      visualSlideCount,
+      contentVisualSlideCount,
+      layoutSignatureCount: signatures.size,
+    },
+  };
+}
+
+async function createStudioPptxBuffer(params, ctx) {
+  const pptx = new PptxGenJS();
+  pptx.layout = 'LAYOUT_WIDE';
+  pptx.author = cleanText(params?.author) || 'UClaw';
+  pptx.company = 'UClaw';
+  pptx.subject = cleanText(params?.subject) || cleanText(params?.designIntent);
+  pptx.title = cleanText(params?.title) || 'UClaw Presentation';
+  pptx.lang = cleanText(params?.language) || 'zh-CN';
+  pptx.theme = {
+    headFontFace: cleanText(params?.fonts?.heading) || 'Aptos Display',
+    bodyFontFace: cleanText(params?.fonts?.body) || 'Aptos',
+    lang: cleanText(params?.language) || 'zh-CN',
+  };
+  for (const slideSpec of params.slides ?? []) {
+    const slide = pptx.addSlide();
+    slide.background = { color: studioColor(slideSpec?.background, 'FFFFFF') };
+    for (const element of slideSpec?.elements ?? []) {
+      const box = studioBox(element);
+      if (element.type === 'text') {
+        slide.addText(studioText(element.text), studioTextOptions(element));
+      } else if (element.type === 'image') {
+        const imagePath = studioAssetPath(ctx, element.path);
+        slide.addImage({
+          path: imagePath,
+          ...box,
+          sizing: { type: element.fit === 'contain' ? 'contain' : 'cover', w: box.w, h: box.h },
+          transparency: Math.max(0, Math.min(100, studioNumber(element.transparency))),
+          rounding: element.rounding === true,
+          rotate: Math.max(-360, Math.min(360, studioNumber(element.rotate))),
+          ...(studioShadow(element.shadow) ? { shadow: studioShadow(true) } : {}),
+        });
+      } else if (element.type === 'shape') {
+        slide.addShape(studioShapeType(pptx, element.shape), {
+          ...box,
+          fill: studioFill(element.fill || 'FFFFFF', element.fillTransparency),
+          line: studioLine(element.line || element.fill || 'FFFFFF', element.lineWidth, element.lineTransparency),
+          rotate: Math.max(-360, Math.min(360, studioNumber(element.rotate))),
+          ...(studioShadow(element.shadow) ? { shadow: studioShadow(true) } : {}),
+        });
+      } else if (element.type === 'chart') {
+        const chart = studioChartType(pptx, element.chartType);
+        const series = (element.series ?? []).map((item) => ({
+          name: cleanText(item.name) || 'Series',
+          labels: (element.categories ?? []).map(cleanText),
+          values: (item.values ?? []).map((value) => studioNumber(value)),
+          ...(item.color ? { color: studioColor(item.color) } : {}),
+        }));
+        slide.addChart(chart.type, series, {
+          ...box,
+          ...chart.options,
+          showTitle: Boolean(cleanText(element.title)),
+          title: cleanText(element.title),
+          showLegend: element.showLegend === true,
+          legendPos: element.legendPosition === 'bottom' ? 'b' : element.legendPosition === 'left' ? 'l' : element.legendPosition === 'top' ? 't' : 'r',
+          showValue: element.showValue === true,
+          showCatName: element.showCategoryName === true,
+          showPercent: element.showPercent === true,
+          chartColors: series.map((item, index) => studioColor(item.color, ['2563EB', 'F97316', '16A34A', 'DC2626'][index % 4])),
+          showBorder: false,
+          showValAxisTitle: false,
+          showCatAxisTitle: false,
+          catAxisLabelFontFace: cleanText(params?.fonts?.body) || 'Aptos',
+          valAxisLabelFontFace: cleanText(params?.fonts?.body) || 'Aptos',
+          showLegendKey: false,
+        });
+      } else if (element.type === 'table') {
+        const rows = Array.isArray(element.rows) ? element.rows : [];
+        const headerFill = studioColor(element.headerFill, '171717');
+        const headerColor = studioColor(element.headerColor, 'FFFFFF');
+        const bodyFill = studioColor(element.bodyFill, 'FFFFFF');
+        const bodyColor = studioColor(element.bodyColor, '171717');
+        const tableRows = rows.map((row, rowIndex) => (row ?? []).map((cell) => ({
+          text: cleanText(cell),
+          options: rowIndex === 0 && element.firstRowHeader !== false
+            ? { fill: headerFill, color: headerColor, bold: true }
+            : { fill: bodyFill, color: bodyColor },
+        })));
+        slide.addTable(tableRows, {
+          ...box,
+          border: { type: 'solid', color: studioColor(element.borderColor, 'D1D5DB'), pt: 0.75 },
+          fontFace: cleanText(params?.fonts?.body) || 'Aptos',
+          fontSize: Math.max(10, Math.min(24, studioNumber(element.fontSize, 14))),
+          margin: Math.max(0, Math.min(12, studioNumber(element.margin, 5))),
+          autoFit: false,
+          valign: 'mid',
+          ...(Array.isArray(element.columnWidths) ? { colW: element.columnWidths.map((value) => Math.max(0.2, studioNumber(value) / 100 * STUDIO_SLIDE_WIDTH)) } : {}),
+        });
+      }
+    }
+    if (studioText(slideSpec?.speakerNotes) && typeof slide.addNotes === 'function') {
+      slide.addNotes(studioText(slideSpec.speakerNotes));
+    }
+  }
+  return pptx.write({ outputType: 'nodebuffer' });
+}
+
+async function verifyStudioPptxBuffer(buffer, params, validation) {
+  const zip = await JSZip.loadAsync(buffer);
+  const slideNames = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/u.test(name));
+  const mediaNames = Object.keys(zip.files).filter((name) => /^ppt\/media\/[^/]+$/u.test(name));
+  const chartNames = Object.keys(zip.files).filter((name) => /^ppt\/charts\/chart\d+\.xml$/u.test(name));
+  const expectedSlides = Array.isArray(params?.slides) ? params.slides.length : 0;
+  if (slideNames.length !== expectedSlides) {
+    throw new Error(`Studio PPT verification failed: slides=${slideNames.length}/${expectedSlides}`);
+  }
+  return {
+    status: 'passed',
+    engine: 'pptxgenjs-free-canvas',
+    slideCount: slideNames.length,
+    mediaCount: mediaNames.length,
+    chartPartCount: chartNames.length,
+    ...validation.evidence,
+  };
+}
+
 const slideSchema = Type.Object({
   title: Type.Optional(Type.String()),
   subtitle: Type.Optional(Type.String()),
@@ -802,6 +1175,111 @@ const presentationDesignSchema = Type.Object({
   density: Type.Optional(Type.Union([Type.Literal('airy'), Type.Literal('balanced'), Type.Literal('dense')])),
 });
 
+const studioCoordinateSchema = Type.Number({ minimum: 0, maximum: 100 });
+const studioSizeSchema = Type.Number({ exclusiveMinimum: 0, maximum: 100 });
+const studioColorSchema = Type.String({ pattern: '^[0-9A-Fa-f]{6}$' });
+const studioBoxSchema = {
+  x: studioCoordinateSchema,
+  y: studioCoordinateSchema,
+  w: studioSizeSchema,
+  h: studioSizeSchema,
+};
+const studioTextElementSchema = Type.Object({
+  type: Type.Literal('text'),
+  ...studioBoxSchema,
+  text: Type.String(),
+  role: Type.Optional(Type.Union([
+    Type.Literal('title'), Type.Literal('subtitle'), Type.Literal('body'), Type.Literal('caption'), Type.Literal('metric'),
+  ])),
+  fontFace: Type.Optional(Type.String()),
+  fontSize: Type.Optional(Type.Number({ minimum: 10, maximum: 96 })),
+  color: Type.Optional(studioColorSchema),
+  bold: Type.Optional(Type.Boolean()),
+  italic: Type.Optional(Type.Boolean()),
+  align: Type.Optional(Type.Union([Type.Literal('left'), Type.Literal('center'), Type.Literal('right'), Type.Literal('justify')])),
+  valign: Type.Optional(Type.Union([Type.Literal('top'), Type.Literal('mid'), Type.Literal('bottom')])),
+  margin: Type.Optional(Type.Number({ minimum: 0, maximum: 20 })),
+  fill: Type.Optional(studioColorSchema),
+  fillTransparency: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+  line: Type.Optional(studioColorSchema),
+  lineWidth: Type.Optional(Type.Number({ minimum: 0, maximum: 12 })),
+  lineTransparency: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+  transparency: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+  rotate: Type.Optional(Type.Number({ minimum: -360, maximum: 360 })),
+  shadow: Type.Optional(Type.Boolean()),
+  allowOverlap: Type.Optional(Type.Boolean()),
+});
+const studioImageElementSchema = Type.Object({
+  type: Type.Literal('image'),
+  ...studioBoxSchema,
+  path: Type.String({ description: 'Absolute path, or path relative to the OpenClaw workspace, for a local PNG/JPEG/WebP asset.' }),
+  fit: Type.Optional(Type.Union([Type.Literal('cover'), Type.Literal('contain')])),
+  transparency: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+  rotate: Type.Optional(Type.Number({ minimum: -360, maximum: 360 })),
+  rounding: Type.Optional(Type.Boolean()),
+  shadow: Type.Optional(Type.Boolean()),
+  allowReuse: Type.Optional(Type.Boolean({ description: 'Allow intentional reuse of a brand asset such as a logo.' })),
+});
+const studioShapeElementSchema = Type.Object({
+  type: Type.Literal('shape'),
+  ...studioBoxSchema,
+  shape: Type.Optional(Type.Union([
+    Type.Literal('rect'), Type.Literal('roundRect'), Type.Literal('ellipse'), Type.Literal('line'), Type.Literal('chevron'),
+    Type.Literal('hexagon'), Type.Literal('arc'), Type.Literal('triangle'), Type.Literal('diamond'),
+  ])),
+  fill: Type.Optional(studioColorSchema),
+  fillTransparency: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+  line: Type.Optional(studioColorSchema),
+  lineWidth: Type.Optional(Type.Number({ minimum: 0, maximum: 12 })),
+  lineTransparency: Type.Optional(Type.Number({ minimum: 0, maximum: 100 })),
+  rotate: Type.Optional(Type.Number({ minimum: -360, maximum: 360 })),
+  shadow: Type.Optional(Type.Boolean()),
+});
+const studioChartElementSchema = Type.Object({
+  type: Type.Literal('chart'),
+  ...studioBoxSchema,
+  chartType: Type.Union([
+    Type.Literal('column'), Type.Literal('bar'), Type.Literal('line'), Type.Literal('area'), Type.Literal('pie'), Type.Literal('doughnut'),
+  ]),
+  title: Type.Optional(Type.String()),
+  categories: Type.Array(Type.String(), { minItems: 1 }),
+  series: Type.Array(Type.Object({
+    name: Type.String(),
+    values: Type.Array(Type.Number(), { minItems: 1 }),
+    color: Type.Optional(studioColorSchema),
+  }), { minItems: 1 }),
+  showLegend: Type.Optional(Type.Boolean()),
+  legendPosition: Type.Optional(Type.Union([Type.Literal('top'), Type.Literal('bottom'), Type.Literal('left'), Type.Literal('right')])),
+  showValue: Type.Optional(Type.Boolean()),
+  showCategoryName: Type.Optional(Type.Boolean()),
+  showPercent: Type.Optional(Type.Boolean()),
+});
+const studioTableElementSchema = Type.Object({
+  type: Type.Literal('table'),
+  ...studioBoxSchema,
+  rows: Type.Array(Type.Array(Type.String(), { minItems: 1 }), { minItems: 1 }),
+  firstRowHeader: Type.Optional(Type.Boolean()),
+  headerFill: Type.Optional(studioColorSchema),
+  headerColor: Type.Optional(studioColorSchema),
+  bodyFill: Type.Optional(studioColorSchema),
+  bodyColor: Type.Optional(studioColorSchema),
+  borderColor: Type.Optional(studioColorSchema),
+  fontSize: Type.Optional(Type.Number({ minimum: 10, maximum: 24 })),
+  margin: Type.Optional(Type.Number({ minimum: 0, maximum: 12 })),
+  columnWidths: Type.Optional(Type.Array(Type.Number({ exclusiveMinimum: 0, maximum: 100 }), { minItems: 1 })),
+});
+const studioSlideSchema = Type.Object({
+  background: Type.Optional(studioColorSchema),
+  speakerNotes: Type.Optional(Type.String()),
+  elements: Type.Array(Type.Union([
+    studioTextElementSchema,
+    studioImageElementSchema,
+    studioShapeElementSchema,
+    studioChartElementSchema,
+    studioTableElementSchema,
+  ]), { minItems: 1 }),
+});
+
 const sectionSchema = Type.Object({
   title: Type.Optional(Type.String()),
   paragraphs: Type.Optional(Type.Array(Type.String())),
@@ -817,10 +1295,61 @@ const baseFileSchema = {
 function createTools() {
   return [
     {
+      name: 'create_designed_pptx_file',
+      label: 'Create Designed PPTX',
+      description: 'Primary PPTX renderer for professional, visual presentations. Render a model-authored free-canvas deck with local images, charts, tables, shapes, and varied per-slide composition. Use the presentation-maker skill to plan and source assets first.',
+      promptSnippet: 'create_designed_pptx_file: primary high-design PPTX tool. Plan the story and visual direction, source local visual assets, render each slide on a 0-100 free canvas, vary compositions, and return MEDIA:<absolute-path>.',
+      parameters: Type.Object({
+        ...baseFileSchema,
+        title: Type.String(),
+        subject: Type.Optional(Type.String()),
+        author: Type.Optional(Type.String()),
+        language: Type.Optional(Type.String()),
+        designIntent: Type.String({ description: 'One concise visual direction tied to the subject and audience.' }),
+        fonts: Type.Optional(Type.Object({
+          heading: Type.Optional(Type.String()),
+          body: Type.Optional(Type.String()),
+        })),
+        slides: Type.Array(studioSlideSchema, { minItems: 1, maxItems: 40 }),
+      }),
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        const safeParams = normalizeStudioParams(params);
+        const validation = validateStudioDeck(safeParams, ctx);
+        if (!validation.ok) {
+          const detail = `PPT studio quality gate blocked: ${validation.issues.join('; ')}`;
+          return toolErrorResult(detail, {
+            kind: 'presentation',
+            title: cleanText(safeParams?.title),
+            verification: {
+              status: 'blocked',
+              kind: 'artifact.content',
+              required: true,
+              severity: 'blocking',
+              detail,
+              evidence: JSON.stringify(validation.evidence),
+            },
+          });
+        }
+        const filePath = await uniqueOutputPath(ctx, safeParams, 'pptx', 'UClaw_Studio_PPT');
+        const output = await createStudioPptxBuffer(safeParams, ctx);
+        const buffer = Buffer.isBuffer(output) ? output : Buffer.from(output);
+        const verification = await verifyStudioPptxBuffer(buffer, safeParams, validation);
+        await writeFile(filePath, buffer);
+        return artifactResult(
+          filePath,
+          MIME.pptx,
+          'presentation',
+          cleanText(safeParams?.title),
+          safeParams?.openAfterCreate === true,
+          { verification, designIntent: cleanText(safeParams?.designIntent) },
+        );
+      },
+    },
+    {
       name: 'create_pptx_file',
-      label: 'Create PPTX',
-      description: 'Create a real local .pptx presentation file from a complete slide plan. Select a semantic presentationDesign theme; slides[0] is the cover. Return the file path; do not substitute with an outline.',
-      promptSnippet: 'create_pptx_file: create a real local PPTX from a complete slide plan, use presentationDesign for a semantic theme, keep slides[0] as the cover, and return MEDIA:<absolute-path>.',
+      label: 'Create Basic PPTX',
+      description: 'Lightweight fallback PPTX renderer with built-in semantic themes. Use only when create_designed_pptx_file cannot be satisfied; it is not the primary route for visual or high-design presentations.',
+      promptSnippet: 'create_pptx_file: fallback-only basic PPTX renderer. Prefer create_designed_pptx_file for professional or visual decks; if fallback is necessary, keep slides[0] as the cover and return MEDIA:<absolute-path>.',
       parameters: Type.Object({
         ...baseFileSchema,
         title: Type.Optional(Type.String()),
@@ -956,6 +1485,9 @@ export default pluginEntry;
 export const __test = {
   createTools,
   createPptxBuffer,
+  createStudioPptxBuffer,
+  validateStudioDeck,
+  verifyStudioPptxBuffer,
   createDocxBuffer,
   createXlsxBuffer,
   renderTextContent,

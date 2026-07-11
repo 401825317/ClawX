@@ -98,6 +98,7 @@
     "jszip": "3.10.1",
     "node-machine-id": "^1.1.12",
     "posthog-node": "^5.28.0",
+    "pptxgenjs": "4.0.1",
     "tar": "^6.2.1",
     "ws": "^8.19.0",
     "yaml": "^2.9.0"

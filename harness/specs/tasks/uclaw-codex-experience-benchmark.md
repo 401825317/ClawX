@@ -40,7 +40,7 @@ acceptance:
   - Prompt suite covers ordinary chat, preference/memory, image, image edit, video, composite multi-deliverable work, PPT, Excel, mini-program/web app, history recovery, concurrency, failure recovery, performance, and process display.
   - Each prompt declares priority, exact text, Codex expected visible behavior, and UClaw observation focus.
   - PPT, Excel, and mini-program/web app prompts include a quality bar that rejects fixed-template-only artifacts.
-  - PPT evidence records the selected semantic theme family, visible page-frame diversity, layout kinds, and cross-topic theme signatures.
+  - PPT evidence records the studio engine, local visual assets, image/chart/table counts, layout signatures, and cross-topic composition differences.
   - Result log template records Codex actual behavior, UClaw actual behavior, scores, gap classification, required implementation, and evidence.
 docs:
   required: false
@@ -172,11 +172,11 @@ PPT must be judged by content structure, visual hierarchy, page count, readable 
 | D01 | P0 | `做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划` | Real 8-page deck, each page has meaningful content and layout. | Not a fixed 5-page template. Validate pptx opens. |
 | D02 | P0 | `把这个主题做成适合老板看的汇报 PPT：为什么我们要投入 UClaw 执行层产品化` | Executive tone, decision-oriented structure. | Business framing, not generic AI workflow text. |
 | D03 | P1 | `做一个销售培训 PPT，主题是“如何跟进企业客户”，要有练习题` | Includes training structure and exercises. | Content specificity. |
-| D04 | P1 | `做一个发布会风格 PPT，主题是“个人 AI 工作台”，页面要高级一点` | Product-launch theme with stage-style cover, high-impact statement pages, coherent hierarchy, and no text overflow. | Semantic `product-launch` selection and visible structure, not random recoloring. |
+| D04 | P1 | `做一个发布会风格 PPT，主题是“个人 AI 工作台”，页面要高级一点` | High-impact stage narrative with a real visual focal point, coherent hierarchy, varied composition, and no text overflow. | `presentation-maker` plus `create_designed_pptx_file`, with visual assets and free-canvas composition rather than recolored cards. |
 | D05 | P1 | `根据下面要点做 PPT：目标用户、小红书投放、转化路径、预算、风险` | Uses provided outline faithfully. | Does it preserve user input, not replace with template. |
 | D06 | P2 | `生成 PPT 后帮我检查每页标题是否重复、是否有空页` | Create and verify. | Verification output tied to actual deck. |
-| D07 | P0 | `生成一个苹果18的宣传介绍 PPT` | Plan and produce an Apple 18-specific product-launch deck. | `product-launch` theme signature, stage cover/page frame, subject-specific content, and no generic fixed-template fast path. |
-| D08 | P0 | `生成一个张家界旅游介绍 PPT` after D07 in a fresh run | Plan and produce a Zhangjiajie-specific travel-editorial deck. | `travel-editorial` theme signature and page frame differ materially from D07, not only content or accent color. |
+| D07 | P0 | `生成一个苹果18的宣传介绍 PPT` | Plan and produce an Apple 18-specific launch deck with product imagery and editorial product storytelling. | Studio engine, local subject visuals, varied slide silhouettes, and no generic fixed-template fast path. |
+| D08 | P0 | `生成一个张家界旅游介绍 PPT` after D07 in a fresh run | Plan and produce a Zhangjiajie-specific travel deck with real destination imagery and a visual journey. | Visual assets and composition signatures differ materially from D07, not only content or accent color. |
 
 ### E. Excel Quality: Data, Formulas, Formatting, Validation
 
@@ -344,16 +344,16 @@ These artifacts should move from "template-level" to "agent/skill-level".
 
 - The content must be planned by the agent from the prompt or supplied material.
 - Prompt-specific outline, not fixed generic sections.
-- Deterministic design specification with semantic theme family, audience, purpose, visual tone, and density.
-- Product, travel, executive, training, and editorial decks use visibly different cover composition and page frames, not one template with alternate colors.
-- Five-page-or-longer decks combine multiple semantic content layouts when the material supports them; layout selection is content-driven rather than random.
+- Prompt-specific design intent with audience, purpose, visual direction, and per-slide composition.
+- Product, travel, executive, training, and editorial decks use subject-relevant visual assets and visibly different compositions, not one template with alternate colors.
+- Five-page-or-longer decks put images, charts, or tables on at least 40 percent of content slides and use at least three distinct layout signatures.
 - Correct requested page count or clear reason if adjusted.
 - Meaningful Chinese page titles and bullets.
 - No empty pages, no duplicated titles unless intentional.
 - Layout readable at normal slide size.
 - File opens in PowerPoint/Keynote or a verifier.
 - Verification reads the generated deck metadata/content, not just "file exists".
-- Verification reads the theme signature and rendered layout markers; cross-topic regression compares at least one product deck with one travel deck.
+- Verification reads the studio engine, slide/media/chart parts, visual counts, and layout signatures; cross-topic regression compares at least one product deck with one travel deck.
 - Final reply states file created and verification result.
 
 ### Excel Must Have

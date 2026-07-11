@@ -1055,6 +1055,7 @@ function detectCompositeTasks(params: {
 
   if (tasks.length === 0) return [];
   if (tasks.length === 1) {
+    if (tasks[0]!.kind === 'presentation') return [];
     return isSingleLocalArtifactCompositeKind(tasks[0]!.kind) ? tasks : [];
   }
   return hasExplicitMultiplicity || containsCompositeSeparator(prompt) ? tasks : [];
@@ -1910,13 +1911,14 @@ function normalizePlannerCompositeTasks(params: {
     if (dependsOn.length > 0) entry.task.dependsOn = dependsOn;
   }
 
-  return prioritizeCompositeImageSources({
+  const prioritized = prioritizeCompositeImageSources({
     tasks: normalized.map(({ task }) => task),
     prompt: params.prompt,
     explicitImages: params.explicitImages,
     candidateImages: params.candidateImages,
     preservePlannerCandidateSelection: params.preservePlannerCandidateSelection,
   });
+  return prioritized.length === 1 && prioritized[0]!.kind === 'presentation' ? [] : prioritized;
 }
 
 function normalizePlannerDecision(params: {
@@ -2256,7 +2258,8 @@ function buildPlannerMessages(params: {
         'Every composite media task must correspond to an explicitly requested media deliverable. Context phrases such as video frames, image content, reference picture, 视频画面, or 图片内容 do not authorize an extra image_generate or video_generate task.',
         'Allowed composite task kinds: image_generate, presentation, spreadsheet, video_generate, image_edit, mini_program, copywriting.',
         'When the user explicitly requests 2-5 outputs of the same kind, emit that many independent tasks. Never emit more than 5 tasks of one kind. For quantities above 5, emit only 5.',
-        'For a single explicit presentation, spreadsheet, mini_program, or copywriting artifact request, return action=chat with exactly one composite_task so the deterministic local artifact runtime can deliver it. Keep single image/video requests on their direct media action.',
+        'For a single explicit presentation request, return action=chat with no composite_tasks so the ordinary OpenClaw agent can use the presentation-maker skill and its designed free-canvas PPTX tool.',
+        'For a single explicit spreadsheet, mini_program, or copywriting artifact request, return action=chat with exactly one composite_task so the deterministic local artifact runtime can deliver it. Keep single image/video requests on their direct media action.',
         'Treat an explicit long-form novel, story, article, essay, report, or screenplay request with a word-count, minimum-length, full-version, or long-form constraint as one copywriting artifact task with requires_artifact=true. Preserve every length and completeness constraint in the task prompt. Capability questions or requests for writing advice remain chat.',
         'artifact_context is authoritative thread-scoped run state when present. For a short or elliptical current turn, use its kind, objective, status, delivery_status, and artifact_refs before inferring anything from recent_messages. If status is planned, queued, running, or finalizing, use chat to report or explain the active run; never start a duplicate task. Continue the same local artifact kind only from a recoverable partial, blocked, failed, cancelled, or completed-but-undelivered state, and carry the original constraints into the task prompt.',
         'When artifact_context is absent, use recent_messages only as a compatibility fallback for a short or elliptical turn. Do not invent a continuation when context does not establish the objective. A completed run with successful delivery and usable artifact refs is evidence of completion: inspect or explain that result instead of regenerating it.',

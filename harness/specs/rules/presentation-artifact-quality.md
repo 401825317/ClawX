@@ -6,11 +6,12 @@ appliesTo:
   - gateway-backend-communication
 ---
 
-Presentation generation must treat the PPTX writer as a rendering engine, not as one visible template.
+Presentation generation must treat the PPTX writer as a free-canvas rendering engine, not as a visible template.
 
-- Plans use a deterministic semantic design specification. Explicit theme choices win; otherwise the subject, audience, purpose, and tone select the theme family. Random recoloring is not a design decision.
-- Product launches, travel stories, executive reports, training decks, and general editorial narratives must have visibly different cover composition, page chrome, palette, and content-layout behavior.
-- The composite runtime, direct `create_pptx_file` tool, and bundled presentation fallback use the same theme-family vocabulary and first-slide-as-cover page-count contract.
-- Structured layouts render their matching content fields without dropping columns, metrics, timelines, or statement content.
-- Empty slides, placeholder copy, repeated content, missing theme markers, missing requested layouts, text overload, or page-count drift cannot pass completion verification.
-- Cross-topic validation compares a product-launch deck with a travel-editorial deck and confirms different theme and slide XML signatures, successful Office openability, readable renders, and no incoherent overlap.
+- A standalone presentation request routes to the ordinary OpenClaw agent, the bundled `presentation-maker` skill, and `create_designed_pptx_file`. Main-process deterministic rendering must not intercept this path.
+- The agent plans a prompt-specific story, visual direction, and per-slide composition before rendering. It sources or generates real visual assets when the subject benefits from them.
+- The studio contract supports positioned text, local images, shapes, charts, and tables on a 0-100 canvas. It must not reduce every page to title, subtitle, and repeated bullet cards.
+- Five-page-or-longer decks require evidence visuals on at least 40 percent of content slides and at least three distinct layout signatures. Text collisions, canvas overflow, empty pages, placeholder copy, and page-count drift block completion.
+- Product, place, person, and object decks show the actual subject when suitable assets are available. The same decorative image must not be reused across the whole deck.
+- `create_pptx_file`, semantic theme families, and the bundled XML generator remain basic fallbacks only. A fallback result is disclosed as such and cannot be reported as a high-design deck.
+- Cross-topic validation compares at least one product deck with one travel deck and confirms different visual assets, composition signatures, successful Office openability, readable renders, and no incoherent overlap.

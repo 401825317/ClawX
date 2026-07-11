@@ -494,7 +494,11 @@ create_docx('output.docx', [
 
 ---
 
-## PPTX 创建 (需 python-pptx)
+## PPTX 创建 (兼容兜底)
+
+新建或重做视觉化 PPT 时，先使用 `presentation-maker` skill 和
+`create_designed_pptx_file`。下面的 `python-pptx` 路径只用于设计工具
+不可用、批量兼容或已有复杂文件处理，不能替代高设计主链路。
 
 **验证:** ✅ WPS 可正常打开
 **依赖:** UClaw Office Python 环境通常已提供 `python-pptx==1.0.2`；如果缺失，使用 `uv run --with python-pptx==1.0.2 python <script>` 重试。

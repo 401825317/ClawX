@@ -1,11 +1,12 @@
 {
   "name": "uclaw-local-artifacts-plugin",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "main": "index.mjs",
   "dependencies": {
     "@sinclair/typebox": "^0.34.48",
     "jszip": "3.10.1",
+    "pptxgenjs": "4.0.1",
     "xlsx": "^0.18.5"
   }
 }

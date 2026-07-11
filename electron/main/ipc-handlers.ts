@@ -101,6 +101,7 @@ import {
 
 const gatewayRpcBackpressure = new GatewayRpcBackpressure();
 const OFFICE_ARTIFACT_TOOL_NAMES = [
+  'create_designed_pptx_file',
   'create_pptx_file',
   'create_docx_file',
   'create_xlsx_file',

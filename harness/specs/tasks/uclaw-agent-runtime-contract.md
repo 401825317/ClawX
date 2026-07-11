@@ -20,6 +20,7 @@ touchedAreas:
   - pnpm-lock.yaml
   - electron/api/routes/gateway.ts
   - electron/api/routes/media.ts
+  - electron/main/ipc-handlers.ts
   - electron/utils/composite-run-coordinator.ts
   - electron/utils/openclaw-auth.ts
   - electron/utils/chat-session-image-message.ts
@@ -39,14 +40,20 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-local-artifacts/index.mjs
   - resources/openclaw-plugins/uclaw-local-artifacts/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-local-artifacts/package.json
+  - resources/context/AGENTS.clawx.md
+  - resources/context/TOOLS.clawx.md
   - resources/openclaw-skill-shims/presentation-maker/SKILL.md
+  - resources/openclaw-skill-shims/presentation-maker/references/studio-schema.md
   - resources/openclaw-skill-shims/presentation-maker/scripts/make-pptx.mjs
+  - resources/openclaw-skill-shims/office-toolkit/create.md
+  - resources/openclaw-skill-shims/office-toolkit/references/create.md
   - scripts/openclaw-model-request-contract-patch.mjs
   - scripts/openclaw-streaming-runtime-patch.mjs
   - scripts/openclaw-tool-directory-i18n-patch.mjs
   - scripts/patch-browser-hint.mjs
   - scripts/bundle-openclaw.mjs
   - src/pages/Chat/ChatInput.tsx
+  - src/pages/Chat/index.tsx
   - src/pages/Chat/ChatMessage.tsx
   - src/i18n/locales/en/chat.json
   - src/i18n/locales/ja/chat.json

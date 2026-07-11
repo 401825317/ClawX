@@ -26,7 +26,8 @@
 ### 文件产物
 
 - 用户要 PPT/PPTX、Word/DOCX、Excel/XLSX、文案或小程序时，要交付真实文件，不要只返回模板说明。
-- 简单产物优先使用当前列出的 `create_pptx_file`、`create_docx_file`、`create_xlsx_file`、`create_text_file`、`create_html_app_file`；复杂产物按匹配 skill 的流程生成。
+- PPT/PPTX 使用 `presentation-maker` skill，主工具是 `create_designed_pptx_file`；先规划叙事、准备视觉素材和逐页自由构图，再生成带图片、图表或表格的真实 PPTX。`create_pptx_file` 仅是设计工具不可用时的基础兜底。
+- DOCX、XLSX、文本和 HTML 简单产物可使用 `create_docx_file`、`create_xlsx_file`、`create_text_file`、`create_html_app_file`；复杂产物按匹配 skill 的流程生成。
 - Office 依赖失败时先用 `uv` 的显式依赖方式重试一次，不要把依赖说明当最终交付。
 - 用户可见文件使用不覆盖旧文件的名称；完成后验证文件存在且可打开，并在最终回复中保留绝对路径或 `MEDIA:<absolute-path>`。
 
