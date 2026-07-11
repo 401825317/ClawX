@@ -2,11 +2,11 @@ export const JUNFEIAI_PROVIDER_ID = 'lingzhiwuxian';
 export const JUNFEIAI_PROVIDER_NAME = '零至无限';
 export const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
 export const JUNFEIAI_DEFAULT_MODEL = 'smart-latest';
-export const JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW = 200_000;
+export const JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW = 372_000;
 export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-completions';
 export const JUNFEIAI_PROVIDER_TIMEOUT_SECONDS = 300;
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'lingzhiwuxian-auth';
-export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 1;
+export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 2;
 
 export function normalizeJunFeiAIModelContextWindow(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
