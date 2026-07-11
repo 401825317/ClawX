@@ -84,13 +84,13 @@ function resolveChatSendThinkingOverride(message: string, explicitThinking?: unk
   }
 
   if (SIMPLE_GREETING_RE.test(normalized)) {
-    return { thinking: 'off', reason: 'simple_greeting' };
+    return { thinking: 'xhigh', reason: 'simple_greeting' };
   }
   if (SIMPLE_IDENTITY_RE.test(normalized)) {
-    return { thinking: 'off', reason: 'simple_identity' };
+    return { thinking: 'xhigh', reason: 'simple_identity' };
   }
   if (SIMPLE_CAPABILITY_RE.test(normalized) || isArtifactCapabilityQuestion(normalized)) {
-    return { thinking: 'off', reason: 'capability_question' };
+    return { thinking: 'xhigh', reason: 'capability_question' };
   }
 
   return null;

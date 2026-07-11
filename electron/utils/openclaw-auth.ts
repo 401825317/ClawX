@@ -34,6 +34,8 @@ import {
   isOpenClawOAuthPluginProviderKey,
 } from './provider-keys';
 import {
+  PI_AI_OPENROUTER_REASONING_COMPAT,
+  PI_AI_OPENROUTER_THINKING_LEVEL_MAP,
   PI_AI_PROMPT_CACHE_KEY_COMPAT,
   normalizePiAiModelCost,
   type PiAiModelCostRates,
@@ -1633,6 +1635,9 @@ export async function setOpenClawDefaultModel(
       primary: model,
       fallbacks: fallbackModels,
     };
+    if (provider === JUNFEIAI_PROVIDER_ID) {
+      defaults.thinkingDefault = 'xhigh';
+    }
     agents.defaults = defaults;
     config.agents = agents;
 
@@ -1982,6 +1987,109 @@ function applyOpenClawProviderAgentRuntimePinsToConfig(config: Record<string, un
   return pinned;
 }
 
+function isJunFeiAIDefaultModel(config: Record<string, unknown>): boolean {
+  const agents = isPlainRecord(config.agents) ? config.agents : {};
+  const defaults = isPlainRecord(agents.defaults) ? agents.defaults : {};
+  const model = isPlainRecord(defaults.model) ? defaults.model : {};
+  const primary = typeof model.primary === 'string' ? model.primary.trim() : '';
+  return primary.startsWith(`${JUNFEIAI_PROVIDER_ID}/`);
+}
+
+function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>): boolean {
+  if (!isJunFeiAIDefaultModel(config)) {
+    return false;
+  }
+
+  const agents = isPlainRecord(config.agents) ? config.agents : {};
+  const defaults = isPlainRecord(agents.defaults) ? agents.defaults : {};
+  let modified = false;
+  if (defaults.thinkingDefault !== 'xhigh') {
+    defaults.thinkingDefault = 'xhigh';
+    agents.defaults = defaults;
+    config.agents = agents;
+    modified = true;
+  }
+
+  const models = isPlainRecord(config.models) ? config.models : {};
+  const providers = isPlainRecord(models.providers) ? models.providers : {};
+  const provider = isPlainRecord(providers[JUNFEIAI_PROVIDER_ID])
+    ? providers[JUNFEIAI_PROVIDER_ID]
+    : null;
+  if (!provider || !Array.isArray(provider.models)) {
+    return modified;
+  }
+
+  const nextModels = provider.models.map((entry) => {
+    if (!isPlainRecord(entry) || entry.id !== 'smart-latest') {
+      return entry;
+    }
+    const compat = isPlainRecord(entry.compat) ? entry.compat : {};
+    const nextCompat = { ...compat, ...PI_AI_OPENROUTER_REASONING_COMPAT };
+    const hasThinkingLevelMap = JSON.stringify(entry.thinkingLevelMap)
+      === JSON.stringify(PI_AI_OPENROUTER_THINKING_LEVEL_MAP);
+    if (JSON.stringify(compat) === JSON.stringify(nextCompat) && hasThinkingLevelMap) {
+      return entry;
+    }
+    modified = true;
+    return {
+      ...entry,
+      compat: nextCompat,
+      thinkingLevelMap: PI_AI_OPENROUTER_THINKING_LEVEL_MAP,
+    };
+  });
+  if (modified) {
+    provider.models = nextModels;
+    providers[JUNFEIAI_PROVIDER_ID] = provider;
+    models.providers = providers;
+    config.models = models;
+  }
+  return modified;
+}
+
+async function ensureJunFeiAIReasoningCompatInAgentModels(): Promise<void> {
+  const agentIds = await discoverAgentIdsForModelsJsonUpdate();
+  for (const agentId of agentIds) {
+    const modelsPath = join(getOpenClawAgentDir(agentId), 'models.json');
+    const data = await readJsonFile<Record<string, unknown>>(modelsPath);
+    const providers = data && isPlainRecord(data.providers) ? data.providers : null;
+    const provider = providers && isPlainRecord(providers[JUNFEIAI_PROVIDER_ID])
+      ? providers[JUNFEIAI_PROVIDER_ID]
+      : null;
+    if (!data || !providers || !provider || !Array.isArray(provider.models)) {
+      continue;
+    }
+
+    let modified = false;
+    const models = provider.models.map((entry) => {
+      if (!isPlainRecord(entry) || entry.id !== 'smart-latest') {
+        return entry;
+      }
+      const compat = isPlainRecord(entry.compat) ? entry.compat : {};
+      const nextCompat = { ...compat, ...PI_AI_OPENROUTER_REASONING_COMPAT };
+      const hasThinkingLevelMap = JSON.stringify(entry.thinkingLevelMap)
+        === JSON.stringify(PI_AI_OPENROUTER_THINKING_LEVEL_MAP);
+      if (JSON.stringify(compat) === JSON.stringify(nextCompat) && hasThinkingLevelMap) {
+        return entry;
+      }
+      modified = true;
+      return {
+        ...entry,
+        compat: nextCompat,
+        thinkingLevelMap: PI_AI_OPENROUTER_THINKING_LEVEL_MAP,
+      };
+    });
+    if (!modified) {
+      continue;
+    }
+
+    provider.models = models;
+    providers[JUNFEIAI_PROVIDER_ID] = provider;
+    data.providers = providers;
+    await writeJsonFile(modelsPath, data);
+    console.log(`Synced xhigh reasoning compatibility for agent "${agentId}"`);
+  }
+}
+
 const OPENCLAW_CONFIG_MODEL_COMPAT_KEYS = new Set([
   'supportsStore',
   'supportsPromptCacheKey',
@@ -2084,6 +2192,7 @@ function normalizeProviderModelEntries(
       : registryModel?.input;
     const registryCompat = isPlainRecord(registryModel?.compat) ? registryModel.compat : {};
     const modelCompat = isPlainRecord(model.compat) ? model.compat : {};
+    const isManagedReasoningModel = model.id === 'smart-latest';
 
     return {
       ...model,
@@ -2097,6 +2206,9 @@ function normalizeProviderModelEntries(
         ...modelCompat,
         ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
       },
+      ...(isManagedReasoningModel
+        ? { thinkingLevelMap: PI_AI_OPENROUTER_THINKING_LEVEL_MAP }
+        : {}),
     };
   });
 }
@@ -2577,6 +2689,9 @@ export async function setOpenClawDefaultModelWithOverride(
       primary: model,
       fallbacks: fallbackModels,
     };
+    if (provider === JUNFEIAI_PROVIDER_ID) {
+      defaults.thinkingDefault = 'xhigh';
+    }
     agents.defaults = defaults;
     config.agents = agents;
 
@@ -2989,10 +3104,16 @@ export async function syncSessionIdleMinutesToOpenClaw(): Promise<void> {
  */
 export async function batchSyncConfigFields(token: string): Promise<void> {
   const DEFAULT_IDLE_MINUTES = 10_080; // 7 days
+  let shouldSyncJunFeiAIReasoningCompat = false;
 
-  return withConfigLock(async () => {
+  await withConfigLock(async () => {
     const config = await readOpenClawJson();
     let modified = true;
+
+    shouldSyncJunFeiAIReasoningCompat = isJunFeiAIDefaultModel(config);
+    if (ensureJunFeiAIReasoningDefaultsInConfig(config)) {
+      modified = true;
+    }
 
     // ── Gateway token + controlUi ──
     const gateway = (
@@ -3113,6 +3234,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       console.log('Synced gateway token, browser config, web_fetch/web_search config, and session idle to openclaw.json');
     }
   });
+
+  if (shouldSyncJunFeiAIReasoningCompat) {
+    await ensureJunFeiAIReasoningCompatInAgentModels();
+  }
 }
 
 /**

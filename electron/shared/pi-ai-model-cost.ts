@@ -27,6 +27,16 @@ export type PiAiPromptCacheKeyCompat = typeof PI_AI_PROMPT_CACHE_KEY_COMPAT;
 export const PI_AI_OPENROUTER_REASONING_COMPAT = {
   ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
   thinkingFormat: 'openrouter',
+  supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+} as const;
+
+export const PI_AI_OPENROUTER_THINKING_LEVEL_MAP = {
+  off: 'none',
+  minimal: 'low',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'xhigh',
 } as const;
 
 export type PiAiModelCompat = PiAiPromptCacheKeyCompat | typeof PI_AI_OPENROUTER_REASONING_COMPAT;
@@ -47,6 +57,7 @@ export type PiAiModelsJsonModelEntry = {
   reasoning?: boolean;
   input?: PiAiModelInputModality[];
   compat?: PiAiModelCompat;
+  thinkingLevelMap?: typeof PI_AI_OPENROUTER_THINKING_LEVEL_MAP;
 };
 
 export function normalizePiAiModelCost(existing: unknown): PiAiModelCostRates {
@@ -89,8 +100,8 @@ function normalizePiAiModelCompat(compat: unknown): PiAiModelCompat | undefined 
 
 function normalizePiAiModelCapabilities(
   metadata?: PiAiModelCapabilityMetadata,
-): Pick<PiAiModelsJsonModelEntry, 'reasoning' | 'input' | 'compat'> {
-  const capabilities: Pick<PiAiModelsJsonModelEntry, 'reasoning' | 'input' | 'compat'> = {};
+): Pick<PiAiModelsJsonModelEntry, 'reasoning' | 'input' | 'compat' | 'thinkingLevelMap'> {
+  const capabilities: Pick<PiAiModelsJsonModelEntry, 'reasoning' | 'input' | 'compat' | 'thinkingLevelMap'> = {};
   if (typeof metadata?.reasoning === 'boolean') {
     capabilities.reasoning = metadata.reasoning;
   }
@@ -106,6 +117,9 @@ function normalizePiAiModelCapabilities(
   const compat = normalizePiAiModelCompat(metadata?.compat);
   if (compat) {
     capabilities.compat = compat;
+    if (compat === PI_AI_OPENROUTER_REASONING_COMPAT) {
+      capabilities.thinkingLevelMap = PI_AI_OPENROUTER_THINKING_LEVEL_MAP;
+    }
   }
   return capabilities;
 }

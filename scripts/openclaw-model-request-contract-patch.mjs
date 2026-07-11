@@ -105,169 +105,17 @@ function buildUClawModelRequestContractSummary(model, init) {
 }
 `;
 
-const LIGHT_CHAT_REQUEST_OVERRIDE_HELPERS = `const UCLAW_LIGHT_CHAT_MODEL_REQUEST_OVERRIDE = "reasoning-none-v1";
-const UCLAW_LIGHT_CHAT_MAX_CHARS = 80;
-const UCLAW_SIMPLE_GREETING_RE = /^(?:hi|hello|hey|yo|你好|您好|嗨|哈喽|哈囉|在吗|在么|hi\\s+codex|hello\\s+codex)[\\s.!?。！？~～]*$/i;
-const UCLAW_SIMPLE_IDENTITY_RE = /^(?:你是谁|你是(?:什么|谁)|你是什么|who\\s+are\\s+you|what\\s+are\\s+you)[\\s?？!！.。]*$/i;
-const UCLAW_SIMPLE_CAPABILITY_RE = /^(?:你能做什么|你可以做什么|你会什么|能做什么|可以做什么|你有什么能力|有什么功能|what\\s+can\\s+you\\s+do|what\\s+do\\s+you\\s+do|help|帮助)[\\s?？!！.。]*$/i;
-const UCLAW_SENDER_METADATA_RE = new RegExp("^Sender \\\\(untrusted metadata\\\\):\\\\s*\\\\x60\\\\x60\\\\x60(?:json)?\\\\s*[\\\\s\\\\S]*?\\\\x60\\\\x60\\\\x60\\\\s*", "i");
-const UCLAW_QUEUED_USER_MESSAGE_MARKER_RE = /^\\[Queued user message that arrived while the previous turn was still active\\]$/i;
-const UCLAW_LIGHT_CHAT_MAX_SEGMENTS = 4;
-function isUClawLightChatRecord(value) {
-\treturn value && typeof value === "object" && !Array.isArray(value);
-}
-function readUClawLightChatTextContent(value) {
-\tif (typeof value === "string") return { text: value, hasNonText: false };
-\tif (Array.isArray(value)) {
-\t\tlet text = "";
-\t\tlet hasNonText = false;
-\t\tfor (const item of value) {
-\t\t\tif (typeof item === "string") {
-\t\t\t\ttext += item;
-\t\t\t\tcontinue;
-\t\t\t}
-\t\t\tif (!isUClawLightChatRecord(item)) {
-\t\t\t\thasNonText = true;
-\t\t\t\tcontinue;
-\t\t\t}
-\t\t\tconst type = typeof item.type === "string" ? item.type : "";
-\t\t\tconst itemText = typeof item.text === "string" ? item.text : typeof item.input_text === "string" ? item.input_text : typeof item.content === "string" ? item.content : "";
-\t\t\tif (itemText) text += itemText;
-\t\t\tif (!itemText && type && type !== "text" && type !== "input_text") hasNonText = true;
-\t\t}
-\t\treturn { text, hasNonText };
-\t}
-\tif (isUClawLightChatRecord(value)) {
-\t\tconst text = typeof value.text === "string" ? value.text : typeof value.input_text === "string" ? value.input_text : typeof value.content === "string" ? value.content : "";
-\t\tconst type = typeof value.type === "string" ? value.type : "";
-\t\treturn { text, hasNonText: Boolean(type && type !== "text" && type !== "input_text" && !text) };
-\t}
-\treturn { text: "", hasNonText: value != null };
-}
-function getUClawLightChatLastUserPrompt(payload) {
-\tconst records = Array.isArray(payload.messages) ? payload.messages : Array.isArray(payload.input) ? payload.input : null;
-\tif (records) {
-\t\tfor (let index = records.length - 1; index >= 0; index -= 1) {
-\t\t\tconst message = records[index];
-\t\t\tif (!isUClawLightChatRecord(message) || message.role !== "user") continue;
-\t\t\tconst content = readUClawLightChatTextContent(message.content ?? message.text ?? message.input);
-\t\t\tif (content.hasNonText) return null;
-\t\t\tconst text = content.text.trim();
-\t\t\tif (text) return text;
-\t\t}
-\t\treturn null;
-\t}
-\tif (typeof payload.input === "string") return payload.input.trim();
-\treturn null;
-}
-function normalizeUClawLightChatSegment(text) {
-\treturn text.replace(/\\s+/g, " ").trim();
-}
-function classifyUClawLightChatNormalizedPrompt(normalized) {
-\tif (UCLAW_SIMPLE_GREETING_RE.test(normalized)) return { reason: "simple_greeting", promptChars: Array.from(normalized).length };
-\tif (UCLAW_SIMPLE_IDENTITY_RE.test(normalized)) return { reason: "simple_identity", promptChars: Array.from(normalized).length };
-\tif (UCLAW_SIMPLE_CAPABILITY_RE.test(normalized)) return { reason: "capability_question", promptChars: Array.from(normalized).length };
-\treturn null;
-}
-function getUClawLightChatPromptSegments(text) {
-\tconst stripped = typeof text === "string"
-\t\t? text.trim().replace(UCLAW_SENDER_METADATA_RE, "")
-\t\t: "";
-\tconst segments = [];
-\tfor (const line of stripped.split(/\\r?\\n/u)) {
-\t\tconst normalized = normalizeUClawLightChatSegment(line);
-\t\tif (!normalized || UCLAW_QUEUED_USER_MESSAGE_MARKER_RE.test(normalized)) continue;
-\t\tsegments.push(normalized);
-\t}
-\treturn segments;
-}
-function classifyUClawLightChatPrompt(text) {
-\tconst segments = getUClawLightChatPromptSegments(text);
-\tif (segments.length === 0 || segments.length > UCLAW_LIGHT_CHAT_MAX_SEGMENTS) return null;
-\tconst classifications = [];
-\tlet promptChars = 0;
-\tfor (const segment of segments) {
-\t\tconst segmentChars = Array.from(segment).length;
-\t\tif (segmentChars > UCLAW_LIGHT_CHAT_MAX_CHARS) return null;
-\t\tconst classification = classifyUClawLightChatNormalizedPrompt(segment);
-\t\tif (!classification) return null;
-\t\tclassifications.push(classification);
-\t\tpromptChars += segmentChars;
-\t}
-\tconst preferred = classifications.find((classification) => classification.reason === "capability_question")
-\t\t?? classifications[classifications.length - 1];
-\treturn { reason: preferred.reason, promptChars };
-}
-function disableUClawLightChatReasoning(payload) {
-\tlet changed = false;
-\tif (Object.prototype.hasOwnProperty.call(payload, "reasoning")) {
-\t\tconst existing = isUClawLightChatRecord(payload.reasoning) ? payload.reasoning : {};
-\t\tpayload.reasoning = {
-\t\t\t...existing,
-\t\t\teffort: "none",
-\t\t};
-\t\tif (Object.prototype.hasOwnProperty.call(payload.reasoning, "enabled")) payload.reasoning.enabled = false;
-\t\tchanged = true;
-\t}
-\tif (Object.prototype.hasOwnProperty.call(payload, "reasoning_effort")) {
-\t\tdelete payload.reasoning_effort;
-\t\tchanged = true;
-\t}
-\tif (Object.prototype.hasOwnProperty.call(payload, "enable_thinking") && payload.enable_thinking !== false) {
-\t\tpayload.enable_thinking = false;
-\t\tchanged = true;
-\t}
-\tif (Object.prototype.hasOwnProperty.call(payload, "thinking")) {
-\t\tpayload.thinking = { type: "disabled" };
-\t\tchanged = true;
-\t}
-\tif (isUClawLightChatRecord(payload.chat_template_kwargs) && payload.chat_template_kwargs.enable_thinking !== false) {
-\t\tpayload.chat_template_kwargs = {
-\t\t\t...payload.chat_template_kwargs,
-\t\t\tenable_thinking: false,
-\t\t};
-\t\tchanged = true;
-\t}
-\treturn changed;
-}
-function summarizeUClawLightChatReasoning(payload) {
-\tif (isUClawLightChatRecord(payload.reasoning) && typeof payload.reasoning.effort === "string") return \`reasoning.effort:\${payload.reasoning.effort}\`;
-\tif (Object.prototype.hasOwnProperty.call(payload, "reasoning_effort")) return \`reasoning_effort:\${typeof payload.reasoning_effort === "string" ? payload.reasoning_effort : typeof payload.reasoning_effort}\`;
-\tif (Object.prototype.hasOwnProperty.call(payload, "enable_thinking")) return \`enable_thinking:\${String(payload.enable_thinking)}\`;
-\treturn "none";
-}
-function applyUClawLightChatModelRequestOverride(baseInit, logOverride) {
-\tif (!baseInit || typeof baseInit.body !== "string") return baseInit;
-\tlet payload;
-\ttry {
-\t\tpayload = JSON.parse(baseInit.body);
-\t} catch {
-\t\treturn baseInit;
-\t}
-\tif (!isUClawLightChatRecord(payload)) return baseInit;
-\tconst classification = classifyUClawLightChatPrompt(getUClawLightChatLastUserPrompt(payload));
-\tif (!classification) return baseInit;
-\tif (!disableUClawLightChatReasoning(payload)) return baseInit;
-\ttry {
-\t\tlogOverride?.({
-\t\t\tdiagnostic: UCLAW_LIGHT_CHAT_MODEL_REQUEST_OVERRIDE,
-\t\t\treason: classification.reason,
-\t\t\tpromptChars: classification.promptChars,
-\t\t\treasoning: summarizeUClawLightChatReasoning(payload),
-\t\t\ttoolsPresent: Object.prototype.hasOwnProperty.call(payload, "tools"),
-\t\t\ttoolCount: Array.isArray(payload.tools) ? payload.tools.length : 0,
-\t\t});
-\t} catch {
-\t\t// Best-effort diagnostics only.
-\t}
-\treturn {
-\t\t...baseInit,
-\t\tbody: JSON.stringify(payload),
-\t};
+const LIGHT_CHAT_REQUEST_OVERRIDE_HELPERS = `const UCLAW_LIGHT_CHAT_MODEL_REQUEST_OVERRIDE = "disabled-v2";
+function applyUClawLightChatModelRequestOverride(baseInit) {
+\treturn baseInit;
 }
 `;
 
-const LIGHT_CHAT_HELPER_START = 'const UCLAW_LIGHT_CHAT_MODEL_REQUEST_OVERRIDE = "reasoning-none-v1";';
+const LIGHT_CHAT_HELPER_START_MARKERS = [
+  'const UCLAW_LIGHT_CHAT_MODEL_REQUEST_OVERRIDE = "reasoning-none-v1";',
+  'const UCLAW_LIGHT_CHAT_MODEL_REQUEST_OVERRIDE = "disabled-v2";',
+];
+const LIGHT_CHAT_HELPER_VERSION_MARKER = LIGHT_CHAT_HELPER_START_MARKERS[1];
 const LIGHT_CHAT_HELPER_END = '\nfunction buildGuardedModelFetch';
 
 const BASE_INIT_ANCHOR = `		}) ?? init;
@@ -313,7 +161,7 @@ function patchModelRequestContractContent(content, filePath) {
   let patched = content;
   let contractAlreadyPatched = content.includes(PATCH_MARKER);
   let lightChatAlreadyPatched = content.includes(LIGHT_CHAT_PATCH_MARKER);
-  let lightChatHelperNeedsUpgrade = lightChatAlreadyPatched && !content.includes('UCLAW_QUEUED_USER_MESSAGE_MARKER_RE');
+  let lightChatHelperNeedsUpgrade = lightChatAlreadyPatched && !content.includes(LIGHT_CHAT_HELPER_VERSION_MARKER);
 
   if (contractAlreadyPatched) {
     const expectedPatchedSnippets = [
@@ -340,7 +188,9 @@ function patchModelRequestContractContent(content, filePath) {
   }
 
   if (lightChatHelperNeedsUpgrade) {
-    const start = patched.indexOf(LIGHT_CHAT_HELPER_START);
+    const start = LIGHT_CHAT_HELPER_START_MARKERS
+      .map((marker) => patched.indexOf(marker))
+      .find((index) => index >= 0) ?? -1;
     const end = patched.indexOf(LIGHT_CHAT_HELPER_END, start);
     if (start < 0 || end < 0) {
       throw new Error(`[openclaw-model-request-contract-patch] Failed to locate light chat helper block in ${filePath}.`);

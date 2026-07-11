@@ -6,6 +6,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
 const REVISION_REASON = 'UClaw artifact delivery final reply had no completed artifact evidence.';
+const PRESENTATION_FORCE_TOOL_CHOICE_MARKER = 'UClaw force artifact tool choice: create_designed_pptx_file.';
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
 const MEDIA_INTENT_TOOL_GATE_HOOK_ID = `${PLUGIN_ID}:media-intent-tool-gate`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
@@ -2501,6 +2502,9 @@ function buildRevision(analysis) {
     };
   }
   const lengthEffect = analysis?.requiredEffects?.find((effect) => effect.textLength)?.textLength;
+  const forcePresentationTool = analysis?.missingRequiredEffects?.some(
+    (result) => result?.effect?.kind === 'presentation',
+  );
   return {
     action: 'revise',
     reason: REVISION_REASON,
@@ -2508,8 +2512,10 @@ function buildRevision(analysis) {
       idempotencyKey: REVISION_ID,
       maxAttempts: 3,
       instruction: [
+        ...(forcePresentationTool ? [PRESENTATION_FORCE_TOOL_CHOICE_MARKER] : []),
         '用户要的是真实本地产物，不要用“我会生成/我将处理/接下来我会”这类未来承诺结束。',
         '现在继续执行：优先使用可用的 create_* 文件工具或相关 skill；如果没有专用工具，就用 exec 结合 Node/Python/uv 临时构造执行路径。',
+        ...(forcePresentationTool ? ['本次补偿轮必须调用顶层 tool_call，id 固定为 openclaw:uclaw-local-artifacts:create_designed_pptx_file，并在 args 中一次性提交完整 PPT 参数。'] : []),
         '如果当前任务是 PPT/PPTX，本次修订必须实际调用 create_designed_pptx_file；禁止再次只做工具搜索、素材搜索、读取说明或描述“即将渲染”。已有素材应直接复用，缺少素材也要在本次修订内完成准备并紧接着调用生成工具。',
         '生成后必须用可用工具验证文件存在，并在最终回复中返回 MEDIA:<absolute-path> 或绝对文件路径。',
         ...(lengthEffect ? [`最终文本必须读取复核，${lengthEffect.unit === 'words' ? '词数' : '字符数'}不得低于 ${lengthEffect.min ?? 1}${lengthEffect.max ? `，且不得超过 ${lengthEffect.max}` : ''}；不足时继续补写，不能只交付提纲、序章或片段。`] : []),

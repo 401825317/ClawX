@@ -585,7 +585,7 @@ export async function planLocalArtifactBatch(
           model,
           messages: plannerMessages(modelItems),
           temperature: 0.25,
-          reasoning_effort: 'low',
+          reasoning_effort: 'xhigh',
           max_tokens: maxTokens,
         }),
         signal: controller.signal,

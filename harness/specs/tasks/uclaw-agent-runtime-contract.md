@@ -134,6 +134,7 @@ acceptance:
   - Managed OpenClaw config enables heartbeat isolatedSession, lightContext, and skipWhenBusy without changing chat, image, or video model routing.
   - Internal prompt-history sanitization blocks pure runtime messages while preserving real user text from mixed queued/restart envelopes.
   - The final guarded model fetch logs only request-shape metadata, including reasoning effort, tool count, tool choice, prompt-cache-key presence, and top-level keys.
+  - The managed `lingzhiwuxian/smart-latest` model declares native `xhigh` support in both catalog compatibility and its top-level thinking-level map, so an `xhigh` Agent turn reaches the final OpenRouter payload as `reasoning.effort=xhigh` instead of being clamped to `high`.
   - Dev and packaged OpenClaw runtimes apply the CJK tool-directory and streaming cadence patches idempotently.
   - Composite results persist structured task, artifact, verification, gate, and progress state instead of reconstructing success from localized summary text.
   - Composite routing requires explicit execution intent, while single and multi-artifact execution requests use the same planner and verification contract.
