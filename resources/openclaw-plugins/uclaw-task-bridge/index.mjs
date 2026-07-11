@@ -441,6 +441,28 @@ function createBridge(api, options = {}) {
   function createTools() {
     return [
       {
+        name: 'uclaw_get_runtime_capabilities',
+        label: 'UClaw runtime capabilities',
+        description: 'Read the real capabilities available to the current UClaw/OpenClaw runtime before selecting an unfamiliar tool or claiming that a local action can be executed. Treat unavailable and not-implemented entries as blockers, not as tools to retry.',
+        parameters: Type.Object({}, { additionalProperties: false }),
+        async execute(toolCallId, _params, _signal, _onUpdate, ctx) {
+          try {
+            const correlation = correlationFromContext(ctx, toolCallId);
+            const query = new URLSearchParams({ sessionKey: correlation.sessionKey });
+            const payload = await request(`/api/runtime/capabilities?${query.toString()}`);
+            const result = {
+              schema: 'uclaw.runtime-capabilities.result/v1',
+              ok: true,
+              catalog: payload?.catalog ?? payload,
+              next: 'Select only a capability reported as available. For unfamiliar OpenClaw tools, use tool_search or tool_describe after reading this catalog.',
+            };
+            return { content: [{ type: 'text', text: safeJson(result) }], details: result };
+          } catch (error) {
+            return buildBridgeErrorResult('runtime_capabilities', error);
+          }
+        },
+      },
+      {
         name: 'uclaw_get_task_bridge_capabilities',
         label: 'UClaw task bridge capabilities',
         description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task.',

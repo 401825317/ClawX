@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ChatRuntimeArtifact, ChatRuntimeEvent, ChatRuntimeVerification } from '../../../shared/chat-runtime-events';
 import { hostTaskService, type HostTaskCreateRequest, type HostTaskSnapshot, type HostTaskUpdateRequest } from '../../services/agent-runtime/host-task-service';
+import { buildRuntimeCapabilityCatalog } from '../../services/agent-runtime/runtime-capability-catalog';
 import { agentTurnPreferenceStore } from '../../services/agent-runtime/turn-preference-store';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
@@ -78,6 +79,20 @@ export async function handleRuntimeRoutes(
   ctx: HostApiContext,
 ): Promise<boolean> {
   hostTaskService.setPublisher((event) => publishHostTaskEvent(ctx, event));
+
+  if (url.pathname === '/api/runtime/capabilities' && req.method === 'GET') {
+    const sessionKey = url.searchParams.get('sessionKey')?.trim() || undefined;
+    try {
+      const catalog = await buildRuntimeCapabilityCatalog({
+        gatewayManager: ctx.gatewayManager,
+        sessionKey,
+      });
+      sendJson(res, 200, { success: true, catalog });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
 
   if (url.pathname === '/api/task-bridge/capabilities' && req.method === 'GET') {
     sendJson(res, 200, {
