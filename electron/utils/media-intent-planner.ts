@@ -11,8 +11,14 @@ import type {
   VideoGenerationRouteMode,
 } from './media-generation-types';
 import { proxyAwareFetch } from './proxy-fetch';
+import {
+  countVideoPromptCharacters,
+  MAX_VIDEO_GENERATION_PROMPT_CHARS,
+} from './video-generation-prompt-limits';
 
 const MEDIA_INTENT_PLANNER_TIMEOUT_MS = 15_000;
+const MEDIA_PROMPT_ENHANCER_TIMEOUT_MS = 20_000;
+const MEDIA_PROMPT_REASONING_EFFORT = 'high' as const;
 const MEDIA_INTENT_PLANNER_MIN_CONFIDENCE = 0.55;
 const MAX_PLANNER_IMAGES = 5;
 const MAX_RECENT_MESSAGES = 8;
@@ -114,6 +120,13 @@ export type MediaIntentPlan = {
   artifactContinuationAction?: MediaIntentArtifactContinuationAction;
   artifactContext?: MediaIntentArtifactContext;
   compositeTasks?: MediaIntentCompositeTask[];
+  promptPlanning?: {
+    status: 'enhanced' | 'fallback';
+    reasoningEffort: typeof MEDIA_PROMPT_REASONING_EFFORT;
+    originalPromptChars: number;
+    finalPromptChars: number;
+    reason?: string;
+  };
 };
 
 export function isMediaSideEffectAction(action: MediaIntentAction | undefined): boolean {
@@ -223,6 +236,7 @@ function summarizePlanForLog(plan: MediaIntentPlan): Record<string, unknown> {
       selectedImageIndex: task.selectedImageIndex,
       sourceImages: summarizeImagesForLog(task.sourceImages ?? []),
     })),
+    promptPlanning: plan.promptPlanning,
   };
 }
 
@@ -283,6 +297,17 @@ function normalizePrompt(value: unknown, fallback: string): string {
 
 function normalizeOptionalText(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function countPromptCharacters(prompt: string): number {
+  return Array.from(prompt).length;
+}
+
+function truncatePromptCharacters(prompt: string, maxChars: number): string {
+  const characters = Array.from(prompt.trim());
+  return characters.length <= maxChars
+    ? characters.join('')
+    : characters.slice(0, maxChars).join('').trimEnd();
 }
 
 function normalizeImageQuality(value: unknown): 'low' | 'medium' | 'high' | undefined {
@@ -1097,8 +1122,12 @@ function plannerCandidateSelectionIsAuthorized(params: {
 }
 
 function isImageEditPrompt(prompt: string): boolean {
-  return /(?:修图|改图|精修|编辑图片|图片编辑|调整图片|优化图片|换背景|去背景|抠图|加上|去掉|删除|移除|把.+改成|把.+换成|logo|remove|edit image|image edit|retouch|modify)/i.test(prompt)
-    || (promptReferencesExistingImage(prompt) && /(?:改|修|换|加|去|删|调整|优化|编辑|变成|edit|modify|remove|replace|add)/i.test(prompt));
+  const promptWithoutEditableArtifactCopy = prompt.replace(
+    /可编辑(?:的)?\s*(?:pptx?|powerpoint|slides?|幻灯片|演示文稿|文档|docx?|表格|xlsx?|文件)/giu,
+    '',
+  );
+  return /(?:修图|改图|精修|编辑图片|图片编辑|调整图片|优化图片|换背景|去背景|抠图|加上|去掉|删除|移除|把.+改成|把.+换成|logo|remove|edit image|image edit|retouch|modify)/i.test(promptWithoutEditableArtifactCopy)
+    || (promptReferencesExistingImage(promptWithoutEditableArtifactCopy) && /(?:改|修|换|加|去|删|调整|优化|编辑|变成|edit|modify|remove|replace|add)/i.test(promptWithoutEditableArtifactCopy));
 }
 
 function isImageRevisionFeedbackPrompt(prompt: string): boolean {
@@ -2270,6 +2299,9 @@ function buildPlannerMessages(params: {
         'Never emit composite_tasks for capability questions, explanations, comparisons, planning-only requests, future/default preferences, memory updates, or hypothetical examples.',
         'If any composite task creates or edits media, intent_kind must be current_media_task and current_turn_media_request must be true. Otherwise no media composite task is authorized.',
         'Extract media parameters only when the user explicitly asks for them: image_size, image_quality, video_size, video_duration_seconds. Leave them null otherwise.',
+        'For an authorized image_generate or image_edit action, rewrite prompt into a concise production-ready visual prompt while preserving every explicit user constraint.',
+        `For an authorized video_generate action, rewrite video_prompt into a production-ready prompt of no more than ${MAX_VIDEO_GENERATION_PROMPT_CHARS} Unicode characters. This applies to both text-to-video and image-to-video.`,
+        'Prompt rewriting may improve subject, environment, composition, camera, lighting, material, color, motion, timing, and negative constraints. It must not invent models, files, brands, people, facts, sizes, durations, or deliverables.',
         'Never invent model names. Use only the user-requested size/quality/duration values you can infer from the text.',
         'requested_mode is a UI hint, not a substitute for reasoning. Respect image/video mode when it is compatible with the prompt; otherwise choose clarify or chat.',
         'Return JSON schema: {"action":"chat|vision_chat|image_generate|image_edit|video_generate|desktop_screenshot|clarify","intent_kind":"current_media_task|current_non_media_task|preference_or_memory_update|ordinary_chat|clarification","current_turn_media_request":boolean,"confidence":0-1,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null,"prompt":string|null,"image_size":string|null,"image_quality":"low|medium|high|null,"requested_image_count":number|null,"video_mode":"text_to_video|image_to_video|edit_image_then_video|null,"video_size":string|null,"video_duration_seconds":number|null,"video_prompt":string|null,"image_edit_prompt":string|null,"clarification":string|null,"artifact_continuation_action":"retry_delivery|resume_task|inspect_result|none|null","reason":string,"composite_tasks":[{"id":string,"kind":"image_generate|presentation|spreadsheet|video_generate|image_edit|mini_program|copywriting","title":string,"prompt":string,"requires_artifact":boolean,"depends_on":string[],"fallback":string|null,"selected_image_source":"explicit|candidate|none","selected_image_index":number|null}]}',
@@ -2287,6 +2319,182 @@ function buildPlannerMessages(params: {
       }),
     },
   ];
+}
+
+function buildMediaPromptEnhancerMessages(params: {
+  plan: MediaIntentPlan;
+  originalPrompt: string;
+}): Array<{ role: 'system' | 'user'; content: string }> {
+  const isVideo = params.plan.action === 'video_generate';
+  return [
+    {
+      role: 'system',
+      content: [
+        'You are UClaw media prompt director. Return strict JSON only.',
+        'The media side effect has already been authorized by a separate deterministic guard. Do not change, cancel, reinterpret, or re-authorize the action.',
+        'Improve the prompt for visual quality: subject, environment, composition, camera, lighting, material, color, motion, timing, and negative constraints when they are relevant.',
+        'Preserve every explicit user requirement. Do not invent brands, people, text, facts, model names, file paths, image counts, sizes, durations, or safety claims.',
+        'Keep the result concise and production-ready. Do not explain your reasoning.',
+        isVideo
+          ? `video_prompt must be no more than ${MAX_VIDEO_GENERATION_PROMPT_CHARS} Unicode characters. This applies to both text-to-video and image-to-video.`
+          : 'prompt must describe exactly one still-image generation or edit operation.',
+        params.plan.videoMode === 'edit_image_then_video'
+          ? 'For edit_image_then_video, image_edit_prompt describes only the still-image edit and video_prompt describes only the subsequent animation.'
+          : 'Set image_edit_prompt to null unless the authorized route is edit_image_then_video.',
+        'JSON schema: {"prompt":string,"video_prompt":string|null,"image_edit_prompt":string|null}',
+      ].join('\n'),
+    },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        action: params.plan.action,
+        video_mode: params.plan.videoMode ?? null,
+        has_source_image: Boolean(params.plan.sourceImages?.length),
+        original_prompt: params.originalPrompt,
+        current_prompt: params.plan.prompt || params.originalPrompt,
+        current_video_prompt: params.plan.videoPrompt || null,
+        current_image_edit_prompt: params.plan.imageEditPrompt || null,
+      }),
+    },
+  ];
+}
+
+async function enhanceAuthorizedMediaPlan(params: {
+  plan: MediaIntentPlan;
+  originalPrompt: string;
+}): Promise<MediaIntentPlan> {
+  if (!isCurrentTurnMediaSideEffectAuthorized(params.plan)) return params.plan;
+  if (params.plan.action !== 'image_generate'
+    && params.plan.action !== 'image_edit'
+    && params.plan.action !== 'video_generate') return params.plan;
+
+  const originalPrompt = params.originalPrompt.trim();
+  const originalPromptChars = countPromptCharacters(originalPrompt);
+  const fallback = (reason: string): MediaIntentPlan => {
+    logger.warn('[media-prompt-planner] fallback', {
+      action: params.plan.action,
+      reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+      originalPromptChars,
+      reason,
+    });
+    return {
+      ...params.plan,
+      promptPlanning: {
+        status: 'fallback',
+        reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+        originalPromptChars,
+        finalPromptChars: params.plan.action === 'video_generate'
+          ? countVideoPromptCharacters(params.plan.videoPrompt || params.plan.prompt || originalPrompt)
+          : countPromptCharacters(params.plan.prompt || originalPrompt),
+        reason,
+      },
+    };
+  };
+
+  try {
+    const secret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+    const apiKey = getApiKey(secret);
+    if (!apiKey) return fallback('prompt_planner_api_key_unavailable');
+
+    const account = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
+    const endpoint = toChatCompletionsEndpoint(account?.baseUrl || getJunFeiAIProviderBaseUrl());
+    const model = account?.model?.trim() || JUNFEIAI_DEFAULT_MODEL;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MEDIA_PROMPT_ENHANCER_TIMEOUT_MS);
+    logger.info('[media-prompt-planner] request', {
+      endpoint,
+      model,
+      action: params.plan.action,
+      videoMode: params.plan.videoMode,
+      reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+      originalPromptChars,
+    });
+
+    try {
+      const response = await proxyAwareFetch(endpoint, {
+        method: 'POST',
+        headers: {
+          ...(account?.headers ?? {}),
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: buildMediaPromptEnhancerMessages(params),
+          temperature: 0.2,
+          reasoning_effort: MEDIA_PROMPT_REASONING_EFFORT,
+          max_tokens: 2200,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) return fallback(`prompt_planner_http_${response.status}`);
+
+      const payload = await response.json() as {
+        choices?: Array<{ message?: { content?: unknown } }>;
+      };
+      const content = payload.choices?.[0]?.message?.content;
+      const parsed = typeof content === 'string' ? parseJsonObject(content) : null;
+      if (!parsed) return fallback('prompt_planner_invalid_json');
+
+      const enhancedPrompt = normalizePrompt(parsed.prompt, params.plan.prompt || originalPrompt);
+      if (params.plan.action !== 'video_generate') {
+        const finalPromptChars = countPromptCharacters(enhancedPrompt);
+        logger.info('[media-prompt-planner] enhanced', {
+          action: params.plan.action,
+          reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+          originalPromptChars,
+          finalPromptChars,
+        });
+        return {
+          ...params.plan,
+          prompt: enhancedPrompt,
+          promptPlanning: {
+            status: 'enhanced',
+            reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+            originalPromptChars,
+            finalPromptChars,
+          },
+        };
+      }
+
+      const rawVideoPrompt = normalizePrompt(
+        parsed.video_prompt ?? parsed.videoPrompt,
+        params.plan.videoPrompt || enhancedPrompt,
+      );
+      const videoPrompt = truncatePromptCharacters(rawVideoPrompt, MAX_VIDEO_GENERATION_PROMPT_CHARS);
+      const imageEditPrompt = params.plan.videoMode === 'edit_image_then_video'
+        ? normalizePrompt(
+            parsed.image_edit_prompt ?? parsed.imageEditPrompt,
+            params.plan.imageEditPrompt || enhancedPrompt,
+          )
+        : undefined;
+      const finalPromptChars = countVideoPromptCharacters(videoPrompt);
+      logger.info('[media-prompt-planner] enhanced', {
+        action: params.plan.action,
+        videoMode: params.plan.videoMode,
+        reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+        originalPromptChars,
+        finalPromptChars,
+        truncatedToLimit: countVideoPromptCharacters(rawVideoPrompt) > MAX_VIDEO_GENERATION_PROMPT_CHARS,
+      });
+      return {
+        ...params.plan,
+        prompt: enhancedPrompt,
+        videoPrompt,
+        imageEditPrompt,
+        promptPlanning: {
+          status: 'enhanced',
+          reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+          originalPromptChars,
+          finalPromptChars,
+        },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    return fallback(error instanceof Error ? `prompt_planner_exception:${error.message}` : 'prompt_planner_exception');
+  }
 }
 
 export async function planMediaIntent(
@@ -2352,6 +2560,22 @@ export async function planMediaIntent(
     return plan;
   }
 
+  if (
+    !isCapabilityOrKnowledgeOnlyPrompt(prompt)
+    && explicitlyRequestsCompositeTask(prompt, 'presentation')
+  ) {
+    const plan = localChatPlan(
+      'local_standalone_presentation_agent_skill',
+      prompt,
+      'current_non_media_task',
+    );
+    logger.info('[media-intent-planner] standalone_presentation_skill', {
+      durationMs: Date.now() - startedAt,
+      plan: summarizePlanForLog(plan),
+    });
+    return plan;
+  }
+
   const localNonMediaPlan = localNonMediaChatPlan({
     prompt,
     requestedMode,
@@ -2377,11 +2601,15 @@ export async function planMediaIntent(
     artifactContext: params.artifactContext,
   });
   if (localPlan) {
+    const planned = await enhanceAuthorizedMediaPlan({
+      plan: localPlan,
+      originalPrompt: prompt,
+    });
     logger.info('[media-intent-planner] local_fast_path', {
       durationMs: Date.now() - startedAt,
-      plan: summarizePlanForLog(localPlan),
+      plan: summarizePlanForLog(planned),
     });
-    return localPlan;
+    return planned;
   }
 
   if (!needsRemoteMediaPlanner({
@@ -2420,6 +2648,7 @@ export async function planMediaIntent(
     logger.info('[media-intent-planner] request', {
       endpoint,
       model,
+      reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
       requestedMode,
       promptChars: prompt.length,
       explicitImageCount: explicitImages.length,
@@ -2445,6 +2674,7 @@ export async function planMediaIntent(
             artifactContext: params.artifactContext,
           }),
           temperature: 0,
+          reasoning_effort: MEDIA_PROMPT_REASONING_EFFORT,
           max_tokens: 1200,
         }),
         signal: controller.signal,
@@ -2503,7 +2733,30 @@ export async function planMediaIntent(
         durationMs: Date.now() - startedAt,
         plan: summarizePlanForLog(planned),
       });
-      return planned;
+      if (!isCurrentTurnMediaSideEffectAuthorized(planned)
+        || (planned.action !== 'image_generate'
+          && planned.action !== 'image_edit'
+          && planned.action !== 'video_generate')) return planned;
+
+      const plannedVideoPrompt = planned.action === 'video_generate'
+        ? truncatePromptCharacters(
+            planned.videoPrompt || planned.prompt || prompt,
+            MAX_VIDEO_GENERATION_PROMPT_CHARS,
+          )
+        : undefined;
+      const finalPromptChars = plannedVideoPrompt
+        ? countVideoPromptCharacters(plannedVideoPrompt)
+        : countPromptCharacters(planned.prompt || prompt);
+      return {
+        ...planned,
+        ...(plannedVideoPrompt ? { videoPrompt: plannedVideoPrompt } : {}),
+        promptPlanning: {
+          status: 'enhanced',
+          reasoningEffort: MEDIA_PROMPT_REASONING_EFFORT,
+          originalPromptChars: countPromptCharacters(prompt),
+          finalPromptChars,
+        },
+      };
     } finally {
       clearTimeout(timeout);
     }

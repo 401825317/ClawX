@@ -172,7 +172,7 @@ PPT must be judged by content structure, visual hierarchy, page count, readable 
 | D01 | P0 | `做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划` | Real 8-page deck, each page has meaningful content and layout. | Not a fixed 5-page template. Validate pptx opens. |
 | D02 | P0 | `把这个主题做成适合老板看的汇报 PPT：为什么我们要投入 UClaw 执行层产品化` | Executive tone, decision-oriented structure. | Business framing, not generic AI workflow text. |
 | D03 | P1 | `做一个销售培训 PPT，主题是“如何跟进企业客户”，要有练习题` | Includes training structure and exercises. | Content specificity. |
-| D04 | P1 | `做一个发布会风格 PPT，主题是“个人 AI 工作台”，页面要高级一点` | High-impact stage narrative with a real visual focal point, coherent hierarchy, varied composition, and no text overflow. | `presentation-maker` plus `create_designed_pptx_file`, with visual assets and free-canvas composition rather than recolored cards. |
+| D04 | P0 | `帮我做一份 8 页 PPT，主题是“个人 AI 工作台”。我要发布会风格，视觉冲击力强，高级、酷炫、少文字，多用图片和数据化表达。每一页要根据内容采用不同构图，不要做成一堆文字和圆角框框。直接生成可编辑的 PPTX，完成后打开。` | High-impact stage narrative with a real visual focal point, coherent hierarchy, varied composition, and no text overflow. | Must route to `presentation-maker` plus `create_designed_pptx_file`. `多用图片` and `可编辑的 PPTX` must not be combined into an image-edit clarification. |
 | D05 | P1 | `根据下面要点做 PPT：目标用户、小红书投放、转化路径、预算、风险` | Uses provided outline faithfully. | Does it preserve user input, not replace with template. |
 | D06 | P2 | `生成 PPT 后帮我检查每页标题是否重复、是否有空页` | Create and verify. | Verification output tied to actual deck. |
 | D07 | P0 | `生成一个苹果18的宣传介绍 PPT` | Plan and produce an Apple 18-specific launch deck with product imagery and editorial product storytelling. | Studio engine, local subject visuals, varied slide silhouettes, and no generic fixed-template fast path. |

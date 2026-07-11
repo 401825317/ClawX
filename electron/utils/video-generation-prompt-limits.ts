@@ -1,4 +1,4 @@
-export const MAX_VIDEO_GENERATION_PROMPT_CHARS = 3800;
+export const MAX_VIDEO_GENERATION_PROMPT_CHARS = 4096;
 
 export function countVideoPromptCharacters(prompt: string): number {
   return Array.from(prompt).length;

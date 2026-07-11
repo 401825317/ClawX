@@ -1065,13 +1065,12 @@ function patchBundledRuntime(outputDir) {
   // deterministic side effects. UClaw needs one narrow exception for the
   // artifact guard hook that catches final replies like "I will create it now"
   // after browser/exec activity.
-  if (ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH) {
-    const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {
-      logger: { log: (message) => echo`   ${message}` },
-    });
-    if (localActionFinalizePatch.patchedFiles > 0) {
-      echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} local-action finalize runtime file(s)`;
-    }
+  const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {
+    allowLocalActionRevision: ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH,
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (localActionFinalizePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} artifact finalize runtime file(s)`;
   }
 
   // --- Reply session initialization conflict patch ---

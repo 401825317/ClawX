@@ -47,6 +47,7 @@ function cleanText(value) {
 
 function studioText(value) {
   return normalizeBrandText(value)
+    .replace(/\\r\\n|\\n|\\r/gu, '\n')
     .replace(/\r\n?/gu, '\n')
     .split('\n')
     .map((line) => line.replace(/[\t ]+/gu, ' ').trim())
@@ -935,12 +936,55 @@ function overlapRatio(left, right) {
   return intersection / smaller;
 }
 
+function studioRgb(value) {
+  const color = studioColor(value, '000000');
+  return [0, 2, 4].map((offset) => Number.parseInt(color.slice(offset, offset + 2), 16));
+}
+
+function studioRelativeLuminance(value) {
+  const channels = studioRgb(value).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+}
+
+function studioContrastRatio(foreground, background) {
+  const foregroundLuminance = studioRelativeLuminance(foreground);
+  const backgroundLuminance = studioRelativeLuminance(background);
+  const lighter = Math.max(foregroundLuminance, backgroundLuminance);
+  const darker = Math.min(foregroundLuminance, backgroundLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function studioSolidTextBackground(slide, elements, textElement) {
+  if (textElement?.fill && studioNumber(textElement?.fillTransparency) <= 15) {
+    return studioColor(textElement.fill, slide?.background || 'FFFFFF');
+  }
+  const elementIndex = Number.isInteger(textElement?.elementIndex)
+    ? textElement.elementIndex
+    : elements.indexOf(textElement);
+  for (let index = elementIndex - 1; index >= 0; index -= 1) {
+    const candidate = elements[index];
+    if (!candidate || overlapRatio(textElement, candidate) < 0.8) continue;
+    if (candidate.type === 'image') return null;
+    if (candidate.type !== 'shape') continue;
+    if (!candidate.fill || studioNumber(candidate.fillTransparency) > 15) return null;
+    return studioColor(candidate.fill, slide?.background || 'FFFFFF');
+  }
+  return studioColor(slide?.background, 'FFFFFF');
+}
+
 function validateStudioDeck(params, ctx) {
   const slides = Array.isArray(params?.slides) ? params.slides : [];
   const issues = [];
   let imageCount = 0;
   let chartCount = 0;
   let tableCount = 0;
+  let metricSlideCount = 0;
+  let lowContrastTextCount = 0;
   let visualSlideCount = 0;
   let contentVisualSlideCount = 0;
   const signatures = new Set();
@@ -949,6 +993,7 @@ function validateStudioDeck(params, ctx) {
     const elements = Array.isArray(slide?.elements) ? slide.elements : [];
     if (elements.length === 0) issues.push(`slide ${slideIndex + 1} has no elements`);
     let hasEvidenceVisual = false;
+    let hasDataMetric = false;
     const textElements = [];
     elements.forEach((element, elementIndex) => {
       const x = studioNumber(element?.x, -1);
@@ -964,6 +1009,15 @@ function validateStudioDeck(params, ctx) {
         if (!text) issues.push(`slide ${slideIndex + 1} text element ${elementIndex + 1} is empty`);
         if (/(?:lorem ipsum|placeholder|tbd|todo|待补充|可继续编辑)/iu.test(text)) {
           issues.push(`slide ${slideIndex + 1} text element ${elementIndex + 1} contains placeholder copy`);
+        }
+        const metricArea = studioNumber(element?.w) * studioNumber(element?.h);
+        if (
+          element?.role === 'metric'
+          && studioNumber(element?.fontSize) >= 24
+          && metricArea >= 100
+          && /\d/u.test(text)
+        ) {
+          hasDataMetric = true;
         }
       }
       if (element?.type === 'image') {
@@ -1008,6 +1062,20 @@ function validateStudioDeck(params, ctx) {
         }
       }
     }
+    for (const textElement of textElements) {
+      const background = studioSolidTextBackground(slide, elements, textElement);
+      if (!background || studioNumber(textElement?.transparency) > 20) continue;
+      const contrast = studioContrastRatio(textElement.color, background);
+      if (contrast >= 2.2) continue;
+      lowContrastTextCount += 1;
+      issues.push(
+        `slide ${slideIndex + 1} text element ${textElement.elementIndex + 1} has unreadable ${contrast.toFixed(2)}:1 contrast against its solid background`,
+      );
+    }
+    if (hasDataMetric) {
+      metricSlideCount += 1;
+      hasEvidenceVisual = true;
+    }
     if (hasEvidenceVisual) {
       visualSlideCount += 1;
       if (slideIndex > 0) contentVisualSlideCount += 1;
@@ -1032,6 +1100,8 @@ function validateStudioDeck(params, ctx) {
       imageCount,
       chartCount,
       tableCount,
+      metricSlideCount,
+      lowContrastTextCount,
       visualSlideCount,
       contentVisualSlideCount,
       layoutSignatureCount: signatures.size,
@@ -1080,6 +1150,12 @@ async function createStudioPptxBuffer(params, ctx) {
         });
       } else if (element.type === 'chart') {
         const chart = studioChartType(pptx, element.chartType);
+        const slideBackground = studioColor(slideSpec?.background, 'FFFFFF');
+        const chartTextColor = studioContrastRatio('FFFFFF', slideBackground)
+          >= studioContrastRatio('111827', slideBackground)
+          ? 'F8FAFC'
+          : '111827';
+        const chartGridColor = chartTextColor === 'F8FAFC' ? '64748B' : 'CBD5E1';
         const series = (element.series ?? []).map((item) => ({
           name: cleanText(item.name) || 'Series',
           labels: (element.categories ?? []).map(cleanText),
@@ -1102,6 +1178,15 @@ async function createStudioPptxBuffer(params, ctx) {
           showCatAxisTitle: false,
           catAxisLabelFontFace: cleanText(params?.fonts?.body) || 'Aptos',
           valAxisLabelFontFace: cleanText(params?.fonts?.body) || 'Aptos',
+          catAxisLabelColor: chartTextColor,
+          valAxisLabelColor: chartTextColor,
+          dataLabelColor: chartTextColor,
+          legendColor: chartTextColor,
+          titleColor: chartTextColor,
+          catAxisLineColor: chartGridColor,
+          valAxisLineColor: chartGridColor,
+          catGridLine: { color: chartGridColor, size: 0.5, style: 'solid' },
+          valGridLine: { color: chartGridColor, size: 0.5, style: 'solid' },
           showLegendKey: false,
         });
       } else if (element.type === 'table') {
@@ -1298,7 +1383,7 @@ function createTools() {
       name: 'create_designed_pptx_file',
       label: 'Create Designed PPTX',
       description: 'Primary PPTX renderer for professional, visual presentations. Render a model-authored free-canvas deck with local images, charts, tables, shapes, and varied per-slide composition. Use the presentation-maker skill to plan and source assets first.',
-      promptSnippet: 'create_designed_pptx_file: primary high-design PPTX tool. Plan the story and visual direction, source local visual assets, render each slide on a 0-100 free canvas, vary compositions, and return MEDIA:<absolute-path>.',
+      promptSnippet: 'create_designed_pptx_file: primary high-design PPTX tool. Plan the story and visual direction, source local visual assets, then call this tool in the same turn instead of announcing a future render. Render each slide on a 0-100 free canvas, vary compositions, and return MEDIA:<absolute-path>.',
       parameters: Type.Object({
         ...baseFileSchema,
         title: Type.String(),

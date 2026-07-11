@@ -23,9 +23,9 @@ try {
   if (ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH) {
     patchInstalledOpenClawBrowserRuntime();
   }
-  if (ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH) {
-    patchInstalledOpenClawFinalizeLocalActionRuntime();
-  }
+  patchInstalledOpenClawFinalizeLocalActionRuntime(process.cwd(), {
+    allowLocalActionRevision: ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH,
+  });
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawSessionCwdRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
