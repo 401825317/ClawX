@@ -2097,7 +2097,8 @@ function extractAsyncTaskEvidence(value: unknown): AsyncTaskEvidence[] {
   return [...evidence.values()];
 }
 
-function asyncTaskEvidenceMatches(entry: AsyncTaskLedgerEntry, evidence: AsyncTaskEvidence): boolean {
+function asyncTaskEvidenceMatches(entry: AsyncTaskLedgerEntry, evidence: AsyncTaskLedgerEntry): boolean {
+  if (entry.taskId && evidence.taskId) return entry.taskId === evidence.taskId;
   const entryAliases = new Set([
     entry.taskId,
     entry.runId,
@@ -2116,9 +2117,12 @@ function asyncTaskEvidenceMatches(entry: AsyncTaskLedgerEntry, evidence: AsyncTa
 
 function mergeAsyncTaskLedgerEntry(
   previous: AsyncTaskLedgerEntry | undefined,
-  evidence: AsyncTaskEvidence,
+  evidence: AsyncTaskLedgerEntry,
 ): AsyncTaskLedgerEntry {
   if (!previous) return { ...evidence };
+  if (evidence.updatedAt < previous.updatedAt) {
+    return { ...evidence, ...previous, updatedAt: previous.updatedAt };
+  }
   const status = previous.status !== 'pending' && evidence.status === 'pending'
     ? previous.status
     : evidence.status;
@@ -2180,6 +2184,18 @@ function applyAsyncTaskEvidenceToRuns(
       .map(([runId]) => runId);
     if (matchingRunIds.length > 0) {
       matchingRunIds.forEach((runId) => updateRun(runId, evidence));
+      // The task-ledger poll can arrive before the sessions_spawn/tool result.
+      // When that later tool event identifies the owning chat run, bind the
+      // same task there as well instead of leaving it stranded on a child run.
+      if (ownerRunId && nextRuns[ownerRunId] && !matchingRunIds.includes(ownerRunId)) {
+        const authoritative = matchingRunIds
+          .flatMap((runId) => Object.values(nextRuns[runId]?.asyncTaskLedger ?? {}))
+          .filter((entry) => asyncTaskEvidenceMatches(entry, evidence))
+          .reduce<AsyncTaskLedgerEntry | undefined>((current, entry) => (
+            current ? mergeAsyncTaskLedgerEntry(current, entry) : entry
+          ), undefined);
+        updateRun(ownerRunId, authoritative ?? evidence);
+      }
       continue;
     }
     if (ownerRunId && (evidence.status === 'pending' || nextRuns[ownerRunId])) {
@@ -2191,7 +2207,30 @@ function applyAsyncTaskEvidenceToRuns(
 }
 
 function runtimeRunHasPendingAsyncTasks(run: ChatRuntimeRunState | undefined): boolean {
-  return Object.values(run?.asyncTaskLedger ?? {}).some((entry) => entry.status === 'pending');
+  if (Object.values(run?.asyncTaskLedger ?? {}).some((entry) => entry.status === 'pending')) return true;
+  return (run?.tasks ?? []).some((task) => (
+    task.status === 'pending'
+    || task.status === 'running'
+    || task.status === 'waiting_approval'
+  ));
+}
+
+function collectRunDetachedTaskIdsForAbort(
+  runtimeRuns: Record<string, ChatRuntimeRunState>,
+  activeRunId: string | null,
+): string[] {
+  if (!activeRunId) return [];
+  const activeRun = runtimeRuns[activeRunId];
+  if (!activeRun) return [];
+
+  const taskIds = new Set<string>();
+  for (const entry of Object.values(activeRun.asyncTaskLedger ?? {})) {
+    if (entry.status === 'pending' && entry.taskId) taskIds.add(entry.taskId);
+  }
+  for (const task of activeRun.tasks ?? []) {
+    if (['pending', 'running', 'waiting_approval'].includes(task.status)) taskIds.add(task.taskId);
+  }
+  return [...taskIds];
 }
 
 /**
@@ -2317,8 +2356,11 @@ export {
   upsertToolStatuses,
   messageHasDeliverableContent,
   extractAsyncTaskEvidence,
+  asyncTaskEvidenceMatches,
+  mergeAsyncTaskLedgerEntry,
   applyAsyncTaskEvidenceToRuns,
   runtimeRunHasPendingAsyncTasks,
+  collectRunDetachedTaskIdsForAbort,
   hasNonToolAssistantContent,
   hasPendingToolUse,
   hasAssistantAfterLastRealUser,

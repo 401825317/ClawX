@@ -2,7 +2,7 @@
   "id": "clawx-openai-image",
   "name": "UClaw OpenAI Image",
   "description": "Independent OpenAI-compatible image generation provider managed by UClaw.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "entry": "index.mjs",
   "enabledByDefault": false,
   "contracts": {

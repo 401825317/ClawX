@@ -1,5 +1,8 @@
 import type { ChatRuntimeArtifact, ChatRuntimeVerification } from '../../../shared/chat-runtime-events';
-import type { HostTaskSnapshot, HostTaskUpdateRequest } from './host-task-service';
+import type {
+  HostTaskExecutorContext,
+  HostTaskLifecycleExecutor,
+} from './host-task-service';
 
 export type HostCapabilityAvailability = 'available' | 'unavailable' | 'not_implemented';
 
@@ -15,18 +18,18 @@ export type HostCapabilityDescriptor = {
 
 export type ResolvedHostCapability = HostCapabilityDescriptor & {
   availability: HostCapabilityAvailability;
+  operations: {
+    start: true;
+    cancel: boolean;
+    resume: boolean;
+  };
 };
 
-export type HostCapabilityTaskContext = {
-  task: HostTaskSnapshot;
-  input: unknown;
-  update: (update: HostTaskUpdateRequest) => Promise<HostTaskSnapshot | undefined>;
-};
+export type HostCapabilityTaskContext = HostTaskExecutorContext;
 
-export type HostCapabilityExecutor = {
+export type HostCapabilityExecutor = HostTaskLifecycleExecutor & {
   descriptor: HostCapabilityDescriptor;
   assess?: () => Promise<Pick<ResolvedHostCapability, 'availability' | 'reason'>>;
-  start: (context: HostCapabilityTaskContext) => Promise<void>;
 };
 
 export class HostCapabilityRegistry {
@@ -57,6 +60,11 @@ export class HostCapabilityRegistry {
     const baseline: ResolvedHostCapability = {
       ...executor.descriptor,
       availability: executor.descriptor.availability ?? 'available',
+      operations: {
+        start: true,
+        cancel: typeof executor.cancel === 'function',
+        resume: typeof executor.resume === 'function',
+      },
     };
     if (!executor.assess) return baseline;
     try {

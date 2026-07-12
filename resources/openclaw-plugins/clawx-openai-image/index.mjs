@@ -232,6 +232,7 @@ async function fetchImageUrl(url, context = {}) {
   try {
     const response = await undiciFetch(trimmed, {
       method: 'GET',
+      signal: context.signal,
       dispatcher: imageFetchDispatcher,
     });
     if (!response.ok) {
@@ -276,7 +277,7 @@ async function parseImagesResponse(payload, context = {}) {
           ? entry.mime_type.trim()
           : DEFAULT_MIME_TYPE,
       }
-      : await fetchImageUrl(url, { requestId: context.requestId, index });
+      : await fetchImageUrl(url, { requestId: context.requestId, index, signal: context.signal });
     if (!fetched) return null;
     logImageTiming('image_payload_decoded', {
       requestId: context.requestId,
@@ -469,6 +470,9 @@ function buildProvider() {
       const upstreamPath = new URL(upstreamUrl).pathname;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), resolveTimeoutMs(req));
+      const relayRequestAbort = () => controller.abort(req.signal?.reason);
+      if (req.signal?.aborted) relayRequestAbort();
+      else req.signal?.addEventListener('abort', relayRequestAbort, { once: true });
       try {
         const requestBody = mode === 'edit'
           ? editMultipart.body
@@ -516,7 +520,7 @@ function buildProvider() {
           durationMs: durationSince(parseStartedAt),
           responseItems: Array.isArray(payload?.data) ? payload.data.length : 0,
         });
-        const images = await parseImagesResponse(payload, { requestId });
+        const images = await parseImagesResponse(payload, { requestId, signal: controller.signal });
         logImageTiming('request_done', {
           requestId,
           mode,
@@ -534,6 +538,7 @@ function buildProvider() {
         throw error;
       } finally {
         clearTimeout(timeout);
+        req.signal?.removeEventListener('abort', relayRequestAbort);
       }
     },
   };

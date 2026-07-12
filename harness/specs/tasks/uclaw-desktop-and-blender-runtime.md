@@ -17,7 +17,6 @@ touchedAreas:
   - electron/services/blender/**
   - electron/shared/skills/bundled-allowlist.ts
   - electron/utils/composite-run-coordinator.ts
-  - electron/utils/media-intent-planner.ts
   - electron/utils/openclaw-auth.ts
   - resources/openclaw-plugins/uclaw-desktop-control/**
   - resources/openclaw-plugins/uclaw-blender/**
@@ -46,7 +45,7 @@ expectedUserBehavior:
   - Existing browser/API/CLI capabilities remain preferred over desktop interaction and ordinary chat does not gain desktop side effects.
   - Explicit 3D requests produce verified Blender source, portable GLB, and preview artifacts when Blender is available.
   - Blender receives declarative SceneSpec data only; model-produced arbitrary Python is never executed.
-  - Existing chat, image, video, and presentation routing remains unchanged unless a current-turn request explicitly targets desktop control or Blender 3D creation.
+  - Existing chat, image, video, and presentation Agent tool ownership remains unchanged unless a current-turn request explicitly targets desktop control or Blender 3D creation.
 requiredProfiles:
   - fast
   - comms
@@ -84,6 +83,10 @@ Desktop control is a fallback for explicit local-app tasks after a purpose-built
 ## Platform Contract
 
 macOS and Windows are first-class targets. Linux uses a capability-reported adapter and may return a recoverable unsupported/permission blocker where the active display server cannot provide equivalent control.
+
+## Current Release Boundary
+
+The current UClaw Host implements managed desktop screenshots and window discovery on macOS only. Accessibility snapshots and native actions such as click, type, drag, scroll, and key input remain `not-implemented`; the runtime capability catalog must expose that blocker instead of advertising executable Computer Use. The desktop-action acceptance clauses below apply only after a signed platform driver, privileged approval surface, durable `desktop.action` Host Task, and same-session completion wake are connected. Electron UI regression testing uses Playwright and does not depend on the Codex Computer Use helper.
 
 ## Safety Contract
 

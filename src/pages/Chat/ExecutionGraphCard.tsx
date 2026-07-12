@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, Link, Loader2, MessageSquare, Wrench, XCircle } from 'lucide-react';
+import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleDashed, CircleStop, GitBranch, Link, Loader2, MessageSquare, Wrench, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
+import { sanitizeRuntimeDisplayText } from '@/lib/runtime-display-sanitizer';
 import type { TaskStep } from './task-visualization';
 
 interface ExecutionGraphCardProps {
@@ -41,7 +42,7 @@ function summarizePreviewLine(value: string | undefined): string | undefined {
 }
 
 function summarizeStepDetail(step: TaskStep): string | undefined {
-  const { detail } = step;
+  const detail = step.detail ? sanitizeRuntimeDisplayText(step.detail) : undefined;
   if (!detail) return undefined;
   try {
     const parsed = JSON.parse(detail) as unknown;
@@ -100,24 +101,27 @@ function AnimatedDots({ className }: { className?: string }) {
 }
 
 function GraphStatusIcon({ status }: { status: TaskStep['status'] }) {
-  if (status === 'completed') return <CheckCircle2 className="h-4 w-4" />;
-  if (status === 'error') return <XCircle className="h-4 w-4" />;
-  return <CircleDashed className="h-4 w-4" />;
+  if (status === 'completed') return <CheckCircle2 data-status-icon="completed" className="h-4 w-4" />;
+  if (status === 'aborted') return <CircleStop data-status-icon="aborted" className="h-4 w-4" />;
+  if (status === 'blocked') return <CircleAlert data-status-icon="blocked" className="h-4 w-4" />;
+  if (status === 'error' || status === 'failed') return <XCircle data-status-icon={status} className="h-4 w-4" />;
+  return <CircleDashed data-status-icon={status} className="h-4 w-4" />;
 }
 
 function CompactStatusIcon({ status }: { status: TaskStep['status'] }) {
-  if (status === 'running') return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
-  if (status === 'completed') return <CheckCircle2 className="h-3.5 w-3.5" />;
-  if (status === 'error' || status === 'failed' || status === 'blocked' || status === 'aborted') {
-    return <XCircle className="h-3.5 w-3.5" />;
-  }
-  return <CircleDashed className="h-3.5 w-3.5" />;
+  if (status === 'running') return <Loader2 data-status-icon="running" className="h-3.5 w-3.5 animate-spin" />;
+  if (status === 'completed') return <CheckCircle2 data-status-icon="completed" className="h-3.5 w-3.5" />;
+  if (status === 'aborted') return <CircleStop data-status-icon="aborted" className="h-3.5 w-3.5" />;
+  if (status === 'blocked') return <CircleAlert data-status-icon="blocked" className="h-3.5 w-3.5" />;
+  if (status === 'error' || status === 'failed') return <XCircle data-status-icon={status} className="h-3.5 w-3.5" />;
+  return <CircleDashed data-status-icon={status} className="h-3.5 w-3.5" />;
 }
 
 function StepDetailCard({ step }: { step: TaskStep }) {
   const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
-  const hasDetail = !!step.detail;
+  const safeDetail = step.detail ? sanitizeRuntimeDisplayText(step.detail) : undefined;
+  const hasDetail = !!safeDetail;
   // Narration steps (intermediate pure-text assistant messages folded from
   // the chat stream) are rendered without a label/status pill: the message
   // text IS the primary content.
@@ -171,7 +175,7 @@ function StepDetailCard({ step }: { step: TaskStep }) {
                   rel="noopener noreferrer"
                   onClick={(e) => e.stopPropagation()}
                   className="shrink-0 text-muted-foreground hover:text-foreground"
-                  title={step.url}
+                  title={sanitizeRuntimeDisplayText(step.url)}
                 >
                   <Link className="h-3.5 w-3.5" />
                 </a>
@@ -196,7 +200,7 @@ function StepDetailCard({ step }: { step: TaskStep }) {
               )}
             </div>
           )}
-          {step.detail && !expanded && !isFlatRow && (
+          {safeDetail && !expanded && !isFlatRow && (
             <p
               className={cn(
                 'text-muted-foreground',
@@ -205,7 +209,7 @@ function StepDetailCard({ step }: { step: TaskStep }) {
                   : 'text-meta leading-6 text-muted-foreground line-clamp-2',
               )}
             >
-              {step.detail}
+              {safeDetail}
             </p>
           )}
         </div>
@@ -215,14 +219,14 @@ function StepDetailCard({ step }: { step: TaskStep }) {
           </span>
         )}
       </button>
-      {step.detail && expanded && canExpand && isFlatRow && (() => {
+      {safeDetail && expanded && canExpand && isFlatRow && (() => {
             // Tool inputs are typically JSON; system payloads (e.g. subagent
             // session keys) are usually plain strings. Pretty-print if the
             // detail parses as JSON, otherwise fall back to the raw text so
             // session keys render unchanged.
-            let formatted = step.detail;
+            let formatted = safeDetail;
             try {
-              formatted = JSON.stringify(JSON.parse(step.detail), null, 2);
+              formatted = JSON.stringify(JSON.parse(safeDetail), null, 2);
             } catch { /* not valid JSON */ }
             return (
               <div className="mt-3 rounded-lg border border-black/10 bg-black/[0.03] px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
@@ -234,12 +238,12 @@ function StepDetailCard({ step }: { step: TaskStep }) {
               </div>
             );
           })()}
-          {step.detail && expanded && canExpand && (isNarration || isThinking) && (
+          {safeDetail && expanded && canExpand && (isNarration || isThinking) && (
             <div className="mt-3 rounded-lg border border-black/10 bg-black/[0.03] px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
               <pre
                 className="whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground"
               >
-                {step.detail}
+                {safeDetail}
               </pre>
             </div>
           )}
@@ -310,6 +314,7 @@ export function ExecutionGraphCard({
         <div
           data-testid="chat-execution-graph"
           data-collapsed="true"
+          data-compact-status={collapsedStatus}
           className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground"
         >
           {collapsedContent}
@@ -321,6 +326,7 @@ export function ExecutionGraphCard({
         type="button"
         data-testid="chat-execution-graph"
         data-collapsed="true"
+        data-compact-status={collapsedStatus}
         onClick={() => setExpanded(true)}
         className="group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-black/5 hover:text-muted-foreground dark:hover:bg-white/5"
       >
@@ -333,6 +339,7 @@ export function ExecutionGraphCard({
     <div
       data-testid="chat-execution-graph"
       data-collapsed="false"
+      data-compact-status={collapsedStatus}
       className="w-full px-0 py-0 text-muted-foreground"
     >
       <button
@@ -379,6 +386,9 @@ export function ExecutionGraphCard({
             <div
               className="flex items-start gap-0.5"
               data-testid="chat-execution-step"
+              data-task-id={step.taskId}
+              data-parent-id={step.parentId}
+              data-step-status={step.status}
               style={{ marginLeft: `${rowMarginLeft}px` }}
             >
               <div className="flex w-6 shrink-0 justify-center">

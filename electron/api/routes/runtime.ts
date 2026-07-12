@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ChatRuntimeArtifact, ChatRuntimeEvent, ChatRuntimeVerification } from '../../../shared/chat-runtime-events';
+import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
 import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../../shared/chat-runtime-events';
 import { normalizeAgentTurnContract, type AgentTurnContractInput } from '../../../shared/agent-turn-contract';
-import { hostTaskService, type HostTaskCreateRequest, type HostTaskSnapshot, type HostTaskUpdateRequest } from '../../services/agent-runtime/host-task-service';
+import { hostTaskService, type HostTaskCreateRequest, type HostTaskSnapshot } from '../../services/agent-runtime/host-task-service';
 import { ensureDefaultHostCapabilities } from '../../services/agent-runtime/host-capability-defaults';
 import { hostCapabilityRegistry } from '../../services/agent-runtime/host-capability-registry';
 import { buildRuntimeCapabilityCatalog } from '../../services/agent-runtime/runtime-capability-catalog';
@@ -17,21 +17,8 @@ function publishHostTaskEvent(ctx: HostApiContext, event: ChatRuntimeEvent): voi
   }
 }
 
-function taskIdFromPath(pathname: string): { taskId?: string; action?: string } {
-  const segments = pathname.slice('/api/runtime/tasks/'.length)
-    .split('/')
-    .filter(Boolean)
-    .map((segment) => decodeURIComponent(segment).trim());
-  return { taskId: segments[0], action: segments[1] };
-}
-
-function waitMs(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
-  return Math.min(Math.max(0, Math.floor(value)), 90_000);
-}
-
 function bridgeStatus(status: HostTaskSnapshot['status']): string {
-  return status === 'waiting' ? 'blocked' : status;
+  return status;
 }
 
 function requiredCorrelationValue(value: unknown, label: string): string {
@@ -55,24 +42,19 @@ function requiredTaskTitle(value: unknown): string {
   return normalized;
 }
 
-function startRegisteredHostTask(params: {
-  task: HostTaskSnapshot;
-  input: unknown;
-  executor: NonNullable<Awaited<ReturnType<typeof hostCapabilityRegistry.get>>>['executor'];
-}): void {
-  void params.executor.start({
-    task: params.task,
-    input: params.input,
-    update: async (update) => await hostTaskService.update(params.task.taskId, update),
-  }).catch(async (error) => {
-    await hostTaskService.update(params.task.taskId, {
-      status: 'failed',
-      error: error instanceof Error ? error.message : String(error),
-    }).catch(() => undefined);
-  });
+function taskBelongsToSession(task: HostTaskSnapshot, sessionKey: unknown): boolean {
+  return typeof sessionKey === 'string' && sessionKey.trim() === task.sessionKey;
 }
 
-function bridgeTask(task: HostTaskSnapshot) {
+async function bridgeTask(task: HostTaskSnapshot) {
+  const registration = await hostCapabilityRegistry.get(task.capability);
+  const supportsResume = typeof registration?.executor.resume === 'function';
+  const supportsCancel = typeof registration?.executor.cancel === 'function';
+  const supportedRecovery = [
+    'status_only',
+    ...(supportsResume && task.status !== 'succeeded' && task.status !== 'cancelled' ? ['resume_if_safe'] : []),
+    ...(task.artifacts.length > 0 ? ['redeliver_existing_artifacts'] : []),
+  ];
   const progress = task.progress
     ? [{
         id: `progress:${task.taskId}:${task.revision}`,
@@ -96,8 +78,12 @@ function bridgeTask(task: HostTaskSnapshot) {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     ...(task.error ? { error: task.error } : {}),
-    recoverable: task.artifacts.length > 0,
-    recovery: task.artifacts.length > 0 ? { supported: ['status_only', 'redeliver_existing_artifacts'] } : { supported: ['status_only'] },
+    recoverable: supportedRecovery.length > 1,
+    recovery: {
+      supported: supportedRecovery,
+      checkpointAvailable: task.checkpoint !== undefined,
+      cancelSupported: supportsCancel,
+    },
     correlation: {
       sessionKey: task.sessionKey,
       runId: task.runId,
@@ -107,6 +93,16 @@ function bridgeTask(task: HostTaskSnapshot) {
     progress,
     artifacts: task.artifacts.map((artifact) => ({ ...artifact, role: artifact.kind ?? 'output' })),
     verifications: task.verifications,
+    lifecycle: {
+      operations: task.lifecycle.operations.map((operation) => ({
+        kind: operation.kind,
+        status: operation.status,
+        attempt: operation.attempt,
+        startedAt: operation.startedAt,
+        ...(operation.finishedAt ? { finishedAt: operation.finishedAt } : {}),
+        ...(operation.error ? { error: operation.error } : {}),
+      })),
+    },
   };
 }
 
@@ -215,11 +211,15 @@ export async function handleRuntimeRoutes(
         idempotencyKey: requiredCorrelationValue(correlation.idempotencyKey, 'correlation.idempotencyKey'),
         capability: kind,
         title: requiredTaskTitle(body.title),
+        input: body.input ?? {},
       });
-      if (!result.idempotent) {
-        startRegisteredHostTask({ task: result.task, input: body.input ?? {}, executor: registration.executor });
-      }
-      sendJson(res, result.idempotent ? 200 : 202, { success: true, idempotent: result.idempotent, task: bridgeTask(result.task) });
+      let task = result.task;
+      // Always attempt dispatch after an exact idempotent replay. If the Host
+      // crashed after persisting create but before claiming start, this closes
+      // that gap; a persisted start claim still prevents duplicate execution.
+      const dispatched = await hostTaskService.dispatchStart(result.task.taskId, registration.executor);
+      task = dispatched.task ?? task;
+      sendJson(res, result.idempotent ? 200 : 202, { success: true, idempotent: result.idempotent, task: await bridgeTask(task) });
     } catch (error) {
       sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
     }
@@ -235,7 +235,7 @@ export async function handleRuntimeRoutes(
       || !['succeeded', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost'].includes(task.status)
       || (includeTerminalUndelivered && !isBridgeTerminalDelivered(task))
     ));
-    sendJson(res, 200, { success: true, tasks: tasks.map(bridgeTask) });
+    sendJson(res, 200, { success: true, tasks: await Promise.all(tasks.map(bridgeTask)) });
     return true;
   }
 
@@ -247,25 +247,64 @@ export async function handleRuntimeRoutes(
     if (!taskId) return false;
     if (!action && req.method === 'GET') {
       const task = await hostTaskService.get(taskId);
-      sendJson(res, task ? 200 : 404, task ? { success: true, task: bridgeTask(task) } : { success: false, error: 'Host task not found' });
+      const sessionKey = url.searchParams.get('sessionKey');
+      const visibleTask = task && taskBelongsToSession(task, sessionKey) ? task : undefined;
+      sendJson(res, visibleTask ? 200 : 404, visibleTask ? { success: true, task: await bridgeTask(visibleTask) } : { success: false, error: 'Host task not found' });
       return true;
     }
     if (action === 'cancel' && req.method === 'POST') {
-      const body = await parseJsonBody<{ reason?: string }>(req).catch(() => ({}));
-      const task = await hostTaskService.cancel(taskId, typeof body.reason === 'string' ? body.reason : undefined);
-      sendJson(res, task ? 200 : 404, task ? { success: true, task: bridgeTask(task) } : { success: false, error: 'Host task not found' });
+      try {
+        const body = await parseJsonBody<{ reason?: string; correlation?: { sessionKey?: unknown } }>(req).catch(() => ({}));
+        const current = await hostTaskService.get(taskId);
+        if (!current || !taskBelongsToSession(current, body.correlation?.sessionKey)) {
+          sendJson(res, 404, { success: false, error: 'Host task not found' });
+          return true;
+        }
+        const registration = await hostCapabilityRegistry.get(current.capability);
+        if (!registration?.executor.cancel) {
+          sendJson(res, 409, { success: false, error: `Host capability ${current.capability} does not support cancellation.` });
+          return true;
+        }
+        const result = await hostTaskService.requestCancel(taskId, registration.executor, typeof body.reason === 'string' ? body.reason : undefined);
+        sendJson(res, result.dispatched ? 202 : 200, { success: true, task: await bridgeTask(result.task ?? current) });
+      } catch (error) {
+        sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+      }
       return true;
     }
     if (action === 'recover' && req.method === 'POST') {
-      const body = await parseJsonBody<{ strategy?: 'status_only' | 'resume_if_safe' | 'redeliver_existing_artifacts' }>(req).catch(() => ({}));
-      const task = await hostTaskService.recover(taskId, body.strategy ?? 'status_only');
-      sendJson(res, task ? 200 : 404, task ? { success: true, task: bridgeTask(task) } : { success: false, error: 'Host task not found' });
+      try {
+        const body = await parseJsonBody<{
+          strategy?: 'status_only' | 'resume_if_safe' | 'redeliver_existing_artifacts';
+          correlation?: { sessionKey?: unknown };
+        }>(req).catch(() => ({}));
+        const strategy = body.strategy ?? 'status_only';
+        const current = await hostTaskService.get(taskId);
+        if (!current || !taskBelongsToSession(current, body.correlation?.sessionKey)) {
+          sendJson(res, 404, { success: false, error: 'Host task not found' });
+          return true;
+        }
+        const registration = strategy === 'resume_if_safe' ? await hostCapabilityRegistry.get(current.capability) : undefined;
+        if (strategy === 'resume_if_safe' && !registration?.executor.resume) {
+          sendJson(res, 409, { success: false, error: `Host capability ${current.capability} does not support safe resume.` });
+          return true;
+        }
+        const result = await hostTaskService.recover(taskId, strategy, registration?.executor);
+        sendJson(res, result.dispatched ? 202 : 200, { success: true, task: await bridgeTask(result.task ?? current) });
+      } catch (error) {
+        sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
+      }
       return true;
     }
     if (action === 'ack' && req.method === 'POST') {
-      const body = await parseJsonBody<{ deliveryKey?: string }>(req).catch(() => ({}));
+      const body = await parseJsonBody<{ deliveryKey?: string; sessionKey?: unknown }>(req).catch(() => ({}));
+      const current = await hostTaskService.get(taskId);
+      if (!current || !taskBelongsToSession(current, body.sessionKey)) {
+        sendJson(res, 404, { success: false, error: 'Host task not found' });
+        return true;
+      }
       const task = await hostTaskService.acknowledgeCompletion(taskId, body.deliveryKey ?? '');
-      sendJson(res, task ? 200 : 404, task ? { success: true, task: bridgeTask(task) } : { success: false, error: 'Host task not found' });
+      sendJson(res, task ? 200 : 404, task ? { success: true, task: await bridgeTask(task) } : { success: false, error: 'Host task not found' });
       return true;
     }
     return false;
@@ -287,65 +326,11 @@ export async function handleRuntimeRoutes(
     return true;
   }
 
-  if (url.pathname === '/api/runtime/tasks' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<HostTaskCreateRequest & { waitMs?: number }>(req);
-      const result = await hostTaskService.create(body);
-      const task = await hostTaskService.waitForTerminal(result.task.taskId, waitMs(body.waitMs));
-      sendJson(res, result.idempotent ? 200 : 202, { success: true, idempotent: result.idempotent, task: task ?? result.task });
-    } catch (error) {
-      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
-    }
-    return true;
-  }
-
-  if (url.pathname === '/api/runtime/tasks' && req.method === 'GET') {
-    const sessionKey = url.searchParams.get('sessionKey')?.trim() || undefined;
-    sendJson(res, 200, { success: true, tasks: await hostTaskService.list(sessionKey) });
-    return true;
-  }
-
-  if (!url.pathname.startsWith('/api/runtime/tasks/')) return false;
-  const { taskId, action } = taskIdFromPath(url.pathname);
-  if (!taskId) return false;
-
-  if (!action && req.method === 'GET') {
-    const task = await hostTaskService.get(taskId);
-    sendJson(res, task ? 200 : 404, task ? { success: true, task } : { success: false, error: 'Host task not found' });
-    return true;
-  }
-
-  if (action === 'update' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<HostTaskUpdateRequest>(req);
-      const task = await hostTaskService.update(taskId, body);
-      sendJson(res, task ? 200 : 404, task ? { success: true, task } : { success: false, error: 'Host task not found' });
-    } catch (error) {
-      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
-    }
-    return true;
-  }
-
-  if (action === 'complete' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<HostTaskUpdateRequest & { status?: 'succeeded' | 'failed' | 'cancelled' }>(req).catch(() => ({}));
-      const task = await hostTaskService.update(taskId, {
-        ...body,
-        status: body.status ?? 'succeeded',
-        artifacts: Array.isArray(body.artifacts) ? body.artifacts as ChatRuntimeArtifact[] : undefined,
-        verifications: Array.isArray(body.verifications) ? body.verifications as ChatRuntimeVerification[] : undefined,
-      });
-      sendJson(res, task ? 200 : 404, task ? { success: true, task } : { success: false, error: 'Host task not found' });
-    } catch (error) {
-      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
-    }
-    return true;
-  }
-
-  if (action === 'cancel' && req.method === 'POST') {
-    const body = await parseJsonBody<{ reason?: string }>(req).catch(() => ({}));
-    const task = await hostTaskService.cancel(taskId, typeof body.reason === 'string' ? body.reason : undefined);
-    sendJson(res, task ? 200 : 404, task ? { success: true, task } : { success: false, error: 'Host task not found' });
+  if (url.pathname === '/api/runtime/tasks' || url.pathname.startsWith('/api/runtime/tasks/')) {
+    sendJson(res, 410, {
+      success: false,
+      error: 'The unscoped runtime task API is retired. Use the session-scoped /api/task-bridge/tasks contract.',
+    });
     return true;
   }
 

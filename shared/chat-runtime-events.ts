@@ -22,9 +22,43 @@ export type ChatRuntimeEventBase = {
   /** Optional parent task for native task-flow and subagent projections. */
   parentTaskId?: string;
   /** Native task lifecycle state when OpenClaw emits a detached-task projection. */
-  taskStatus?: 'pending' | 'running' | 'completed' | 'error' | 'waiting_approval' | 'partial' | string;
+  taskStatus?: ChatRuntimeTaskStatus;
   seq?: number;
   ts?: number;
+};
+
+/**
+ * UClaw's closed projection of OpenClaw task-ledger states. The original
+ * OpenClaw status is retained on `sourceStatus`; consumers should use this
+ * lifecycle for UI behavior instead of interpreting completion prose.
+ */
+export type ChatRuntimeTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'error'
+  | 'waiting_approval'
+  | 'partial';
+
+export type ChatRuntimeTaskProjection = {
+  taskId: string;
+  parentTaskId?: string;
+  flowId?: string;
+  kind?: string;
+  runtime?: string;
+  title: string;
+  detail?: string;
+  agentId?: string;
+  sessionKey?: string;
+  childSessionKey?: string;
+  status: ChatRuntimeTaskStatus;
+  sourceStatus?: string;
+  deliveryStatus?: string;
+  terminalOutcome?: string;
+  createdAt?: number;
+  startedAt?: number;
+  updatedAt?: number;
+  endedAt?: number;
 };
 
 export type ChatRuntimeStepStatus = 'pending' | 'running' | 'completed' | 'error' | 'blocked' | 'skipped';
@@ -136,13 +170,17 @@ export type ChatRuntimeGateEvaluation = {
 };
 
 export type ChatRuntimeProgressEntryKind = 'commentary' | 'action' | 'status';
-export type ChatRuntimeProgressEntryStatus = 'running' | 'completed' | 'blocked' | 'error';
+export type ChatRuntimeProgressEntryStatus = 'running' | 'completed' | 'blocked' | 'error' | 'aborted';
 
 export type ChatRuntimeProgressEntry = {
   id: string;
   kind: ChatRuntimeProgressEntryKind;
   text: string;
   status?: ChatRuntimeProgressEntryStatus;
+  translationKey?: string;
+  translationParams?: Record<string, string | number>;
+  toolName?: string;
+  toolLabel?: string;
   command?: string;
   detail?: string;
   dedupeKey?: string;
@@ -171,6 +209,10 @@ export type ChatRuntimeEvent =
   | (ChatRuntimeEventBase & {
       type: 'run.step.updated';
       step: ChatRuntimePlanStep;
+    })
+  | (ChatRuntimeEventBase & {
+      type: 'task.updated';
+      task: ChatRuntimeTaskProjection;
     })
   | (ChatRuntimeEventBase & {
       type: 'run.ended';

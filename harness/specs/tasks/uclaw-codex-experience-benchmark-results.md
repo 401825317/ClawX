@@ -6,6 +6,16 @@ Branch under review: `feature/uclaw-agent-runtime-contract`
 
 UClaw package version observed in dev logs: `0.7.3`
 
+Current architecture note (2026-07-12): all fresh ordinary, image-mode,
+video-mode, file, desktop, and multi-deliverable turns enter the OpenClaw Agent
+through `/api/chat/send`. OpenClaw owns semantic tool selection and Task Flow;
+UClaw supplies current-turn preferences, registered Host capabilities, durable
+task projection, approvals, and verification. The legacy composite coordinator
+is recovery-only for pre-migration snapshots and history. References below to
+the removed media-routing modules, retired direct media endpoints, local fast paths, and old
+unit-test runner are historical evidence for the branch/date above, not the
+current execution contract.
+
 ## Evidence Rules
 
 - `observed`: manually observed in the product or directly reproduced.
@@ -20,57 +30,61 @@ UClaw package version observed in dev logs: `0.7.3`
 | A01/K01 | ordinary chat / memory preference | Current session evidence shows no media/artifact side effects, but Electron UI still needs confirmation that the process graph is hidden by default. | Codex keeps this as a short conversational/memory confirmation without graph noise. | P0 |
 | B01/J01 | image generation timing | Current dev runs show image generation works, but timing varies widely: one smoke was about 29.9s total, H01 images took about 79s and 151s wall time with provider header waits of 68.6s and 132.2s. Provider-vs-local reconciliation remains required. | Codex shows calm progress and final artifact; it does not make the user debug raw gate internals. | P0 |
 | B05/I04 | video generation/playback | User observed a broken/0s video case before. Must re-run current build and require duration/playability evidence. | Codex should not mark a broken media artifact as successful. | P0 |
-| C01/G01/K03 | seven-item composite pack | Composite routing and history persistence have improved, but user still saw messy final layout, confusing task count, and only-final delivery. | Codex-style behavior is a compact sample pack manifest with completed/failed/pending items. | P0 |
-| D01 | PPT quality | Code has local PPT writers and skill shims, but composite fast path can still create prompt-light template-like decks. | Codex-level output needs prompt-specific deck planning plus verification. | P0 |
-| E01 | Excel quality | Code can create `.xlsx` with formulas, but composite fast path can still create a generic budget-style table. | Codex-level output needs prompt-specific workbook planning, formulas, sheet validation. | P0 |
+| C01/G01/K03 | seven-item pack | Historical legacy runs showed messy layout, confusing task count, and final-only delivery; the fresh Agent/Task Flow path requires a new UI rerun. | Codex-style behavior is a compact manifest with completed/failed/pending items. | P0 |
+| D01 | PPT quality | Historical local-writer runs produced prompt-light template-like decks; current Agent/skill plus Host-writer quality requires re-benchmarking. | Codex-level output needs prompt-specific deck planning plus verification. | P0 |
+| E01 | Excel quality | Historical local-writer runs could create generic tables; current Agent/skill plus Host-writer quality requires re-benchmarking. | Codex-level output needs prompt-specific workbook planning, formulas, and sheet validation. | P0 |
 | F01 | mini-program quality | Code can create an HTML app, but default behavior is a fixed Todo-like template unless the agent plans content/behavior. | Codex-level output needs runnable, prompt-specific interactions and verification. | P0 |
 | H01/H02 | multi-run isolation | H01 produced separate cat/dog image tasks; H02 kept a normal chat turn independent while video generation was running. Both image and video completions still persisted internal/inter-session pseudo-user messages in the transcript. | Codex keeps turns/run ownership separate and hides internal completion plumbing from chat history. | P0 |
-| I01 | missing image for edit | Single image-edit without image should ask for input; composite sample packs may use generated image as fallback. | Codex does not block the whole batch on one missing optional input. | P0 |
+| I01 | missing image for edit | Single image-edit without image should ask for input; a multi-deliverable Task Flow may use its own generated image dependency. | Codex does not block the whole batch on one missing optional input. | P0 |
 | X01 | front-end demo with external data | Observed ZHCW demo eventually delivered, but the run was noisy, slow, and artifact intent/gate state was inconsistent. | Codex-style behavior should hide recovered internal retries and deliver a verified runnable artifact with concise caveats. | P0 |
 
 ## Code Evidence Anchors
 
-- Composite planner detects multi-deliverable prompts in `electron/utils/media-intent-planner.ts`.
-- Composite execution runs locally in `src/stores/chat.ts`.
-- Composite local Office/web artifacts are created via `/api/local-artifacts/create`.
-- Local artifact generation is implemented in `electron/utils/local-artifact-runtime.ts`.
+- Fresh turns enter OpenClaw through `/api/chat/send`; image/video modes are current-turn preferences.
+- OpenClaw Task Flow and native subagents own multi-step decomposition and dependencies.
+- Registered Host capabilities and `uclaw-task-bridge` own durable local execution and structured results.
+- Local artifact writing remains implemented in `electron/utils/local-artifact-runtime.ts` as a low-level Host capability.
 - Bundled low-level artifact tools exist in `resources/openclaw-plugins/uclaw-local-artifacts/index.mjs`.
 - Prompt-facing skill shims exist in `resources/openclaw-skill-shims/presentation-maker/SKILL.md` and `resources/openclaw-skill-shims/spreadsheet-maker/SKILL.md`.
+- The legacy composite coordinator is retained only to resume or finalize pre-migration snapshots.
 
 ## Current Key Finding
 
-The current system has two different artifact paths:
+The current system has one fresh-turn path plus one compatibility path:
 
-1. Agent/skill path: the model can use `create_pptx_file`, `create_xlsx_file`, and related tools after planning content.
-2. Composite fast path: UClaw can bypass agent planning and call local artifact creation directly for PPT/Excel/mini-program/copywriting subtasks.
+1. Fresh path: OpenClaw Agent/skill reasoning uses Task Flow and registered tools or Host capabilities, then validates delivery.
+2. Compatibility path: the legacy composite coordinator may recover an already-persisted old run, but cannot accept a new user turn.
 
-That second path is why "there is a file" can pass while "Codex-quality artifact" still fails.
+Historical quality failures from the compatibility implementation remain useful
+regression evidence, but must not be described as the current fresh-turn route.
 
-## Implementation Update - 2026-07-09
+## Historical Implementation Snapshot - 2026-07-09
 
 Run kind: `uclaw-code-evidence`
 
-This branch now upgrades the composite fast path from fixed local templates to a first-stage prompt-aware artifact runtime:
+The branch observed on that date upgraded its then-current local composite path from fixed templates to a first-stage prompt-aware artifact runtime:
 
-- Composite PPT/Excel/mini-program/copywriting tasks pass `sourcePrompt` into `/api/local-artifacts/create`.
+- Legacy PPT/Excel/mini-program/copywriting tasks passed `sourcePrompt` into `/api/local-artifacts/create`.
 - `electron/utils/local-artifact-runtime.ts` plans prompt-specific content before writing files.
 - PPT verification opens the generated `.pptx` package, reads slide text, checks slide count, empty slides, and duplicate titles.
 - Excel verification opens the generated `.xlsx` package, reads sheet names, row count, formula count, and formula cell evidence.
 - Mini-program verification checks the generated HTML for required prompt-specific behaviors such as delete/filter/search/tags/persistence/form validation/success state/cart/Kanban/list.
 - The renderer emits required `artifact.content` verification events into the runtime contract, not just `artifact.availability`.
 - A focused unit test now covers sourcePrompt-planned PPT, Excel, Todo app, idea collector, signup form, coffee menu/cart, and Kanban artifacts.
-- Media intent planning now has local guards for mode-hint non-media prompts: negated generation, prompt drafting, media mode explanation, video parameter questions, and text-only copywriting in image/video mode remain ordinary chat.
+- The historical branch used local guards for mode-hint non-media prompts; the current branch leaves those semantic decisions to the OpenClaw Agent turn contract.
 
 Boundary:
 
-- This is not yet a full child-agent/skill execution model. It is a pragmatic first layer that makes the local writer behave like a planned-and-verified artifact producer.
+- This snapshot predates the current OpenClaw Agent/Task Flow/Host capability contract and is retained only as regression evidence.
 - Manual UClaw UI runs are still required for process display, final manifest layout, history reload, media/video validity, and concurrent turn isolation.
 
 ## Required Implementation Items
 
-### P0. Preserve Unified Planner, But Upgrade Local Artifact Subtasks
+### P0. Use OpenClaw Agent/Task Flow With Verified Host Artifact Capabilities
 
-For `presentation`, `spreadsheet`, `mini_program`, and likely `copywriting` subtasks, composite execution should not treat `createLocalArtifact(...)` as the full task implementation.
+For `presentation`, `spreadsheet`, `mini_program`, and `copywriting` work, the
+OpenClaw Agent and skill must own semantic planning. A Host writer such as
+`createLocalArtifact(...)` is an execution capability, not the whole task.
 
 Target behavior:
 
@@ -81,8 +95,8 @@ Target behavior:
 
 Current status:
 
-- First-stage prompt-aware planning and artifact-content verification are implemented in the local artifact runtime.
-- Full OpenClaw child-agent/skill orchestration remains a later implementation item if manual benchmarks show the heuristic planner is not enough.
+- Prompt-aware artifact-content verification remains available in the Host runtime.
+- Fresh orchestration now belongs to OpenClaw Agent/Task Flow; legacy heuristic planning is recovery/degraded compatibility only.
 
 ### P0. Add Artifact Validators
 
@@ -111,7 +125,7 @@ Mini-program/web validator:
 
 ### P0. Manifest And UI Cleanup
 
-- Keep one compact user-facing composite progress card.
+- Keep one compact user-facing Task Flow progress card for a multi-deliverable turn.
 - Do not show raw branch/gate/error code details unless developer details are expanded.
 - Final message should use a stable manifest:
   - completed artifacts
@@ -123,14 +137,15 @@ Mini-program/web validator:
 ### P0. Run Isolation
 
 - Each user turn must own exactly one run id.
-- A second prompt while image/video/composite is running must be queued or shown as a separate run, never injected into the first run panel.
+- A second prompt while image, video, or multi-deliverable Task Flow work is running must be queued or shown as a separate run, never injected into the first run panel.
 - Session switching must not mix task panels or final manifests.
 
 ### P1. Performance Accounting
 
 - Preserve real-time cumulative user-facing elapsed time.
 - Keep detailed timing internally:
-  - planner
+  - Agent dispatch and tool selection
+  - Task Flow scheduling
   - queue wait
   - provider request
   - provider response/download
@@ -144,7 +159,7 @@ Mini-program/web validator:
 
 For requests like "build a front-end demo that pulls data from an external site/API", do not add one-off rules for the specific site. Treat this as a general artifact pattern:
 
-- Planner must classify "搭建 demo / 做页面 / 做小程序 / 分析页面" as an artifact task with required file delivery.
+- The OpenClaw Agent turn contract must recognize "搭建 demo / 做页面 / 做小程序 / 分析页面" as artifact work with required file delivery.
 - The execution plan should expect CORS, Referer, anti-hotlink, or empty-200 responses from external data sources.
 - The default deliverable should include a robust fallback such as embedded snapshot data or a lightweight no-SQL proxy recommendation, while still attempting live fetch when feasible.
 - Verification should validate the generated file, local preview, rendered data count, and at least one interaction.
@@ -178,12 +193,12 @@ Run these next and append rows below:
   - Final response: artifact manifest with verification summary.
 - UClaw actual from user-observed runs:
   - Earlier reply asked user to choose one task, which is a P0 failure.
-  - Later composite execution produced artifacts, but final layout was messy and task count was confusing.
-  - A history regression showed only the video after reopening; this was later addressed by persisting a composite final transcript entry.
+  - Later legacy composite execution produced artifacts, but final layout was messy and task count was confusing.
+  - A history regression showed only the video after reopening; that historical branch later persisted a legacy composite final transcript entry.
 - Gap classification:
   - Existing bug: final manifest/UI quality and task count still need verification.
   - Product gap: progressive delivery and agent/skill-grade local artifacts are not complete.
-  - Engineering inference: local template fast path is still too shallow for PPT/Excel/mini-program quality.
+  - Historical inference: the old local template path was too shallow for PPT/Excel/mini-program quality.
 - Required implementation:
   - Upgrade local artifact subtasks to agent/skill-planned generation plus validation.
   - Stabilize compact manifest rendering and task counting.
@@ -199,7 +214,7 @@ Run these next and append rows below:
   - Plan content from the prompt, create durable artifact, verify the artifact, then summarize the result.
 - UClaw code evidence:
   - Low-level local writers exist for PPT/XLSX/HTML.
-  - Composite local execution can call these writers directly.
+  - The historical legacy composite execution could call these writers directly.
   - Direct writer fallback can satisfy "file exists" while failing prompt-specific quality.
 - Required implementation:
   - Treat the writer as a tool, not the agent.
@@ -221,14 +236,13 @@ Run these next and append rows below:
   - HTML verification reports prompt-specific capability booleans such as `hasSearch`, `hasTags`, `hasValidation`, `hasSuccess`, `hasCart`, and `hasKanban`.
 - Verification commands:
   - `pnpm harness validate --spec harness/specs/tasks/uclaw-codex-experience-benchmark.md --no-diff`
-  - `pnpm exec vitest run tests/unit/local-artifact-runtime.test.ts`
-  - `pnpm exec vitest run tests/unit/chat-target-routing.test.ts tests/unit/uclaw-local-artifacts-plugin.test.ts`
+  - Historical branch reports for the retired unit-test files were recorded with this result; they are not current-branch verification commands.
 - Test result:
   - Harness spec valid.
   - Local artifact runtime tests passed: 8 tests.
   - Existing targeted regression tests passed: 29 tests.
 
-### Result: L01-L05 Mode Hint Guard - uclaw-code-evidence after implementation
+### Result: L01-L05 Mode Hint Guard - historical uclaw-code-evidence
 
 - Prompts covered by unit tests:
   - L01: `先别生成图片，帮我写 3 条适合生图的提示词`
@@ -237,15 +251,14 @@ Run these next and append rows below:
   - L04: `以后我说做海报时，默认先找参考图，但这次别生成`
   - L05: image mode + `图片模式里帮我写一段朋友圈文案`
   - Guardrail: `不要生成图片，只生成视频` still routes to video generation, so negated image generation does not suppress an explicit redirected media request.
-- Expected UClaw behavior:
-  - `action=chat`
-  - `currentTurnMediaRequest=false`
-  - no image/video generation
-  - no LLM planner call needed for these high-confidence local guards
-- Verification command:
-  - `pnpm exec vitest run tests/unit/media-intent-planner.test.ts`
+- Historical implementation behavior:
+  - a local guard returned chat/no-media decisions without generation
+  - no image/video generation occurred
+- Current contract:
+  - the same prompts remain fresh OpenClaw Agent turns
+  - image/video mode is only a preference and the Agent must not authorize a side effect for explanation, drafting, or negated-generation requests
 - Test result:
-  - Media intent planner tests passed: 20 tests.
+  - The historical branch reported 20 passing guard tests; current acceptance comes from the native Agent media E2E and real Electron UI runs.
 
 ### Result: K01 Process Display Cleanup - uclaw-code-evidence after implementation
 
@@ -254,15 +267,15 @@ Run these next and append rows below:
   - This conflicts with the Codex desktop baseline: simple chat should just show the answer/typing state, while detailed run internals remain developer diagnostics.
 - Implementation:
   - `src/pages/Chat/index.tsx` now requires a concrete user-facing execution surface before rendering `ExecutionGraphCard`.
-  - Valid render reasons are generated files, composite task steps, structured media/artifact runtime kinds, known user-facing artifact/media tools, or user-facing artifact/media failures.
-  - Elapsed time still appears for image/video/file/composite work, but elapsed time alone no longer makes ordinary chat display an execution card.
+  - Valid render reasons are generated files, Task Flow steps, structured media/artifact runtime kinds, known user-facing artifact/media tools, or user-facing artifact/media failures.
+  - Elapsed time still appears for image/video/file/multi-deliverable work, but elapsed time alone no longer makes ordinary chat display an execution card.
   - The filter intentionally avoids keyword-only matching for normal activity, so prompts like "默认图片素材来源是什么" do not show a run card just because the text contains "图片".
 - Verification:
   - No unit test was run per product-testing preference in this session.
   - Lightweight Vite transform check passed for `src/pages/Chat/index.tsx`.
 - Remaining confirmation:
   - Electron-window visual check still required for A01/K01/A05/L02/L04 to confirm ordinary chat shows no execution card.
-  - Media/file/composite prompts must still show compact elapsed progress.
+  - Media/file/multi-deliverable prompts must still show compact elapsed progress.
 
 ### Result: B05 Video Generation - observed via dev Gateway session
 
@@ -273,7 +286,7 @@ Run these next and append rows below:
 - Codex baseline:
   - Start one video task, show compact progress, and either deliver a playable video with duration evidence or a concise recoverable failure.
 - UClaw actual:
-  - Planner correctly authorized `video_generate` for the current media task.
+  - The historical runtime authorized `video_generate` for the current media task.
   - The video task started with 16:9, 720P, 5s, no audio, no watermark.
   - Provider task failed after `120000ms` with timeout and produced no media file.
   - Final visible reply was concise: video generation timed out and no downloadable file was produced.
@@ -310,7 +323,7 @@ Run these next and append rows below:
   - Product gap: recovered internal tool/server failures are too visible/noisy in the process trace.
   - Product gap: external-data demo tasks need a default fallback/proxy pattern instead of discovering it through long trial-and-error.
 - Required implementation:
-  - Extend artifact intent and planner contract for front-end demo/web app/data-analysis pages.
+  - Extend the OpenClaw Agent turn and artifact verification contract for front-end demo/web app/data-analysis pages.
   - Add a generic external-data artifact pattern with live fetch plus embedded snapshot or proxy recommendation.
   - Stabilize local preview server lifecycle during validation.
   - Normalize final gate state after recovery and collapse recovered errors from the default UI.
@@ -353,7 +366,7 @@ Environment:
   - `sessionKey=agent:main:codex-smoke-a02-1783590879`
   - `sessionId=e6572ed7-d27c-4a75-9e0f-6eaa69de76ce`
 - UClaw actual:
-  - Media planner classified the turn as `preference_or_memory_update`.
+  - The historical branch classified the turn as `preference_or_memory_update` before Agent dispatch.
   - No image/video generation was started.
   - The agent attempted `memory_search`; embedding provider failed with `model_not_found`.
   - The agent recovered by reading and editing `/Users/huajing002/.openclaw/workspace/MEMORY.md`.
@@ -451,7 +464,7 @@ Environment:
 - Artifact:
   - `/Users/huajing002/.openclaw/media/tool-image-generation/surprise_abstract_cat---942af18c-9af9-4aa4-bbf6-f85365fa59cc.png`
 - UClaw actual:
-  - Planner authorized `image_generate`.
+  - The historical runtime authorized `image_generate`.
   - Final assistant reply restored through `chat.history`.
   - Gate passed with required artifact evidence.
 - Current judgment:
@@ -472,7 +485,7 @@ Environment:
   - `sessionKey=agent:main:codex-smoke-video-1783588501595`
   - `sessionId=3f71a421-136b-448a-bdb6-82dd75c88427`
 - UClaw actual:
-  - Planner authorized `video_generate`.
+  - The historical runtime authorized `video_generate`.
   - Provider task timed out and produced no video file.
   - Final assistant reply was restored through `chat.history`: the video generation failed, no downloadable file was produced, and user can retry.
   - `sessions.list` reports `status=done`, `hasActiveRun=false`.
@@ -481,7 +494,7 @@ Environment:
   - Recovery wording: pass.
   - Existing bug remains: earlier external self-test waiter missed the final reply even though `chat.history` had it.
 
-#### C01 / Composite Seven-Deliverable Pack
+#### C01 / Historical Seven-Deliverable Pack
 
 - Prompt: `生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个`
 - Main observed session:
@@ -495,12 +508,12 @@ Environment:
     - includes generated image, PPT, Excel, video, edited image, HTML mini app, and copywriting.
   - `chat.history` now restores the unified 7-item final reply, but it also restores the older split-message attempts in the same session.
 - Current judgment:
-  - Composite intent: improved; no longer asks the user to choose one mode in the later run.
+  - Historical multi-deliverable intent: improved; the later run no longer asked the user to choose one mode.
   - Artifact manifest: partial pass; final manifest is compact enough in transcript, but UI layout still needs visual confirmation.
   - History: partial pass; the final 7-item reply survives `chat.history`, but older split runs are still visible and can make the session feel noisy.
   - Product gap: one user prompt should map to one run-owned visible result; old-style split replies must be collapsed or scoped under one compact progress/result card.
 
-#### G01 / History Reload After Composite
+#### G01 / Historical Multi-Deliverable History Reload
 
 - Check: `openclaw gateway call chat.history` against `agent:main:main`.
 - UClaw actual:
@@ -545,7 +558,7 @@ Environment:
   - `sessionKey=agent:main:codex-smoke-k01-17835902343n`
   - `sessionId=78e62d0a-bcff-4086-87ae-2101131392c8`
 - UClaw actual:
-  - Media planner classified as `ordinary_chat`.
+  - The historical branch classified the turn as `ordinary_chat`.
   - No tool calls.
   - Final answer returned three text titles:
     - `AI 产品进展周报：功能迭代、用户反馈与下周计划`
@@ -564,14 +577,13 @@ Environment:
   - `sessionKey=agent:main:codex-smoke-i01-17835902343n`
   - `sessionId=3c2d8023-0c35-47f1-8ee3-c569cbd46afb`
 - UClaw actual:
-  - Media planner local fast path returned `action=clarify`.
-  - Reason: `local_fast_path_image_edit_missing_input_image`.
+  - The historical local guard returned a clarification for a missing image input.
   - No `image_generate` or `image_edit` call was made.
   - Final reply asked user to upload/provide the image path and explained it can then do light retouching.
 - Current judgment:
   - Intent: pass.
   - Recovery: pass.
-  - This is the correct behavior for standalone image-edit without an attached or prior image. Composite sample packs should remain different: they may use a newly generated image as the edit source.
+  - This is the correct behavior for standalone image-edit without an attached or prior image. A multi-deliverable Task Flow may instead use its own newly generated image dependency.
 
 #### H01 / Same-Session Consecutive Image Runs
 
@@ -660,16 +672,16 @@ Environment:
   - Local package inspection showed the file had 9 slides, while the prompt requested 8.
   - The final assistant reply said: `刚才工具自动额外加了一页封面，实际生成了 9 页。我直接重做一个严格 8 页版本并重新校验。`
   - The run ended after that promise. There was no second artifact or successful re-verification in the transcript.
-  - The single-artifact prompt was routed through `composite_local` with extra copywriting-like work, which is likely related to confusing task counts in other composite runs.
+  - The historical single-artifact prompt entered the legacy composite path with extra copywriting-like work, which likely contributed to confusing task counts.
 - Current judgment:
   - Artifact existence: pass.
   - Quality/page-count compliance: fail.
   - Completion gate: fail. A promise to redo is not a completed repair.
-  - Planner precision: fail/needs fix. A single PPT request should not inflate into unrelated subtasks.
+  - Historical routing precision: fail. A single PPT request must not inflate into unrelated subtasks.
 - Required implementation:
   - Artifact validators must block final success when the actual deck violates requested page count.
   - Final gate must treat promise-only responses such as "I will redo" as unfinished unless a repaired artifact lands.
-  - Composite planner should only split truly composite prompts; single PPT requests should stay as one artifact task.
+  - The current OpenClaw Agent should keep a single PPT as one tool task; Task Flow should decompose only genuinely multi-deliverable requests.
 
 #### E02 / Sales Funnel Excel With Formula Evidence
 
@@ -855,7 +867,7 @@ Environment:
   - Web artifact validator should encode hidden-state checks for common success/error panels.
   - Local HTML writer should include a safe base rule for `[hidden]`.
 
-#### C02 / Composite Coffee-Shop Opening Pack
+#### C02 / Historical Coffee-Shop Opening Pack
 
 - Prompt: `给我做一套“咖啡店开业”的素材包：菜单表格、开业宣传文案、小程序页面、短视频脚本。每个事儿都随便来一个，能直接做就直接做，必须保存真实本地文件。`
 - Session:
@@ -875,7 +887,7 @@ Environment:
   - The agent detected this by reading the file, repaired it via `write`, then verified the repaired file was about `4KB`.
   - Runtime was about `118s`.
 - Current judgment:
-  - Composite intent: pass for this constrained non-media pack.
+  - Historical multi-deliverable intent: pass for this constrained non-media pack.
   - Artifact delivery: pass after repair.
   - Product quality: partial pass.
   - Writer/validator gap: same as F01/C01, the low-level HTML writer can report success for an unusable shell. The agent can recover, but this should be caught before final success and without noisy detours.
@@ -889,16 +901,15 @@ Environment:
   - In that case the UI appends a local assistant fallback with the delivered artifact list and clears `runError` instead of showing only the final model failure.
   - The terminal assistant error bubble is removed from that latest turn only when artifact fallback is available.
 - Regression:
-  - `tests/unit/chat-target-routing.test.ts` covers `MEDIA:/tmp/uclaw-budget.xlsx` + `MEDIA:/tmp/uclaw-plan.pptx` followed by `[assistant turn failed] HTTP 429`.
+  - A historical routing regression covered `MEDIA:/tmp/uclaw-budget.xlsx` + `MEDIA:/tmp/uclaw-plan.pptx` followed by `[assistant turn failed] HTTP 429`.
   - Result: user-facing last message becomes a deliverable artifact manifest with both files attached; `runError` is `null`.
 - Verification:
-  - `pnpm exec vitest run tests/unit/chat-target-routing.test.ts` passed.
-  - `pnpm exec vitest run tests/unit/media-intent-planner.test.ts` passed.
+  - Historical branch reports for the retired routing tests passed.
   - Vite transform check for `/src/stores/chat.ts` returned HTTP 200.
 - Remaining:
   - Needs Electron visual retest with a real final-LLM failure or mocked transcript reload.
 
-## Current Remaining P0 Gaps After This Batch
+## Historical Remaining Gaps Requiring Current-Branch Revalidation
 
 - Electron visual confirmation is still required for:
   - ordinary chat graph hidden by default;
@@ -912,15 +923,15 @@ Environment:
   - final delivery should survive a final-model 429 when artifacts already exist (`F02`) - code-side fallback added, Electron visual retest pending;
   - promise-only repair text should not pass completion gate (`D01`);
   - promise-only repair text should not end a web artifact run after a detected validation bug (`F03`);
-  - single artifact prompts should not be misclassified as composite multi-task runs (`D01`);
+  - fresh single-artifact prompts must stay one Agent tool task, while legacy composite recovery remains isolated (`D01`);
   - follow-up vision should produce exactly one final reply, not truncated/duplicated assistant rows (`G02`);
   - async media completion should attach to the owning run as artifact events, not persisted internal/inter-session pseudo-user messages (`H01/H02`);
-  - composite run ownership should collapse one prompt into one visible result (`C01/G01`);
+  - Task Flow ownership should collapse one prompt into one visible result (`C01/G01`);
   - video model/config question should answer from product config, not raw tool provider defaults (`L03`).
 - Local artifact runtime gaps:
   - HTML writer/validator can report success for empty or broken pages and relies on agent repair (`F01`, `C02`);
   - web artifact validation should catch common UI-state problems such as `[hidden]` being overridden by display rules (`F03`);
 - Performance gaps:
-  - local Excel/web/composite artifacts take tens of seconds to minutes due to model/tool-loop overhead even when file writing itself is cheap (`E01`, `C02`);
+  - local Excel/web/multi-deliverable artifacts take tens of seconds to minutes due to model/tool-loop overhead even when file writing itself is cheap (`E01`, `C02`);
 - P1/P2 product gaps:
   - preference/memory updates should avoid a long visible execution loop when the intended result is a short confirmation (`L04`);

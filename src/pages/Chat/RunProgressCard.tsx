@@ -1,6 +1,8 @@
-import { AlertCircle, CheckCircle2, Loader2, TerminalSquare } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleAlert, CircleStop, Loader2, TerminalSquare } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
+import { sanitizeRuntimeDisplayText } from '@/lib/runtime-display-sanitizer';
 import type { TaskStep } from './task-visualization';
 import type { ChatRuntimeProgressEntry } from '../../../shared/chat-runtime-events';
 
@@ -41,6 +43,36 @@ function normalizeText(value: string | undefined | null): string | undefined {
   return trimmed || undefined;
 }
 
+function canonicalToolName(value: string | undefined): string | undefined {
+  const normalized = normalizeText(value)?.toLowerCase();
+  if (!normalized) return undefined;
+  const leaf = normalized.split(':').filter(Boolean).at(-1) ?? normalized;
+  return leaf.replace(/[^a-z0-9]+/gu, '_').replace(/^_+|_+$/gu, '') || undefined;
+}
+
+function humanizeToolName(value: string | undefined): string {
+  const normalized = normalizeText(value);
+  if (!normalized) return 'Tool';
+  const leaf = normalized.split(':').filter(Boolean).at(-1) ?? normalized;
+  return leaf.replace(/[_-]+/gu, ' ').replace(/\s+/gu, ' ').trim() || 'Tool';
+}
+
+function translateToolLabel(entry: ChatRuntimeProgressEntry, t: TFunction): string {
+  const toolName = canonicalToolName(entry.toolName);
+  const fallback = normalizeText(entry.toolLabel) ?? humanizeToolName(entry.toolName);
+  if (!toolName) return fallback;
+  return t(`runtimeProgress.toolLabels.${toolName}`, { defaultValue: fallback });
+}
+
+function translateProgressEntryText(entry: ChatRuntimeProgressEntry, t: TFunction): string {
+  if (!entry.translationKey) return entry.text;
+  return t(entry.translationKey, {
+    ...entry.translationParams,
+    tool: translateToolLabel(entry, t),
+    defaultValue: entry.text,
+  });
+}
+
 function truncateText(value: string, maxChars = 140): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   if (normalized.length <= maxChars) return normalized;
@@ -65,11 +97,11 @@ function summarizeShellCommand(command: string): string {
     .map((line) => line.trim())
     .filter(Boolean)
     .find((line) => !/^(?:set\s+-[A-Za-z]+|printf\b|echo\b|#|true$|false$)/u.test(line));
-  return truncateText(candidate || command, 160);
+  return truncateText(sanitizeRuntimeDisplayText(candidate || command), 160);
 }
 
 function summarizePathLike(value: string): string {
-  return truncateText(value, 140);
+  return truncateText(sanitizeRuntimeDisplayText(value), 140);
 }
 
 function extractCommandPreview(step: TaskStep): string | undefined {
@@ -84,21 +116,23 @@ function extractCommandPreview(step: TaskStep): string | undefined {
     return summarizePathLike(record.filePath);
   }
   if (record && typeof record.url === 'string' && record.url.trim()) {
-    return truncateText(record.url, 160);
+    return truncateText(sanitizeRuntimeDisplayText(record.url), 160);
   }
   if (typeof step.url === 'string' && step.url.trim()) {
-    return truncateText(step.url, 160);
+    return truncateText(sanitizeRuntimeDisplayText(step.url), 160);
   }
   return undefined;
 }
 
-function buildActionEntry(step: TaskStep, t: (key: string) => string): RunProgressEntry {
+function buildActionEntry(step: TaskStep, t: TFunction): RunProgressEntry {
   const command = extractCommandPreview(step);
   const label = step.label.trim().toLowerCase();
   let generic = false;
   const text = (() => {
     if (step.status === 'running') return t('runtimeProgress.executing');
-    if (PROBLEM_STATUSES.has(step.status)) return t('runtimeProgress.failed');
+    if (step.status === 'aborted') return t('runtimeProgress.aborted');
+    if (step.status === 'blocked') return t('runtimeProgress.blocked');
+    if (step.status === 'error' || step.status === 'failed') return t('runtimeProgress.failed');
     if (label === 'web_fetch' && command) return t('runtimeProgress.visited');
     if (label === 'read' && command) return t('runtimeProgress.read');
     if (label === 'edit' || label === 'apply_patch') return t('runtimeProgress.edited');
@@ -123,7 +157,7 @@ function buildStatusEntry(step: TaskStep): RunProgressEntry | null {
     id: `${step.id}:status`,
     kind: 'status',
     status: step.status,
-    text: truncateText(detail, 180),
+    text: truncateText(sanitizeRuntimeDisplayText(detail), 180),
   };
 }
 
@@ -138,7 +172,7 @@ function buildRunProgressEntries(
   steps: TaskStep[],
   progressEntries: ChatRuntimeProgressEntry[] | undefined,
   liveText: string | null | undefined,
-  t: (key: string) => string,
+  t: TFunction,
 ): RunProgressEntry[] {
   if ((progressEntries?.length ?? 0) > 0) {
     const entries = progressEntries!.map((entry): RunProgressEntry => {
@@ -146,22 +180,22 @@ function buildRunProgressEntries(
         return {
           id: entry.id,
           kind: 'narration',
-          text: entry.text,
+          text: sanitizeRuntimeDisplayText(translateProgressEntryText(entry, t)),
         };
       }
       if (entry.kind === 'status') {
         return {
           id: entry.id,
           kind: 'status',
-          text: entry.text,
+          text: sanitizeRuntimeDisplayText(translateProgressEntryText(entry, t)),
           status: entry.status ?? 'completed',
         };
       }
       return {
         id: entry.id,
         kind: 'action',
-        text: entry.text,
-        command: entry.command,
+        text: sanitizeRuntimeDisplayText(translateProgressEntryText(entry, t)),
+        command: entry.command ? sanitizeRuntimeDisplayText(entry.command) : undefined,
         status: entry.status ?? 'completed',
       };
     });
@@ -233,9 +267,23 @@ export function shouldUseRunProgressTranscript(
 }
 
 function ActionStatusIcon({ status }: { status: TaskStep['status'] }) {
-  if (status === 'running') return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
-  if (PROBLEM_STATUSES.has(status)) return <AlertCircle className="h-3.5 w-3.5" />;
-  return <CheckCircle2 className="h-3.5 w-3.5" />;
+  if (status === 'running') return <Loader2 data-status-icon="running" className="h-3.5 w-3.5 animate-spin" />;
+  if (status === 'aborted') return <CircleStop data-status-icon="aborted" className="h-3.5 w-3.5" />;
+  if (status === 'blocked') return <CircleAlert data-status-icon="blocked" className="h-3.5 w-3.5" />;
+  if (status === 'error' || status === 'failed') return <AlertCircle data-status-icon={status} className="h-3.5 w-3.5" />;
+  return <CheckCircle2 data-status-icon="completed" className="h-3.5 w-3.5" />;
+}
+
+function ProblemStatusIcon({ status }: { status: TaskStep['status'] }) {
+  if (status === 'aborted') return <CircleStop data-status-icon="aborted" className="h-3.5 w-3.5" />;
+  if (status === 'blocked') return <CircleAlert data-status-icon="blocked" className="h-3.5 w-3.5" />;
+  return <AlertCircle data-status-icon={status} className="h-3.5 w-3.5" />;
+}
+
+function problemTextClass(status: TaskStep['status']): string {
+  if (status === 'aborted') return 'text-muted-foreground';
+  if (status === 'blocked') return 'text-amber-700 dark:text-amber-400';
+  return 'text-destructive/85';
 }
 
 export function RunProgressCard({ summary, status, steps, progressEntries, liveText }: RunProgressCardProps) {
@@ -269,9 +317,11 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
             return (
               <div
                 key={entry.id}
-                className="flex items-start gap-1.5 text-xs text-destructive/85"
+                className={cn('flex items-start gap-1.5 text-xs', problemTextClass(entry.status))}
               >
-                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span className="mt-0.5 shrink-0">
+                  <ProblemStatusIcon status={entry.status} />
+                </span>
                 <span className="min-w-0 break-words leading-5">{entry.text}</span>
               </div>
             );
@@ -280,20 +330,21 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
           return (
             <div
               key={entry.id}
+              data-testid="chat-run-progress-action"
               className={cn(
                 'flex min-w-0 items-start gap-1.5 text-[11px] leading-5',
                 PROBLEM_STATUSES.has(entry.status)
-                  ? 'text-destructive/85'
+                  ? problemTextClass(entry.status)
                   : 'text-muted-foreground',
               )}
             >
               <div className="mt-0.5 shrink-0">
                 {PROBLEM_STATUSES.has(entry.status) ? (
-                  <AlertCircle className="h-3.5 w-3.5" />
+                  <ProblemStatusIcon status={entry.status} />
                 ) : entry.status === 'running' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <Loader2 data-status-icon="running" className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <TerminalSquare className="h-3.5 w-3.5" />
+                  <TerminalSquare data-status-icon="completed" className="h-3.5 w-3.5" />
                 )}
               </div>
               <div className="min-w-0 space-y-1">

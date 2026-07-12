@@ -114,9 +114,9 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
-聊天、图片模式和视频模式现在共用同一个 OpenClaw Agent turn。模式只提供本轮模型、尺寸、质量、时长与已选产物偏好，不再在 Renderer 侧调用意图 planner 或媒体队列。原生 `image_generate` / `video_generate` 保留 OpenClaw 的任务账本和同会话完成唤醒；UClaw 仅把进度、产物、验证、审批与部分失败投影到执行界面。内置 Host Task Bridge 为后续可恢复的本地执行器复用同一套 `session/run/tool-call/idempotency` 契约，不再增加第二个 Agent loop。
+聊天、图片和视频的新请求现在共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物偏好，不再在 Renderer 侧调用意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 通过 Task Flow 复用同一套 `session/run/tool-call/idempotency` 契约，支持可恢复长任务和同会话完成唤醒；UClaw 只把结构化进度、产物、验证、审批与部分失败投影到执行界面，不再增加第二个 Agent loop。旧 composite run 仅保留查询、取消、重试等迁移前任务恢复能力，旧 direct planner POST 端点统一返回 `410`；新请求全部进入 Agent loop。
 
-桌面操作和 Blender 三维场景不再依赖普通聊天结束：桌面控制按 session/run 隔离、全局串行，并且必须由应用内界面签发一次性批准令牌后才能执行。内置 Blender runtime 接收声明式 SceneSpec，在不加载启动扩展的本地 Blender 中渲染，并校验 `.blend`、`.glb`、预览图和 manifest 后再投递到会话。Blender 是可选的本地依赖，平台或可执行文件不可用时会明确返回能力状态，不会把未产出当作完成；三维预览只会在打开兼容模型文件时按需加载，不增加普通聊天路径的负担。
+桌面观察当前只支持截图；原生桌面动作驱动尚未实现，本版本也不宣称 Computer Use 可以操作 UClaw 窗口。内置 Blender runtime 接收声明式 SceneSpec，在不加载启动扩展的本地 Blender 中渲染，并校验 `.blend`、`.glb`、预览图和 manifest 后再投递到会话。Blender 是可选的本地依赖，平台或可执行文件不可用时会明确返回能力状态，不会把未产出当作完成；三维预览只会在打开兼容模型文件时按需加载，不增加普通聊天路径的负担。
 
 ### 📡 多频道管理
 同时配置和监控多个 AI 频道。每个频道独立运行，允许你为不同任务运行专门的智能体。

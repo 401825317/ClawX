@@ -446,15 +446,20 @@ export function buildRuntimeCompletionGateReport(
 ): CompletionGateReport {
   const { artifacts, verifications, steps } = effectiveRuntimeEvidence(run, pendingVerifications);
   const checkpoints = run?.checkpoints ?? [];
+  const tasks = run?.tasks ?? [];
   const turnContract = run?.turnContract;
   const runtimeEvents = run?.events ?? [];
-
   const issues: ChatRuntimeGateIssue[] = [];
   const artifactRequiredSteps = artifactRequiredPlanSteps(run);
   const missingArtifactSteps = missingArtifactRequiredSteps(artifactRequiredSteps, artifacts);
   const verifiedArtifactIds = new Set(
     verifications
-      .filter((verification) => verification.artifactId && verification.required !== false && verification.status === 'passed')
+      .filter((verification) => (
+        verification.artifactId
+        && verification.required !== false
+        && verification.status === 'passed'
+        && verification.kind === 'artifact.availability'
+      ))
       .map((verification) => verification.artifactId as string),
   );
 
@@ -539,13 +544,17 @@ export function buildRuntimeCompletionGateReport(
   }
 
   for (const [index, artifact] of artifacts.entries()) {
-    if (verifications.some((verification) => verification.artifactId === artifact.id && verification.required !== false)) continue;
+    if (verifications.some((verification) => (
+      verification.artifactId === artifact.id
+      && verification.required !== false
+      && verification.kind === 'artifact.availability'
+    ))) continue;
     issues.push({
       id: gateIssueId(run?.runId, 'artifact.verification.missing', artifact.id, index),
       code: 'artifact.verification.missing',
       severity: 'blocking',
-      title: `${artifactLabel(artifact)} 缺少产物验证`,
-      detail: '产物已经进入执行上下文，但最终交付前没有对应 verification.completed 事件。',
+      title: `${artifactLabel(artifact)} 缺少可用性验证`,
+      detail: '产物已经进入执行上下文，但没有对应的 artifact.availability 验证，不能确认路径或远端结果真实可用。',
       artifactId: artifact.id,
       targetId: artifact.id,
       recoverable: true,
@@ -568,9 +577,49 @@ export function buildRuntimeCompletionGateReport(
     });
   }
 
+  for (const [index, task] of tasks.entries()) {
+    if (task.status === 'error') {
+      issues.push({
+        id: gateIssueId(run?.runId, 'task.failed', task.taskId, index),
+        code: 'task.failed',
+        severity: 'blocking',
+        title: `${task.title} 执行失败`,
+        detail: task.detail,
+        targetId: task.taskId,
+        recoverable: true,
+        suggestedRecovery: '修复后台任务错误后重试，并等待终态结果回到当前会话。',
+      });
+    } else if (task.status === 'partial' || task.status === 'waiting_approval') {
+      issues.push({
+        id: gateIssueId(run?.runId, 'task.blocked', task.taskId, index),
+        code: 'task.blocked',
+        severity: 'blocking',
+        title: task.status === 'waiting_approval' ? `${task.title} 等待批准` : `${task.title} 仅部分完成`,
+        detail: task.detail,
+        targetId: task.taskId,
+        recoverable: task.status !== 'waiting_approval',
+        suggestedRecovery: task.status === 'waiting_approval'
+          ? '请用户完成所需审批后继续。'
+          : '继续补齐未完成部分和交付证据。',
+      });
+    } else if (task.status === 'pending' || task.status === 'running') {
+      issues.push({
+        id: gateIssueId(run?.runId, 'task.unfinished', task.taskId, index),
+        code: 'task.unfinished',
+        severity: 'blocking',
+        title: `${task.title} 尚未结束`,
+        detail: task.detail,
+        targetId: task.taskId,
+        recoverable: true,
+        suggestedRecovery: '等待后台任务进入终态并回传结果后再交付。',
+      });
+    }
+  }
+
   for (const [index, step] of steps.entries()) {
     if (isBuiltInGateStep(step.id)) continue;
     if (isMediaObservationStep(step)) continue;
+    if (step.taskId && tasks.some((task) => task.taskId === step.taskId)) continue;
     if (step.status === 'error' || step.status === 'blocked') {
       issues.push({
         id: gateIssueId(run?.runId, 'step.failed', step.id, index),
@@ -666,8 +715,13 @@ export function buildRuntimeCompletionGateReport(
   const missingRequiredArtifactCount = uniqueIssues.filter((issue) => issue.code === 'artifact.required.missing').length;
   const missingVerificationCount = uniqueIssues.filter((issue) => issue.code === 'artifact.verification.missing').length;
   const blockedVerificationCount = uniqueIssues.filter((issue) => issue.code === 'verification.required.failed' && issue.severity === 'blocking').length;
-  const failedStepCount = uniqueIssues.filter((issue) => issue.code === 'step.failed' || issue.code === 'tool.failed' || issue.code === 'command.failed' || issue.code === 'approval.denied').length;
-  const runningStepCount = uniqueIssues.filter((issue) => issue.code === 'step.unfinished').length;
+  const failedStepCount = uniqueIssues.filter((issue) => issue.code === 'step.failed'
+    || issue.code === 'task.failed'
+    || issue.code === 'task.blocked'
+    || issue.code === 'tool.failed'
+    || issue.code === 'command.failed'
+    || issue.code === 'approval.denied').length;
+  const runningStepCount = uniqueIssues.filter((issue) => issue.code === 'step.unfinished' || issue.code === 'task.unfinished').length;
   const blockingCheckpointCount = uniqueIssues.filter((issue) => issue.code === 'checkpoint.nonrecoverable').length;
   const blockingIssueCount = uniqueIssues.filter((issue) => issue.severity === 'blocking').length;
   const warningIssueCount = uniqueIssues.filter((issue) => issue.severity === 'warning').length;
@@ -694,7 +748,9 @@ export function buildRuntimeCompletionGateReport(
     warningIssueCount,
     requiredVerificationCount,
     passedRequiredVerificationCount,
-    verificationCoverage: artifacts.length === 0 ? (missingRequiredArtifactCount > 0 ? 0 : 1) : verifiedArtifactIds.size / artifacts.length,
+    verificationCoverage: artifacts.length === 0
+      ? (missingRequiredArtifactCount > 0 ? 0 : 1)
+      : verifiedArtifactIds.size / artifacts.length,
     hasBlockingIssues: blockingIssueCount > 0,
     reasons,
     issues: uniqueIssues,

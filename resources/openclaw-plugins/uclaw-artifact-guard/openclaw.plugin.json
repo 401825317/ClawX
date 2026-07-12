@@ -2,7 +2,7 @@
   "id": "uclaw-artifact-guard",
   "name": "UClaw Artifact Guard",
   "description": "Prevents artifact and external-action tasks from ending with unexecuted future-tense promises.",
-  "version": "0.1.11",
+  "version": "0.1.17",
   "entry": "index.mjs",
   "enabledByDefault": false,
   "contracts": {

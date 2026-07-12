@@ -9,6 +9,7 @@ const REVISION_REASON = 'UClaw artifact delivery final reply had no completed ar
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:artifact-delivery-context`;
 const MEDIA_TOOL_PREPARATION_HOOK_ID = `${PLUGIN_ID}:media-tool-preparation`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
+const TURN_CONTRACT_TOOL_NAME = 'uclaw_declare_turn_contract';
 let runtimeEventSeq = 0;
 const BASE_PROMPT_CONTEXT = [
   'UClaw 基础回复规则：',
@@ -29,8 +30,28 @@ const ARTIFACT_PROMPT_CONTEXT = [
 ].join('\n');
 const PROMPT_CONTEXT = `${BASE_PROMPT_CONTEXT}\n\n${ARTIFACT_PROMPT_CONTEXT}`;
 
-const MEDIA_INTENT_GATE_TIMEOUT_MS = 1_200;
+const TURN_PREFERENCES_TIMEOUT_MS = 1_200;
 const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate', 'create_blender_scene', 'repair_blender_scene']);
+const NATIVE_MEDIA_GENERATION_TOOLS = new Set(['image_generate', 'video_generate']);
+const NATIVE_MEDIA_PROMPT_MAX_CHARACTERS = 4_096;
+const HIDDEN_PROGRESS_TOOLS = new Set([
+  'tool_describe',
+  'tool_search',
+  'uclaw_declare_turn_contract',
+  'uclaw_get_runtime_capabilities',
+  'uclaw_get_task_bridge_capabilities',
+  'uclaw_get_host_task',
+  'uclaw_list_host_tasks',
+]);
+const ASYNC_PROGRESS_STARTED_STATUSES = new Set([
+  'accepted',
+  'pending',
+  'queued',
+  'running',
+  'started',
+  'submitted',
+]);
+const SIDE_EFFECT_FREE_HOST_TASK_CAPABILITIES = new Set(['desktop.observe']);
 const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
 const MEDIA_INPUT_PARAM_KEYS = new Set(['image', 'images', 'mask', 'video', 'videos']);
 const IMAGE_INPUT_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/iu;
@@ -44,7 +65,7 @@ const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|pa
 const ARTIFACT_CAPABILITY_TARGET_RE = /(?:文件(?:类)?产物|文件|文档|报告|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|小程序|代码文件|压缩包|zip|产物|artifact|file|document|report|presentation|slides?|spreadsheet|image|video|webpage|mini[-\s]?app)/iu;
 const ARTIFACT_CAPABILITY_QUESTION_RE = /(?:能做哪些|可以做哪些|支持哪些|支持生成哪些|能生成哪些|能创建哪些|能产出哪些|可以生成哪些|可以创建哪些|能(?:做|生成|创建|产出|导出|输出|制作)(?:什么|哪些|哪类|哪种)|可以(?:做|生成|创建|产出|导出|输出|制作)(?:什么|哪些|哪类|哪种)|支持(?:什么|哪些|哪类|哪种)|有哪些(?:能力|功能|文件|产物|类型|格式)|有什么(?:能力|功能)|能力(?:范围|列表|介绍)|(?:能|可以)做吗|能不能做|支不支持|what can you|which .{0,40} can|can you|support(?:ed)?|capabilit)/iu;
 const ARTIFACT_CREATE_COMMAND_RE = /(?:(?:帮我|给我|替我|直接).{0,20}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出)|(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|(?:create|make|generate|build|produce|export|write)\s+(?:a|an|one|some|the)\b)/iu;
-const ARTIFACT_CREATION_NEGATION_RE = /(?:不要|别|不用|无需|不需要|禁止|不得|do\s+not|don't|without)\s*.{0,18}?(?:写(?:入)?|改(?:动|写)?|修改|创建|生成|制作|保存|输出|导出)(?:任何)?(?:文件|文档|报告|PPT|Excel|图片|视频|网页|代码)?/giu;
+const ARTIFACT_CREATION_NEGATION_RE = /(?:不要|别|不用|无需|不需要|禁止|不得|do\s+not|don't|without)\s*.{0,18}?(?:写(?:入)?|做(?:成)?|改(?:动|写)?|修改|创建|生成|制作|保存|输出|导出)(?:任何)?(?:文件|文档|报告|PPT|Excel|图片|视频|网页|代码)?/giu;
 const ARTIFACT_READ_ONLY_OR_KNOWLEDGE_RE = /(?:只读|查看|检查|读取|搜索|查找|分析|诊断|解释|说明|告诉我|怎么|如何|为什么|inspect|read|review|analy[sz]e|diagnose|explain|how|why).{0,50}(?:文件|文档|报告|PPT|Word|Excel|表格|PDF|图片|视频|网页|HTML|脚本|代码|package\.json|\.tsx?\b|\.jsx?\b)|(?:文件|文档|报告|PPT|Word|Excel|表格|PDF|图片|视频|网页|HTML|脚本|代码|package\.json|\.tsx?\b|\.jsx?\b).{0,50}(?:只读|查看|检查|读取|分析|诊断|解释|说明|怎么|如何|为什么|inspect|read|review|analy[sz]e|diagnose|explain|how|why)/iu;
 const ARTIFACT_DIRECT_EXECUTION_RE = /(?:(?:帮我|给我|替我|直接|现在|马上|立即|立刻).{0,30}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出)|(?:然后|接着|随后|再).{0,12}(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|^\s*(?:请)?\s*(?:做|制作|生成|创建|导出|输出|写|编写|起草|弄|出).{0,8}(?:一个|一份|一张|一套|个|份|张|套)|(?:please\s+)?(?:create|make|generate|build|produce|export|write)\s+(?:a|an|one|some|the)\b)/iu;
 const ARTIFACT_REVISION_FEEDBACK_RE = /(?:太丑|丑|难看|不好看|不满意|不行|不对|太差|太简陋|占位|模板感|不够.{0,12}(?:高级|好看|精致|正式|苹果|产品|宣传)|重新(?:做|制作|生成|来|搞)|重做|再做|再来|换一版|改一版|美化|优化|润色|升级|高级一点|好看一点|精致一点|重新直接制作|make it better|too ugly|ugly|not good|redo|remake|regenerate|make another|improve|polish)/iu;
@@ -82,6 +103,16 @@ const DESKTOP_ACTION_REQUEST_RE = /(?:(?:打开|启动|操作|控制|点击|输�
 const STRUCTURED_CONNECTOR_TOOL_RE = /(?:\[tool:(?:message|directory|wechat|openclaw-weixin|channel)[^\]]*\]|toolName["']?\s*:\s*["'](?:message|directory|wechat|openclaw-weixin|channel)|"name"\s*:\s*"(?:message|directory|wechat|openclaw-weixin|channel)")/iu;
 const STRUCTURED_CONNECTOR_SUCCESS_RE = /(?:success["']?\s*:\s*true|status["']?\s*:\s*["']?(?:ok|sent|success|completed)|已(?:经)?(?:发送|发出|投递|完成)|发送成功|sent|delivered|completed)/iu;
 const PRODUCER_TOOL_RE = /(?:^|[_-])(?:create|write|edit|generate|export|render|save|screenshot|capture|record)(?:$|[_-])|(?:pptx|docx|xlsx|pdf|image|video|artifact|media)/iu;
+const SIDE_EFFECTING_PRODUCER_TOOL_RE = /(?:^|[_-])(?:create|write|edit|repair|generate|export|render|save|capture|record)(?:$|[_-])/iu;
+const REMOTE_GENERATION_TOOL_RE = /(?:^|[_-])(?:image|video|music|audio|speech|voice|sound|avatar)(?:[_-])(?:generate|generation|synthesize|synthesis)(?:$|[_-])|(?:^|[_-])(?:generate|generation|synthesize|synthesis)(?:[_-])(?:image|video|music|audio|speech|voice|sound|avatar)(?:$|[_-])/iu;
+const EXTERNAL_ACTION_TOOL_RE = /(?:^|[_-])(?:send|publish|upload|delete|remove)(?:$|[_-])/iu;
+const SIDE_EFFECT_FREE_TOOL_ACTIONS = new Set([
+  ...SAFE_MEDIA_TOOL_ACTIONS,
+  'read',
+  'search',
+]);
+const SIDE_EFFECT_FREE_TOOL_NAME_RE = /^(?:get|list|read|search|status|inspect|describe|models?|info|help)(?:$|[_-])|(?:^|[_-])(?:status|info|details?|list)$/iu;
+const TERMINAL_SIDE_EFFECT_ACTION_RE = /(?:^|[_-])(?:send|publish|upload|delete|remove|create|write|edit|repair|generate|export|render|save|capture|record)$/iu;
 const GENERATED_ARTIFACT_CUE_RE = /(?:MEDIA:|filePath|outputPath|artifact|saved|wrote|created|generated|exported|rendered|已生成|已保存|已导出|已创建|写入|产物)/iu;
 const TOOL_ERROR_STATUS_RE = /^(?:error|failed|failure|blocked)$/iu;
 const COMPOSITE_CONTRACT_RE = /【UClaw composite execution contract】|这是一个组合任务|子任务清单：/iu;
@@ -338,7 +369,7 @@ async function requestTurnPreferencesFromHost(event, ctx) {
   const token = normalizeOptionalString(process.env.CLAWX_HOST_API_TOKEN);
   if (!sessionKey || !message || !origin || !token || typeof fetch !== 'function') return undefined;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MEDIA_INTENT_GATE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), TURN_PREFERENCES_TIMEOUT_MS);
   try {
     const response = await fetch(`${origin}/api/runtime/turn-preferences/consume`, {
       method: 'POST',
@@ -404,17 +435,10 @@ function turnPreferencePromptContext(preferences) {
 }
 
 function shouldInjectArtifactPromptContext(event, preferences) {
-  const latest = extractLatestUserRequestText(event);
-  const allUserText = extractUserRequestText(event);
-  const text = latest || allUserText;
-  if (!text.trim()) return false;
-  return Boolean(
-    preferences
-    || isArtifactRequest(text)
-    || isArtifactRevisionFeedback(text)
-    || isDesktopActionRequest(text)
-    || matchRawCompositeArtifactDetectors(text).length > 0
-  );
+  // OpenClaw owns semantic intent and tool selection. Keep the execution
+  // contract available on every real turn instead of deciding whether the
+  // user "sounds like" an artifact request with client-side text matching.
+  return Boolean(extractLatestUserRequestText(event).trim() || preferences);
 }
 
 function buildPromptContextForEvent(event, preferences) {
@@ -429,10 +453,30 @@ function buildPromptContextForEvent(event, preferences) {
 }
 
 function normalizeToolName(event) {
-  return normalizeOptionalString(event?.toolName)
+  const direct = normalizeOptionalString(event?.toolName)
     ?? normalizeOptionalString(event?.name)
     ?? normalizeOptionalString(event?.tool?.name)
     ?? '';
+  let resolved = direct;
+  if (direct.trim().toLowerCase() === 'tool_call') {
+    const params = normalizeToolParams(event);
+    resolved = [params.id, params.toolName, params.tool_name, params.name]
+      .find((value) => typeof value === 'string' && value.trim())?.trim()
+      ?? direct;
+    if (resolved === direct) {
+      const envelope = parseProgressRecord(event?.result);
+      const delegated = isPlainRecord(envelope?.result) ? envelope.result : envelope;
+      const tool = isPlainRecord(envelope?.tool)
+        ? envelope.tool
+        : isPlainRecord(delegated?.tool)
+          ? delegated.tool
+          : undefined;
+      resolved = [tool?.name, tool?.id, tool?.toolName, tool?.tool_name]
+        .find((value) => typeof value === 'string' && value.trim())?.trim()
+        ?? resolved;
+    }
+  }
+  return resolved.includes(':') ? resolved.split(':').at(-1) ?? resolved : resolved;
 }
 
 function normalizeToolParams(event) {
@@ -440,6 +484,18 @@ function normalizeToolParams(event) {
   if (isPlainRecord(event?.input)) return event.input;
   if (isPlainRecord(event?.args)) return event.args;
   return {};
+}
+
+function normalizeEffectiveToolParams(event) {
+  const params = normalizeToolParams(event);
+  const directName = normalizeOptionalString(event?.toolName)
+    ?? normalizeOptionalString(event?.name)
+    ?? normalizeOptionalString(event?.tool?.name);
+  if (directName?.trim().toLowerCase() !== 'tool_call') return params;
+  return [params.args, params.arguments, params.params, params.input]
+    .map((value) => isPlainRecord(value) ? value : null)
+    .find(Boolean)
+    ?? params;
 }
 
 function normalizeToolAction(params) {
@@ -452,39 +508,6 @@ function normalizeToolAction(params) {
 function isSafeMediaToolReadAction(params) {
   const action = normalizeToolAction(params);
   return Boolean(action && SAFE_MEDIA_TOOL_ACTIONS.has(action));
-}
-
-function shouldBlockMediaToolCall(event, ctx) {
-  const toolName = normalizeToolName(event);
-  if (!MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) {
-    return { block: false, toolName };
-  }
-  const params = normalizeToolParams(event);
-  if (isSafeMediaToolReadAction(params)) {
-    return {
-      block: false,
-      toolName,
-      reason: 'safe_media_tool_read_action',
-    };
-  }
-  const gate = resolveMediaIntentGate(event, ctx);
-  const allowed = Boolean(gate?.allowedMediaTools?.includes(toolName));
-  return {
-    block: !allowed,
-    toolName,
-    gate,
-    reason: allowed ? 'authorized_current_media_task' : (gate?.reason || 'missing_media_intent_gate'),
-  };
-}
-
-function buildMediaToolBlockReason(decision) {
-  if (decision.toolName === 'video_generate') {
-    return '当前用户消息没有授权生成视频，已阻止 video_generate 执行。';
-  }
-  if (decision.toolName === 'create_blender_scene' || decision.toolName === 'repair_blender_scene') {
-    return '当前用户消息没有授权创建或修改 Blender 三维场景，已阻止该工具执行。';
-  }
-  return '当前用户消息没有授权生成图片，已阻止 image_generate 执行。';
 }
 
 function resolveOpenClawHomeForPlugin() {
@@ -778,6 +801,14 @@ function isArtifactRequest(text) {
     && LONG_FORM_CONTENT_REQUEST_RE.test(actionableText)
     && !LONG_FORM_KNOWLEDGE_QUESTION_RE.test(actionableText);
   return ARTIFACT_REQUEST_RE.test(actionableText) || PAGE_ARTIFACT_RE.test(actionableText) || longFormRequest;
+}
+
+function isUndeclaredArtifactDeliveryRequest(text) {
+  const value = String(text ?? '').trim();
+  if (!value) return false;
+  const actionableText = value.replace(ARTIFACT_CREATION_NEGATION_RE, ' ');
+  return isArtifactRequest(value)
+    && (ARTIFACT_DIRECT_EXECUTION_RE.test(actionableText) || ARTIFACT_CREATE_COMMAND_RE.test(actionableText));
 }
 
 function isArtifactRevisionFeedback(text) {
@@ -1782,6 +1813,13 @@ function isProducerToolName(toolName) {
   return PRODUCER_TOOL_RE.test(toolName ?? '');
 }
 
+function isSideEffectingProducerToolName(toolName) {
+  const normalized = String(toolName ?? '').trim().toLowerCase();
+  return SIDE_EFFECTING_PRODUCER_TOOL_RE.test(normalized)
+    || normalized === 'apply_patch'
+    || normalized === 'screenshot';
+}
+
 function hasGeneratedArtifactCue(text) {
   return GENERATED_ARTIFACT_CUE_RE.test(text);
 }
@@ -1816,14 +1854,27 @@ function readToolStatus(result) {
   return undefined;
 }
 
+function delegatedToolResult(result) {
+  const details = isRecord(result?.details) ? result.details : {};
+  return isRecord(details.result) ? details.result : undefined;
+}
+
+function resultIndicatesError(result) {
+  if (!isRecord(result)) return false;
+  if (result.isError === true) return true;
+  if (typeof result.error === 'string' && result.error.trim()) return true;
+  if (result.ok === false || result.success === false) return true;
+  if (typeof result.details?.error === 'string' && result.details.error.trim()) return true;
+  if (result.details?.ok === false || result.details?.success === false) return true;
+  const status = readToolStatus(result);
+  return typeof status === 'string' && TOOL_ERROR_STATUS_RE.test(status);
+}
+
 function isToolError(event) {
   if (event?.isError === true) return true;
   if (typeof event?.error === 'string' && event.error.trim()) return true;
-  if (event?.result?.ok === false || event?.result?.success === false) return true;
-  if (typeof event?.result?.error === 'string' && event.result.error.trim()) return true;
-  if (event?.result?.details?.ok === false || event?.result?.details?.success === false) return true;
-  const status = readToolStatus(event?.result);
-  return typeof status === 'string' && TOOL_ERROR_STATUS_RE.test(status);
+  return resultIndicatesError(event?.result)
+    || resultIndicatesError(delegatedToolResult(event?.result));
 }
 
 function summarizeToolFailure(event) {
@@ -1834,7 +1885,7 @@ function summarizeToolFailure(event) {
     details.reason,
     readToolStatus(event?.result),
   ].find((value) => typeof value === 'string' && value.trim());
-  return candidate ? truncateText(candidate, 180) : undefined;
+  return candidate ? truncateText(redactProgressPreview(candidate), 180) : undefined;
 }
 
 function pruneToolEvidence(now = Date.now()) {
@@ -1852,11 +1903,14 @@ function recordToolEvidence(event, ctx) {
   const runId = getRunId(event, ctx);
   const toolName = normalizeToolName(event);
   if (!runId || !toolName) return undefined;
-  if (MEDIA_SIDE_EFFECT_TOOLS.has(toolName) && isSafeMediaToolReadAction(normalizeToolParams(event))) {
+  if (MEDIA_SIDE_EFFECT_TOOLS.has(toolName) && isSafeMediaToolReadAction(normalizeEffectiveToolParams(event))) {
     return undefined;
   }
 
   const failed = isToolError(event);
+  const declaredContract = toolName === TURN_CONTRACT_TOOL_NAME && !failed
+    ? normalizeDeclaredTurnContract(event)
+    : undefined;
   const artifacts = failed ? [] : buildToolArtifactEvidence(event).map((entry) => ({
     ...entry,
     artifact: {
@@ -1870,11 +1924,17 @@ function recordToolEvidence(event, ctx) {
     sourceToolCallId: normalizeOptionalString(event?.toolCallId),
     sourceToolName: toolName,
   }));
-  if (!failed && artifacts.length === 0 && !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) return undefined;
+  if (
+    !declaredContract
+    && !failed
+    && artifacts.length === 0
+    && !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
+  ) return undefined;
 
   const now = Date.now();
   pruneToolEvidence(now);
   const current = toolEvidenceByRunId.get(runId) ?? { updatedAt: now, attempts: [] };
+  if (declaredContract) current.contract = declaredContract;
   const toolCallId = normalizeOptionalString(event?.toolCallId);
   const attempt = {
     runId,
@@ -1894,6 +1954,42 @@ function recordToolEvidence(event, ctx) {
   toolEvidenceByRunId.set(runId, current);
   pruneToolEvidence(now);
   return attempt;
+}
+
+function normalizeDeclaredTurnContract(event) {
+  const params = normalizeEffectiveToolParams(event);
+  const details = isRecord(event?.result?.details) ? event.result.details : {};
+  const delegatedResult = delegatedToolResult(event?.result);
+  const delegatedDetails = isRecord(delegatedResult?.details) ? delegatedResult.details : {};
+  const resultContract = isRecord(details.contract)
+    ? details.contract
+    : isRecord(delegatedDetails.contract)
+      ? delegatedDetails.contract
+      : undefined;
+  const candidate = resultContract ?? params;
+  if (!isRecord(candidate)) return undefined;
+
+  const intent = normalizeOptionalString(candidate.intent);
+  const sideEffect = normalizeOptionalString(candidate.sideEffect);
+  const toolRequirement = normalizeOptionalString(candidate.toolRequirement);
+  const acceptance = isRecord(candidate.acceptance) ? candidate.acceptance : {};
+  if (!intent || !sideEffect || !toolRequirement) return undefined;
+
+  return {
+    intent,
+    sideEffect,
+    toolRequirement,
+    sideEffectAuthorized: candidate.sideEffectAuthorized === true,
+    capabilityRefs: Array.isArray(candidate.capabilityRefs)
+      ? candidate.capabilityRefs.filter((value) => typeof value === 'string' && value.trim()).slice(0, 32)
+      : [],
+    acceptance: {
+      requiresArtifact: acceptance.requiresArtifact === true,
+      requiresVerification: acceptance.requiresVerification === true,
+      requiresApproval: acceptance.requiresApproval === true,
+      requiresToolEvidence: acceptance.requiresToolEvidence === true,
+    },
+  };
 }
 
 function getToolEvidenceForRun(runId) {
@@ -2008,6 +2104,9 @@ function makeRequiredEffect(params) {
     targetArtifactRef: params.targetArtifactRef,
     targetArtifactKeys: params.targetArtifactKeys,
     textLength: params.textLength,
+    requiresToolEvidence: params.requiresToolEvidence === true,
+    allowImplicitMediaToolEvidence: params.allowImplicitMediaToolEvidence !== false,
+    requiresVerification: params.requiresVerification !== false,
     required: true,
     source: RUNTIME_EVENT_SOURCE,
   };
@@ -2021,9 +2120,43 @@ function deriveRequiredEffects({
   priorArtifacts,
   desktopActionRequest,
   compositeRequiredArtifactCount,
+  declaredContract,
+  runToolEvidence,
+  requireCurrentRunToolEvidence,
 }) {
   const effects = [];
   const textLength = textLengthRequirement ?? requestedTextLength(activeUserText);
+  if (declaredContract) {
+    if (artifactRequest) {
+      const target = artifactRevisionRequest ? priorArtifacts.at(-1) : undefined;
+      effects.push(makeRequiredEffect({
+        type: artifactRevisionRequest ? 'create_artifact_revision' : 'create_artifact',
+        intent: declaredContract.intent || 'artifact_delivery',
+        kind: inferContractArtifactKind(declaredContract, runToolEvidence),
+        title: artifactRevisionRequest ? '产物修订' : '产物交付',
+        minCount: 1,
+        mustBeNewArtifact: artifactRevisionRequest,
+        targetArtifactId: target?.artifact?.id,
+        targetArtifactRef: target?.ref,
+        targetArtifactKeys: target ? artifactIdentityKeys(target) : undefined,
+        textLength,
+        requiresToolEvidence: declaredContract.acceptance?.requiresToolEvidence === true,
+        allowImplicitMediaToolEvidence: false,
+        requiresVerification: declaredContract.acceptance?.requiresVerification === true,
+      }));
+    }
+    if (desktopActionRequest) {
+      effects.push(makeRequiredEffect({
+        type: 'external_action',
+        intent: declaredContract.intent || 'external_action',
+        kind: 'desktop_or_message',
+        title: '桌面或外部消息动作',
+        minCount: 1,
+      }));
+    }
+    return effects;
+  }
+
   const rawCompositeDetectors = matchRawCompositeArtifactDetectors(activeUserText);
   const compositeCount = Math.max(compositeRequiredArtifactCount, rawCompositeDetectors.length);
 
@@ -2040,6 +2173,7 @@ function deriveRequiredEffects({
       targetArtifactRef: target?.ref,
       targetArtifactKeys: target ? artifactIdentityKeys(target) : undefined,
       textLength,
+      requiresToolEvidence: requireCurrentRunToolEvidence,
     }));
   } else if (artifactRequest) {
     if (compositeCount > 1) {
@@ -2052,6 +2186,7 @@ function deriveRequiredEffects({
           index: index + 1,
           minCount: 1,
           textLength: detector.kind === 'document' ? textLength : undefined,
+          requiresToolEvidence: requireCurrentRunToolEvidence,
         }));
       });
       for (let index = effects.length; index < compositeCount; index += 1) {
@@ -2061,6 +2196,7 @@ function deriveRequiredEffects({
           title: `组合产物 ${index + 1}`,
           index: index + 1,
           minCount: 1,
+          requiresToolEvidence: requireCurrentRunToolEvidence,
         }));
       }
     } else {
@@ -2071,6 +2207,7 @@ function deriveRequiredEffects({
         title: '产物交付',
         minCount: 1,
         textLength,
+        requiresToolEvidence: requireCurrentRunToolEvidence,
       }));
     }
   }
@@ -2088,6 +2225,19 @@ function deriveRequiredEffects({
   return effects;
 }
 
+function inferContractArtifactKind(contract, runToolEvidence) {
+  const toolNames = (runToolEvidence?.attempts ?? []).map((attempt) => attempt.toolName);
+  const refs = [...(contract?.capabilityRefs ?? []), ...toolNames].join(' ').toLowerCase();
+  if (/video_generate|video/.test(refs)) return 'video';
+  if (/image_generate|image/.test(refs)) return 'image';
+  if (/pptx|presentation|slide/.test(refs)) return 'presentation';
+  if (/xlsx|spreadsheet|excel/.test(refs)) return 'spreadsheet';
+  if (/docx|document|word/.test(refs)) return 'document';
+  if (/html|webpage|web_app/.test(refs)) return 'webpage';
+  if (/blend|blender|glb|gltf/.test(refs)) return 'model';
+  return undefined;
+}
+
 function artifactKindSatisfies(requiredKind, actualKind) {
   if (!requiredKind || requiredKind === 'file') return true;
   if (!actualKind) return false;
@@ -2101,6 +2251,8 @@ function artifactKindSatisfies(requiredKind, actualKind) {
 }
 
 function effectRequiresCurrentRunToolEvidence(effect, evidence) {
+  if (effect?.requiresToolEvidence === true) return true;
+  if (effect?.allowImplicitMediaToolEvidence === false) return false;
   if (effect?.kind !== 'image' && effect?.kind !== 'video') return false;
   return Boolean(
     evidence?.enforceCurrentRunToolEvidence
@@ -2108,10 +2260,133 @@ function effectRequiresCurrentRunToolEvidence(effect, evidence) {
   );
 }
 
+const UNAUTHORIZED_CONTRACT_SAFE_TOOLS = new Set([
+  TURN_CONTRACT_TOOL_NAME,
+  'read',
+  'file_read',
+  'tool_search',
+  'tool_describe',
+  'web_search',
+  'web_fetch',
+  'uclaw_get_runtime_capabilities',
+  'uclaw_get_task_bridge_capabilities',
+  'uclaw_get_host_task',
+  'uclaw_list_host_tasks',
+  'tasks.get',
+  'tasks.list',
+]);
+
+function canonicalAuthorizationToolName(event) {
+  const direct = normalizeToolName(event).trim().toLowerCase();
+  return direct.includes(':') ? direct.split(':').at(-1) : direct;
+}
+
+function nativeMediaPromptLengthBlock(event) {
+  const toolName = canonicalAuthorizationToolName(event);
+  if (!NATIVE_MEDIA_GENERATION_TOOLS.has(toolName)) return undefined;
+  const prompt = normalizeEffectiveToolParams(event).prompt;
+  if (typeof prompt !== 'string') return undefined;
+  const characterCount = Array.from(prompt).length;
+  if (characterCount <= NATIVE_MEDIA_PROMPT_MAX_CHARACTERS) return undefined;
+  return {
+    toolName,
+    characterCount,
+    reason: `${toolName} prompt exceeds the unified ${NATIVE_MEDIA_PROMPT_MAX_CHARACTERS}-character limit (${characterCount}). Shorten the prompt before retrying.`,
+  };
+}
+
+function isSideEffectFreeToolInvocation(event) {
+  const toolName = canonicalAuthorizationToolName(event);
+  const action = normalizeToolAction(normalizeEffectiveToolParams(event));
+  if (action) return SIDE_EFFECT_FREE_TOOL_ACTIONS.has(action);
+  return SIDE_EFFECT_FREE_TOOL_NAME_RE.test(toolName)
+    && !TERMINAL_SIDE_EFFECT_ACTION_RE.test(toolName);
+}
+
+function knownToolSideEffect(event) {
+  const toolName = canonicalAuthorizationToolName(event);
+  if (!toolName || UNAUTHORIZED_CONTRACT_SAFE_TOOLS.has(toolName)) return undefined;
+  if (isSideEffectFreeToolInvocation(event)) return undefined;
+  if (MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) {
+    if (NATIVE_MEDIA_GENERATION_TOOLS.has(toolName)) return 'remote_generation';
+  }
+  if (EXTERNAL_ACTION_TOOL_RE.test(toolName)) return 'external_action';
+  if (REMOTE_GENERATION_TOOL_RE.test(toolName)) return 'remote_generation';
+  if (isSideEffectingProducerToolName(toolName)) return 'local_artifact';
+  if (['message', 'channel', 'wechat', 'openclaw-weixin'].includes(toolName)) {
+    return 'external_action';
+  }
+  return undefined;
+}
+
+function knownSideEffectTool(event) {
+  const toolName = canonicalAuthorizationToolName(event);
+  if (toolName === 'uclaw_start_host_task') {
+    const kind = normalizeOptionalString(normalizeEffectiveToolParams(event).kind)?.toLowerCase();
+    return !kind || !SIDE_EFFECT_FREE_HOST_TASK_CAPABILITIES.has(kind);
+  }
+  return Boolean(
+    knownToolSideEffect(event)
+    || ['uclaw_cancel_host_task', 'uclaw_recover_host_task'].includes(toolName),
+  );
+}
+
+function undeclaredSideEffectBlock(event, ctx) {
+  const runId = getRunId(event, ctx);
+  if (!runId || getToolEvidenceForRun(runId).contract || !knownSideEffectTool(event)) return undefined;
+  const toolName = canonicalAuthorizationToolName(event);
+  return {
+    toolName,
+    reason: `Declare the UClaw turn contract before executing side-effecting tool ${toolName}. This tool call was not executed.`,
+  };
+}
+
+function contractSideEffectMismatchBlock(event, ctx) {
+  const runId = getRunId(event, ctx);
+  if (!runId || !knownSideEffectTool(event)) return undefined;
+  const contract = getToolEvidenceForRun(runId).contract;
+  if (!contract) return undefined;
+  const actualSideEffect = knownToolSideEffect(event);
+  const mismatch = contract.sideEffect === 'none'
+    || (actualSideEffect && actualSideEffect !== contract.sideEffect);
+  if (!mismatch) return undefined;
+  const toolName = canonicalAuthorizationToolName(event);
+  return {
+    toolName,
+    declaredSideEffect: contract.sideEffect,
+    actualSideEffect,
+    reason: `Tool ${toolName} has side effect ${actualSideEffect ?? 'side_effecting'}, but the turn contract declares ${contract.sideEffect}. Declare a matching authorized contract before retrying. This tool call was not executed.`,
+  };
+}
+
+function unauthorizedSideEffectBlock(event, ctx) {
+  const runId = getRunId(event, ctx);
+  if (!runId) return undefined;
+  const contract = getToolEvidenceForRun(runId).contract;
+  if (!contract || contract.sideEffect === 'none' || contract.sideEffectAuthorized === true) return undefined;
+  const toolName = canonicalAuthorizationToolName(event);
+  if (UNAUTHORIZED_CONTRACT_SAFE_TOOLS.has(toolName)) return undefined;
+  if (isSideEffectFreeToolInvocation(event)) return undefined;
+  if (MEDIA_SIDE_EFFECT_TOOLS.has(toolName) && isSafeMediaToolReadAction(normalizeEffectiveToolParams(event))) {
+    return undefined;
+  }
+  if (['message', 'channel', 'wechat', 'openclaw-weixin'].includes(toolName)) {
+    const action = normalizeToolAction(normalizeEffectiveToolParams(event));
+    if (action && ['get', 'list', 'read', 'search', 'status'].includes(action)) return undefined;
+  }
+  return {
+    toolName,
+    sideEffect: contract.sideEffect,
+    reason: `User authorization is required before executing the declared ${contract.sideEffect} side effect. Do not retry this tool until the user explicitly authorizes it.`,
+  };
+}
+
 function artifactSatisfiesEffect(effect, entry, usedArtifactIds, evidence) {
   const artifact = entry?.artifact;
   if (!artifact?.id || usedArtifactIds.has(artifact.id)) return false;
+  // Availability is an authenticity baseline, not an optional quality check.
   if (entry?.verification?.status !== 'passed') return false;
+  if (artifact.url && entry?.successfulToolResult !== true) return false;
   if (!artifactKindSatisfies(effect.kind, artifact.kind)) return false;
   if (effect.textLength) {
     const actual = entry?.textMetrics?.[effect.textLength.unit];
@@ -2165,9 +2440,11 @@ function evaluateRequiredEffects(requiredEffects, evidence) {
           ? `缺少满足文本长度要求的可读产物证据（${effect.textLength.unit}，目标 ${effect.textLength.target}）。`
         : effectRequiresCurrentRunToolEvidence(effect, evidence)
           ? '当前运行缺少由成功工具结果产生的同类型产物证据。'
+          : effect.requiresVerification
+            ? '缺少满足 effect 的产物证据或可用性验证未通过。'
           : effect.mustBeNewArtifact
             ? '缺少 latest user 之后产生的非覆盖新产物证据。'
-            : '缺少满足 effect 的产物证据或可用性验证未通过。',
+            : '缺少满足 effect 的产物证据。',
     };
   });
 }
@@ -2188,17 +2465,52 @@ function analyzeArtifactFinal(event, ctx) {
   const { before: eventBeforeLatestUser, after: eventAfterLatestUser } = splitEventMessagesAroundLatestUser(event);
   const priorArtifacts = buildArtifactEvidence(eventBeforeLatestUser, '');
   const priorArtifactEvidence = priorArtifacts.length > 0 || hasArtifactEvidence(eventBeforeLatestUser, '');
-  const artifactRevisionFeedback = isArtifactRevisionFeedback(activeUserText);
-  const artifactRevisionRequest = artifactRevisionFeedback && priorArtifactEvidence;
-  const compositeRequiredArtifactCount = countCompositeRequiredArtifacts(activeUserText);
-  const rawCompositeRequiredArtifactCount = countRawCompositeRequiredArtifacts(activeUserText);
-  const inferredRequiredArtifactCount = Math.max(compositeRequiredArtifactCount, rawCompositeRequiredArtifactCount);
-  const artifactRequest = isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest;
-  const textLengthRequirement = requestedTextLength(activeUserText);
-  const desktopActionRequest = isDesktopActionRequest(activeUserText);
   const currentRunId = getRunId(event, ctx);
   const runToolEvidence = getToolEvidenceForRun(currentRunId);
+  const declaredContract = runToolEvidence.contract;
   const enforceCurrentRunToolEvidence = Boolean(ctx && currentRunId);
+  const legacySemanticFallback = !enforceCurrentRunToolEvidence;
+  const artifactRevisionFeedback = isArtifactRevisionFeedback(activeUserText);
+  const contractRequiresArtifact = Boolean(
+    declaredContract?.acceptance?.requiresArtifact
+    || declaredContract?.sideEffect === 'local_artifact'
+    || declaredContract?.sideEffect === 'remote_generation'
+  );
+  const artifactRevisionRequest = contractRequiresArtifact && artifactRevisionFeedback && priorArtifactEvidence;
+  const compositeRequiredArtifactCount = legacySemanticFallback
+    ? countCompositeRequiredArtifacts(activeUserText)
+    : 0;
+  const rawCompositeRequiredArtifactCount = legacySemanticFallback
+    ? countRawCompositeRequiredArtifacts(activeUserText)
+    : 0;
+  const inferredRequiredArtifactCount = Math.max(compositeRequiredArtifactCount, rawCompositeRequiredArtifactCount);
+  const producerAttempted = runToolEvidence.attempts.some((attempt) => (
+    isProducerToolName(attempt.toolName) || MEDIA_SIDE_EFFECT_TOOLS.has(attempt.toolName)
+  ));
+  // This is a delivery-only fail-safe, never a routing or tool authorization
+  // decision. The Agent owns semantics through the turn contract; if it skips
+  // both the contract and execution, the existing high-confidence detector may
+  // only prevent an unsupported "completed" reply from escaping.
+  const undeclaredExecutionRequest = Boolean(
+    enforceCurrentRunToolEvidence
+    && !declaredContract
+    && isUndeclaredArtifactDeliveryRequest(activeUserText),
+  );
+  const artifactRequest = declaredContract
+    ? contractRequiresArtifact
+    : legacySemanticFallback
+      ? isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest
+      : producerAttempted || undeclaredExecutionRequest;
+  const textLengthRequirement = artifactRequest ? requestedTextLength(activeUserText) : undefined;
+  const desktopActionRequest = declaredContract
+    ? declaredContract.sideEffect === 'external_action'
+    : legacySemanticFallback && isDesktopActionRequest(activeUserText);
+  const approvalRequired = declaredContract?.acceptance?.requiresApproval === true;
+  const authorizationMissing = Boolean(
+    declaredContract
+    && declaredContract.sideEffect !== 'none'
+    && declaredContract.sideEffectAuthorized !== true
+  );
   const artifacts = bindArtifactsToCurrentRunToolEvidence(
     buildArtifactEvidence(eventAfterLatestUser, finalText),
     runToolEvidence,
@@ -2216,6 +2528,9 @@ function analyzeArtifactFinal(event, ctx) {
     priorArtifacts,
     desktopActionRequest,
     compositeRequiredArtifactCount,
+    declaredContract,
+    runToolEvidence,
+    requireCurrentRunToolEvidence: enforceCurrentRunToolEvidence,
   });
   const effectResults = evaluateRequiredEffects(requiredEffects, {
     artifacts,
@@ -2244,12 +2559,22 @@ function analyzeArtifactFinal(event, ctx) {
   const unfinishedArtifactPromise = Boolean(
     artifactRequest
     && promiseOnly
-    && (!finalVerificationPassed || artifactRepairPromise),
+    && (missingArtifactEffects.length > 0 || artifactRepairPromise),
   );
+  const artifactVerificationRequired = requiredEffects.some((effect) => (
+    (effect.type === 'create_artifact' || effect.type === 'create_artifact_revision')
+    && effect.requiresVerification === true
+  ));
   const unresolvedFinalVerificationBlock = Boolean(
     artifactRequest
+    && artifactVerificationRequired
     && finalVerificationBlocked
     && !finalVerificationPassed,
+  );
+  const shouldReviseAuthorization = Boolean(
+    userText.trim()
+    && authorizationMissing
+    && !explicitBlocker,
   );
   const shouldReviseArtifact = Boolean(
     userText.trim()
@@ -2279,6 +2604,7 @@ function analyzeArtifactFinal(event, ctx) {
   );
   const shouldRevise = shouldReviseHeartbeat
     || shouldReviseEmptyFinal
+    || shouldReviseAuthorization
     || shouldReviseArtifact
     || shouldReviseDesktopAction;
   return {
@@ -2290,6 +2616,8 @@ function analyzeArtifactFinal(event, ctx) {
     heartbeatPoll,
     heartbeatOk,
     artifactRequest,
+    declaredContract,
+    legacySemanticFallback,
     artifactRevisionFeedback,
     artifactRevisionRequest,
     currentRunId,
@@ -2303,6 +2631,8 @@ function analyzeArtifactFinal(event, ctx) {
     priorArtifactEvidence,
     priorArtifactCount: priorArtifacts.length,
     desktopActionRequest,
+    approvalRequired,
+    authorizationMissing,
     compositeRequiredArtifactCount,
     rawCompositeRequiredArtifactCount,
     requiredEffects,
@@ -2328,6 +2658,7 @@ function analyzeArtifactFinal(event, ctx) {
     unresolvedFinalVerificationBlock,
     shouldReviseHeartbeat,
     shouldReviseEmptyFinal,
+    shouldReviseAuthorization,
     shouldReviseArtifact,
     shouldReviseDesktopAction,
     shouldRevise,
@@ -2366,6 +2697,21 @@ function buildRevision(analysis) {
           '优先依据本轮已有工具结果、产物和验证事实作答；不要重复执行已经成功的外部动作、文件生成、图片生成或视频生成。',
           '如果已有证据足够，直接用简体中文给出结论、完成项和必要限制。',
           '如果已有工具结果不足或失败，明确说明实际尝试、失败点和下一步，不要假装完成。',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.shouldReviseAuthorization) {
+    return {
+      action: 'revise',
+      reason: 'UClaw turn contract has no user authorization for the declared side effect.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:side-effect-authorization`,
+        maxAttempts: 1,
+        instruction: [
+          '本轮合同声明了副作用，但没有记录用户授权，因此不能声称已经完成，也不能在补偿轮继续或重试该副作用。',
+          '请用简体中文明确说明尚未执行，并向用户说明将发生的副作用、影响对象和必要风险，然后请求用户确认。',
+          '不要伪造审批、工具结果、产物路径或完成状态。',
         ].join('\n'),
       },
     };
@@ -2497,7 +2843,28 @@ function emitGateIssue(api, event, issue) {
 }
 
 function emitCompletionCheckpoint(api, event, analysis, reason) {
-  if (!analysis.artifactRequest && !analysis.desktopActionRequest) return;
+  if (!analysis.artifactRequest && !analysis.desktopActionRequest && !analysis.authorizationMissing) return;
+  if (analysis.authorizationMissing) {
+    const issue = buildGateIssue(event, {
+      code: 'side_effect.unauthorized',
+      title: '副作用尚未获得用户授权',
+      detail: reason,
+      targetId: getRunId(event) ?? eventId(event),
+      recoverable: false,
+      suggestedRecovery: '先向用户说明副作用和影响并取得明确确认，再重新执行；当前不能声称已经完成。',
+    });
+    emitGateIssue(api, event, issue);
+    emitRuntimeEvent(api, event, 'checkpoint', {
+      checkpointId: `checkpoint:${getRunId(event) ?? eventId(event)}:side-effect-authorization`,
+      summary: '本轮副作用尚未获得用户授权。',
+      reason,
+      recoverable: false,
+      issues: [issue],
+      suggestedRecovery: issue.suggestedRecovery,
+      source: RUNTIME_EVENT_SOURCE,
+    });
+    return;
+  }
   if (analysis.desktopActionRequest && (!analysis.artifactRequest || analysis.shouldReviseDesktopAction || analysis.explicitBlocker)) {
     const issue = buildGateIssue(event, {
       code: analysis.explicitBlocker ? 'desktop.action.blocked' : 'desktop.action.evidence.missing',
@@ -2595,9 +2962,10 @@ function buildToolStep(event) {
   const failed = isToolError(event);
   const status = failed ? 'error' : 'completed';
   const statusDetail = readToolStatus(event?.result);
+  const toolName = normalizeToolName(event);
   return {
-    id: event?.toolCallId ? `tool:${event.toolCallId}` : `tool:${hashString(event?.toolName ?? 'unknown')}`,
-    title: event?.toolName ? `工具 ${event.toolName}` : '工具执行',
+    id: event?.toolCallId ? `tool:${event.toolCallId}` : `tool:${hashString(toolName || 'unknown')}`,
+    title: toolName ? `工具 ${toolName}` : '工具执行',
     status,
     kind: 'tool',
     detail: statusDetail ? `status=${statusDetail}` : undefined,
@@ -2610,25 +2978,120 @@ function summarizeProgressCommand(command) {
     .map((line) => line.trim())
     .filter(Boolean)
     .find((line) => !/^(?:set\s+-[A-Za-z]+|printf\b|echo\b|#|true$|false$)/u.test(line));
-  return truncateText(candidate || String(command ?? ''), 160);
+  return truncateText(redactProgressPreview(candidate || String(command ?? '')), 160);
+}
+
+function redactProgressPreview(value) {
+  return String(value ?? '')
+    .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu, '[REDACTED]')
+    .replace(/\b(?:eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|sk-(?:proj-)?[A-Za-z0-9_-]{8,}|sess-[A-Za-z0-9_-]{8,})\b/gu, '[REDACTED]')
+    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s\/:@]+:)[^\s\/@]+(@)/gu, '$1[REDACTED]$2')
+    .replace(/(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s"']+/giu, '$1[REDACTED]')
+    .replace(/((?:^|[\r\n])\s*(?:cookie|set-cookie)\s*:\s*)[^\r\n]*/gimu, '$1[REDACTED]')
+    .replace(/(["']?(?:authorization|proxy[_-]?authorization|cookie|set[_-]?cookie|api[_-]?key|apiKey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|secret|credential|client[_-]?secret|private[_-]?key|signature|sig|aws[_-]?secret[_-]?access[_-]?key|aws[_-]?session[_-]?token|[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|API_KEY))["']?\s*[:=]\s*["'])[^"'\r\n]*(["'])/giu, '$1[REDACTED]$2')
+    .replace(/((?:^|[\s{[(,;])(?:export\s+)?(?:[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|API_KEY)|aws[_-]?secret[_-]?access[_-]?key|aws[_-]?session[_-]?token|api[_-]?key|apiKey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|password|passwd|secret|credential|client[_-]?secret|private[_-]?key|cookie)\s*=\s*)[^\s,;)}\]]+/gimu, '$1[REDACTED]')
+    .replace(/([?&#](?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|signature|sig|secret|credential|x-amz-credential|x-amz-signature)=)[^&#\s"']*/giu, '$1[REDACTED]')
+    .replace(/(--(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|private[_-]?key|cookie)(?:=|\s+))["']?[^\s"']+["']?/giu, '$1[REDACTED]');
 }
 
 function extractProgressPathLike(params) {
   for (const key of ['path', 'filePath', 'url']) {
     if (typeof params?.[key] === 'string' && params[key].trim()) {
-      return truncateText(params[key].trim(), 160);
+      return truncateText(redactProgressPreview(params[key].trim()), 160);
     }
   }
   return undefined;
 }
 
+function parseProgressRecord(value) {
+  if (isPlainRecord(value)) {
+    if (typeof value.summary === 'string') {
+      const parsed = parseProgressRecord(value.summary);
+      if (parsed) return parsed;
+    }
+    if (Array.isArray(value.content)) {
+      for (const part of value.content) {
+        if (!isPlainRecord(part) || typeof part.text !== 'string') continue;
+        const parsed = parseProgressRecord(part.text);
+        if (parsed) return parsed;
+      }
+    }
+    return value;
+  }
+  if (typeof value !== 'string' || !value.trim().startsWith('{')) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return isPlainRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function progressResultEnvelope(event) {
+  return parseProgressRecord(event?.result) ?? parseProgressRecord(event?.meta);
+}
+
+function progressDelegatedResult(event) {
+  const envelope = progressResultEnvelope(event);
+  return isPlainRecord(envelope?.result) ? envelope.result : envelope;
+}
+
+function progressResultDetails(event) {
+  const envelope = progressResultEnvelope(event);
+  const delegated = progressDelegatedResult(event);
+  return isPlainRecord(delegated?.details)
+    ? delegated.details
+    : isPlainRecord(envelope?.details)
+      ? envelope.details
+      : {};
+}
+
+function progressToolLabel(event, toolName) {
+  const envelope = progressResultEnvelope(event);
+  const delegated = progressDelegatedResult(event);
+  const tool = isPlainRecord(envelope?.tool)
+    ? envelope.tool
+    : isPlainRecord(delegated?.tool)
+      ? delegated.tool
+      : undefined;
+  const structuredLabel = normalizeOptionalString(tool?.label)
+    ?? normalizeOptionalString(tool?.title)
+    ?? String(toolName ?? '').replace(/[_-]+/gu, ' ').trim();
+  return truncateText(redactProgressPreview(structuredLabel || 'tool'), 120);
+}
+
+function mediaProgressSummary(params, details = {}) {
+  const values = { ...params, ...details };
+  const parts = [];
+  if (Number.isFinite(values.durationSeconds)) parts.push(`${Math.max(1, Math.round(values.durationSeconds))}s`);
+  const size = normalizeOptionalString(values.size);
+  const resolution = normalizeOptionalString(values.resolution);
+  const aspectRatio = normalizeOptionalString(values.aspectRatio) ?? normalizeOptionalString(values.aspect_ratio);
+  if (size) parts.push(size);
+  if (resolution && resolution.toLowerCase() !== size?.toLowerCase()) parts.push(resolution);
+  if (aspectRatio) parts.push(aspectRatio);
+  if (values.audio === true) parts.push('audio');
+  if (values.audio === false) parts.push('no audio');
+  return parts.length > 0 ? truncateText(parts.join(' · '), 140) : undefined;
+}
+
 function extractToolProgressCommand(event) {
-  const params = normalizeToolParams(event);
+  const params = normalizeEffectiveToolParams(event);
   const commandKey = commandParamKey(params);
   if (commandKey) {
     return summarizeProgressCommand(params[commandKey]);
   }
-  return extractProgressPathLike(params);
+  const pathLike = extractProgressPathLike(params);
+  if (pathLike) return pathLike;
+  const query = normalizeOptionalString(params.query)
+    ?? normalizeOptionalString(params.searchQuery)
+    ?? normalizeOptionalString(params.search_query);
+  if (query) return truncateText(redactProgressPreview(query), 160);
+  const toolName = normalizeToolName(event);
+  if (NATIVE_MEDIA_GENERATION_TOOLS.has(toolName) || toolName === 'image_edit') {
+    return mediaProgressSummary(params, progressResultDetails(event));
+  }
+  return undefined;
 }
 
 function extractOpenAppName(command) {
@@ -2668,26 +3131,50 @@ function buildNativeToolCommentary(toolName, command) {
   return undefined;
 }
 
-function buildNativeToolActionText(toolName, status, command) {
-  const label = String(toolName ?? '').trim().toLowerCase();
-  if (status === 'running') {
-    if (label === 'web_fetch' || label === 'browser') return '正在查看页面';
-    if (label === 'read') return '正在读取相关内容';
-    if (label === 'edit' || label === 'apply_patch') return '正在修改相关内容';
-    return '正在执行';
-  }
-  if (status === 'error') return '执行失败';
-  if (label === 'web_fetch' || label === 'browser') return '已访问相关页面';
-  if (label === 'read') return '已读取相关内容';
-  if (label === 'edit' || label === 'apply_patch') return '已修改相关内容';
-  return '已运行';
+function nativeToolProgressState(event, failed = false) {
+  const details = progressResultDetails(event);
+  const status = normalizeOptionalString(details.status)?.toLowerCase();
+  if (status && /^(?:aborted|cancelled|canceled|stopped|terminated)$/u.test(status)) return 'aborted';
+  if (status && /^(?:blocked|waiting_approval|approval_required|pending_approval)$/u.test(status)) return 'blocked';
+  if (status && /^(?:partial|partially_completed|partial_failure)$/u.test(status)) return 'partial';
+  if (failed) return 'error';
+  if (details.async === true && status && ASYNC_PROGRESS_STARTED_STATUSES.has(status)) return 'submitted';
+  return event?.result === undefined ? 'running' : 'completed';
+}
+
+function nativeToolProgressStatus(state) {
+  if (state === 'error') return 'error';
+  if (state === 'aborted') return 'aborted';
+  if (state === 'blocked' || state === 'partial') return 'blocked';
+  if (state === 'running' || state === 'submitted') return 'running';
+  return 'completed';
+}
+
+function nativeToolProgressTranslationKey(state) {
+  if (state === 'error') return 'runtimeProgress.toolFailed';
+  if (state === 'blocked') return 'runtimeProgress.toolBlocked';
+  if (state === 'aborted') return 'runtimeProgress.toolAborted';
+  if (state === 'partial') return 'runtimeProgress.toolPartial';
+  if (state === 'submitted') return 'runtimeProgress.toolSubmitted';
+  if (state === 'running') return 'runtimeProgress.toolRunning';
+  return 'runtimeProgress.toolCompleted';
+}
+
+function buildNativeToolActionText(toolLabel, state) {
+  if (state === 'error') return `执行失败：${toolLabel}`;
+  if (state === 'blocked') return `需要处理：${toolLabel}`;
+  if (state === 'aborted') return `已停止：${toolLabel}`;
+  if (state === 'partial') return `部分完成：${toolLabel}`;
+  if (state === 'submitted') return `已提交：${toolLabel}`;
+  if (state === 'running') return `正在执行：${toolLabel}`;
+  return `已完成：${toolLabel}`;
 }
 
 function buildNativeToolProgressId(event, suffix = '') {
   const toolCallId = normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id);
   const base = toolCallId
-    ? `progress:native:tool:${toolCallId}`
-    : `progress:native:tool:${hashString(normalizeToolName(event) || 'tool')}`;
+    ? `progress:tool:${toolCallId}`
+    : `progress:tool:${hashString(normalizeToolName(event) || 'tool')}`;
   return suffix ? `${base}:${suffix}` : base;
 }
 
@@ -2701,6 +3188,18 @@ function emitNativeToolProgress(api, event, ctx, entry) {
   emitRuntimeEvent(api, runEvent, 'progress', {
     entry: {
       ...entry,
+      text: redactProgressPreview(entry?.text),
+      detail: typeof entry?.detail === 'string' ? redactProgressPreview(entry.detail) : entry?.detail,
+      command: typeof entry?.command === 'string' ? redactProgressPreview(entry.command) : entry?.command,
+      toolLabel: typeof entry?.toolLabel === 'string' ? redactProgressPreview(entry.toolLabel) : entry?.toolLabel,
+      translationParams: entry?.translationParams && typeof entry.translationParams === 'object'
+        ? {
+            ...entry.translationParams,
+            tool: typeof entry.translationParams.tool === 'string'
+              ? redactProgressPreview(entry.translationParams.tool)
+              : entry.translationParams.tool,
+          }
+        : entry?.translationParams,
       source: 'native',
       toolCallId: normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id),
     },
@@ -2709,7 +3208,7 @@ function emitNativeToolProgress(api, event, ctx, entry) {
 
 function emitToolCallProgress(api, event, ctx) {
   const toolName = normalizeToolName(event);
-  if (!toolName) return;
+  if (!toolName || HIDDEN_PROGRESS_TOOLS.has(toolName)) return;
   const command = extractToolProgressCommand(event);
   const commentary = buildNativeToolCommentary(toolName, command);
   if (commentary) {
@@ -2721,11 +3220,17 @@ function emitToolCallProgress(api, event, ctx) {
       stepId: normalizeOptionalString(event?.toolCallId),
     });
   }
+  const toolLabel = progressToolLabel(event, toolName);
+  const state = nativeToolProgressState(event);
   emitNativeToolProgress(api, event, ctx, {
     id: buildNativeToolProgressId(event),
     kind: 'action',
-    text: buildNativeToolActionText(toolName, 'running', command),
-    status: 'running',
+    text: buildNativeToolActionText(toolLabel, state),
+    status: nativeToolProgressStatus(state),
+    translationKey: nativeToolProgressTranslationKey(state),
+    translationParams: { tool: toolLabel },
+    toolName,
+    toolLabel,
     command,
     stepId: normalizeOptionalString(event?.toolCallId),
   });
@@ -2733,13 +3238,22 @@ function emitToolCallProgress(api, event, ctx) {
 
 function emitToolResultProgress(api, event, ctx) {
   const toolName = normalizeToolName(event);
-  if (!toolName) return;
+  if (!toolName || HIDDEN_PROGRESS_TOOLS.has(toolName)) return;
   const failed = isToolError(event);
+  const toolLabel = progressToolLabel(event, toolName);
+  const state = nativeToolProgressState(event, failed);
+  const details = progressResultDetails(event);
   emitNativeToolProgress(api, event, ctx, {
     id: buildNativeToolProgressId(event),
     kind: 'action',
-    text: buildNativeToolActionText(toolName, failed ? 'error' : 'completed'),
-    status: failed ? 'error' : 'completed',
+    text: buildNativeToolActionText(toolLabel, state),
+    status: nativeToolProgressStatus(state),
+    translationKey: nativeToolProgressTranslationKey(state),
+    translationParams: { tool: toolLabel },
+    toolName,
+    toolLabel,
+    command: extractToolProgressCommand(event),
+    taskId: normalizeOptionalString(details.taskId) ?? normalizeOptionalString(details.task_id),
     stepId: normalizeOptionalString(event?.toolCallId),
   });
   if (!failed) return;
@@ -2923,7 +3437,7 @@ function registerArtifactGuard(api) {
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
       description: 'Inject UClaw artifact delivery, turn preferences, and Chinese language context before workspace context is ready.',
-      timeoutMs: MEDIA_INTENT_GATE_TIMEOUT_MS + 2_000,
+      timeoutMs: TURN_PREFERENCES_TIMEOUT_MS + 2_000,
     });
     registerLifecycleHook(api, 'before_tool_call', async (event, ctx) => {
       const screenshotRewrite = rewriteExecScreenshotParams(event);
@@ -2943,6 +3457,59 @@ function registerArtifactGuard(api) {
       }
 
       const toolName = normalizeToolName(effectiveEvent);
+      const promptLengthBlock = nativeMediaPromptLengthBlock(effectiveEvent);
+      if (promptLengthBlock) {
+        logDiagnostic('native-media-prompt-too-long', {
+          eventId: eventId(event, ctx),
+          toolName: promptLengthBlock.toolName,
+          characterCount: promptLengthBlock.characterCount,
+          limit: NATIVE_MEDIA_PROMPT_MAX_CHARACTERS,
+        });
+        return {
+          block: true,
+          blockReason: promptLengthBlock.reason,
+          reason: promptLengthBlock.reason,
+        };
+      }
+      const undeclaredBlock = undeclaredSideEffectBlock(effectiveEvent, ctx);
+      if (undeclaredBlock) {
+        logDiagnostic('undeclared-side-effect-block', {
+          eventId: eventId(event, ctx),
+          toolName: undeclaredBlock.toolName,
+        });
+        return {
+          block: true,
+          blockReason: undeclaredBlock.reason,
+          reason: undeclaredBlock.reason,
+        };
+      }
+      const sideEffectMismatchBlock = contractSideEffectMismatchBlock(effectiveEvent, ctx);
+      if (sideEffectMismatchBlock) {
+        logDiagnostic('side-effect-contract-mismatch', {
+          eventId: eventId(event, ctx),
+          toolName: sideEffectMismatchBlock.toolName,
+          declaredSideEffect: sideEffectMismatchBlock.declaredSideEffect,
+          actualSideEffect: sideEffectMismatchBlock.actualSideEffect,
+        });
+        return {
+          block: true,
+          blockReason: sideEffectMismatchBlock.reason,
+          reason: sideEffectMismatchBlock.reason,
+        };
+      }
+      const authorizationBlock = unauthorizedSideEffectBlock(effectiveEvent, ctx);
+      if (authorizationBlock) {
+        logDiagnostic('side-effect-authorization-block', {
+          eventId: eventId(event, ctx),
+          toolName: authorizationBlock.toolName,
+          sideEffect: authorizationBlock.sideEffect,
+        });
+        return {
+          block: true,
+          blockReason: authorizationBlock.reason,
+          reason: authorizationBlock.reason,
+        };
+      }
       if (toolName && MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) {
         logDiagnostic('native-media-tool-call', {
           eventId: eventId(event, ctx),
@@ -2996,6 +3563,9 @@ function registerArtifactGuard(api) {
         heartbeatPoll: analysis.heartbeatPoll,
         heartbeatOk: analysis.heartbeatOk,
         artifactRequest: analysis.artifactRequest,
+        contractDeclared: Boolean(analysis.declaredContract),
+        contractIntent: analysis.declaredContract?.intent,
+        legacySemanticFallback: analysis.legacySemanticFallback,
         artifactRevisionFeedback: analysis.artifactRevisionFeedback,
         artifactRevisionRequest: analysis.artifactRevisionRequest,
         textLengthRequirement: analysis.textLengthRequirement,
@@ -3028,8 +3598,11 @@ function registerArtifactGuard(api) {
         unresolvedFinalVerificationBlock: analysis.unresolvedFinalVerificationBlock,
         desktopActionRequest: analysis.desktopActionRequest,
         desktopActionEvidence: analysis.desktopActionEvidence,
+        approvalRequired: analysis.approvalRequired,
+        authorizationMissing: analysis.authorizationMissing,
         shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
         shouldReviseEmptyFinal: analysis.shouldReviseEmptyFinal,
+        shouldReviseAuthorization: analysis.shouldReviseAuthorization,
         shouldRevise: analysis.shouldRevise,
       });
       emitRuntimeContractEvents(api, event, analysis);
@@ -3045,7 +3618,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.11',
+  version: '0.1.17',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -3062,14 +3635,22 @@ export const __test = {
   evaluateRequiredEffects,
   buildRevision,
   buildArtifactEvidence,
+  unauthorizedSideEffectBlock,
+  undeclaredSideEffectBlock,
+  contractSideEffectMismatchBlock,
+  knownToolSideEffect,
+  nativeMediaPromptLengthBlock,
   buildToolArtifactEvidence,
   summarizeToolResultForTranscript,
+  emitToolCallProgress,
+  emitToolResultProgress,
   emitToolResultRuntimeEvents,
   emitRuntimeEvent,
   rewriteTmpScreenshotMediaPaths,
   rewriteExecScreenshotParams,
   stageMediaToolInputs,
   recordToolEvidence,
+  getToolEvidenceForRun,
   isInternalTranscriptMessage,
   classifyInternalTranscriptMessage,
   sanitizeInternalTranscriptMessage,

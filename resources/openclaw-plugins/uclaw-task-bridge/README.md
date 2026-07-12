@@ -39,9 +39,18 @@ POST /api/task-bridge/tasks/:taskId/ack
 ```
 
 The Host returns `uclaw.host-task/v1` records containing `progress`,
-`artifacts`, `verifications`, `revision`, `recovery`, and the same correlation
-object. It must treat `idempotencyKey` as durable and return the existing job
-on a replay. `ack` must be idempotent and record the supplied completion key.
+`artifacts`, `verifications`, `revision`, `recovery`, lifecycle operations, and
+the same correlation object. The durable Host snapshot also stores a bounded
+JSON input and executor-owned checkpoint. It must treat `idempotencyKey` as
+durable, reject a conflicting replay, and return the existing job for an exact
+replay. `ack` must be idempotent and record the supplied completion key.
+
+Capabilities advertise lifecycle support from their actual registered methods:
+`start` is required, while `cancel` and `resume` are optional. The Host persists
+an operation claim before invoking any method. Repeated requests in the same
+process reuse that claim; after a restart, only an explicit `resume_if_safe`
+request can delegate the stored input and checkpoint to a capability's
+`resume` method. The generic bridge never replays a side effect itself.
 
 ## Completion boundary
 
@@ -55,4 +64,8 @@ the event is durable but waits for the next session turn/heartbeat.
 
 The two stores cannot share one transaction. A Host acknowledgement reduces
 duplicate wake scheduling after restart; delivery is at-least-once at the
-scheduler boundary and exactly-once for the injected completion context.
+scheduler boundary and exactly-once for the injected completion context. A
+duplicate idempotent injection handle is valid evidence that the durable context
+already exists, so a successful same-session wake can acknowledge it. Failed
+injection, wake, or acknowledgement attempts use bounded exponential backoff
+instead of polling the same terminal task every monitor tick.

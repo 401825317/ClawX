@@ -35,6 +35,7 @@ function cloneRunState(runId: string, event: ChatRuntimeEvent): ChatRuntimeRunSt
     turnContract: undefined,
     planSummary: undefined,
     planSteps: [],
+    tasks: [],
     artifacts: [],
     verifications: [],
     issues: [],
@@ -61,9 +62,6 @@ function stableRuntimeFingerprint(value: unknown): string {
 function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntimeEvent): boolean {
   if (!left) return false;
   if (left.runId !== right.runId || left.type !== right.type) return false;
-  if (typeof left.seq === 'number' && typeof right.seq === 'number') {
-    return left.seq === right.seq;
-  }
   if (left.type === 'tool.started') {
     return right.type === left.type && right.toolCallId === left.toolCallId;
   }
@@ -121,6 +119,10 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
     return right.type === left.type
       && stableRuntimeFingerprint(right.step) === stableRuntimeFingerprint(left.step);
   }
+  if (left.type === 'task.updated') {
+    return right.type === left.type
+      && stableRuntimeFingerprint(right.task) === stableRuntimeFingerprint(left.task);
+  }
   if (left.type === 'artifact.produced') {
     return right.type === left.type
       && stableRuntimeFingerprint(right.artifact) === stableRuntimeFingerprint(left.artifact);
@@ -151,6 +153,138 @@ function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
   return items.map((item, index) => (index === existingIndex ? { ...item, ...next } : item));
 }
 
+function upsertProgressEntry(
+  items: NonNullable<ChatRuntimeRunState['progressEntries']>,
+  next: NonNullable<ChatRuntimeRunState['progressEntries']>[number],
+): NonNullable<ChatRuntimeRunState['progressEntries']> {
+  const canMatchToolKind = Boolean(
+    next.toolCallId && (next.kind === 'action' || next.kind === 'commentary'),
+  );
+  const existingIndex = items.findIndex((item) => (
+    item.id === next.id
+    || (canMatchToolKind && item.toolCallId === next.toolCallId && item.kind === next.kind)
+  ));
+  if (existingIndex === -1) return [...items, next];
+  const existing = items[existingIndex]!;
+  if (existing.source === 'native' && next.source !== 'native') return items;
+  if (
+    next.kind === 'action'
+    && next.status === 'running'
+    && (
+      (existing.status != null && existing.status !== 'running')
+      || (
+        next.translationKey === 'runtimeProgress.toolRunning'
+        && existing.translationKey === 'runtimeProgress.toolSubmitted'
+      )
+    )
+  ) {
+    return items;
+  }
+  const existingTerminal = existing.status != null && existing.status !== 'running';
+  const nextRunning = next.status === 'running';
+  const existingSubmitted = existing.status === 'running'
+    && (existing.translationKey === 'runtimeProgress.toolSubmitted' || Boolean(existing.taskId));
+  const nextPlainRunning = nextRunning
+    && next.translationKey === 'runtimeProgress.toolRunning'
+    && !next.taskId;
+  if ((existingTerminal && nextRunning) || (existingSubmitted && nextPlainRunning)) return items;
+  const merged = { ...existing };
+  for (const [key, value] of Object.entries(next)) {
+    if (value !== undefined) (merged as unknown as Record<string, unknown>)[key] = value;
+  }
+  merged.id = existing.id;
+  return items.map((item, index) => (index === existingIndex ? merged : item));
+}
+
+type RuntimeTaskProjection = NonNullable<ChatRuntimeRunState['tasks']>[number];
+
+const TERMINAL_TASK_STATUSES = new Set<RuntimeTaskProjection['status']>(['completed', 'error']);
+
+function taskUpdatedAt(task: RuntimeTaskProjection, fallback?: number): number | undefined {
+  if (typeof task.updatedAt === 'number' && Number.isFinite(task.updatedAt)) return task.updatedAt;
+  if (typeof fallback === 'number' && Number.isFinite(fallback)) return fallback;
+  return undefined;
+}
+
+function shouldApplyTaskUpdate(
+  existing: RuntimeTaskProjection | undefined,
+  incoming: RuntimeTaskProjection,
+  eventTs?: number,
+): boolean {
+  if (!existing) return true;
+  const existingUpdatedAt = taskUpdatedAt(existing);
+  const incomingUpdatedAt = taskUpdatedAt(incoming, eventTs);
+  if (existingUpdatedAt != null && incomingUpdatedAt != null && incomingUpdatedAt < existingUpdatedAt) {
+    return false;
+  }
+  if (TERMINAL_TASK_STATUSES.has(existing.status) && !TERMINAL_TASK_STATUSES.has(incoming.status)) {
+    return false;
+  }
+  return true;
+}
+
+function mergeTaskProjection(
+  existing: RuntimeTaskProjection | undefined,
+  incoming: RuntimeTaskProjection,
+  eventTs?: number,
+): RuntimeTaskProjection {
+  const merged = { ...existing } as RuntimeTaskProjection;
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value !== undefined) {
+      (merged as unknown as Record<string, unknown>)[key] = value;
+    }
+  }
+  merged.updatedAt = taskUpdatedAt(incoming, eventTs) ?? existing?.updatedAt;
+  return merged;
+}
+
+function upsertTaskProjection(
+  items: RuntimeTaskProjection[],
+  next: RuntimeTaskProjection,
+  eventTs?: number,
+): RuntimeTaskProjection[] {
+  const existingIndex = items.findIndex((item) => item.taskId === next.taskId);
+  if (existingIndex === -1) return [...items, mergeTaskProjection(undefined, next, eventTs)];
+  return items.map((item, index) => (
+    index === existingIndex ? mergeTaskProjection(item, next, eventTs) : item
+  ));
+}
+
+function updateTaskOnlyRunStatus(run: ChatRuntimeRunState): void {
+  const hasExplicitRunLifecycle = run.events.some((event) => (
+    event.type === 'run.started' || event.type === 'run.ended'
+  ));
+  if (hasExplicitRunLifecycle) return;
+  const tasks = run.tasks ?? [];
+  if (tasks.length === 0) return;
+  const hasActiveTask = tasks.some((task) => (
+    task.status === 'pending'
+    || task.status === 'running'
+    || task.status === 'waiting_approval'
+  ));
+  if (hasActiveTask) {
+    run.status = 'running';
+    run.endedAt = undefined;
+    return;
+  }
+  run.status = tasks.some((task) => task.status === 'error') ? 'error' : 'completed';
+  run.endedAt = Math.max(
+    ...tasks.map((task) => task.endedAt ?? task.updatedAt ?? 0),
+    run.lastEventAt ?? 0,
+  ) || undefined;
+}
+
+function isPartialTaskIssue(issue: NonNullable<ChatRuntimeRunState['issues']>[number], taskId: string): boolean {
+  return issue.code === 'task.partial' && issue.targetId === taskId;
+}
+
+function isPartialTaskCheckpoint(
+  checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number],
+  taskId: string,
+): boolean {
+  return checkpoint.kind === 'partial' && checkpoint.taskId === taskId;
+}
+
 function sortPlanSteps(steps: NonNullable<ChatRuntimeRunState['planSteps']>): NonNullable<ChatRuntimeRunState['planSteps']> {
   return [...steps].sort((left, right) => {
     const leftOrder = typeof left.order === 'number' ? left.order : Number.MAX_SAFE_INTEGER;
@@ -170,14 +304,26 @@ export function applyRuntimeEventToRuns(
   const existing = currentRuns[event.runId] ?? cloneRunState(event.runId, event);
   if (
     typeof event.seq === 'number'
-    && existing.events.some((existingEvent) => existingEvent.seq === event.seq)
+    && existing.events.some((existingEvent) => (
+      existingEvent.seq === event.seq && sameRuntimeEvent(existingEvent, event)
+    ))
+  ) {
+    return currentRuns;
+  }
+  const eventTs = typeof event.ts === 'number' ? event.ts : Date.now();
+  const existingTask = event.type === 'task.updated'
+    ? existing.tasks?.find((task) => task.taskId === event.task.taskId)
+    : undefined;
+  if (
+    event.type === 'task.updated'
+    && !shouldApplyTaskUpdate(existingTask, event.task, eventTs)
   ) {
     return currentRuns;
   }
   const nextRun: ChatRuntimeRunState = {
     ...existing,
     sessionKey: event.sessionKey ?? existing.sessionKey,
-    lastEventAt: typeof event.ts === 'number' ? event.ts : Date.now(),
+    lastEventAt: Math.max(existing.lastEventAt ?? eventTs, eventTs),
     events: sameRuntimeEvent(existing.events.at(-1), event)
       ? existing.events
       : [...existing.events, event],
@@ -189,6 +335,10 @@ export function applyRuntimeEventToRuns(
       nextRun.startedAt = event.startedAt ?? nextRun.startedAt;
       nextRun.objective = event.objective ?? nextRun.objective;
       nextRun.endedAt = undefined;
+      nextRun.issues = [];
+      nextRun.checkpoints = [];
+      nextRun.gateEvaluations = [];
+      nextRun.gateResult = undefined;
       break;
     case 'run.plan.updated':
       nextRun.objective = event.objective ?? nextRun.objective;
@@ -200,6 +350,23 @@ export function applyRuntimeEventToRuns(
       break;
     case 'run.step.updated':
       nextRun.planSteps = sortPlanSteps(upsertById(nextRun.planSteps ?? [], event.step));
+      break;
+    case 'task.updated':
+      nextRun.tasks = upsertTaskProjection(nextRun.tasks ?? [], event.task, eventTs);
+      if (
+        event.task.status !== 'partial'
+        && (
+          existingTask?.status === 'partial'
+          || (nextRun.issues ?? []).some((issue) => isPartialTaskIssue(issue, event.task.taskId))
+          || (nextRun.checkpoints ?? []).some((checkpoint) => isPartialTaskCheckpoint(checkpoint, event.task.taskId))
+        )
+      ) {
+        nextRun.issues = (nextRun.issues ?? []).filter((issue) => !isPartialTaskIssue(issue, event.task.taskId));
+        nextRun.checkpoints = (nextRun.checkpoints ?? [])
+          .filter((checkpoint) => !isPartialTaskCheckpoint(checkpoint, event.task.taskId));
+        nextRun.gateResult = undefined;
+      }
+      updateTaskOnlyRunStatus(nextRun);
       break;
     case 'run.ended':
       nextRun.status = event.status;
@@ -254,7 +421,7 @@ export function applyRuntimeEventToRuns(
       break;
     }
     case 'progress.update':
-      nextRun.progressEntries = upsertById(nextRun.progressEntries ?? [], event.entry);
+      nextRun.progressEntries = upsertProgressEntry(nextRun.progressEntries ?? [], event.entry);
       break;
     default:
       break;

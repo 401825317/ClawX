@@ -4,9 +4,22 @@ import { Type } from '@sinclair/typebox';
 const PLUGIN_ID = 'uclaw-task-bridge';
 const CONTRACT_VERSION = 'uclaw.host-task/v1';
 const REQUEST_SCHEMA = 'uclaw.host-task.request/v1';
+const TOOL_NAMES = [
+  'uclaw_get_runtime_capabilities',
+  'uclaw_declare_turn_contract',
+  'uclaw_get_task_bridge_capabilities',
+  'uclaw_start_host_task',
+  'uclaw_get_host_task',
+  'uclaw_list_host_tasks',
+  'uclaw_cancel_host_task',
+  'uclaw_recover_host_task',
+];
 const DEFAULT_HOST_API_ORIGIN = 'http://127.0.0.1:13210';
 const MONITOR_INTERVAL_MS = 2_500;
 const COMPLETION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const COMPLETION_RETRY_BASE_MS = 15_000;
+const COMPLETION_RETRY_MAX_MS = 5 * 60 * 1_000;
+const MAX_COMPLETION_RETRY_ENTRIES = 2_000;
 const MAX_EVENT_ITEMS = 24;
 const MAX_TEXT_CHARS = 4_000;
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost']);
@@ -140,6 +153,17 @@ function normalizeTask(value) {
   const verifications = Array.isArray(task.verifications)
     ? task.verifications.slice(-MAX_EVENT_ITEMS).map(normalizeVerification)
     : [];
+  const lifecycle = task.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : {};
+  const operations = Array.isArray(lifecycle.operations)
+    ? lifecycle.operations.slice(-MAX_EVENT_ITEMS).map((operation) => ({
+        kind: cleanText(operation?.kind, 80),
+        status: cleanText(operation?.status, 80),
+        attempt: Number.isFinite(operation?.attempt) ? Math.max(1, Math.floor(operation.attempt)) : 1,
+        startedAt: Number.isFinite(operation?.startedAt) ? operation.startedAt : undefined,
+        finishedAt: Number.isFinite(operation?.finishedAt) ? operation.finishedAt : undefined,
+        error: cleanText(operation?.error, 1_500) || undefined,
+      }))
+    : [];
   return {
     schema: cleanText(task.schema, 120) || CONTRACT_VERSION,
     taskId: cleanText(task.taskId || task.id, 300),
@@ -153,6 +177,7 @@ function normalizeTask(value) {
     error: cleanText(task.error, 1_500) || undefined,
     recoverable: task.recoverable === true,
     recovery: task.recovery && typeof task.recovery === 'object' ? task.recovery : undefined,
+    lifecycle: { operations },
     correlation: {
       sessionKey: cleanText(correlation.sessionKey, 300),
       runId: cleanText(correlation.runId, 300),
@@ -224,6 +249,7 @@ function taskInstruction(task) {
       : 'Task did not complete. Report the concrete failure; do not claim an artifact was delivered.';
   }
   if (task.status === 'cancelled') return 'Task was cancelled. Do not claim completion.';
+  if (task.recoverable) return 'Task did not complete, but the Host reported a supported recovery path. Inspect task.recovery before requesting it.';
   return 'Task status is unknown. Query it again before describing any completion.';
 }
 
@@ -324,14 +350,60 @@ function extractTasks(payload) {
 
 function createBridge(api, options = {}) {
   const request = options.hostApiFetch || hostApiFetch;
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  const completionRetryBaseMs = Number.isFinite(options.completionRetryBaseMs)
+    ? Math.max(1, Math.floor(options.completionRetryBaseMs))
+    : COMPLETION_RETRY_BASE_MS;
+  const completionRetryMaxMs = Number.isFinite(options.completionRetryMaxMs)
+    ? Math.max(completionRetryBaseMs, Math.floor(options.completionRetryMaxMs))
+    : COMPLETION_RETRY_MAX_MS;
   let timer;
   let polling = false;
   let loggedUnavailable = false;
   const tracked = new Map();
+  const completionRetries = new Map();
 
   function track(task) {
     if (task?.taskId) tracked.set(task.taskId, task);
     return task;
+  }
+
+  function completionRetryKey(task) {
+    return `${task.taskId}:${task.revision}`;
+  }
+
+  function completionRetryDue(task) {
+    const retry = completionRetries.get(completionRetryKey(task));
+    return !retry || retry.nextAttemptAt <= now();
+  }
+
+  function clearCompletionRetry(task) {
+    completionRetries.delete(completionRetryKey(task));
+  }
+
+  function scheduleCompletionRetry(task, reason, details = {}) {
+    const key = completionRetryKey(task);
+    const previous = completionRetries.get(key);
+    const attempts = (previous?.attempts || 0) + 1;
+    const delayMs = Math.min(
+      completionRetryMaxMs,
+      completionRetryBaseMs * (2 ** Math.min(attempts - 1, 20)),
+    );
+    completionRetries.set(key, {
+      attempts,
+      nextAttemptAt: now() + delayMs,
+    });
+    while (completionRetries.size > MAX_COMPLETION_RETRY_ENTRIES) {
+      completionRetries.delete(completionRetries.keys().next().value);
+    }
+    api.logger?.warn?.(`[${PLUGIN_ID}] Completion delivery deferred with bounded retry`, {
+      taskId: task.taskId,
+      sessionKey: task.correlation.sessionKey,
+      reason,
+      attempt: attempts,
+      retryInMs: delayMs,
+      ...details,
+    });
   }
 
   async function acknowledge(task, key, result) {
@@ -341,40 +413,54 @@ function createBridge(api, options = {}) {
         body: JSON.stringify({
           schema: 'uclaw.host-task.delivery-ack/v1',
           deliveryKey: key,
+          sessionKey: task.correlation.sessionKey,
           delivery: {
             kind: 'openclaw_session_completion',
-            injectionEnqueued: result?.injection?.enqueued === true,
+            injectionEnqueued: result?.injectionReady === true,
             sessionTurnScheduled: result?.scheduled === true,
-            at: Date.now(),
+            at: now(),
           },
         }),
       });
-      return true;
+      return { ok: true };
     } catch (error) {
-      api.logger?.warn?.(`[${PLUGIN_ID}] Host acknowledgement failed; completion remains retryable`, {
-        taskId: task.taskId,
+      return {
+        ok: false,
         error: error instanceof Error ? error.message : String(error),
-      });
-      return false;
+      };
     }
   }
 
   async function deliverTerminalTask(task) {
     if (!terminalTask(task) || !task.taskId || !task.correlation.sessionKey) return;
+    if (!completionRetryDue(task)) return;
     const key = completionKey(task);
-    const injection = await api.session.workflow.enqueueNextTurnInjection({
-      sessionKey: task.correlation.sessionKey,
-      text: completionInjectionText(task),
-      idempotencyKey: key,
-      placement: 'prepend_context',
-      ttlMs: COMPLETION_TTL_MS,
-      metadata: {
-        taskId: task.taskId,
-        revision: task.revision,
-        runId: task.correlation.runId,
-        toolCallId: task.correlation.toolCallId,
-      },
-    });
+    let injection;
+    try {
+      injection = await api.session.workflow.enqueueNextTurnInjection({
+        sessionKey: task.correlation.sessionKey,
+        text: completionInjectionText(task),
+        idempotencyKey: key,
+        placement: 'prepend_context',
+        ttlMs: COMPLETION_TTL_MS,
+        metadata: {
+          taskId: task.taskId,
+          revision: task.revision,
+          runId: task.correlation.runId,
+          toolCallId: task.correlation.toolCallId,
+        },
+      });
+    } catch (error) {
+      scheduleCompletionRetry(task, 'injection_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const injectionReady = injection?.enqueued === true || Boolean(cleanText(injection?.id, 300));
+    if (!injectionReady) {
+      scheduleCompletionRetry(task, 'injection_not_ready');
+      return;
+    }
 
     let scheduled = false;
     let scheduleError;
@@ -392,11 +478,15 @@ function createBridge(api, options = {}) {
       scheduleError = error instanceof Error ? error.message : String(error);
     }
 
-    await acknowledge(task, key, { injection, scheduled });
-    if (!scheduled) {
-      api.logger?.warn?.(`[${PLUGIN_ID}] Completion injected but same-session wake was unavailable`, {
-        taskId: task.taskId,
-        sessionKey: task.correlation.sessionKey,
+    if (scheduled) {
+      const acknowledged = await acknowledge(task, key, { injectionReady, scheduled });
+      if (acknowledged.ok) {
+        clearCompletionRetry(task);
+      } else {
+        scheduleCompletionRetry(task, 'host_acknowledgement_failed', { error: acknowledged.error });
+      }
+    } else {
+      scheduleCompletionRetry(task, 'session_wake_failed', {
         injectionEnqueued: injection?.enqueued === true,
         scheduleError,
       });
@@ -407,7 +497,7 @@ function createBridge(api, options = {}) {
     if (polling) return;
     polling = true;
     try {
-      const payload = await request('/api/task-bridge/tasks?activeOnly=false&includeTerminalUndelivered=true');
+      const payload = await request('/api/task-bridge/tasks?activeOnly=true&includeTerminalUndelivered=true');
       loggedUnavailable = false;
       const tasks = extractTasks(payload);
       for (const task of tasks) {
@@ -438,16 +528,16 @@ function createBridge(api, options = {}) {
     timer = undefined;
   }
 
-  function createTools() {
+  function createTools(toolContext) {
     return [
       {
         name: 'uclaw_get_runtime_capabilities',
         label: 'UClaw runtime capabilities',
         description: 'Read the real capabilities available to the current UClaw/OpenClaw runtime before selecting an unfamiliar tool or claiming that a local action can be executed. Treat unavailable and not-implemented entries as blockers, not as tools to retry.',
         parameters: Type.Object({}, { additionalProperties: false }),
-        async execute(toolCallId, _params, _signal, _onUpdate, ctx) {
+        async execute(toolCallId) {
           try {
-            const correlation = correlationFromContext(ctx, toolCallId);
+            const correlation = correlationFromContext(toolContext, toolCallId);
             const query = new URLSearchParams({ sessionKey: correlation.sessionKey });
             const payload = await request(`/api/runtime/capabilities?${query.toString()}`);
             const result = {
@@ -487,7 +577,9 @@ function createBridge(api, options = {}) {
             Type.Literal('remote_generation'),
             Type.Literal('external_action'),
           ]),
-          sideEffectAuthorized: Type.Optional(Type.Boolean()),
+          sideEffectAuthorized: Type.Boolean({
+            description: 'Required. True when the current user message explicitly requests or confirms this side effect; false while confirmation is pending.',
+          }),
           capabilityRefs: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 32 })),
           acceptance: Type.Optional(Type.Object({
             requiresArtifact: Type.Optional(Type.Boolean()),
@@ -496,9 +588,9 @@ function createBridge(api, options = {}) {
             requiresToolEvidence: Type.Optional(Type.Boolean()),
           }, { additionalProperties: false })),
         }, { additionalProperties: false }),
-        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+        async execute(toolCallId, params) {
           try {
-            const correlation = correlationFromContext(ctx, toolCallId);
+            const correlation = correlationFromContext(toolContext, toolCallId);
             const payload = await request('/api/runtime/turn-contracts', {
               method: 'POST',
               body: JSON.stringify({ correlation, contract: params }),
@@ -539,9 +631,9 @@ function createBridge(api, options = {}) {
           input: Type.Optional(Type.Any()),
           idempotencyKey: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
         }, { additionalProperties: false }),
-        async execute(toolCallId, params, _signal, onUpdate, ctx) {
+        async execute(toolCallId, params, _signal, onUpdate) {
           try {
-            const correlation = correlationFromContext(ctx, toolCallId, params.idempotencyKey);
+            const correlation = correlationFromContext(toolContext, toolCallId, params.idempotencyKey);
             const payload = await request('/api/task-bridge/tasks', {
               method: 'POST',
               body: JSON.stringify({
@@ -568,9 +660,11 @@ function createBridge(api, options = {}) {
         parameters: Type.Object({
           taskId: Type.String({ minLength: 1, maxLength: 300 }),
         }, { additionalProperties: false }),
-        async execute(_toolCallId, params, _signal, onUpdate) {
+        async execute(toolCallId, params, _signal, onUpdate) {
           try {
-            const task = track(normalizeTask(await request(`/api/task-bridge/tasks/${encodeURIComponent(params.taskId)}`)));
+            const correlation = correlationFromContext(toolContext, toolCallId);
+            const query = new URLSearchParams({ sessionKey: correlation.sessionKey });
+            const task = track(normalizeTask(await request(`/api/task-bridge/tasks/${encodeURIComponent(params.taskId)}?${query.toString()}`)));
             if (!task.taskId) throw new HostTaskBridgeError('Host task status response did not include taskId', 'host_task_id_missing');
             emitToolUpdate(onUpdate, 'status', task);
             return buildTaskToolResult('status', task);
@@ -586,9 +680,9 @@ function createBridge(api, options = {}) {
         parameters: Type.Object({
           activeOnly: Type.Optional(Type.Boolean()),
         }, { additionalProperties: false }),
-        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+        async execute(toolCallId, params) {
           try {
-            const correlation = correlationFromContext(ctx, toolCallId);
+            const correlation = correlationFromContext(toolContext, toolCallId);
             const query = new URLSearchParams({ sessionKey: correlation.sessionKey, activeOnly: String(params.activeOnly !== false) });
             const tasks = extractTasks(await request(`/api/task-bridge/tasks?${query.toString()}`));
             tasks.forEach(track);
@@ -610,14 +704,14 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_cancel_host_task',
         label: 'Cancel UClaw Host task',
-        description: 'Request cancellation of a specific UClaw Host task. The Host owns whether cancellation is safe and must return the resulting terminal state.',
+        description: 'Request cancellation of a specific UClaw Host task. The registered Host executor owns cancellation. The returned snapshot may only confirm that cancellation was delegated; wait for terminal evidence before claiming it stopped.',
         parameters: Type.Object({
           taskId: Type.String({ minLength: 1, maxLength: 300 }),
           reason: Type.Optional(Type.String({ maxLength: 1_000 })),
         }, { additionalProperties: false }),
-        async execute(toolCallId, params, _signal, onUpdate, ctx) {
+        async execute(toolCallId, params, _signal, onUpdate) {
           try {
-            const correlation = correlationFromContext(ctx, toolCallId);
+            const correlation = correlationFromContext(toolContext, toolCallId);
             const task = track(normalizeTask(await request(`/api/task-bridge/tasks/${encodeURIComponent(params.taskId)}/cancel`, {
               method: 'POST',
               body: JSON.stringify({ correlation, reason: cleanText(params.reason, 1_000) || undefined }),
@@ -633,7 +727,7 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_recover_host_task',
         label: 'Recover UClaw Host task',
-        description: 'Ask the UClaw Host to recover a specific interrupted task. Use only after status shows recoverable=true. The Host decides whether it can resume without duplicating side effects.',
+        description: 'Ask the UClaw Host to recover a specific interrupted task. Use only after status shows recoverable=true and task.recovery lists the requested strategy. resume_if_safe is delegated only to the registered executor and never replays a generic side effect.',
         parameters: Type.Object({
           taskId: Type.String({ minLength: 1, maxLength: 300 }),
           strategy: Type.Optional(Type.Union([
@@ -642,9 +736,9 @@ function createBridge(api, options = {}) {
             Type.Literal('redeliver_existing_artifacts'),
           ])),
         }, { additionalProperties: false }),
-        async execute(toolCallId, params, _signal, onUpdate, ctx) {
+        async execute(toolCallId, params, _signal, onUpdate) {
           try {
-            const correlation = correlationFromContext(ctx, toolCallId);
+            const correlation = correlationFromContext(toolContext, toolCallId);
             const task = track(normalizeTask(await request(`/api/task-bridge/tasks/${encodeURIComponent(params.taskId)}/recover`, {
               method: 'POST',
               body: JSON.stringify({
@@ -672,7 +766,7 @@ export const pluginEntry = definePluginEntry({
   description: 'Adapts recoverable UClaw Host work into OpenClaw tools and same-session completion events without owning an agent loop.',
   register(api) {
     const bridge = createBridge(api);
-    for (const tool of bridge.createTools()) api.registerTool(tool);
+    api.registerTool((toolContext) => bridge.createTools(toolContext), { names: TOOL_NAMES });
     api.registerService({
       id: 'uclaw-task-bridge-monitor',
       start() {
@@ -696,6 +790,7 @@ export default pluginEntry;
 export const __test = {
   HostTaskBridgeError,
   normalizeTask,
+  terminalTask,
   taskEvents,
   buildTaskToolResult,
   correlationFromContext,

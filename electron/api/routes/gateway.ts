@@ -202,13 +202,36 @@ async function runSerializedChatSendRpc(
 async function runSerializedChatAbortRpc(
   ctx: HostApiContext,
   sessionKeyRaw: string,
+  options: { runId?: string; taskIds?: string[] } = {},
 ): Promise<Record<string, unknown>> {
   const sessionKey = sessionKeyRaw.trim() || 'unknown';
+  const runId = typeof options.runId === 'string' && options.runId.trim() ? options.runId.trim() : undefined;
+  const taskIds = [...new Set((options.taskIds ?? [])
+    .map((taskId) => typeof taskId === 'string' ? taskId.trim() : '')
+    .filter(Boolean))].slice(0, 100);
   chatAbortSessionVersions.set(sessionKey, (chatAbortSessionVersions.get(sessionKey) ?? 0) + 1);
   const previousAbortTail = chatAbortSessionTails.get(sessionKey) ?? Promise.resolve();
   const promise = previousAbortTail
     .catch(() => undefined)
-    .then(() => runGatewayRpc<Record<string, unknown>>(ctx, 'chat.abort', { sessionKey: sessionKeyRaw }))
+    .then(async () => {
+      const taskCancellations = await Promise.all(taskIds.map(async (taskId) => {
+        try {
+          const result = await runGatewayRpc<Record<string, unknown>>(ctx, 'tasks.cancel', {
+            taskId,
+            reason: 'Cancelled from the UClaw chat composer.',
+          }, 15_000);
+          return { taskId, ok: true, result };
+        } catch (error) {
+          logger.warn('[chat.abort] Failed to cancel detached task', { taskId, error: String(error) });
+          return { taskId, ok: false, error: String(error) };
+        }
+      }));
+      const chat = await runGatewayRpc<Record<string, unknown>>(ctx, 'chat.abort', {
+        sessionKey: sessionKeyRaw,
+        ...(runId ? { runId } : {}),
+      });
+      return { ...chat, taskCancellations };
+    })
     .finally(() => {
       chatAbortSettleUntil.set(sessionKey, Date.now() + CHAT_ABORT_SETTLE_MS);
     });
@@ -427,8 +450,11 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/chat/abort' && req.method === 'POST') {
     try {
-      const body = await parseJsonBody<{ sessionKey: string }>(req);
-      const result = await runSerializedChatAbortRpc(ctx, body.sessionKey);
+      const body = await parseJsonBody<{ sessionKey: string; runId?: string; taskIds?: string[] }>(req);
+      const result = await runSerializedChatAbortRpc(ctx, body.sessionKey, {
+        runId: body.runId,
+        taskIds: Array.isArray(body.taskIds) ? body.taskIds : [],
+      });
       sendJson(res, 200, { success: true, result });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });

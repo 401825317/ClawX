@@ -36,7 +36,16 @@ function desktopObservationInput(value: unknown): DesktopObservationRequest {
 
 async function runDesktopObservation(context: HostCapabilityTaskContext): Promise<void> {
   const request = desktopObservationInput(context.input);
-  await context.update({ status: 'running', progress: { detail: '正在获取新的桌面观察快照。' } });
+  const operation = context.task.lifecycle.operations.at(-1);
+  await context.update({
+    status: 'running',
+    checkpoint: {
+      phase: 'observing',
+      operation: operation?.kind ?? 'start',
+      attempt: operation?.attempt ?? 1,
+    },
+    progress: { detail: '正在获取新的桌面观察快照。' },
+  });
   const state = await desktopRunCoordinator.observe({
     sessionKey: context.task.sessionKey,
     runId: context.task.runId,
@@ -44,6 +53,10 @@ async function runDesktopObservation(context: HostCapabilityTaskContext): Promis
   if (state.error || !state.screenshot) {
     await context.update({
       status: 'blocked',
+      checkpoint: {
+        phase: 'blocked',
+        retryable: state.error?.retryable === true,
+      },
       error: state.error?.message ?? 'Desktop observation did not return a screenshot.',
       progress: { detail: '桌面观察不可用，未执行任何桌面操作。' },
     });
@@ -76,6 +89,11 @@ async function runDesktopObservation(context: HostCapabilityTaskContext): Promis
   };
   await context.update({
     status: 'succeeded',
+    checkpoint: {
+      phase: 'completed',
+      artifactId,
+      filePath: state.screenshot.filePath,
+    },
     progress: { completed: 1, total: 1, detail: '桌面观察已完成并验证截图产物。' },
     artifacts: [artifact],
     verifications: [verification],
@@ -101,5 +119,8 @@ export function ensureDefaultHostCapabilities(): void {
       };
     },
     start: runDesktopObservation,
+    // Observation has no external side effect, so an interrupted capture can
+    // safely obtain a fresh snapshot instead of replaying an action.
+    resume: runDesktopObservation,
   });
 }

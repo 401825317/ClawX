@@ -3,17 +3,12 @@ id: video-generation-prompt-length-guard
 title: Video generation prompt length guard
 scenario: gateway-backend-communication
 taskType: runtime-bridge
-intent: Prevent over-limit Grok/xAI video prompts from reaching the upstream video generation provider by enforcing a local final-prompt length guard in UClaw Main process routing and worker execution.
+intent: Keep the 4096-character provider boundary in the executable video worker while ensuring chat turns reach video generation only through OpenClaw's native Agent tool path.
 touchedAreas:
   - harness/specs/tasks/video-generation-prompt-length-guard.md
-  - electron/api/routes/media.ts
   - electron/utils/media-generation-worker-entry.ts
   - electron/utils/video-generation-prompt-limits.ts
-  - electron/utils/video-generation-route-planner.ts
-  - electron/utils/media-intent-planner.ts
-  - tests/unit/media-generation-worker-entry.test.ts
-  - tests/unit/video-generation-chat-send-route.test.ts
-  - tests/unit/video-generation-route-planner.test.ts
+  - electron/api/routes/media.ts
 requiredProfiles:
   - fast
   - comms
@@ -22,32 +17,25 @@ requiredRules:
   - renderer-main-boundary
   - api-client-transport-policy
 expectedUserBehavior:
-  - Authorized image and video actions use an `xhigh` reasoning text-planning pass before the media generation API is called; the media generation API itself does not receive reasoning-only parameters.
-  - The prompt planner, route guard, and worker guard share one 4096 Unicode-character limit for both text-to-video and image-to-video.
-  - Video route planning asks the planner to keep `video_prompt` concise and within the local Grok/xAI safety limit.
-  - Final video prompts longer than the local safety limit are rejected locally before a video job is enqueued.
-  - Worker execution repeats the same final prompt length guard before calling the video runtime.
+  - Chat, image-mode, and video-mode requests first enter OpenClaw's Agent loop; UClaw does not shorten or authorize a video prompt in a parallel chat-send route.
+  - The executable video worker enforces the shared 4096 Unicode-character limit immediately before calling the provider runtime.
+  - The retired `/api/media/video-generation/chat-send` route returns HTTP 410 and never enqueues a video job.
 acceptance:
-  - Explicit image and video mode generation plans include prompt-planning evidence with `reasoningEffort=xhigh`, original character count, and final character count.
-  - Prompt-planning failure preserves the authorized media route and falls back to the original prompt instead of silently cancelling generation.
-  - Planned video prompts, route validation, and worker validation all use the same exported 4096 Unicode-character limit.
-  - POST /api/media/video-generation/chat-send validates the final `route.videoPrompt || prompt` value, not only the raw user prompt.
-  - Over-limit final video prompts return a local 400 response with prompt length metadata and do not call `prepareMediaGenerationJob` or `enqueueMediaGenerationJob`.
   - Worker-side over-limit video prompts fail before `generateVideoForChatSession` is called.
+  - The shared `MAX_VIDEO_GENERATION_PROMPT_CHARS` constant remains 4096.
+  - Normal video-mode sends use `/api/chat/send` with video preferences and never call a direct media chat-send route.
+  - The retired direct route cannot bypass Agent authorization, prompt validation, idempotency, or the native task ledger.
 requiredTests:
-  - tests/unit/video-generation-chat-send-route.test.ts
-  - tests/unit/media-generation-worker-entry.test.ts
-  - tests/unit/video-generation-route-planner.test.ts
+  - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
+  - pnpm harness validate --spec harness/specs/tasks/video-generation-prompt-length-guard.md --since HEAD
+  - pnpm exec tsc --noEmit --pretty false
 docs:
   required: false
 ---
 
 ## Contract
 
-- The video provider limit is enforced on the final prompt sent to the video
-  runtime, after route planning and fallback normalization.
-- Planner instructions are a helpful soft limit only; code-level validation is
-  the boundary that protects upstream SLA.
-- Reasoning belongs to the pre-generation text planner. Image and video model
-  requests keep their provider-specific schemas and do not receive
-  `reasoning_effort`.
+- Prompt planning belongs to OpenClaw's Agent loop.
+- Parameter limits belong at both the native tool schema and the final provider
+  execution boundary. This spec retains the worker boundary; the retired
+  UClaw chat-send route is not a compatibility path.

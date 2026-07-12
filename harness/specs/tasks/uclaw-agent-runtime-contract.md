@@ -29,10 +29,11 @@ touchedAreas:
   - electron/utils/media-generation-jobs.ts
   - electron/utils/media-generation-types.ts
   - electron/utils/media-generation-worker-entry.ts
-  - electron/utils/media-intent-planner.ts
+  - electron/services/agent-runtime/**
   - shared/chat-runtime-events.ts
   - shared/composite-run.ts
   - electron/gateway/chat-runtime-events.ts
+  - electron/gateway/task-ledger-monitor.ts
   - electron/gateway/event-dispatch.ts
   - resources/openclaw-plugins/uclaw-artifact-guard/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
@@ -40,6 +41,7 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-local-artifacts/index.mjs
   - resources/openclaw-plugins/uclaw-local-artifacts/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-local-artifacts/package.json
+  - resources/openclaw-plugins/uclaw-task-bridge/**
   - resources/context/AGENTS.clawx.md
   - resources/context/TOOLS.clawx.md
   - resources/openclaw-skill-shims/presentation-maker/SKILL.md
@@ -52,7 +54,13 @@ touchedAreas:
   - scripts/openclaw-tool-directory-i18n-patch.mjs
   - scripts/patch-browser-hint.mjs
   - scripts/bundle-openclaw.mjs
+  - scripts/host-capability-registry.test.ts
+  - scripts/host-task-lifecycle.test.ts
+  - scripts/host-task-runtime-route.test.ts
+  - scripts/gateway-task-ledger-monitor.test.ts
+  - scripts/uclaw-contract-driven-gate.test.mjs
   - src/pages/Chat/ChatInput.tsx
+  - src/pages/Chat/ExecutionGraphCard.tsx
   - src/pages/Chat/index.tsx
   - src/pages/Chat/ChatMessage.tsx
   - src/i18n/locales/en/chat.json
@@ -70,9 +78,13 @@ touchedAreas:
   - src/stores/gateway.ts
   - src/pages/Chat/RunProgressCard.tsx
   - src/pages/Chat/task-visualization.ts
-  - tests/setup.ts
-  - tests/unit/**
-  - vitest.config.ts
+  - tests/e2e/**
+  - harness/specs/tasks/media-intent-image-edit-routing.md
+  - harness/specs/tasks/openclaw-native-media-host-bridge.md
+  - harness/specs/tasks/uclaw-codex-experience-benchmark-results.md
+  - harness/specs/tasks/uclaw-desktop-and-blender-runtime.md
+  - harness/specs/tasks/uclaw-feedback-runtime-regressions.md
+  - harness/specs/tasks/video-generation-prompt-length-guard.md
 expectedUserBehavior:
   - Agent runs can expose a structured objective and plan in the active execution graph.
   - Step progress updates replace prior state by stable identifiers instead of creating duplicate timeline noise.
@@ -83,10 +95,10 @@ expectedUserBehavior:
   - Safe diagnostics can prove the final provider request contract without recording prompts, credentials, tool schemas, or media payloads.
   - Chinese engineering and read-only prompts discover the same relevant tool families as equivalent English prompts.
   - Visible assistant deltas remain genuinely streamed with a responsive UI cadence instead of arriving in large bursts.
-  - Composite work uses task-specific prompts and creates media dependencies only when the user intent requires them.
-  - Live composite delivery and reopened history share one canonical artifact manifest and finalized runtime snapshot.
+  - Fresh multi-deliverable work remains one OpenClaw Agent turn whose Task Flow creates task-specific dependencies only when the user intent requires them.
+  - Live Task Flow delivery and reopened history share one canonical artifact manifest and finalized runtime snapshot.
   - Terminal state is monotonic across chat final, runtime end, async completion, and history reconciliation.
-  - User stop invalidates local planners, cancels queued/running media workers, and prevents stale UI or transcript delivery.
+  - User stop aborts the active Agent turn, Task Flow, and Host tasks, cancels queued/running media workers, and prevents stale UI or transcript delivery.
   - Capability comparisons and other non-execution questions never acquire file/media side-effect authorization.
   - Concurrent sessions cannot overwrite each other's transcript index or inject a follow-up into an already busy run.
   - Existing tool lifecycle events, assistant deltas, and legacy Gateway notifications continue to work.
@@ -107,18 +119,19 @@ requiredTests:
   - pnpm run comms:replay
   - pnpm run comms:compare
 acceptance:
-  - Main owns a durable composite coordinator with idempotent create/get/list/cancel/retry APIs, atomic run snapshots, and an append-only active-run event journal.
-  - Composite DAG recovery blocks downstream tasks when a dependency fails, resumes pending local work, and never automatically duplicates an unconfirmed media generation after Main restart.
-  - Main-owned composite tasks reuse the existing local artifact planner/runtime and media queues while preserving standalone chat, image, and video routing.
-  - Composite final delivery persists one canonical manifest only after the Main-owned completion gate allows delivery, using a stable assistant message id for idempotency.
+  - Every fresh ordinary, media, file, desktop, browser, Blender, MCP, and multi-deliverable request enters the same OpenClaw Agent loop.
+  - OpenClaw Task Flow and native subagents own fresh decomposition, dependency ordering, retry decisions, and session continuation.
+  - Host capabilities execute local work behind structured contracts and return task, artifact, verification, approval, and delivery evidence without performing semantic intent routing.
+  - The legacy composite coordinator is recovery-only: it can resume or finalize pre-migration snapshots but cannot accept a fresh `/api/chat/send` turn.
+  - Legacy composite DAG recovery blocks downstream work after dependency failure and never automatically duplicates an unconfirmed media generation after Main restart.
+  - Legacy composite final delivery uses one canonical manifest and stable assistant message id so old runs remain recoverable without creating a parallel fresh-turn path.
   - A local artifact run remains non-terminal while its canonical conversation delivery is pending or failed; only a successful transcript append can publish completed delivery state.
-  - Media cancellation resolves by job id, then composite run id, then session id so stopping one composite run cannot cancel unrelated standalone media work.
-  - Safe recoverable composite failures receive at most one automatic retry; exhausted or unsafe failures always produce a partial final manifest, while restart-uncertain media is never automatically resubmitted.
-  - Partial composite delivery keeps completed artifacts, marks unresolved tasks for user action, and ends the runtime with an error status instead of reporting the whole batch as completed.
-  - Partial delivery preserves explicit retry for recoverable tasks, including restart-uncertain media, without automatically resubmitting an unconfirmed generation.
-  - Composite delivery publishes completed/error run termination only after the canonical assistant transcript append succeeds; exhausted append failure emits a recoverable delivery checkpoint and never marks the run completed.
+  - Media cancellation resolves by native task/job id first and by legacy composite run id only during recovery, so stopping one run cannot cancel unrelated media work.
+  - Safe recoverable legacy failures receive at most one automatic retry; exhausted or unsafe failures produce a partial manifest, while restart-uncertain media is never automatically resubmitted.
+  - Partial legacy delivery keeps completed artifacts, marks unresolved tasks for user action, and never reports the whole batch as completed.
+  - Legacy delivery publishes completed/error termination only after canonical transcript append succeeds; exhausted append failure emits a recoverable delivery checkpoint and never marks the run completed.
   - Canonical transcript delivery retries transient append failures after 0.5, 1.5, and 4 seconds with the same assistant message id; only exhausted delivery becomes terminal failed and drops out of active-run reloads.
-  - Composite snapshot and journal files are private to the current OS user, active journals remain append-only, and terminal journals compact to one final snapshot before expiring after seven days.
+  - Host and legacy recovery journal files are private to the current OS user; active journals remain append-only and terminal journals compact before retention expiry.
   - Shared runtime event types include objective, plan, step, artifact, verification, and checkpoint events.
   - Main process normalizes Gateway plan/artifact/verification/checkpoint streams into the shared runtime event contract.
   - Chat runtime state aggregates the new contract events with stable upsert semantics.
@@ -128,7 +141,7 @@ acceptance:
   - OpenClaw tool-result middleware can produce step, artifact, verification, and checkpoint runtime events before final reply generation.
   - Artifact delivery finals are revised when they lack a real artifact reference or a passed availability verification, while explicit blockers are allowed with a recoverable checkpoint.
   - Completed/error/aborted runs pass through a completion gate that records artifact verification, failed steps, unfinished steps, and blocking checkpoints before clearing active run state.
-  - Default chat can auto-route image/video intent without requiring mode selection, while still applying the strongest allowed image/video parameters by default.
+  - OpenClaw can select native image/video tools from default chat without requiring mode selection; image/video mode defaults remain current-turn preferences only.
   - The active execution graph projects the new contract events into visible steps without exposing sensitive prompt or body text in diagnostics.
   - Runtime tool events can also project into a durable user-facing progress transcript for ordinary chat surfaces.
   - Managed OpenClaw config enables heartbeat isolatedSession, lightContext, and skipWhenBusy without changing chat, image, or video model routing.
@@ -136,18 +149,18 @@ acceptance:
   - The final guarded model fetch logs only request-shape metadata, including reasoning effort, tool count, tool choice, prompt-cache-key presence, and top-level keys.
   - The managed `lingzhiwuxian/smart-latest` model declares native `xhigh` support in both catalog compatibility and its top-level thinking-level map, so an `xhigh` Agent turn reaches the final OpenRouter payload as `reasoning.effort=xhigh` instead of being clamped to `high`.
   - Dev and packaged OpenClaw runtimes apply the CJK tool-directory and streaming cadence patches idempotently.
-  - Composite results persist structured task, artifact, verification, gate, and progress state instead of reconstructing success from localized summary text.
-  - Composite routing requires explicit execution intent, while single and multi-artifact execution requests use the same planner and verification contract.
-  - Single local artifacts use the current text model for semantic content planning; deterministic prompt heuristics are only an observable degraded fallback after planner failure, never the default speed path.
+  - Task Flow and recovered legacy results persist structured task, artifact, verification, gate, and progress state instead of reconstructing success from localized summary text.
+  - Single and multi-artifact fresh requests use the same OpenClaw Agent turn contract, Task Flow semantics, Host capability registry, and verification contract.
+  - Single local artifacts use Agent/skill reasoning for semantic content planning; deterministic Host heuristics are only an observable degraded or legacy fallback, never the fresh-turn router.
   - Presentation and local web artifacts preserve the requested subject and interaction domain, and semantic verification rejects unrelated generic templates.
-  - Presentation plans carry a deterministic design specification; product, travel, executive, training, and editorial themes render different visible cover and page frameworks across the composite runtime, direct PPT tool, and bundled fallback.
+  - Presentation plans carry a deterministic design specification; product, travel, executive, training, and editorial themes render different visible cover and page frameworks across the OpenClaw tool path, Host writer, and legacy fallback.
   - Explicit long-form character or word targets are carried as structured task requirements, receive sufficient planning budget, and fail completion verification when the final readable text is short.
   - Terse follow-ups resolve against the latest structured artifact run and delivery state instead of relying on a phrase-specific local rule or losing the prior objective.
-  - A high-confidence current-turn image-to-video plan can retain its selected current-session candidate image, while ordinary chat remains unable to reuse stale media implicitly.
+  - A current-turn image-to-video tool call can retain its selected current-session artifact, while ordinary chat remains unable to reuse stale media implicitly.
   - Async completion evidence can resolve accepted tasks by task id, child session key, or child session id without treating generic continuations as completion.
   - Local media availability passes only after Main verifies a readable, non-empty output file.
   - Chat run completion and artifact delivery completion remain separate lifecycle facts so delayed persistence cannot produce a false successful terminal state.
-  - Aborting a local run cancels queued/running media jobs and all later planner, worker, verification, and transcript results are ignored for that send generation.
+  - Aborting a local run cancels queued/running media jobs and all later tool, worker, verification, and transcript results are ignored for that send generation.
   - Session transcript/index persistence is serialized and atomically replaced for concurrent completions.
   - Deliverable detection covers text, image, video, audio, file blocks, and attached artifact metadata.
   - Renderer does not add direct Gateway HTTP calls or direct page/component IPC calls.
@@ -163,5 +176,5 @@ This task is the execution-layer foundation for making UClaw behave like a relia
 
 - A full redesigned run details panel.
 - New approval policy UI.
-- A general-purpose run journal beyond the finalized snapshot stored with composite deliveries.
+- A second orchestration journal that competes with OpenClaw Task Ledger, Host task journals, or recovery-only legacy snapshots.
 - Agent completion eval harnesses beyond the existing communication regression checks.

@@ -60,6 +60,7 @@ import {
   type GatewayCapabilitySnapshot,
 } from './capability-monitor';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import { GatewayTaskLedgerMonitor } from './task-ledger-monitor';
 
 export interface GatewayStatus {
   state: GatewayLifecycleState;
@@ -230,6 +231,16 @@ export class GatewayManager extends EventEmitter {
   private gatewayReadyFallbackTimer: NodeJS.Timeout | null = null;
   private gatewayReadyFallbackAttempt = 0;
   private readonly capabilityMonitor = new GatewayCapabilityMonitor();
+  private readonly taskLedgerMonitor = new GatewayTaskLedgerMonitor({
+    listTasks: async ({ cursor, limit, status }) => await this.rpc('tasks.list', {
+      limit,
+      status,
+      ...(cursor ? { cursor } : {}),
+    }, 5_000),
+    getTask: async (taskId) => await this.rpc('tasks.get', { taskId }, 5_000),
+    emit: (event) => this.emit('chat:runtime-event', event),
+    warn: (message, details) => logger.warn(message, details),
+  });
   private readonly lifecycleEvents: GatewayLifecycleEvent[] = [];
   private diagnostics: GatewayDiagnosticsSnapshot = {
     consecutiveHeartbeatMisses: 0,
@@ -1133,6 +1144,7 @@ export class GatewayManager extends EventEmitter {
     }
     this.resetGatewayReadyFallback();
     this.clearInitialReadyHeartbeatRecoveryTimer();
+    this.taskLedgerMonitor.stop();
   }
 
   private clearGatewayReadyFallbackTimer(): void {
@@ -1509,6 +1521,7 @@ export class GatewayManager extends EventEmitter {
           connectedAt: Date.now(),
         });
         this.startPing();
+        this.taskLedgerMonitor.start();
         this.scheduleGatewayReadyFallback();
       },
       onMessage: (message) => {
@@ -1516,6 +1529,7 @@ export class GatewayManager extends EventEmitter {
       },
       onCloseAfterHandshake: (closeCode) => {
         this.connectionMonitor.clear();
+        this.taskLedgerMonitor.stop();
         this.recordSocketClose(closeCode);
         this.recordLifecycleEvent('websocket_close', {
           reason: closeCode === 1012 ? 'gateway-in-process-restart' : 'websocket-close',

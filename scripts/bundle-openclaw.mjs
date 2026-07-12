@@ -22,11 +22,14 @@ import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-ski
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
+import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
+import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchOpenClawTaskSummaryDeliveryRuntime } from './openclaw-task-summary-delivery-patch.mjs';
 import { patchOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
 
@@ -1145,6 +1148,37 @@ function patchBundledRuntime(outputDir) {
   });
   if (rawToolSignalPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${rawToolSignalPatch.patchedFiles} raw tool signal runtime file(s)`;
+  }
+
+  // --- Plugin tool run correlation patch ---
+  // OpenClaw already owns the authoritative agent run id while creating tools.
+  // Expose it only through the trusted plugin factory context so UClaw Host
+  // contracts and tasks can correlate work without model-supplied identities.
+  const pluginToolRunContextPatch = patchOpenClawPluginToolRunContextRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (pluginToolRunContextPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${pluginToolRunContextPatch.patchedFiles} plugin tool run context file(s)`;
+  }
+
+  // --- Native detached media task cancellation patch ---
+  // Tie tasks.cancel to the exact image/video provider request and suppress
+  // completion wake/delivery after cancellation instead of only changing the ledger.
+  const nativeMediaCancellationPatch = patchOpenClawNativeMediaCancellationRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (nativeMediaCancellationPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${nativeMediaCancellationPatch.patchedFiles} native media cancellation runtime file(s)`;
+  }
+
+  // --- Public task delivery outcome patch ---
+  // Keep the gateway TaskSummary response backward compatible while exposing
+  // enough terminal delivery state for UClaw to avoid false completion.
+  const taskSummaryDeliveryPatch = patchOpenClawTaskSummaryDeliveryRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (taskSummaryDeliveryPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${taskSummaryDeliveryPatch.patchedFiles} task summary delivery file(s)`;
   }
 
 }

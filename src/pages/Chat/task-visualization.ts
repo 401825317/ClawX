@@ -6,67 +6,17 @@ import {
   isInternalAssistantReplyText,
   isInternalProcessNarration,
 } from './message-utils';
+import type { TaskStep } from './runtime-task-visualization';
 import { isInternalMessage, messageHasDeliverableContent } from '@/stores/chat/helpers';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
-import type { ChatRuntimeRunState } from '@/stores/chat/types';
-import { appendToolErrorHint, normalizeToolErrorMessage } from '@/lib/tool-error-messages';
+import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 
-export type TaskStepStatus = 'running' | 'completed' | 'error' | 'blocked' | 'failed' | 'aborted';
-
-export type RuntimePlanStep = NonNullable<ChatRuntimeRunState['planSteps']>[number];
-
-export interface TaskStep {
-  id: string;
-  label: string;
-  status: TaskStepStatus;
-  kind: 'thinking' | 'tool' | 'system' | 'message';
-  runtimeKind?: string;
-  detail?: string;
-  durationMs?: number;
-  depth: number;
-  parentId?: string;
-  /** Extracted URL for web_fetch tool, used to render a clickable link icon. */
-  url?: string;
-}
-
-const RUNTIME_SCAFFOLD_PLAN_STEP_IDS = new Set([
-  'uclaw.objective',
-  'uclaw.execute',
-  'uclaw.verify',
-  'uclaw.deliver',
-]);
-
-const RUNTIME_SCAFFOLD_PLAN_STEP_KINDS = new Set([
-  'objective',
-  'execution',
-  'verification',
-  'delivery',
-]);
+export { deriveRuntimeTaskSteps, isVisibleRuntimePlanStep } from './runtime-task-visualization';
+export type { RuntimePlanStep, TaskStep, TaskStepStatus } from './runtime-task-visualization';
 
 function isFilteredExecutionGraphTool(name: string | undefined | null): boolean {
   const normalized = typeof name === 'string' ? name.trim().toLowerCase() : '';
   return normalized === 'process';
-}
-
-function runtimeStepRequiresArtifact(step: RuntimePlanStep): boolean {
-  return step.requiresArtifact === true
-    || step.requiredArtifact === true
-    || step.artifactRequired === true
-    || step.outputArtifactRequired === true;
-}
-
-function isRuntimeScaffoldPlanStep(step: RuntimePlanStep): boolean {
-  const kind = typeof step.kind === 'string' ? step.kind.trim().toLowerCase() : '';
-  return RUNTIME_SCAFFOLD_PLAN_STEP_IDS.has(step.id)
-    && (kind.length === 0 || RUNTIME_SCAFFOLD_PLAN_STEP_KINDS.has(kind));
-}
-
-export function isVisibleRuntimePlanStep(step: RuntimePlanStep): boolean {
-  const kind = typeof step.kind === 'string' ? step.kind.trim().toLowerCase() : '';
-  if (kind === 'composite' || kind === 'composite-task' || kind.startsWith('media.')) return true;
-  if (runtimeStepRequiresArtifact(step)) return true;
-  if (step.status === 'blocked' || step.status === 'error') return true;
-  return !isRuntimeScaffoldPlanStep(step);
 }
 
 /**
@@ -268,10 +218,6 @@ export function parseSubagentCompletionInfo(message: RawMessage): SubagentComple
   return { sessionKey, sessionId, agentId };
 }
 
-function isSpawnLikeStep(label: string): boolean {
-  return /(spawn|subagent|delegate|parallel)/i.test(label);
-}
-
 function tryParseJsonObject(detail: string | undefined): Record<string, unknown> | null {
   if (!detail) return null;
   try {
@@ -286,11 +232,7 @@ function extractBranchAgent(step: TaskStep): string | null {
   const parsed = tryParseJsonObject(step.detail);
   const agentId = parsed?.agentId;
   if (typeof agentId === 'string' && agentId.trim()) return agentId.trim();
-
-  const message = typeof parsed?.message === 'string' ? parsed.message : step.detail;
-  if (!message) return null;
-  const match = message.match(/\b(coder|reviewer|project-manager|manager|planner|researcher|worker|subagent)\b/i);
-  return match ? match[1] : null;
+  return null;
 }
 
 function attachTopology(steps: TaskStep[]): TaskStep[] {
@@ -298,6 +240,13 @@ function attachTopology(steps: TaskStep[]): TaskStep[] {
   let activeBranchNodeId: string | null = null;
 
   for (const step of steps) {
+    // Runtime task projections already carry authoritative topology. Preserve
+    // it before applying the legacy transcript-only sessions_* fallback below.
+    if (step.parentId) {
+      withTopology.push(step);
+      continue;
+    }
+
     if (step.kind === 'system') {
       activeBranchNodeId = null;
       withTopology.push({
@@ -344,16 +293,6 @@ function attachTopology(steps: TaskStep[]): TaskStep[] {
       continue;
     }
 
-    if (isSpawnLikeStep(step.label)) {
-      activeBranchNodeId = step.id;
-      withTopology.push({
-        ...step,
-        depth: 1,
-        parentId: 'agent-run',
-      });
-      continue;
-    }
-
     withTopology.push({
       ...step,
       depth: activeBranchNodeId ? 3 : 1,
@@ -391,515 +330,11 @@ function appendDetailSegments(
   });
 }
 
-function runtimeDetail(value: unknown): string | undefined {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    return trimmed || undefined;
-  }
-  if (value == null) return undefined;
-  try {
-    const rendered = JSON.stringify(value, null, 2);
-    return rendered.length > 4000 ? `${rendered.slice(0, 4000)}…` : rendered;
-  } catch {
-    return String(value);
-  }
-}
-
-function parseJsonObjectText(value: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function firstTextBlock(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
-  for (const entry of content) {
-    if (!entry || typeof entry !== 'object') continue;
-    const text = (entry as { text?: unknown }).text;
-    if (typeof text === 'string' && text.trim()) {
-      return text.trim();
-    }
-  }
-  return undefined;
-}
-
-function extractToolErrorText(value: unknown): string | undefined {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return undefined;
-    const parsed = parseJsonObjectText(trimmed);
-    if (parsed) {
-      return extractToolErrorText(parsed) ?? trimmed;
-    }
-    return trimmed;
-  }
-  if (!value || typeof value !== 'object') return undefined;
-
-  const record = value as Record<string, unknown>;
-  const details = record.details;
-  if (details && typeof details === 'object') {
-    const detailsError = extractToolErrorText((details as Record<string, unknown>).error);
-    if (detailsError) return detailsError;
-    const detailsMessage = extractToolErrorText((details as Record<string, unknown>).message);
-    if (detailsMessage) return detailsMessage;
-  }
-
-  const directError = extractToolErrorText(record.error);
-  if (directError) return directError;
-  const directMessage = extractToolErrorText(record.message);
-  if (directMessage) return directMessage;
-
-  const contentText = firstTextBlock(record.content);
-  if (contentText) {
-    const parsed = parseJsonObjectText(contentText);
-    if (parsed) return extractToolErrorText(parsed) ?? contentText;
-    return contentText;
-  }
-
-  return undefined;
-}
-
-function getToolErrorDetail(value: unknown): string | undefined {
-  const rendered = extractToolErrorText(value) ?? runtimeDetail(value);
-  return appendToolErrorHint(rendered, 'zh');
-}
-
 function getToolSummaryDetail(tool: ToolStatus): string | undefined {
   if (tool.status === 'error') {
     return normalizeToolErrorMessage(tool.summary, 'zh') ?? normalizeText(tool.summary);
   }
   return normalizeText(tool.summary);
-}
-
-function formatDuration(durationMs: number | undefined): string | undefined {
-  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return undefined;
-  if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
-  if (durationMs < 10_000) return `${(durationMs / 1000).toFixed(1)}s`;
-  return `${Math.round(durationMs / 1000)}s`;
-}
-
-function runElapsedMs(runState: ChatRuntimeRunState): number | undefined {
-  const startedAt = typeof runState.startedAt === 'number' ? runState.startedAt : undefined;
-  if (startedAt == null) return undefined;
-  const endAt = typeof runState.endedAt === 'number'
-    ? runState.endedAt
-    : typeof runState.lastEventAt === 'number'
-      ? runState.lastEventAt
-      : Date.now();
-  const elapsed = endAt - startedAt;
-  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : undefined;
-}
-
-function runtimeStepStatus(status: string | undefined): TaskStepStatus {
-  if (status === 'completed' || status === 'passed' || status === 'skipped') return 'completed';
-  if (status === 'blocked') return 'blocked';
-  if (status === 'failed') return 'failed';
-  if (status === 'aborted') return 'aborted';
-  if (status === 'error') return 'error';
-  return 'running';
-}
-
-function artifactDetail(artifact: NonNullable<ChatRuntimeRunState['artifacts']>[number]): string | undefined {
-  const lines = [
-    artifact.filePath,
-    artifact.url,
-    artifact.mimeType,
-    typeof artifact.sizeBytes === 'number' ? `${artifact.sizeBytes} bytes` : undefined,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function verificationDetail(verification: NonNullable<ChatRuntimeRunState['verifications']>[number]): string | undefined {
-  const meta = [
-    verification.kind ? `kind=${verification.kind}` : undefined,
-    verification.required === false ? 'optional' : verification.required === true ? 'required' : undefined,
-    verification.severity ? `severity=${verification.severity}` : undefined,
-  ].filter(Boolean).join(' · ');
-  const lines = [
-    meta || undefined,
-    verification.detail,
-    verification.evidence,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function checkpointDetail(checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number]): string | undefined {
-  const issueLines = (checkpoint.issues ?? []).map((issue, index) => {
-    const meta = [
-      issue.severity,
-      `code=${issue.code}`,
-      typeof issue.recoverable === 'boolean' ? `recoverable=${issue.recoverable}` : undefined,
-    ].filter(Boolean).join(' · ');
-    const prefix = `${index + 1}. [${meta}] ${issue.title}`;
-    return [
-      issue.detail ? `${prefix}: ${issue.detail}` : prefix,
-      issue.suggestedRecovery ? `recovery=${issue.suggestedRecovery}` : undefined,
-    ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0).join('\n');
-  });
-  const lines = [
-    `checkpoint=${checkpoint.id}`,
-    typeof checkpoint.recoverable === 'boolean' ? `recoverable=${checkpoint.recoverable}` : undefined,
-    checkpoint.summary,
-    checkpoint.reason,
-    ...issueLines,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function gateIssueDetail(issue: NonNullable<ChatRuntimeRunState['issues']>[number]): string | undefined {
-  const lines = [
-    `code=${issue.code}`,
-    typeof issue.recoverable === 'boolean' ? `recoverable=${issue.recoverable}` : undefined,
-    issue.detail,
-    issue.suggestedRecovery ? `recovery=${issue.suggestedRecovery}` : undefined,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function gateEvaluationStatus(decision: NonNullable<ChatRuntimeRunState['gateResult']>['decision']): TaskStepStatus {
-  if (decision === 'deliverable') return 'completed';
-  if (decision === 'continue_required' || decision === 'blocked_needs_user') return 'blocked';
-  if (decision === 'failed') return 'failed';
-  if (decision === 'aborted') return 'aborted';
-  return 'error';
-}
-
-function gateEvaluationDetail(gate: NonNullable<ChatRuntimeRunState['gateResult']>): string | undefined {
-  const lines = [
-    gate.summary,
-    `decision=${gate.decision}`,
-    `artifacts=${gate.artifactCount}`,
-    `required_verifications=${gate.passedRequiredVerificationCount}/${gate.requiredVerificationCount}`,
-    `blocking=${gate.blockingIssueCount}`,
-    `warnings=${gate.warningIssueCount}`,
-    `coverage=${Math.round(gate.verificationCoverage * 100)}%`,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function gateIssueStatus(issue: NonNullable<ChatRuntimeRunState['issues']>[number]): TaskStepStatus {
-  if (issue.severity !== 'blocking') return 'completed';
-  return issue.recoverable === false ? 'failed' : 'blocked';
-}
-
-function checkpointStatus(checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number]): TaskStepStatus {
-  if (checkpoint.recoverable === false) return 'failed';
-  if (checkpoint.recoverable === true || (checkpoint.issues?.length ?? 0) > 0 || checkpoint.reason) return 'blocked';
-  return 'completed';
-}
-
-function sanitizeRuntimePlanSummary(summary: string | undefined): string | undefined {
-  const text = normalizeText(summary);
-  if (!text) return undefined;
-  if (text === 'UClaw 已接管本轮任务。' || text === 'UClaw 已接管本轮任务执行。') return undefined;
-  if (text === 'UClaw 已接管组合任务，将按顺序执行所有子任务并逐项交付产物。') {
-    return '按顺序执行所有子任务并逐项交付产物。';
-  }
-  return text;
-}
-
-function runtimePlanDetail(objective: string | undefined, summary: string | undefined): string | undefined {
-  const lines = [
-    normalizeText(objective),
-    sanitizeRuntimePlanSummary(summary),
-  ].filter((line): line is string => typeof line === 'string' && line.length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | undefined): TaskStep[] {
-  if (!runState) return [];
-
-  const steps: TaskStep[] = [];
-  const stepIndexById = new Map<string, number>();
-  const toolStartedAt = new Map<string, number>();
-  const failedToolStepIdsByFamily = new Map<string, Set<string>>();
-  const elapsedMs = runElapsedMs(runState);
-  const upsertStep = (step: TaskStep): void => {
-    const existingIndex = stepIndexById.get(step.id);
-    if (existingIndex == null) {
-      stepIndexById.set(step.id, steps.length);
-      steps.push(step);
-      return;
-    }
-    const existing = steps[existingIndex];
-    steps[existingIndex] = {
-      ...existing,
-      ...step,
-      detail: step.detail ?? existing.detail,
-      durationMs: step.durationMs ?? existing.durationMs,
-      url: step.url ?? existing.url,
-    };
-  };
-
-  for (const event of runState.events) {
-    switch (event.type) {
-      case 'tool.started':
-        toolStartedAt.set(event.toolCallId, typeof event.ts === 'number' ? event.ts : Date.now());
-        if (isFilteredExecutionGraphTool(event.name)) {
-          break;
-        }
-        {
-          const input = event.args as Record<string, unknown> | undefined;
-          const url = event.name === 'web_fetch' && typeof input?.url === 'string' ? input.url : undefined;
-          upsertStep({
-            id: event.toolCallId,
-            label: event.name,
-            status: 'running',
-            kind: 'tool',
-            detail: runtimeDetail(event.args),
-            depth: 1,
-            url,
-          });
-        }
-        break;
-      case 'run.plan.updated': {
-        const visiblePlanSteps = event.steps.filter(isVisibleRuntimePlanStep);
-        if (visiblePlanSteps.length === 0) {
-          break;
-        }
-        upsertStep({
-          id: 'run-plan',
-          label: '计划',
-          status: visiblePlanSteps.some((step) => step.status === 'running') ? 'running' : 'completed',
-          kind: 'system',
-          detail: runtimePlanDetail(event.objective, event.summary),
-          depth: 1,
-        });
-        for (const planStep of visiblePlanSteps) {
-          upsertStep({
-            id: `plan-step:${planStep.id}`,
-            label: planStep.title,
-            status: runtimeStepStatus(planStep.status),
-            kind: 'system',
-            runtimeKind: typeof planStep.kind === 'string' ? planStep.kind : undefined,
-            detail: planStep.detail,
-            durationMs: planStep.durationMs,
-            depth: planStep.parentId ? 2 : 1,
-            parentId: planStep.parentId ? `plan-step:${planStep.parentId}` : 'run-plan',
-          });
-        }
-        break;
-      }
-      case 'run.step.updated': {
-        if (!isVisibleRuntimePlanStep(event.step)) {
-          break;
-        }
-        upsertStep({
-          id: `plan-step:${event.step.id}`,
-          label: event.step.title,
-          status: runtimeStepStatus(event.step.status),
-          kind: 'system',
-          runtimeKind: typeof event.step.kind === 'string' ? event.step.kind : undefined,
-          detail: event.step.detail,
-          durationMs: event.step.durationMs,
-          depth: event.step.parentId ? 2 : 1,
-          parentId: event.step.parentId ? `plan-step:${event.step.parentId}` : 'run-plan',
-        });
-        break;
-      }
-      case 'tool.updated': {
-        if (isFilteredExecutionGraphTool(event.name)) {
-          break;
-        }
-        upsertStep({
-          id: event.toolCallId,
-          label: event.name,
-          status: 'running',
-          kind: 'tool',
-          detail: runtimeDetail(event.partialResult),
-          depth: 1,
-        });
-        break;
-      }
-      case 'tool.completed': {
-        if (isFilteredExecutionGraphTool(event.name)) {
-          break;
-        }
-        const existingIndex = stepIndexById.get(event.toolCallId);
-        const previousDetail = existingIndex != null ? steps[existingIndex]?.detail : undefined;
-        const startedAt = toolStartedAt.get(event.toolCallId);
-        const completedAt = typeof event.ts === 'number' ? event.ts : Date.now();
-        const inferredDurationMs = startedAt != null && completedAt >= startedAt
-          ? completedAt - startedAt
-          : undefined;
-        const normalizedToolName = event.name.trim().toLowerCase();
-        const recoveryFamily = normalizedToolName === 'create_designed_pptx_file' || normalizedToolName === 'repair_designed_pptx_file'
-          ? 'designed_pptx_file'
-          : normalizedToolName;
-        const nextDetail = event.isError
-          ? getToolErrorDetail(event.result)
-          : normalizedToolName === 'exec'
-            ? previousDetail ?? runtimeDetail(event.result)
-            : runtimeDetail(event.result) ?? previousDetail;
-        upsertStep({
-          id: event.toolCallId,
-          label: event.name,
-          status: event.isError ? 'error' : 'completed',
-          kind: 'tool',
-          detail: nextDetail,
-          durationMs: event.durationMs ?? inferredDurationMs,
-          depth: 1,
-        });
-        if (event.isError) {
-          const failedIds = failedToolStepIdsByFamily.get(recoveryFamily) ?? new Set<string>();
-          failedIds.add(event.toolCallId);
-          failedToolStepIdsByFamily.set(recoveryFamily, failedIds);
-        } else {
-          for (const failedId of failedToolStepIdsByFamily.get(recoveryFamily) ?? []) {
-            const failedIndex = stepIndexById.get(failedId);
-            if (failedIndex == null) continue;
-            const failedStep = steps[failedIndex];
-            if (!failedStep) continue;
-            steps[failedIndex] = {
-              ...failedStep,
-              status: 'completed',
-              detail: recoveryFamily === 'designed_pptx_file'
-                ? '版式问题已由增量修复恢复，并通过完整质量检查。'
-                : '后续重试已恢复该步骤。',
-            };
-          }
-          failedToolStepIdsByFamily.delete(recoveryFamily);
-        }
-        break;
-      }
-      case 'artifact.produced': {
-        upsertStep({
-          id: `artifact:${event.artifact.id}`,
-          label: event.artifact.title || event.artifact.kind || 'Artifact',
-          status: 'completed',
-          kind: 'system',
-          detail: artifactDetail(event.artifact),
-          depth: 1,
-        });
-        break;
-      }
-      case 'verification.completed': {
-        upsertStep({
-          id: `verification:${event.verification.id}`,
-          label: event.verification.title || 'Verification',
-          status: runtimeStepStatus(event.verification.status),
-          kind: 'system',
-          detail: verificationDetail(event.verification),
-          depth: event.verification.artifactId ? 2 : 1,
-          parentId: event.verification.artifactId ? `artifact:${event.verification.artifactId}` : undefined,
-        });
-        break;
-      }
-      case 'gate.issue': {
-        upsertStep({
-          id: `gate-issue:${event.issue.id}`,
-          label: event.issue.title,
-          status: gateIssueStatus(event.issue),
-          kind: 'system',
-          detail: gateIssueDetail(event.issue),
-          depth: 2,
-          parentId: 'gate-result',
-        });
-        break;
-      }
-      case 'run.checkpoint': {
-        upsertStep({
-          id: `checkpoint:${event.checkpoint.id}`,
-          label: 'Checkpoint',
-          status: checkpointStatus(event.checkpoint),
-          kind: 'message',
-          detail: checkpointDetail(event.checkpoint),
-          depth: 1,
-        });
-        break;
-      }
-      case 'gate.evaluated': {
-        upsertStep({
-          id: 'gate-result',
-          label: 'Gate',
-          status: gateEvaluationStatus(event.gate.decision),
-          kind: 'system',
-          detail: gateEvaluationDetail(event.gate),
-          depth: 1,
-        });
-        for (const issue of event.gate.issues) {
-          upsertStep({
-            id: `gate-issue:${issue.id}`,
-            label: issue.title,
-            status: gateIssueStatus(issue),
-            kind: 'system',
-            detail: gateIssueDetail(issue),
-            depth: 2,
-            parentId: 'gate-result',
-          });
-        }
-        break;
-      }
-      case 'command.output': {
-        if (isFilteredExecutionGraphTool(event.name)) {
-          break;
-        }
-        const id = event.itemId || `${event.toolCallId || event.name || 'command'}:output`;
-        upsertStep({
-          id,
-          label: event.title || `${event.name || 'Command'} output`,
-          status: event.status === 'failed' || event.status === 'error' ? 'error' : event.phase === 'end' ? 'completed' : 'running',
-          kind: 'message',
-          detail: runtimeDetail(event.output),
-          durationMs: event.durationMs,
-          depth: 1,
-        });
-        break;
-      }
-      case 'patch.completed': {
-        const id = event.itemId || `${event.toolCallId || event.name || 'patch'}:patch`;
-        upsertStep({
-          id,
-          label: event.title || event.name || 'Patch',
-          status: 'completed',
-          kind: 'system',
-          detail: runtimeDetail(event.summary),
-          depth: 1,
-        });
-        break;
-      }
-      case 'approval.updated': {
-        const id = event.itemId || `${event.toolCallId || 'approval'}:approval`;
-        upsertStep({
-          id,
-          label: event.title || 'Approval',
-          status: event.status === 'denied' || event.status === 'failed' ? 'error' : event.phase === 'resolved' ? 'completed' : 'running',
-          kind: 'system',
-          detail: runtimeDetail(event.message),
-          depth: 1,
-        });
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  const shouldShowElapsed = elapsedMs !== undefined
-    && steps.length > 0
-    && (runState.status !== 'running' || elapsedMs >= 1000);
-  const elapsedLabel = formatDuration(elapsedMs);
-  const visibleSteps = shouldShowElapsed
-    ? [
-      {
-        id: 'run-duration',
-        label: '整体耗时',
-        status: runState.status === 'running' ? 'running' : runtimeStepStatus(runState.status),
-        kind: 'system' as const,
-        detail: elapsedLabel ? `耗时：${elapsedLabel}` : undefined,
-        durationMs: elapsedMs,
-        depth: 1,
-      },
-      ...steps,
-    ]
-    : steps;
-
-  return attachTopology(visibleSteps);
 }
 
 export function deriveTaskSteps({

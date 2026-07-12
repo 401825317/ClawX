@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   extractEffectiveToolEntries,
+  normalizeReportedCapability,
   normalizeRuntimeSkillEntries,
 } from '../electron/services/agent-runtime/runtime-capability-catalog.ts';
 
@@ -31,4 +32,26 @@ test('marks disabled runtime skills unavailable without reading disk-only skills
   assert.equal(entries.length, 2);
   assert.equal(entries.find((entry) => entry.id === 'skill:presentation-maker')?.availability, 'available');
   assert.equal(entries.find((entry) => entry.id === 'skill:desktop-control')?.availability, 'unavailable');
+});
+
+test('uses the concrete Host capability status instead of treating any response object as available', () => {
+  const capabilities = {
+    capabilities: [
+      { name: 'desktop.capture', status: 'unavailable', reason: 'Screen Recording permission is denied.' },
+      { name: 'desktop.actions', status: 'not-implemented', reason: 'Native action driver is missing.' },
+    ],
+  };
+
+  assert.deepEqual(normalizeReportedCapability(capabilities, 'desktop.capture'), {
+    availability: 'unavailable',
+    reason: 'Screen Recording permission is denied.',
+  });
+  assert.deepEqual(normalizeReportedCapability(capabilities, 'desktop.actions'), {
+    availability: 'not_implemented',
+    reason: 'Native action driver is missing.',
+  });
+  assert.deepEqual(normalizeReportedCapability(capabilities, 'desktop.accessibility'), {
+    availability: 'unknown',
+    reason: 'Host did not report desktop.accessibility.',
+  });
 });

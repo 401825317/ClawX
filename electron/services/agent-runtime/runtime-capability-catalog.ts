@@ -48,6 +48,32 @@ function configuredPrimary(value: unknown): boolean {
   return Boolean(text(config?.primary));
 }
 
+export function normalizeReportedCapability(
+  value: unknown,
+  name: string,
+): Pick<RuntimeCapabilityEntry, 'availability' | 'reason'> {
+  const record = asRecord(value);
+  const capabilities = Array.isArray(record?.capabilities) ? record.capabilities : [];
+  const capability = capabilities
+    .map(asRecord)
+    .find((candidate) => text(candidate?.name) === name);
+  if (!capability) return { availability: 'unknown', reason: `Host did not report ${name}.` };
+  const status = text(capability.status)?.toLowerCase().replace(/_/gu, '-');
+  const availability: RuntimeCapabilityAvailability = status === 'available'
+    ? 'available'
+    : status === 'unavailable'
+      ? 'unavailable'
+      : status === 'degraded'
+        ? 'degraded'
+        : status === 'not-implemented'
+          ? 'not_implemented'
+          : 'unknown';
+  return {
+    availability,
+    reason: text(capability.reason),
+  };
+}
+
 function uniqueCapabilities(entries: RuntimeCapabilityEntry[]): RuntimeCapabilityEntry[] {
   const seen = new Set<string>();
   return entries.filter((entry) => {
@@ -168,6 +194,15 @@ export async function buildRuntimeCapabilityCatalog(params: {
     probe(() => blenderJobService.capabilities()),
     probe(() => hostCapabilityRegistry.list()),
   ]);
+  const desktopObservation = desktop.value
+    ? normalizeReportedCapability(desktop.value, 'desktop.capture')
+    : { availability: 'unknown' as const, reason: desktop.error };
+  const desktopAction = desktop.value
+    ? normalizeReportedCapability(desktop.value, 'desktop.actions')
+    : { availability: 'unknown' as const, reason: desktop.error };
+  const blenderAvailability: RuntimeCapabilityAvailability = blender.value
+    ? (blender.value.available ? 'available' : 'unavailable')
+    : 'unknown';
 
   const capabilities: RuntimeCapabilityEntry[] = [
     ...(tools.value ? extractEffectiveToolEntries(tools.value) : [hostCapability(
@@ -205,25 +240,29 @@ export async function buildRuntimeCapabilityCatalog(params: {
     hostCapability(
       'desktop:observe',
       'Desktop observation',
-      desktop.value ? 'available' : 'unknown',
-      { sideEffect: 'none', description: 'Observe a desktop app with a fresh screenshot and accessibility snapshot.', reason: desktop.error },
+      desktopObservation.availability,
+      { sideEffect: 'none', description: 'Observe a desktop app with a fresh screenshot and accessibility snapshot.', reason: desktopObservation.reason },
     ),
     hostCapability(
       'desktop:action',
       'Desktop actions',
-      'not_implemented',
+      desktopAction.availability,
       {
         sideEffect: 'external_action',
         requiresApproval: true,
         description: 'Desktop actions require explicit local approval and a native action driver.',
-        reason: desktop.error ?? 'The current desktop backend reports no executable native action driver.',
+        reason: desktopAction.reason,
       },
     ),
     hostCapability(
       'blender:scene',
       'Blender scene generation',
-      blender.value ? 'available' : 'unknown',
-      { sideEffect: 'local_artifact', description: 'Create and validate a Blender scene through the UClaw host runtime.', reason: blender.error },
+      blenderAvailability,
+      {
+        sideEffect: 'local_artifact',
+        description: 'Create and validate a Blender scene through the UClaw host runtime.',
+        reason: blender.error ?? (blender.value?.available ? undefined : 'Blender executable or trusted runner is unavailable.'),
+      },
     ),
     ...(hostTasks.value ?? []).map((capability) => hostCapability(
       `host-task:${capability.kind}`,

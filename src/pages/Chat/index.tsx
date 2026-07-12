@@ -7,7 +7,11 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, ArrowDownToLine, Loader2, RotateCcw } from 'lucide-react';
 import { useChatStore, type ChatRuntimeRunState, type RawMessage } from '@/stores/chat';
-import { buildStreamingAssistantMessageFromRuntimeRun, isInternalMessage } from '@/stores/chat/helpers';
+import {
+  buildStreamingAssistantMessageFromRuntimeRun,
+  isInternalMessage,
+  runtimeRunHasPendingAsyncTasks,
+} from '@/stores/chat/helpers';
 import { buildBaselineRunKey, getBaseline } from '@/stores/baseline-cache';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
@@ -44,6 +48,7 @@ import { GeneratedFilesPanel } from '@/components/file-preview/GeneratedFilesPan
 import type { FilePreviewTarget } from '@/components/file-preview/types';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import type { AttachedFileMeta } from '@/stores/chat/types';
+import { mergeRuntimeRunStates, runtimeRunsShareTaskIdentity } from './runtime-run-merge';
 import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 import { toast } from 'sonner';
 
@@ -107,7 +112,16 @@ const QUESTION_DIRECTORY_RENDER_LIMIT = 300;
 const CHILD_TRANSCRIPT_LOAD_LIMIT = 3;
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
-type RunCompactKind = 'composite' | 'image' | 'video' | 'artifact' | 'generic';
+type RunCompactKind = 'task-flow' | 'image' | 'video' | 'artifact' | 'generic';
+
+type TaskFlowCompactProgress = {
+  total: number;
+  completed: number;
+  running: number;
+  blocked: number;
+  failed: number;
+  aborted: number;
+};
 
 const PROBLEM_STEP_STATUSES = new Set<TaskStep['status']>(['error', 'blocked', 'failed', 'aborted']);
 const USER_FACING_RUNTIME_TOOLS = new Set([
@@ -169,7 +183,7 @@ function problemStepLooksUserFacing(step: TaskStep): boolean {
 
 function runCardHasUserFacingActivity(card: UserRunCard, generatedFiles: GeneratedFile[]): boolean {
   if (generatedFiles.length > 0) return true;
-  if (getCompositeCompactProgress(card.steps)) return true;
+  if (getTaskFlowCompactProgress(card.steps)) return true;
   return card.steps.some(taskStepLooksLikeUserFacingArtifact);
 }
 
@@ -181,19 +195,35 @@ function runCardHasUserFacingProblem(card: UserRunCard, generatedFiles: Generate
   );
 }
 
+function getRuntimeTaskProblemStatus(run: ChatRuntimeRunState | null): TaskStep['status'] | null {
+  const tasks = run?.tasks ?? [];
+  if (tasks.some((task) => task.status === 'error')) return 'error';
+  if (tasks.some((task) => task.status === 'partial' || task.status === 'waiting_approval')) return 'blocked';
+  return null;
+}
+
 function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
   const runtimeStatus = card.runtimeRun?.status;
+  const taskFlowProgress = getTaskFlowCompactProgress(card.steps);
+  const taskFlowProblemStatus = getTaskFlowProblemStatus(taskFlowProgress)
+    ?? getRuntimeTaskProblemStatus(card.runtimeRun);
+  if (runtimeStatus === 'completed') {
+    const gateDecision = card.runtimeRun?.gateResult?.decision;
+    if (gateDecision === 'blocked_needs_user' || gateDecision === 'continue_required') return 'blocked';
+    if (taskFlowProblemStatus) return taskFlowProblemStatus;
+    if ((taskFlowProgress?.running ?? 0) > 0 || runtimeRunHasPendingAsyncTasks(card.runtimeRun ?? undefined)) {
+      return 'running';
+    }
+    return 'completed';
+  }
   if (card.active) {
     if (runtimeStatus === 'aborted') return 'aborted';
     if (runtimeStatus === 'error') return 'error';
     if (card.runtimeRun?.gateResult?.decision === 'blocked_needs_user') return 'blocked';
+    if (taskFlowProgress && taskFlowProgress.running === 0 && taskFlowProblemStatus) {
+      return taskFlowProblemStatus;
+    }
     return 'running';
-  }
-  if (runtimeStatus === 'completed') {
-    const gateDecision = card.runtimeRun?.gateResult?.decision;
-    return gateDecision === 'blocked_needs_user' || gateDecision === 'continue_required'
-      ? 'blocked'
-      : 'completed';
   }
   if (runtimeStatus === 'aborted') return 'aborted';
   if (runtimeStatus === 'error') return 'error';
@@ -216,25 +246,38 @@ function taskStepSearchText(step: TaskStep): string {
   return `${step.label}\n${step.detail ?? ''}`.toLowerCase();
 }
 
-function isCompositeCompactStep(step: TaskStep): boolean {
+function isTaskFlowCompactStep(step: TaskStep): boolean {
+  if (step.taskId && step.flowId && step.id === `plan-step:task:${step.taskId}`) return true;
   if (step.id === 'plan-step:uclaw.composite') return false;
   const runtimeKind = typeof step.runtimeKind === 'string' ? step.runtimeKind.trim().toLowerCase() : '';
   if (runtimeKind) return runtimeKind === 'composite-task';
   return step.id.startsWith('plan-step:uclaw.composite.');
 }
 
-function getCompositeCompactProgress(steps: TaskStep[]): { total: number; completed: number } | null {
+function getTaskFlowCompactProgress(steps: TaskStep[]): TaskFlowCompactProgress | null {
   const taskStepsById = new Map<string, TaskStep>();
   for (const step of steps) {
-    if (!isCompositeCompactStep(step)) continue;
-    taskStepsById.set(step.id, step);
+    if (!isTaskFlowCompactStep(step)) continue;
+    taskStepsById.set(step.taskId ?? step.id, step);
   }
   if (taskStepsById.size === 0) return null;
   const taskSteps = [...taskStepsById.values()];
   return {
     total: taskSteps.length,
     completed: taskSteps.filter((step) => step.status === 'completed').length,
+    running: taskSteps.filter((step) => step.status === 'running').length,
+    blocked: taskSteps.filter((step) => step.status === 'blocked').length,
+    failed: taskSteps.filter((step) => step.status === 'failed' || step.status === 'error').length,
+    aborted: taskSteps.filter((step) => step.status === 'aborted').length,
   };
+}
+
+function getTaskFlowProblemStatus(progress: TaskFlowCompactProgress | null): TaskStep['status'] | null {
+  if (!progress) return null;
+  if (progress.failed > 0) return 'error';
+  if (progress.aborted > 0) return 'aborted';
+  if (progress.blocked > 0) return 'blocked';
+  return null;
 }
 
 function formatRunElapsedDuration(durationMs: number | null | undefined): string | null {
@@ -298,7 +341,7 @@ function hasFinalAssistantDeltaAfterLatestTool(run: ChatRuntimeRunState | null):
 }
 
 function inferRunCompactKind(card: UserRunCard, generatedFiles: GeneratedFile[]): RunCompactKind {
-  if (getCompositeCompactProgress(card.steps)) return 'composite';
+  if (getTaskFlowCompactProgress(card.steps)) return 'task-flow';
   const structuredStepText = card.steps
     .map((step) => `${step.label}\n${step.runtimeKind ?? ''}`)
     .join('\n');
@@ -324,12 +367,12 @@ function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile
   if (status === 'aborted') return withElapsed(t('executionGraph.compact.aborted'));
 
   const kind = inferRunCompactKind(card, generatedFiles);
-  const compositeProgress = kind === 'composite' ? getCompositeCompactProgress(card.steps) : null;
-  if (card.active) {
-    if (kind === 'composite') {
-      return withElapsed(t('executionGraph.compact.workingComposite', {
-        completedCount: compositeProgress?.completed ?? 0,
-        totalCount: compositeProgress?.total ?? generatedFiles.length,
+  const taskFlowProgress = kind === 'task-flow' ? getTaskFlowCompactProgress(card.steps) : null;
+  if (status === 'running') {
+    if (kind === 'task-flow') {
+      return withElapsed(t('executionGraph.compact.workingTaskFlow', {
+        completedCount: taskFlowProgress?.completed ?? 0,
+        totalCount: taskFlowProgress?.total ?? generatedFiles.length,
       }));
     }
     if (kind === 'image') return withElapsed(t('executionGraph.compact.generatingImage'));
@@ -338,9 +381,9 @@ function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile
     return withElapsed(t('executionGraph.compact.working'));
   }
 
-  if (kind === 'composite') {
-    return withElapsed(t('executionGraph.compact.compositeDone', {
-      totalCount: compositeProgress?.total ?? generatedFiles.length,
+  if (kind === 'task-flow') {
+    return withElapsed(t('executionGraph.compact.taskFlowDone', {
+      totalCount: taskFlowProgress?.total ?? generatedFiles.length,
     }));
   }
   if (kind === 'image') return withElapsed(t('executionGraph.compact.imageDone'));
@@ -533,109 +576,21 @@ function getRunFirstEventMs(run: ChatRuntimeRunState): number | null {
   return Math.min(startedAt, firstEventAt);
 }
 
-function getRunLastEventMs(run: ChatRuntimeRunState): number | null {
-  const lastEventAt = toTimestampMs(run.lastEventAt);
-  const endedAt = toTimestampMs(run.endedAt);
-  const eventTimes = run.events
-    .map(getRuntimeEventMs)
-    .filter((value): value is number => value != null);
-  const latest = [lastEventAt, endedAt, ...eventTimes]
-    .filter((value): value is number => value != null);
-  return latest.length > 0 ? Math.max(...latest) : null;
-}
-
 function getSegmentStartMs(triggerMessage: RawMessage, lastUserMessageAt: number | null): number | null {
   return toTimestampMs(triggerMessage.timestamp) ?? toTimestampMs(lastUserMessageAt);
 }
 
-function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
-  const index = items.findIndex((item) => item.id === next.id);
-  if (index === -1) return [...items, next];
-  return items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...next } : item));
-}
-
-function mergeRuntimeRunsForSegment(
+export function mergeRuntimeRunsForSegment(
   sessionKey: string,
   triggerMessage: RawMessage,
   triggerIndex: number,
   runs: ChatRuntimeRunState[],
 ): ChatRuntimeRunState | null {
-  if (runs.length === 0) return null;
-  if (runs.length === 1) return runs[0];
-
-  const sortedRuns = [...runs].sort((left, right) => {
-    const leftStart = getRunFirstEventMs(left) ?? Number.MAX_SAFE_INTEGER;
-    const rightStart = getRunFirstEventMs(right) ?? Number.MAX_SAFE_INTEGER;
-    if (leftStart !== rightStart) return leftStart - rightStart;
-    return left.runId.localeCompare(right.runId);
-  });
-
-  const events = sortedRuns
-    .flatMap((run) => run.events)
-    .sort((left, right) => {
-      const leftTs = getRuntimeEventMs(left) ?? Number.MAX_SAFE_INTEGER;
-      const rightTs = getRuntimeEventMs(right) ?? Number.MAX_SAFE_INTEGER;
-      if (leftTs !== rightTs) return leftTs - rightTs;
-      return left.runId.localeCompare(right.runId);
-    });
-  const startedAt = sortedRuns
-    .map(getRunFirstEventMs)
-    .filter((value): value is number => value != null)
-    .sort((left, right) => left - right)[0];
-  const lastEventAt = sortedRuns
-    .map(getRunLastEventMs)
-    .filter((value): value is number => value != null)
-    .sort((left, right) => right - left)[0];
-  const status = sortedRuns.some((run) => run.status === 'running')
-    ? 'running'
-    : sortedRuns.some((run) => run.status === 'error')
-      ? 'error'
-      : sortedRuns.some((run) => run.status === 'aborted')
-        ? 'aborted'
-        : 'completed';
-
-  return {
-    runId: `segment:${buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)}`,
+  return mergeRuntimeRunStates(
+    `segment:${buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)}`,
     sessionKey,
-    status,
-    startedAt,
-    lastEventAt,
-    endedAt: status === 'running' ? undefined : lastEventAt,
-    objective: sortedRuns.find((run) => run.objective)?.objective,
-    planSummary: [...sortedRuns].reverse().find((run) => run.planSummary)?.planSummary,
-    planSteps: sortedRuns.flatMap((run) => run.planSteps ?? []).reduce(
-      (items, step) => upsertById(items, step),
-      [] as NonNullable<ChatRuntimeRunState['planSteps']>,
-    ),
-    artifacts: sortedRuns.flatMap((run) => run.artifacts ?? []).reduce(
-      (items, artifact) => upsertById(items, artifact),
-      [] as NonNullable<ChatRuntimeRunState['artifacts']>,
-    ),
-    verifications: sortedRuns.flatMap((run) => run.verifications ?? []).reduce(
-      (items, verification) => upsertById(items, verification),
-      [] as NonNullable<ChatRuntimeRunState['verifications']>,
-    ),
-    issues: sortedRuns.flatMap((run) => run.issues ?? []).reduce(
-      (items, issue) => upsertById(items, issue),
-      [] as NonNullable<ChatRuntimeRunState['issues']>,
-    ),
-    checkpoints: sortedRuns.flatMap((run) => run.checkpoints ?? []).reduce(
-      (items, checkpoint) => upsertById(items, checkpoint),
-      [] as NonNullable<ChatRuntimeRunState['checkpoints']>,
-    ),
-    gateEvaluations: sortedRuns.flatMap((run) => run.gateEvaluations ?? []).reduce(
-      (items, gate) => upsertById(items, gate),
-      [] as NonNullable<ChatRuntimeRunState['gateEvaluations']>,
-    ),
-    gateResult: [...sortedRuns].reverse().find((run) => run.gateResult)?.gateResult,
-    assistantText: sortedRuns.map((run) => run.assistantText).filter(Boolean).join('\n\n'),
-    thinkingText: sortedRuns.map((run) => run.thinkingText).filter(Boolean).join('\n\n'),
-    progressEntries: sortedRuns.flatMap((run) => run.progressEntries ?? []).reduce(
-      (items, entry) => upsertById(items, entry),
-      [] as NonNullable<ChatRuntimeRunState['progressEntries']>,
-    ),
-    events,
-  };
+    runs,
+  );
 }
 
 function canMergeRuntimeRunIntoActiveSegment(
@@ -648,7 +603,7 @@ function canMergeRuntimeRunIntoActiveSegment(
   return run.sessionKey === sessionKey;
 }
 
-function getRuntimeRunForSegment(
+export function getRuntimeRunForSegment(
   runtimeRuns: Record<string, ChatRuntimeRunState>,
   sessionKey: string,
   triggerMessage: RawMessage,
@@ -678,7 +633,20 @@ function getRuntimeRunForSegment(
     .map((runId) => runtimeRuns[runId])
     .find((run): run is ChatRuntimeRunState => Boolean(run && run.sessionKey === sessionKey));
   if (historicalRun?.sessionKey === sessionKey) {
-    return historicalRun;
+    const relatedTaskRuns = Object.values(runtimeRuns).filter((run) => (
+      run !== historicalRun
+      && !run.runId.startsWith('history:')
+      && run.sessionKey === sessionKey
+      && runtimeRunsShareTaskIdentity(historicalRun, run)
+    ));
+    return relatedTaskRuns.length > 0
+      ? mergeRuntimeRunsForSegment(
+          sessionKey,
+          triggerMessage,
+          triggerIndex,
+          [historicalRun, ...relatedTaskRuns],
+        )
+      : historicalRun;
   }
 
   return null;
@@ -1483,6 +1451,8 @@ export function Chat() {
       const hasToolSteps = card.steps.some((step) => step.kind === 'tool');
       const hasNarrationSteps = card.steps.some((step) => step.kind === 'message');
       const hasRuntimeProgressEntries = (card.runtimeRun?.progressEntries?.length ?? 0) > 0;
+      const hasNativeTaskFlow = getTaskFlowCompactProgress(card.steps) != null
+        || (card.runtimeRun?.tasks?.length ?? 0) > 0;
       const shouldShowTranscript = shouldUseRunProgressTranscript(
         card.steps,
         generatedFiles.length,
@@ -1499,6 +1469,7 @@ export function Chat() {
       const hasCanonicalProgressTranscript = hasRuntimeProgressEntries || !!card.liveText;
       const shouldHideExecutionGraphBehindTranscript = shouldShowTranscript
         && hasCanonicalProgressTranscript
+        && !hasNativeTaskFlow
         && !devModeUnlocked
         && !hasProblem;
       const shouldRenderExecutionGraph = hasExecutionGraphDetails

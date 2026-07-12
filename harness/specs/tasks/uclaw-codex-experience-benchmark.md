@@ -10,10 +10,10 @@ touchedAreas:
   - src/stores/chat/runtime-contract.ts
   - src/pages/Chat/index.tsx
   - src/pages/Chat/ChatMessage.tsx
-  - electron/utils/media-intent-planner.ts
+  - tests/e2e/native-agent-media-routing.spec.ts
   - electron/utils/media-generation-jobs.ts
-  - electron/utils/local-artifact-planner.ts
   - electron/utils/local-artifact-runtime.ts
+  - electron/services/agent-runtime/**
   - electron/api/routes/media.ts
   - resources/openclaw-plugins/uclaw-local-artifacts/index.mjs
   - resources/openclaw-plugins/uclaw-local-artifacts/package.json
@@ -37,11 +37,12 @@ requiredRules:
   - comms-regression
   - presentation-artifact-quality
 acceptance:
-  - Prompt suite covers ordinary chat, preference/memory, image, image edit, video, composite multi-deliverable work, PPT, Excel, mini-program/web app, history recovery, concurrency, failure recovery, performance, and process display.
+  - Prompt suite covers ordinary chat, preference/memory, image, image edit, video, multi-deliverable Task Flow work, PPT, Excel, mini-program/web app, history recovery, concurrency, failure recovery, performance, and process display.
   - Each prompt declares priority, exact text, Codex expected visible behavior, and UClaw observation focus.
   - PPT, Excel, and mini-program/web app prompts include a quality bar that rejects fixed-template-only artifacts.
   - PPT evidence records the studio engine, local visual assets, image/chart/table counts, layout signatures, and cross-topic composition differences.
   - Result log template records Codex actual behavior, UClaw actual behavior, scores, gap classification, required implementation, and evidence.
+  - Fresh UClaw turns are evaluated on the OpenClaw Agent, Task Flow, and Host capability path; legacy composite records are exercised only by explicit restart/history recovery cases.
 docs:
   required: false
 ---
@@ -139,7 +140,7 @@ Do not turn Codex behavior into a claimed internal architecture unless the sourc
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
 | B01 | P0 | `随便给我生成一张图片` | Generate one image with sane default subject/params. | Total time, progress wording, image visible immediately, history reload. |
-| B02 | P0 | `生成一张 16:9 的未来城市工作台海报，尽量高清` | Generate image with inferred size/quality. | Does planner choose max allowed sensible params? |
+| B02 | P0 | `生成一张 16:9 的未来城市工作台海报，尽量高清` | Generate image with inferred size/quality. | Does the Agent choose sensible parameters within provider limits? |
 | B03 | P0 | `把这张图改成暖色电影感` with one image attached | Edit attached image. | Uses explicit image, does not generate unrelated new image. |
 | B04 | P0 | `把刚才那张图做成视频` after B01 | Use prior generated image as source if available. | Family transcript/source image lookup. |
 | B05 | P0 | `随便生成一个 15 秒视频` | Generate video, final playable with duration > 0. | Video link/file durability, playback, time breakdown. |
@@ -148,14 +149,14 @@ Do not turn Codex behavior into a claimed internal architecture unless the sourc
 | B08 | P1 | `把这个 logo 放到图片右下角` with two images attached | Image edit with multiple sources, maybe ask if ambiguous. | Correct reference handling. |
 | B09 | P1 | `给我 3 张不同风格的封面图` | Either generate 3 or clearly batch them. | Image queue/concurrency, per-image delivery. |
 | B10 | P2 | `生成一个竖屏短视频，适合朋友圈` | Choose portrait video params if supported. | Param selection and final display. |
-| B11 | P0 | After generating an image: `根据生成的图片制作一个 15 秒视频` | Use the generated image selected by the current-turn planner. | Must remain image-to-video; no normalization downgrade to text-to-video. |
+| B11 | P0 | After generating an image: `根据生成的图片制作一个 15 秒视频` | Use the generated image selected by the current Agent turn. | Must remain image-to-video; no normalization downgrade to text-to-video. |
 
-### C. Composite Multi-Deliverable Work
+### C. Multi-Deliverable Task Flow Work
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
 | C01 | P0 | `生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个` | Build a sample pack with defaults. Do not ask user to choose one. Final shows artifact manifest. | 7 logical deliverables, no internal mode conflict, history reload intact. |
-| C02 | P0 | `给我做一套“咖啡店开业”的素材包：海报、菜单表格、开业宣传文案、小程序页面、短视频脚本` | Produce all deliverables that do not require external media. | Composite task queue, artifact naming, final manifest. |
+| C02 | P0 | `给我做一套“咖啡店开业”的素材包：海报、菜单表格、开业宣传文案、小程序页面、短视频脚本` | Produce all deliverables that do not require external media. | Task Flow ordering, artifact naming, final manifest. |
 | C03 | P0 | `我明天要汇报 AI 降本增效，帮我一次性准备 PPT、预算 Excel、演讲稿和一张封面图` | Create four useful artifacts. | PPT/Excel quality and image integration. |
 | C04 | P1 | `给我做一个产品发布会资料包，主题你定，包括 PPT、邀请函文案、流程表和页面 Demo` | Choose theme and deliver artifacts. | Autonomy and artifact quality. |
 | C05 | P1 | `随便做一个儿童节活动方案，包含海报、排期表、预算表、小程序报名页` | Structured artifacts, useful defaults. | Excel formulas and mini-program usability. |
@@ -175,7 +176,7 @@ PPT must be judged by content structure, visual hierarchy, page count, readable 
 | D04 | P0 | `帮我做一份 8 页 PPT，主题是“个人 AI 工作台”。我要发布会风格，视觉冲击力强，高级、酷炫、少文字，多用图片和数据化表达。每一页要根据内容采用不同构图，不要做成一堆文字和圆角框框。直接生成可编辑的 PPTX，完成后打开。` | High-impact stage narrative with a real visual focal point, coherent hierarchy, varied composition, and no text overflow. | Must route to `presentation-maker` plus `create_designed_pptx_file`. `多用图片` and `可编辑的 PPTX` must not be combined into an image-edit clarification. |
 | D05 | P1 | `根据下面要点做 PPT：目标用户、小红书投放、转化路径、预算、风险` | Uses provided outline faithfully. | Does it preserve user input, not replace with template. |
 | D06 | P2 | `生成 PPT 后帮我检查每页标题是否重复、是否有空页` | Create and verify. | Verification output tied to actual deck. |
-| D07 | P0 | `生成一个苹果18的宣传介绍 PPT` | Plan and produce an Apple 18-specific launch deck with product imagery and editorial product storytelling. | Studio engine, local subject visuals, varied slide silhouettes, and no generic fixed-template fast path. |
+| D07 | P0 | `生成一个苹果18的宣传介绍 PPT` | Plan and produce an Apple 18-specific launch deck with product imagery and editorial product storytelling. | Studio engine, local subject visuals, varied slide silhouettes, and no generic fixed-template fallback. |
 | D08 | P0 | `生成一个张家界旅游介绍 PPT` after D07 in a fresh run | Plan and produce a Zhangjiajie-specific travel deck with real destination imagery and a visual journey. | Visual assets and composition signatures differ materially from D07, not only content or accent color. |
 
 ### E. Excel Quality: Data, Formulas, Formatting, Validation
@@ -244,10 +245,10 @@ Mini-program can be HTML prototype or actual mini-program depending current prod
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
-| J01 | P0 | `随便生成一个图片` | Timing roughly equals provider + small overhead. | planner, queue, provider, save, history, render timings. |
+| J01 | P0 | `随便生成一个图片` | Timing roughly equals provider + small overhead. | Agent/tool selection, Host queue, provider, save, history, render timings. |
 | J02 | P0 | `随便生成一个视频` | Clear long-running progress. | Provider vs local overhead, playable output. |
-| J03 | P1 | C01 composite prompt | Partial deliverables should appear as they finish. | Does video block whole final delivery? |
-| J04 | P1 | `做一个 PPT` | No unnecessary media planner/model calls. | Route latency. |
+| J03 | P1 | C01 multi-deliverable prompt | Partial deliverables should appear as they finish. | Does video block whole final delivery? |
+| J04 | P1 | `做一个 PPT` | No unnecessary media tool or Host-capability calls. | Agent-to-tool route latency. |
 | J05 | P1 | Ordinary chat memory prompt A01 | Near-chat latency, no graph overhead. | Internal execution overhead. |
 
 ### K. Process Display And UI Cleanliness
@@ -256,7 +257,7 @@ Mini-program can be HTML prototype or actual mini-program depending current prod
 | --- | --- | --- | --- | --- |
 | K01 | P0 | Any ordinary chat prompt | No execution graph shown. | Avoid "Main Agent 执行 / Gate / 0ms". |
 | K02 | P0 | B01 image generation | One compact progress line, final image. | No raw branch/gate spam. |
-| K03 | P0 | C01 composite prompt | Compact progress plus final manifest. | Not a messy interleaving of cards. |
+| K03 | P0 | C01 multi-deliverable prompt | Compact progress plus final manifest. | Not a messy interleaving of cards. |
 | K04 | P1 | Failed artifact task | Friendly failure summary. | Hide internal codes by default. |
 | K05 | P1 | Developer mode enabled | Details available when intentionally expanded. | Raw graph remains useful for debugging. |
 
@@ -293,7 +294,7 @@ These prompts catch the difference between a UI mode hint and the user's actual 
 | N04 | P1 | `把这段乱糟糟的需求整理成 PPT + Excel 排期 + 小程序 Demo，三者字段要一致` | Cross-artifact consistency. | Shared fields/theme across artifacts. |
 | N05 | P1 | `生成完 PPT 后，告诉我每页标题，并检查有没有空页` | Verify from the generated file. | No invented verification. |
 
-### O. Progressive Composite Delivery And Manifest
+### O. Progressive Task Flow Delivery And Manifest
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
@@ -383,11 +384,11 @@ PPT, Excel, and mini-program/web-app tasks should treat the local file generator
 
 The acceptable target flow is:
 
-1. Planner detects an artifact task and creates a typed subtask.
-2. Agent/skill prepares prompt-specific content, data model, app behavior, and file name.
-3. A local artifact tool writes the real file.
+1. The OpenClaw Agent declares the turn contract and, when needed, creates typed Task Flow work.
+2. Agent/skill reasoning prepares prompt-specific content, data model, app behavior, and file name.
+3. A registered OpenClaw tool or Host capability writes the real file.
 4. A validator opens or reads the file and records concrete evidence.
-5. The final manifest lists the artifact and the verification result.
+5. Task Flow and the completion gate publish the final artifact manifest and verification result.
 
 Template-only fallback is allowed only as a recoverable degraded mode, and must be visible in the result log as a quality failure for P0/P1 artifact prompts.
 
@@ -395,13 +396,13 @@ Template-only fallback is allowed only as a recoverable degraded mode, and must 
 
 | Gap If Observed | Likely Implementation Work |
 | --- | --- |
-| UClaw asks user to choose one mode for composite prompt | Planner must support composite intent to subtask queue. |
+| UClaw asks user to choose one mode for a multi-deliverable prompt | Keep one OpenClaw Agent turn and let Task Flow create the required subtasks. |
 | Results appear live but disappear after restart | Persist durable artifact manifest or transcript entry for final result. |
 | Video blocks all other artifacts from being visible | Progressive artifact manifest updates, not final-only delivery. |
 | PPT/Excel/mini-program are fixed templates | Route these tasks through agent/skill generation and verification instead of local static generator defaults. |
 | Ordinary chat shows execution graph | Compact UI gating must hide graph unless real user-visible work exists or developer mode is on. |
 | Second prompt enters first task panel | Run/session isolation, queued turns, and run ownership checks. |
-| Image/video local time far exceeds provider time | Add timing trace for planner, queue, provider, download, save, history reload, render. |
+| Image/video local time far exceeds provider time | Add timing trace for Agent dispatch, Host queue, provider, download, save, history reload, and render. |
 | Broken video shown as success | Add media availability/playability validation before gate pass. |
 | Follow-up cannot find prior artifact | Artifact manifest lookup and revision routing. |
 | Internal gate/code text visible | Map gate failures to user-facing recovery summaries. |
@@ -423,7 +424,7 @@ Run these first before expanding to the full suite:
 11. J01
 12. K01
 
-This first dozen covers the highest-risk product gaps: normal chat cleanliness, media performance, composite delivery, history recovery, office/web artifact quality, multi-run isolation, missing-input recovery, and process display.
+This first dozen covers the highest-risk product gaps: normal chat cleanliness, media performance, Task Flow delivery, history recovery, office/web artifact quality, multi-run isolation, missing-input recovery, and process display.
 
 ## Result Log Template
 

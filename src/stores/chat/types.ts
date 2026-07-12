@@ -6,6 +6,7 @@ import type {
   ChatRuntimeGateIssue,
   ChatRuntimePlanStep,
   ChatRuntimeProgressEntry,
+  ChatRuntimeTaskProjection,
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
 import type { AgentTurnContract } from '../../../shared/agent-turn-contract';
@@ -173,6 +174,7 @@ export interface ChatRuntimeRunState {
   turnContract?: AgentTurnContract;
   planSummary?: string;
   planSteps?: ChatRuntimePlanStep[];
+  tasks?: ChatRuntimeTaskProjection[];
   artifacts?: ChatRuntimeArtifact[];
   verifications?: ChatRuntimeVerification[];
   issues?: ChatRuntimeGateIssue[];

@@ -9,9 +9,23 @@ import type {
 import { getOpenClawConfigDir } from '../../utils/paths';
 
 export type HostTaskStatus = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'timed_out' | 'lost';
+export type HostTaskData = null | boolean | number | string | HostTaskData[] | { [key: string]: HostTaskData };
+export type HostTaskOperationKind = 'start' | 'resume' | 'cancel';
+export type HostTaskOperationStatus = 'running' | 'completed' | 'failed' | 'interrupted';
+
+export type HostTaskOperation = {
+  operationId: string;
+  kind: HostTaskOperationKind;
+  status: HostTaskOperationStatus;
+  ownerId: string;
+  attempt: number;
+  startedAt: number;
+  finishedAt?: number;
+  error?: string;
+};
 
 export type HostTaskSnapshot = {
-  version: 1;
+  version: 2;
   taskId: string;
   sessionKey: string;
   runId: string;
@@ -19,6 +33,8 @@ export type HostTaskSnapshot = {
   idempotencyKey: string;
   capability: string;
   title: string;
+  input: HostTaskData;
+  checkpoint?: HostTaskData;
   status: HostTaskStatus;
   createdAt: number;
   updatedAt: number;
@@ -28,6 +44,7 @@ export type HostTaskSnapshot = {
   artifacts: ChatRuntimeArtifact[];
   verifications: ChatRuntimeVerification[];
   completionAcks: string[];
+  lifecycle: { operations: HostTaskOperation[] };
 };
 
 export type HostTaskCreateRequest = {
@@ -37,22 +54,49 @@ export type HostTaskCreateRequest = {
   idempotencyKey: string;
   capability: string;
   title: string;
+  input?: unknown;
   status?: Extract<HostTaskStatus, 'queued' | 'running' | 'waiting'>;
 };
 
 export type HostTaskUpdateRequest = {
   status?: HostTaskStatus;
   progress?: { completed?: number; total?: number; detail?: string };
+  checkpoint?: unknown;
   error?: string;
   artifacts?: ChatRuntimeArtifact[];
   verifications?: ChatRuntimeVerification[];
 };
 
+export type HostTaskExecutorContext = {
+  task: HostTaskSnapshot;
+  input: HostTaskData;
+  checkpoint?: HostTaskData;
+  update: (update: HostTaskUpdateRequest) => Promise<HostTaskSnapshot | undefined>;
+};
+
+export type HostTaskLifecycleExecutor = {
+  start: (context: HostTaskExecutorContext) => Promise<void>;
+  resume?: (context: HostTaskExecutorContext) => Promise<void>;
+  cancel?: (context: HostTaskExecutorContext & { reason: string }) => Promise<void>;
+};
+
+export type HostTaskServiceOptions = {
+  rootDir?: string;
+};
+
 type RuntimePublisher = (event: ChatRuntimeEvent) => void;
+type DispatchResult = { task?: HostTaskSnapshot; dispatched: boolean };
 
 const TERMINAL = new Set<HostTaskStatus>(['succeeded', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost']);
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const MAX_TASK_DATA_BYTES = 64 * 1024;
+const MAX_TASK_DATA_DEPTH = 12;
+const MAX_TASK_DATA_NODES = 4_096;
+const MAX_TASK_DATA_STRING = 16_384;
+const MAX_TASK_DATA_ITEMS = 512;
+const MAX_LIFECYCLE_OPERATIONS = 64;
+const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -62,6 +106,52 @@ function shortText(value: unknown, maximum = 1_000): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.replace(/[\r\n\t]+/gu, ' ').trim();
   return normalized ? normalized.slice(0, maximum) : undefined;
+}
+
+function normalizeTaskData(value: unknown, label: string, allowUndefined = false): HostTaskData | undefined {
+  if (value === undefined) {
+    if (allowUndefined) return undefined;
+    value = {};
+  }
+  let nodes = 0;
+  const seen = new WeakSet<object>();
+  const visit = (current: unknown, depth: number): HostTaskData => {
+    nodes += 1;
+    if (nodes > MAX_TASK_DATA_NODES) throw new Error(`${label} is too complex`);
+    if (depth > MAX_TASK_DATA_DEPTH) throw new Error(`${label} is too deeply nested`);
+    if (current === null || typeof current === 'boolean') return current;
+    if (typeof current === 'number') {
+      if (!Number.isFinite(current)) throw new Error(`${label} contains a non-finite number`);
+      return current;
+    }
+    if (typeof current === 'string') {
+      if (current.length > MAX_TASK_DATA_STRING) throw new Error(`${label} contains an oversized string`);
+      return current;
+    }
+    if (!current || typeof current !== 'object') throw new Error(`${label} must contain JSON-compatible values only`);
+    if (seen.has(current)) throw new Error(`${label} contains a circular reference`);
+    seen.add(current);
+    if (Array.isArray(current)) {
+      if (current.length > MAX_TASK_DATA_ITEMS) throw new Error(`${label} contains too many array items`);
+      const result = current.map((item) => visit(item, depth + 1));
+      seen.delete(current);
+      return result;
+    }
+    const prototype = Object.getPrototypeOf(current);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error(`${label} must contain plain objects only`);
+    const entries = Object.entries(current as Record<string, unknown>);
+    if (entries.length > MAX_TASK_DATA_ITEMS) throw new Error(`${label} contains too many object fields`);
+    const result: Record<string, HostTaskData> = {};
+    for (const [key, item] of entries) {
+      if (!key || key.length > 256 || FORBIDDEN_KEYS.has(key)) throw new Error(`${label} contains an invalid object field`);
+      result[key] = visit(item, depth + 1);
+    }
+    seen.delete(current);
+    return result;
+  };
+  const normalized = visit(value, 0);
+  if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > MAX_TASK_DATA_BYTES) throw new Error(`${label} exceeds 64 KiB`);
+  return normalized;
 }
 
 function normalizeProgress(value: HostTaskUpdateRequest['progress']): HostTaskSnapshot['progress'] | undefined {
@@ -76,6 +166,31 @@ function normalizeProgress(value: HostTaskUpdateRequest['progress']): HostTaskSn
   return completed !== undefined || total !== undefined || detail
     ? { completed, total, detail }
     : undefined;
+}
+
+function normalizeLifecycle(value: unknown): HostTaskSnapshot['lifecycle'] {
+  const operations = value && typeof value === 'object' && Array.isArray((value as { operations?: unknown }).operations)
+    ? (value as { operations: unknown[] }).operations
+    : [];
+  return {
+    operations: operations.slice(-MAX_LIFECYCLE_OPERATIONS).flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const record = item as Partial<HostTaskOperation>;
+      if (!record.operationId || !record.ownerId || !record.kind || !record.status || !record.startedAt) return [];
+      if (!['start', 'resume', 'cancel'].includes(record.kind)) return [];
+      if (!['running', 'completed', 'failed', 'interrupted'].includes(record.status)) return [];
+      return [{
+        operationId: record.operationId,
+        kind: record.kind,
+        status: record.status,
+        ownerId: record.ownerId,
+        attempt: typeof record.attempt === 'number' && Number.isFinite(record.attempt) ? Math.max(1, Math.floor(record.attempt)) : 1,
+        startedAt: record.startedAt,
+        ...(typeof record.finishedAt === 'number' ? { finishedAt: record.finishedAt } : {}),
+        ...(shortText(record.error) ? { error: shortText(record.error) } : {}),
+      } satisfies HostTaskOperation];
+    }),
+  };
 }
 
 function runtimeStatus(status: HostTaskStatus): 'pending' | 'running' | 'completed' | 'error' | 'blocked' {
@@ -107,8 +222,18 @@ export class HostTaskService {
   private readonly idempotency = new Map<string, string>();
   private readonly waiters = new Map<string, Set<(snapshot: HostTaskSnapshot) => void>>();
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly ownerId = randomUUID();
+  private readonly configuredRootDir?: string;
   private initialized?: Promise<void>;
   private publisher?: RuntimePublisher;
+
+  constructor(options: HostTaskServiceOptions = {}) {
+    this.configuredRootDir = options.rootDir;
+  }
+
+  private getRootDir(): string {
+    return this.configuredRootDir ?? taskRoot();
+  }
 
   setPublisher(publisher: RuntimePublisher): void {
     this.publisher = publisher;
@@ -117,14 +242,18 @@ export class HostTaskService {
   async create(input: HostTaskCreateRequest): Promise<{ task: HostTaskSnapshot; idempotent: boolean }> {
     await this.ensureInitialized();
     this.validateCreate(input);
-    const key = `${input.sessionKey}:${input.idempotencyKey}`;
+    const normalizedInput = normalizeTaskData(input.input, 'Host task input') ?? {};
+    const key = `${input.sessionKey.trim()}:${input.idempotencyKey.trim()}`;
     const existingId = this.idempotency.get(key);
     const existing = existingId ? this.tasks.get(existingId) : undefined;
-    if (existing) return { task: clone(existing), idempotent: true };
+    if (existing) {
+      this.assertIdempotentReplay(existing, input, normalizedInput);
+      return { task: clone(existing), idempotent: true };
+    }
 
     const now = Date.now();
     const task: HostTaskSnapshot = {
-      version: 1,
+      version: 2,
       taskId: randomUUID(),
       sessionKey: input.sessionKey.trim(),
       runId: input.runId.trim(),
@@ -132,6 +261,7 @@ export class HostTaskService {
       idempotencyKey: input.idempotencyKey.trim(),
       capability: input.capability.trim(),
       title: input.title.trim(),
+      input: normalizedInput,
       status: input.status ?? 'queued',
       createdAt: now,
       updatedAt: now,
@@ -139,6 +269,7 @@ export class HostTaskService {
       artifacts: [],
       verifications: [],
       completionAcks: [],
+      lifecycle: { operations: [] },
     };
     this.tasks.set(task.taskId, task);
     this.idempotency.set(key, task.taskId);
@@ -163,19 +294,73 @@ export class HostTaskService {
     return { task: clone(task), idempotent: false };
   }
 
+  async dispatchStart(taskId: string, executor: HostTaskLifecycleExecutor): Promise<DispatchResult> {
+    const claim = await this.claimOperation(taskId, 'start');
+    if (!claim.task || !claim.operation) return { task: claim.task, dispatched: false };
+    void this.executeOperation(taskId, claim.operation.operationId, 'start', executor);
+    return { task: claim.task, dispatched: true };
+  }
+
+  async requestCancel(taskId: string, executor: HostTaskLifecycleExecutor, reason = 'Cancelled by user'): Promise<DispatchResult> {
+    if (!executor.cancel) throw new Error('Host capability does not support cancellation');
+    const normalizedReason = shortText(reason) ?? 'Cancelled by user';
+    const claim = await this.claimOperation(taskId, 'cancel', normalizedReason);
+    if (!claim.task || !claim.operation) return { task: claim.task, dispatched: false };
+    void this.executeOperation(taskId, claim.operation.operationId, 'cancel', executor, normalizedReason);
+    return { task: claim.task, dispatched: true };
+  }
+
   async update(taskId: string, update: HostTaskUpdateRequest): Promise<HostTaskSnapshot | undefined> {
+    return this.applyUpdate(taskId, update, undefined, true);
+  }
+
+  private async applyUpdate(
+    taskId: string,
+    update: HostTaskUpdateRequest,
+    operationId?: string,
+    external = false,
+  ): Promise<HostTaskSnapshot | undefined> {
     await this.ensureInitialized();
     return this.withTaskLock(taskId, async (task) => {
-      if (TERMINAL.has(task.status) && update.status && update.status !== task.status) {
+      if (operationId) {
+        const operation = task.lifecycle.operations.find((candidate) => candidate.operationId === operationId);
+        const cancellationClaimed = task.lifecycle.operations.some((candidate) => (
+          candidate.kind === 'cancel'
+          && candidate.status === 'running'
+          && candidate.operationId !== operationId
+        ));
+        if (
+          !operation
+          || operation.ownerId !== this.ownerId
+          || operation.status !== 'running'
+          || (operation.kind !== 'cancel' && (TERMINAL.has(task.status) || cancellationClaimed))
+        ) {
+          throw new Error(`Host task ${task.taskId} rejected an update from a stale ${operation?.kind ?? 'unknown'} operation`);
+        }
+      }
+      // Execution updates are immutable after a terminal snapshot. Completion
+      // acknowledgements and explicit redelivery use dedicated methods below;
+      // accepting a late progress/artifact callback here would resurrect a
+      // cancelled operation and schedule a second terminal delivery revision.
+      if (TERMINAL.has(task.status)) {
         throw new Error(`Host task ${task.taskId} is already terminal`);
+      }
+      if (external && task.lifecycle.operations.length > 0) {
+        throw new Error(`Host task ${task.taskId} requires an active executor operation token`);
       }
       const artifactIdsBefore = new Set(task.artifacts.map((artifact) => artifact.id));
       const verificationIdsBefore = new Set(task.verifications.map((verification) => verification.id));
       const knownArtifactIds = new Set(artifactIdsBefore);
       const knownVerificationIds = new Set(verificationIdsBefore);
-      if (update.status) task.status = update.status;
+      if (update.status) {
+        task.status = update.status;
+        if ((update.status === 'running' || update.status === 'succeeded') && !shortText(update.error)) task.error = undefined;
+      }
       const progress = normalizeProgress(update.progress);
       if (progress) task.progress = progress;
+      if (Object.hasOwn(update, 'checkpoint')) {
+        task.checkpoint = normalizeTaskData(update.checkpoint, 'Host task checkpoint', true);
+      }
       const error = shortText(update.error);
       if (error) task.error = error;
       if (Array.isArray(update.artifacts)) {
@@ -201,10 +386,6 @@ export class HostTaskService {
     });
   }
 
-  async cancel(taskId: string, reason = 'Cancelled by user'): Promise<HostTaskSnapshot | undefined> {
-    return this.update(taskId, { status: 'cancelled', error: reason });
-  }
-
   async acknowledgeCompletion(taskId: string, deliveryKey: string): Promise<HostTaskSnapshot | undefined> {
     const normalizedKey = shortText(deliveryKey, 512);
     if (!normalizedKey) throw new Error('deliveryKey is required');
@@ -219,19 +400,31 @@ export class HostTaskService {
     });
   }
 
-  async recover(taskId: string, strategy: 'status_only' | 'resume_if_safe' | 'redeliver_existing_artifacts'): Promise<HostTaskSnapshot | undefined> {
+  async recover(
+    taskId: string,
+    strategy: 'status_only' | 'resume_if_safe' | 'redeliver_existing_artifacts',
+    executor?: HostTaskLifecycleExecutor,
+  ): Promise<DispatchResult> {
     await this.ensureInitialized();
-    return this.withTaskLock(taskId, async (task) => {
-      if (strategy === 'redeliver_existing_artifacts' && task.artifacts.length > 0) {
-        task.completionAcks = [];
-        task.updatedAt = Date.now();
-        task.revision += 1;
-        await this.persist(task, 'task.redelivery_requested');
+    if (strategy === 'resume_if_safe') {
+      if (!executor?.resume) throw new Error('Host capability does not support safe resume');
+      const claim = await this.claimOperation(taskId, 'resume');
+      if (!claim.task || !claim.operation) return { task: claim.task, dispatched: false };
+      void this.executeOperation(taskId, claim.operation.operationId, 'resume', executor);
+      return { task: claim.task, dispatched: true };
+    }
+    const task = await this.withTaskLock(taskId, async (current) => {
+      if (strategy === 'redeliver_existing_artifacts') {
+        if (current.artifacts.length === 0) throw new Error('Host task has no existing artifacts to redeliver');
+        current.completionAcks = [];
+        current.updatedAt = Date.now();
+        current.revision += 1;
+        await this.persist(current, 'task.redelivery_requested');
+        this.notify(current);
       }
-      // Generic registration intentionally never retries a side effect by
-      // itself. A concrete Host capability owns any safe resumption policy.
-      return clone(task);
+      return clone(current);
     });
+    return { task, dispatched: false };
   }
 
   async get(taskId: string): Promise<HostTaskSnapshot | undefined> {
@@ -270,11 +463,20 @@ export class HostTaskService {
   }
 
   private validateCreate(input: HostTaskCreateRequest): void {
-    for (const [field, value] of Object.entries(input)) {
-      if (field === 'status') continue;
+    for (const field of ['sessionKey', 'runId', 'toolCallId', 'idempotencyKey', 'capability', 'title'] as const) {
+      const value = input[field];
       if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} is required for Host task`);
       if (value.length > 2_048) throw new Error(`${field} is too long for Host task`);
     }
+  }
+
+  private assertIdempotentReplay(existing: HostTaskSnapshot, input: HostTaskCreateRequest, normalizedInput: HostTaskData): void {
+    const matches = existing.runId === input.runId.trim()
+      && existing.toolCallId === input.toolCallId.trim()
+      && existing.capability === input.capability.trim()
+      && existing.title === input.title.trim()
+      && JSON.stringify(existing.input) === JSON.stringify(normalizedInput);
+    if (!matches) throw new Error('Host task idempotency key was reused with a different request');
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -283,21 +485,166 @@ export class HostTaskService {
   }
 
   private async load(): Promise<void> {
-    const jobsRoot = path.join(taskRoot(), 'jobs');
+    const jobsRoot = path.join(this.getRootDir(), 'jobs');
     await fs.mkdir(jobsRoot, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const entries = await fs.readdir(jobsRoot, { withFileTypes: true }).catch(() => []);
     await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
       try {
-        const raw = await fs.readFile(path.join(jobsRoot, entry.name, 'task.json'), 'utf8');
-        const task = JSON.parse(raw) as HostTaskSnapshot;
-        if (!task?.taskId || !task.sessionKey || !task.runId || !task.idempotencyKey) return;
-        task.completionAcks = Array.isArray(task.completionAcks) ? task.completionAcks : [];
+        const raw = JSON.parse(await fs.readFile(path.join(jobsRoot, entry.name, 'task.json'), 'utf8')) as Partial<HostTaskSnapshot> & { version?: number };
+        if (!raw?.taskId || !raw.sessionKey || !raw.runId || !raw.idempotencyKey || !raw.capability || !raw.title) return;
+        const task: HostTaskSnapshot = {
+          ...(raw as HostTaskSnapshot),
+          version: 2,
+          input: normalizeTaskData(raw.input, 'Persisted Host task input') ?? {},
+          checkpoint: normalizeTaskData(raw.checkpoint, 'Persisted Host task checkpoint', true),
+          artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
+          verifications: Array.isArray(raw.verifications) ? raw.verifications : [],
+          completionAcks: Array.isArray(raw.completionAcks) ? raw.completionAcks : [],
+          lifecycle: normalizeLifecycle(raw.lifecycle),
+        };
+        const now = Date.now();
+        let interruptedOwnerOperation = false;
+        for (const operation of task.lifecycle.operations) {
+          if (operation.status !== 'running' || operation.ownerId === this.ownerId) continue;
+          operation.status = 'interrupted';
+          operation.finishedAt = now;
+          operation.error = 'Host process stopped before this operation completed.';
+          interruptedOwnerOperation = true;
+        }
+        if (interruptedOwnerOperation && ['queued', 'running', 'waiting'].includes(task.status)) {
+          task.status = 'lost';
+          task.error = 'Host process stopped before the claimed operation completed.';
+          task.updatedAt = now;
+          task.revision += 1;
+        }
         this.tasks.set(task.taskId, task);
         this.idempotency.set(`${task.sessionKey}:${task.idempotencyKey}`, task.taskId);
+        if (interruptedOwnerOperation) await this.persist(task, 'task.owner_interrupted');
       } catch {
         // A corrupt orphan must not stop the app or invalidate other durable work.
       }
     }));
+  }
+
+  private async claimOperation(
+    taskId: string,
+    kind: HostTaskOperationKind,
+    detail?: string,
+  ): Promise<{ task?: HostTaskSnapshot; operation?: HostTaskOperation }> {
+    await this.ensureInitialized();
+    return await this.withTaskLock(taskId, async (task) => {
+      if (kind === 'start' && TERMINAL.has(task.status)) return { task: clone(task) };
+      if (kind === 'cancel' && TERMINAL.has(task.status)) return { task: clone(task) };
+      if (kind === 'resume' && !['failed', 'blocked', 'timed_out', 'lost'].includes(task.status)) {
+        return { task: clone(task) };
+      }
+
+      const now = Date.now();
+      for (const operation of task.lifecycle.operations) {
+        if (operation.status !== 'running') continue;
+        if (operation.ownerId !== this.ownerId) {
+          operation.status = 'interrupted';
+          operation.finishedAt = now;
+          operation.error = 'Host process stopped before this operation completed.';
+          continue;
+        }
+        if (operation.kind === kind || kind !== 'cancel') return { task: clone(task) };
+      }
+      if (kind === 'start' && task.lifecycle.operations.some((operation) => (
+        operation.kind === 'start'
+        && operation.status !== 'failed'
+        && operation.status !== 'interrupted'
+      ))) {
+        return { task: clone(task) };
+      }
+      const attempt = task.lifecycle.operations.filter((operation) => operation.kind === kind).length + 1;
+      const operation: HostTaskOperation = {
+        operationId: randomUUID(),
+        kind,
+        status: 'running',
+        ownerId: this.ownerId,
+        attempt,
+        startedAt: now,
+      };
+      task.lifecycle.operations.push(operation);
+      task.lifecycle.operations = task.lifecycle.operations.slice(-MAX_LIFECYCLE_OPERATIONS);
+      if (kind === 'resume') {
+        task.status = 'queued';
+        task.error = undefined;
+        task.completionAcks = [];
+        task.progress = { ...task.progress, detail: detail ?? 'Safe resume was delegated to the registered Host executor.' };
+      } else if (kind === 'cancel') {
+        task.progress = { ...task.progress, detail: detail ?? 'Cancellation was delegated to the registered Host executor.' };
+      }
+      task.updatedAt = now;
+      task.revision += 1;
+      await this.persist(task, `task.${kind}.claimed`);
+      this.publishTaskUpdate(task, { progress: task.progress }, new Set(task.artifacts.map((artifact) => artifact.id)), new Set(task.verifications.map((verification) => verification.id)));
+      this.notify(task);
+      return { task: clone(task), operation: clone(operation) };
+    }) ?? {};
+  }
+
+  private async executeOperation(
+    taskId: string,
+    operationId: string,
+    kind: HostTaskOperationKind,
+    executor: HostTaskLifecycleExecutor,
+    reason?: string,
+  ): Promise<void> {
+    try {
+      const task = await this.get(taskId);
+      if (!task) return;
+      const context: HostTaskExecutorContext = {
+        task,
+        input: clone(task.input),
+        checkpoint: task.checkpoint === undefined ? undefined : clone(task.checkpoint),
+        update: async (update) => await this.applyUpdate(taskId, update, operationId),
+      };
+      if (kind === 'start') await executor.start(context);
+      else if (kind === 'resume') await executor.resume?.(context);
+      else await executor.cancel?.({ ...context, reason: reason ?? 'Cancelled by user' });
+
+      if (kind === 'cancel') {
+        const current = await this.get(taskId);
+        if (current && !TERMINAL.has(current.status)) {
+          await this.applyUpdate(
+            taskId,
+            { status: 'cancelled', error: reason ?? 'Cancelled by user' },
+            operationId,
+          );
+        }
+      }
+      await this.finishOperation(taskId, operationId, 'completed');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const current = await this.get(taskId).catch(() => undefined);
+      if (current && !TERMINAL.has(current.status)) {
+        const status = kind === 'start' ? 'failed' : kind === 'resume' ? 'blocked' : undefined;
+        await this.applyUpdate(taskId, {
+          ...(status ? { status } : {}),
+          error: message,
+          progress: { ...current.progress, detail: `${kind} failed: ${message}` },
+        }, operationId).catch(() => undefined);
+      }
+      await this.finishOperation(taskId, operationId, 'failed', message).catch(() => undefined);
+    }
+  }
+
+  private async finishOperation(taskId: string, operationId: string, status: 'completed' | 'failed', error?: string): Promise<void> {
+    await this.withTaskLock(taskId, async (task) => {
+      const operation = task.lifecycle.operations.find((candidate) => candidate.operationId === operationId);
+      if (!operation || operation.status !== 'running') return;
+      operation.status = status;
+      operation.finishedAt = Date.now();
+      operation.error = shortText(error);
+      task.updatedAt = operation.finishedAt;
+      // Terminal delivery is keyed by revision. Completing the executor claim
+      // after the terminal state must not create a second delivery revision.
+      if (!TERMINAL.has(task.status)) task.revision += 1;
+      await this.persist(task, `task.${operation.kind}.${status}`);
+      this.notify(task);
+    });
   }
 
   private async withTaskLock<T>(taskId: string, operation: (task: HostTaskSnapshot) => Promise<T>): Promise<T | undefined> {
@@ -316,13 +663,21 @@ export class HostTaskService {
   }
 
   private async persist(task: HostTaskSnapshot, type: string): Promise<void> {
-    const directory = path.join(taskRoot(), 'jobs', task.taskId);
+    const directory = path.join(this.getRootDir(), 'jobs', task.taskId);
     await fs.mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     const target = path.join(directory, 'task.json');
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
     await fs.writeFile(temporary, `${JSON.stringify(task, null, 2)}\n`, { mode: PRIVATE_FILE_MODE });
     await fs.rename(temporary, target);
-    await fs.appendFile(path.join(directory, 'journal.jsonl'), `${JSON.stringify({ version: 1, ts: Date.now(), type, revision: task.revision, status: task.status })}\n`, { mode: PRIVATE_FILE_MODE });
+    const operation = task.lifecycle.operations.at(-1);
+    await fs.appendFile(path.join(directory, 'journal.jsonl'), `${JSON.stringify({
+      version: 2,
+      ts: Date.now(),
+      type,
+      revision: task.revision,
+      status: task.status,
+      ...(operation ? { operation: { kind: operation.kind, status: operation.status, attempt: operation.attempt } } : {}),
+    })}\n`, { mode: PRIVATE_FILE_MODE });
   }
 
   private publishTaskUpdate(
@@ -361,7 +716,7 @@ export class HostTaskService {
     for (const verification of task.verifications) {
       if (!verificationIdsBefore.has(verification.id)) events.push({ type: 'verification.completed', verification, toolCallId: task.toolCallId });
     }
-    if (TERMINAL.has(task.status)) {
+    if (update.status && TERMINAL.has(task.status)) {
       events.push({
         type: 'tool.completed',
         toolCallId: task.toolCallId,

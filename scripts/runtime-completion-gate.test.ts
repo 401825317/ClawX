@@ -45,7 +45,7 @@ function artifactRunWithToolAttempts(attempts: Array<{ id: string; isError: bool
       artifactId: 'artifact-ppt',
       status: 'passed',
       required: true,
-      kind: 'artifact.content',
+      kind: 'artifact.availability',
     }],
     events: attempts.map((attempt, index) => ({
       contractVersion: 1,
@@ -109,6 +109,115 @@ test('a text-only request that mentions search and PPT copy does not require a t
   }).find((event) => event.type === 'gate.evaluated');
   assert.ok(gateEvent && gateEvent.type === 'gate.evaluated');
   assert.equal(gateEvent.gate.decision, 'deliverable');
+});
+
+test('an artifact contract may explicitly waive verification without creating a missing-verification gate', () => {
+  const run: ChatRuntimeRunState = {
+    runId: 'run-artifact-no-verification',
+    sessionKey: 'agent:main:main',
+    status: 'completed',
+    objective: '创建一个无需内容验证的临时文件',
+    turnContract: {
+      ...pptxTurnContract,
+      toolRequirement: 'optional',
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: false,
+        requiresApproval: false,
+        requiresToolEvidence: false,
+      },
+    },
+    artifacts: [{
+      id: 'artifact-unverified',
+      kind: 'document',
+      title: 'draft.txt',
+      filePath: '/tmp/draft.txt',
+    }],
+    verifications: [{
+      id: 'verification-unverified-availability',
+      artifactId: 'artifact-unverified',
+      status: 'passed',
+      required: true,
+      kind: 'artifact.availability',
+    }],
+    assistantText: '临时文件已创建。',
+    thinkingText: '',
+    events: [],
+  };
+
+  const report = buildRuntimeCompletionGateReport(run);
+  assert.equal(report.hasBlockingIssues, false);
+  assert.equal(report.missingVerificationCount, 0);
+  assert.equal(report.verificationCoverage, 1);
+});
+
+test('requiresVerification=false never waives the artifact availability baseline', () => {
+  const run: ChatRuntimeRunState = {
+    runId: 'run-artifact-missing-availability',
+    sessionKey: 'agent:main:main',
+    status: 'completed',
+    objective: '创建一个临时文件',
+    turnContract: {
+      ...pptxTurnContract,
+      toolRequirement: 'optional',
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: false,
+        requiresApproval: false,
+        requiresToolEvidence: false,
+      },
+    },
+    artifacts: [{ id: 'artifact-missing-availability', kind: 'document', title: 'missing.txt' }],
+    verifications: [],
+    assistantText: '文件已创建。',
+    thinkingText: '',
+    events: [],
+  };
+
+  const report = buildRuntimeCompletionGateReport(run);
+  assert.equal(report.hasBlockingIssues, true);
+  assert.equal(report.issues.some((issue) => issue.code === 'artifact.verification.missing'), true);
+});
+
+test('approval and side-effect authorization remain independent completion requirements', () => {
+  const baseRun: ChatRuntimeRunState = {
+    runId: 'run-artifact-approval',
+    sessionKey: 'agent:main:main',
+    status: 'completed',
+    objective: '审批后创建文件',
+    turnContract: {
+      ...pptxTurnContract,
+      toolRequirement: 'optional',
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: false,
+        requiresApproval: true,
+        requiresToolEvidence: false,
+      },
+    },
+    artifacts: [{ id: 'artifact-approved', kind: 'document', title: 'approved.txt' }],
+    verifications: [{
+      id: 'verification-approved-availability',
+      artifactId: 'artifact-approved',
+      status: 'passed',
+      required: true,
+      kind: 'artifact.availability',
+    }],
+    assistantText: '文件已创建。',
+    thinkingText: '',
+    events: [],
+  };
+
+  const missingApproval = buildRuntimeCompletionGateReport(baseRun);
+  assert.equal(missingApproval.issues.some((issue) => issue.code === 'approval.required.missing'), true);
+  assert.equal(missingApproval.issues.some((issue) => issue.code === 'artifact.verification.missing'), false);
+
+  const unauthorized = buildRuntimeCompletionGateReport({
+    ...baseRun,
+    runId: 'run-artifact-unauthorized',
+    turnContract: { ...baseRun.turnContract!, sideEffectAuthorized: false },
+  });
+  assert.equal(unauthorized.issues.some((issue) => issue.code === 'side_effect.unauthorized'), true);
 });
 
 test('text-only explanations may mention search, open, and run without being held for a tool', () => {
@@ -274,21 +383,21 @@ function wrappedDesignedPptxRepairRun(options: {
       artifactId: 'ppt-draft-create',
       status: 'blocked' as const,
       required: true,
-      kind: 'artifact.content',
+      kind: 'artifact.availability',
     },
     {
       id: 'verify-ppt-draft-repair-1',
       artifactId: 'ppt-draft-repair-1',
       status: 'blocked' as const,
       required: true,
-      kind: 'artifact.content',
+      kind: 'artifact.availability',
     },
     {
       id: 'verify-ppt-final',
       artifactId: 'ppt-final',
       status: finalVerificationStatus,
       required: true,
-      kind: 'artifact.content',
+      kind: 'artifact.availability',
     },
   ];
   if (options.includeUnrelatedBlockedArtifact) {
@@ -304,7 +413,7 @@ function wrappedDesignedPptxRepairRun(options: {
       artifactId: 'unrelated-artifact',
       status: 'blocked',
       required: true,
-      kind: 'artifact.content',
+      kind: 'artifact.availability',
     });
   }
 
@@ -392,3 +501,62 @@ test('an unrecovered tool failure remains blocking', () => {
   assert.equal(report.failedStepCount, 1);
   assert.equal(report.issues.some((issue) => issue.code === 'tool.failed'), true);
 });
+
+for (const scenario of [
+  { status: 'completed' as const, issue: undefined, decision: 'deliverable', running: 0, failed: 0, delivery: 'completed' },
+  { status: 'pending' as const, issue: 'task.unfinished', decision: 'continue_required', running: 1, failed: 0, delivery: 'blocked' },
+  { status: 'running' as const, issue: 'task.unfinished', decision: 'continue_required', running: 1, failed: 0, delivery: 'blocked' },
+  { status: 'partial' as const, issue: 'task.blocked', decision: 'continue_required', running: 0, failed: 1, delivery: 'error' },
+  { status: 'waiting_approval' as const, issue: 'task.blocked', decision: 'blocked_needs_user', running: 0, failed: 1, delivery: 'error' },
+  { status: 'error' as const, issue: 'task.failed', decision: 'continue_required', running: 0, failed: 1, delivery: 'error' },
+]) {
+  test(`completion gate projects ${scenario.status} detached tasks without duplicate companion-step issues`, () => {
+    const run: ChatRuntimeRunState = {
+      runId: `run-task-${scenario.status}`,
+      sessionKey: 'agent:main:main',
+      status: 'completed',
+      objective: 'Execute detached work',
+      assistantText: '',
+      thinkingText: '',
+      tasks: [{
+        taskId: 'detached-task',
+        title: 'Detached task',
+        status: scenario.status,
+        detail: scenario.status === 'waiting_approval' ? 'Approval required.' : undefined,
+        updatedAt: 10,
+      }],
+      planSteps: [{
+        id: 'task:detached-task',
+        taskId: 'detached-task',
+        title: 'Stale companion step',
+        status: scenario.status === 'completed' ? 'completed' : 'running',
+      }],
+      artifacts: [],
+      verifications: [],
+      events: [],
+    };
+
+    const report = buildRuntimeCompletionGateReport(run);
+    const taskIssues = report.issues.filter((issue) => issue.code.startsWith('task.'));
+    assert.equal(taskIssues.length, scenario.issue ? 1 : 0);
+    assert.equal(taskIssues[0]?.code, scenario.issue);
+    assert.equal(report.issues.some((issue) => issue.code.startsWith('step.')), false);
+    assert.equal(report.runningStepCount, scenario.running);
+    assert.equal(report.failedStepCount, scenario.failed);
+    if (scenario.status === 'waiting_approval') assert.equal(taskIssues[0]?.recoverable, false);
+
+    const events = buildRuntimeCompletionGateEvents(run, {
+      runId: run.runId,
+      sessionKey: run.sessionKey,
+      status: 'completed',
+    });
+    const gate = events.find((event) => event.type === 'gate.evaluated');
+    const delivery = events.find((event) => (
+      event.type === 'run.step.updated' && event.step.id === 'uclaw.deliver'
+    ));
+    assert.ok(gate && gate.type === 'gate.evaluated');
+    assert.equal(gate.gate.decision, scenario.decision);
+    assert.ok(delivery && delivery.type === 'run.step.updated');
+    assert.equal(delivery.step.status, scenario.delivery);
+  });
+}

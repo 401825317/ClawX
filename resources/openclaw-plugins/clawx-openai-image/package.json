@@ -1,6 +1,6 @@
 {
   "name": "clawx-openai-image-plugin",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "UClaw independent OpenAI-compatible image generation provider for OpenClaw",
   "private": true,
   "type": "module",

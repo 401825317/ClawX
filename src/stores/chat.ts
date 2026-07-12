@@ -79,6 +79,7 @@ import {
 import {
   applyAsyncTaskEvidenceToRuns,
   buildStreamingAssistantMessageFromRuntimeRun,
+  collectRunDetachedTaskIdsForAbort,
   enrichWithToolCallAttachments,
   extractAsyncTaskEvidence,
   isInternalMessage as isHistoryInternalMessage,
@@ -219,109 +220,6 @@ type GatewayTurnPreferences = {
     title: string;
   }>;
 };
-
-function isImageAttachmentFile(
-  file: Pick<AttachedFileMeta, 'mimeType' | 'filePath' | 'fileName' | 'fileSize' | 'preview'> | undefined | null,
-): file is Required<Pick<AttachedFileMeta, 'mimeType' | 'filePath' | 'fileName' | 'fileSize' | 'preview'>> {
-  return Boolean(
-    file
-    && typeof file.mimeType === 'string'
-    && file.mimeType.startsWith('image/')
-    && typeof file.filePath === 'string'
-    && file.filePath.trim().length > 0
-    && typeof file.fileName === 'string'
-    && typeof file.fileSize === 'number',
-  );
-}
-
-function normalizePendingImageInput(
-  file: Pick<AttachedFileMeta, 'mimeType' | 'filePath' | 'fileName' | 'fileSize' | 'preview'>,
-): PendingImageInput {
-  return {
-    fileName: file.fileName,
-    mimeType: file.mimeType,
-    fileSize: file.fileSize,
-    stagedPath: file.filePath || '',
-    preview: file.preview,
-  };
-}
-
-function resolveImageModeReferenceInputs(
-  explicitAttachments: PendingImageInput[] | undefined,
-  messages: RawMessage[],
-): PendingImageInput[] {
-  const explicitImages = (explicitAttachments ?? []).filter((file) => file.mimeType.startsWith('image/'));
-  if (explicitImages.length > 0) {
-    return explicitImages;
-  }
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role === 'user') continue;
-    const imageFile = (message._attachedFiles ?? []).find((file) => isImageAttachmentFile(file));
-    if (imageFile) {
-      return [normalizePendingImageInput(imageFile)];
-    }
-  }
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    const imageFile = (message._attachedFiles ?? []).find((file) => isImageAttachmentFile(file));
-    if (imageFile) {
-      return [normalizePendingImageInput(imageFile)];
-    }
-  }
-
-  return [];
-}
-
-function shouldLoadFamilyImageReferences(prompt: string, mode: ChatSendMode): boolean {
-  const referencesImage = /(?:这张|这幅|这个图|这图|这张图|这个图片|图片|照片|画面|上一张|上一个|刚才|刚生成|它|previous|last|this image|this picture|this photo|the image|the picture|it)/i.test(prompt);
-  const asksAboutImage = /(?:美吗|美嘛|好看吗|漂亮吗|丑吗|怎么样|咋样|如何|评价|点评|审美|哪里.*(?:好|不好|优化|改进)|what do you think|look good|beautiful|pretty|rate|review|critique|analy[sz]e)/i.test(prompt);
-  const editsImage = /(?:去掉|删除|移除|替换|添加|加一|加个|改成|修一下|调整|换成|美化|背景|动起来|animate|turn .* into video|make .* move|remove|replace|add|edit)/i.test(prompt);
-  if (mode === 'image' || mode === 'video') {
-    return referencesImage || asksAboutImage || editsImage;
-  }
-  return referencesImage;
-}
-
-async function loadFamilyImageReferenceInputs(
-  sessionKey: string,
-  prompt: string,
-  mode: ChatSendMode,
-): Promise<PendingImageInput[]> {
-  if (!shouldLoadFamilyImageReferences(prompt, mode)) return [];
-
-  try {
-    const transcriptMessages = await withTimeout(
-      loadSessionTranscriptFallback(sessionKey, PREVIEW_HYDRATION_MESSAGE_LIMIT, { includeFamily: true }),
-      CHAT_HISTORY_DISK_FALLBACK_TIMEOUT_MS,
-    );
-    const messagesWithToolImages = enrichWithToolResultFiles(transcriptMessages);
-    const enrichedMessages = enrichWithCachedImages(messagesWithToolImages);
-    return resolveImageModeReferenceInputs([], enrichedMessages);
-  } catch (error) {
-    console.warn('[chat.media] family image reference fallback failed:', error);
-    return [];
-  }
-}
-
-function mergeGatewayImageReferences(
-  explicitAttachments: ChatSendAttachment[] | undefined,
-  references: PendingImageInput[],
-): ChatSendAttachment[] {
-  const byPath = new Map<string, ChatSendAttachment>();
-  for (const attachment of explicitAttachments ?? []) {
-    if (attachment.stagedPath.trim()) {
-      byPath.set(attachment.stagedPath, attachment);
-    }
-  }
-  for (const reference of references) {
-    if (!reference.stagedPath.trim() || byPath.has(reference.stagedPath)) continue;
-    byPath.set(reference.stagedPath, reference);
-  }
-  return [...byPath.values()];
-}
 
 function sanitizeCompositeTaskId(value: string, index: number): string {
   const cleaned = value.trim().replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '');
@@ -2877,7 +2775,25 @@ function applyRuntimeContractEvents(
   if (events.length === 0) return currentRuns;
   let nextRuns = currentRuns;
   for (const event of events) {
+    const previousRuns = nextRuns;
     nextRuns = applyRuntimeEventToRuns(nextRuns, event);
+    if (nextRuns === previousRuns) continue;
+    if (event.type === 'task.updated') {
+      const ledgerStatus = event.task.status === 'completed'
+        ? 'completed'
+        : event.task.status === 'error' || event.task.status === 'partial'
+          ? 'error'
+          : 'pending';
+      nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, event.runId, [{
+        id: `task:${event.task.taskId}`,
+        taskId: event.task.taskId,
+        runId: event.runId,
+        childSessionKey: event.task.childSessionKey,
+        status: ledgerStatus,
+        source: ledgerStatus === 'pending' ? 'tool-result' : 'task-completion',
+        updatedAt: event.task.updatedAt ?? event.ts ?? Date.now(),
+      }], event.sessionKey);
+    }
     if (event.type === 'progress.update') continue;
     const progressEvents = buildRuntimeProgressEvents(nextRuns[event.runId], event);
     for (const progressEvent of progressEvents) {
@@ -5319,20 +5235,28 @@ async function sendChatMessageViaHostApi(params: {
   }
 }
 
-async function abortChatRunViaHostApi(sessionKey: string): Promise<void> {
+async function abortChatRunViaHostApi(sessionKey: string, runId?: string | null, taskIds: string[] = []): Promise<void> {
   try {
     const response = await hostApiFetch<{
       success: boolean;
       error?: string;
     }>('/api/chat/abort', {
       method: 'POST',
-      body: JSON.stringify({ sessionKey }),
+      body: JSON.stringify({
+        sessionKey,
+        ...(runId ? { runId } : {}),
+        ...(taskIds.length > 0 ? { taskIds } : {}),
+      }),
     });
     if (!response.success) {
       throw new Error(response.error || 'Failed to abort chat run');
     }
   } catch {
-    await useGatewayStore.getState().rpc('chat.abort', { sessionKey });
+    await Promise.allSettled(taskIds.map((taskId) => useGatewayStore.getState().rpc('tasks.cancel', {
+      taskId,
+      reason: 'Cancelled from the UClaw chat composer.',
+    })));
+    await useGatewayStore.getState().rpc('chat.abort', { sessionKey, ...(runId ? { runId } : {}) });
   }
 }
 
@@ -7707,7 +7631,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     const currentSessionKey = targetSessionKey;
-    const currentMessages = get().messages;
     const explicitPendingImages = (attachments ?? [])
       .filter((file) => file.mimeType.startsWith('image/') && file.stagedPath.trim().length > 0)
       .map((file) => ({
@@ -7757,14 +7680,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     };
 
-    const referencesPriorImage = mode === 'image' || mode === 'video';
-    let candidateImageInputs = referencesPriorImage
-      ? resolveImageModeReferenceInputs([], currentMessages)
-      : [];
-    if (referencesPriorImage && candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
-      candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
-    }
-    if (!sendGenerationIsCurrent()) return;
     rememberPendingRuntimeIntent(currentSessionKey, {
       objective: trimmed,
       mode,
@@ -7784,7 +7699,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Every new turn belongs to the native OpenClaw agent loop. The legacy
     // planner/composite coordinator remains only for already-started jobs;
     // it must not turn a fresh user message into a synthetic user contract.
-    const gatewayReferenceImages = referencesPriorImage ? candidateImageInputs : [];
+    const gatewayReferenceImages = explicitPendingImages;
     const compositeTasks: MediaIntentCompositeTask[] | undefined = undefined;
     const runtimeMessage = trimmed;
     const effectiveMode: ChatSendMode = mode;
@@ -7965,7 +7880,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const thinkingLevel = get().thinkingLevel ?? undefined;
       const chatMediaAttachments = compositeTasks
         ? []
-        : mergeGatewayImageReferences(attachments, gatewayReferenceImages);
+        : (attachments ?? []);
       const hasMedia = chatMediaAttachments.length > 0;
       const clientPreferences = buildGatewayTurnPreferences({
         mode: effectiveMode,
@@ -8097,7 +8012,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   abortRun: async () => {
     clearHistoryPoll();
     clearErrorRecoveryTimer();
-    const { currentSessionKey, activeRunId } = get();
+    const stateAtAbort = get();
+    const { currentSessionKey, activeRunId } = stateAtAbort;
+    const detachedTaskIds = collectRunDetachedTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
     _sessionsCancelling.add(currentSessionKey);
     _activeSendGenerationBySession.delete(currentSessionKey);
     rememberLocallyAbortedRun(activeRunId);
@@ -8152,7 +8069,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     try {
-      await abortChatRunViaHostApi(currentSessionKey);
+      await abortChatRunViaHostApi(currentSessionKey, activeRunId, detachedTaskIds);
     } catch (err) {
       set({ error: String(err) });
     } finally {

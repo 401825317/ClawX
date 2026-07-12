@@ -113,9 +113,9 @@ ClawXは公式の**OpenClaw**コアを直接ベースに構築されています
 各 Agent は `provider/model` の実行時設定を個別に上書きできます。上書きしていない Agent は引き続きグローバルの既定モデルを継承します。
 Agents ページでは、簡単な役割名と責任、内蔵アバターを選ぶだけで、モデルが実用的な Agent プロファイルと最初のメッセージを生成し、作成後すぐにその Agent 専用チャットへ移動できます。
 
-チャット、画像モード、動画モードは同じ OpenClaw Agent turn を共有します。モードはその turn のモデル、サイズ、品質、時間、選択済み artifact の設定だけを渡し、Renderer 側の intent planner や media queue には分岐しません。ネイティブの `image_generate` / `video_generate` は OpenClaw の task ledger と同一 session への完了 wake を維持し、UClaw は進行、artifact、検証、承認、部分失敗を実行 UI に投影します。同梱の Host Task Bridge は、将来の復旧可能なローカル executor にも `session/run/tool-call/idempotency` 契約を適用し、別の Agent loop を作りません。
+チャット、画像、動画の新規リクエストは同じ OpenClaw Agent loop を共有します。モードはその turn のモデル、サイズ、品質、時間、選択済み artifact の設定だけを渡し、Renderer 側の intent planner や media queue には分岐しません。ネイティブタスクと同梱の Host Task Bridge は Task Flow と共通の `session/run/tool-call/idempotency` 契約を使い、復旧可能な長時間タスクと同一 session への完了 wake を提供します。UClaw は構造化された進行、artifact、検証、承認、部分失敗を実行 UI に投影するだけで、別の Agent loop は作りません。旧 composite run は移行前ジョブ向けの参照・取消・再試行だけを残し、旧 direct planner の POST endpoint は `410` を返します。新規リクエストはすべて Agent loop に入ります。
 
-デスクトップ操作と Blender の 3D シーンは通常のチャット完了に依存しません。デスクトップ制御は session/run ごとに分離され、全体で直列化され、アプリ内 UI が一回限りの承認トークンを発行した後にだけ実行できます。組み込み Blender runtime は宣言的な SceneSpec を受け取り、起動拡張を読み込まないローカル Blender で実行し、`.blend`、`.glb`、プレビュー、manifest を検証してから会話へ届けます。Blender は任意のローカル依存関係であり、対象プラットフォームまたは実行ファイルが利用できない場合は能力状態を明示し、未生成を完了として扱いません。3D プレビューは対応するモデルを開いたときだけ遅延読み込みされ、通常のチャット経路を重くしません。
+デスクトップ観察は現在スクリーンショットだけに対応しています。ネイティブのデスクトップ操作ドライバは未実装であり、このリリースでは Computer Use が UClaw ウィンドウを操作できるとはうたいません。組み込み Blender runtime は宣言的な SceneSpec を受け取り、起動拡張を読み込まないローカル Blender で実行し、`.blend`、`.glb`、プレビュー、manifest を検証してから会話へ届けます。Blender は任意のローカル依存関係であり、対象プラットフォームまたは実行ファイルが利用できない場合は能力状態を明示し、未生成を完了として扱いません。3D プレビューは対応するモデルを開いたときだけ遅延読み込みされ、通常のチャット経路を重くしません。
 
 ### 📡 マルチチャネル管理
 複数のAIチャネルを同時に設定・監視できます。各チャネルは独立して動作するため、異なるタスクに特化したエージェントを実行できます。

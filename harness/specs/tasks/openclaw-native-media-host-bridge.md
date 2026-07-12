@@ -6,31 +6,47 @@ taskType: runtime-bridge
 intent: Keep OpenClaw as the sole owner of user-intent reasoning, tool selection, subagent coordination, session continuation, and async task lifecycle. UClaw remains the desktop Host: it supplies current-turn preferences, local capability adapters, task journals, UI projection, validation, and user approvals without creating a parallel planner-to-job-to-synthetic-transcript route.
 touchedAreas:
   - harness/specs/tasks/openclaw-native-media-host-bridge.md
+  - harness/specs/tasks/media-intent-image-edit-routing.md
+  - harness/specs/tasks/video-generation-prompt-length-guard.md
   - harness/specs/tasks/uclaw-codex-experience-benchmark.md
+  - harness/specs/tasks/uclaw-codex-experience-benchmark-results.md
+  - harness/specs/tasks/uclaw-agent-runtime-contract.md
+  - harness/specs/tasks/uclaw-feedback-runtime-regressions.md
+  - harness/specs/tasks/uclaw-desktop-and-blender-runtime.md
   - harness/specs/rules/backend-communication-boundary.md
   - electron/api/routes/gateway.ts
+  - electron/api/routes/media.ts
   - electron/api/routes/runtime.ts
   - electron/services/agent-runtime/**
   - electron/gateway/chat-runtime-events.ts
-  - electron/utils/media-intent-planner.ts
+  - electron/gateway/task-ledger-monitor.ts
+  - shared/chat-runtime-events.ts
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - resources/openclaw-plugins/uclaw-artifact-guard/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-artifact-guard/package.json
   - resources/openclaw-plugins/uclaw-task-bridge/**
+  - resources/context/TOOLS.clawx.md
   - electron/gateway/config-sync.ts
   - electron/utils/openclaw-auth.ts
   - electron/utils/plugin-install.ts
   - scripts/bundle-openclaw-plugins.mjs
+  - scripts/host-capability-registry.test.ts
+  - scripts/host-task-lifecycle.test.ts
+  - scripts/host-task-runtime-route.test.ts
+  - scripts/gateway-task-ledger-monitor.test.ts
+  - scripts/uclaw-contract-driven-gate.test.mjs
   - src/stores/chat.ts
   - src/stores/chat/helpers.ts
   - src/stores/chat/runtime-contract.ts
   - src/pages/Chat/ChatInput.tsx
+  - src/pages/Chat/ExecutionGraphCard.tsx
+  - src/pages/Chat/task-visualization.ts
   - tests/e2e/**
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
 expectedUserBehavior:
-  - A normal chat can invoke native image_generate or video_generate based on the full OpenClaw session context; UClaw does not require a keyword matcher, composite planner, or a second model planner first.
+  - A normal chat can invoke native image_generate or video_generate based on the full OpenClaw session context; UClaw does not require a keyword matcher or second semantic planning pass.
   - Image and video modes remain visible product affordances. They supply current-turn defaults such as model, size, quality, duration, and selected input artifact, but do not bypass the OpenClaw agent loop.
   - Native OpenClaw media task start, progress, completion, failure, and produced attachments project into the existing UClaw runtime graph and artifact UI.
   - A native async media completion resumes the same session through OpenClaw's completion path. UClaw does not synthesize an assistant reply to pretend that an Agent tool returned.
@@ -52,15 +68,20 @@ requiredTests:
   - pnpm exec tsc --noEmit --pretty false
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
+  - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
   - Electron UI validation for chat-mode image continuation and native async task delivery
 acceptance:
   - The renderer has no direct media job/polling branch for a normal agent turn.
   - Image/video mode preferences reach the matching OpenClaw turn without being persisted as user-authored system instructions.
   - Native image_generate and video_generate retain their OpenClaw task ledger, duplicate guard, completion wake, and normal session delivery semantics.
-  - The UClaw media intent planner is not called to decide whether a normal conversation may use a native media tool.
-  - The artifact guard does not block native image_generate or video_generate because a UClaw planner failed, timed out, or missed a wording variant.
+  - Fresh turns never call the retired UClaw media intent or video-route planners; OpenClaw performs semantic tool selection once.
+  - The retired intent-plan and direct image/video endpoints fail closed with HTTP 410 and cannot enqueue duplicate media work.
+  - Media provider settings and existing job inspection/cancel/retry endpoints remain available for operations and legacy recovery; they are not fresh-turn entrypoints.
+  - The legacy composite coordinator can resume pre-migration records but cannot accept a fresh `/api/chat/send` turn or synthesize a new assistant result.
+  - The artifact guard validates the declared Agent turn contract and does not depend on a second UClaw planner.
   - Tool/task completion events create stable runtime artifacts and required availability verification before UClaw presents terminal success.
-  - New and legacy paths cannot create duplicate side effects for one idempotency key.
+  - Fresh Agent/Task Flow execution and legacy recovery cannot create duplicate side effects for one idempotency key.
+  - Ordinary, image-mode, and video-mode composer sends all use `/api/chat/send`; only image/video preference fields differ.
   - Existing standalone PPT, file, desktop, Blender, browser, and MCP tool paths continue to use OpenClaw tools/plugins rather than gaining another front-end intent router.
   - New chat turns never persist an internal execution contract as user-authored text; the UI only renders the original user request and verified runtime artifacts.
   - The packaged and development startup paths install and enable every required bundled bridge plugin.

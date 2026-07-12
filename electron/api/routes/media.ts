@@ -1,5 +1,4 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import { promises as fsP } from 'node:fs';
 import type { HostApiContext } from '../context';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
@@ -31,139 +30,28 @@ import {
   cancelMediaGenerationJobWithResult,
   cancelMediaGenerationJobsForRun,
   cancelMediaGenerationJobsForSession,
-  enqueueMediaGenerationJobWithResult,
   getMediaGenerationJob,
   getMediaGenerationJobsForSession,
   retryMediaGenerationJobDelivery,
 } from '../../utils/media-generation-jobs';
-import {
-  planMediaIntent,
-  type MediaIntentArtifactContext,
-  type MediaIntentRecentMessage,
-} from '../../utils/media-intent-planner';
 import { logger } from '../../utils/logger';
-import type {
-  MediaGenerationInputImageRef,
-  VideoGenerationRouteDecision,
-  VideoGenerationRouteMode,
-} from '../../utils/media-generation-types';
-import {
-  countVideoPromptCharacters,
-  getVideoPromptLengthError,
-  MAX_VIDEO_GENERATION_PROMPT_CHARS,
-} from '../../utils/video-generation-prompt-limits';
-import {
-  createLocalArtifact,
-  type LocalArtifactCreateRequest,
-} from '../../utils/local-artifact-runtime';
-import {
-  isLocalArtifactKind,
-  planLocalArtifactBatch,
-  type LocalArtifactPlanItem,
-} from '../../utils/local-artifact-planner';
-import {
-  appendCompositeArtifactConversation,
-  type PersistedCompositeArtifactManifest,
-} from '../../utils/chat-session-image-message';
 import {
   compositeRunCoordinator,
 } from '../../utils/composite-run-coordinator';
 import type {
   CompositeRunCancelRequest,
   CompositeRunRetryRequest,
-  CompositeRunStartRequest,
 } from '../../../shared/composite-run';
 
-const CANCELLED_LOCAL_RUN_TTL_MS = 30 * 60 * 1000;
-const cancelledLocalRunIds = new Map<string, number>();
-
-function rememberCancelledLocalRun(runId: string): void {
-  if (!runId) return;
-  const now = Date.now();
-  cancelledLocalRunIds.set(runId, now);
-  for (const [candidateRunId, cancelledAt] of cancelledLocalRunIds) {
-    if (now - cancelledAt > CANCELLED_LOCAL_RUN_TTL_MS) {
-      cancelledLocalRunIds.delete(candidateRunId);
-    }
-  }
-}
-
-function localRunWasCancelled(runId: string): boolean {
-  const cancelledAt = cancelledLocalRunIds.get(runId);
-  return cancelledAt != null && Date.now() - cancelledAt <= CANCELLED_LOCAL_RUN_TTL_MS;
-}
-
-function normalizeMediaInputImageRefs(
-  images: Array<{
-    fileName?: string;
-    mimeType?: string;
-    filePath?: string;
-  }> | undefined,
-): MediaGenerationInputImageRef[] | undefined {
-  return Array.isArray(images)
-    ? images
-      .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
-      .map((image) => ({
-        fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
-        mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
-        filePath: image.filePath!.trim(),
-      }))
-    : undefined;
-}
-
-function isVideoRouteMode(value: unknown): value is VideoGenerationRouteMode {
-  return value === 'text_to_video'
-    || value === 'image_to_video'
-    || value === 'edit_image_then_video';
-}
-
-function normalizeVideoRouteDecision(
-  rawRoute: unknown,
-  params: {
-    prompt: string;
-    inputImages?: MediaGenerationInputImageRef[];
-  },
-): VideoGenerationRouteDecision {
-  const route = rawRoute && typeof rawRoute === 'object'
-    ? rawRoute as Record<string, unknown>
-    : {};
-  const rawMode = route.mode;
-  const mode = isVideoRouteMode(rawMode)
-    ? rawMode
-    : ((params.inputImages?.length ?? 0) > 0 ? 'image_to_video' : 'text_to_video');
-  const routeSourceImages = normalizeMediaInputImageRefs(route.sourceImages as Array<{
-    fileName?: string;
-    mimeType?: string;
-    filePath?: string;
-  }> | undefined);
-  const sourceImages = routeSourceImages?.length
-    ? routeSourceImages
-    : (mode === 'text_to_video' ? undefined : params.inputImages);
-  const selectedImageSource = route.selectedImageSource === 'candidate' || route.selectedImageSource === 'explicit'
-    ? route.selectedImageSource
-    : (sourceImages?.length ? 'explicit' : 'none');
-  const selectedImageIndex = typeof route.selectedImageIndex === 'number' && Number.isFinite(route.selectedImageIndex)
-    ? Math.max(0, Math.floor(route.selectedImageIndex))
-    : (sourceImages?.length ? 0 : undefined);
-
-  return {
-    mode: sourceImages?.length ? mode : 'text_to_video',
-    source: route.source === 'fallback' ? 'fallback' : 'router',
-    confidence: typeof route.confidence === 'number' && Number.isFinite(route.confidence)
-      ? Math.max(0, Math.min(1, route.confidence))
-      : undefined,
-    reason: typeof route.reason === 'string' ? route.reason : undefined,
-    selectedImageSource: sourceImages?.length ? selectedImageSource : 'none',
-    selectedImageIndex,
-    videoPrompt: typeof route.videoPrompt === 'string' && route.videoPrompt.trim()
-      ? route.videoPrompt.trim()
-      : params.prompt,
-    imageEditPrompt: typeof route.imageEditPrompt === 'string' && route.imageEditPrompt.trim()
-      ? route.imageEditPrompt.trim()
-      : undefined,
-    sourceImages,
-  };
-}
+const RETIRED_AGENT_BYPASS_PATHS = new Set([
+  '/api/composite-runs',
+  '/api/local-artifacts/plan-batch',
+  '/api/local-artifacts/create',
+  '/api/local-artifacts/append-conversation',
+  '/api/media/intent-plan',
+  '/api/media/image-generation/chat-send',
+  '/api/media/video-generation/chat-send',
+]);
 
 export async function handleMediaRoutes(
   req: IncomingMessage,
@@ -179,14 +67,17 @@ export async function handleMediaRoutes(
     }
   });
 
-  if (url.pathname === '/api/composite-runs' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<CompositeRunStartRequest>(req);
-      const result = await compositeRunCoordinator.start(body);
-      sendJson(res, result.idempotent ? 200 : 202, result);
-    } catch (error) {
-      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
-    }
+  if (req.method === 'POST' && RETIRED_AGENT_BYPASS_PATHS.has(url.pathname)) {
+    logger.warn('[media-route] retired_agent_bypass_blocked', {
+      path: url.pathname,
+      replacement: '/api/chat/send',
+    });
+    sendJson(res, 410, {
+      success: false,
+      code: 'media_agent_bypass_retired',
+      error: 'This legacy media routing endpoint has been retired. Send the user turn through /api/chat/send with clientPreferences.',
+      replacement: '/api/chat/send',
+    });
     return true;
   }
 
@@ -256,160 +147,6 @@ export async function handleMediaRoutes(
     }
   }
 
-  if (url.pathname === '/api/local-artifacts/plan-batch' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{ items?: LocalArtifactPlanItem[]; runId?: string }>(req);
-      const runId = body.runId?.trim() || '';
-      if (runId && localRunWasCancelled(runId)) {
-        sendJson(res, 409, { success: false, error: 'Local artifact planning cancelled' });
-        return true;
-      }
-      const items = (Array.isArray(body.items) ? body.items : [])
-        .filter((item) => (
-          typeof item?.id === 'string'
-          && item.request
-          && isLocalArtifactKind(item.request.kind)
-        ));
-      const result = await planLocalArtifactBatch(items);
-      if (runId && localRunWasCancelled(runId)) {
-        sendJson(res, 409, { success: false, error: 'Local artifact planning cancelled' });
-        return true;
-      }
-      sendJson(res, 200, { success: true, ...result });
-    } catch (error) {
-      sendJson(res, 500, { success: false, error: String(error) });
-    }
-    return true;
-  }
-
-  if (url.pathname === '/api/local-artifacts/create' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<LocalArtifactCreateRequest & { runId?: string }>(req);
-      const runId = body.runId?.trim() || '';
-      if (runId && localRunWasCancelled(runId)) {
-        sendJson(res, 409, { success: false, error: 'Local artifact creation cancelled' });
-        return true;
-      }
-      const artifact = await createLocalArtifact(body);
-      if (runId && localRunWasCancelled(runId)) {
-        await fsP.rm(artifact.filePath, { force: true }).catch(() => undefined);
-        sendJson(res, 409, { success: false, error: 'Local artifact creation cancelled' });
-        return true;
-      }
-      sendJson(res, 200, { success: true, artifact });
-    } catch (error) {
-      sendJson(res, 500, { success: false, error: String(error) });
-    }
-    return true;
-  }
-
-  if (url.pathname === '/api/local-artifacts/append-conversation' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        sessionKey?: string;
-        prompt?: string;
-        runId?: string;
-        summaryText?: string;
-        files?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          fileSize?: number;
-          width?: number;
-          height?: number;
-          filePath?: string;
-          gatewayUrl?: string;
-          source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
-        }>;
-        outputPaths?: string[];
-        inputPaths?: string[];
-        userMessageTimestampMs?: number;
-        manifest?: PersistedCompositeArtifactManifest;
-      }>(req);
-      const sessionKey = body.sessionKey?.trim() || '';
-      const prompt = body.prompt?.trim() || '';
-      const runId = body.runId?.trim() || '';
-      const summaryText = body.summaryText?.trim() || '';
-      if (!sessionKey) {
-        sendJson(res, 400, { success: false, error: 'sessionKey is required' });
-        return true;
-      }
-      if (!prompt) {
-        sendJson(res, 400, { success: false, error: 'prompt is required' });
-        return true;
-      }
-      if (!summaryText) {
-        sendJson(res, 400, { success: false, error: 'summaryText is required' });
-        return true;
-      }
-      const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
-        ? Math.floor(body.userMessageTimestampMs)
-        : undefined;
-      await appendCompositeArtifactConversation({
-        sessionKey,
-        prompt,
-        summaryText,
-        ...(runId ? { runId } : {}),
-        files: Array.isArray(body.files) ? body.files : undefined,
-        outputPaths: Array.isArray(body.outputPaths) ? body.outputPaths : undefined,
-        inputPaths: Array.isArray(body.inputPaths) ? body.inputPaths : undefined,
-        ...(userMessageTimestampMs !== undefined ? { userTimestampMs: userMessageTimestampMs } : {}),
-        manifest: body.manifest,
-        shouldAbort: () => Boolean(runId && localRunWasCancelled(runId)),
-      });
-      sendJson(res, 200, { success: true });
-    } catch (error) {
-      sendJson(res, 500, { success: false, error: String(error) });
-    }
-    return true;
-  }
-
-  if (url.pathname === '/api/media/intent-plan' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        prompt?: string;
-        requestedMode?: 'chat' | 'image' | 'video';
-        explicitImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        candidateImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        recentMessages?: MediaIntentRecentMessage[];
-        artifactContext?: MediaIntentArtifactContext;
-      }>(req);
-      const plan = await planMediaIntent({
-        prompt: body.prompt?.trim() || '',
-        requestedMode: body.requestedMode,
-        explicitImages: normalizeMediaInputImageRefs(body.explicitImages),
-        candidateImages: normalizeMediaInputImageRefs(body.candidateImages),
-        recentMessages: Array.isArray(body.recentMessages) ? body.recentMessages : undefined,
-        artifactContext: body.artifactContext,
-      });
-      logger.info('[media-intent-route] planned', {
-        requestedMode: body.requestedMode || 'chat',
-        action: plan.action,
-        source: plan.source,
-        confidence: plan.confidence,
-        selectedImageSource: plan.selectedImageSource,
-        selectedImageIndex: plan.selectedImageIndex,
-        sourceImageCount: plan.sourceImages?.length ?? 0,
-        compositeTaskCount: plan.compositeTasks?.length ?? 0,
-        artifactContinuationAction: plan.artifactContinuationAction,
-        artifactContextRunId: body.artifactContext?.runId,
-        artifactContextStatus: body.artifactContext?.status,
-        artifactContextDeliveryStatus: body.artifactContext?.deliveryStatus,
-      });
-      sendJson(res, 200, { success: true, plan });
-    } catch (error) {
-      sendJson(res, 500, { success: false, error: String(error) });
-    }
-    return true;
-  }
-
   if (url.pathname.startsWith('/api/media/generation-jobs/') && req.method === 'GET') {
     const jobId = decodeURIComponent(url.pathname.slice('/api/media/generation-jobs/'.length)).trim();
     const job = jobId ? getMediaGenerationJob(jobId) : null;
@@ -445,7 +182,6 @@ export async function handleMediaRoutes(
         sendJson(res, 400, { success: false, error: 'jobId, sessionKey, or runId is required' });
         return true;
       }
-      rememberCancelledLocalRun(runId);
       if (jobId) {
         const result = cancelMediaGenerationJobWithResult(jobId);
         sendJson(res, result.outcome === 'not_found' ? 404 : 200, {
@@ -590,99 +326,6 @@ export async function handleMediaRoutes(
     return true;
   }
 
-  if (url.pathname === '/api/media/image-generation/chat-send' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        sessionKey?: string;
-        originalPrompt?: string;
-        prompt?: string;
-        model?: string;
-        size?: string;
-        quality?: 'low' | 'medium' | 'high';
-        batchIndex?: number;
-        batchTotal?: number;
-        inputImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        userInputImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        userMessageTimestampMs?: number;
-        suppressConversationAppend?: boolean;
-        runId?: string;
-        clientRequestId?: string;
-      }>(req);
-      const sessionKey = body.sessionKey?.trim() || '';
-      const prompt = body.prompt?.trim() || '';
-      const originalPrompt = body.originalPrompt?.trim();
-      if (!sessionKey) {
-        sendJson(res, 400, { success: false, error: 'sessionKey is required' });
-        return true;
-      }
-      if (!prompt) {
-        sendJson(res, 400, { success: false, error: 'prompt is required' });
-        return true;
-      }
-      const inputImages = Array.isArray(body.inputImages)
-        ? body.inputImages
-          .filter((image) => typeof image?.filePath === 'string' && image.filePath.trim())
-          .map((image) => ({
-            fileName: typeof image.fileName === 'string' ? image.fileName.trim() : undefined,
-            mimeType: typeof image.mimeType === 'string' ? image.mimeType.trim() : undefined,
-            filePath: image.filePath!.trim(),
-          }))
-        : undefined;
-      const userInputImages = normalizeMediaInputImageRefs(body.userInputImages);
-      const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
-        ? Math.floor(body.userMessageTimestampMs)
-        : undefined;
-      const batchIndex = typeof body.batchIndex === 'number' && Number.isFinite(body.batchIndex) && body.batchIndex >= 1
-        ? Math.floor(body.batchIndex)
-        : undefined;
-      const batchTotal = typeof body.batchTotal === 'number' && Number.isFinite(body.batchTotal) && body.batchTotal >= 1
-        ? Math.floor(body.batchTotal)
-        : undefined;
-      const runId = body.runId?.trim();
-      const clientRequestId = body.clientRequestId?.trim()
-        || (body.suppressConversationAppend !== true ? runId : undefined)
-        || (body.suppressConversationAppend !== true && userMessageTimestampMs !== undefined
-          ? `standalone:image:${sessionKey}:${userMessageTimestampMs}`
-          : undefined);
-
-      const payload = {
-        kind: 'image' as const,
-        sessionKey,
-        ...(clientRequestId ? { clientRequestId } : {}),
-        prompt,
-        model: body.model?.trim(),
-        size: body.size?.trim(),
-        quality: body.quality,
-        ...(batchIndex !== undefined ? { batchIndex } : {}),
-        ...(batchTotal !== undefined ? { batchTotal } : {}),
-        inputImages,
-        ...(originalPrompt ? { originalPrompt } : {}),
-        ...(userInputImages ? { userInputImages } : {}),
-        ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
-        ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
-        ...(runId ? { runId } : {}),
-      };
-      const enqueued = enqueueMediaGenerationJobWithResult(payload);
-      sendJson(res, enqueued.idempotent ? 200 : 202, {
-        success: true,
-        jobId: enqueued.job.id,
-        job: enqueued.job,
-        idempotent: enqueued.idempotent,
-      });
-    } catch (error) {
-      sendJson(res, 500, { success: false, error: String(error) });
-    }
-    return true;
-  }
-
   if (url.pathname === '/api/media/video-generation' && req.method === 'GET') {
     try {
       sendJson(res, 200, { success: true, ...(await getVideoGenerationSettingsSnapshot()) });
@@ -767,139 +410,6 @@ export async function handleMediaRoutes(
       }>(req);
       const result = await runVideoGenerationTest(body);
       sendJson(res, result.success ? 200 : 500, result);
-    } catch (error) {
-      sendJson(res, 500, { success: false, error: String(error) });
-    }
-    return true;
-  }
-
-  if (url.pathname === '/api/media/video-generation/chat-send' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        sessionKey?: string;
-        originalPrompt?: string;
-        prompt?: string;
-        model?: string;
-        size?: string;
-        durationSeconds?: number;
-        inputImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        userInputImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        userMessageTimestampMs?: number;
-        candidateImages?: Array<{
-          fileName?: string;
-          mimeType?: string;
-          filePath?: string;
-        }>;
-        route?: unknown;
-        suppressConversationAppend?: boolean;
-        runId?: string;
-        clientRequestId?: string;
-      }>(req);
-      const sessionKey = body.sessionKey?.trim() || '';
-      const prompt = body.prompt?.trim() || '';
-      if (!sessionKey) {
-        sendJson(res, 400, { success: false, error: 'sessionKey is required' });
-        return true;
-      }
-      if (!prompt) {
-        sendJson(res, 400, { success: false, error: 'prompt is required' });
-        return true;
-      }
-      const inputImages = normalizeMediaInputImageRefs(body.inputImages);
-      const userInputImages = normalizeMediaInputImageRefs(body.userInputImages);
-      const originalPrompt = body.originalPrompt?.trim() || prompt;
-      const userMessageTimestampMs = typeof body.userMessageTimestampMs === 'number' && Number.isFinite(body.userMessageTimestampMs)
-        ? Math.floor(body.userMessageTimestampMs)
-        : undefined;
-      const runId = body.runId?.trim();
-      const clientRequestId = body.clientRequestId?.trim()
-        || (body.suppressConversationAppend !== true ? runId : undefined)
-        || (body.suppressConversationAppend !== true && userMessageTimestampMs !== undefined
-          ? `standalone:video:${sessionKey}:${userMessageTimestampMs}`
-          : undefined);
-      logger.info('[video-generation-route] chat_send_received', {
-        sessionKey,
-        promptChars: countVideoPromptCharacters(prompt),
-        model: body.model?.trim(),
-        size: body.size?.trim(),
-        durationSeconds: body.durationSeconds,
-        inputImageCount: inputImages?.length ?? 0,
-      });
-      const route = normalizeVideoRouteDecision(body.route, {
-        prompt,
-        inputImages,
-      });
-      logger.info('[video-generation-route] chat_send_planned', {
-        sessionKey,
-        mode: route.mode,
-        source: route.source,
-        confidence: route.confidence,
-        selectedImageSource: route.selectedImageSource,
-        selectedImageIndex: route.selectedImageIndex,
-        sourceImageCount: route.sourceImages?.length ?? 0,
-      });
-
-      const finalVideoPrompt = route.videoPrompt?.trim() || prompt;
-      const finalVideoPromptChars = countVideoPromptCharacters(finalVideoPrompt);
-      const promptLengthError = getVideoPromptLengthError(finalVideoPrompt);
-      if (promptLengthError) {
-        logger.warn('[video-generation-route] chat_send_prompt_too_long', {
-          sessionKey,
-          mode: route.mode,
-          source: route.source,
-          promptChars: finalVideoPromptChars,
-          maxPromptChars: MAX_VIDEO_GENERATION_PROMPT_CHARS,
-        });
-        sendJson(res, 400, {
-          success: false,
-          error: promptLengthError,
-          promptChars: finalVideoPromptChars,
-          maxPromptChars: MAX_VIDEO_GENERATION_PROMPT_CHARS,
-        });
-        return true;
-      }
-
-      const payload = {
-        kind: 'video' as const,
-        sessionKey,
-        ...(clientRequestId ? { clientRequestId } : {}),
-        prompt: finalVideoPrompt,
-        originalPrompt,
-        ...(body.model?.trim() ? { model: body.model.trim() } : {}),
-        size: body.size?.trim(),
-        durationSeconds: typeof body.durationSeconds === 'number' && Number.isFinite(body.durationSeconds)
-          ? Math.max(1, Math.floor(body.durationSeconds))
-          : undefined,
-        inputImages: route.mode === 'text_to_video' ? undefined : route.sourceImages,
-        ...(userInputImages ? { userInputImages } : {}),
-        ...(userMessageTimestampMs !== undefined ? { userMessageTimestampMs } : {}),
-        route,
-        ...(body.suppressConversationAppend === true ? { suppressConversationAppend: true } : {}),
-        ...(runId ? { runId } : {}),
-      };
-      const enqueued = enqueueMediaGenerationJobWithResult(payload);
-      const job = enqueued.job;
-      logger.info('[video-generation-route] chat_send_enqueued', {
-        jobId: job.id,
-        sessionKey,
-        mode: route.mode,
-        status: job.status,
-      });
-
-      sendJson(res, enqueued.idempotent ? 200 : 202, {
-        success: true,
-        jobId: job.id,
-        job,
-        idempotent: enqueued.idempotent,
-      });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

@@ -5,6 +5,8 @@ import type {
   ChatRuntimeGateIssue,
   ChatRuntimeIssueSeverity,
   ChatRuntimeProgressEntry,
+  ChatRuntimeTaskProjection,
+  ChatRuntimeTaskStatus,
   ChatRuntimeVerificationKind,
 } from '../../shared/chat-runtime-events';
 import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../shared/chat-runtime-events';
@@ -19,6 +21,14 @@ function readString(value: unknown): string | undefined {
 
 function readNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readTimestamp(value: unknown): number | undefined {
+  const numeric = readNumber(value);
+  if (numeric != null) return numeric;
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function readBoolean(value: unknown): boolean | undefined {
@@ -59,6 +69,7 @@ function resolveRuntimeTaskContext(payload: Record<string, unknown>): RuntimeTas
     ?? nestedRecord(data, 'taskRun')
     ?? nestedRecord(data, 'task_run')
     ?? nestedRecord(details, 'task')
+    ?? nestedRecord(result, 'task')
     ?? nestedRecord(resultDetails, 'task')
     ?? nestedRecord(meta, 'task')
     ?? nestedRecord(payload, 'task');
@@ -67,10 +78,15 @@ function resolveRuntimeTaskContext(payload: Record<string, unknown>): RuntimeTas
   const taskLooksNative = Boolean(task && (
     readString(task.taskKind)
     || readString(task.task_kind)
+    || readString(task.runtime)
+    || readString(task.kind)
     || readString(task.deliveryStatus)
     || readString(task.delivery_status)
     || readString(task.requesterSessionKey)
     || readString(task.requester_session_key)
+    || readString(task.childSessionKey)
+    || readString(task.parentTaskId)
+    || readString(task.flowId)
   ));
   const taskId = explicitTaskId ?? (taskLooksNative ? readString(task?.id) : undefined);
   return {
@@ -226,13 +242,28 @@ function normalizeProgressEntry(value: unknown): ChatRuntimeProgressEntry | null
   const kind = readString(record.kind);
   if (kind !== 'commentary' && kind !== 'action' && kind !== 'status') return null;
   const status = readString(record.status);
+  const translationParamsRecord = asRecord(record.translationParams ?? record.translation_params);
+  const translationParams = translationParamsRecord
+    ? Object.fromEntries(Object.entries(translationParamsRecord)
+      .filter(([, entryValue]) => (
+        (typeof entryValue === 'string' && entryValue.length <= 240)
+        || (typeof entryValue === 'number' && Number.isFinite(entryValue))
+      ))
+      .slice(0, 16)) as Record<string, string | number>
+    : undefined;
   return {
     id: readString(record.id) ?? `progress:${kind}:${text}`,
     kind,
     text,
-    status: status === 'running' || status === 'completed' || status === 'blocked' || status === 'error'
+    status: status === 'running' || status === 'completed' || status === 'blocked' || status === 'error' || status === 'aborted'
       ? status
       : undefined,
+    translationKey: readString(record.translationKey) ?? readString(record.translation_key),
+    translationParams: translationParams && Object.keys(translationParams).length > 0
+      ? translationParams
+      : undefined,
+    toolName: readString(record.toolName) ?? readString(record.tool_name),
+    toolLabel: readString(record.toolLabel) ?? readString(record.tool_label),
     command: readString(record.command),
     detail: readString(record.detail),
     dedupeKey: readString(record.dedupeKey),
@@ -399,7 +430,7 @@ function normalizeCommandVerificationEvents(event: ChatRuntimeEvent): ChatRuntim
   ];
 }
 
-type NativeTaskLifecycle = 'pending' | 'running' | 'completed' | 'error' | 'waiting_approval' | 'partial';
+type NativeTaskLifecycle = ChatRuntimeTaskStatus;
 
 function normalizeMarker(value: unknown): string {
   return typeof value === 'string'
@@ -414,10 +445,15 @@ function isNativeTaskRecord(record: Record<string, unknown> | null): record is R
   const hasTaskShape = Boolean(
     readString(record.taskKind)
     || readString(record.task_kind)
+    || readString(record.runtime)
+    || readString(record.kind)
     || readString(record.deliveryStatus)
     || readString(record.delivery_status)
     || readString(record.requesterSessionKey)
-    || readString(record.requester_session_key),
+    || readString(record.requester_session_key)
+    || readString(record.childSessionKey)
+    || readString(record.parentTaskId)
+    || readString(record.flowId),
   );
   return hasTaskShape && Boolean(readString(record.id) ?? readString(record.runId) ?? readString(record.run_id));
 }
@@ -429,18 +465,46 @@ function resolveNativeTaskRecord(payload: Record<string, unknown>): Record<strin
   return null;
 }
 
+function nativeTaskStateRecords(
+  task: Record<string, unknown>,
+  data: Record<string, unknown>,
+): Array<Record<string, unknown> | null> {
+  const details = nestedRecord(data, 'details');
+  const result = nestedRecord(data, 'result');
+  const resultDetails = nestedRecord(result, 'details');
+  const meta = nestedRecord(data, 'meta');
+  return [
+    task,
+    data,
+    details,
+    result,
+    resultDetails,
+    meta,
+    nestedRecord(task, 'approval'),
+    nestedRecord(data, 'approval'),
+    nestedRecord(details, 'approval'),
+    nestedRecord(resultDetails, 'approval'),
+  ];
+}
+
 function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string, unknown>): NativeTaskLifecycle {
-  const records = [task, data];
-  const status = normalizeMarker(readFirstString(records, ['status', 'state', 'phase']));
+  const records = nativeTaskStateRecords(task, data);
+  const status = normalizeMarker(
+    readFirstString(records, ['status', 'state'])
+      ?? readFirstString([task, ...records.slice(2)], ['phase']),
+  );
   const deliveryStatus = normalizeMarker(readFirstString(records, ['deliveryStatus', 'delivery_status']));
   const terminalOutcome = normalizeMarker(readFirstString(records, ['terminalOutcome', 'terminal_outcome']));
-  const approvalStatus = normalizeMarker(readFirstString(records, [
-    'approvalStatus',
-    'approval_status',
-    'approvalState',
-    'approval_state',
-  ]));
+  const approvalStatus = normalizeMarker(
+    readFirstString(records, [
+      'approvalStatus',
+      'approval_status',
+      'approvalState',
+      'approval_state',
+    ]) ?? readFirstString(records.slice(6), ['status', 'state', 'phase']),
+  );
 
+  if (['failed', 'failure', 'error', 'aborted', 'cancelled', 'canceled', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
   if (
     ['waiting_approval', 'approval_required', 'requires_approval', 'pending_approval'].includes(status)
     || ['waiting', 'pending', 'required'].includes(approvalStatus)
@@ -450,11 +514,11 @@ function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string,
     || ['partial', 'blocked'].includes(terminalOutcome)
     || ['partial', 'failed'].includes(deliveryStatus)
   ) return 'partial';
-  if (['failed', 'failure', 'error', 'aborted', 'cancelled', 'canceled', 'lost'].includes(status)) return 'error';
   if (['succeeded', 'success', 'completed', 'complete', 'done', 'finished'].includes(status)) {
-    return ['pending', 'queued', 'running'].includes(deliveryStatus) ? 'running' : 'completed';
+    if (['pending', 'queued', 'running', 'session_queued'].includes(deliveryStatus)) return 'running';
+    return ['delivered', 'not_applicable'].includes(deliveryStatus) ? 'completed' : 'partial';
   }
-  if (['running', 'started', 'active', 'processing'].includes(status)) return 'running';
+  if (['running', 'started', 'accepted', 'active', 'processing'].includes(status)) return 'running';
   return 'pending';
 }
 
@@ -473,7 +537,7 @@ function nativeTaskProgressStatus(lifecycle: NativeTaskLifecycle): ChatRuntimePr
 }
 
 function nativeTaskTitle(task: Record<string, unknown>, data: Record<string, unknown>, taskId: string): string {
-  return readFirstString([task, data], [
+  return readFirstString(nativeTaskStateRecords(task, data), [
     'label',
     'title',
     'task',
@@ -485,6 +549,7 @@ function nativeTaskTitle(task: Record<string, unknown>, data: Record<string, unk
     'terminal_summary',
     'toolName',
     'tool_name',
+    'name',
     'taskKind',
     'task_kind',
     'sourceId',
@@ -493,7 +558,7 @@ function nativeTaskTitle(task: Record<string, unknown>, data: Record<string, unk
 }
 
 function nativeTaskDetail(task: Record<string, unknown>, data: Record<string, unknown>): string | undefined {
-  return readFirstString([task, data], [
+  return readFirstString(nativeTaskStateRecords(task, data), [
     'progressSummary',
     'progress_summary',
     'terminalSummary',
@@ -502,6 +567,45 @@ function nativeTaskDetail(task: Record<string, unknown>, data: Record<string, un
     'message',
     'summary',
   ]);
+}
+
+function nativeTaskProjection(
+  task: Record<string, unknown>,
+  data: Record<string, unknown>,
+  taskId: string,
+  lifecycle: NativeTaskLifecycle,
+): ChatRuntimeTaskProjection {
+  const records = nativeTaskStateRecords(task, data);
+  return {
+    taskId,
+    parentTaskId: readFirstString(records, ['parentTaskId', 'parent_task_id']),
+    flowId: readFirstString(records, ['flowId', 'flow_id', 'parentFlowId', 'parent_flow_id']),
+    kind: readFirstString(records, ['taskKind', 'task_kind', 'kind']),
+    runtime: readFirstString(records, ['runtime']),
+    title: nativeTaskTitle(task, data, taskId),
+    detail: nativeTaskDetail(task, data),
+    agentId: readFirstString(records, ['agentId', 'agent_id']),
+    sessionKey: readFirstString(records, [
+      'sessionKey',
+      'session_key',
+      'requesterSessionKey',
+      'requester_session_key',
+      'ownerKey',
+      'owner_key',
+    ]),
+    childSessionKey: readFirstString(records, ['childSessionKey', 'child_session_key']),
+    status: lifecycle,
+    sourceStatus: readFirstString(records, ['status', 'state', 'phase']),
+    deliveryStatus: readFirstString(records, ['deliveryStatus', 'delivery_status']),
+    terminalOutcome: readFirstString(records, ['terminalOutcome', 'terminal_outcome']),
+    createdAt: readTimestamp(task.createdAt) ?? readTimestamp(data.createdAt),
+    startedAt: readTimestamp(task.startedAt) ?? readTimestamp(data.startedAt),
+    updatedAt: readTimestamp(task.updatedAt)
+      ?? readTimestamp(task.lastEventAt)
+      ?? readTimestamp(data.updatedAt)
+      ?? readTimestamp(data.lastEventAt),
+    endedAt: readTimestamp(task.endedAt) ?? readTimestamp(data.endedAt),
+  };
 }
 
 function nativeTaskArtifactEntries(value: unknown): unknown[] {
@@ -518,28 +622,12 @@ function nativeTaskArtifactEntries(value: unknown): unknown[] {
 function collectNativeTaskArtifactEntries(task: Record<string, unknown>, data: Record<string, unknown>): unknown[] {
   const result = asRecord(data.result);
   const resultDetails = nestedRecord(result, 'details');
-  const internalEvents = [data.internalEvents, data.internal_events, result?.internalEvents, result?.internal_events]
-    .flatMap((value) => Array.isArray(value) ? value : [])
-    .map((value) => asRecord(value))
-    .filter((value): value is Record<string, unknown> => value != null);
-  const mediaRecords = [
-    nestedRecord(task, 'media'),
-    nestedRecord(data, 'media'),
-    nestedRecord(result, 'media'),
-    nestedRecord(resultDetails, 'media'),
-  ];
   const entries: unknown[] = [];
-  const records = [task, data, result, resultDetails, ...internalEvents];
+  const records = [task, data, result, resultDetails];
   for (const record of records) {
     if (!record) continue;
-    for (const key of ['artifact', 'artifacts', 'attachment', 'attachments', 'paths', 'mediaUrls', 'media_urls', 'outputPath', 'output_path', 'filePath', 'path']) {
+    for (const key of ['artifacts', 'outputArtifacts', 'output_artifacts']) {
       entries.push(...nativeTaskArtifactEntries(record[key]));
-    }
-  }
-  for (const media of mediaRecords) {
-    if (!media) continue;
-    for (const key of ['artifact', 'artifacts', 'attachment', 'attachments', 'paths', 'mediaUrls', 'media_urls', 'url']) {
-      entries.push(...nativeTaskArtifactEntries(media[key]));
     }
   }
   return entries;
@@ -571,16 +659,20 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
   const task = resolveNativeTaskRecord(raw);
   if (!task || !context.taskId) return [];
 
-  const base = withBase('run.step.updated', raw);
+  const base = withBase('task.updated', raw);
   if (!base) return [];
   const lifecycle = nativeTaskLifecycle(task, context.data);
   const nativeBase = { ...base, taskStatus: lifecycle };
   const taskId = context.taskId;
   const title = nativeTaskTitle(task, context.data, taskId);
   const detail = nativeTaskDetail(task, context.data);
-  const toolCallId = readFirstString([task, context.data], ['toolCallId', 'tool_call_id']);
+  const toolCallId = readFirstString(nativeTaskStateRecords(task, context.data), ['toolCallId', 'tool_call_id']);
   const stepId = `task:${taskId}`;
   const events: ChatRuntimeEvent[] = [{
+    ...nativeBase,
+    type: 'task.updated',
+    task: nativeTaskProjection(task, context.data, taskId, lifecycle),
+  }, {
     ...nativeBase,
     type: 'run.step.updated',
     step: {
@@ -588,7 +680,7 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
       title,
       status: nativeTaskStepStatus(lifecycle),
       detail,
-      kind: readFirstString([task, context.data], ['taskKind', 'task_kind']),
+      kind: readFirstString(nativeTaskStateRecords(task, context.data), ['taskKind', 'task_kind', 'kind', 'runtime']),
       parentId: context.parentTaskId ? `task:${context.parentTaskId}` : undefined,
       taskId,
       toolCallId,
@@ -635,11 +727,9 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
     });
   }
 
-  const verificationIds = new Set<string>();
   for (const entry of collectNativeTaskVerifications(task, context.data)) {
     const verification = normalizeVerification(entry);
     if (!verification) continue;
-    verificationIds.add(verification.id);
     events.push({
       ...nativeBase,
       type: 'verification.completed',
@@ -652,31 +742,6 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
       toolCallId,
       itemId: taskId,
     });
-  }
-
-  if (lifecycle === 'completed') {
-    for (const artifact of artifactMap.values()) {
-      const verificationId = `verification:task:${taskId}:${artifact.id}`;
-      if (verificationIds.has(verificationId)) continue;
-      events.push({
-        ...nativeBase,
-        type: 'verification.completed',
-        verification: {
-          id: verificationId,
-          status: 'passed',
-          kind: 'artifact.availability',
-          required: true,
-          title: artifact.title ?? artifact.id,
-          targetId: artifact.id,
-          artifactId: artifact.id,
-          taskId,
-          evidence: context.runId,
-          source: 'openclaw.task',
-        },
-        toolCallId,
-        itemId: taskId,
-      });
-    }
   }
 
   if (lifecycle === 'waiting_approval' || lifecycle === 'partial') {
@@ -726,22 +791,12 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
     });
   }
 
-  if (lifecycle === 'completed' || lifecycle === 'error' || lifecycle === 'partial') {
-    events.push({
-      ...nativeBase,
-      type: 'run.ended',
-      status: lifecycle === 'completed' ? 'completed' : 'error',
-      endedAt: readNumber(task.endedAt) ?? readNumber(context.data.endedAt),
-      error: lifecycle === 'completed' ? undefined : detail,
-      stopReason: lifecycle === 'partial' ? 'partial_task_completion' : undefined,
-    });
-  }
-
   return events;
 }
 
 function runtimeEventIdentity(event: ChatRuntimeEvent): string {
   if (event.type === 'run.step.updated') return `${event.type}:${event.runId}:${event.step.id}:${event.step.status}`;
+  if (event.type === 'task.updated') return `${event.type}:${event.runId}:${event.task.taskId}:${event.task.status}:${event.task.updatedAt ?? ''}`;
   if (event.type === 'progress.update') return `${event.type}:${event.runId}:${event.entry.id}:${event.entry.status}`;
   if (event.type === 'artifact.produced') return `${event.type}:${event.runId}:${event.artifact.id}`;
   if (event.type === 'verification.completed') return `${event.type}:${event.runId}:${event.verification.id}:${event.verification.status}`;

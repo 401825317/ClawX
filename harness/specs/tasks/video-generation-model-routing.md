@@ -9,14 +9,14 @@ touchedAreas:
   - src/pages/Chat/ChatInput.tsx
   - src/stores/chat.ts
   - electron/api/routes/media.ts
+  - electron/services/agent-runtime/**
   - electron/utils/openclaw-video-generation.ts
   - electron/utils/openclaw-video-generation-runtime.ts
   - electron/utils/openclaw-video-relay-constants.ts
-  - tests/unit/chat-input.test.tsx
-  - tests/unit/chat-target-routing.test.ts
-  - tests/unit/openclaw-video-generation-routing.test.ts
-  - tests/unit/openclaw-video-generation-runtime-direct.test.ts
-  - tests/unit/video-generation-chat-send-route.test.ts
+  - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
+  - resources/openclaw-plugins/uclaw-task-bridge/**
+  - scripts/uclaw-contract-driven-gate.test.mjs
+  - tests/e2e/native-agent-media-routing.spec.ts
 requiredProfiles:
   - fast
   - comms
@@ -25,27 +25,27 @@ requiredRules:
   - renderer-main-boundary
   - api-client-transport-policy
 expectedUserBehavior:
-  - Video sends are planned by a Main-owned intent router before selecting text-to-video, image-to-video, or edit-image-then-video behavior.
-  - Text-only video sends do not pass old chat images as direct `inputImages`; recent chat images may be sent only as `candidateImages` for the router.
-  - Video prompts that refer to previous/current/reference images let the router choose whether to use the latest candidate image.
-  - Prompts that ask to alter a referenced image before making a video run image edit first, then feed the edited local image into image-to-video.
-  - Explicitly uploaded, pasted, or selected image references in video mode are available to the router as direct `inputImages`.
+  - Every fresh video request remains one OpenClaw Agent turn; video mode supplies current-turn preferences but does not select or invoke a capability by itself.
+  - Text-only video requests do not implicitly attach stale chat images. The Agent may reuse a prior artifact only when the current request and session context identify it.
+  - Explicitly uploaded, pasted, or selected images are attached to the current Agent turn and are available to `video_generate` as resolved `inputImages`.
+  - OpenClaw Task Flow can sequence image edit and video generation when the request requires both, and the video task consumes the verified edited artifact.
   - Switching from image reference mode to video mode preserves the selected image reference for the next video send.
 acceptance:
-  - ChatInput sends selected image references as video attachments when the user switches to video mode.
-  - Chat store forwards explicit video attachments as `inputImages`; previous assistant images in history are forwarded as `candidateImages`, not direct `inputImages`.
-  - Main video chat-send calls the video route planner and stores its route decision on the queued video job.
-  - Low-confidence, failed, or unavailable route planning falls back to explicit-image image-to-video or no-image text-to-video without failing the user request.
-  - The edit-image-then-video route first generates an edited local image and then calls image-to-video with that edited image.
-  - Main video generation routing selects `grok-image-video` when `inputImages` is empty and `grok-video-1.5` when at least one explicit image is present.
-  - Direct runtime generation rejects `grok-video-1.5` without exactly one reference image before calling the backend.
+  - ChatInput sends selected image references as attachments on the shared `/api/chat/send` path and carries video settings only as current-turn preferences.
+  - The OpenClaw Agent owns text-to-video, image-to-video, and edit-then-video tool selection from the full session context; UClaw does not run a second semantic router.
+  - The Host video capability selects `grok-image-video` when resolved `inputImages` is empty and `grok-video-1.5` when exactly one verified reference image is present.
+  - Host validation rejects `grok-video-1.5` without exactly one readable reference image before calling the backend.
+  - Task Flow preserves the edited-image dependency and does not silently downgrade a requested image-to-video task to text-to-video.
+  - Retired video intent and direct media endpoints cannot accept fresh turns; legacy media jobs remain readable/cancellable only for recovery compatibility.
 docs:
   required: false
 ---
 
 ## Contract
 
-- UClaw client code owns the distinction between explicit reference images and
-  old images present in chat history.
-- Main process video generation owns the final model selection; renderer should
-  not pass a video model override from the composer.
+- OpenClaw owns semantic tool selection and Task Flow dependencies. UClaw owns
+  attachment staging, Host-side parameter validation, provider model selection,
+  durable task projection, and artifact verification.
+- The renderer never passes a provider video model override from the composer.
+  It sends the user request, explicit attachments, and current-turn preferences
+  through the shared Agent entrypoint.

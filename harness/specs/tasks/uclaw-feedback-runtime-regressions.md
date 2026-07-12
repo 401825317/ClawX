@@ -15,8 +15,8 @@ touchedAreas:
   - electron/utils/composite-run-coordinator.ts
   - electron/utils/local-artifact-openability.ts
   - electron/utils/local-artifact-planner.ts
-  - electron/utils/media-intent-planner.ts
   - electron/utils/local-artifact-runtime.ts
+  - electron/services/agent-runtime/**
   - package.json
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - resources/openclaw-plugins/uclaw-artifact-guard/package.json
@@ -38,12 +38,14 @@ touchedAreas:
   - src/stores/chat.ts
   - src/stores/chat/session-selection.ts
   - src/stores/chat/types.ts
-  - tests/unit
+  - scripts/host-task-lifecycle.test.ts
+  - scripts/uclaw-contract-driven-gate.test.mjs
+  - tests/e2e/native-agent-media-routing.spec.ts
   - harness/specs/tasks/openclaw-ordinary-session-cwd-runtime.md
   - harness/specs/tasks/uclaw-feedback-runtime-regressions.md
 expectedUserBehavior:
   - Launching another portable UClaw copy must not start a second process that kills or replaces the active Gateway on port 18789.
-  - An explicit request such as "use this prompt to generate a 15-second video" executes as a video task even though the text contains the word prompt.
+  - An explicit request such as "use this prompt to generate a 15-second video" remains one OpenClaw Agent turn, which may select the native video tool even though the text contains the word prompt.
   - Descriptive text such as "based on the video frames" does not create an additional image task unless the user explicitly requests an image deliverable.
   - A user-selected image or video outside the OpenClaw workspace is staged into an approved per-run directory before a media tool reads it.
   - A failed media tool cannot be treated as successful because older files, extracted frames, or prior-turn artifacts exist.
@@ -56,20 +58,21 @@ requiredRules:
   - comms-regression
   - docs-sync
 requiredTests:
-  - pnpm exec vitest run tests/unit/media-intent-planner.test.ts
-  - pnpm exec vitest run tests/unit/process-instance-lock.test.ts
-  - pnpm exec vitest run tests/unit/local-artifact-runtime.test.ts
+  - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
+  - pnpm exec tsx --test scripts/host-task-lifecycle.test.ts
+  - node scripts/uclaw-contract-driven-gate.test.mjs
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - pnpm run typecheck
+  - Manual duplicate-portable-launch and Electron artifact-delivery regression
 acceptance:
   - Instance ownership is global to the current OS user and app identity rather than scoped only to one portable extraction directory.
   - A duplicate or legacy portable launch cannot enter an unbounded token-mismatch reconnect and orphan-kill loop.
-  - Explicit generation verbs take precedence over prompt-drafting heuristics when they request execution now.
-  - Composite parsing requires an explicit deliverable request for every generated image or video task and does not infer an image task from contextual nouns alone.
+  - OpenClaw decides current-turn execution from conversation context without a second UClaw semantic router.
+  - OpenClaw Task Flow creates media subtasks only when the current turn authorizes those deliverables; UClaw does not infer an image task from contextual nouns alone.
   - External media staging preserves the original file, uses a narrowly approved runtime directory, and does not broaden arbitrary filesystem access.
   - Final verification binds evidence to the current run, required artifact type, and successful tool result.
   - The Office skill accepts its documented references paths and presentation execution has a deterministic fallback when the model requests the legacy root create.md path.
-  - Existing chat, image-only, video-only, intentional composite, history recovery, and current session-cwd behavior remain covered.
+  - Existing chat, image-only, video-only, multi-deliverable Task Flow, legacy composite recovery, history recovery, and current session-cwd behavior remain covered.
 docs:
   required: false
 ---
@@ -81,10 +84,13 @@ versions used different Gateway tokens on the same port and repeatedly killed
 one another; a PPT request generated only an image; a desktop video path was
 rejected by local-media policy and the run still appeared complete; and a
 video request containing the word "prompt" was downgraded to chat and later
-split into an unrequested image plus video composite.
+split into an unrequested image plus video legacy composite run.
 
 ## Scope
 
 This task fixes the general runtime contracts exposed by those examples. It
 must not special-case the reported Chinese sentences, relax local-media access
 globally, or make UI mode hints authoritative over current-turn intent.
+Fresh turns always remain OpenClaw Agent turns. Task Flow owns decomposition,
+Host capabilities own local execution and verification, and the legacy
+composite coordinator is restricted to resuming pre-migration records.
