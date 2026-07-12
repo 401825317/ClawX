@@ -45,9 +45,13 @@ touchedAreas:
   - scripts/bundle-openclaw.mjs
   - scripts/junfeiai-reasoning-defaults.test.ts
   - scripts/openclaw-native-media-acceptance-patch.mjs
+  - scripts/openclaw-video-segment-dedupe-patch.mjs
+  - scripts/openclaw-video-segment-dedupe-patch.test.mjs
   - scripts/patch-browser-hint.mjs
   - scripts/reasoning-projection.test.ts
   - scripts/runtime-progress-semantics.test.ts
+  - scripts/runtime-completion-gate.test.ts
+  - scripts/runtime-turn-contract-graph.test.ts
   - scripts/uclaw-media-limit-default.test.ts
   - shared/agent-turn-contract.ts
   - src/i18n/locales/en/chat.json
@@ -63,6 +67,7 @@ touchedAreas:
   - src/stores/chat.ts
   - src/stores/chat/helpers.ts
   - src/stores/chat/runtime-contract.ts
+  - src/stores/chat/runtime-task-recovery.ts
   - src/pages/Chat/ChatInput.tsx
   - src/pages/Chat/ExecutionGraphCard.tsx
   - src/pages/Chat/task-visualization.ts
@@ -82,6 +87,8 @@ expectedUserBehavior:
   - Native image task terminal state from the task ledger closes the pending image UI and freezes elapsed time even when internal completion messages are intentionally absent from the visible transcript.
   - When remote video providers cannot produce clips, the Agent can select the advertised `local.video.timeline.render` Host capability to render managed image/video scenes with deterministic duration, basic motion, transitions, captions, narration, and optional background music.
   - `video_generate action=list` exposes the models configured in `agents.defaults.videoGenerationModel` and `models.providers.<id>.models`; the local timeline renderer is a fallback after those real configured candidates are unavailable, not a replacement for provider discovery.
+  - Long-form video plans may submit multiple native `video_generate` tasks with one shared `parentTaskId` and a unique `segmentId` per shot. The duplicate guard suppresses only the same logical segment, while legacy calls without segment identity retain their existing single-flight behavior.
+  - A still-image-only timeline is disclosed as a fallback after provider generation is unavailable or fails; it is never described as equivalent to provider-generated motion.
 requiredProfiles:
   - fast
   - comms
@@ -100,6 +107,9 @@ requiredTests:
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
   - pnpm exec tsx --test scripts/local-video-timeline.test.ts
   - node scripts/openclaw-native-image-delivery-patch.test.mjs
+  - node scripts/openclaw-video-segment-dedupe-patch.test.mjs
+  - pnpm exec tsx --test scripts/runtime-completion-gate.test.ts
+  - pnpm exec tsx --test scripts/runtime-turn-contract-graph.test.ts
   - node scripts/clawx-openai-image-request-options.test.mjs
   - pnpm exec tsx scripts/uclaw-media-limit-default.test.ts
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
@@ -108,6 +118,8 @@ acceptance:
   - The renderer has no direct media job/polling branch for a normal agent turn.
   - Image/video mode preferences reach the matching OpenClaw turn without being persisted as user-authored system instructions.
   - Native image_generate and video_generate retain their OpenClaw task ledger, duplicate guard, completion wake, and normal session delivery semantics.
+  - Replaying one `parentTaskId + segmentId` pair reuses the active or recent successful video task, while a different `segmentId` under the same parent may start another planned shot.
+  - Calls that omit `parentTaskId` and `segmentId` preserve the legacy session-level native video single-flight guard.
   - Fresh turns never call the retired UClaw media intent or video-route planners; OpenClaw performs semantic tool selection once.
   - The retired intent-plan and direct image/video endpoints fail closed with HTTP 410 and cannot enqueue duplicate media work.
   - Media provider settings and existing job inspection/cancel/retry endpoints remain available for operations and legacy recovery; they are not fresh-turn entrypoints.

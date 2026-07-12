@@ -13,6 +13,7 @@ import { patchInstalledOpenClawNativeImageDeliveryRuntime } from './openclaw-nat
 import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
 import { patchInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-patch.mjs';
 import { patchInstalledOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
+import { patchInstalledOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchInstalledOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
@@ -47,6 +48,7 @@ try {
   patchInstalledOpenClawNativeMediaCancellationRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
   patchInstalledOpenClawNativeMediaAcceptanceRuntime();
+  patchInstalledOpenClawVideoSegmentDedupeRuntime();
   patchInstalledOpenClawVideoProviderCatalogRuntime();
   patchInstalledOpenClawTaskSummaryDeliveryRuntime();
 } catch (error) {

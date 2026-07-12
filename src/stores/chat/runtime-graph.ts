@@ -7,6 +7,7 @@ import {
   makeAttachedFile,
 } from './helpers';
 import type { AttachedFileMeta, ChatRuntimeRunState } from './types';
+import { unresolvedRuntimeTasks } from './runtime-task-recovery';
 
 type RuntimeTaskUpdateEvent = Extract<ChatRuntimeEvent, { type: 'task.updated' }>;
 type CompletionWakeEvidenceEvent = Extract<ChatRuntimeEvent, {
@@ -199,7 +200,7 @@ export function settledRuntimeRunStatus(
   run: ChatRuntimeRunState | undefined,
 ): Extract<ChatRuntimeRunState['status'], 'completed' | 'error' | 'aborted'> | null {
   if (!run) return null;
-  const tasks = run.tasks ?? [];
+  const tasks = unresolvedRuntimeTasks(run.tasks ?? []);
   const ledgerEntries = Object.values(run.asyncTaskLedger ?? {});
   const hasPendingTask = tasks.some((task) => (
     task.status === 'pending'
@@ -224,7 +225,7 @@ export function settledRuntimeRunStatus(
 }
 
 export function settledRuntimeRunError(run: ChatRuntimeRunState | undefined): string | undefined {
-  const failedTask = (run?.tasks ?? []).find((task) => (
+  const failedTask = unresolvedRuntimeTasks(run?.tasks ?? []).find((task) => (
     !runtimeTaskWasAborted(task)
     && (task.status === 'error'
       || task.status === 'partial'

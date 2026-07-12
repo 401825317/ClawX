@@ -623,7 +623,7 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_get_task_bridge_capabilities',
         label: 'UClaw task bridge capabilities',
-        description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task. For video fallback, inspect whether local.video.timeline.render can turn managed image/video scenes into a narrated MP4 instead of assuming local.video.compose can animate still images.',
+        description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task. For long-form generated video, first use video_generate with one shared parentTaskId and distinct segmentId values, then compose verified video scenes. local.video.timeline.render may combine managed video scenes, narration, captions, and music; an image-only timeline is a disclosed fallback after provider generation is unavailable or fails, not an equivalent replacement for generated motion.',
         parameters: Type.Object({}, { additionalProperties: false }),
         async execute() {
           try {
@@ -636,8 +636,8 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_start_host_task',
         label: 'Start UClaw Host task',
-        description: 'Start a recoverable local Host task. Use for a capability that has a confirmed Host task kind. local.video.timeline.render accepts managed image/video scenes and produces a verified local MP4; local.video.compose only concatenates existing video segments. This returns a task receipt, not final delivery; query status or wait for the Host completion event. Do not supply session/run identity yourself.',
-        promptSnippet: 'uclaw_start_host_task: starts a Host-owned recoverable task only after selecting a supported Host capability. For still-image video fallback, use local.video.timeline.render with managed scene paths, durations, motion, transitions, captions, narration, and final dimensions. It returns a task receipt; do not claim completion until verified artifacts arrive in a later task event.',
+        description: 'Start a recoverable local Host task after selecting a confirmed Host capability. For long-form generated video, compose verified video_generate segments; use one shared parentTaskId and distinct segmentId values while generating them. local.video.timeline.render accepts managed image/video scenes and produces a verified local MP4, while local.video.compose only concatenates existing video segments. An image-only timeline must be disclosed as fallback and must not be presented as provider-generated motion. This returns a task receipt, not final delivery; query status or wait for the Host completion event. Do not supply session/run identity yourself.',
+        promptSnippet: 'uclaw_start_host_task: starts a Host-owned recoverable task only after selecting a supported Host capability. For long-form generated video, generate distinct shots with video_generate using a shared parentTaskId and unique segmentId values, verify them, then pass the managed video paths to local.video.timeline.render or local.video.compose. Use still-image scenes only as an explicit fallback after provider generation is unavailable or fails, and disclose that fallback. The Host task returns a receipt; do not claim completion until verified artifacts arrive in a later task event.',
         parameters: Type.Object({
           kind: Type.String({ minLength: 1, maxLength: 240, pattern: '^[a-zA-Z0-9._-]+$' }),
           title: Type.String({ minLength: 1, maxLength: 500 }),

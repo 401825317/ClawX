@@ -141,6 +141,63 @@ test('detached task terminal updates fan out to the owning chat run and completi
   }), null);
 });
 
+test('a successful retry settles only the matching logical video segment failure', () => {
+  const recoveredTitle = 'video-segment:{"parentTaskId":"promo-120s","segmentId":"scene-001"}';
+  const unresolvedTitle = 'video-segment:{"parentTaskId":"promo-120s","segmentId":"scene-002"}';
+  const base = {
+    runId: 'run-video-segment-task-recovery',
+    sessionKey: SESSION_KEY,
+    status: 'completed' as const,
+    assistantText: '',
+    thinkingText: '',
+    events: [],
+    artifacts: [],
+    verifications: [],
+  };
+  const recoveredRun = {
+    ...base,
+    tasks: [
+      {
+        taskId: 'scene-001-attempt-1',
+        runtime: 'video_generate',
+        title: recoveredTitle,
+        status: 'error' as const,
+        detail: 'first attempt failed',
+        updatedAt: 10,
+        endedAt: 10,
+      },
+      {
+        taskId: 'scene-001-attempt-2',
+        runtime: 'video_generate',
+        title: recoveredTitle,
+        status: 'completed' as const,
+        updatedAt: 20,
+        endedAt: 20,
+      },
+    ],
+  };
+  assert.equal(settledRuntimeRunStatus(recoveredRun), 'completed');
+  assert.equal(settledRuntimeRunError(recoveredRun), undefined);
+
+  const unresolvedRun = {
+    ...recoveredRun,
+    tasks: [
+      ...recoveredRun.tasks,
+      {
+        taskId: 'scene-002-attempt-1',
+        runtime: 'video_generate',
+        title: unresolvedTitle,
+        status: 'error' as const,
+        detail: 'second segment failed',
+        updatedAt: 30,
+        endedAt: 30,
+      },
+    ],
+  };
+  assert.equal(settledRuntimeRunStatus(unresolvedRun), 'error');
+  assert.match(settledRuntimeRunError(unresolvedRun) ?? '', /second segment failed/u);
+});
+
 test('successful image completion wake closes the owner task and projects artifact evidence to the owner run', () => {
   const ownerRunId = 'run-owner-image';
   const taskId = '1ac62e1d-85fa-4fae-b2ac-ae5f94487639';

@@ -13,6 +13,7 @@ import {
   turnContractRequiresVerification,
 } from '../../../shared/agent-turn-contract';
 import type { AttachedFileMeta, ChatRuntimeRunState, ChatSendMode } from './types';
+import { runtimeTaskSupersededByLaterSuccess } from './runtime-task-recovery';
 import {
   type CompletionGateReport,
   artifactRequiredPlanSteps,
@@ -324,8 +325,50 @@ function runtimeToolRecoveryFamily(events: ChatRuntimeEvent[], eventIndex: numbe
     .find((family) => family === 'designed_pptx_file');
   if (designedPptxFamily) return designedPptxFamily;
   const actualToolFamily = families.find((family) => family !== 'tool_call' && family !== 'tool_describe');
-  return actualToolFamily
+  const family = actualToolFamily
     ?? toolRecoveryFamily(event?.type === 'tool.started' || event?.type === 'tool.completed' ? event.name : '');
+  if (family !== 'video_generate') return family;
+  const segmentKey = runtimeVideoSegmentKey(events, eventIndex);
+  return segmentKey ? `${family}:${segmentKey}` : family;
+}
+
+function appendRuntimeVideoSegmentKeys(value: unknown, keys: Set<string>, depth = 0): void {
+  if (depth > 4 || value == null) return;
+  const record = asRuntimeRecord(value);
+  if (!record) return;
+  const parentTaskId = normalizeText(
+    typeof record.parentTaskId === 'string' ? record.parentTaskId : undefined,
+  );
+  const segmentId = normalizeText(
+    typeof record.segmentId === 'string' ? record.segmentId : undefined,
+  );
+  if (parentTaskId && segmentId) keys.add(`${parentTaskId}\u0000${segmentId}`);
+  for (const key of ['args', 'input', 'params', 'result', 'details', 'tool']) {
+    appendRuntimeVideoSegmentKeys(record[key], keys, depth + 1);
+  }
+}
+
+function runtimeVideoSegmentKey(
+  events: ChatRuntimeEvent[],
+  eventIndex: number,
+): string | undefined {
+  const event = events[eventIndex];
+  if (!event || (event.type !== 'tool.started' && event.type !== 'tool.completed')) return undefined;
+  const keys = new Set<string>();
+  if (event.type === 'tool.started') appendRuntimeVideoSegmentKeys(event.args, keys);
+  else {
+    appendRuntimeVideoSegmentKeys(event.result, keys);
+    appendRuntimeVideoSegmentKeys(event.meta, keys);
+    if (event.toolCallId) {
+      for (let index = eventIndex - 1; index >= 0; index -= 1) {
+        const candidate = events[index];
+        if (candidate?.type !== 'tool.started' || candidate.toolCallId !== event.toolCallId) continue;
+        appendRuntimeVideoSegmentKeys(candidate.args, keys);
+        break;
+      }
+    }
+  }
+  return [...keys][0];
 }
 
 function toolFailureRecoveredByLaterSuccess(
@@ -578,6 +621,7 @@ export function buildRuntimeCompletionGateReport(
   }
 
   for (const [index, task] of tasks.entries()) {
+    if (runtimeTaskSupersededByLaterSuccess(task, tasks)) continue;
     if (task.status === 'error') {
       issues.push({
         id: gateIssueId(run?.runId, 'task.failed', task.taskId, index),

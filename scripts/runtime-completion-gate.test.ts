@@ -85,6 +85,110 @@ test('a successful incremental PPT repair resolves the blocked create attempt', 
   assert.equal(report.issues.some((issue) => issue.code === 'tool.failed'), false);
 });
 
+function videoSegmentToolRun(params: {
+  failedSegmentId: string;
+  successfulSegmentId: string;
+}): ChatRuntimeRunState {
+  const runId = 'run-video-segment-retry';
+  const sessionKey = 'agent:main:video-segment-retry';
+  const toolEvents = (toolCallId: string, segmentId: string, isError: boolean, ts: number) => ([
+    {
+      contractVersion: 1 as const,
+      producer: 'history' as const,
+      runId,
+      sessionKey,
+      ts,
+      type: 'tool.started' as const,
+      toolCallId,
+      name: 'tool_call',
+      args: {
+        id: 'video_generate',
+        args: { parentTaskId: 'promo-120s', segmentId, prompt: `Generate ${segmentId}` },
+      },
+    },
+    {
+      contractVersion: 1 as const,
+      producer: 'history' as const,
+      runId,
+      sessionKey,
+      ts: ts + 1,
+      type: 'tool.completed' as const,
+      toolCallId,
+      name: 'tool_call',
+      isError,
+      result: isError ? { error: `${segmentId} failed` } : { ok: true },
+    },
+  ]);
+  return {
+    runId,
+    sessionKey,
+    status: 'completed',
+    objective: 'Generate a long-form video from native video segments',
+    assistantText: '',
+    thinkingText: '',
+    artifacts: [],
+    verifications: [],
+    events: [
+      ...toolEvents('scene-failed', params.failedSegmentId, true, 1),
+      ...toolEvents('scene-success', params.successfulSegmentId, false, 3),
+    ],
+  };
+}
+
+test('a different video segment success does not hide an earlier segment failure', () => {
+  const report = buildRuntimeCompletionGateReport(videoSegmentToolRun({
+    failedSegmentId: 'scene-001',
+    successfulSegmentId: 'scene-002',
+  }));
+
+  assert.equal(report.issues.some((issue) => issue.code === 'tool.failed'), true);
+});
+
+test('a later success for the same video segment supersedes its earlier tool failure', () => {
+  const report = buildRuntimeCompletionGateReport(videoSegmentToolRun({
+    failedSegmentId: 'scene-001',
+    successfulSegmentId: 'scene-001',
+  }));
+
+  assert.equal(report.issues.some((issue) => issue.code === 'tool.failed'), false);
+});
+
+test('a successful retry task supersedes only the failed task for the same video segment', () => {
+  const recoveredTitle = 'video-segment:{"parentTaskId":"promo-120s","segmentId":"scene-001"}';
+  const unresolvedTitle = 'video-segment:{"parentTaskId":"promo-120s","segmentId":"scene-002"}';
+  const run = videoSegmentToolRun({ failedSegmentId: 'scene-001', successfulSegmentId: 'scene-001' });
+  run.tasks = [
+    {
+      taskId: 'scene-001-attempt-1',
+      runtime: 'video_generate',
+      title: recoveredTitle,
+      status: 'error',
+      updatedAt: 10,
+      endedAt: 10,
+    },
+    {
+      taskId: 'scene-001-attempt-2',
+      runtime: 'video_generate',
+      title: recoveredTitle,
+      status: 'completed',
+      updatedAt: 20,
+      endedAt: 20,
+    },
+    {
+      taskId: 'scene-002-attempt-1',
+      runtime: 'video_generate',
+      title: unresolvedTitle,
+      status: 'error',
+      updatedAt: 30,
+      endedAt: 30,
+    },
+  ];
+
+  const report = buildRuntimeCompletionGateReport(run);
+  assert.equal(report.issues.some((issue) => issue.code === 'task.failed' && issue.targetId === 'scene-001-attempt-1'), false);
+  assert.equal(report.issues.some((issue) => issue.code === 'task.failed' && issue.targetId === 'scene-002-attempt-1'), true);
+});
+
 test('a text-only request that mentions search and PPT copy does not require a tool attempt', () => {
   const run: ChatRuntimeRunState = {
     runId: 'run-rag-copy',

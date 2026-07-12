@@ -26,6 +26,7 @@ import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
 import { patchOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-patch.mjs';
 import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
+import { patchOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
@@ -1208,6 +1209,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (nativeMediaAcceptancePatch.patchedFiles > 0) {
     echo`   🩹 Patched ${nativeMediaAcceptancePatch.patchedFiles} native media acceptance runtime file(s)`;
+  }
+
+  // --- Segment-scoped native video idempotency patch ---
+  // Keep legacy single-flight behavior for old calls while allowing an
+  // explicit long-form plan to generate distinct segment ids safely.
+  const videoSegmentDedupePatch = patchOpenClawVideoSegmentDedupeRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (videoSegmentDedupePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${videoSegmentDedupePatch.patchedFiles} video segment dedupe runtime file(s)`;
   }
 
   const videoProviderCatalogPatch = patchOpenClawVideoProviderCatalogRuntime(distDir, {
