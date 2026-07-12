@@ -29,6 +29,7 @@ import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-pa
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
 import { patchOpenClawTaskSummaryDeliveryRuntime } from './openclaw-task-summary-delivery-patch.mjs';
 import { patchOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 import { patchExtensionOpenClawSelfImports } from './openclaw-self-import-patch.mjs';
@@ -1108,6 +1109,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (promptCacheKeyPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
+  }
+
+  // --- Thinking effort vs reasoning visibility prompt patch ---
+  // OpenClaw exposes both values to the model. Label them unambiguously so
+  // reasoning visibility=off cannot be misreported as model thinking=off.
+  const reasoningLabelPatch = patchOpenClawSystemPromptReasoningLabelRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (reasoningLabelPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${reasoningLabelPatch.patchedFiles} reasoning status prompt file(s)`;
   }
 
   // --- Tool directory CJK intent scoring patch ---

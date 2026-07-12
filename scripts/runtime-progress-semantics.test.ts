@@ -250,6 +250,145 @@ const historyMetaAction = historyMetaRuns[historyMetaRunId]?.progressEntries?.fi
 assert.equal(historyMetaAction?.translationKey, 'runtimeProgress.toolSubmitted');
 assert.equal(historyMetaAction?.taskId, 'history-video-task');
 
+const directoryRunId = 'run-directory-wrapper-dedupe';
+const directoryParentCallId = 'call-directory-image';
+const directoryNestedCallId = `tool_search_code:${directoryParentCallId}:image_generate:2`;
+let directoryRuns: Record<string, ChatRuntimeRunState> = {};
+for (const event of [{
+  type: 'tool.started' as const,
+  runId: directoryRunId,
+  sessionKey,
+  ts: 1,
+  toolCallId: directoryParentCallId,
+  name: 'tool_call',
+  args: { id: 'image_generate', args: { prompt: '生成汽车图片' } },
+}, {
+  type: 'tool.started' as const,
+  runId: directoryRunId,
+  sessionKey,
+  ts: 2,
+  toolCallId: directoryNestedCallId,
+  name: 'image_generate',
+  args: { prompt: '生成汽车图片' },
+}, {
+  type: 'tool.completed' as const,
+  runId: directoryRunId,
+  sessionKey,
+  ts: 3,
+  toolCallId: directoryNestedCallId,
+  name: 'image_generate',
+  result: { details: { async: true, status: 'started', taskId: 'directory-image-task' } },
+}, {
+  type: 'tool.completed' as const,
+  runId: directoryRunId,
+  sessionKey,
+  ts: 4,
+  toolCallId: directoryParentCallId,
+  name: 'tool_call',
+  result: {
+    tool: { name: 'image_generate', label: 'Image Generation' },
+    result: { details: { async: true, status: 'started', taskId: 'directory-image-task' } },
+  },
+}]) {
+  directoryRuns = applyWithDerivedProgress(directoryRuns, event);
+}
+const directoryActions = directoryRuns[directoryRunId]?.progressEntries?.filter((entry) => entry.kind === 'action') ?? [];
+assert.equal(directoryActions.length, 1);
+assert.equal(directoryActions[0]?.id, `progress:tool:${directoryParentCallId}`);
+assert.equal(directoryActions[0]?.toolCallId, directoryParentCallId);
+assert.equal(directoryActions[0]?.toolName, 'image_generate');
+assert.equal(directoryActions[0]?.translationKey, 'runtimeProgress.toolSubmitted');
+
+const independentRunId = 'run-independent-image-tools';
+let independentRuns: Record<string, ChatRuntimeRunState> = {};
+for (const [index, parentCallId] of ['call-image-one', 'call-image-two'].entries()) {
+  const nestedCallId = `tool_search_code:${parentCallId}:image_generate:1`;
+  for (const event of [{
+    type: 'tool.started' as const,
+    runId: independentRunId,
+    sessionKey,
+    ts: index * 10 + 1,
+    toolCallId: parentCallId,
+    name: 'tool_call',
+    args: { id: 'image_generate', args: { prompt: `生成图片 ${index + 1}` } },
+  }, {
+    type: 'tool.started' as const,
+    runId: independentRunId,
+    sessionKey,
+    ts: index * 10 + 2,
+    toolCallId: nestedCallId,
+    name: 'image_generate',
+    args: { prompt: `生成图片 ${index + 1}` },
+  }, {
+    type: 'tool.completed' as const,
+    runId: independentRunId,
+    sessionKey,
+    ts: index * 10 + 3,
+    toolCallId: nestedCallId,
+    name: 'image_generate',
+    result: { details: { async: true, status: 'started', taskId: `image-task-${index + 1}` } },
+  }, {
+    type: 'tool.completed' as const,
+    runId: independentRunId,
+    sessionKey,
+    ts: index * 10 + 4,
+    toolCallId: parentCallId,
+    name: 'tool_call',
+    result: {
+      tool: { name: 'image_generate', label: 'Image Generation' },
+      result: { details: { async: true, status: 'started', taskId: `image-task-${index + 1}` } },
+    },
+  }]) {
+    independentRuns = applyWithDerivedProgress(independentRuns, event);
+  }
+}
+const independentActions = independentRuns[independentRunId]?.progressEntries?.filter((entry) => entry.kind === 'action') ?? [];
+assert.equal(independentActions.length, 2);
+assert.deepEqual(independentActions.map((entry) => entry.toolCallId), ['call-image-one', 'call-image-two']);
+
+const codeModeRunId = 'run-code-mode-multiple-tools';
+const codeModeParentCallId = 'call-code-mode';
+let codeModeRuns: Record<string, ChatRuntimeRunState> = {};
+codeModeRuns = applyWithDerivedProgress(codeModeRuns, {
+  type: 'tool.started',
+  runId: codeModeRunId,
+  sessionKey,
+  ts: 1,
+  toolCallId: codeModeParentCallId,
+  name: 'tool_search_code',
+  args: { code: 'call image_generate twice' },
+});
+for (const sequence of [1, 2]) {
+  const toolCallId = `tool_search_code:${codeModeParentCallId}:image_generate:${sequence}`;
+  for (const event of [{
+    type: 'tool.started' as const,
+    runId: codeModeRunId,
+    sessionKey,
+    ts: sequence * 10,
+    toolCallId,
+    name: 'image_generate',
+    args: { prompt: `代码模式图片 ${sequence}` },
+  }, {
+    type: 'tool.completed' as const,
+    runId: codeModeRunId,
+    sessionKey,
+    ts: sequence * 10 + 1,
+    toolCallId,
+    name: 'image_generate',
+    result: { details: { async: true, status: 'started', taskId: `code-image-task-${sequence}` } },
+  }]) {
+    codeModeRuns = applyWithDerivedProgress(codeModeRuns, event);
+  }
+}
+const codeModeImageActions = codeModeRuns[codeModeRunId]?.progressEntries?.filter((entry) => (
+  entry.kind === 'action' && entry.toolName === 'image_generate'
+)) ?? [];
+assert.equal(codeModeImageActions.length, 2);
+assert.deepEqual(codeModeImageActions.map((entry) => entry.toolCallId), [
+  `tool_search_code:${codeModeParentCallId}:image_generate:1`,
+  `tool_search_code:${codeModeParentCallId}:image_generate:2`,
+]);
+
 const derivedFirstRunId = 'run-derived-first';
 let derivedFirst: Record<string, ChatRuntimeRunState> = {};
 derivedFirst = applyWithDerivedProgress(derivedFirst, {

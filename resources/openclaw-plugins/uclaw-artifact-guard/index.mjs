@@ -59,6 +59,9 @@ const VIDEO_INPUT_EXT_RE = /\.(?:mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)$/iu;
 const RUN_TOOL_EVIDENCE_TTL_MS = 30 * 60 * 1000;
 const RUN_TOOL_EVIDENCE_MAX_ENTRIES = 256;
 const toolEvidenceByRunId = new Map();
+const PROGRESS_WRAPPER_TTL_MS = 30 * 60 * 1000;
+const PROGRESS_WRAPPER_MAX_ENTRIES = 512;
+const progressWrappersByParentToolCallId = new Map();
 
 const ARTIFACT_REQUEST_RE = /(?:(?:做|制作|生成|创建|输出|导出|整理成|写|编写|起草|出|弄|做个|做一份|生成一份|创建一份).{0,40}(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip)|(?:文件|文档|报告|标书|投标书|招投标书|投标文件|招标响应文件|方案|维保方案|服务方案|PPT|pptx?|演示文稿|幻灯片|Word|docx?|Excel|xlsx?|表格|PDF|pdf|图片|图像|海报|视频|网页|HTML|html|脚本|代码文件|压缩包|zip).{0,40}(?:做|制作|生成|创建|输出|导出|整理|编写|起草|成稿|成品)|(?:create|make|generate|build|produce|export|write).{0,50}(?:file|document|report|proposal|bid|tender|presentation|slides?|pptx?|docx?|xlsx?|spreadsheet|pdf|image|video|html|script|zip))/iu;
 const PAGE_ARTIFACT_RE = /(?:做|生成|写|编写|起草).{0,20}\d+\s*(?:页|page|pages).{0,20}(?:文档|报告|标书|投标书|招投标书|方案|Word|docx?|PDF|pdf)?/iu;
@@ -91,6 +94,8 @@ const QUEUED_USER_MESSAGE_MARKER_RE = /^\s*\[Queued user message that arrived wh
 const RUNTIME_EVENT_CONTINUATION_RE = /^Continue the OpenClaw runtime event\.?\s*$/iu;
 const PROMISE_ONLY_RE = /(?:(?:^|[。！？!?；;\n\r]\s*)(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在|继续|直接|随后|稍后)|(?:接下来|下一步|随后|稍后|现在|马上|继续).{0,12}(?:我)?(?:会|将|来|准备|可以|马上|先|继续|直接)?|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成|校验|验证|测试|检查)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|修(?:复|掉|正|改)?|修改|调整|补(?:做|齐|上)|校验|验证|测试|检查|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish|fix|repair|validate|verify|test|continue))/iu;
 const ARTIFACT_REPAIR_PROMISE_CUE_RE = /(?:发现.{0,80}(?:问题|不对|不符合|未通过|失败|bug|错误)|实际.{0,40}(?:生成|只有|多了|少了|不符合)|(?:多了|少了|额外).{0,30}(?:页|项|个|张|条)|首屏可见|验证未通过|校验未通过|测试未通过|不符合(?:交互|预期|要求)|空页|页数不(?:对|符)|公式(?:缺失|错误)|交互(?:异常|错误)|bug|错误)/iu;
+const UNFINISHED_ARTIFACT_ADMISSION_RE = /(?:不能算(?:完成|交付)|尚未(?:完成|交付|达到|满足)|还(?:没|没有)(?:完成|交付|达到|满足)|未(?:完成|交付|达到|满足|通过)|不是(?:完整|最终|完成).{0,16}(?:成片|版本|产物|交付)|没有(?:达到|满足).{0,24}(?:要求|目标|条件)|只(?:有|完成|生成).{0,16}(?:秒|页|张|个|部分)|仍(?:需|需要)|需要(?:继续|重新|补齐|修复|修改|重做)|not (?:complete|finished|delivered)|still need(?:s)?|does not (?:meet|satisfy))/iu;
+const ARTIFACT_CONTINUATION_NEGATION_RE = /(?:(?:不要|别|无需|不需要|先别).{0,24}(?:执行|继续|修改|重做|重新|生成|制作|剪辑|合成)|只(?:解释|说明|分析|给方案|说方案|讨论)|do not.{0,24}(?:execute|continue|modify|regenerate|create)|explain only)/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
 const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm|blend|glb|gltf|obj|fbx';
 const ARTIFACT_EVIDENCE_RE = new RegExp(`(?:MEDIA:\\s*(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+|(?:[A-Za-z]:[\\\\/]|/|~/|\\.\\.?/)[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|https?://[^\\s\`"'<>]+\\.(?:${ARTIFACT_EXT})\\b|(?:filePath|outputPath|output_path|mediaUrl|media_url|url)["']?\\s*:\\s*["'][^"']+|(?:^|[\\s"'\`])out["']?\\s*:\\s*["'][^"']+)`, 'iu');
@@ -477,6 +482,15 @@ function normalizeToolName(event) {
     }
   }
   return resolved.includes(':') ? resolved.split(':').at(-1) ?? resolved : resolved;
+}
+
+function normalizeDirectToolName(event) {
+  const direct = normalizeOptionalString(event?.toolName)
+    ?? normalizeOptionalString(event?.name)
+    ?? normalizeOptionalString(event?.tool?.name)
+    ?? '';
+  const normalized = direct.includes(':') ? direct.split(':').at(-1) ?? direct : direct;
+  return normalized.trim().toLowerCase();
 }
 
 function normalizeToolParams(event) {
@@ -2016,6 +2030,13 @@ function successfulMediaCompletionTool(runId) {
   return match?.[1]?.toLowerCase();
 }
 
+function successfulMediaCompletionKind(runId) {
+  const toolName = successfulMediaCompletionTool(runId);
+  if (toolName === 'image_generate') return 'image';
+  if (toolName === 'video_generate') return 'video';
+  return undefined;
+}
+
 function bindArtifactsToCurrentRunToolEvidence(artifacts, runToolEvidence, runId) {
   const completionTool = successfulMediaCompletionTool(runId);
   return artifacts.map((entry) => {
@@ -2116,6 +2137,7 @@ function deriveRequiredEffects({
   activeUserText,
   artifactRequest,
   artifactRevisionRequest,
+  completionArtifactKind,
   textLengthRequirement,
   priorArtifacts,
   desktopActionRequest,
@@ -2165,7 +2187,7 @@ function deriveRequiredEffects({
     effects.push(makeRequiredEffect({
       type: 'create_artifact_revision',
       intent: 'artifact_revision',
-      kind: inferRequestedArtifactKind(activeUserText) ?? target?.artifact?.kind,
+      kind: completionArtifactKind ?? inferRequestedArtifactKind(activeUserText) ?? target?.artifact?.kind,
       title: '产物修订',
       minCount: 1,
       mustBeNewArtifact: true,
@@ -2203,7 +2225,7 @@ function deriveRequiredEffects({
       effects.push(makeRequiredEffect({
         type: 'create_artifact',
         intent: 'artifact_delivery',
-        kind: inferRequestedArtifactKind(activeUserText),
+        kind: completionArtifactKind ?? inferRequestedArtifactKind(activeUserText),
         title: '产物交付',
         minCount: 1,
         textLength,
@@ -2466,17 +2488,39 @@ function analyzeArtifactFinal(event, ctx) {
   const priorArtifacts = buildArtifactEvidence(eventBeforeLatestUser, '');
   const priorArtifactEvidence = priorArtifacts.length > 0 || hasArtifactEvidence(eventBeforeLatestUser, '');
   const currentRunId = getRunId(event, ctx);
+  const completionArtifactKind = successfulMediaCompletionKind(currentRunId);
   const runToolEvidence = getToolEvidenceForRun(currentRunId);
   const declaredContract = runToolEvidence.contract;
   const enforceCurrentRunToolEvidence = Boolean(ctx && currentRunId);
   const legacySemanticFallback = !enforceCurrentRunToolEvidence;
+  const explicitBlocker = isExplicitBlocker(finalText);
+  const promiseOnly = PROMISE_ONLY_RE.test(finalText);
+  // A new turn may omit a fresh contract even though the assistant itself
+  // explicitly admits that the previously delivered artifact is unfinished.
+  // This is a delivery fail-safe based on structured transcript evidence and
+  // the assistant's own completion claim, not a user-phrase routing shortcut.
+  const artifactContinuationPromise = Boolean(
+    enforceCurrentRunToolEvidence
+    && !declaredContract
+    && priorArtifactEvidence
+    && promiseOnly
+    && UNFINISHED_ARTIFACT_ADMISSION_RE.test(finalText)
+    && !ARTIFACT_CONTINUATION_NEGATION_RE.test(activeUserText)
+    && !explicitBlocker
+  );
   const artifactRevisionFeedback = isArtifactRevisionFeedback(activeUserText);
   const contractRequiresArtifact = Boolean(
     declaredContract?.acceptance?.requiresArtifact
     || declaredContract?.sideEffect === 'local_artifact'
     || declaredContract?.sideEffect === 'remote_generation'
   );
-  const artifactRevisionRequest = contractRequiresArtifact && artifactRevisionFeedback && priorArtifactEvidence;
+  const artifactRevisionRequest = Boolean(
+    priorArtifactEvidence
+    && (
+      contractRequiresArtifact && artifactRevisionFeedback
+      || artifactContinuationPromise
+    )
+  );
   const compositeRequiredArtifactCount = legacySemanticFallback
     ? countCompositeRequiredArtifacts(activeUserText)
     : 0;
@@ -2500,7 +2544,7 @@ function analyzeArtifactFinal(event, ctx) {
     ? contractRequiresArtifact
     : legacySemanticFallback
       ? isArtifactRequest(activeUserText) || inferredRequiredArtifactCount > 0 || artifactRevisionRequest
-      : producerAttempted || undeclaredExecutionRequest;
+      : Boolean(completionArtifactKind) || producerAttempted || undeclaredExecutionRequest || artifactContinuationPromise;
   const textLengthRequirement = artifactRequest ? requestedTextLength(activeUserText) : undefined;
   const desktopActionRequest = declaredContract
     ? declaredContract.sideEffect === 'external_action'
@@ -2524,6 +2568,7 @@ function analyzeArtifactFinal(event, ctx) {
     activeUserText,
     artifactRequest,
     artifactRevisionRequest,
+    completionArtifactKind,
     textLengthRequirement,
     priorArtifacts,
     desktopActionRequest,
@@ -2553,8 +2598,6 @@ function analyzeArtifactFinal(event, ctx) {
     .filter((effect) => effect.type === 'create_artifact' || effect.type === 'create_artifact_revision')
     .reduce((total, effect) => total + (effect.minCount ?? 1), 0);
   const missingRequiredArtifactCount = missingArtifactEffects.length;
-  const explicitBlocker = isExplicitBlocker(finalText);
-  const promiseOnly = PROMISE_ONLY_RE.test(finalText);
   const artifactRepairPromise = artifactRequest && promiseOnly && ARTIFACT_REPAIR_PROMISE_CUE_RE.test(finalText);
   const unfinishedArtifactPromise = Boolean(
     artifactRequest
@@ -2620,6 +2663,8 @@ function analyzeArtifactFinal(event, ctx) {
     legacySemanticFallback,
     artifactRevisionFeedback,
     artifactRevisionRequest,
+    artifactContinuationPromise,
+    completionArtifactKind,
     currentRunId,
     enforceCurrentRunToolEvidence,
     currentRunToolAttemptCount: runToolEvidence.attempts.length,
@@ -2741,7 +2786,7 @@ function buildRevision(analysis) {
         idempotencyKey: `${REVISION_ID}:artifact-revision`,
         maxAttempts: 2,
         instruction: [
-          '用户是在评价或否定上一轮已生成产物，这等价于要求重做/改进产物。',
+          '当前轮是在修订上一轮产物，或者上一回复已经明确承认该产物尚未满足验收条件。',
           '不要只说“我会重做/我直接重做/我来优化”；现在必须继续执行，定位上一轮 MEDIA 路径或最近产物，创建一个新的非覆盖改进版。',
           '优先使用可用的 create_* 文件工具或相关 skill；如果没有专用工具，就用 exec 结合 Node/Python/uv 读取旧产物信息并重新生成。',
           '生成后必须用可用工具验证新文件存在，并在最终回复中返回新的 MEDIA:<absolute-path> 或新的绝对文件路径。',
@@ -3170,8 +3215,50 @@ function buildNativeToolActionText(toolLabel, state) {
   return `已完成：${toolLabel}`;
 }
 
-function buildNativeToolProgressId(event, suffix = '') {
+function pruneProgressWrappers(now = Date.now()) {
+  for (const [parentToolCallId, wrapper] of progressWrappersByParentToolCallId.entries()) {
+    if (now - wrapper.updatedAt > PROGRESS_WRAPPER_TTL_MS) {
+      progressWrappersByParentToolCallId.delete(parentToolCallId);
+    }
+  }
+  while (progressWrappersByParentToolCallId.size > PROGRESS_WRAPPER_MAX_ENTRIES) {
+    const oldestParentToolCallId = progressWrappersByParentToolCallId.keys().next().value;
+    if (!oldestParentToolCallId) break;
+    progressWrappersByParentToolCallId.delete(oldestParentToolCallId);
+  }
+}
+
+function rememberStructuredProgressWrapper(event, ctx) {
+  if (normalizeDirectToolName(event) !== 'tool_call') return;
+  const parentToolCallId = normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id);
+  const targetToolName = normalizeToolName(event).trim().toLowerCase();
+  if (!parentToolCallId || !targetToolName || targetToolName === 'tool_call') return;
+  const now = Date.now();
+  pruneProgressWrappers(now);
+  progressWrappersByParentToolCallId.delete(parentToolCallId);
+  progressWrappersByParentToolCallId.set(parentToolCallId, {
+    runId: getRunId(event, ctx),
+    targetToolName,
+    updatedAt: now,
+  });
+}
+
+function canonicalProgressToolCallId(event, ctx) {
   const toolCallId = normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id);
+  if (!toolCallId) return undefined;
+  const nested = /^tool_search_code:(.+):([^:]+):\d+$/u.exec(toolCallId);
+  if (!nested) return toolCallId;
+  pruneProgressWrappers();
+  const wrapper = progressWrappersByParentToolCallId.get(nested[1]);
+  if (!wrapper) return toolCallId;
+  const runId = getRunId(event, ctx);
+  if (wrapper.runId && runId && wrapper.runId !== runId) return toolCallId;
+  const childToolName = String(nested[2] ?? '').trim().toLowerCase();
+  return childToolName === wrapper.targetToolName ? nested[1] : toolCallId;
+}
+
+function buildNativeToolProgressId(event, ctx, suffix = '') {
+  const toolCallId = canonicalProgressToolCallId(event, ctx);
   const base = toolCallId
     ? `progress:tool:${toolCallId}`
     : `progress:tool:${hashString(normalizeToolName(event) || 'tool')}`;
@@ -3201,19 +3288,20 @@ function emitNativeToolProgress(api, event, ctx, entry) {
           }
         : entry?.translationParams,
       source: 'native',
-      toolCallId: normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id),
+      toolCallId: canonicalProgressToolCallId(event, ctx),
     },
   });
 }
 
 function emitToolCallProgress(api, event, ctx) {
+  rememberStructuredProgressWrapper(event, ctx);
   const toolName = normalizeToolName(event);
   if (!toolName || HIDDEN_PROGRESS_TOOLS.has(toolName)) return;
   const command = extractToolProgressCommand(event);
   const commentary = buildNativeToolCommentary(toolName, command);
   if (commentary) {
     emitNativeToolProgress(api, event, ctx, {
-      id: buildNativeToolProgressId(event, 'commentary'),
+      id: buildNativeToolProgressId(event, ctx, 'commentary'),
       kind: 'commentary',
       text: commentary,
       command,
@@ -3223,7 +3311,7 @@ function emitToolCallProgress(api, event, ctx) {
   const toolLabel = progressToolLabel(event, toolName);
   const state = nativeToolProgressState(event);
   emitNativeToolProgress(api, event, ctx, {
-    id: buildNativeToolProgressId(event),
+    id: buildNativeToolProgressId(event, ctx),
     kind: 'action',
     text: buildNativeToolActionText(toolLabel, state),
     status: nativeToolProgressStatus(state),
@@ -3237,6 +3325,7 @@ function emitToolCallProgress(api, event, ctx) {
 }
 
 function emitToolResultProgress(api, event, ctx) {
+  rememberStructuredProgressWrapper(event, ctx);
   const toolName = normalizeToolName(event);
   if (!toolName || HIDDEN_PROGRESS_TOOLS.has(toolName)) return;
   const failed = isToolError(event);
@@ -3244,7 +3333,7 @@ function emitToolResultProgress(api, event, ctx) {
   const state = nativeToolProgressState(event, failed);
   const details = progressResultDetails(event);
   emitNativeToolProgress(api, event, ctx, {
-    id: buildNativeToolProgressId(event),
+    id: buildNativeToolProgressId(event, ctx),
     kind: 'action',
     text: buildNativeToolActionText(toolLabel, state),
     status: nativeToolProgressStatus(state),
@@ -3260,7 +3349,7 @@ function emitToolResultProgress(api, event, ctx) {
   const detail = summarizeToolFailure(event);
   if (!detail) return;
   emitNativeToolProgress(api, event, ctx, {
-    id: buildNativeToolProgressId(event, 'status'),
+    id: buildNativeToolProgressId(event, ctx, 'status'),
     kind: 'status',
     text: detail,
     status: 'error',
@@ -3568,6 +3657,8 @@ function registerArtifactGuard(api) {
         legacySemanticFallback: analysis.legacySemanticFallback,
         artifactRevisionFeedback: analysis.artifactRevisionFeedback,
         artifactRevisionRequest: analysis.artifactRevisionRequest,
+        artifactContinuationPromise: analysis.artifactContinuationPromise,
+        completionArtifactKind: analysis.completionArtifactKind,
         textLengthRequirement: analysis.textLengthRequirement,
         enforceCurrentRunToolEvidence: analysis.enforceCurrentRunToolEvidence,
         currentRunToolAttemptCount: analysis.currentRunToolAttemptCount,
@@ -3580,6 +3671,9 @@ function registerArtifactGuard(api) {
         requiredEffectCount: analysis.requiredEffects.length,
         missingRequiredEffectCount: analysis.missingRequiredEffects.length,
         requiredEffectTypes: analysis.requiredEffects.map((effect) => effect.type),
+        requiredEffectKinds: analysis.requiredEffects.map((effect) => effect.kind),
+        missingRequiredEffectKinds: analysis.missingRequiredEffects.map((result) => result.effect.kind),
+        missingRequiredEffectReasons: analysis.missingRequiredEffects.map((result) => result.reason),
         requiredArtifactCount: analysis.requiredArtifactCount,
         passedArtifactCount: analysis.passedArtifactCount,
         missingRequiredArtifactCount: analysis.missingRequiredArtifactCount,
@@ -3618,7 +3712,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.17',
+  version: '0.1.19',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -3646,6 +3740,8 @@ export const __test = {
   emitToolResultProgress,
   emitToolResultRuntimeEvents,
   emitRuntimeEvent,
+  canonicalProgressToolCallId,
+  rememberStructuredProgressWrapper,
   rewriteTmpScreenshotMediaPaths,
   rewriteExecScreenshotParams,
   stageMediaToolInputs,

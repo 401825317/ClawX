@@ -50,6 +50,8 @@ touchedAreas:
   - resources/openclaw-skill-shims/office-toolkit/create.md
   - resources/openclaw-skill-shims/office-toolkit/references/create.md
   - scripts/openclaw-model-request-contract-patch.mjs
+  - scripts/openclaw-system-prompt-reasoning-label-patch.mjs
+  - scripts/openclaw-system-prompt-reasoning-label-patch.test.mjs
   - scripts/openclaw-streaming-runtime-patch.mjs
   - scripts/openclaw-tool-directory-i18n-patch.mjs
   - scripts/patch-browser-hint.mjs
@@ -58,7 +60,9 @@ touchedAreas:
   - scripts/host-task-lifecycle.test.ts
   - scripts/host-task-runtime-route.test.ts
   - scripts/gateway-task-ledger-monitor.test.ts
+  - scripts/runtime-progress-semantics.test.ts
   - scripts/uclaw-contract-driven-gate.test.mjs
+  - scripts/uclaw-tool-progress.test.mjs
   - src/pages/Chat/ChatInput.tsx
   - src/pages/Chat/ExecutionGraphCard.tsx
   - src/pages/Chat/index.tsx
@@ -93,6 +97,7 @@ expectedUserBehavior:
   - Heartbeat work runs in an isolated lightweight session and never reuses the interactive chat transcript.
   - Internal heartbeat, restart-continuation, and runtime-plumbing messages are removed before prompt construction and future transcript writes.
   - Safe diagnostics can prove the final provider request contract without recording prompts, credentials, tool schemas, or media payloads.
+  - Runtime self-reporting distinguishes model thinking effort from reasoning-trace visibility, so hidden reasoning is never reported as disabled thinking.
   - Chinese engineering and read-only prompts discover the same relevant tool families as equivalent English prompts.
   - Visible assistant deltas remain genuinely streamed with a responsive UI cadence instead of arriving in large bursts.
   - Fresh multi-deliverable work remains one OpenClaw Agent turn whose Task Flow creates task-specific dependencies only when the user intent requires them.
@@ -115,6 +120,10 @@ requiredRules:
 requiredTests:
   - pnpm exec tsc --noEmit --pretty false
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
+  - node scripts/openclaw-system-prompt-reasoning-label-patch.test.mjs
+  - node scripts/uclaw-contract-driven-gate.test.mjs
+  - node scripts/uclaw-tool-progress.test.mjs
+  - pnpm exec tsx scripts/runtime-progress-semantics.test.ts
   - pnpm harness validate --spec harness/specs/tasks/uclaw-agent-runtime-contract.md --since HEAD
   - pnpm run comms:replay
   - pnpm run comms:compare
@@ -140,14 +149,18 @@ acceptance:
   - OpenClaw finalize hooks can produce artifact, verification, and checkpoint runtime events through the native agent event bus.
   - OpenClaw tool-result middleware can produce step, artifact, verification, and checkpoint runtime events before final reply generation.
   - Artifact delivery finals are revised when they lack a real artifact reference or a passed availability verification, while explicit blockers are allowed with a recoverable checkpoint.
+  - Successful native image/video completion runs derive their required artifact kind from the structured completion run identity, never from noisy internal completion prose; a verified matching artifact finalizes without another model pass, while mismatched or unavailable artifacts remain blocked.
+  - A follow-up run cannot end with a future-tense artifact promise when the transcript contains the prior artifact and the assistant itself admits that delivery is unfinished; it must continue execution or report concrete blocker evidence.
   - Completed/error/aborted runs pass through a completion gate that records artifact verification, failed steps, unfinished steps, and blocking checkpoints before clearing active run state.
   - OpenClaw can select native image/video tools from default chat without requiring mode selection; image/video mode defaults remain current-turn preferences only.
   - The active execution graph projects the new contract events into visible steps without exposing sensitive prompt or body text in diagnostics.
+  - Structured `tool_call` wrapper progress and its matching directory child share one visible action, while code-mode multi-tool calls and independent executions retain separate actions.
   - Runtime tool events can also project into a durable user-facing progress transcript for ordinary chat surfaces.
   - Managed OpenClaw config enables heartbeat isolatedSession, lightContext, and skipWhenBusy without changing chat, image, or video model routing.
   - Internal prompt-history sanitization blocks pure runtime messages while preserving real user text from mixed queued/restart envelopes.
   - The final guarded model fetch logs only request-shape metadata, including reasoning effort, tool count, tool choice, prompt-cache-key presence, and top-level keys.
   - The managed `lingzhiwuxian/smart-latest` model declares native `xhigh` support in both catalog compatibility and its top-level thinking-level map, so an `xhigh` Agent turn reaches the final OpenRouter payload as `reasoning.effort=xhigh` instead of being clamped to `high`.
+  - Dev and packaged system prompts label `thinking` as model effort and `reasoning` as trace visibility, and explicitly prohibit using visibility=off to claim that model thinking is disabled.
   - Dev and packaged OpenClaw runtimes apply the CJK tool-directory and streaming cadence patches idempotently.
   - Task Flow and recovered legacy results persist structured task, artifact, verification, gate, and progress state instead of reconstructing success from localized summary text.
   - Single and multi-artifact fresh requests use the same OpenClaw Agent turn contract, Task Flow semantics, Host capability registry, and verification contract.

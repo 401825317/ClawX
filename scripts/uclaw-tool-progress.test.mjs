@@ -117,6 +117,51 @@ __test.emitToolResultProgress(api, {
   },
 }, ctx);
 
+const directoryImageParentId = 'call-directory-image';
+for (const toolCallId of [
+  directoryImageParentId,
+  `tool_search_code:${directoryImageParentId}:image_generate:2`,
+]) {
+  __test.emitToolCallProgress(api, {
+    toolCallId,
+    toolName: toolCallId === directoryImageParentId ? 'tool_call' : 'image_generate',
+    params: {
+      id: 'image_generate',
+      args: { prompt: '生成一张汽车图片', size: '1536x1024' },
+    },
+  }, ctx);
+  __test.emitToolResultProgress(api, {
+    toolCallId,
+    toolName: toolCallId === directoryImageParentId ? 'tool_call' : 'image_generate',
+    params: { id: 'image_generate' },
+    result: {
+      tool: { name: 'image_generate', label: 'Image Generation' },
+      result: { details: { async: true, status: 'started', taskId: 'image-task-native-1' } },
+    },
+  }, ctx);
+}
+
+const codeModeParentId = 'call-code-mode';
+__test.emitToolCallProgress(api, {
+  toolCallId: codeModeParentId,
+  toolName: 'tool_search_code',
+  params: { code: 'call image_generate twice' },
+}, ctx);
+for (const sequence of [1, 2]) {
+  const toolCallId = `tool_search_code:${codeModeParentId}:image_generate:${sequence}`;
+  __test.emitToolCallProgress(api, {
+    toolCallId,
+    toolName: 'image_generate',
+    params: { prompt: `代码模式图片 ${sequence}` },
+  }, ctx);
+  __test.emitToolResultProgress(api, {
+    toolCallId,
+    toolName: 'image_generate',
+    params: { prompt: `代码模式图片 ${sequence}` },
+    result: { details: { async: true, status: 'started', taskId: `code-image-task-${sequence}` } },
+  }, ctx);
+}
+
 __test.emitToolCallProgress(api, {
   toolCallId: 'secret-command',
   toolName: 'exec',
@@ -148,6 +193,17 @@ assert.equal(submittedVideo?.status, 'running');
 assert.equal(submittedVideo?.taskId, 'video-task-native-1');
 assert.match(submittedVideo?.command ?? '', /60s/u);
 assert.doesNotMatch(submittedVideo?.command ?? '', /电影级汽车宣传片/u);
+const directoryImageEntries = entries.filter((entry) => (
+  entry.toolName === 'image_generate' && entry.taskId === 'image-task-native-1'
+));
+assert.equal(new Set(directoryImageEntries.map((entry) => entry.id)).size, 1);
+assert.equal(directoryImageEntries.every((entry) => entry.toolCallId === directoryImageParentId), true);
+const codeModeEntries = entries.filter((entry) => entry.taskId?.startsWith('code-image-task-'));
+assert.equal(new Set(codeModeEntries.map((entry) => entry.id)).size, 2);
+assert.deepEqual(codeModeEntries.map((entry) => entry.toolCallId), [
+  `tool_search_code:${codeModeParentId}:image_generate:1`,
+  `tool_search_code:${codeModeParentId}:image_generate:2`,
+]);
 assert.equal(entries.some((entry) => entry.text === '已运行' || entry.text === '正在执行'), false);
 const secretEntries = entries.filter((entry) => entry.toolCallId === 'secret-command');
 const secretDisplay = JSON.stringify(secretEntries);

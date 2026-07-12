@@ -70,6 +70,56 @@ for (const prompt of [
   assert.equal(result.shouldReviseArtifact, false, prompt);
 }
 
+const unfinishedContinuationRunId = 'contract-gate:unfinished-artifact-continuation';
+const unfinishedContinuation = __test.analyzeArtifactFinal({
+  runId: unfinishedContinuationRunId,
+  messages: [
+    { role: 'user', content: '做一条 60 秒汽车宣传片。' },
+    {
+      role: 'assistant',
+      content: '当前只生成了 12 秒短版。\nMEDIA:/tmp/uclaw-short-video.mp4',
+    },
+    { role: 'user', content: '我要60秒啊' },
+    {
+      role: 'assistant',
+      content: '你说得对，12 秒不能算完成。我会把现有样片重新剪辑成准确 60 秒的版本，并补齐旁白；最终会核验实际时长后再交付。',
+    },
+  ],
+}, { runId: unfinishedContinuationRunId });
+assert.equal(unfinishedContinuation.artifactContinuationPromise, true);
+assert.equal(unfinishedContinuation.artifactRequest, true);
+assert.equal(unfinishedContinuation.artifactRevisionRequest, true);
+assert.equal(unfinishedContinuation.requiredEffects[0]?.kind, 'video');
+assert.equal(unfinishedContinuation.requiredEffects[0]?.requiresToolEvidence, true);
+assert.equal(unfinishedContinuation.shouldReviseArtifact, true);
+assert.match(__test.buildRevision(unfinishedContinuation).reason, /revision final reply/iu);
+
+const explanationOnlyContinuationRunId = 'contract-gate:artifact-explanation-only';
+const explanationOnlyContinuation = __test.analyzeArtifactFinal({
+  runId: explanationOnlyContinuationRunId,
+  messages: [
+    { role: 'assistant', content: 'MEDIA:/tmp/uclaw-short-video.mp4' },
+    { role: 'user', content: '只解释为什么只有 12 秒，不要继续修改视频。' },
+    { role: 'assistant', content: '服务端单次生成时长上限是 12 秒，所以这次返回了短版。' },
+  ],
+}, { runId: explanationOnlyContinuationRunId });
+assert.equal(explanationOnlyContinuation.artifactContinuationPromise, false);
+assert.equal(explanationOnlyContinuation.artifactRequest, false);
+assert.equal(explanationOnlyContinuation.shouldReviseArtifact, false);
+
+const promiseWithoutPriorArtifactRunId = 'contract-gate:promise-without-prior-artifact';
+const promiseWithoutPriorArtifact = __test.analyzeArtifactFinal(
+  finalizeEvent(
+    promiseWithoutPriorArtifactRunId,
+    '继续。',
+    '当前版本不能算完成，我会重新制作并验证后交付。',
+  ),
+  { runId: promiseWithoutPriorArtifactRunId },
+);
+assert.equal(promiseWithoutPriorArtifact.artifactContinuationPromise, false);
+assert.equal(promiseWithoutPriorArtifact.artifactRequest, false);
+assert.equal(promiseWithoutPriorArtifact.shouldReviseArtifact, false);
+
 const artifactRunId = 'contract-gate:artifact';
 __test.recordToolEvidence({
   runId: artifactRunId,
@@ -147,6 +197,50 @@ const artifactDir = mkdtempSync(join(tmpdir(), 'uclaw-contract-artifact-'));
 try {
   const artifactPath = join(artifactDir, 'image.png');
   writeFileSync(artifactPath, 'real artifact');
+  const priorImagePath = join(artifactDir, 'prior-image.png');
+  writeFileSync(priorImagePath, 'prior image artifact');
+
+  const nativeCompletionRunId = 'image_generate:native-completion:ok';
+  const nativeCompletion = __test.analyzeArtifactFinal({
+    runId: nativeCompletionRunId,
+    prompt: '[Inter-session message] This content was routed from an async completion event. Deliver the generated media.',
+    finalText: `图片已完成。\nMEDIA:${artifactPath}`,
+    messages: [
+      { role: 'assistant', content: `上一张图片。\nMEDIA:${priorImagePath}` },
+      { role: 'user', content: '修改上一张图片，保持构图不变。' },
+      { role: 'assistant', content: `图片已完成。\nMEDIA:${artifactPath}` },
+    ],
+  }, { runId: nativeCompletionRunId });
+  assert.equal(nativeCompletion.completionArtifactKind, 'image');
+  assert.equal(nativeCompletion.priorArtifactEvidence, true);
+  assert.equal(nativeCompletion.requiredEffects[0]?.kind, 'image');
+  assert.equal(nativeCompletion.artifacts[0]?.successfulToolResult, true);
+  assert.equal(nativeCompletion.missingRequiredArtifactCount, 0);
+  assert.equal(nativeCompletion.shouldRevise, false);
+
+  const videoPath = join(artifactDir, 'video.mp4');
+  writeFileSync(videoPath, 'real video artifact');
+  const nativeVideoCompletionRunId = 'video_generate:native-video-completion:ok';
+  const nativeVideoCompletion = __test.analyzeArtifactFinal({
+    runId: nativeVideoCompletionRunId,
+    prompt: '[Inter-session message] This content contains an image reference and a presentation summary.',
+    finalText: `视频已完成。\nMEDIA:${videoPath}`,
+  }, { runId: nativeVideoCompletionRunId });
+  assert.equal(nativeVideoCompletion.completionArtifactKind, 'video');
+  assert.equal(nativeVideoCompletion.requiredEffects[0]?.kind, 'video');
+  assert.equal(nativeVideoCompletion.missingRequiredArtifactCount, 0);
+  assert.equal(nativeVideoCompletion.shouldRevise, false);
+
+  const mismatchedCompletionRunId = 'image_generate:mismatched-completion:ok';
+  const mismatchedCompletion = __test.analyzeArtifactFinal({
+    runId: mismatchedCompletionRunId,
+    prompt: '[Inter-session message] This content was routed from an async completion event.',
+    finalText: `任务已完成。\nMEDIA:${videoPath}`,
+  }, { runId: mismatchedCompletionRunId });
+  assert.equal(mismatchedCompletion.completionArtifactKind, 'image');
+  assert.equal(mismatchedCompletion.missingRequiredArtifactCount, 1);
+  assert.equal(mismatchedCompletion.shouldRevise, true);
+
   const localArtifact = __test.buildArtifactEvidence({}, `MEDIA:${artifactPath}`)[0];
   const noVerificationResults = __test.evaluateRequiredEffects(noVerificationEffects, {
     artifacts: [{ ...localArtifact, successfulToolResult: false }],

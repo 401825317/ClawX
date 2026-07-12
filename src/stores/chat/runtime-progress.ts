@@ -309,12 +309,28 @@ function findProgressEntry(
   return (run?.progressEntries ?? []).find((entry) => entry.id === id);
 }
 
+function canonicalProgressToolCallId(
+  run: ChatRuntimeRunState | undefined,
+  event: RuntimeToolEvent,
+): string {
+  const nested = /^tool_search_code:(.+):([^:]+):\d+$/u.exec(event.toolCallId);
+  if (!nested) return event.toolCallId;
+  const parentStart = matchingToolStart(run, nested[1]);
+  if (!parentStart) return event.toolCallId;
+  const parentContext = resolveRuntimeToolProgressContext(run, parentStart);
+  const childToolName = canonicalToolName(nested[2]);
+  return parentContext.outerName === 'tool_call' && parentContext.name === childToolName
+    ? nested[1]
+    : event.toolCallId;
+}
+
 function hasNativeToolProgress(
   run: ChatRuntimeRunState | undefined,
-  toolCallId: string,
+  event: RuntimeToolEvent,
 ): boolean {
+  const canonicalToolCallId = canonicalProgressToolCallId(run, event);
   return (run?.progressEntries ?? []).some((entry) => (
-    entry.toolCallId === toolCallId && entry.kind === 'action' && entry.source === 'native'
+    entry.toolCallId === canonicalToolCallId && entry.kind === 'action' && entry.source === 'native'
   ));
 }
 
@@ -424,23 +440,24 @@ function recoveredToolProgressEvents(
     && candidate.toolCallId !== event.toolCallId
   ));
   return recovered.flatMap((failedEvent) => {
-    const existing = findProgressEntry(run, `progress:tool:${failedEvent.toolCallId}`);
+    const progressToolCallId = canonicalProgressToolCallId(run, failedEvent);
+    const existing = findProgressEntry(run, `progress:tool:${progressToolCallId}`);
     return [
       buildProgressEntryEvent(event, {
-        id: `progress:tool:${failedEvent.toolCallId}`,
+        id: `progress:tool:${progressToolCallId}`,
         kind: 'action',
         text: family === 'designed_pptx_file' ? '版式问题已修复' : '重试已成功',
         status: 'completed',
         command: existing?.command,
-        toolCallId: failedEvent.toolCallId,
+        toolCallId: progressToolCallId,
         source: 'derived',
       }),
       buildProgressEntryEvent(event, {
-        id: `progress:tool:${failedEvent.toolCallId}:status`,
+        id: `progress:tool:${progressToolCallId}:status`,
         kind: 'status',
         text: family === 'designed_pptx_file' ? '增量修复已通过完整质量检查' : '后续重试已恢复该步骤',
         status: 'completed',
-        toolCallId: failedEvent.toolCallId,
+        toolCallId: progressToolCallId,
         source: 'derived',
       }),
     ];
@@ -568,7 +585,7 @@ export function buildRuntimeProgressEvents(
       : [];
     const context = resolveRuntimeToolProgressContext(run, event);
     if (context.hidden) return recoveryEvents;
-    if (hasNativeToolProgress(run, event.toolCallId)) return recoveryEvents;
+    if (hasNativeToolProgress(run, event)) return recoveryEvents;
     if (
       event.type === 'tool.started'
       && run?.events.some((candidate) => (
@@ -577,8 +594,9 @@ export function buildRuntimeProgressEvents(
     ) {
       return recoveryEvents;
     }
+    const progressToolCallId = canonicalProgressToolCallId(run, event);
     const command = buildToolProgressCommand(context)
-      ?? findProgressEntry(run, `progress:tool:${event.toolCallId}`)?.command;
+      ?? findProgressEntry(run, `progress:tool:${progressToolCallId}`)?.command;
     const narration = event.type === 'tool.started'
       ? inferToolNarration(context.name, command)
       : null;
@@ -591,16 +609,16 @@ export function buildRuntimeProgressEvents(
     const nextEvents: ChatRuntimeEvent[] = [];
     if (narration && narration.key !== lastNarrationKey(run)) {
       nextEvents.push(buildProgressEntryEvent(event, {
-        id: `progress:tool:${event.toolCallId}:commentary`,
+        id: `progress:tool:${progressToolCallId}:commentary`,
         kind: 'commentary',
         text: narration.text,
         dedupeKey: narration.key,
-        toolCallId: event.toolCallId,
+        toolCallId: progressToolCallId,
         source: 'derived',
       }));
     }
     nextEvents.push(buildProgressEntryEvent(event, {
-      id: `progress:tool:${event.toolCallId}`,
+      id: `progress:tool:${progressToolCallId}`,
       kind: 'action',
       text: fallbackTextForSemanticState(semanticState, context),
       status: progressStatusForSemanticState(semanticState),
@@ -609,7 +627,7 @@ export function buildRuntimeProgressEvents(
       toolName: context.name,
       toolLabel: context.label,
       command,
-      toolCallId: event.toolCallId,
+      toolCallId: progressToolCallId,
       taskId: context.taskId,
       source: 'derived',
     }));
@@ -619,11 +637,11 @@ export function buildRuntimeProgressEvents(
       : undefined;
     if (detail) {
       nextEvents.push(buildProgressEntryEvent(event, {
-        id: `progress:tool:${event.toolCallId}:status`,
+        id: `progress:tool:${progressToolCallId}:status`,
         kind: 'status',
         text: detail,
         status: 'error',
-        toolCallId: event.toolCallId,
+        toolCallId: progressToolCallId,
         taskId: context.taskId,
         source: 'derived',
       }));

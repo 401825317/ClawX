@@ -16,6 +16,7 @@ import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchInstalledOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
 import { patchInstalledOpenClawTaskSummaryDeliveryRuntime } from './openclaw-task-summary-delivery-patch.mjs';
 import { patchInstalledOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 
@@ -32,6 +33,7 @@ try {
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawSessionCwdRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
+  patchInstalledOpenClawSystemPromptReasoningLabelRuntime();
   patchInstalledOpenClawToolDirectoryI18nRuntime();
   patchInstalledOpenClawStreamingRuntime();
   patchInstalledOpenClawModelRequestContractRuntime();
