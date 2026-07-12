@@ -63,6 +63,11 @@ function applyWindowsOrMacLaunchAtStartup(enabled: boolean): void {
 
 export async function applyLaunchAtStartupSetting(enabled: boolean): Promise<void> {
   try {
+    if (!app.isPackaged) {
+      logger.info('Launch-at-startup sync skipped in development mode');
+      return;
+    }
+
     if (process.platform === 'linux') {
       await applyLinuxLaunchAtStartup(enabled);
       return;

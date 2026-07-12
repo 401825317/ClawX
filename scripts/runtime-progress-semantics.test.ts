@@ -95,6 +95,24 @@ apply(base({
   },
 }));
 
+const listVideoCallId = 'call-video-list';
+assert.deepEqual(apply(base({
+  type: 'tool.started',
+  toolCallId: listVideoCallId,
+  name: 'tool_call',
+  args: { id: 'video_generate', args: { action: 'list' } },
+})), []);
+assert.deepEqual(apply(base({
+  type: 'tool.completed',
+  toolCallId: listVideoCallId,
+  name: 'tool_call',
+  result: {
+    tool: { name: 'video_generate', label: 'Video Generation' },
+    result: { details: { status: 'completed', items: [] } },
+  },
+})), []);
+assert.equal(actionEntries().length, 1);
+
 const longPrompt = '制作电影级汽车宣传片'.repeat(200);
 const videoCallId = 'call-video-generate';
 apply(base({
@@ -185,6 +203,39 @@ const failedVideo = actions.find((entry) => entry.toolName === 'video_generate')
 assert.equal(failedVideo?.translationKey, 'runtimeProgress.toolFailed');
 assert.equal(failedVideo?.status, 'error');
 assert.equal((runs[runId]?.progressEntries ?? []).some((entry) => /HTTP 503/u.test(entry.text)), true);
+
+const partialRunId = 'run-partial-video';
+let partialRuns: Record<string, ChatRuntimeRunState> = {};
+function applyPartial(event: ChatRuntimeEvent): void {
+  partialRuns = applyRuntimeEventToRuns(partialRuns, event);
+  for (const progressEvent of buildRuntimeProgressEvents(partialRuns[partialRunId], event)) {
+    partialRuns = applyRuntimeEventToRuns(partialRuns, progressEvent);
+  }
+}
+applyPartial({
+  type: 'tool.started', runId: partialRunId, sessionKey, ts: 1,
+  toolCallId: 'partial-video', name: 'tool_call',
+  args: { id: 'video_generate', args: { durationSeconds: 60, resolution: '1080P', audio: true } },
+});
+applyPartial({
+  type: 'tool.completed', runId: partialRunId, sessionKey, ts: 2,
+  toolCallId: 'partial-video', name: 'tool_call',
+  result: { tool: { name: 'video_generate', label: 'Video Generation' }, result: { details: { async: true, status: 'started', taskId: 'partial-video-task' } } },
+});
+applyPartial({
+  type: 'task.updated', runId: partialRunId, sessionKey, ts: 3,
+  task: {
+    taskId: 'partial-video-task', title: '生成一分钟视频', status: 'completed',
+    sourceStatus: 'succeeded', terminalOutcome: 'blocked',
+    detail: 'Generated intermediate video; requested 60s, actual 12s; audio unsupported',
+    updatedAt: 3, endedAt: 3,
+  },
+});
+const partialAction = partialRuns[partialRunId]?.progressEntries?.find((entry) => entry.kind === 'action');
+assert.equal(partialAction?.translationKey, 'runtimeProgress.toolPartial');
+assert.equal(partialAction?.status, 'blocked');
+assert.equal(partialAction?.command, '');
+assert.equal((partialRuns[partialRunId]?.progressEntries ?? []).some((entry) => /actual 12s/u.test(entry.text)), true);
 
 function applyWithDerivedProgress(
   current: Record<string, ChatRuntimeRunState>,

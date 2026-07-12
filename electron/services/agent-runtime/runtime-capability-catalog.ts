@@ -18,6 +18,8 @@ export type RuntimeCapabilityEntry = {
   requiresApproval: boolean;
   description?: string;
   reason?: string;
+  inputSchema?: Record<string, unknown>;
+  outputDescription?: string;
   source: 'openclaw' | 'uclaw-host';
 };
 
@@ -163,6 +165,8 @@ function hostCapability(id: string, label: string, availability: RuntimeCapabili
   requiresApproval?: boolean;
   description?: string;
   reason?: string;
+  inputSchema?: Record<string, unknown>;
+  outputDescription?: string;
 }): RuntimeCapabilityEntry {
   return {
     id,
@@ -173,6 +177,8 @@ function hostCapability(id: string, label: string, availability: RuntimeCapabili
     requiresApproval: options.requiresApproval === true,
     description: options.description,
     reason: options.reason,
+    inputSchema: options.inputSchema,
+    outputDescription: options.outputDescription,
     source: 'uclaw-host',
   };
 }
@@ -273,6 +279,8 @@ export async function buildRuntimeCapabilityCatalog(params: {
         requiresApproval: capability.requiresApproval,
         description: capability.description,
         reason: capability.reason,
+        inputSchema: capability.inputSchema,
+        outputDescription: capability.outputDescription,
       },
     )),
     ...(hostTasks.error ? [hostCapability(

@@ -9,6 +9,21 @@ const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_SIZE = '1024x1024';
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MIME_TYPE = 'image/png';
+const OUTPUT_MIME_TYPES = {
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+const SUPPORTED_SIZES = [
+  '1024x1024',
+  '1536x1024',
+  '1024x1536',
+  '2048x2048',
+  '2048x1152',
+  '3840x2160',
+  '2160x3840',
+];
+const SUPPORTED_ASPECT_RATIOS = ['1:1', '3:2', '2:3', '16:9', '9:16'];
 const MAX_INPUT_IMAGES = 5;
 const MAX_UPSTREAM_DIAGNOSTIC_CHARS = 1000;
 const imageFetchDispatcher = new Agent({
@@ -149,6 +164,19 @@ function sniffSupportedImageMimeType(bytes) {
   return '';
 }
 
+function resolveActualImageMimeType(bytes, declaredMimeType, fallbackMimeType = DEFAULT_MIME_TYPE) {
+  const sniffedMimeType = sniffSupportedImageMimeType(bytes);
+  if (sniffedMimeType) return sniffedMimeType;
+  const normalizedDeclaredMimeType = normalizeMimeType(declaredMimeType);
+  if (SUPPORTED_EDIT_IMAGE_MIME_TYPES.has(normalizedDeclaredMimeType)) {
+    return normalizedDeclaredMimeType;
+  }
+  const normalizedFallbackMimeType = normalizeMimeType(fallbackMimeType);
+  return SUPPORTED_EDIT_IMAGE_MIME_TYPES.has(normalizedFallbackMimeType)
+    ? normalizedFallbackMimeType
+    : DEFAULT_MIME_TYPE;
+}
+
 function supportedMimeTypeFromFileName(fileName) {
   const normalized = String(fileName || '').toLowerCase();
   if (/\.(jpe?g|jfif)$/u.test(normalized)) return 'image/jpeg';
@@ -197,9 +225,10 @@ function resolveEditInputImages(inputImages) {
 function parseDataUrlImage(dataUrl) {
   const match = String(dataUrl || '').match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/iu);
   if (!match) return null;
-  const mimeType = normalizeMimeType(match[1]) || DEFAULT_MIME_TYPE;
+  const buffer = Buffer.from(match[2], 'base64');
+  const mimeType = resolveActualImageMimeType(buffer, match[1]);
   return {
-    buffer: Buffer.from(match[2], 'base64'),
+    buffer,
     mimeType,
   };
 }
@@ -238,8 +267,8 @@ async function fetchImageUrl(url, context = {}) {
     if (!response.ok) {
       throw new Error(`UClaw OpenAI image URL fetch failed: HTTP ${response.status}`);
     }
-    const contentType = normalizeMimeType(response.headers.get('content-type')) || DEFAULT_MIME_TYPE;
     const buffer = Buffer.from(await response.arrayBuffer());
+    const contentType = resolveActualImageMimeType(buffer, response.headers.get('content-type'));
     logImageTiming('image_url_fetch_done', {
       requestId: context.requestId,
       index: context.index,
@@ -270,12 +299,15 @@ async function parseImagesResponse(payload, context = {}) {
     const itemStartedAt = nowMs();
     const base64 = typeof entry?.b64_json === 'string' ? entry.b64_json.trim() : '';
     const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
-    const fetched = base64
+    const decodedBuffer = base64 ? Buffer.from(base64, 'base64') : null;
+    const fetched = decodedBuffer
       ? {
-        buffer: Buffer.from(base64, 'base64'),
-        mimeType: typeof entry?.mime_type === 'string' && entry.mime_type.trim()
-          ? entry.mime_type.trim()
-          : DEFAULT_MIME_TYPE,
+        buffer: decodedBuffer,
+        mimeType: resolveActualImageMimeType(
+          decodedBuffer,
+          entry?.mime_type,
+          context.outputMimeType,
+        ),
       }
       : await fetchImageUrl(url, { requestId: context.requestId, index, signal: context.signal });
     if (!fetched) return null;
@@ -345,13 +377,86 @@ async function readJsonResponse(response, failureLabel, context = {}) {
   return payload;
 }
 
+function resolveOpenAIImageOptions(req) {
+  const openai = req.providerOptions?.openai ?? {};
+  const outputFormat = req.outputFormat ?? req.output_format ?? openai.outputFormat ?? openai.output_format;
+  const background = openai.background ?? req.background;
+  const requestedCompression = openai.outputCompression
+    ?? openai.output_compression
+    ?? req.outputCompression
+    ?? req.output_compression;
+  const outputCompression = outputFormat === 'jpeg' || outputFormat === 'webp'
+    ? requestedCompression
+    : undefined;
+  return {
+    outputFormat,
+    outputMimeType: OUTPUT_MIME_TYPES[outputFormat] || DEFAULT_MIME_TYPE,
+    background,
+    outputCompression,
+    moderation: openai.moderation,
+    user: openai.user,
+  };
+}
+
+function openAIImageOptionEntries(req) {
+  const options = resolveOpenAIImageOptions(req);
+  return {
+    ...(req.quality ? { quality: req.quality } : {}),
+    ...(options.outputFormat !== undefined ? { output_format: options.outputFormat } : {}),
+    ...(options.background !== undefined ? { background: options.background } : {}),
+    ...(options.moderation !== undefined ? { moderation: options.moderation } : {}),
+    ...(options.outputCompression !== undefined ? { output_compression: options.outputCompression } : {}),
+    ...(options.user !== undefined ? { user: options.user } : {}),
+  };
+}
+
+function parseDimensions(value) {
+  const match = String(value || '').trim().match(/^(\d+)x(\d+)$/u);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height, area: width * height, ratio: width / height };
+}
+
+function parseAspectRatio(value) {
+  const match = String(value || '').trim().match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/u);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return width / height;
+}
+
+function resolveRequestedSize(req) {
+  const requestedSize = req.size ?? DEFAULT_SIZE;
+  const requestedDimensions = parseDimensions(requestedSize);
+  const requestedRatio = parseAspectRatio(req.aspectRatio);
+  if (!requestedRatio) return requestedSize;
+  if (requestedDimensions && Math.abs(Math.log(requestedDimensions.ratio / requestedRatio)) < 0.01) {
+    return requestedSize;
+  }
+
+  const referenceArea = requestedDimensions?.area ?? parseDimensions(DEFAULT_SIZE).area;
+  return SUPPORTED_SIZES
+    .map((size) => ({ size, dimensions: parseDimensions(size) }))
+    .filter(({ dimensions }) => dimensions)
+    .sort((left, right) => {
+      const leftRatioDistance = Math.abs(Math.log(left.dimensions.ratio / requestedRatio));
+      const rightRatioDistance = Math.abs(Math.log(right.dimensions.ratio / requestedRatio));
+      if (leftRatioDistance !== rightRatioDistance) return leftRatioDistance - rightRatioDistance;
+      return Math.abs(Math.log(left.dimensions.area / referenceArea))
+        - Math.abs(Math.log(right.dimensions.area / referenceArea));
+    })[0]?.size ?? requestedSize;
+}
+
 function buildGenerateBody(req, model, count) {
   return {
     model,
     prompt: req.prompt,
     n: count,
-    size: req.size ?? DEFAULT_SIZE,
-    ...(req.quality ? { quality: req.quality } : {}),
+    size: resolveRequestedSize(req),
+    ...openAIImageOptionEntries(req),
   };
 }
 
@@ -388,10 +493,10 @@ function buildEditMultipart(req, editImages, model, count) {
     multipartTextPart(boundary, 'model', model),
     multipartTextPart(boundary, 'prompt', req.prompt),
     multipartTextPart(boundary, 'n', String(count)),
-    multipartTextPart(boundary, 'size', req.size ?? DEFAULT_SIZE),
+    multipartTextPart(boundary, 'size', resolveRequestedSize(req)),
   ];
-  if (req.quality) {
-    parts.push(multipartTextPart(boundary, 'quality', req.quality));
+  for (const [name, value] of Object.entries(openAIImageOptionEntries(req))) {
+    parts.push(multipartTextPart(boundary, name, value));
   }
   editImages.forEach((image, index) => {
     const fieldName = editImages.length > 1 ? 'image[]' : 'image';
@@ -422,7 +527,7 @@ function buildProvider() {
       generate: {
         maxCount: 4,
         supportsSize: true,
-        supportsAspectRatio: false,
+        supportsAspectRatio: true,
         supportsResolution: false,
       },
       edit: {
@@ -430,24 +535,17 @@ function buildProvider() {
         maxCount: 4,
         maxInputImages: MAX_INPUT_IMAGES,
         supportsSize: true,
-        supportsAspectRatio: false,
+        supportsAspectRatio: true,
         supportsResolution: false,
       },
       geometry: {
-        sizes: [
-          '1024x1024',
-          '1536x1024',
-          '1024x1536',
-          '2048x2048',
-          '2048x1152',
-          '3840x2160',
-          '2160x3840',
-        ],
+        sizes: [...SUPPORTED_SIZES],
+        aspectRatios: [...SUPPORTED_ASPECT_RATIOS],
       },
       output: {
         qualities: ['low', 'medium', 'high'],
-        formats: [],
-        backgrounds: [],
+        formats: ['png', 'jpeg', 'webp'],
+        backgrounds: ['transparent', 'opaque', 'auto'],
       },
     },
     isConfigured: ({ cfg }) => Boolean(String(cfg?.models?.providers?.[PROVIDER_ID]?.apiKey || '').trim()),
@@ -465,6 +563,7 @@ function buildProvider() {
       const model = String(req.model || DEFAULT_MODEL).split('/').pop() || DEFAULT_MODEL;
       const count = resolveCount(req);
       const baseUrl = normalizeRelayBaseUrl(providerConfig.baseUrl, DEFAULT_BASE_URL);
+      const outputOptions = resolveOpenAIImageOptions(req);
       const editMultipart = mode === 'edit' ? buildEditMultipart(req, editImages, model, count) : null;
       const upstreamUrl = appendImagesPath(baseUrl, mode);
       const upstreamPath = new URL(upstreamUrl).pathname;
@@ -484,8 +583,11 @@ function buildProvider() {
           model,
           path: upstreamPath,
           count,
-          size: req.size ?? DEFAULT_SIZE,
+          size: resolveRequestedSize(req),
           quality: req.quality || null,
+          outputFormat: outputOptions.outputFormat || null,
+          background: outputOptions.background || null,
+          outputCompression: outputOptions.outputCompression ?? null,
           requestBodyBytes: Buffer.byteLength(requestBody),
         });
         const requestStartedAt = nowMs();
@@ -520,7 +622,11 @@ function buildProvider() {
           durationMs: durationSince(parseStartedAt),
           responseItems: Array.isArray(payload?.data) ? payload.data.length : 0,
         });
-        const images = await parseImagesResponse(payload, { requestId, signal: controller.signal });
+        const images = await parseImagesResponse(payload, {
+          requestId,
+          signal: controller.signal,
+          outputMimeType: outputOptions.outputMimeType,
+        });
         logImageTiming('request_done', {
           requestId,
           mode,

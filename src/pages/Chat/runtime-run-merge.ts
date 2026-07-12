@@ -104,6 +104,7 @@ function synchronizeProgressWithTasks(
       : task.status === 'error'
         ? 'error'
         : task.status === 'partial' || task.status === 'waiting_approval'
+          || terminalOutcome === 'partial' || terminalOutcome === 'blocked'
           ? 'blocked'
           : task.status === 'completed'
             ? 'completed'
@@ -115,7 +116,7 @@ function synchronizeProgressWithTasks(
         ? `已停止：${label}`
         : task.status === 'waiting_approval'
           ? `等待批准：${label}`
-          : task.status === 'partial'
+          : task.status === 'partial' || terminalOutcome === 'partial' || terminalOutcome === 'blocked'
             ? `部分完成：${label}`
           : status === 'completed'
             ? `已完成：${label}`
@@ -130,13 +131,20 @@ function synchronizeProgressWithTasks(
           ? 'runtimeProgress.toolAborted'
           : task.status === 'waiting_approval'
             ? 'runtimeProgress.toolWaitingApproval'
-            : task.status === 'partial'
+          : task.status === 'partial' || terminalOutcome === 'partial' || terminalOutcome === 'blocked'
               ? 'runtimeProgress.toolPartial'
             : status === 'completed'
               ? 'runtimeProgress.toolCompleted'
               : action.translationKey,
     };
-    if (task.detail && status !== 'completed' && !nextEntries.some((entry) => entry.id === `${action.id}:task-status`)) {
+    if (status === 'completed' || status === 'blocked' || status === 'error') {
+      // The command on the initial async entry is requested input, not
+      // authoritative output. Remove it once the detached task terminates;
+      // the terminal detail carries actual provider facts instead.
+      nextEntries[actionIndex] = { ...nextEntries[actionIndex]!, command: '' };
+    }
+    const existingDetailIndex = nextEntries.findIndex((entry) => entry.id === `${action.id}:task-status`);
+    if (task.detail && existingDetailIndex < 0) {
       nextEntries.push({
         id: `${action.id}:task-status`,
         kind: 'status',
@@ -146,6 +154,12 @@ function synchronizeProgressWithTasks(
         taskId: task.taskId,
         source: 'derived',
       });
+    } else if (task.detail && existingDetailIndex >= 0) {
+      nextEntries[existingDetailIndex] = {
+        ...nextEntries[existingDetailIndex]!,
+        text: sanitizeRuntimeDisplayText(task.detail),
+        status: status === 'aborted' ? 'aborted' : status,
+      };
     }
   }
   return nextEntries;
@@ -159,15 +173,30 @@ function runtimeTaskAliases(run: ChatRuntimeRunState): Set<string> {
     const leaf = value.split(':').pop();
     if (leaf) aliases.add(leaf);
   };
+  const addDistinctChildSession = (value: string | undefined): void => {
+    if (!value) return;
+    const sessionKey = run.sessionKey?.trim();
+    const childSessionKey = value.trim();
+    if (!childSessionKey) return;
+    const sessionLeaf = sessionKey?.split(':').pop();
+    const childLeaf = childSessionKey.split(':').pop();
+    if (
+      sessionKey
+      && (childSessionKey === sessionKey || (sessionLeaf && childLeaf === sessionLeaf))
+    ) {
+      return;
+    }
+    add(childSessionKey);
+  };
   for (const entry of Object.values(run.asyncTaskLedger ?? {})) {
     add(entry.taskId);
     add(entry.runId);
-    add(entry.childSessionKey);
+    addDistinctChildSession(entry.childSessionKey);
     add(entry.childSessionId);
   }
   for (const task of run.tasks ?? []) {
     add(task.taskId);
-    add(task.childSessionKey);
+    addDistinctChildSession(task.childSessionKey);
   }
   return aliases;
 }

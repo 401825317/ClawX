@@ -248,7 +248,9 @@ export function projectTaskLedgerRecord(
     kind: text(task.kind ?? task.taskKind ?? task.task_kind, 160),
     runtime: text(task.runtime, 120),
     title: taskTitle(task),
-    detail: text(task.progressSummary ?? task.progress_summary ?? task.terminalSummary ?? task.terminal_summary ?? task.error),
+    detail: text(status === 'partial' || status === 'error' || status === 'completed'
+      ? task.terminalSummary ?? task.terminal_summary ?? task.error ?? task.progressSummary ?? task.progress_summary
+      : task.progressSummary ?? task.progress_summary ?? task.terminalSummary ?? task.terminal_summary ?? task.error),
     agentId: text(task.agentId ?? task.agent_id, 160),
     sessionKey,
     childSessionKey: taskChildSessionKey(task),

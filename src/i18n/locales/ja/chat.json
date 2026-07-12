@@ -50,6 +50,8 @@
         "types": { "image": "画像", "video": "動画", "presentation": "PPT", "spreadsheet": "Excel", "miniProgram": "ミニアプリ", "copywriting": "文章", "file": "ファイル" }
     },
     "runtimeProgress": {
+        "title": "共同作業の進捗",
+        "commandDetails": "コマンドの詳細を表示",
         "executing": "実行中",
         "blocked": "対応が必要です",
         "aborted": "停止済み",
@@ -82,6 +84,12 @@
             "create_designed_pptx_file": "PPT 作成",
             "repair_designed_pptx_file": "PPT 修復"
         }
+    },
+    "reasoning": {
+        "title": "思考過程",
+        "live": "思考中",
+        "show": "思考過程を表示",
+        "hide": "思考過程を隠す"
     },
     "desktopApproval": {
         "title": "デスクトップ操作を許可",

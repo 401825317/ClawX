@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
+import { pathToFileURL } from 'node:url';
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import type { Plugin } from 'vite';
 
@@ -28,6 +29,9 @@ function getExtensionPackages(): Set<string> {
 }
 
 const extensionPackages = getExtensionPackages();
+const uclawDevElectronPackage = pathToFileURL(
+  resolve(__dirname, 'scripts/uclaw-dev-electron-path.cjs'),
+).href;
 const mainProcessBundledPackages = new Set([
   'core-util-is',
   'immediate',
@@ -102,7 +106,11 @@ export default defineConfig(({ mode }) => {
           // Main process entry file
           entry: 'electron/main/index.ts',
           onstart(options) {
-            options.startup();
+            options.startup(
+              undefined,
+              undefined,
+              process.platform === 'darwin' ? uclawDevElectronPackage : undefined,
+            );
           },
           vite: {
             plugins: [copyGatewayStaticScripts()],

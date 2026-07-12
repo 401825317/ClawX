@@ -24,7 +24,9 @@ import { ChatMessage } from './ChatMessage';
 import { ChatInput, type ImageEditReference } from './ChatInput';
 import { ExecutionGraphCard } from './ExecutionGraphCard';
 import { RunProgressCard, shouldUseRunProgressTranscript } from './RunProgressCard';
+import { ReasoningPanel } from './ReasoningPanel';
 import { ChatToolbar } from './ChatToolbar';
+import { projectReasoningPanels } from './reasoning-projection';
 import { extractImages, extractText, extractThinking, extractToolUse, isInternalAssistantReplyText, isInternalProcessNarration, normalizeMessageRole, stripProcessMessagePrefix } from './message-utils';
 import {
   deriveRuntimeTaskSteps,
@@ -395,7 +397,7 @@ function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile
 function buildRunTranscriptSummary(card: UserRunCard, nowMs: number): string {
   const elapsed = formatRunElapsedDuration(getRunCardElapsedMs(card, nowMs));
   const status = getRunCompactStatus(card);
-  if (status === 'running') return elapsed ? `已处理 ${elapsed}` : '处理中';
+  if (status === 'running') return elapsed ? `处理中 · ${elapsed}` : '处理中';
   if (status === 'completed') return elapsed ? `已处理 ${elapsed}` : '处理完成';
   if (status === 'blocked') return elapsed ? `任务需要补充处理 · ${elapsed}` : '任务需要补充处理';
   if (status === 'failed' || status === 'error') return elapsed ? `任务执行失败 · ${elapsed}` : '任务执行失败';
@@ -712,9 +714,11 @@ export function Chat() {
     () => (agentsList ?? []).find((a) => a.id === currentAgentId) ?? null,
     [agentsList, currentAgentId],
   );
-  const currentWorkspace = sessions.find((session) => session.key === currentSessionKey)?.cwd
+  const currentSession = sessions.find((session) => session.key === currentSessionKey);
+  const currentWorkspace = currentSession?.cwd
     || currentAgent?.workspace
     || '';
+  const currentReasoningLevel = currentSession?.reasoningLevel ?? 'on';
   const currentAgentAvatarSrc = currentAgent?.profile?.avatarId
     ? getAgentAvatar(currentAgent.profile.avatarId).src
     : DEFAULT_AGENT_AVATAR_SRC;
@@ -1031,7 +1035,9 @@ export function Chat() {
     );
     const hasFinalReply = segmentHasFinalReply(postTriggerMessages);
     const pendingImageGeneration = isLatestRunSegment
-      && (pendingImageGenerationLocal || isImageGenerationPending(postTriggerMessages, streamingTools));
+      && (pendingImageGenerationLocal || isImageGenerationPending(postTriggerMessages, streamingTools, {
+        runtimeRun: segmentRuntimeRun,
+      }));
     const imageGenerationSettledInHistory = isLatestRunSegment
       && hasDeliveredImageGenerationResult(postTriggerMessages)
       && !pendingImageGeneration;
@@ -1334,6 +1340,38 @@ export function Chat() {
       userRunCardsByTriggerIndex,
     };
   }, [messages, subagentCompletionInfos, currentSessionKey, streamingMessage, streamingTools, pendingFinal, sending, pendingImageGenerationLocal, hasAnyStreamContent, hasStreamText, hasStreamThinking, hasStreamImages, hasStreamTools, hasStreamToolStatus, streamText, streamTools.length, hasRunningStreamToolStatus, hasHistoryCompletionBlockingStream, childTranscripts, currentAgentId, agents, sessionLabels, graphStepCache, runError, isRunTrigger, nextUserMessageIndexes, activeRunId, runtimeRuns, lastUserMessageAt]);
+
+  const reasoningPanelsByTriggerIndex = useMemo(() => {
+    const panels = new Map<number, ReturnType<typeof projectReasoningPanels>[number]>();
+    messages.forEach((message, triggerIndex) => {
+      if (!isRunTrigger(message, triggerIndex)) return;
+      const nextUserIndex = nextUserMessageIndexes[triggerIndex];
+      const segmentEnd = nextUserIndex === -1 ? messages.length - 1 : nextUserIndex - 1;
+      const runCard = userRunCardsByTriggerIndex.get(triggerIndex)?.[0];
+      const activeTurn = runCard?.active ?? (nextUserIndex === -1 && sending);
+      const panel = projectReasoningPanels({
+        reasoningLevel: currentReasoningLevel,
+        historyMessages: messages.slice(triggerIndex + 1, segmentEnd + 1),
+        historyStartIndex: triggerIndex + 1,
+        runtimeRun: runCard?.runtimeRun ?? (activeTurn ? currentRuntimeRun : null),
+        streamMessage: activeTurn ? effectiveStreamMsg : null,
+        activeTurn,
+        turnId: message.id || `${currentSessionKey}:trigger-${triggerIndex}`,
+      })[0];
+      if (panel) panels.set(triggerIndex, panel);
+    });
+    return panels;
+  }, [
+    currentReasoningLevel,
+    currentRuntimeRun,
+    currentSessionKey,
+    effectiveStreamMsg,
+    isRunTrigger,
+    messages,
+    nextUserMessageIndexes,
+    sending,
+    userRunCardsByTriggerIndex,
+  ]);
   let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
   let pendingVideoGeneration = false;
@@ -1352,6 +1390,7 @@ export function Chat() {
       || isImageGenerationPending(
         postTrigger,
         nextUserIndex === -1 ? streamingTools : [],
+        { runtimeRun: currentRuntimeRun },
       );
     pendingVideoGeneration = nextUserIndex === -1 && pendingVideoGenerationLocal;
     imageGenerationSettledInHistory = nextUserIndex === -1
@@ -1720,7 +1759,8 @@ export function Chat() {
                       return null;
                     }
                     const runCardsForMessage = userRunCardsByTriggerIndex.get(idx) ?? [];
-                    const hasVisibleRunSurface = runCardsForMessage.some((card) => {
+                    const reasoningPanel = reasoningPanelsByTriggerIndex.get(idx);
+                    const hasVisibleRunSurface = Boolean(reasoningPanel) || runCardsForMessage.some((card) => {
                       const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
                       const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
                       const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
@@ -1752,6 +1792,12 @@ export function Chat() {
                         onOpenFile={handleOpenAttachedFile}
                         onUseImageAsReference={handleUseImageAsReference}
                       />
+                      {reasoningPanel && (
+                        <ReasoningPanel
+                          text={reasoningPanel.text}
+                          live={reasoningPanel.displayMode === 'live'}
+                        />
+                      )}
                       {runCardsForMessage.map((card) => {
                           const triggerMsg = messages[card.triggerIndex];
                           const runKey = triggerMsg?.id

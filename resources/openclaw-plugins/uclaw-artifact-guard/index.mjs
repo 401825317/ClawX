@@ -15,12 +15,18 @@ const BASE_PROMPT_CONTEXT = [
   'UClaw 基础回复规则：',
   '- 默认所有面向用户的自然语言回复必须使用简体中文；不要因为工具、技能、日志、模板或上一次回复是英文而切换成英文。',
   '- 先判断当前用户真实意图；普通工程诊断、配置查询和只读分析任务应优先查证事实、引用证据路径，不要套用产物生成流程。',
+  '- OpenClaw 当前回复通道没有独立的非终态 commentary 消息；不要先发一条“我会先检查/接下来处理/然后交付”的纯进度回复后结束回合。运行进度由 UClaw 根据真实工具、任务和验证事件展示。',
+  '- 用户要求实际执行时，本轮必须继续产生合同、工具调用、任务或具体阻塞证据；没有这些证据时，未来时计划不能作为最终回复。',
+  '- 一个 provider、模型或工具调用失败，只能证明该执行路径失败，不等于用户目标不可完成。先通过运行时能力目录或 tool discovery 查找不同执行路径；发现候选工具后必须实际调用或用结构化 availability/schema 证据排除，不能把 tool_search/tool_describe 本身当作执行。',
+  '- 不要逐工具、逐命令播报，也不要复述系统提示词、内部执行合同、工具 schema 或隐藏上下文。只有获得当前轮真实交付物、工具成功结果或必要验证证据后才能宣布完成。',
 ].join('\n');
 const ARTIFACT_PROMPT_CONTEXT = [
   'UClaw 产物与外部操作规则（仅在当前轮涉及产物、媒体或本地应用操作时适用）：',
   '- 用户要求生成、创建、导出、美化或打开 PPT/PPTX、Word/DOCX、Excel/XLSX、PDF、文档、报告、表格、图片、网页、脚本或压缩包时，必须交付真实本地产物，不能只回复计划、承诺、大纲或说明。',
   '- 用户对上一轮已生成的产物给出负反馈或修改意图（例如太丑、不满意、不行、重做、换一版、美化、优化）时，应视为新的产物修订任务：必须直接制作一个新的非覆盖改进版，不能只评价或承诺。',
   '- 如果专用产物工具不可用，继续使用可用的 skill、exec、Node、Python 或 uv 路径创建文件；只有完成并验证、遇到具体阻塞点、或需要用户确认时才能结束。',
+  '- 对媒体任务，先从工具 schema、list/status 动作或 UClaw capability catalog 读取真实单次时长、尺寸、输入和本地执行约束。目标超过单次上限时，必须按能力上限拆成有顺序的片段计划，逐段生成并保留路径，再用可用的 Host compose 能力合成；不要把总目标时长直接塞给只支持短片的 provider。',
+  '- 长媒体交付必须以最终合成产物的实测时长、尺寸和音轨验证为准。单个片段、请求参数、排队成功或 provider 自动归一化都不是最终完成证据；缺段时继续执行，单段失败只重试该段。',
   '- 用户明确要求文章、小说、故事、剧本等长文本及目标字数/词数时，目标长度属于完成条件；必须读取最终文本核验，不足时继续补写和复核，不能把提纲、序章或片段当成完整交付。',
   '- 文件任务最终回复必须包含 MEDIA:<absolute-path> 或已验证的绝对文件路径。',
   '- 旧的 uclaw-computer-use 插件不属于可靠执行面；不要把启用它当作恢复路径，也不要假装存在 computer_* 桌面工具。',
@@ -33,6 +39,13 @@ const PROMPT_CONTEXT = `${BASE_PROMPT_CONTEXT}\n\n${ARTIFACT_PROMPT_CONTEXT}`;
 const TURN_PREFERENCES_TIMEOUT_MS = 1_200;
 const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate', 'create_blender_scene', 'repair_blender_scene']);
 const NATIVE_MEDIA_GENERATION_TOOLS = new Set(['image_generate', 'video_generate']);
+const DISCOVERY_TOOL_NAMES = new Set([
+  'tool_search',
+  'tool_describe',
+  'uclaw_get_runtime_capabilities',
+  'uclaw_get_task_bridge_capabilities',
+]);
+const DISCOVERY_MEDIA_ACTIONS = new Set(['list', 'describe', 'models', 'model', 'info', 'help']);
 const NATIVE_MEDIA_PROMPT_MAX_CHARACTERS = 4_096;
 const HIDDEN_PROGRESS_TOOLS = new Set([
   'tool_describe',
@@ -59,6 +72,12 @@ const VIDEO_INPUT_EXT_RE = /\.(?:mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)$/iu;
 const RUN_TOOL_EVIDENCE_TTL_MS = 30 * 60 * 1000;
 const RUN_TOOL_EVIDENCE_MAX_ENTRIES = 256;
 const toolEvidenceByRunId = new Map();
+// A detached task finishes in a different OpenClaw run from the tool call
+// that declared the contract. Keep the contract bound to the async task id,
+// not to the next arbitrary user turn, so completion recovery can still use
+// the original acceptance criteria without leaking stale requirements.
+const pendingContractsBySession = new Map();
+const pendingContractsByTaskId = new Map();
 const PROGRESS_WRAPPER_TTL_MS = 30 * 60 * 1000;
 const PROGRESS_WRAPPER_MAX_ENTRIES = 512;
 const progressWrappersByParentToolCallId = new Map();
@@ -93,8 +112,10 @@ const GATEWAY_RESTART_CAPTURED_REPLY_NOTE_RE = /^\s*Note:\s+The interrupted fina
 const QUEUED_USER_MESSAGE_MARKER_RE = /^\s*\[Queued user message that arrived while the previous turn was still active\]\s*\n?/iu;
 const RUNTIME_EVENT_CONTINUATION_RE = /^Continue the OpenClaw runtime event\.?\s*$/iu;
 const PROMISE_ONLY_RE = /(?:(?:^|[。！？!?；;\n\r]\s*)(?:好(?:的)?[，,。\\s]*)?(?:我(?:会|将|来|准备|可以|马上|先|接下来|现在|继续|直接|随后|稍后)|(?:接下来|下一步|随后|稍后|现在|马上|继续).{0,12}(?:我)?(?:会|将|来|准备|可以|马上|先|继续|直接)?|I(?:'ll| will| can| am going to)|Next(?:,| I)|I can).{0,180}(?:重做|重新(?:做|制作|生成|校验|验证|测试|检查)|生成|创建|制作|编写|起草|输出|整理|排版|导出|处理|完成|修(?:复|掉|正|改)?|修改|调整|补(?:做|齐|上)|校验|验证|测试|检查|make|create|generate|write|produce|export|redo|remake|regenerate|improve|polish|fix|repair|validate|verify|test|continue))/iu;
+const FUTURE_EXECUTION_COMMITMENT_RE = /(?:我(?:会|将|马上|现在|先|接下来)|(?:先|首先).{0,180}(?:再|然后|随后|接着)|(?:完成后|最终会|届时会)|I(?:'ll| will| am going to)|(?:first|next).{0,180}(?:then|after))/isu;
 const ARTIFACT_REPAIR_PROMISE_CUE_RE = /(?:发现.{0,80}(?:问题|不对|不符合|未通过|失败|bug|错误)|实际.{0,40}(?:生成|只有|多了|少了|不符合)|(?:多了|少了|额外).{0,30}(?:页|项|个|张|条)|首屏可见|验证未通过|校验未通过|测试未通过|不符合(?:交互|预期|要求)|空页|页数不(?:对|符)|公式(?:缺失|错误)|交互(?:异常|错误)|bug|错误)/iu;
 const UNFINISHED_ARTIFACT_ADMISSION_RE = /(?:不能算(?:完成|交付)|尚未(?:完成|交付|达到|满足)|还(?:没|没有)(?:完成|交付|达到|满足)|未(?:完成|交付|达到|满足|通过)|不是(?:完整|最终|完成).{0,16}(?:成片|版本|产物|交付)|没有(?:达到|满足).{0,24}(?:要求|目标|条件)|只(?:有|完成|生成).{0,16}(?:秒|页|张|个|部分)|仍(?:需|需要)|需要(?:继续|重新|补齐|修复|修改|重做)|not (?:complete|finished|delivered)|still need(?:s)?|does not (?:meet|satisfy))/iu;
+const MEDIA_ACCEPTANCE_UNMET_RE = /status:\s*intermediate artifact; acceptance requirements remain unmet|original acceptance requirements are not satisfied/iu;
 const ARTIFACT_CONTINUATION_NEGATION_RE = /(?:(?:不要|别|无需|不需要|先别).{0,24}(?:执行|继续|修改|重做|重新|生成|制作|剪辑|合成)|只(?:解释|说明|分析|给方案|说方案|讨论)|do not.{0,24}(?:execute|continue|modify|regenerate|create)|explain only)/iu;
 const CONTINUATION_RE = /(?:我(?:会|将|准备|打算|可以|马上|先|来)|接下来|下一步|随后|稍后|now I|I(?:'ll| will| can| am going to)|next)/iu;
 const ARTIFACT_EXT = 'pptx?|docx?|xlsx?|pdf|csv|tsv|md|html?|json|zip|png|jpe?g|webp|svg|txt|py|js|ts|tsx|jsx|css|mp4|mov|webm|blend|glb|gltf|obj|fbx';
@@ -1854,9 +1875,22 @@ function buildToolArtifactEvidence(event) {
     text,
     {
       allowRawPaths: !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
-        && (isProducerToolName(toolName) || hasGeneratedArtifactCue(text)),
+        && (
+          isProducerToolName(toolName)
+          || hasGeneratedArtifactCue(text)
+          || isSuccessfulProcessCompletion(event, toolName)
+        ),
     },
   );
+}
+
+function isSuccessfulProcessCompletion(event, toolName = normalizeToolName(event)) {
+  if (String(toolName ?? '').trim().toLowerCase() !== 'process') return false;
+  const result = delegatedToolResult(event?.result) ?? event?.result;
+  if (!isRecord(result) || resultIndicatesError(result)) return false;
+  const details = isRecord(result.details) ? result.details : {};
+  const status = readToolStatus(result)?.toLowerCase();
+  return details.exitCode === 0 || status === 'completed' || status === 'ok' || status === 'success';
 }
 
 function readToolStatus(result) {
@@ -1906,6 +1940,12 @@ function pruneToolEvidence(now = Date.now()) {
   for (const [runId, evidence] of toolEvidenceByRunId.entries()) {
     if (now - evidence.updatedAt > RUN_TOOL_EVIDENCE_TTL_MS) toolEvidenceByRunId.delete(runId);
   }
+  for (const [sessionKey, pending] of pendingContractsBySession.entries()) {
+    if (now - pending.updatedAt > RUN_TOOL_EVIDENCE_TTL_MS) pendingContractsBySession.delete(sessionKey);
+  }
+  for (const [taskId, pending] of pendingContractsByTaskId.entries()) {
+    if (now - pending.updatedAt > RUN_TOOL_EVIDENCE_TTL_MS) pendingContractsByTaskId.delete(taskId);
+  }
   while (toolEvidenceByRunId.size > RUN_TOOL_EVIDENCE_MAX_ENTRIES) {
     const oldestRunId = toolEvidenceByRunId.keys().next().value;
     if (!oldestRunId) break;
@@ -1917,14 +1957,20 @@ function recordToolEvidence(event, ctx) {
   const runId = getRunId(event, ctx);
   const toolName = normalizeToolName(event);
   if (!runId || !toolName) return undefined;
-  if (MEDIA_SIDE_EFFECT_TOOLS.has(toolName) && isSafeMediaToolReadAction(normalizeEffectiveToolParams(event))) {
-    return undefined;
-  }
+  const effectiveParams = normalizeEffectiveToolParams(event);
+  const discovery = discoveryEvidenceForToolResult(event, toolName, effectiveParams);
+  if (
+    MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
+    && isSafeMediaToolReadAction(effectiveParams)
+    && !discovery
+  ) return undefined;
 
   const failed = isToolError(event);
   const declaredContract = toolName === TURN_CONTRACT_TOOL_NAME && !failed
     ? normalizeDeclaredTurnContract(event)
     : undefined;
+  const sessionKey = getSessionKey(event, ctx);
+  const taskIds = extractAsyncTaskIds(event);
   const artifacts = failed ? [] : buildToolArtifactEvidence(event).map((entry) => ({
     ...entry,
     artifact: {
@@ -1943,12 +1989,34 @@ function recordToolEvidence(event, ctx) {
     && !failed
     && artifacts.length === 0
     && !MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
+    && !discovery
   ) return undefined;
 
   const now = Date.now();
   pruneToolEvidence(now);
-  const current = toolEvidenceByRunId.get(runId) ?? { updatedAt: now, attempts: [] };
-  if (declaredContract) current.contract = declaredContract;
+  const inheritedContract = inheritedContractForRun(runId);
+  const current = toolEvidenceByRunId.get(runId) ?? {
+    updatedAt: now,
+    attempts: [],
+    ...(inheritedContract ? { contract: inheritedContract } : {}),
+  };
+  if (!current.contract && inheritedContract) current.contract = inheritedContract;
+  if (declaredContract) {
+    current.contract = declaredContract;
+    if (sessionKey) {
+      pendingContractsBySession.set(sessionKey, { contract: declaredContract, updatedAt: now, taskIds: [] });
+    }
+  }
+  if (!failed && taskIds.length > 0 && sessionKey) {
+    const pending = pendingContractsBySession.get(sessionKey);
+    if (pending) {
+      pending.updatedAt = now;
+      for (const taskId of taskIds) {
+        if (!pending.taskIds.includes(taskId)) pending.taskIds.push(taskId);
+        pendingContractsByTaskId.set(taskId, pending);
+      }
+    }
+  }
   const toolCallId = normalizeOptionalString(event?.toolCallId);
   const attempt = {
     runId,
@@ -1957,6 +2025,8 @@ function recordToolEvidence(event, ctx) {
     failed,
     artifacts,
     updatedAt: now,
+    ...(taskIds.length > 0 ? { taskIds } : {}),
+    ...(discovery ? { discovery } : {}),
   };
   const duplicateIndex = current.attempts.findIndex((item) => (
     toolCallId && item.toolCallId === toolCallId && item.toolName === toolName
@@ -1968,6 +2038,121 @@ function recordToolEvidence(event, ctx) {
   toolEvidenceByRunId.set(runId, current);
   pruneToolEvidence(now);
   return attempt;
+}
+
+function extractAsyncTaskIds(event) {
+  const values = [];
+  const seen = new Set();
+  const visit = (value, depth = 0) => {
+    if (depth > 8 || value == null) return;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed || !/^[{[]/u.test(trimmed)) return;
+      try {
+        visit(JSON.parse(trimmed), depth + 1);
+      } catch {
+        // Tool text is often prose; only structured JSON can carry task ids.
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (!isRecord(value)) return;
+    if (seen.has(value)) return;
+    seen.add(value);
+    for (const key of ['taskId', 'task_id', 'childSessionId', 'child_session_id']) {
+      if (typeof value[key] === 'string' && value[key].trim()) values.push(value[key].trim());
+    }
+    for (const nested of Object.values(value)) visit(nested, depth + 1);
+  };
+  visit(event?.result);
+  visit(event?.meta);
+  return [...new Set(values)];
+}
+
+function isDiscoveryToolResult(toolName, effectiveParams) {
+  if (DISCOVERY_TOOL_NAMES.has(toolName)) return true;
+  return MEDIA_SIDE_EFFECT_TOOLS.has(toolName)
+    && DISCOVERY_MEDIA_ACTIONS.has(normalizeToolAction(effectiveParams));
+}
+
+function extractDiscoveryCandidates(event) {
+  const candidates = new Set();
+  const seen = new Set();
+  const visit = (value, depth = 0, collection = '') => {
+    if (depth > 8 || value == null) return;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      if (/^[{[]/u.test(trimmed)) {
+        try {
+          visit(JSON.parse(trimmed), depth + 1, collection);
+        } catch {
+          // Non-JSON discovery text is not structured candidate evidence.
+        }
+      } else if (collection === 'models') {
+        candidates.add(trimmed);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1, collection));
+      return;
+    }
+    if (!isRecord(value) || seen.has(value)) return;
+    seen.add(value);
+
+    const availability = normalizeOptionalString(value.availability)?.toLowerCase();
+    const unavailable = availability && /^(?:unavailable|disabled|not[_ -]?implemented|missing|blocked)$/u.test(availability);
+    const identity = normalizeOptionalString(value.id)
+      ?? normalizeOptionalString(value.name)
+      ?? normalizeOptionalString(value.model);
+    const descriptor = Boolean(
+      identity
+      && !unavailable
+      && (
+        collection
+        || value.source
+        || value.sourceName
+        || value.kind
+        || value.label
+        || value.parameters
+        || value.inputSchema
+        || value.operations
+      )
+    );
+    if (descriptor) candidates.add(identity);
+
+    for (const [key, nested] of Object.entries(value)) {
+      const normalizedKey = key.toLowerCase();
+      const nextCollection = [
+        'capabilities',
+        'catalog',
+        'items',
+        'models',
+        'providers',
+        'results',
+        'tools',
+      ].includes(normalizedKey)
+        ? normalizedKey
+        : collection;
+      visit(nested, depth + 1, nextCollection);
+    }
+  };
+  visit(event?.result);
+  visit(event?.meta);
+  return [...candidates].slice(0, 64);
+}
+
+function discoveryEvidenceForToolResult(event, toolName, effectiveParams) {
+  if (!isDiscoveryToolResult(toolName, effectiveParams)) return undefined;
+  const candidates = isToolError(event) ? [] : extractDiscoveryCandidates(event);
+  return {
+    candidateCount: candidates.length,
+    candidates,
+  };
 }
 
 function normalizeDeclaredTurnContract(event) {
@@ -2002,14 +2187,43 @@ function normalizeDeclaredTurnContract(event) {
       requiresVerification: acceptance.requiresVerification === true,
       requiresApproval: acceptance.requiresApproval === true,
       requiresToolEvidence: acceptance.requiresToolEvidence === true,
+      ...(isRecord(acceptance.media) ? {
+        media: {
+          ...(typeof acceptance.media.kind === 'string' ? { kind: acceptance.media.kind } : {}),
+          ...(Number.isFinite(acceptance.media.minDurationSeconds) ? { minDurationSeconds: acceptance.media.minDurationSeconds } : {}),
+          ...(Number.isFinite(acceptance.media.width) ? { width: acceptance.media.width } : {}),
+          ...(Number.isFinite(acceptance.media.height) ? { height: acceptance.media.height } : {}),
+          ...(typeof acceptance.media.aspectRatio === 'string' ? { aspectRatio: acceptance.media.aspectRatio } : {}),
+          ...(typeof acceptance.media.requiresAudio === 'boolean' ? { requiresAudio: acceptance.media.requiresAudio } : {}),
+          ...(typeof acceptance.media.language === 'string' ? { language: acceptance.media.language } : {}),
+        },
+      } : {}),
     },
   };
+}
+
+function inheritedContractForRun(runId) {
+  const normalized = String(runId ?? '');
+  const taskIdMatch = /^(?:image_generate|video_generate|host(?:-task)?|uclaw_start_host_task):([^:]+):(?:ok|unknown|completed|blocked|error|failed|timed[_-]?out|cancelled|canceled|aborted)$/iu.exec(normalized);
+  if (!taskIdMatch) return undefined;
+  const pending = pendingContractsByTaskId.get(taskIdMatch[1]);
+  if (!pending || Date.now() - pending.updatedAt > RUN_TOOL_EVIDENCE_TTL_MS) return undefined;
+  return pending.contract;
 }
 
 function getToolEvidenceForRun(runId) {
   if (!runId) return { updatedAt: 0, attempts: [] };
   pruneToolEvidence();
-  return toolEvidenceByRunId.get(runId) ?? { updatedAt: 0, attempts: [] };
+  const current = toolEvidenceByRunId.get(runId);
+  const inheritedContract = inheritedContractForRun(runId);
+  if (current) {
+    return current.contract || !inheritedContract
+      ? current
+      : { ...current, contract: inheritedContract };
+  }
+  return inheritedContract
+    ? { updatedAt: Date.now(), attempts: [], contract: inheritedContract }
+    : { updatedAt: 0, attempts: [] };
 }
 
 function findSuccessfulToolArtifact(entry, runToolEvidence) {
@@ -2026,7 +2240,7 @@ function findSuccessfulToolArtifact(entry, runToolEvidence) {
 }
 
 function successfulMediaCompletionTool(runId) {
-  const match = /^(image_generate|video_generate):[^:]+:ok$/iu.exec(String(runId ?? ''));
+  const match = /^(image_generate|video_generate):[^:]+:(?:ok|unknown)$/iu.exec(String(runId ?? ''));
   return match?.[1]?.toLowerCase();
 }
 
@@ -2489,12 +2703,42 @@ function analyzeArtifactFinal(event, ctx) {
   const priorArtifactEvidence = priorArtifacts.length > 0 || hasArtifactEvidence(eventBeforeLatestUser, '');
   const currentRunId = getRunId(event, ctx);
   const completionArtifactKind = successfulMediaCompletionKind(currentRunId);
+  const mediaAcceptanceUnmet = Boolean(completionArtifactKind && MEDIA_ACCEPTANCE_UNMET_RE.test(activeUserText));
   const runToolEvidence = getToolEvidenceForRun(currentRunId);
   const declaredContract = runToolEvidence.contract;
   const enforceCurrentRunToolEvidence = Boolean(ctx && currentRunId);
   const legacySemanticFallback = !enforceCurrentRunToolEvidence;
   const explicitBlocker = isExplicitBlocker(finalText);
   const promiseOnly = PROMISE_ONLY_RE.test(finalText);
+  const discoveryAttempts = runToolEvidence.attempts.filter((attempt) => attempt.discovery);
+  const discoveryCandidates = [...new Set(discoveryAttempts.flatMap((attempt) => attempt.discovery?.candidates ?? []))];
+  const firstCandidateDiscoveryIndex = runToolEvidence.attempts.findIndex((attempt) => (
+    (attempt.discovery?.candidateCount ?? 0) > 0
+  ));
+  const attemptsAfterDiscovery = firstCandidateDiscoveryIndex >= 0
+    ? runToolEvidence.attempts.slice(firstCandidateDiscoveryIndex + 1)
+    : [];
+  const executionAttemptsAfterDiscovery = attemptsAfterDiscovery.filter((attempt) => (
+    attempt.toolName !== TURN_CONTRACT_TOOL_NAME
+    && !attempt.discovery
+  ));
+  const discoveryStalled = Boolean(
+    declaredContract?.toolRequirement === 'required'
+    && declaredContract.sideEffect !== 'none'
+    && discoveryCandidates.length > 0
+    && executionAttemptsAfterDiscovery.length === 0
+    && explicitBlocker
+    && !ARTIFACT_CONTINUATION_NEGATION_RE.test(activeUserText)
+  );
+  const executionUnattempted = Boolean(
+    enforceCurrentRunToolEvidence
+    && !declaredContract
+    && runToolEvidence.attempts.length === 0
+    && promiseOnly
+    && FUTURE_EXECUTION_COMMITMENT_RE.test(finalText)
+    && !explicitBlocker
+    && !ARTIFACT_CONTINUATION_NEGATION_RE.test(activeUserText),
+  );
   // A new turn may omit a fresh contract even though the assistant itself
   // explicitly admits that the previously delivered artifact is unfinished.
   // This is a delivery fail-safe based on structured transcript evidence and
@@ -2619,6 +2863,14 @@ function analyzeArtifactFinal(event, ctx) {
     && authorizationMissing
     && !explicitBlocker,
   );
+  const shouldReviseExecutionUnattempted = executionUnattempted
+    && !artifactRevisionRequest
+    && !mediaAcceptanceUnmet;
+  const shouldReviseDiscoveryStalled = discoveryStalled;
+  const shouldReviseMediaAcceptance = Boolean(
+    mediaAcceptanceUnmet
+    && !ARTIFACT_CONTINUATION_NEGATION_RE.test(activeUserText),
+  );
   const shouldReviseArtifact = Boolean(
     userText.trim()
     && artifactRequest
@@ -2648,6 +2900,9 @@ function analyzeArtifactFinal(event, ctx) {
   const shouldRevise = shouldReviseHeartbeat
     || shouldReviseEmptyFinal
     || shouldReviseAuthorization
+    || shouldReviseExecutionUnattempted
+    || shouldReviseDiscoveryStalled
+    || shouldReviseMediaAcceptance
     || shouldReviseArtifact
     || shouldReviseDesktopAction;
   return {
@@ -2665,6 +2920,7 @@ function analyzeArtifactFinal(event, ctx) {
     artifactRevisionRequest,
     artifactContinuationPromise,
     completionArtifactKind,
+    mediaAcceptanceUnmet,
     currentRunId,
     enforceCurrentRunToolEvidence,
     currentRunToolAttemptCount: runToolEvidence.attempts.length,
@@ -2698,12 +2954,21 @@ function analyzeArtifactFinal(event, ctx) {
     finalVerificationBlocked,
     explicitBlocker,
     promiseOnly,
+    discoveryAttemptCount: discoveryAttempts.length,
+    discoveryCandidateCount: discoveryCandidates.length,
+    discoveryCandidates,
+    executionAttemptCountAfterDiscovery: executionAttemptsAfterDiscovery.length,
+    discoveryStalled,
+    executionUnattempted,
     artifactRepairPromise,
     unfinishedArtifactPromise,
     unresolvedFinalVerificationBlock,
     shouldReviseHeartbeat,
     shouldReviseEmptyFinal,
     shouldReviseAuthorization,
+    shouldReviseExecutionUnattempted,
+    shouldReviseDiscoveryStalled,
+    shouldReviseMediaAcceptance,
     shouldReviseArtifact,
     shouldReviseDesktopAction,
     shouldRevise,
@@ -2757,6 +3022,55 @@ function buildRevision(analysis) {
           '本轮合同声明了副作用，但没有记录用户授权，因此不能声称已经完成，也不能在补偿轮继续或重试该副作用。',
           '请用简体中文明确说明尚未执行，并向用户说明将发生的副作用、影响对象和必要风险，然后请求用户确认。',
           '不要伪造审批、工具结果、产物路径或完成状态。',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.shouldReviseExecutionUnattempted) {
+    return {
+      action: 'revise',
+      reason: 'UClaw run stopped on a future execution plan without any contract, tool, task, artifact, or blocker evidence.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:execution-unattempted`,
+        maxAttempts: 2,
+        instruction: [
+          '上一回复只是未来时执行计划，并没有开始实际执行；它不能作为本轮最终回复。',
+          '不要重复解释计划，也不要再单独发送开工播报。现在沿当前用户目标继续：需要副作用时先调用 uclaw_declare_turn_contract，然后立即调用真实能力、工具或 Host task。',
+          '如果任务陌生，先用 capability/tool discovery 查明可用执行面，并在同一 Agent loop 中继续到第一个真实执行步骤，不要查完后再次停在计划。',
+          '只有获得交付物与必要验证证据，或已经尝试后得到具体不可恢复阻塞，才可以结束。',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.shouldReviseDiscoveryStalled) {
+    return {
+      action: 'revise',
+      reason: 'UClaw capability discovery returned executable candidates, but the run ended on a blocker before attempting or ruling out an alternative path.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:discovery-stalled`,
+        maxAttempts: 2,
+        instruction: [
+          '当前回合已经通过结构化 capability/tool discovery 找到了候选执行能力，但还没有调用任何候选执行路径，不能直接用概括性阻塞说明结束。',
+          '继续沿原始 turn contract 执行：选择最相关候选，必要时先读取 schema，然后进行一次真实调用。不要重复已经返回不可恢复错误的同一候选。',
+          '如果候选实际不适用，必须通过 schema、capability availability 或一次真实调用给出结构化排除证据，再继续评估下一个候选。',
+          '只有候选路径均已实际尝试或有结构化证据证明不可用，才可以把阻塞作为最终回复；不得只做 tool_search/tool_describe 后停止。',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.shouldReviseMediaAcceptance) {
+    return {
+      action: 'revise',
+      reason: 'UClaw media completion produced only an intermediate artifact and did not satisfy the original acceptance contract.',
+      retry: {
+        idempotencyKey: `${REVISION_ID}:media-acceptance`,
+        maxAttempts: 3,
+        instruction: [
+          '当前媒体工具只返回了一个未满足原始验收条件的中间片段，不能把它作为最终交付，也不能只解释限制后结束。',
+          '回到原始用户目标和 turn contract，读取媒体工具真实单次能力上限，计算还需要的片段数量和每段时长；不要再次把总目标时长直接提交给只支持短片的 provider。',
+          '继续在原生 Agent loop 中逐段生成，保留每个成功片段的绝对路径；单段失败只重试该段。',
+          '片段齐备后查询 UClaw Host task capabilities，并用可用的 local.video.compose 按顺序合成；需要旁白时传入 narrationText，目标时长和宽高作为验收输入。',
+          '只有最终合成文件的实测时长、尺寸和音轨验证全部通过后才能回复完成；若真实能力不可用，列出已尝试路径、缺失能力和精确阻塞证据。',
         ].join('\n'),
       },
     };
@@ -3687,6 +4001,12 @@ function registerArtifactGuard(api) {
         finalVerificationBlocked: analysis.finalVerificationBlocked,
         explicitBlocker: analysis.explicitBlocker,
         promiseOnly: analysis.promiseOnly,
+        discoveryAttemptCount: analysis.discoveryAttemptCount,
+        discoveryCandidateCount: analysis.discoveryCandidateCount,
+        discoveryCandidates: analysis.discoveryCandidates,
+        executionAttemptCountAfterDiscovery: analysis.executionAttemptCountAfterDiscovery,
+        discoveryStalled: analysis.discoveryStalled,
+        executionUnattempted: analysis.executionUnattempted,
         artifactRepairPromise: analysis.artifactRepairPromise,
         unfinishedArtifactPromise: analysis.unfinishedArtifactPromise,
         unresolvedFinalVerificationBlock: analysis.unresolvedFinalVerificationBlock,
@@ -3697,6 +4017,8 @@ function registerArtifactGuard(api) {
         shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
         shouldReviseEmptyFinal: analysis.shouldReviseEmptyFinal,
         shouldReviseAuthorization: analysis.shouldReviseAuthorization,
+        shouldReviseExecutionUnattempted: analysis.shouldReviseExecutionUnattempted,
+        shouldReviseDiscoveryStalled: analysis.shouldReviseDiscoveryStalled,
         shouldRevise: analysis.shouldRevise,
       });
       emitRuntimeContractEvents(api, event, analysis);
@@ -3712,7 +4034,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.1.19',
+  version: '0.1.22',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -3747,6 +4069,8 @@ export const __test = {
   stageMediaToolInputs,
   recordToolEvidence,
   getToolEvidenceForRun,
+  extractAsyncTaskIds,
+  extractDiscoveryCandidates,
   isInternalTranscriptMessage,
   classifyInternalTranscriptMessage,
   sanitizeInternalTranscriptMessage,

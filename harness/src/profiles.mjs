@@ -1,15 +1,15 @@
 export const PROFILES = {
   fast: [
-    { name: 'Generate extension bridge', command: 'pnpm', args: ['run', 'ext:bridge'] },
-    { name: 'Lint without autofix', command: 'pnpm', args: ['run', 'lint:check'] },
-    { name: 'Typecheck', command: 'pnpm', args: ['run', 'typecheck'] },
+    { name: 'Generate extension bridge', command: 'pnpm', args: ['-w', 'run', 'ext:bridge'] },
+    { name: 'Lint without autofix', command: 'pnpm', args: ['-w', 'run', 'lint:check'] },
+    { name: 'Typecheck', command: 'pnpm', args: ['-w', 'run', 'typecheck'] },
   ],
   comms: [
-    { name: 'Comms replay', command: 'pnpm', args: ['run', 'comms:replay'] },
-    { name: 'Comms compare', command: 'pnpm', args: ['run', 'comms:compare'] },
+    { name: 'Comms replay', command: 'pnpm', args: ['-w', 'run', 'comms:replay'] },
+    { name: 'Comms compare', command: 'pnpm', args: ['-w', 'run', 'comms:compare'] },
   ],
   e2e: [
-    { name: 'Electron E2E', command: 'pnpm', args: ['run', 'test:e2e'] },
+    { name: 'Electron E2E', command: 'pnpm', args: ['-w', 'run', 'test:e2e'] },
   ],
 };
 

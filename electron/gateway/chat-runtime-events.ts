@@ -558,15 +558,11 @@ function nativeTaskTitle(task: Record<string, unknown>, data: Record<string, unk
 }
 
 function nativeTaskDetail(task: Record<string, unknown>, data: Record<string, unknown>): string | undefined {
-  return readFirstString(nativeTaskStateRecords(task, data), [
-    'progressSummary',
-    'progress_summary',
-    'terminalSummary',
-    'terminal_summary',
-    'error',
-    'message',
-    'summary',
-  ]);
+  const records = nativeTaskStateRecords(task, data);
+  const lifecycle = nativeTaskLifecycle(task, data);
+  return readFirstString(records, lifecycle === 'running' || lifecycle === 'pending'
+    ? ['progressSummary', 'progress_summary', 'terminalSummary', 'terminal_summary', 'error', 'message', 'summary']
+    : ['terminalSummary', 'terminal_summary', 'error', 'progressSummary', 'progress_summary', 'message', 'summary']);
 }
 
 function nativeTaskProjection(

@@ -14,6 +14,8 @@ export type HostCapabilityDescriptor = {
   requiresApproval: boolean;
   availability?: HostCapabilityAvailability;
   reason?: string;
+  inputSchema?: Record<string, unknown>;
+  outputDescription?: string;
 };
 
 export type ResolvedHostCapability = HostCapabilityDescriptor & {

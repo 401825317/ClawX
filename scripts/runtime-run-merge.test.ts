@@ -1,13 +1,57 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { after, before, test } from 'node:test';
 
-import type { ChatRuntimeRunState } from '../src/stores/chat/types.ts';
+import type { AttachedFileMeta, ChatRuntimeRunState, RawMessage } from '../src/stores/chat/types.ts';
 import {
   mergeRuntimeRunStates,
   runtimeRunsShareTaskIdentity,
 } from '../src/pages/Chat/runtime-run-merge.ts';
 
 const sessionKey = 'agent:main:session-merge';
+let dedupeAssistantRepliesForDisplay: (messages: RawMessage[]) => RawMessage[];
+let closeChatStoreModule: (() => Promise<void>) | undefined;
+
+before(async () => {
+  const storage = new Map<string, string>();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      clear: () => storage.clear(),
+      getItem: (key: string) => storage.get(key) ?? null,
+      key: (index: number) => [...storage.keys()][index] ?? null,
+      get length() { return storage.size; },
+      removeItem: (key: string) => storage.delete(key),
+      setItem: (key: string, value: string) => storage.set(key, String(value)),
+    },
+  });
+
+  const { createServer } = await import('vite');
+  const server = await createServer({
+    appType: 'custom',
+    logLevel: 'silent',
+    server: { middlewareMode: true },
+  });
+  const chatStore = await server.ssrLoadModule('/src/stores/chat.ts') as {
+    dedupeAssistantRepliesForDisplay: (messages: RawMessage[]) => RawMessage[];
+  };
+  dedupeAssistantRepliesForDisplay = chatStore.dedupeAssistantRepliesForDisplay;
+  closeChatStoreModule = async () => server.close();
+});
+
+after(async () => {
+  await closeChatStoreModule?.();
+});
+
+function videoAttachment(filePath: string, fileSize = 0): AttachedFileMeta {
+  return {
+    fileName: 'night-market.mp4',
+    mimeType: 'video/mp4',
+    fileSize,
+    preview: null,
+    filePath,
+    source: fileSize > 0 ? 'tool-result' : 'message-ref',
+  };
+}
 
 function run(
   runId: string,
@@ -24,6 +68,77 @@ function run(
     events: [],
   };
 }
+
+test('same-turn assistant replies with the same normalized media attachment collapse to one card', () => {
+  const videoPath = '/Users/me/.openclaw/media/outbound/night-market.mp4';
+  const messages: RawMessage[] = [
+    {
+      id: 'user-video',
+      role: 'user',
+      content: '根据上面的图片生成视频',
+      timestamp: 100,
+    },
+    {
+      id: 'assistant-video-1',
+      role: 'assistant',
+      content: `本地视频已生成。\n\nMEDIA:${videoPath}`,
+      timestamp: 200,
+      _attachedFiles: [videoAttachment('/Users/me/.openclaw/media/outbound/./night-market.mp4')],
+    },
+    {
+      id: 'assistant-video-2',
+      role: 'assistant',
+      content: `本地视频已生成并完成编码验证，时长 8 秒，分辨率 1280x720。\n\nMEDIA:${videoPath}`,
+      timestamp: 300,
+      _attachedFiles: [videoAttachment(videoPath, 6_105_942)],
+    },
+    {
+      id: 'assistant-video-3',
+      role: 'assistant',
+      content: `视频文件已确认存在。\n\nMEDIA:${videoPath}`,
+      timestamp: 400,
+    },
+  ];
+
+  const deduped = dedupeAssistantRepliesForDisplay(messages);
+
+  assert.equal(deduped.length, 2);
+  const reply = deduped[1]!;
+  assert.equal(reply.id, 'assistant-video-3');
+  assert.equal(reply.timestamp, 400);
+  assert.match(String(reply.content), /完成编码验证/);
+  assert.equal(reply._attachedFiles?.length, 1);
+  assert.equal(reply._attachedFiles?.[0]?.filePath, videoPath);
+  assert.equal(reply._attachedFiles?.[0]?.fileSize, 6_105_942);
+});
+
+test('same-turn assistant replies with different media attachments remain separate', () => {
+  const firstPath = '/Users/me/.openclaw/media/outbound/first.mp4';
+  const secondPath = '/Users/me/.openclaw/media/outbound/second.mp4';
+  const messages: RawMessage[] = [
+    { id: 'user-two-videos', role: 'user', content: '生成两个视频', timestamp: 100 },
+    {
+      id: 'assistant-first-video',
+      role: 'assistant',
+      content: `第一个视频。\n\nMEDIA:${firstPath}`,
+      timestamp: 200,
+      _attachedFiles: [videoAttachment(firstPath, 100)],
+    },
+    {
+      id: 'assistant-second-video',
+      role: 'assistant',
+      content: `第二个视频。\n\nMEDIA:${secondPath}`,
+      timestamp: 300,
+      _attachedFiles: [videoAttachment(secondPath, 200)],
+    },
+  ];
+
+  const deduped = dedupeAssistantRepliesForDisplay(messages);
+
+  assert.equal(deduped.length, 3);
+  assert.equal(deduped[1]?.id, 'assistant-first-video');
+  assert.equal(deduped[2]?.id, 'assistant-second-video');
+});
 
 test('terminal task evidence wins over a later-loaded pending history alias', () => {
   const historyRun = run('history:session:message-1', 'completed', 20);
@@ -105,6 +220,60 @@ test('unrelated task aliases never merge by session alone', () => {
   }];
 
   assert.equal(runtimeRunsShareTaskIdentity(first, second), false);
+});
+
+test('native media tasks in one requester session do not merge through childSessionKey', () => {
+  const imageRun = run('history:session:image-message', 'completed', 20);
+  imageRun.asyncTaskLedger = {
+    image: {
+      id: 'task:image-task',
+      taskId: 'image-task',
+      childSessionKey: sessionKey,
+      status: 'completed',
+      source: 'task-completion',
+      updatedAt: 20,
+    },
+  };
+
+  const videoRun = run('tool:video_generate:failed', 'error', 30);
+  videoRun.tasks = [{
+    taskId: 'video-task',
+    runtime: 'video_generate',
+    title: 'Generate video',
+    childSessionKey: sessionKey,
+    status: 'error',
+    detail: 'provider unavailable',
+    updatedAt: 30,
+    endedAt: 30,
+  }];
+
+  assert.equal(runtimeRunsShareTaskIdentity(imageRun, videoRun), false);
+});
+
+test('a distinct child agent session remains a valid task identity alias', () => {
+  const ownerRun = run('run-owner', 'completed', 20);
+  ownerRun.asyncTaskLedger = {
+    child: {
+      id: 'child:agent:researcher:session-child',
+      childSessionKey: 'agent:researcher:session-child',
+      status: 'completed',
+      source: 'task-completion',
+      updatedAt: 20,
+    },
+  };
+
+  const childRun = run('run-child', 'completed', 30);
+  childRun.tasks = [{
+    taskId: 'research-task',
+    runtime: 'subagent',
+    title: 'Research',
+    childSessionKey: 'agent:researcher:session-child',
+    status: 'completed',
+    updatedAt: 30,
+    endedAt: 30,
+  }];
+
+  assert.equal(runtimeRunsShareTaskIdentity(ownerRun, childRun), true);
 });
 
 test('a terminal task error makes the merged user turn terminal error', () => {

@@ -8,6 +8,236 @@ import {
 } from './helpers';
 import type { AttachedFileMeta, ChatRuntimeRunState } from './types';
 
+type RuntimeTaskUpdateEvent = Extract<ChatRuntimeEvent, { type: 'task.updated' }>;
+type CompletionWakeEvidenceEvent = Extract<ChatRuntimeEvent, {
+  type: 'artifact.produced' | 'verification.completed';
+}>;
+
+const COMPLETION_WAKE_RUN_ID_RE = /^(?:image_generate|image_edit|video_generate|music_generate):([^:]+):([^:]+)$/iu;
+
+function completionWakeRunParts(runId: string): { taskId: string; outcome: string } | null {
+  const match = COMPLETION_WAKE_RUN_ID_RE.exec(runId.trim());
+  return match ? { taskId: match[1]!, outcome: match[2]!.trim().toLowerCase() } : null;
+}
+
+export function completionWakeTaskIdFromRunId(runId: string): string | null {
+  return completionWakeRunParts(runId)?.taskId ?? null;
+}
+
+export function runtimeRunOwnsTaskId(
+  run: ChatRuntimeRunState | undefined,
+  taskId: string,
+): boolean {
+  if (!run || !taskId) return false;
+  if ((run.tasks ?? []).some((task) => task.taskId === taskId)) return true;
+  return Object.values(run.asyncTaskLedger ?? {}).some((entry) => entry.taskId === taskId);
+}
+
+export function resolveCompletionWakeOwnerRunId(params: {
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+  activeRunId: string | null;
+  eventRunId: string;
+  currentSessionKey: string;
+  eventSessionKey: string | null;
+}): string | null {
+  if (!params.activeRunId) return null;
+  if (params.eventSessionKey && params.eventSessionKey !== params.currentSessionKey) return null;
+  const taskId = completionWakeTaskIdFromRunId(params.eventRunId);
+  if (!taskId) return null;
+  return runtimeRunOwnsTaskId(params.runtimeRuns[params.activeRunId], taskId)
+    ? params.activeRunId
+    : null;
+}
+
+export function buildCompletionWakeTerminalTaskEvent(params: {
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+  ownerRunId: string;
+  eventRunId: string;
+  sessionKey?: string;
+  state: 'final' | 'error' | 'aborted';
+  error?: string;
+  ts?: number;
+}): RuntimeTaskUpdateEvent | null {
+  const parts = completionWakeRunParts(params.eventRunId);
+  if (!parts || !runtimeRunOwnsTaskId(params.runtimeRuns[params.ownerRunId], parts.taskId)) return null;
+  const existing = params.runtimeRuns[params.ownerRunId]?.tasks?.find((task) => task.taskId === parts.taskId);
+  const outcomeSignalsAbort = /^(?:abort|aborted|cancel|cancelled|canceled|stop|stopped)$/iu.test(parts.outcome);
+  const outcomeSignalsError = /^(?:error|err|fail|failed|failure|timeout|timed_out|timed-out)$/iu.test(parts.outcome);
+  const terminalState = params.state === 'aborted' || outcomeSignalsAbort
+    ? 'aborted'
+    : params.state === 'error' || outcomeSignalsError
+      ? 'error'
+      : 'completed';
+  const ts = params.ts ?? Date.now();
+  return {
+    contractVersion: 1,
+    producer: 'renderer',
+    type: 'task.updated',
+    runId: params.eventRunId,
+    sessionKey: params.sessionKey ?? params.runtimeRuns[params.ownerRunId]?.sessionKey,
+    taskId: parts.taskId,
+    taskStatus: terminalState === 'completed' ? 'completed' : 'error',
+    ts,
+    task: {
+      ...existing,
+      taskId: parts.taskId,
+      title: existing?.title ?? 'Background task',
+      status: terminalState === 'completed' ? 'completed' : 'error',
+      sourceStatus: terminalState,
+      deliveryStatus: terminalState === 'completed' ? 'delivered' : existing?.deliveryStatus,
+      terminalOutcome: terminalState === 'completed' ? 'succeeded' : terminalState,
+      detail: params.error?.trim() || existing?.detail,
+      updatedAt: ts,
+      endedAt: ts,
+    },
+  };
+}
+
+export function applyCompletionWakeEvidenceEventToOwners(
+  currentRuns: Record<string, ChatRuntimeRunState>,
+  event: CompletionWakeEvidenceEvent,
+): {
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+  appliedEvents: CompletionWakeEvidenceEvent[];
+} {
+  const taskId = completionWakeTaskIdFromRunId(event.runId);
+  const ownerRunIds = taskId
+    ? Object.entries(currentRuns)
+        .filter(([runId, run]) => (
+          runId !== event.runId
+          && (!event.sessionKey || !run.sessionKey || run.sessionKey === event.sessionKey)
+          && runtimeRunOwnsTaskId(run, taskId)
+        ))
+        .map(([runId]) => runId)
+    : [];
+  const candidateEvents: CompletionWakeEvidenceEvent[] = [
+    event,
+    ...ownerRunIds.map((runId): CompletionWakeEvidenceEvent => {
+      const common = {
+        ...event,
+        runId,
+        sessionKey: currentRuns[runId]?.sessionKey ?? event.sessionKey,
+        taskId: event.taskId ?? taskId ?? undefined,
+      };
+      return event.type === 'artifact.produced'
+        ? {
+            ...common,
+            type: 'artifact.produced',
+            artifact: {
+              ...event.artifact,
+              taskId: event.artifact.taskId ?? taskId ?? undefined,
+            },
+          }
+        : {
+            ...common,
+            type: 'verification.completed',
+            verification: {
+              ...event.verification,
+              taskId: event.verification.taskId ?? taskId ?? undefined,
+            },
+          };
+    }),
+  ];
+
+  let runtimeRuns = currentRuns;
+  const appliedEvents: CompletionWakeEvidenceEvent[] = [];
+  for (const candidate of candidateEvents) {
+    const previous = runtimeRuns;
+    runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, candidate);
+    if (runtimeRuns !== previous) appliedEvents.push(candidate);
+  }
+  return { runtimeRuns, appliedEvents };
+}
+
+export function applyRuntimeTaskEventToOwners(
+  currentRuns: Record<string, ChatRuntimeRunState>,
+  event: RuntimeTaskUpdateEvent,
+): {
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+  appliedEvents: RuntimeTaskUpdateEvent[];
+} {
+  const ownerRunIds = Object.entries(currentRuns)
+    .filter(([runId, run]) => (
+      runId !== event.runId
+      && (!event.sessionKey || !run.sessionKey || run.sessionKey === event.sessionKey)
+      && runtimeRunOwnsTaskId(run, event.task.taskId)
+    ))
+    .map(([runId]) => runId);
+  const candidateEvents: RuntimeTaskUpdateEvent[] = [
+    event,
+    ...ownerRunIds.map((runId) => ({
+      ...event,
+      runId,
+      sessionKey: currentRuns[runId]?.sessionKey ?? event.sessionKey,
+    })),
+  ];
+
+  let runtimeRuns = currentRuns;
+  const appliedEvents: RuntimeTaskUpdateEvent[] = [];
+  for (const candidate of candidateEvents) {
+    const previous = runtimeRuns;
+    runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, candidate);
+    if (runtimeRuns !== previous) appliedEvents.push(candidate);
+  }
+  return { runtimeRuns, appliedEvents };
+}
+
+function runtimeTaskWasAborted(task: RuntimeTaskUpdateEvent['task']): boolean {
+  const sourceStatus = task.sourceStatus?.trim().toLowerCase();
+  const terminalOutcome = task.terminalOutcome?.trim().toLowerCase();
+  return sourceStatus === 'aborted'
+    || sourceStatus === 'cancelled'
+    || sourceStatus === 'canceled'
+    || sourceStatus === 'stopped'
+    || sourceStatus === 'terminated'
+    || terminalOutcome === 'aborted'
+    || terminalOutcome === 'cancelled'
+    || terminalOutcome === 'canceled';
+}
+
+export function settledRuntimeRunStatus(
+  run: ChatRuntimeRunState | undefined,
+): Extract<ChatRuntimeRunState['status'], 'completed' | 'error' | 'aborted'> | null {
+  if (!run) return null;
+  const tasks = run.tasks ?? [];
+  const ledgerEntries = Object.values(run.asyncTaskLedger ?? {});
+  const hasPendingTask = tasks.some((task) => (
+    task.status === 'pending'
+    || task.status === 'running'
+    || task.status === 'waiting_approval'
+  ));
+  if (hasPendingTask || ledgerEntries.some((entry) => entry.status === 'pending')) return null;
+
+  const failedTask = tasks.find((task) => (
+    !runtimeTaskWasAborted(task)
+    && (task.status === 'error'
+      || task.status === 'partial'
+      || task.terminalOutcome?.trim().toLowerCase() === 'blocked')
+  ));
+  const taskIds = new Set(tasks.map((task) => task.taskId));
+  const hasUnprojectedLedgerError = ledgerEntries.some((entry) => (
+    entry.status === 'error' && (!entry.taskId || !taskIds.has(entry.taskId))
+  ));
+  if (failedTask || hasUnprojectedLedgerError) return 'error';
+  if (tasks.some(runtimeTaskWasAborted)) return 'aborted';
+  return 'completed';
+}
+
+export function settledRuntimeRunError(run: ChatRuntimeRunState | undefined): string | undefined {
+  const failedTask = (run?.tasks ?? []).find((task) => (
+    !runtimeTaskWasAborted(task)
+    && (task.status === 'error'
+      || task.status === 'partial'
+      || task.terminalOutcome?.trim().toLowerCase() === 'blocked')
+  ));
+  if (failedTask?.detail?.trim()) return failedTask.detail.trim();
+  if (failedTask?.title?.trim()) return `任务“${failedTask.title.trim()}”执行失败。`;
+  if (Object.values(run?.asyncTaskLedger ?? {}).some((entry) => entry.status === 'error')) {
+    return '异步任务执行失败。';
+  }
+  return undefined;
+}
+
 export function shouldFilterRuntimeExecutionGraphEvent(event: ChatRuntimeEvent): boolean {
   if (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed') {
     return event.name.trim().toLowerCase() === 'process';
@@ -198,7 +428,7 @@ function upsertProgressEntry(
 
 type RuntimeTaskProjection = NonNullable<ChatRuntimeRunState['tasks']>[number];
 
-const TERMINAL_TASK_STATUSES = new Set<RuntimeTaskProjection['status']>(['completed', 'error']);
+const TERMINAL_TASK_STATUSES = new Set<RuntimeTaskProjection['status']>(['completed', 'error', 'partial']);
 
 function taskUpdatedAt(task: RuntimeTaskProjection, fallback?: number): number | undefined {
   if (typeof task.updatedAt === 'number' && Number.isFinite(task.updatedAt)) return task.updatedAt;

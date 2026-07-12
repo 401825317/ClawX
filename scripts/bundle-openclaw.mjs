@@ -22,10 +22,14 @@ import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-ski
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
+import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
+import { patchOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-patch.mjs';
+import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
+import { patchOpenClawRequiredContractToolRuntime } from './openclaw-required-contract-tool-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
@@ -1131,6 +1135,16 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${toolDirectoryI18nPatch.patchedFiles} tool directory intent runtime file(s)`;
   }
 
+  // --- Required UClaw turn-contract schema patch ---
+  // Keep the metadata contract directly callable while the remaining large
+  // tool catalog stays deferred behind OpenClaw's directory surface.
+  const requiredContractToolPatch = patchOpenClawRequiredContractToolRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (requiredContractToolPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${requiredContractToolPatch.patchedFiles} required contract tool runtime file(s)`;
+  }
+
   // --- Visible stream smoothing and chat delta cadence patch ---
   // Preserve true provider streaming while avoiding large burst-only text
   // updates and the old 150 ms UI throttle.
@@ -1180,6 +1194,27 @@ function patchBundledRuntime(outputDir) {
   });
   if (nativeMediaCancellationPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${nativeMediaCancellationPatch.patchedFiles} native media cancellation runtime file(s)`;
+  }
+
+  const nativeImageDeliveryPatch = patchOpenClawNativeImageDeliveryRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (nativeImageDeliveryPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${nativeImageDeliveryPatch.patchedFiles} native image delivery runtime file(s)`;
+  }
+
+  const nativeMediaAcceptancePatch = patchOpenClawNativeMediaAcceptanceRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (nativeMediaAcceptancePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${nativeMediaAcceptancePatch.patchedFiles} native media acceptance runtime file(s)`;
+  }
+
+  const videoProviderCatalogPatch = patchOpenClawVideoProviderCatalogRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (videoProviderCatalogPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${videoProviderCatalogPatch.patchedFiles} video provider catalog runtime file(s)`;
   }
 
   // --- Public task delivery outcome patch ---

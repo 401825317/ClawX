@@ -4,7 +4,17 @@ import test from 'node:test';
 import type { ChatRuntimeEvent, ChatRuntimeTaskProjection } from '../shared/chat-runtime-events.ts';
 import { normalizeGatewayChatRuntimeEvents } from '../electron/gateway/chat-runtime-events.ts';
 import { deriveRuntimeTaskSteps } from '../src/pages/Chat/runtime-task-visualization.ts';
-import { applyRuntimeEventToRuns } from '../src/stores/chat/runtime-graph.ts';
+import { buildRuntimeCompletionGateEvents } from '../src/stores/chat/runtime-contract.ts';
+import {
+  applyCompletionWakeEvidenceEventToOwners,
+  applyRuntimeEventToRuns,
+  applyRuntimeTaskEventToOwners,
+  buildCompletionWakeTerminalTaskEvent,
+  completionWakeTaskIdFromRunId,
+  resolveCompletionWakeOwnerRunId,
+  settledRuntimeRunError,
+  settledRuntimeRunStatus,
+} from '../src/stores/chat/runtime-graph.ts';
 
 const RUN_ID = 'run-task-graph';
 const SESSION_KEY = 'agent:main:task-graph';
@@ -60,6 +70,196 @@ test('a turn contract event is retained on the originating runtime run', () => {
 
   assert.equal(runs['run-contract-graph']?.turnContract?.intent, 'media');
   assert.equal(runs['run-contract-graph']?.events[0]?.type, 'run.contract.updated');
+});
+
+test('detached task terminal updates fan out to the owning chat run and completion wake resolves to it', () => {
+  const ownerRunId = 'run-owner-video';
+  const taskId = 'ed0c981b-1925-4913-9799-04fb351a3fe5';
+  let runtimeRuns = applyRuntimeEventToRuns({}, {
+    type: 'run.started',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 100,
+    startedAt: 100,
+  });
+  runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+    type: 'task.updated',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 110,
+    task: {
+      taskId,
+      runtime: 'video_generate',
+      title: 'Generate video',
+      status: 'running',
+      updatedAt: 110,
+    },
+  });
+
+  const terminalEvent: Extract<ChatRuntimeEvent, { type: 'task.updated' }> = {
+    type: 'task.updated',
+    runId: `tool:video_generate:${taskId}`,
+    sessionKey: SESSION_KEY,
+    ts: 120,
+    task: {
+      taskId,
+      runtime: 'video_generate',
+      title: 'Generate video',
+      status: 'error',
+      detail: 'No available channel for model sora-2-pro',
+      updatedAt: 120,
+      endedAt: 120,
+    },
+  };
+  const applied = applyRuntimeTaskEventToOwners(runtimeRuns, terminalEvent);
+  runtimeRuns = applied.runtimeRuns;
+
+  assert.deepEqual(applied.appliedEvents.map((event) => event.runId), [
+    `tool:video_generate:${taskId}`,
+    ownerRunId,
+  ]);
+  assert.equal(runtimeRuns[ownerRunId]?.tasks?.[0]?.status, 'error');
+  assert.equal(runtimeRuns[`tool:video_generate:${taskId}`]?.status, 'error');
+  assert.equal(settledRuntimeRunStatus(runtimeRuns[ownerRunId]), 'error');
+  assert.match(settledRuntimeRunError(runtimeRuns[ownerRunId]) ?? '', /No available channel/u);
+
+  const wakeRunId = `video_generate:${taskId}:error`;
+  assert.equal(completionWakeTaskIdFromRunId(wakeRunId), taskId);
+  assert.equal(resolveCompletionWakeOwnerRunId({
+    runtimeRuns,
+    activeRunId: ownerRunId,
+    eventRunId: wakeRunId,
+    currentSessionKey: SESSION_KEY,
+    eventSessionKey: SESSION_KEY,
+  }), ownerRunId);
+  assert.equal(resolveCompletionWakeOwnerRunId({
+    runtimeRuns,
+    activeRunId: ownerRunId,
+    eventRunId: 'video_generate:11111111-1111-4111-8111-111111111111:error',
+    currentSessionKey: SESSION_KEY,
+    eventSessionKey: SESSION_KEY,
+  }), null);
+});
+
+test('successful image completion wake closes the owner task and projects artifact evidence to the owner run', () => {
+  const ownerRunId = 'run-owner-image';
+  const taskId = '1ac62e1d-85fa-4fae-b2ac-ae5f94487639';
+  const wakeRunId = `image_generate:${taskId}:ok`;
+  let runtimeRuns = applyRuntimeEventToRuns({}, {
+    type: 'run.started',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 100,
+    startedAt: 100,
+  });
+  runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+    type: 'run.contract.updated',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 101,
+    contract: {
+      version: 1,
+      intent: 'media',
+      toolRequirement: 'required',
+      sideEffect: 'remote_generation',
+      sideEffectAuthorized: true,
+      capabilityRefs: ['image_generate'],
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: true,
+        requiresApproval: false,
+        requiresToolEvidence: true,
+      },
+    },
+  });
+  runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+    type: 'tool.completed',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 105,
+    toolCallId: 'call-image-generate',
+    name: 'image_generate',
+    result: { async: true, taskId },
+    isError: false,
+  });
+  runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+    type: 'task.updated',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 110,
+    task: {
+      taskId,
+      runtime: 'image_generate',
+      title: 'Generate image',
+      status: 'running',
+      updatedAt: 110,
+    },
+  });
+  runtimeRuns = buildRuntimeCompletionGateEvents(runtimeRuns[ownerRunId], {
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 120,
+    status: 'completed',
+  }).reduce(applyRuntimeEventToRuns, runtimeRuns);
+  assert.equal(runtimeRuns[ownerRunId]?.gateResult?.decision, 'continue_required');
+  assert.ok(runtimeRuns[ownerRunId]?.gateResult?.issues.some((issue) => issue.code === 'task.unfinished'));
+  assert.ok(runtimeRuns[ownerRunId]?.gateResult?.issues.some((issue) => issue.code === 'artifact.required.missing'));
+
+  const terminalTaskEvent = buildCompletionWakeTerminalTaskEvent({
+    runtimeRuns,
+    ownerRunId,
+    eventRunId: wakeRunId,
+    sessionKey: SESSION_KEY,
+    state: 'final',
+    ts: 200,
+  });
+  assert.ok(terminalTaskEvent);
+  runtimeRuns = applyRuntimeTaskEventToOwners(runtimeRuns, terminalTaskEvent).runtimeRuns;
+  assert.equal(runtimeRuns[ownerRunId]?.tasks?.[0]?.status, 'completed');
+  assert.equal(runtimeRuns[ownerRunId]?.tasks?.[0]?.deliveryStatus, 'delivered');
+  assert.equal(settledRuntimeRunStatus(runtimeRuns[ownerRunId]), 'completed');
+
+  const artifactId = 'artifact:image:moonlight-whale';
+  runtimeRuns = applyCompletionWakeEvidenceEventToOwners(runtimeRuns, {
+    type: 'artifact.produced',
+    runId: wakeRunId,
+    sessionKey: SESSION_KEY,
+    ts: 210,
+    artifact: {
+      id: artifactId,
+      kind: 'image',
+      filePath: '/tmp/moonlight-whale.png',
+      mimeType: 'image/png',
+    },
+  }).runtimeRuns;
+  runtimeRuns = applyCompletionWakeEvidenceEventToOwners(runtimeRuns, {
+    type: 'verification.completed',
+    runId: wakeRunId,
+    sessionKey: SESSION_KEY,
+    ts: 220,
+    verification: {
+      id: `verification:${artifactId}`,
+      artifactId,
+      kind: 'artifact.availability',
+      status: 'passed',
+      required: true,
+    },
+  }).runtimeRuns;
+
+  assert.equal(runtimeRuns[ownerRunId]?.artifacts?.[0]?.taskId, taskId);
+  assert.equal(runtimeRuns[ownerRunId]?.artifacts?.[0]?.filePath, '/tmp/moonlight-whale.png');
+  assert.equal(runtimeRuns[ownerRunId]?.verifications?.[0]?.taskId, taskId);
+  assert.equal(runtimeRuns[ownerRunId]?.verifications?.[0]?.status, 'passed');
+  assert.equal(runtimeRuns[wakeRunId]?.artifacts?.[0]?.id, artifactId);
+
+  runtimeRuns = buildRuntimeCompletionGateEvents(runtimeRuns[ownerRunId], {
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 230,
+    status: 'completed',
+  }).reduce(applyRuntimeEventToRuns, runtimeRuns);
+  assert.equal(runtimeRuns[ownerRunId]?.gateResult?.decision, 'deliverable');
+  assert.equal(runtimeRuns[ownerRunId]?.gateResult?.issues.length, 0);
 });
 
 test('task projections are ordered by updatedAt and cannot regress from a terminal state', () => {

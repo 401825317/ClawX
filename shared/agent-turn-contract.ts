@@ -3,12 +3,24 @@ export const AGENT_TURN_CONTRACT_VERSION = 1 as const;
 export type AgentTurnIntent = 'chat' | 'research' | 'artifact' | 'media' | 'desktop' | 'workflow';
 export type AgentTurnToolRequirement = 'none' | 'optional' | 'required';
 export type AgentTurnSideEffect = 'none' | 'local_artifact' | 'remote_generation' | 'external_action';
+export type AgentTurnMediaKind = 'image' | 'video' | 'audio';
+
+export type AgentTurnMediaAcceptance = {
+  kind?: AgentTurnMediaKind;
+  minDurationSeconds?: number;
+  width?: number;
+  height?: number;
+  aspectRatio?: string;
+  requiresAudio?: boolean;
+  language?: string;
+};
 
 export type AgentTurnAcceptance = {
   requiresArtifact: boolean;
   requiresVerification: boolean;
   requiresApproval: boolean;
   requiresToolEvidence: boolean;
+  media?: AgentTurnMediaAcceptance;
 };
 
 /** This declares delivery requirements; it is never completion evidence by itself. */
@@ -34,6 +46,7 @@ export type AgentTurnContractInput = {
 const INTENTS = new Set<AgentTurnIntent>(['chat', 'research', 'artifact', 'media', 'desktop', 'workflow']);
 const TOOL_REQUIREMENTS = new Set<AgentTurnToolRequirement>(['none', 'optional', 'required']);
 const SIDE_EFFECTS = new Set<AgentTurnSideEffect>(['none', 'local_artifact', 'remote_generation', 'external_action']);
+const MEDIA_KINDS = new Set<AgentTurnMediaKind>(['image', 'video', 'audio']);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -63,6 +76,46 @@ function normalizeCapabilityRefs(value: unknown): string[] {
     if (!refs.includes(normalized)) refs.push(normalized);
   }
   return refs;
+}
+
+function optionalPositiveNumber(value: unknown, label: string, maximum: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > maximum) {
+    throw new Error(`Invalid turn contract ${label}`);
+  }
+  return value;
+}
+
+function optionalShortString(value: unknown, label: string, maximum: number): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') throw new Error(`Invalid turn contract ${label}`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maximum) throw new Error(`Invalid turn contract ${label}`);
+  return normalized;
+}
+
+function normalizeMediaAcceptance(value: unknown): AgentTurnMediaAcceptance | undefined {
+  if (value === undefined) return undefined;
+  const record = asRecord(value);
+  if (!record) throw new Error('Invalid turn contract acceptance.media');
+  const kind = record.kind === undefined ? undefined : enumValue(record.kind, MEDIA_KINDS, 'acceptance.media.kind');
+  const minDurationSeconds = optionalPositiveNumber(record.minDurationSeconds, 'acceptance.media.minDurationSeconds', 86_400);
+  const width = optionalPositiveNumber(record.width, 'acceptance.media.width', 16_384);
+  const height = optionalPositiveNumber(record.height, 'acceptance.media.height', 16_384);
+  const aspectRatio = optionalShortString(record.aspectRatio, 'acceptance.media.aspectRatio', 32);
+  const requiresAudio = record.requiresAudio === undefined
+    ? undefined
+    : optionalBoolean(record.requiresAudio, false, 'acceptance.media.requiresAudio');
+  const language = optionalShortString(record.language, 'acceptance.media.language', 64);
+  return {
+    ...(kind ? { kind } : {}),
+    ...(minDurationSeconds !== undefined ? { minDurationSeconds } : {}),
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
+    ...(aspectRatio ? { aspectRatio } : {}),
+    ...(requiresAudio !== undefined ? { requiresAudio } : {}),
+    ...(language ? { language } : {}),
+  };
 }
 
 export function normalizeAgentTurnContract(input: AgentTurnContractInput): AgentTurnContract {
@@ -98,6 +151,7 @@ export function normalizeAgentTurnContract(input: AgentTurnContractInput): Agent
     sideEffect === 'none',
     'sideEffectAuthorized',
   );
+  const media = normalizeMediaAcceptance(acceptanceInput.media);
 
   if (sideEffect !== 'none' && toolRequirement === 'none') {
     throw new Error('A side-effecting turn contract cannot set toolRequirement to none');
@@ -113,7 +167,13 @@ export function normalizeAgentTurnContract(input: AgentTurnContractInput): Agent
     sideEffect,
     sideEffectAuthorized,
     capabilityRefs: normalizeCapabilityRefs(record.capabilityRefs),
-    acceptance: { requiresArtifact, requiresVerification, requiresApproval, requiresToolEvidence },
+    acceptance: {
+      requiresArtifact,
+      requiresVerification,
+      requiresApproval,
+      requiresToolEvidence,
+      ...(media ? { media } : {}),
+    },
   };
 }
 

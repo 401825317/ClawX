@@ -208,10 +208,14 @@ const startBridge = __test.createBridge(makeApi(), {
     return task;
   },
 });
-const startTool = startBridge.createTools({
+const startTools = startBridge.createTools({
   sessionKey: 'agent:main:session-2',
   runId: 'run-2',
-}).find((tool) => tool.name === 'uclaw_start_host_task');
+});
+const capabilityTool = startTools.find((tool) => tool.name === 'uclaw_get_task_bridge_capabilities');
+assert.match(capabilityTool.description, /local\.video\.timeline\.render/);
+const startTool = startTools.find((tool) => tool.name === 'uclaw_start_host_task');
+assert.match(startTool.description, /local\.video\.timeline\.render/);
 const started = await startTool.execute(
   'call-2',
   { kind: 'local.video.compose', title: 'Compose final video' },

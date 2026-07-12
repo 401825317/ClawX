@@ -9,10 +9,14 @@
 import { patchInstalledOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchInstalledOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
+import { patchInstalledOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
+import { patchInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-patch.mjs';
+import { patchInstalledOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchInstalledOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
+import { patchInstalledOpenClawRequiredContractToolRuntime } from './openclaw-required-contract-tool-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
@@ -35,11 +39,15 @@ try {
   patchInstalledOpenClawPromptCacheKeyRuntime();
   patchInstalledOpenClawSystemPromptReasoningLabelRuntime();
   patchInstalledOpenClawToolDirectoryI18nRuntime();
+  patchInstalledOpenClawRequiredContractToolRuntime();
   patchInstalledOpenClawStreamingRuntime();
   patchInstalledOpenClawModelRequestContractRuntime();
   patchInstalledOpenClawRawToolSignalRuntime();
   patchInstalledOpenClawPluginToolRunContextRuntime();
   patchInstalledOpenClawNativeMediaCancellationRuntime();
+  patchInstalledOpenClawNativeImageDeliveryRuntime();
+  patchInstalledOpenClawNativeMediaAcceptanceRuntime();
+  patchInstalledOpenClawVideoProviderCatalogRuntime();
   patchInstalledOpenClawTaskSummaryDeliveryRuntime();
 } catch (error) {
   console.error(

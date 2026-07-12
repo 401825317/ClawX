@@ -2,7 +2,7 @@
   "id": "uclaw-task-bridge",
   "name": "UClaw Task Bridge",
   "description": "Bridges recoverable UClaw Host jobs into OpenClaw tools and the originating session without creating a second agent loop.",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "entry": "index.mjs",
   "enabledByDefault": false,
   "activation": { "onStartup": true },

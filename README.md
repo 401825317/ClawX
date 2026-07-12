@@ -133,6 +133,7 @@ The Skills page can display skills discovered from multiple OpenClaw sources (ma
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
 In developer mode, the dedicated Image Generation page supports an independent OpenAI-compatible image-generation endpoint (Base URL, API key, and model name such as `gpt-image-2`) so image generation can use a dedicated `/v1/images/generations` service while chat continues using the normal OpenAI provider.
+Requested image format, background, and compatible compression options are forwarded to the image provider. Managed installs default generated-media delivery to 16 MiB when the user has not set a custom limit. If an image is still too large, UClaw automatically transcodes and progressively compresses it before saving instead of discarding a provider-successful result; terminal task-ledger state also closes the pending UI even when internal completion envelopes stay hidden.
 For **Custom** providers used with OpenAI-compatible gateways, you can set a custom `User-Agent` in **Settings → AI Providers → Edit Provider** for compatibility-sensitive endpoints.
 When a compatible gateway rejects `/models` for non-auth reasons, ClawX automatically falls back to a lightweight `/chat/completions` or `/responses` probe during API key validation.
 

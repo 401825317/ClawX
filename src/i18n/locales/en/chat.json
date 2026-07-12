@@ -50,6 +50,8 @@
         "types": { "image": "Image", "video": "Video", "presentation": "PPT", "spreadsheet": "Excel", "miniProgram": "Mini app", "copywriting": "Copy", "file": "File" }
     },
     "runtimeProgress": {
+        "title": "Collaboration",
+        "commandDetails": "View command details",
         "executing": "Running",
         "blocked": "Needs attention",
         "aborted": "Stopped",
@@ -82,6 +84,12 @@
             "create_designed_pptx_file": "PPT creation",
             "repair_designed_pptx_file": "PPT repair"
         }
+    },
+    "reasoning": {
+        "title": "Reasoning",
+        "live": "Thinking",
+        "show": "Show reasoning",
+        "hide": "Hide reasoning"
     },
     "desktopApproval": {
         "title": "Allow desktop action",

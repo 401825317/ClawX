@@ -165,6 +165,7 @@ function resolveRuntimeToolProgressContext(
   const label = firstString(toolRecord, ['label', 'title']);
   const status = firstString(details, ['status', 'state'])?.toLowerCase();
   const asyncStarted = details.async === true && Boolean(status && ASYNC_STARTED_STATUSES.has(status));
+  const action = firstString(params, ['action'])?.toLowerCase();
 
   return {
     outerName,
@@ -174,6 +175,7 @@ function resolveRuntimeToolProgressContext(
     details,
     hidden: outerName === 'tool_describe'
       || outerName === 'tool_search'
+      || (name === 'video_generate' && action === 'list')
       || HIDDEN_TOOL_PROGRESS_NAMES.has(name),
     asyncStarted,
     taskId: firstString(details, ['taskId', 'task_id']),
@@ -377,9 +379,13 @@ function semanticStateForTask(
   const terminalOutcome = normalizeText(task.terminalOutcome)?.toLowerCase();
   if (sourceStatus && /^(?:aborted|cancelled|canceled|stopped|terminated)$/u.test(sourceStatus)) return 'aborted';
   if (terminalOutcome && /^(?:aborted|cancelled|canceled)$/u.test(terminalOutcome)) return 'aborted';
+  // OpenClaw represents a generated intermediate artifact as a succeeded
+  // task with terminalOutcome=blocked. Check the outcome before the source
+  // status so the UI cannot turn an unmet contract into "completed".
+  if (terminalOutcome && /^(?:partial|blocked|partially_completed|partial_failure)$/u.test(terminalOutcome)) return 'partial';
+  if (task.status === 'partial') return 'partial';
   if (task.status === 'completed') return 'completed';
   if (task.status === 'error') return 'error';
-  if (task.status === 'partial') return 'partial';
   if (task.status === 'waiting_approval') return 'waitingApproval';
   return undefined;
 }
@@ -551,6 +557,13 @@ function buildTaskProgressEvents(
   const status = progressStatusForSemanticState(semanticState);
   const actionEvent = buildProgressEntryEvent(event, {
     ...existing,
+    // The initial async tool event contains requested parameters. Once the
+    // detached task reaches a terminal state, those values are not evidence
+    // of what the provider actually produced. Keep the action readable and
+    // show authoritative facts in the task-status detail below instead.
+    ...(semanticState === 'completed' || semanticState === 'partial' || semanticState === 'error'
+      ? { command: '' }
+      : {}),
     text: fallbackTextForSemanticState(semanticState, context),
     status,
     translationKey: translationKeyForSemanticState(semanticState),

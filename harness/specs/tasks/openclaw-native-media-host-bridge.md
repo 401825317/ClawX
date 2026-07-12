@@ -14,6 +14,7 @@ touchedAreas:
   - harness/specs/tasks/uclaw-feedback-runtime-regressions.md
   - harness/specs/tasks/uclaw-desktop-and-blender-runtime.md
   - harness/specs/rules/backend-communication-boundary.md
+  - harness/src/profiles.mjs
   - electron/api/routes/gateway.ts
   - electron/api/routes/media.ts
   - electron/api/routes/runtime.ts
@@ -25,16 +26,40 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-artifact-guard/openclaw.plugin.json
   - resources/openclaw-plugins/uclaw-artifact-guard/package.json
   - resources/openclaw-plugins/uclaw-task-bridge/**
+  - resources/openclaw-plugins/clawx-openai-image/**
   - resources/context/TOOLS.clawx.md
   - electron/gateway/config-sync.ts
   - electron/utils/openclaw-auth.ts
   - electron/utils/plugin-install.ts
   - scripts/bundle-openclaw-plugins.mjs
   - scripts/host-capability-registry.test.ts
+  - scripts/local-video-timeline.test.ts
   - scripts/host-task-lifecycle.test.ts
   - scripts/host-task-runtime-route.test.ts
   - scripts/gateway-task-ledger-monitor.test.ts
   - scripts/uclaw-contract-driven-gate.test.mjs
+  - scripts/openclaw-native-image-delivery-patch.mjs
+  - scripts/openclaw-native-image-delivery-patch.test.mjs
+  - scripts/openclaw-native-image-delivery-runtime.mjs
+  - scripts/clawx-openai-image-request-options.test.mjs
+  - scripts/bundle-openclaw.mjs
+  - scripts/junfeiai-reasoning-defaults.test.ts
+  - scripts/openclaw-native-media-acceptance-patch.mjs
+  - scripts/patch-browser-hint.mjs
+  - scripts/reasoning-projection.test.ts
+  - scripts/runtime-progress-semantics.test.ts
+  - scripts/uclaw-media-limit-default.test.ts
+  - shared/agent-turn-contract.ts
+  - src/i18n/locales/en/chat.json
+  - src/i18n/locales/ja/chat.json
+  - src/i18n/locales/ru/chat.json
+  - src/i18n/locales/zh/chat.json
+  - src/pages/Chat/image-generation-status.ts
+  - src/pages/Chat/ReasoningPanel.tsx
+  - src/pages/Chat/RunProgressCard.tsx
+  - src/pages/Chat/index.tsx
+  - src/pages/Chat/reasoning-projection.ts
+  - src/pages/Chat/runtime-run-merge.ts
   - src/stores/chat.ts
   - src/stores/chat/helpers.ts
   - src/stores/chat/runtime-contract.ts
@@ -52,6 +77,11 @@ expectedUserBehavior:
   - A native async media completion resumes the same session through OpenClaw's completion path. UClaw does not synthesize an assistant reply to pretend that an Agent tool returned.
   - OpenClaw remains the only semantic decision maker for when to invoke a capability. UClaw guard code may validate ownership, cost, parameter bounds, media staging, and result evidence, but may not authorize a tool from natural-language regexes.
   - Recoverable Host work has stable sessionKey/runId/toolCallId/idempotencyKey correlation, a durable journal, cancellation/recovery APIs, and a same-session completion injection. Task Flow and native subagents remain OpenClaw control-plane features, while UClaw projects their task state.
+  - A requested image output format and compression setting reach the selected provider unchanged when that provider advertises support.
+  - Generated images that exceed the OpenClaw attachment cap are transcoded and progressively compressed before persistence; a provider-successful image is not discarded solely because its original encoding is too large.
+  - Native image task terminal state from the task ledger closes the pending image UI and freezes elapsed time even when internal completion messages are intentionally absent from the visible transcript.
+  - When remote video providers cannot produce clips, the Agent can select the advertised `local.video.timeline.render` Host capability to render managed image/video scenes with deterministic duration, basic motion, transitions, captions, narration, and optional background music.
+  - `video_generate action=list` exposes the models configured in `agents.defaults.videoGenerationModel` and `models.providers.<id>.models`; the local timeline renderer is a fallback after those real configured candidates are unavailable, not a replacement for provider discovery.
 requiredProfiles:
   - fast
   - comms
@@ -68,6 +98,10 @@ requiredTests:
   - pnpm exec tsc --noEmit --pretty false
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
+  - pnpm exec tsx --test scripts/local-video-timeline.test.ts
+  - node scripts/openclaw-native-image-delivery-patch.test.mjs
+  - node scripts/clawx-openai-image-request-options.test.mjs
+  - pnpm exec tsx scripts/uclaw-media-limit-default.test.ts
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
   - Electron UI validation for chat-mode image continuation and native async task delivery
 acceptance:
@@ -85,6 +119,12 @@ acceptance:
   - Existing standalone PPT, file, desktop, Blender, browser, and MCP tool paths continue to use OpenClaw tools/plugins rather than gaining another front-end intent router.
   - New chat turns never persist an internal execution contract as user-authored text; the UI only renders the original user request and verified runtime artifacts.
   - The packaged and development startup paths install and enable every required bundled bridge plugin.
+  - `clawx-openai-image` advertises only output controls it actually forwards, including JPEG/WebP compression and supported backgrounds.
+  - An oversized PNG response for a requested JPEG is saved as a valid JPEG below the configured image byte cap, with authoritative MIME type and filename metadata.
+  - Managed UClaw installs default `agents.defaults.mediaMaxMb` to 16 when unset, while preserving an explicit user value.
+  - Failed, partial, cancelled, and completed native image tasks are terminal for the renderer pending-state detector even when the artifact guard filters their internal completion envelopes from transcript history.
+  - `local.video.timeline.render` is available only when the macOS Swift, AVFoundation, and speech runtime are present; unsupported platforms report unavailable and never fabricate a video artifact.
+  - Timeline rendering accepts only managed image/video and background-music paths, verifies the final MP4 duration, dimensions, video track, and requested audio track, and returns blocked rather than success when any required fact is missing.
 docs:
   required: true
 ---

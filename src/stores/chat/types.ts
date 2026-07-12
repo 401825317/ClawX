@@ -146,6 +146,7 @@ export interface ChatSession {
   derivedTitle?: string;
   lastMessagePreview?: string;
   thinkingLevel?: string;
+  reasoningLevel?: 'off' | 'on' | 'stream' | string;
   model?: string;
   cwd?: string;
   updatedAt?: number;

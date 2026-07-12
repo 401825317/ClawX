@@ -115,6 +115,7 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
 聊天、图片和视频的新请求现在共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物偏好，不再在 Renderer 侧调用意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 通过 Task Flow 复用同一套 `session/run/tool-call/idempotency` 契约，支持可恢复长任务和同会话完成唤醒；UClaw 只把结构化进度、产物、验证、审批与部分失败投影到执行界面，不再增加第二个 Agent loop。旧 composite run 仅保留查询、取消、重试等迁移前任务恢复能力，旧 direct planner POST 端点统一返回 `410`；新请求全部进入 Agent loop。
+图片格式、背景和兼容的压缩参数会真实透传给图片 provider；用户未自定义时，托管安装的生成媒体交付上限默认为 16 MiB。若生成结果仍超过上限，UClaw 会在保存前自动转码并逐级压缩，不再丢弃 provider 已成功生成的图片。即使内部完成消息被隔离，任务账本中的成功、失败、部分完成或取消终态也会立即关闭等待状态和计时。
 
 桌面观察当前只支持截图；原生桌面动作驱动尚未实现，本版本也不宣称 Computer Use 可以操作 UClaw 窗口。内置 Blender runtime 接收声明式 SceneSpec，在不加载启动扩展的本地 Blender 中渲染，并校验 `.blend`、`.glb`、预览图和 manifest 后再投递到会话。Blender 是可选的本地依赖，平台或可执行文件不可用时会明确返回能力状态，不会把未产出当作完成；三维预览只会在打开兼容模型文件时按需加载，不增加普通聊天路径的负担。
 

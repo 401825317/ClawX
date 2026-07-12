@@ -586,6 +586,19 @@ function createBridge(api, options = {}) {
             requiresVerification: Type.Optional(Type.Boolean()),
             requiresApproval: Type.Optional(Type.Boolean()),
             requiresToolEvidence: Type.Optional(Type.Boolean()),
+            media: Type.Optional(Type.Object({
+              kind: Type.Optional(Type.Union([
+                Type.Literal('image'),
+                Type.Literal('video'),
+                Type.Literal('audio'),
+              ])),
+              minDurationSeconds: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 86400 })),
+              width: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
+              height: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
+              aspectRatio: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
+              requiresAudio: Type.Optional(Type.Boolean()),
+              language: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+            }, { additionalProperties: false })),
           }, { additionalProperties: false })),
         }, { additionalProperties: false }),
         async execute(toolCallId, params) {
@@ -610,7 +623,7 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_get_task_bridge_capabilities',
         label: 'UClaw task bridge capabilities',
-        description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task.',
+        description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task. For video fallback, inspect whether local.video.timeline.render can turn managed image/video scenes into a narrated MP4 instead of assuming local.video.compose can animate still images.',
         parameters: Type.Object({}, { additionalProperties: false }),
         async execute() {
           try {
@@ -623,8 +636,8 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_start_host_task',
         label: 'Start UClaw Host task',
-        description: 'Start a recoverable local Host task. Use for a capability that has a confirmed Host task kind. This returns a task receipt, not final delivery; query status or wait for the Host completion event. Do not supply session/run identity yourself.',
-        promptSnippet: 'uclaw_start_host_task: starts a Host-owned recoverable task only after selecting a supported Host capability. It returns a task receipt; do not claim completion until verified artifacts arrive in a later task event.',
+        description: 'Start a recoverable local Host task. Use for a capability that has a confirmed Host task kind. local.video.timeline.render accepts managed image/video scenes and produces a verified local MP4; local.video.compose only concatenates existing video segments. This returns a task receipt, not final delivery; query status or wait for the Host completion event. Do not supply session/run identity yourself.',
+        promptSnippet: 'uclaw_start_host_task: starts a Host-owned recoverable task only after selecting a supported Host capability. For still-image video fallback, use local.video.timeline.render with managed scene paths, durations, motion, transitions, captions, narration, and final dimensions. It returns a task receipt; do not claim completion until verified artifacts arrive in a later task event.',
         parameters: Type.Object({
           kind: Type.String({ minLength: 1, maxLength: 240, pattern: '^[a-zA-Z0-9._-]+$' }),
           title: Type.String({ minLength: 1, maxLength: 500 }),

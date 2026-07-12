@@ -1640,6 +1640,7 @@ export async function setOpenClawDefaultModel(
     };
     if (provider === JUNFEIAI_PROVIDER_ID) {
       defaults.thinkingDefault = 'xhigh';
+      defaults.reasoningDefault = 'on';
     }
     agents.defaults = defaults;
     config.agents = agents;
@@ -1998,7 +1999,7 @@ function isJunFeiAIDefaultModel(config: Record<string, unknown>): boolean {
   return primary.startsWith(`${JUNFEIAI_PROVIDER_ID}/`);
 }
 
-function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>): boolean {
+export function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>): boolean {
   if (!isJunFeiAIDefaultModel(config)) {
     return false;
   }
@@ -2008,6 +2009,12 @@ function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>
   let modified = false;
   if (defaults.thinkingDefault !== 'xhigh') {
     defaults.thinkingDefault = 'xhigh';
+    agents.defaults = defaults;
+    config.agents = agents;
+    modified = true;
+  }
+  if (defaults.reasoningDefault !== 'on') {
+    defaults.reasoningDefault = 'on';
     agents.defaults = defaults;
     config.agents = agents;
     modified = true;
@@ -2030,12 +2037,17 @@ function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>
     const nextCompat = { ...compat, ...PI_AI_OPENROUTER_REASONING_COMPAT };
     const hasThinkingLevelMap = JSON.stringify(entry.thinkingLevelMap)
       === JSON.stringify(PI_AI_OPENROUTER_THINKING_LEVEL_MAP);
-    if (JSON.stringify(compat) === JSON.stringify(nextCompat) && hasThinkingLevelMap) {
+    if (
+      entry.reasoning === true
+      && JSON.stringify(compat) === JSON.stringify(nextCompat)
+      && hasThinkingLevelMap
+    ) {
       return entry;
     }
     modified = true;
     return {
       ...entry,
+      reasoning: true,
       compat: nextCompat,
       thinkingLevelMap: PI_AI_OPENROUTER_THINKING_LEVEL_MAP,
     };
@@ -2071,12 +2083,17 @@ async function ensureJunFeiAIReasoningCompatInAgentModels(): Promise<void> {
       const nextCompat = { ...compat, ...PI_AI_OPENROUTER_REASONING_COMPAT };
       const hasThinkingLevelMap = JSON.stringify(entry.thinkingLevelMap)
         === JSON.stringify(PI_AI_OPENROUTER_THINKING_LEVEL_MAP);
-      if (JSON.stringify(compat) === JSON.stringify(nextCompat) && hasThinkingLevelMap) {
+      if (
+        entry.reasoning === true
+        && JSON.stringify(compat) === JSON.stringify(nextCompat)
+        && hasThinkingLevelMap
+      ) {
         return entry;
       }
       modified = true;
       return {
         ...entry,
+        reasoning: true,
         compat: nextCompat,
         thinkingLevelMap: PI_AI_OPENROUTER_THINKING_LEVEL_MAP,
       };
@@ -2694,6 +2711,7 @@ export async function setOpenClawDefaultModelWithOverride(
     };
     if (provider === JUNFEIAI_PROVIDER_ID) {
       defaults.thinkingDefault = 'xhigh';
+      defaults.reasoningDefault = 'on';
     }
     agents.defaults = defaults;
     config.agents = agents;
@@ -2987,6 +3005,25 @@ function ensureManagedHeartbeatIsolationInConfig(config: Record<string, unknown>
   return true;
 }
 
+export function ensureManagedMediaLimitInConfig(config: Record<string, unknown>): boolean {
+  const agents = (
+    config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+      ? { ...(config.agents as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const defaults = (
+    agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+      ? { ...(agents.defaults as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (defaults.mediaMaxMb !== undefined) return false;
+  defaults.mediaMaxMb = 16;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
 /** Keep every tool available while sending only a small, locally selected set
  * of schemas on each model call. Directory selection does not use embeddings. */
 function ensureManagedToolDirectoryInConfig(config: Record<string, unknown>): boolean {
@@ -3184,6 +3221,9 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
     if (ensureManagedHeartbeatIsolationInConfig(config)) {
+      modified = true;
+    }
+    if (ensureManagedMediaLimitInConfig(config)) {
       modified = true;
     }
     if (ensureManagedToolDirectoryInConfig(config)) {
@@ -3516,6 +3556,11 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     if (ensureManagedHeartbeatIsolationInConfig(config)) {
       modified = true;
       console.log('[sanitize] Isolated heartbeat runs from interactive transcripts and full chat context');
+    }
+
+    if (ensureManagedMediaLimitInConfig(config)) {
+      modified = true;
+      console.log('[sanitize] Defaulted generated media delivery limit to 16 MiB');
     }
 
     if (ensureManagedToolDirectoryInConfig(config)) {

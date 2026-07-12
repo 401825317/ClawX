@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, CircleAlert, CircleStop, Loader2, TerminalSquare } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronRight, CircleAlert, CircleStop, Loader2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
@@ -18,7 +18,7 @@ type RunProgressEntry =
       text: string;
       command?: string;
       status: TaskStep['status'];
-      generic?: boolean;
+      identity?: string;
     }
   | {
       id: string;
@@ -37,6 +37,18 @@ interface RunProgressCardProps {
 
 const NOISY_MESSAGE_LABELS = new Set(['gate', 'checkpoint']);
 const PROBLEM_STATUSES = new Set<TaskStep['status']>(['blocked', 'error', 'failed', 'aborted']);
+const MEANINGLESS_ACTION_TEXTS = new Set([
+  '已运行',
+  '运行完成',
+  '工具步骤已完成',
+  'ran',
+  'executed',
+  'tool step completed',
+  '実行済み',
+  'ツールの処理が完了しました',
+  'выполнено',
+  'шаг инструмента завершён',
+]);
 
 function normalizeText(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
@@ -71,6 +83,33 @@ function translateProgressEntryText(entry: ChatRuntimeProgressEntry, t: TFunctio
     tool: translateToolLabel(entry, t),
     defaultValue: entry.text,
   });
+}
+
+function translationKeyForStatus(status: TaskStep['status']): string {
+  if (status === 'running') return 'runtimeProgress.toolRunning';
+  if (status === 'aborted') return 'runtimeProgress.toolAborted';
+  if (status === 'blocked') return 'runtimeProgress.toolBlocked';
+  if (status === 'error' || status === 'failed') return 'runtimeProgress.toolFailed';
+  return 'runtimeProgress.toolCompleted';
+}
+
+function semanticActionText(entry: ChatRuntimeProgressEntry, t: TFunction): string {
+  const toolName = normalizeText(entry.toolName) ?? normalizeText(entry.toolLabel);
+  const command = normalizeText(entry.command);
+  if (entry.translationKey && toolName) return translateProgressEntryText(entry, t);
+  if (entry.translationKey && !entry.translationKey.startsWith('runtimeProgress.tool')) {
+    return translateProgressEntryText(entry, t);
+  }
+  if (toolName || command) {
+    const tool = toolName
+      ? translateToolLabel(entry, t)
+      : t('runtimeProgress.toolLabels.command');
+    const translationKey = entry.translationKey ?? translationKeyForStatus(entry.status ?? 'completed');
+    return t(translationKey, { ...entry.translationParams, tool, defaultValue: entry.text });
+  }
+  const text = entry.text.trim();
+  const normalizedText = text.toLowerCase().replace(/[。.!！:：]+$/gu, '');
+  return MEANINGLESS_ACTION_TEXTS.has(normalizedText) ? '' : text;
 }
 
 function truncateText(value: string, maxChars = 140): string {
@@ -126,26 +165,18 @@ function extractCommandPreview(step: TaskStep): string | undefined {
 
 function buildActionEntry(step: TaskStep, t: TFunction): RunProgressEntry {
   const command = extractCommandPreview(step);
-  const label = step.label.trim().toLowerCase();
-  let generic = false;
-  const text = (() => {
-    if (step.status === 'running') return t('runtimeProgress.executing');
-    if (step.status === 'aborted') return t('runtimeProgress.aborted');
-    if (step.status === 'blocked') return t('runtimeProgress.blocked');
-    if (step.status === 'error' || step.status === 'failed') return t('runtimeProgress.failed');
-    if (label === 'web_fetch' && command) return t('runtimeProgress.visited');
-    if (label === 'read' && command) return t('runtimeProgress.read');
-    if (label === 'edit' || label === 'apply_patch') return t('runtimeProgress.edited');
-    generic = true;
-    return t('runtimeProgress.ran');
-  })();
+  const toolName = canonicalToolName(step.label);
+  const fallback = humanizeToolName(step.label);
+  const tool = toolName
+    ? t(`runtimeProgress.toolLabels.${toolName}`, { defaultValue: fallback })
+    : fallback;
   return {
     id: `${step.id}:action`,
     kind: 'action',
-    text,
+    text: t(translationKeyForStatus(step.status), { tool }),
     command,
     status: step.status,
-    generic,
+    identity: `step:${step.id}`,
   };
 }
 
@@ -194,20 +225,25 @@ function buildRunProgressEntries(
       return {
         id: entry.id,
         kind: 'action',
-        text: sanitizeRuntimeDisplayText(translateProgressEntryText(entry, t)),
+        text: sanitizeRuntimeDisplayText(semanticActionText(entry, t)),
         command: entry.command ? sanitizeRuntimeDisplayText(entry.command) : undefined,
         status: entry.status ?? 'completed',
+        identity: entry.dedupeKey
+          ?? entry.toolCallId
+          ?? entry.stepId
+          ?? entry.taskId
+          ?? undefined,
       };
     });
     const normalizedLiveText = normalizeText(liveText);
-    if (!normalizedLiveText) return entries;
+    if (!normalizedLiveText) return dedupeProgressEntries(entries);
     const alreadyPresent = entries.some((entry) => normalizeText(entry.text) === normalizedLiveText);
-    if (alreadyPresent) return entries;
-    return [...entries, {
+    if (alreadyPresent) return dedupeProgressEntries(entries);
+    return dedupeProgressEntries([...entries, {
       id: 'live-text',
       kind: 'narration',
-      text: normalizedLiveText,
-    }];
+      text: sanitizeRuntimeDisplayText(normalizedLiveText),
+    }]);
   }
 
   const entries: RunProgressEntry[] = [];
@@ -240,20 +276,42 @@ function buildRunProgressEntries(
       entries.push({
         id: 'live-text',
         kind: 'narration',
-        text: normalizedLiveText,
+        text: sanitizeRuntimeDisplayText(normalizedLiveText),
       });
     }
   }
 
-  return entries;
+  return dedupeProgressEntries(entries);
 }
 
-function shouldRenderEntry(entry: RunProgressEntry): boolean {
-  if (entry.kind !== 'action') return true;
-  if (normalizeText(entry.command)) return true;
-  if (entry.status === 'running') return true;
-  if (PROBLEM_STATUSES.has(entry.status)) return true;
-  return !entry.generic && Boolean(normalizeText(entry.text));
+function dedupeProgressEntries(entries: RunProgressEntry[]): RunProgressEntry[] {
+  const result: RunProgressEntry[] = [];
+  const actionIndexes = new Map<string, number>();
+
+  for (const entry of entries) {
+    if (!normalizeText(entry.text)) continue;
+    if (entry.kind !== 'action') {
+      const previous = result.at(-1);
+      if (previous?.kind === entry.kind && normalizeText(previous.text) === normalizeText(entry.text)) continue;
+      result.push(entry);
+      continue;
+    }
+
+    const identity = normalizeText(entry.identity);
+    if (!identity) {
+      result.push(entry);
+      continue;
+    }
+    const existingIndex = actionIndexes.get(identity);
+    if (existingIndex == null) {
+      actionIndexes.set(identity, result.length);
+      result.push(entry);
+      continue;
+    }
+    result[existingIndex] = entry;
+  }
+
+  return result;
 }
 
 export function shouldUseRunProgressTranscript(
@@ -288,7 +346,7 @@ function problemTextClass(status: TaskStep['status']): string {
 
 export function RunProgressCard({ summary, status, steps, progressEntries, liveText }: RunProgressCardProps) {
   const { t } = useTranslation('chat');
-  const entries = buildRunProgressEntries(steps, progressEntries, liveText, t).filter(shouldRenderEntry);
+  const entries = buildRunProgressEntries(steps, progressEntries, liveText, t);
   if (entries.length === 0) return null;
 
   return (
@@ -296,20 +354,25 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
       data-testid="chat-run-progress"
       className="w-full py-0.5"
     >
-      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] leading-5 text-muted-foreground">
+      <div className="mb-2 flex items-center gap-1.5 text-[11px] leading-5 text-muted-foreground">
         <span className="shrink-0">
           <ActionStatusIcon status={status} />
         </span>
+        <span className="font-medium text-foreground/70">{t('runtimeProgress.title')}</span>
+        <span aria-hidden="true">·</span>
         <span className="truncate">{summary}</span>
       </div>
 
-      <div className="space-y-2">
+      <div className="relative ml-[7px] border-l border-border/70">
         {entries.map((entry) => {
           if (entry.kind === 'narration') {
             return (
-              <p key={entry.id} className="text-sm leading-6 text-foreground/90 dark:text-foreground/85">
-                {entry.text}
-              </p>
+              <div key={entry.id} className="relative pb-2.5 pl-5 last:pb-0">
+                <span className="absolute -left-[3px] top-[9px] h-1.5 w-1.5 rounded-full bg-muted-foreground/55 ring-4 ring-background" />
+                <p className="text-sm leading-6 text-foreground/90 dark:text-foreground/85">
+                  {entry.text}
+                </p>
+              </div>
             );
           }
 
@@ -317,9 +380,9 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
             return (
               <div
                 key={entry.id}
-                className={cn('flex items-start gap-1.5 text-xs', problemTextClass(entry.status))}
+                className={cn('relative flex items-start gap-1.5 pb-2.5 pl-5 text-xs last:pb-0', problemTextClass(entry.status))}
               >
-                <span className="mt-0.5 shrink-0">
+                <span className="absolute -left-[7px] top-0.5 shrink-0 bg-background">
                   <ProblemStatusIcon status={entry.status} />
                 </span>
                 <span className="min-w-0 break-words leading-5">{entry.text}</span>
@@ -331,34 +394,38 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
             <div
               key={entry.id}
               data-testid="chat-run-progress-action"
+              aria-current={entry.status === 'running' ? 'step' : undefined}
               className={cn(
-                'flex min-w-0 items-start gap-1.5 text-[11px] leading-5',
+                'relative min-w-0 pb-2.5 pl-5 text-xs leading-5 last:pb-0',
                 PROBLEM_STATUSES.has(entry.status)
                   ? problemTextClass(entry.status)
-                  : 'text-muted-foreground',
+                  : entry.status === 'running'
+                    ? 'text-foreground/90'
+                    : 'text-muted-foreground',
               )}
             >
-              <div className="mt-0.5 shrink-0">
+              <div className="absolute -left-[7px] top-0.5 shrink-0 bg-background">
                 {PROBLEM_STATUSES.has(entry.status) ? (
                   <ProblemStatusIcon status={entry.status} />
                 ) : entry.status === 'running' ? (
                   <Loader2 data-status-icon="running" className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <TerminalSquare data-status-icon="completed" className="h-3.5 w-3.5" />
+                  <CheckCircle2 data-status-icon="completed" className="h-3.5 w-3.5" />
                 )}
               </div>
-              <div className="min-w-0 space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span>{entry.text}</span>
-                  {entry.command ? (
-                    <code
-                      className="max-w-full break-all rounded bg-black/[0.045] px-1.5 py-0.5 font-mono text-[11px] leading-4 text-foreground/75 dark:bg-white/[0.08] dark:text-foreground/75"
-                      title={entry.command}
-                    >
+              <div className="min-w-0">
+                <div className="break-words">{entry.text}</div>
+                {entry.command ? (
+                  <details className="group/details mt-0.5">
+                    <summary className="flex w-fit cursor-pointer list-none items-center gap-0.5 text-[11px] text-muted-foreground/80 outline-none hover:text-foreground [&::-webkit-details-marker]:hidden">
+                      <ChevronRight className="h-3 w-3 transition-transform group-open/details:rotate-90" />
+                      {t('runtimeProgress.commandDetails')}
+                    </summary>
+                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all border-l border-border pl-2 font-mono text-[11px] leading-4 text-foreground/70">
                       {entry.command}
-                    </code>
-                  ) : null}
-                </div>
+                    </pre>
+                  </details>
+                ) : null}
               </div>
             </div>
           );

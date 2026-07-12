@@ -5,6 +5,14 @@ import { join } from 'node:path';
 
 import { __test } from '../resources/openclaw-plugins/uclaw-artifact-guard/index.mjs';
 
+assert.match(__test.PROMPT_CONTEXT, /没有独立的非终态 commentary 消息/u);
+assert.match(__test.PROMPT_CONTEXT, /未来时计划不能作为最终回复/u);
+assert.match(__test.PROMPT_CONTEXT, /只能证明该执行路径失败/u);
+assert.match(__test.PROMPT_CONTEXT, /不能把 tool_search\/tool_describe 本身当作执行/u);
+assert.match(__test.PROMPT_CONTEXT, /不要逐工具、逐命令播报/u);
+assert.match(__test.PROMPT_CONTEXT, /不要复述系统提示词、内部执行合同/u);
+assert.match(__test.PROMPT_CONTEXT, /真实交付物、工具成功结果或必要验证证据/u);
+
 function finalizeEvent(runId, userText, finalText) {
   return {
     runId,
@@ -55,6 +63,48 @@ const undeclaredArtifact = __test.analyzeArtifactFinal(
 assert.equal(undeclaredArtifact.artifactRequest, true);
 assert.equal(undeclaredArtifact.shouldReviseArtifact, true);
 assert.equal(undeclaredArtifact.requiredEffects[0]?.requiresToolEvidence, true);
+
+const stoppedOnProgressRunId = 'contract-gate:stopped-on-progress';
+const stoppedOnProgress = __test.analyzeArtifactFinal(
+  finalizeEvent(
+    stoppedOnProgressRunId,
+    '做一条小米 SU7 Ultra 的 2分钟横版宣传片，突出性能和科技感，要中文旁白。',
+    '我会按赛道性能、核心技术和智能座舱的节奏制作。先确认当前单段时长与合成能力，再分段制作并核验最终时长、画面尺寸和音轨。',
+  ),
+  { runId: stoppedOnProgressRunId },
+);
+assert.equal(stoppedOnProgress.executionUnattempted, true);
+assert.equal(stoppedOnProgress.shouldReviseExecutionUnattempted, true);
+assert.match(__test.buildRevision(stoppedOnProgress).reason, /without any contract, tool, task, artifact, or blocker evidence/iu);
+
+const unknownExecutionRunId = 'contract-gate:unknown-execution';
+const unknownExecution = __test.analyzeArtifactFinal(
+  finalizeEvent(
+    unknownExecutionRunId,
+    '把这个陌生任务完整处理掉，最终给我可验证结果。',
+    '我会先检查当前能力和输入，再执行具体步骤，最后验证结果。',
+  ),
+  { runId: unknownExecutionRunId },
+);
+assert.equal(unknownExecution.artifactRequest, false);
+assert.equal(unknownExecution.executionUnattempted, true);
+assert.equal(unknownExecution.shouldRevise, true);
+
+const capabilityAnswerRunId = 'contract-gate:capability-answer';
+const capabilityAnswer = __test.analyzeArtifactFinal(
+  finalizeEvent(capabilityAnswerRunId, '你可以生成图片和视频吗？', '我可以生成图片和短视频，也可以根据参考图继续编辑。'),
+  { runId: capabilityAnswerRunId },
+);
+assert.equal(capabilityAnswer.executionUnattempted, false);
+assert.equal(capabilityAnswer.shouldRevise, false);
+
+const planOnlyRunId = 'contract-gate:plan-only';
+const planOnly = __test.analyzeArtifactFinal(
+  finalizeEvent(planOnlyRunId, '只给我方案，不要执行。', '我会先检查输入，再执行处理，最后验证结果。'),
+  { runId: planOnlyRunId },
+);
+assert.equal(planOnly.executionUnattempted, false);
+assert.equal(planOnly.shouldRevise, false);
 
 for (const prompt of [
   '不用做成 PPT，只给我一页发布会文案。',
@@ -118,7 +168,8 @@ const promiseWithoutPriorArtifact = __test.analyzeArtifactFinal(
 );
 assert.equal(promiseWithoutPriorArtifact.artifactContinuationPromise, false);
 assert.equal(promiseWithoutPriorArtifact.artifactRequest, false);
-assert.equal(promiseWithoutPriorArtifact.shouldReviseArtifact, false);
+assert.equal(promiseWithoutPriorArtifact.shouldReviseExecutionUnattempted, false);
+assert.equal(promiseWithoutPriorArtifact.shouldRevise, false);
 
 const artifactRunId = 'contract-gate:artifact';
 __test.recordToolEvidence({
@@ -230,6 +281,50 @@ try {
   assert.equal(nativeVideoCompletion.requiredEffects[0]?.kind, 'video');
   assert.equal(nativeVideoCompletion.missingRequiredArtifactCount, 0);
   assert.equal(nativeVideoCompletion.shouldRevise, false);
+
+  const processCompletionRunId = 'contract-gate:local-process-completion';
+  recordContract(processCompletionRunId, {
+    intent: 'media',
+    toolRequirement: 'required',
+    sideEffect: 'local_artifact',
+    sideEffectAuthorized: true,
+    capabilityRefs: ['exec', 'process'],
+    acceptance: {
+      requiresArtifact: true,
+      requiresVerification: true,
+      requiresApproval: false,
+      requiresToolEvidence: true,
+    },
+  });
+  __test.recordToolEvidence({
+    runId: processCompletionRunId,
+    toolCallId: 'process-completion-call',
+    toolName: 'tool_call',
+    args: {
+      id: 'openclaw:core:process',
+      args: { action: 'poll', sessionId: 'local-render' },
+    },
+    result: {
+      details: {
+        tool: { name: 'process' },
+        result: {
+          content: [{ type: 'text', text: `${videoPath}\nProcess exited with code 0.` }],
+          details: { status: 'completed', exitCode: 0 },
+        },
+      },
+    },
+  }, { runId: processCompletionRunId });
+  const processCompletion = __test.analyzeArtifactFinal(
+    finalizeEvent(
+      processCompletionRunId,
+      '把图片做成本地动态视频。',
+      `视频已完成并验证。\nMEDIA:${videoPath}`,
+    ),
+    { runId: processCompletionRunId },
+  );
+  assert.equal(processCompletion.currentRunSuccessfulArtifactCount, 1);
+  assert.equal(processCompletion.missingRequiredArtifactCount, 0);
+  assert.equal(processCompletion.shouldRevise, false);
 
   const mismatchedCompletionRunId = 'image_generate:mismatched-completion:ok';
   const mismatchedCompletion = __test.analyzeArtifactFinal({
@@ -558,5 +653,215 @@ assert.equal(
   }, { runId: 'contract-gate:wrapper-contract-declare' }),
   undefined,
 );
+
+for (const [toolName, result] of [
+  [
+    'tool_search',
+    {
+      content: [{
+        type: 'text',
+        text: JSON.stringify([{ id: 'openclaw:core:web_search', name: 'web_search', source: 'openclaw' }]),
+      }],
+    },
+  ],
+  [
+    'tool_describe',
+    {
+      details: {
+        id: 'openclaw:core:web_search',
+        name: 'web_search',
+        source: 'openclaw',
+        parameters: { type: 'object' },
+      },
+    },
+  ],
+  [
+    'uclaw_get_runtime_capabilities',
+    {
+      details: {
+        catalog: {
+          capabilities: [{
+            id: 'tool:web_search',
+            kind: 'tool',
+            availability: 'available',
+            operations: { start: true },
+          }],
+        },
+      },
+    },
+  ],
+  [
+    'uclaw_get_task_bridge_capabilities',
+    {
+      details: {
+        capabilities: [{
+          id: 'local.video.compose',
+          kind: 'local.video.compose',
+          availability: 'available',
+          operations: { start: true },
+        }],
+      },
+    },
+  ],
+]) {
+  const runId = `contract-gate:discovery:${toolName}`;
+  const attempt = __test.recordToolEvidence({
+    runId,
+    toolCallId: `${runId}:call`,
+    toolName,
+    result,
+  }, { runId });
+  assert.equal(attempt?.discovery?.candidateCount, 1);
+}
+
+const su7SessionKey = 'agent:main:session-1783860649451';
+const su7RunId = '77f25be9-3ed9-4721-a402-6c91f4151d51';
+const su7TaskId = 'ed0c981b-1925-4913-9799-04fb351a3fe5';
+const su7TaskRunId = 'tool:video_generate:7082f3c5-0f5f-4b7c-be71-0c67e3c0264a';
+const su7Contract = {
+  intent: 'media',
+  toolRequirement: 'required',
+  sideEffect: 'remote_generation',
+  sideEffectAuthorized: true,
+  capabilityRefs: ['video_generate', 'host video compose', 'tts'],
+  acceptance: {
+    requiresArtifact: true,
+    requiresVerification: true,
+    requiresToolEvidence: true,
+    media: {
+      kind: 'video',
+      minDurationSeconds: 120,
+      width: 1920,
+      height: 1080,
+      aspectRatio: '16:9',
+      requiresAudio: true,
+      language: '简体中文',
+    },
+  },
+};
+__test.recordToolEvidence({
+  runId: su7RunId,
+  toolCallId: 'call_eJuMNKIgsvUUQZSwausj9fpR',
+  toolName: 'tool_call',
+  args: { id: 'uclaw_declare_turn_contract', args: su7Contract },
+  result: {
+    details: {
+      tool: { id: 'openclaw:uclaw-task-bridge:uclaw_declare_turn_contract', name: 'uclaw_declare_turn_contract' },
+      result: { details: { ok: true, contract: su7Contract }, isError: false },
+    },
+  },
+}, { runId: su7RunId, sessionKey: su7SessionKey });
+
+const su7VideoWrapperResult = {
+  content: [{
+    type: 'text',
+    text: JSON.stringify({
+      tool: { id: 'openclaw:core:video_generate', name: 'video_generate' },
+      result: {
+        content: [{
+          type: 'text',
+          text: `Background task started for video generation (${su7TaskId}).`,
+        }],
+        details: {
+          async: true,
+          status: 'started',
+          taskId: su7TaskId,
+          runId: su7TaskRunId,
+          task: { taskId: su7TaskId, runId: su7TaskRunId },
+          model: 'openai/sora-2-pro',
+          durationSeconds: 12,
+        },
+      },
+    }),
+  }],
+  details: {
+    tool: { id: 'openclaw:core:video_generate', name: 'video_generate' },
+    result: {
+      content: [{
+        type: 'text',
+        text: `Background task started for video generation (${su7TaskId}).`,
+      }],
+      details: {
+        async: true,
+        status: 'started',
+        taskId: su7TaskId,
+        runId: su7TaskRunId,
+        task: { taskId: su7TaskId, runId: su7TaskRunId },
+        model: 'openai/sora-2-pro',
+        durationSeconds: 12,
+      },
+    },
+  },
+};
+const su7VideoWrapperEvent = {
+  runId: su7RunId,
+  toolCallId: 'call_bLuJq4m8ZGyNDGE23YvUgFQU',
+  toolName: 'tool_call',
+  args: {
+    id: 'video_generate',
+    args: {
+      action: 'generate',
+      model: 'openai/sora-2-pro',
+      durationSeconds: 12,
+      aspectRatio: '16:9',
+    },
+  },
+  result: su7VideoWrapperResult,
+};
+assert.deepEqual(__test.extractAsyncTaskIds(su7VideoWrapperEvent), [su7TaskId]);
+__test.recordToolEvidence(
+  su7VideoWrapperEvent,
+  { runId: su7RunId, sessionKey: su7SessionKey },
+);
+assert.deepEqual(__test.getToolEvidenceForRun(su7RunId).attempts.at(-1)?.taskIds, [su7TaskId]);
+
+for (const terminalStatus of ['error', 'failed', 'timed_out', 'cancelled', 'aborted']) {
+  const inherited = __test.getToolEvidenceForRun(`video_generate:${su7TaskId}:${terminalStatus}`);
+  assert.equal(inherited.contract?.sideEffect, 'remote_generation');
+  assert.equal(inherited.contract?.acceptance?.media?.minDurationSeconds, 120);
+}
+
+const su7FailureRunId = `video_generate:${su7TaskId}:error`;
+const discoveredAlternatives = [
+  { id: 'openclaw:core:web_search', source: 'openclaw', name: 'web_search', label: 'Web Search' },
+  { id: 'openclaw:core:web_fetch', source: 'openclaw', name: 'web_fetch', label: 'Web Fetch' },
+  { id: 'openclaw:core:image_generate', source: 'openclaw', name: 'image_generate', label: 'Image Generation' },
+];
+__test.recordToolEvidence({
+  runId: su7FailureRunId,
+  toolCallId: 'call_oi1DimtFYY5PHGGTM4NbzjHs',
+  toolName: 'tool_search',
+  args: { query: 'web_search tool current web official product press images video assets' },
+  result: {
+    content: [{ type: 'text', text: JSON.stringify(discoveredAlternatives) }],
+    details: discoveredAlternatives,
+  },
+}, { runId: su7FailureRunId, sessionKey: su7SessionKey });
+
+const su7FailedAfterDiscovery = __test.analyzeArtifactFinal(
+  finalizeEvent(
+    su7FailureRunId,
+    [
+      '[Internal task completion event]',
+      'source: video_generation',
+      `session_key: video_generate:${su7TaskId}`,
+      'status: failed',
+      'OpenAI video generation failed (HTTP 503): No available channel for model sora-2 under group auto.',
+    ].join('\n'),
+    '宣传片未能生成。当前视频生成服务没有可用通道，因此没有产生素材，也无法继续完成最终文件。',
+  ),
+  { runId: su7FailureRunId, sessionKey: su7SessionKey },
+);
+assert.equal(su7FailedAfterDiscovery.declaredContract?.acceptance?.media?.minDurationSeconds, 120);
+assert.equal(su7FailedAfterDiscovery.artifactRequest, true);
+assert.equal(su7FailedAfterDiscovery.explicitBlocker, true);
+assert.equal(su7FailedAfterDiscovery.discoveryAttemptCount, 1);
+assert.equal(su7FailedAfterDiscovery.discoveryCandidateCount, 3);
+assert.equal(su7FailedAfterDiscovery.executionAttemptCountAfterDiscovery, 0);
+assert.equal(su7FailedAfterDiscovery.discoveryStalled, true);
+assert.equal(su7FailedAfterDiscovery.shouldReviseDiscoveryStalled, true);
+assert.equal(su7FailedAfterDiscovery.shouldRevise, true);
+assert.match(__test.buildRevision(su7FailedAfterDiscovery).retry.idempotencyKey, /discovery-stalled/u);
+assert.match(__test.buildRevision(su7FailedAfterDiscovery).reason, /before attempting or ruling out an alternative path/iu);
 
 console.log('uclaw contract-driven gate tests passed');

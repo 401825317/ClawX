@@ -1,4 +1,4 @@
-import type { RawMessage, ToolStatus } from '@/stores/chat';
+import type { ChatRuntimeRunState, RawMessage, ToolStatus } from '@/stores/chat';
 import {
   extractImages,
   extractToolUse,
@@ -12,6 +12,15 @@ const INTER_SESSION_IMAGE_TASK_RE = /sourceSession=image_generate:([0-9a-f-]{36}
 /** Match OpenClaw agents.defaults.imageGenerationModel.timeoutMs default. */
 export const IMAGE_GENERATION_TIMEOUT_MS = 900_000;
 const IMAGE_GENERATION_TIMEOUT_BUFFER_MS = 15_000;
+const TERMINAL_RUNTIME_TASK_STATUSES = new Set(['completed', 'error', 'partial']);
+const CANCELLATION_MARKERS = new Set(['aborted', 'cancelled', 'canceled']);
+
+type ImageGenerationRuntimeRun = Pick<ChatRuntimeRunState, 'tasks' | 'asyncTaskLedger'>;
+
+export interface ImageGenerationPendingOptions {
+  now?: number;
+  runtimeRun?: ImageGenerationRuntimeRun | null;
+}
 
 function toMs(timestamp: number | undefined): number | null {
   if (timestamp == null || !Number.isFinite(timestamp)) return null;
@@ -105,6 +114,46 @@ function collectCompletedAsyncImageTaskIds(segmentMessages: RawMessage[]): Set<s
   return completed;
 }
 
+function normalizeStatusMarker(value: unknown): string {
+  return typeof value === 'string'
+    ? value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+    : '';
+}
+
+function runtimeTaskIsTerminal(task: NonNullable<ImageGenerationRuntimeRun['tasks']>[number]): boolean {
+  if (TERMINAL_RUNTIME_TASK_STATUSES.has(normalizeStatusMarker(task.status))) return true;
+  return [task.sourceStatus, task.deliveryStatus, task.terminalOutcome]
+    .some((value) => CANCELLATION_MARKERS.has(normalizeStatusMarker(value)));
+}
+
+function runtimeRunHasTerminalImageTask(
+  runtimeRun: ImageGenerationRuntimeRun | null | undefined,
+  taskId: string,
+): boolean {
+  if (runtimeRun?.tasks?.some((task) => task.taskId === taskId && runtimeTaskIsTerminal(task))) {
+    return true;
+  }
+
+  return Object.values(runtimeRun?.asyncTaskLedger ?? {}).some((entry) => {
+    const entryMatchesTask = entry.taskId === taskId
+      || entry.id === taskId
+      || entry.id === `task:${taskId}`;
+    return entryMatchesTask && (entry.status === 'completed' || entry.status === 'error');
+  });
+}
+
+function resolvePendingOptions(
+  options: ImageGenerationPendingOptions | number,
+): Required<Pick<ImageGenerationPendingOptions, 'now'>> & Pick<ImageGenerationPendingOptions, 'runtimeRun'> {
+  if (typeof options === 'number') {
+    return { now: options, runtimeRun: null };
+  }
+  return {
+    now: options.now ?? Date.now(),
+    runtimeRun: options.runtimeRun ?? null,
+  };
+}
+
 function hasTimedOut(startedAtMs: number | null, now: number): boolean {
   if (startedAtMs == null) return false;
   return now - startedAtMs > IMAGE_GENERATION_TIMEOUT_MS + IMAGE_GENERATION_TIMEOUT_BUFFER_MS;
@@ -162,8 +211,9 @@ export function hasDeliveredImageGenerationResult(segmentMessages: RawMessage[])
 export function isImageGenerationPending(
   segmentMessages: RawMessage[],
   streamingTools: ToolStatus[] = [],
-  now = Date.now(),
+  options: ImageGenerationPendingOptions | number = {},
 ): boolean {
+  const { now, runtimeRun } = resolvePendingOptions(options);
   const toolCallIndex = findLastImageGenerateToolCallIndex(segmentMessages);
   const asyncStarts = collectAsyncImageTaskStarts(segmentMessages);
   const completedTaskIds = collectCompletedAsyncImageTaskIds(segmentMessages);
@@ -189,7 +239,10 @@ export function isImageGenerationPending(
 
   if (hasDeliveredImageGenerationResult(segmentMessages)) return false;
 
-  const hasOpenAsyncTask = asyncStarts.some((start) => !completedTaskIds.has(start.taskId));
+  const hasOpenAsyncTask = asyncStarts.some((start) => (
+    !completedTaskIds.has(start.taskId)
+    && !runtimeRunHasTerminalImageTask(runtimeRun, start.taskId)
+  ));
   if (asyncStarts.length > 0) {
     if (!hasOpenAsyncTask) return false;
   } else if (toolCallIndex >= 0 && hasTerminalReplyAfterToolCall(segmentMessages, toolCallIndex)) {

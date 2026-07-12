@@ -150,6 +150,7 @@ acceptance:
   - OpenClaw tool-result middleware can produce step, artifact, verification, and checkpoint runtime events before final reply generation.
   - Artifact delivery finals are revised when they lack a real artifact reference or a passed availability verification, while explicit blockers are allowed with a recoverable checkpoint.
   - Successful native image/video completion runs derive their required artifact kind from the structured completion run identity, never from noisy internal completion prose; a verified matching artifact finalizes without another model pass, while mismatched or unavailable artifacts remain blocked.
+  - An execution request cannot finish on a future-tense progress or plan reply when the current run has no declared contract, tool attempt, Host task, artifact, or concrete blocker evidence; the same Agent loop must resume into real execution without depending on request-specific keywords.
   - A follow-up run cannot end with a future-tense artifact promise when the transcript contains the prior artifact and the assistant itself admits that delivery is unfinished; it must continue execution or report concrete blocker evidence.
   - Completed/error/aborted runs pass through a completion gate that records artifact verification, failed steps, unfinished steps, and blocking checkpoints before clearing active run state.
   - OpenClaw can select native image/video tools from default chat without requiring mode selection; image/video mode defaults remain current-turn preferences only.

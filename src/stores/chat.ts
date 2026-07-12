@@ -67,7 +67,17 @@ import {
   type RawMessage,
   type ToolStatus,
 } from './chat/types';
-import { applyRuntimeEventToRuns, extractToolCompletedFiles, shouldFilterRuntimeExecutionGraphEvent } from './chat/runtime-graph';
+import {
+  applyCompletionWakeEvidenceEventToOwners,
+  applyRuntimeEventToRuns,
+  applyRuntimeTaskEventToOwners,
+  buildCompletionWakeTerminalTaskEvent,
+  extractToolCompletedFiles,
+  resolveCompletionWakeOwnerRunId,
+  settledRuntimeRunError,
+  settledRuntimeRunStatus,
+  shouldFilterRuntimeExecutionGraphEvent,
+} from './chat/runtime-graph';
 import { buildRuntimeProgressEvents } from './chat/runtime-progress';
 import {
   buildRuntimeArtifactEventsFromAttachedFiles,
@@ -708,7 +718,7 @@ function shouldDropMessageFromRuntimeReplay(message: RawMessage): boolean {
 
 function buildRuntimeReplayMessages(messages: RawMessage[]): RawMessage[] {
   return collapseSupersededCompositeHistoryReplies(
-    dedupeRedundantAssistantReplies(
+    dedupeAssistantRepliesForDisplay(
       enrichWithCachedImages(
         messages.filter((message, index) => (
           !shouldDropMessageFromRuntimeReplay(message) || shouldRetainAssistantHistorySummary(messages, index)
@@ -2775,9 +2785,21 @@ function applyRuntimeContractEvents(
   if (events.length === 0) return currentRuns;
   let nextRuns = currentRuns;
   for (const event of events) {
-    const previousRuns = nextRuns;
-    nextRuns = applyRuntimeEventToRuns(nextRuns, event);
-    if (nextRuns === previousRuns) continue;
+    const appliedEvents: ChatRuntimeEvent[] = [];
+    if (event.type === 'task.updated') {
+      const applied = applyRuntimeTaskEventToOwners(nextRuns, event);
+      nextRuns = applied.runtimeRuns;
+      appliedEvents.push(...applied.appliedEvents);
+    } else if (event.type === 'artifact.produced' || event.type === 'verification.completed') {
+      const applied = applyCompletionWakeEvidenceEventToOwners(nextRuns, event);
+      nextRuns = applied.runtimeRuns;
+      appliedEvents.push(...applied.appliedEvents);
+    } else {
+      const previousRuns = nextRuns;
+      nextRuns = applyRuntimeEventToRuns(nextRuns, event);
+      if (nextRuns !== previousRuns) appliedEvents.push(event);
+    }
+    if (appliedEvents.length === 0) continue;
     if (event.type === 'task.updated') {
       const ledgerStatus = event.task.status === 'completed'
         ? 'completed'
@@ -2794,10 +2816,12 @@ function applyRuntimeContractEvents(
         updatedAt: event.task.updatedAt ?? event.ts ?? Date.now(),
       }], event.sessionKey);
     }
-    if (event.type === 'progress.update') continue;
-    const progressEvents = buildRuntimeProgressEvents(nextRuns[event.runId], event);
-    for (const progressEvent of progressEvents) {
-      nextRuns = applyRuntimeEventToRuns(nextRuns, progressEvent);
+    for (const appliedEvent of appliedEvents) {
+      if (appliedEvent.type === 'progress.update') continue;
+      const progressEvents = buildRuntimeProgressEvents(nextRuns[appliedEvent.runId], appliedEvent);
+      for (const progressEvent of progressEvents) {
+        nextRuns = applyRuntimeEventToRuns(nextRuns, progressEvent);
+      }
     }
   }
   return nextRuns;
@@ -2815,14 +2839,29 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
   useChatStore.setState((state) => {
     const run = state.runtimeRuns[runId];
     if (!run || runtimeRunHasPendingAsyncTasks(run)) return {};
+    const terminalStatus = settledRuntimeRunStatus(run) ?? 'completed';
+    const terminalError = terminalStatus === 'error' ? settledRuntimeRunError(run) : undefined;
+    const ts = Date.now();
     const runtimeRuns = applyRuntimeContractEvents(
       state.runtimeRuns,
-      buildRuntimeCompletionGateEvents(run, {
-        runId,
-        sessionKey: withheld.sessionKey,
-        ts: Date.now(),
-        status: 'completed',
-      }),
+      [
+        ...buildRuntimeCompletionGateEvents(run, {
+          runId,
+          sessionKey: withheld.sessionKey,
+          ts,
+          status: terminalStatus,
+          ...(terminalError ? { error: terminalError } : {}),
+        }),
+        {
+          runId,
+          sessionKey: withheld.sessionKey,
+          ts,
+          type: 'run.ended',
+          status: terminalStatus,
+          ...(terminalError ? { error: terminalError } : {}),
+          stopReason: 'async_tasks_settled',
+        } satisfies ChatRuntimeEvent,
+      ],
     );
     const decision = runtimeRuns[runId]?.gateResult?.decision;
     if (!gateDecisionAllowsTerminalIdle(decision)) {
@@ -5753,16 +5792,58 @@ function suppressPrematureAssistantFinals(messages: RawMessage[], lastUserMessag
   });
 }
 
+function isDeduplicableAssistantFinal(message: RawMessage): boolean {
+  if (message.role !== 'assistant') return false;
+  if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
+  if (isTerminalAssistantErrorMessage(message)) return false;
+  if (!messageHasDeliverableContent(message)) return false;
+  return !isInternalMessage(message);
+}
+
 function normalizeAssistantReplyForDedupe(message: RawMessage): string {
-  if (!isTextOnlyAssistantFinal(message)) return '';
-  if (isInternalMessage(message)) return '';
+  if (!isDeduplicableAssistantFinal(message)) return '';
   return getMessageText(message.content)
-    .replace(/\bMEDIA:\s*\S+/giu, ' ')
+    .replace(/(?:^|\n)\s*MEDIA:[^\n]*/giu, ' ')
+    .replace(/\[media attached:[^\]]*\]/giu, ' ')
     .replace(/\s+/gu, ' ')
     .trim();
 }
 
+function getAssistantReplyArtifactFiles(message: RawMessage): AttachedFileMeta[] {
+  if (!isDeduplicableAssistantFinal(message)) return [];
+  return extractMessageArtifactFiles(message);
+}
+
+function attachmentGroupsOverlap(
+  left: AttachedFileMeta[],
+  right: AttachedFileMeta[],
+): boolean {
+  if (left.length === 0 || right.length === 0) return false;
+
+  const leftGroups = left.map((file) => new Set(getAttachedFileNormalizedIdentityKeys(file)));
+  const rightGroups = right.map((file) => new Set(getAttachedFileNormalizedIdentityKeys(file)));
+  const smaller = leftGroups.length <= rightGroups.length ? leftGroups : rightGroups;
+  const larger = leftGroups.length <= rightGroups.length ? rightGroups : leftGroups;
+  const matched = new Set<number>();
+
+  return smaller.every((group) => {
+    const matchIndex = larger.findIndex((candidate, index) => (
+      !matched.has(index) && [...group].some((key) => candidate.has(key))
+    ));
+    if (matchIndex < 0) return false;
+    matched.add(matchIndex);
+    return true;
+  });
+}
+
 function areRedundantAssistantReplies(left: RawMessage, right: RawMessage): boolean {
+  if (!isDeduplicableAssistantFinal(left) || !isDeduplicableAssistantFinal(right)) return false;
+  const leftArtifacts = getAssistantReplyArtifactFiles(left);
+  const rightArtifacts = getAssistantReplyArtifactFiles(right);
+  if (leftArtifacts.length > 0 && rightArtifacts.length > 0) {
+    return attachmentGroupsOverlap(leftArtifacts, rightArtifacts);
+  }
+
   const leftText = normalizeAssistantReplyForDedupe(left);
   const rightText = normalizeAssistantReplyForDedupe(right);
   if (!leftText || !rightText) return false;
@@ -5772,19 +5853,41 @@ function areRedundantAssistantReplies(left: RawMessage, right: RawMessage): bool
   return shorter.length >= 16 && longer.startsWith(shorter);
 }
 
+function attachedFileCompletenessScore(file: AttachedFileMeta): number {
+  let score = 0;
+  if (file.filePath?.trim()) score += 8;
+  if (file.gatewayUrl?.trim()) score += 8;
+  if (file.fileSize > 0) score += 4;
+  if (file.preview) score += 4;
+  if (file.width && file.width > 0) score += 1;
+  if (file.height && file.height > 0) score += 1;
+  if (file.mimeType && file.mimeType !== 'application/octet-stream') score += 1;
+  if (file.source && file.source !== 'message-ref') score += 1;
+  return score;
+}
+
+function mergeAssistantReplyAttachments(left: RawMessage, right: RawMessage): AttachedFileMeta[] {
+  return dedupeAttachedFiles([
+    ...getAssistantReplyArtifactFiles(right),
+    ...getAssistantReplyArtifactFiles(left),
+  ].sort((a, b) => attachedFileCompletenessScore(b) - attachedFileCompletenessScore(a)));
+}
+
 function mergeRedundantAssistantReplies(left: RawMessage, right: RawMessage): RawMessage {
   const leftText = normalizeAssistantReplyForDedupe(left);
   const rightText = normalizeAssistantReplyForDedupe(right);
   const keepRight = rightText.length >= leftText.length;
-  const base = keepRight ? right : left;
-  const attachedFiles = dedupeAttachedFiles([
-    ...(left._attachedFiles ?? []),
-    ...(right._attachedFiles ?? []),
-  ]);
-  return attachedFiles.length > 0 ? { ...base, _attachedFiles: attachedFiles } : base;
+  const contentSource = keepRight ? right : left;
+  const attachedFiles = mergeAssistantReplyAttachments(left, right);
+  const merged: RawMessage = {
+    ...left,
+    ...right,
+    content: contentSource.content,
+  };
+  return attachedFiles.length > 0 ? { ...merged, _attachedFiles: attachedFiles } : merged;
 }
 
-function dedupeRedundantAssistantReplies(messages: RawMessage[]): RawMessage[] {
+export function dedupeAssistantRepliesForDisplay(messages: RawMessage[]): RawMessage[] {
   const result: RawMessage[] = [];
   let lastAssistantIndexInTurn = -1;
 
@@ -5795,7 +5898,7 @@ function dedupeRedundantAssistantReplies(messages: RawMessage[]): RawMessage[] {
       continue;
     }
 
-    if (message.role !== 'assistant' || !isTextOnlyAssistantFinal(message)) {
+    if (message.role !== 'assistant' || !isDeduplicableAssistantFinal(message)) {
       result.push(message);
       continue;
     }
@@ -5804,10 +5907,13 @@ function dedupeRedundantAssistantReplies(messages: RawMessage[]): RawMessage[] {
       lastAssistantIndexInTurn >= 0
       && areRedundantAssistantReplies(result[lastAssistantIndexInTurn]!, message)
     ) {
-      result[lastAssistantIndexInTurn] = mergeRedundantAssistantReplies(
+      const merged = mergeRedundantAssistantReplies(
         result[lastAssistantIndexInTurn]!,
         message,
       );
+      result.splice(lastAssistantIndexInTurn, 1);
+      result.push(merged);
+      lastAssistantIndexInTurn = result.length - 1;
       continue;
     }
 
@@ -6018,20 +6124,83 @@ function inferHistoricalOpenRunState(
   };
 }
 
+function normalizeLocalAttachmentPath(value: string): string {
+  let normalized = trimPathTerminators(value.trim()).normalize('NFC');
+  if (/^file:\/\//i.test(normalized)) {
+    try {
+      const parsed = new URL(normalized);
+      normalized = decodeURIComponent(parsed.pathname);
+      if (parsed.hostname) normalized = `//${parsed.hostname}${normalized}`;
+      if (/^\/[A-Za-z]:\//u.test(normalized)) normalized = normalized.slice(1);
+    } catch {
+      normalized = normalized.replace(/^file:\/\//i, '');
+    }
+  }
+
+  normalized = normalized.replace(/\\/gu, '/');
+  const isUncPath = normalized.startsWith('//');
+  const hasRoot = normalized.startsWith('/');
+  const segments = normalized.split('/');
+  const compacted: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..' && compacted.length > 0 && compacted.at(-1) !== '..') {
+      compacted.pop();
+      continue;
+    }
+    compacted.push(segment);
+  }
+
+  normalized = `${isUncPath ? '//' : hasRoot ? '/' : ''}${compacted.join('/')}`;
+  if (/^[A-Za-z]:\//u.test(normalized)) normalized = normalized.toLowerCase();
+  return normalized;
+}
+
+function normalizeRemoteAttachmentUrl(value: string): string {
+  const trimmed = trimPathTerminators(value.trim()).normalize('NFC');
+  try {
+    const parsed = new URL(trimmed);
+    parsed.hash = '';
+    parsed.pathname = normalizeLocalAttachmentPath(parsed.pathname);
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+function normalizeAttachmentMetadataPart(value: string | number | null | undefined): string {
+  return String(value ?? '').trim().normalize('NFC').toLowerCase();
+}
+
+function getAttachedFileNormalizedIdentityKeys(file: AttachedFileMeta): string[] {
+  const keys: string[] = [];
+  const addLocation = (value: string | undefined) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    keys.push(looksLikeRemoteMediaUrl(trimmed)
+      ? `url:${normalizeRemoteAttachmentUrl(trimmed)}`
+      : `path:${normalizeLocalAttachmentPath(trimmed)}`);
+  };
+
+  addLocation(file.filePath);
+  addLocation(file.gatewayUrl);
+  if (keys.length === 0) {
+    keys.push([
+      'meta',
+      normalizeAttachmentMetadataPart(file.fileName),
+      normalizeAttachmentMetadataPart(file.mimeType),
+      normalizeAttachmentMetadataPart(file.fileSize),
+      normalizeAttachmentMetadataPart(file.preview),
+    ].join(':'));
+  }
+  return [...new Set(keys)];
+}
+
 function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
   const seen = new Set<string>();
   const next: AttachedFileMeta[] = [];
   for (const file of files) {
-    const keys: string[] = [];
-    const filePath = file.filePath?.trim();
-    if (filePath) {
-      keys.push(looksLikeRemoteMediaUrl(filePath) ? `url:${filePath}` : `path:${filePath}`);
-    }
-    const gatewayUrl = file.gatewayUrl?.trim();
-    if (gatewayUrl) keys.push(`url:${gatewayUrl}`);
-    if (keys.length === 0) {
-      keys.push(`meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview || ''}`);
-    }
+    const keys = getAttachedFileNormalizedIdentityKeys(file);
     if (keys.some((key) => seen.has(key))) continue;
     keys.forEach((key) => seen.add(key));
     next.push(file);
@@ -6049,11 +6218,7 @@ function hashStringForLocalMessageId(value: string): string {
 }
 
 function attachedFileKey(file: AttachedFileMeta): string {
-  const filePath = file.filePath?.trim();
-  if (filePath) return `path:${filePath}`;
-  const gatewayUrl = file.gatewayUrl?.trim();
-  if (gatewayUrl) return `gateway:${gatewayUrl}`;
-  return `meta:${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview || ''}`;
+  return getAttachedFileNormalizedIdentityKeys(file)[0]!;
 }
 
 function collectAssistantArtifactsForFallback(segmentMessages: RawMessage[]): AttachedFileMeta[] {
@@ -6252,6 +6417,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
               lastMessagePreview: s.lastMessagePreview ? String(s.lastMessagePreview) : undefined,
               thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
+              reasoningLevel: s.reasoningLevel ? String(s.reasoningLevel) : undefined,
               model: buildSessionModelRef(s.model, s.modelProvider),
               cwd: typeof s.cwd === 'string' && s.cwd.trim() ? s.cwd.trim() : undefined,
               updatedAt: parseSessionUpdatedAtMs(s.updatedAt),
@@ -6805,7 +6971,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
       };
 
-      const applyLoadedMessages = (rawMessages: RawMessage[], thinkingLevel: string | null) => {
+      const applyLoadedMessages = (
+        rawMessages: RawMessage[],
+        thinkingLevel: string | null,
+        reasoningLevel: string | null,
+      ) => {
       // Guard: if the user switched sessions while this async load was in
       // flight, discard the result to prevent overwriting the new session's
       // messages with stale data from the old session.
@@ -6816,7 +6986,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = filterHistoryMessagesForUi(messagesWithToolAttachments);
       // Restore file attachments for user/assistant messages (from cache + text patterns)
-      const enrichedMessages = dedupeRedundantAssistantReplies(enrichWithCachedImages(filteredMessages));
+      const enrichedMessages = dedupeAssistantRepliesForDisplay(enrichWithCachedImages(filteredMessages));
       const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
 
       // Preserve optimistic user messages independently from sending state.
@@ -6838,7 +7008,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       finalMessages = preserveOptimisticMediaResultMessages(get().messages, finalMessages);
       finalMessages = preserveExistingAttachmentPreviews(get().messages, finalMessages);
       finalMessages = collapseSupersededCompositeHistoryReplies(finalMessages);
-      finalMessages = dedupeRedundantAssistantReplies(finalMessages);
+      finalMessages = dedupeAssistantRepliesForDisplay(finalMessages);
 
       const currentSessionRow = get().sessions.find((session) => session.key === currentSessionKey);
       const backendSessionIdle = shouldTrustBackendSessionIdle(currentSessionRow, get().lastUserMessageAt);
@@ -6955,12 +7125,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         messages: finalMessages,
         thinkingLevel,
+        ...(reasoningLevel ? {
+          sessions: get().sessions.map((session) => (
+            session.key === currentSessionKey ? { ...session, reasoningLevel } : session
+          )),
+        } : {}),
         loading: false,
         runError: historyErrorIsTransient || terminalArtifactFallbackMessage
           ? null
           : normalizedTerminalAssistantErrorMessage,
         runtimeRuns: nextRuntimeRuns,
       });
+      scheduleWithheldFinalReevaluationForSession(currentSessionKey);
       for (const run of Object.values(nextRuntimeRuns)) {
         const artifacts = run.artifacts ?? [];
         if (run.sessionKey !== currentSessionKey || artifacts.length === 0) continue;
@@ -7273,7 +7449,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return false;
         }
 
-        const applied = applyLoadedMessages(fallbackMessages, null);
+        const applied = applyLoadedMessages(fallbackMessages, null, null);
         if (!applied) return false;
 
         localFallbackApplied = true;
@@ -7358,6 +7534,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (data) {
           let rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
           const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
+          const reasoningLevel = data.reasoningLevel ? String(data.reasoningLevel) : null;
           if (rawMessages.length === 0 && isCronSessionKey(currentSessionKey)) {
             rawMessages = fallbackMessages.length > 0
               ? fallbackMessages
@@ -7376,7 +7553,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             return;
           }
 
-          const applied = applyLoadedMessages(rawMessages, thinkingLevel);
+          const applied = applyLoadedMessages(rawMessages, thinkingLevel, reasoningLevel);
           if (applied) {
             if (isCurrentSession()) set({ hasMoreHistory: rawMessages.length >= HISTORY_PAGE_SIZE });
           }
@@ -7395,7 +7572,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           const appliedLateFallback = fallbackMessages.length > 0
-            ? applyLoadedMessages(fallbackMessages, null)
+            ? applyLoadedMessages(fallbackMessages, null, null)
             : await applyLocalFallbackMessages();
           if (appliedLateFallback) {
             if (fallbackMessages.length > 0) {
@@ -7492,7 +7669,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolImages = enrichWithToolResultFiles(rawMessages);
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = filterHistoryMessagesForUi(messagesWithToolAttachments);
-      const enrichedMessages = dedupeRedundantAssistantReplies(enrichWithCachedImages(filteredMessages));
+      const enrichedMessages = dedupeAssistantRepliesForDisplay(enrichWithCachedImages(filteredMessages));
       const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
       set((state) => ({
         messages: enrichedMessages,
@@ -8125,18 +8302,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Handle incoming chat events from Gateway ──
 
   handleChatEvent: (event: Record<string, unknown>) => {
-    const runId = String(event.runId || '');
-    if (wasLocallyAbortedRun(runId)) return;
+    const eventRunId = String(event.runId || '');
     const eventState = String(event.state || '');
     const rawEventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
     const initialState = get();
-    const eventSessionKey = inferSessionKeyForRun(initialState, runId || null, rawEventSessionKey);
+    const eventSessionKey = inferSessionKeyForRun(initialState, eventRunId || null, rawEventSessionKey);
     const { activeRunId, currentSessionKey } = initialState;
     const terminalEvent = eventState === 'final'
       || eventState === 'error'
       || eventState === 'aborted'
       || (event.message && typeof event.message === 'object'
         && getMessageStopReason(event.message as Record<string, unknown>) != null);
+    const completionWakeOwnerRunId = resolveCompletionWakeOwnerRunId({
+      runtimeRuns: initialState.runtimeRuns,
+      activeRunId,
+      eventRunId,
+      currentSessionKey,
+      eventSessionKey,
+    });
+    const correlatedCompletionWake = completionWakeOwnerRunId != null;
+    const runId = completionWakeOwnerRunId ?? eventRunId;
+    if (wasLocallyAbortedRun(eventRunId) || (runId !== eventRunId && wasLocallyAbortedRun(runId))) return;
     const asyncTaskEvidence = extractAsyncTaskEvidence(event.message ?? event);
     if (asyncTaskEvidence.length > 0) {
       const ownerRunId = runId || activeRunId;
@@ -8149,6 +8335,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
       }));
       scheduleWithheldFinalReevaluationForSession(eventSessionKey ?? currentSessionKey);
+    }
+    if (completionWakeOwnerRunId && terminalEvent) {
+      const stopReason = event.message && typeof event.message === 'object'
+        ? getMessageStopReason(event.message as Record<string, unknown>)
+        : null;
+      const completionWakeIsTerminal = eventState === 'final'
+        || eventState === 'error'
+        || eventState === 'aborted'
+        || (stopReason != null && !/^(?:tool[_-]?use|tooluse)$/iu.test(stopReason));
+      if (completionWakeIsTerminal) {
+        set((state) => {
+          const taskEvent = buildCompletionWakeTerminalTaskEvent({
+            runtimeRuns: state.runtimeRuns,
+            ownerRunId: completionWakeOwnerRunId,
+            eventRunId,
+            sessionKey: eventSessionKey ?? currentSessionKey,
+            state: eventState === 'error' ? 'error' : eventState === 'aborted' ? 'aborted' : 'final',
+            error: typeof event.errorMessage === 'string'
+              ? event.errorMessage
+              : event.message && typeof event.message === 'object'
+                ? getMessageErrorMessage(event.message as Record<string, unknown>) ?? undefined
+                : undefined,
+            ts: Date.now(),
+          });
+          return taskEvent
+            ? { runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, [taskEvent]) }
+            : {};
+        });
+      }
     }
 
     // Only process events for the current session (when sessionKey is present)
@@ -8469,6 +8684,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const hasPendingAsyncTask = runId
               ? runtimeRunHasPendingAsyncTasks(runtimeRuns[runId])
               : false;
+            const settledAsyncStatus = runId && correlatedCompletionWake && !hasPendingAsyncTask
+              ? settledRuntimeRunStatus(runtimeRuns[runId])
+              : null;
+            const terminalStatus = emptyTerminalFailure
+              ? 'error'
+              : settledAsyncStatus ?? 'completed';
+            const terminalError = emptyTerminalFailure
+              ?? (terminalStatus === 'error' ? settledRuntimeRunError(runtimeRuns[runId]) : undefined);
+            const shouldEndRuntimeRun = Boolean(
+              emptyTerminalFailure
+              || (correlatedCompletionWake && !hasPendingAsyncTask && settledAsyncStatus),
+            );
             if (runId && clearLifecycle && !toolOnly) {
               runtimeRuns = applyRuntimeContractEvents(
                 runtimeRuns,
@@ -8477,17 +8704,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     runId,
                     sessionKey: eventSessionKey ?? currentSessionKey,
                     ts: Date.now(),
-                    status: emptyTerminalFailure ? 'error' : 'completed',
-                    ...(emptyTerminalFailure ? { error: emptyTerminalFailure } : {}),
+                    status: terminalStatus,
+                    ...(terminalError ? { error: terminalError } : {}),
                   }),
-                  ...(emptyTerminalFailure ? [{
+                  ...(shouldEndRuntimeRun ? [{
                     runId,
                     sessionKey: eventSessionKey ?? currentSessionKey,
                     ts: Date.now(),
                     type: 'run.ended' as const,
-                    status: 'error' as const,
-                    error: emptyTerminalFailure,
-                    stopReason: 'empty_final_delivery',
+                    status: terminalStatus,
+                    ...(terminalError ? { error: terminalError } : {}),
+                    stopReason: emptyTerminalFailure
+                      ? 'empty_final_delivery'
+                      : 'async_completion_wake',
                   }] : []),
                 ],
               );
@@ -8583,8 +8812,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // delayed follow-up can pick up the Gateway's `assistant-media`
           // bubble that may still be getting written.
           const shouldIdleAfterGate = !terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision);
+          const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
           if (clearLifecycle && !toolOnly && shouldIdleAfterGate) {
-            const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
             clearHistoryPoll();
             beginSessionBackendIdleSettlement(sessionKeyAtFinal);
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
@@ -8635,6 +8864,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
               forceNextHistoryLoad(sessionKeyAtFinal);
               void get().loadHistory(true);
             }, 1500);
+          } else if (clearLifecycle && !toolOnly && correlatedCompletionWake) {
+            // Completion-wake finals have their MEDIA directives removed from
+            // the live chat payload. Keep the gate closed, but reload the
+            // authoritative transcript so the original run can recover the
+            // persisted artifact and verification evidence before reevaluation.
+            clearHistoryPoll();
+            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
+            [0, 500, 1500].forEach((delayMs) => {
+              setTimeout(() => {
+                if (get().currentSessionKey !== sessionKeyAtFinal) return;
+                forceNextHistoryLoad(sessionKeyAtFinal);
+                void get().loadHistory(true);
+              }, delayMs);
+            });
           }
         } else {
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
@@ -8861,6 +9104,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const nextPatch: Partial<ChatState> = { runtimeRuns };
     const appliesToActiveUi = matchesActiveRun || matchesActiveTurn || (activeRunId == null && matchesCurrentSession);
     let completedToolFiles: AttachedFileMeta[] = [];
+
+    if (eventForSession.type === 'artifact.produced' || eventForSession.type === 'verification.completed') {
+      scheduleWithheldFinalReevaluationForSession(eventSessionKey ?? currentSessionKey);
+    }
 
     if (eventForSession.type === 'artifact.produced') {
       scheduleRuntimeArtifactVerification(
