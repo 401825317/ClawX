@@ -15,10 +15,10 @@ export const JUNFEIAI_PROVIDER_NAME = '零至无限';
 export const JUNFEIAI_PRODUCTION_ORIGIN = productionOrigin;
 export const JUNFEIAI_DEFAULT_MODEL = 'smart-latest';
 export const JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID = 'openai';
-export const JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL = JUNFEIAI_DEFAULT_API_PROTOCOL;
+export const JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL = 'openai-responses';
 export const JUNFEIAI_PROVIDER_TIMEOUT_SECONDS = 300;
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'lingzhiwuxian-auth';
-export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 2;
+export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 3;
 
 export function normalizeJunFeiAIModelContextWindow(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0

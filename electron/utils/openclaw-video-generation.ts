@@ -22,6 +22,7 @@ import {
   CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
   CLAWX_OPENAI_VIDEO_MODEL_OPTIONS,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
+  isClawXOpenAiVideoModelRef,
   normalizeClawXOpenAiVideoModelId,
   orderedClawXOpenAiVideoModelIds,
   selectClawXOpenAiVideoModelIdForInput,
@@ -515,15 +516,20 @@ export async function runVideoGenerationTest(params: {
   }
 }
 
-export async function ensureManagedOpenAiVideoRelay(): Promise<void> {
+export async function ensureManagedOpenAiVideoRelay(
+  options: { preserveExisting?: boolean } = {},
+): Promise<void> {
   const config = await readOpenClawConfig();
+  const currentConfig = parseVideoGenerationModelConfig(config.agents?.defaults?.videoGenerationModel);
+  if (options.preserveExisting && currentConfig.primary && !isClawXOpenAiVideoModelRef(currentConfig.primary)) {
+    return;
+  }
   const current = await getVideoGenerationSettingsSnapshot();
   const model = current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
   const timeoutMs = current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
   const modelIds = orderedClawXOpenAiVideoModelIds(model);
   const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0] ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
   const relayState = readOpenAiCompatibleVideoRelayState(config as Record<string, unknown>);
-  const currentConfig = parseVideoGenerationModelConfig(config.agents?.defaults?.videoGenerationModel);
   const relayAlreadyConfigured = relayState.enabled
     && relayState.providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     && relayState.baseUrl.trim() === current.openAiRelay.baseUrl.trim()

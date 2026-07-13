@@ -537,28 +537,42 @@ export async function runImageGenerationTest(params: {
   }
 }
 
-export async function ensureManagedOpenAiImageRelay(): Promise<void> {
+export async function ensureManagedOpenAiImageRelay(
+  options: { preserveExisting?: boolean } = {},
+): Promise<void> {
   const config = await readOpenClawConfig();
+  const currentModel = await resolveImageGenerationPrimaryFromConfig(config.agents?.defaults?.imageGenerationModel);
+  if (options.preserveExisting && currentModel && !isManagedOpenAiImageModelRef(currentModel)) {
+    return;
+  }
   const current = await getImageGenerationSettingsSnapshot();
   const model = current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
   const managedModelRef = toManagedOpenAiImageModelRef(model);
   const timeoutMs = resolveChatImageTimeoutMs(current.config.timeoutMs);
   const relayState = readOpenAiCompatibleImageRelayState(config as Record<string, unknown>);
   const relayModel = resolveOpenAiImageRelayModelId(current.config, config as Record<string, unknown>);
+  const managedDefaults = await getManagedImageRelayDefaults();
+  const models = isRecord(config.models) ? config.models : {};
+  const providers = isRecord(models.providers) ? models.providers : {};
+  const relayProvider = isRecord(providers[CLAWX_OPENAI_IMAGE_PROVIDER_KEY])
+    ? providers[CLAWX_OPENAI_IMAGE_PROVIDER_KEY]
+    : {};
+  const relayApiKey = typeof relayProvider.apiKey === 'string' ? relayProvider.apiKey.trim() : '';
   const relayAlreadyConfigured = relayState.enabled
     && relayState.providerKey === CLAWX_OPENAI_IMAGE_PROVIDER_KEY
     && relayState.baseUrl.trim() === current.openAiRelay.baseUrl.trim()
-    && relayModel === model;
+    && relayModel === model
+    && (!managedDefaults.apiKey || relayApiKey === managedDefaults.apiKey);
 
   if (!relayAlreadyConfigured) {
     await applyOpenAiImageRelaySettings({
       enabled: true,
       baseUrl: current.openAiRelay.baseUrl,
+      apiKey: managedDefaults.apiKey || undefined,
       model,
     });
   }
 
-  const currentModel = await resolveImageGenerationPrimaryFromConfig(config.agents?.defaults?.imageGenerationModel);
   if (!isManagedOpenAiImageModelRef(currentModel) || currentModel !== managedModelRef || current.config.timeoutMs !== timeoutMs) {
     await setImageGenerationConfig({
       primary: managedModelRef,
