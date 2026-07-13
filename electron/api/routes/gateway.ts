@@ -7,6 +7,7 @@ import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../utils/store';
 import { logger } from '../../utils/logger';
 import { agentTurnPreferenceStore, normalizeUClawTurnPreferences } from '../../services/agent-runtime/turn-preference-store';
+import { ensureJunFeiAIProviderSeeded } from '../../services/junfeiai/junfeiai-service';
 import {
   buildOpenClawInlineImageAttachment,
   OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
@@ -278,6 +279,11 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/start' && req.method === 'POST') {
     try {
+      await ensureJunFeiAIProviderSeeded({
+        gatewayManager: ctx.gatewayManager,
+        syncRuntime: true,
+        syncRuntimeOnAuthChange: true,
+      });
       await ctx.gatewayManager.start({
         reason: 'api-gateway-start',
         source: '/api/gateway/start',
@@ -304,6 +310,11 @@ export async function handleGatewayRoutes(
 
   if (url.pathname === '/api/gateway/restart' && req.method === 'POST') {
     try {
+      await ensureJunFeiAIProviderSeeded({
+        gatewayManager: ctx.gatewayManager,
+        syncRuntime: true,
+        syncRuntimeOnAuthChange: true,
+      });
       await ctx.gatewayManager.restart({
         reason: 'api-gateway-restart',
         source: '/api/gateway/restart',

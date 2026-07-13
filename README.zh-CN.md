@@ -112,10 +112,10 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 本地产物执行采用“审查、修复、验证”闭环：由当前文本模型完成语义规划，主题、长度、媒体和交互等明确要求随实际选中的能力或持久任务一起保存。完成状态只由真实工具/任务终态、能力专属验证和规范会话交付共同决定；模型不再先调用元数据工具给自己的执行授权，也不能用声明证明已经完成。
 独立 PPT 请求现在走 `presentation-maker` 视觉工作室：agent 先做叙事、素材和逐页构图，再由 `create_designed_pptx_file` 用 PptxGenJS 自由画布写入图片、图表、表格、形状和文本。五套内置语义主题只保留给 `create_pptx_file` 与迁移前任务恢复做基础兜底，不再冒充高设计主链路。
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
-零至无限托管安装可在提供商设置中显式把旧 `lingzhiwuxian/*` 聊天引用迁移为 `openai/*`，改用 OpenClaw 原生 Responses 适配器。迁移会保留旧 provider 作为兼容路径，继续使用 `xhigh` 推理和现有 Agent/持久任务运行时；只有 `/responses` 在尚未开始输出时返回 404，才会回退一次 Chat Completions。
+零至无限托管安装会在启动时把旧 `lingzhiwuxian/*` 聊天引用自动迁移为 `openai/*`，改用 OpenClaw 原生 Responses 适配器；如果检测到无法确认归属的个人 OpenAI 配置，则不会覆盖，并保留提供商设置中的处理入口。迁移会保留旧 provider 作为兼容路径，继续使用 `xhigh` 推理和现有 Agent/持久任务运行时；只有 `/responses` 在尚未开始输出时返回 404，才会回退一次 Chat Completions。
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
-聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物偏好，不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决，也不无条件唤醒模型生成“完成播报”。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。
+聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物的结构化媒体默认值；只有 Agent 已选择原生媒体工具时才会补到工具参数中，绝不会拼接进模型提示词。模式不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决，也不无条件唤醒模型生成“完成播报”。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。
 图片格式、背景和兼容的压缩参数会真实透传给图片 provider；用户未自定义时，托管安装的生成媒体交付上限默认为 16 MiB。若生成结果仍超过上限，UClaw 会在保存前自动转码并逐级压缩，不再丢弃 provider 已成功生成的图片。即使内部完成消息被隔离，任务账本中的成功、失败、部分完成或取消终态也会立即关闭等待状态和计时。
 
 桌面观察当前只支持截图；原生桌面动作驱动尚未实现，本版本也不宣称 Computer Use 可以操作 UClaw 窗口。内置 Blender runtime 接收声明式 SceneSpec，在不加载启动扩展的本地 Blender 中渲染，并校验 `.blend`、`.glb`、预览图和 manifest 后再投递到会话。Blender 是可选的本地依赖，平台或可执行文件不可用时会明确返回能力状态，不会把未产出当作完成；三维预览只会在打开兼容模型文件时按需加载，不增加普通聊天路径的负担。

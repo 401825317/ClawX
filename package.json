@@ -3,11 +3,13 @@
   "version": "0.7.4",
   "pnpm": {
     "onlyBuiltDependencies": [
+      "@google/genai",
       "@whiskeysockets/baileys",
       "electron",
       "esbuild",
       "koffi",
       "node-llama-cpp",
+      "openclaw",
       "protobufjs",
       "sharp"
     ],

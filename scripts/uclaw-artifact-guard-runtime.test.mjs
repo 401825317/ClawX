@@ -99,7 +99,22 @@ const ordinaryPromptContext = await beforePromptBuild({
   userMessage: '解释一下 PPT 是什么，不要生成文件。',
   messages: [{ role: 'user', content: '解释一下 PPT 是什么，不要生成文件。' }],
 }, { runId: 'prompt:ordinary' });
-assert.doesNotMatch(ordinaryPromptContext?.appendSystemContext ?? '', /UClaw 产物与外部操作规则/u);
+assert.equal(ordinaryPromptContext, undefined);
+
+const mediaDefaultsEvent = {
+  runId: 'prompt:media',
+  toolName: 'image_generate',
+  params: { prompt: 'test' },
+};
+__test.cacheTurnPreferences(mediaDefaultsEvent, { runId: 'prompt:media' }, {
+  mode: 'image',
+  image: { model: 'gpt-image-2', size: '1024x1024', quality: 'high' },
+});
+const mediaDefaults = __test.applyTurnMediaDefaults(mediaDefaultsEvent, { runId: 'prompt:media' });
+assert.deepEqual(mediaDefaults, {
+  params: { prompt: 'test', model: 'gpt-image-2', size: '1024x1024', quality: 'high' },
+  appliedKeys: ['model', 'size', 'quality'],
+});
 
 const beforeToolCall = lifecycleHooks.get('before_tool_call');
 assert.equal(typeof beforeToolCall, 'function');

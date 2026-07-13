@@ -12,6 +12,8 @@ import {
   isManagedOpenAiChatMigrated,
   syncManagedOpenAiChatAfterRelayRefresh,
 } from '../providers/openai-chat-migration';
+import { ensureManagedOpenAiImageRelay } from '../../utils/openclaw-image-generation';
+import { ensureManagedOpenAiVideoRelay } from '../../utils/openclaw-video-generation';
 import { removeProviderKeyFromOpenClaw } from '../../utils/openclaw-auth';
 import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
 import {
@@ -1569,6 +1571,14 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       await syncManagedOpenAiChatAfterRelayRefresh(account, apiKey, runtimeSyncGatewayManager);
     } else if ((defaultProviderChanged || options.syncRuntime === true) && !shouldClearRuntimeKey) {
       await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, runtimeSyncGatewayManager);
+    }
+    if (!shouldClearRuntimeKey) {
+      try {
+        await ensureManagedOpenAiImageRelay();
+        await ensureManagedOpenAiVideoRelay();
+      } catch (error) {
+        logger.warn('[junfeiai] Failed to sync managed media relay runtime config:', error);
+      }
     }
   }
   if (shouldApplyRuntimeAuthImmediately) {

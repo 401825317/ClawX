@@ -39,6 +39,7 @@ import {
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_ID,
+  JUNFEIAI_RUNTIME_CONTRACT_VERSION,
   getJunFeiAIOrigin,
   getJunFeiAIProviderBaseUrl,
 } from '../../utils/junfeiai-distribution';
@@ -59,6 +60,12 @@ export interface OpenAiChatMigrationResult {
   protocol: string;
 }
 
+export type OpenAiChatStartupMigrationResult =
+  | { status: 'already-migrated' }
+  | { status: 'migrated'; result: OpenAiChatMigrationResult }
+  | { status: 'skipped-conflict'; error: string }
+  | { status: 'failed'; error: string };
+
 type PreparedJsonWrite = {
   path: string;
   original: string | null;
@@ -74,13 +81,18 @@ function normalizeBaseUrl(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
 }
 
-function isManagedOpenAiAccount(account: ProviderAccount | null): boolean {
+export function isManagedOpenAiAccountForMigration(account: ProviderAccount | null): boolean {
+  const metadata = isRecord(account?.metadata) ? account.metadata : {};
   return Boolean(
     account
     && account.id === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
     && account.vendorId === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
     && account.apiProtocol === JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL
-    && normalizeBaseUrl(account.baseUrl) === normalizeBaseUrl(getJunFeiAIProviderBaseUrl()),
+    && (
+      metadata.managedTransport === JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL
+      || typeof metadata.managedRuntimeContractVersion === 'number'
+      || normalizeBaseUrl(account.baseUrl) === normalizeBaseUrl(getJunFeiAIProviderBaseUrl())
+    ),
   );
 }
 
@@ -238,8 +250,11 @@ async function preparePersistedModelRefWrites(): Promise<PreparedJsonWrite[]> {
 
 async function assertNoPersonalOpenAiConflict(): Promise<void> {
   const account = await getProviderAccount(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
-  if (account && !isManagedOpenAiAccount(account)) {
+  if (account && !isManagedOpenAiAccountForMigration(account)) {
     throw new Error('managed_openai_account_conflict: an existing personal OpenAI account uses the reserved provider id');
+  }
+  if (account && isManagedOpenAiAccountForMigration(account)) {
+    return;
   }
 
   const document = await readJsonStrict(getOpenClawConfigPath(), true);
@@ -276,10 +291,11 @@ function normalizeManagedOpenAiAccount(
     metadata: {
       ...(source?.metadata ?? {}),
       ...(existing?.metadata ?? {}),
-      resourceUrl: source?.metadata?.resourceUrl || existing?.metadata?.resourceUrl || getJunFeiAIOrigin(),
+      resourceUrl: getJunFeiAIOrigin(),
       managedDefaultModel: source?.metadata?.managedDefaultModel || existing?.metadata?.managedDefaultModel || model,
       managedAllowedModels: source?.metadata?.managedAllowedModels || existing?.metadata?.managedAllowedModels || [model],
       managedTransport: JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
+      managedRuntimeContractVersion: JUNFEIAI_RUNTIME_CONTRACT_VERSION,
     },
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -323,7 +339,7 @@ export async function isManagedOpenAiChatMigrated(): Promise<boolean> {
   const store = await getClawXProviderStore();
   if (store.get(MIGRATION_FLAG_KEY) !== true) return false;
   const account = await getProviderAccount(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
-  if (!isManagedOpenAiAccount(account)) return false;
+  if (!isManagedOpenAiAccountForMigration(account)) return false;
 
   const document = await readJsonStrict(getOpenClawConfigPath(), true);
   const models = document && isRecord(document.data.models) ? document.data.models : {};
@@ -337,10 +353,34 @@ export async function isManagedOpenAiChatMigrated(): Promise<boolean> {
   return Boolean(
     runtimeOpenAi
     && runtimeOpenAi.api === JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL
-    && normalizeBaseUrl(runtimeOpenAi.baseUrl) === normalizeBaseUrl(getJunFeiAIProviderBaseUrl())
     && typeof model.primary === 'string'
     && model.primary.startsWith(`${JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID}/`),
   );
+}
+
+/**
+ * Runs the managed Responses migration without surfacing migration failures to
+ * the application startup flow or taking ownership of Gateway/app restarts.
+ */
+export async function autoMigrateManagedChatToOpenAiOnStartup(): Promise<OpenAiChatStartupMigrationResult> {
+  try {
+    if (await isManagedOpenAiChatMigrated()) {
+      return { status: 'already-migrated' };
+    }
+    return {
+      status: 'migrated',
+      result: await migrateManagedChatToOpenAi(),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (
+      message.includes('managed_openai_account_conflict')
+      || message.includes('managed_openai_runtime_conflict')
+    ) {
+      return { status: 'skipped-conflict', error: message };
+    }
+    return { status: 'failed', error: message };
+  }
 }
 
 export async function syncManagedOpenAiChatAfterRelayRefresh(

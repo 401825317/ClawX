@@ -61,6 +61,7 @@ import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ensureJunFeiAIProviderSeeded, getJunFeiAILocalStatus, isJunFeiAISeedReady } from '../services/junfeiai/junfeiai-service';
+import { autoMigrateManagedChatToOpenAiOnStartup } from '../services/providers/openai-chat-migration';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
@@ -81,6 +82,52 @@ function isJunFeiAILocalStatusReadyForGateway(status: JunFeiAILocalStatus): bool
     && Boolean(status.hasAuthToken)
     && Boolean(status.hasRelayToken)
     && status.activationRequired !== true;
+}
+
+/** Applies the managed Responses migration and records a non-blocking startup result. */
+async function runManagedOpenAiStartupMigration(): Promise<void> {
+  const migration = await autoMigrateManagedChatToOpenAiOnStartup();
+  if (migration.status === 'already-migrated') {
+    logger.debug('[provider-migration] Managed OpenAI Responses startup migration already complete');
+    return;
+  }
+  if (migration.status === 'migrated') {
+    logger.info('[provider-migration] Managed OpenAI Responses startup migration complete', {
+      filesUpdated: migration.result.filesUpdated,
+      refsRewritten: migration.result.refsRewritten,
+    });
+    return;
+  }
+  if (migration.status === 'skipped-conflict') {
+    logger.warn('[provider-migration] Managed OpenAI Responses startup migration skipped because the OpenAI provider ownership is ambiguous:', migration.error);
+    return;
+  }
+  logger.warn('[provider-migration] Managed OpenAI Responses startup migration failed; keeping the legacy provider active:', migration.error);
+}
+
+// Gateway startup is the last safe point to repair OpenClaw runtime config
+// before the runtime process reads ~/.openclaw/openclaw.json.
+async function syncProviderRuntimeBeforeGatewayStart(
+  gatewayManager: GatewayManager,
+): Promise<boolean> {
+  if (!isJunFeiAIManagedDistribution()) {
+    await syncAllProviderAuthToRuntime();
+    return true;
+  }
+
+  const seed = await ensureJunFeiAIProviderSeeded({
+    gatewayManager,
+    syncRuntime: true,
+    syncRuntimeOnAuthChange: true,
+  });
+  if (!isJunFeiAISeedReady(seed)) {
+    logger.info(
+      `Gateway start deferred until JunFeiAI runtime config is ready; authToken=${seed.hasAuthToken ? 'present' : 'missing'} relayToken=${seed.hasRelayToken ? 'present' : 'missing'} activation=${seed.activationRequired ? 'required' : 'ready'}`,
+    );
+    return false;
+  }
+  await runManagedOpenAiStartupMigration();
+  return true;
 }
 
 function resolveLegacyUserDataPath(): string {
@@ -623,13 +670,15 @@ async function initialize(): Promise<void> {
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
   if (!isE2EMode && gatewayAutoStart && managedProviderReadyForGateway) {
     try {
-      await syncAllProviderAuthToRuntime();
-      logger.debug('Auto-starting Gateway...');
-      await gatewayManager.start({
-        reason: 'app-auto-start',
-        source: 'main-startup',
-      });
-      logger.info('Gateway auto-start succeeded');
+      const runtimeReady = await syncProviderRuntimeBeforeGatewayStart(gatewayManager);
+      if (runtimeReady) {
+        logger.debug('Auto-starting Gateway...');
+        await gatewayManager.start({
+          reason: 'app-auto-start',
+          source: 'main-startup',
+        });
+        logger.info('Gateway auto-start succeeded');
+      }
     } catch (error) {
       logger.error('Gateway auto-start failed:', error);
       mainWindow?.webContents.send('gateway:error', String(error));
@@ -654,19 +703,24 @@ async function initialize(): Promise<void> {
       logger.info(
         `JunFeiAI provider verified from ${seed.source}; auth=${seed.authValid ? 'valid' : 'missing'} relayToken=${seed.hasRelayToken ? 'present' : 'missing'} activation=${seed.activationRequired ? 'required' : 'ready'}`,
       );
+      if (isJunFeiAISeedReady(seed)) {
+        await runManagedOpenAiStartupMigration();
+      }
       if (
         gatewayAutoStart
         && isJunFeiAISeedReady(seed)
         && gatewayManager.getStatus().state === 'stopped'
       ) {
         try {
-          await syncAllProviderAuthToRuntime();
-          logger.debug('Auto-starting Gateway after JunFeiAI background verification...');
-          await gatewayManager.start({
-            reason: 'junfeiai-background-verification',
-            source: 'main-startup',
-          });
-          logger.info('Gateway auto-start after JunFeiAI verification succeeded');
+          const runtimeReady = await syncProviderRuntimeBeforeGatewayStart(gatewayManager);
+          if (runtimeReady) {
+            logger.debug('Auto-starting Gateway after JunFeiAI background verification...');
+            await gatewayManager.start({
+              reason: 'junfeiai-background-verification',
+              source: 'main-startup',
+            });
+            logger.info('Gateway auto-start after JunFeiAI verification succeeded');
+          }
         } catch (error) {
           logger.error('Gateway auto-start after JunFeiAI verification failed:', error);
           mainWindow?.webContents.send('gateway:error', String(error));

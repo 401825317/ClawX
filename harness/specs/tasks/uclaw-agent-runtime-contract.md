@@ -95,7 +95,8 @@ requiredTests:
   - pnpm run comms:compare
 acceptance:
   - OpenClaw owns semantic intent, tool selection, decomposition, dependency ordering, retries, subagent use, and session continuation for fresh turns.
-  - UClaw mode controls provide current-turn preferences only; they cannot force or suppress a capability independently of the Agent loop.
+  - UClaw mode controls provide current-turn media defaults only; they cannot force or suppress a capability independently of the Agent loop.
+  - The artifact guard never injects UClaw reply rules, artifact instructions, or UI preferences into the model prompt; it only applies matching UI media defaults after the Agent selects a native media tool.
   - The artifact guard has no model-callable declaration tool, no natural-language authorization cache, and no semantic retry policy.
   - The artifact guard validates only deterministic facts such as parameter bounds, staged media ownership, artifact references, readable non-empty local files, and provider result evidence.
   - Host capability descriptors declare required artifact kinds, minimum counts, and required verification kinds.

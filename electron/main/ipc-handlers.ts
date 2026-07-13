@@ -87,6 +87,7 @@ import {
   syncSavedProviderToRuntime,
   syncUpdatedProviderToRuntime,
 } from '../services/providers/provider-runtime-sync';
+import { ensureJunFeiAIProviderSeeded } from '../services/junfeiai/junfeiai-service';
 import { validateApiKeyWithProvider } from '../services/providers/provider-validation';
 import { appUpdater } from './updater';
 import { GatewayRpcBackpressure } from '../gateway/rpc-backpressure';
@@ -1348,6 +1349,11 @@ function registerGatewayHandlers(
   // Start Gateway
   ipcMain.handle('gateway:start', async () => {
     try {
+      await ensureJunFeiAIProviderSeeded({
+        gatewayManager,
+        syncRuntime: true,
+        syncRuntimeOnAuthChange: true,
+      });
       await gatewayManager.start({
         reason: 'ipc-gateway-start',
         source: 'gateway:start',
@@ -1374,6 +1380,11 @@ function registerGatewayHandlers(
   // Restart Gateway
   ipcMain.handle('gateway:restart', async () => {
     try {
+      await ensureJunFeiAIProviderSeeded({
+        gatewayManager,
+        syncRuntime: true,
+        syncRuntimeOnAuthChange: true,
+      });
       await gatewayManager.restart({
         reason: 'ipc-gateway-restart',
         source: 'gateway:restart',
