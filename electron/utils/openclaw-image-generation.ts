@@ -26,6 +26,10 @@ import {
 } from './openclaw-image-relay-constants';
 import { getJunFeiAIDefaultBaseUrl, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
 import { getProviderSecret } from '../services/secrets/secret-store';
+import {
+  JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS,
+  JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS,
+} from '../../shared/junfeiai-endpoints';
 
 export interface ImageGenerationModelConfig {
   primary: string | null;
@@ -107,10 +111,10 @@ export interface ImageGenerationInputImageRef {
 const DEFAULT_TEST_PROMPT = 'A small red circle on a white background, minimal flat illustration.';
 /** Some relays (e.g. gpt-image-2) reject 512×512 as below minimum pixel budget. */
 const DEFAULT_TEST_IMAGE_SIZE = '1024x1024';
-const DEFAULT_TEST_TIMEOUT_MS = 30 * 60 * 1000;
-export const IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_TEST_TIMEOUT_MS = JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS;
+export const IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS = JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS;
 /** Cap UI test duration so Models page does not wait on multi-minute config timeouts. */
-export const IMAGE_GEN_UI_TEST_MAX_TIMEOUT_MS = 90_000;
+export const IMAGE_GEN_UI_TEST_MAX_TIMEOUT_MS = JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS;
 
 type AgentModelConfigShape = {
   primary?: string;
@@ -151,8 +155,8 @@ export function toManagedOpenAiImageModelRef(
   return `${CLAWX_OPENAI_IMAGE_PROVIDER_KEY}/${extractImageModelId(raw, fallbackModel)}`;
 }
 
-export function resolveChatImageTimeoutMs(timeoutMs: number | null | undefined): number {
-  return Math.max(timeoutMs ?? IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS, IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS);
+export function resolveChatImageTimeoutMs(_timeoutMs: number | null | undefined): number {
+  return IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS;
 }
 
 function normalizeInputImageRefs(raw: ImageGenerationInputImageRef[] | undefined): ImageGenerationInputImageRef[] {
@@ -291,7 +295,7 @@ export async function setImageGenerationConfig(
     const writeValue = buildImageGenerationModelConfigWrite({
       primary: next.primary,
       fallbacks: [...new Set(next.fallbacks.map((ref) => ref.trim()).filter(Boolean))],
-      timeoutMs: next.timeoutMs,
+      timeoutMs: IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS,
     });
 
     if (writeValue) {
@@ -500,7 +504,7 @@ export async function runImageGenerationTest(params: {
   const agentDir = resolveAgentDirForTest(agentId, snapshot);
   const prompt = params.prompt?.trim() || DEFAULT_TEST_PROMPT;
   const generateTimeoutMs = Math.min(
-    config.timeoutMs ?? DEFAULT_TEST_TIMEOUT_MS,
+    DEFAULT_TEST_TIMEOUT_MS,
     IMAGE_GEN_UI_TEST_MAX_TIMEOUT_MS,
   );
   const startedAt = Date.now();
@@ -548,7 +552,7 @@ export async function ensureManagedOpenAiImageRelay(
   const current = await getImageGenerationSettingsSnapshot();
   const model = current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
   const managedModelRef = toManagedOpenAiImageModelRef(model);
-  const timeoutMs = resolveChatImageTimeoutMs(current.config.timeoutMs);
+  const timeoutMs = IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS;
   const relayState = readOpenAiCompatibleImageRelayState(config as Record<string, unknown>);
   const relayModel = resolveOpenAiImageRelayModelId(current.config, config as Record<string, unknown>);
   const managedDefaults = await getManagedImageRelayDefaults();

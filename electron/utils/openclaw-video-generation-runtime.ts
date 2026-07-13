@@ -4,6 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS } from '../../shared/junfeiai-endpoints';
 import { proxyAwareFetch } from './proxy-fetch';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 import {
@@ -95,7 +96,7 @@ type DirectVideoTaskPayload = {
 const OPENCLAW_VIDEO_GENERATION_RUNTIME = 'openclaw/plugin-sdk/video-generation-runtime';
 const OPENCLAW_MEDIA_STORE = 'openclaw/plugin-sdk/media-store';
 const OFFICIAL_OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
-const DIRECT_POLL_INTERVAL_MS = 2500;
+const DIRECT_POLL_INTERVAL_MS = JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS;
 
 let videoRuntimeModule: VideoGenerationRuntimeModule | null = null;
 let mediaStoreModule: MediaStoreModule | null = null;

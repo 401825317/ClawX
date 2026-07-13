@@ -25,6 +25,7 @@ import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-loc
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
+import { patchOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
 import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
 import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
@@ -1215,6 +1216,13 @@ function patchBundledRuntime(outputDir) {
   });
   if (nativeMediaCancellationPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${nativeMediaCancellationPatch.patchedFiles} native media cancellation runtime file(s)`;
+  }
+
+  const managedMediaTimeoutPatch = patchOpenClawManagedMediaTimeoutRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (managedMediaTimeoutPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${managedMediaTimeoutPatch.patchedFiles} managed media timeout runtime file(s)`;
   }
 
   const nativeImageDeliveryPatch = patchOpenClawNativeImageDeliveryRuntime(distDir, {

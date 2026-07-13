@@ -1,4 +1,5 @@
-import { AlertCircle, CheckCircle2, ChevronRight, CircleAlert, CircleStop, Loader2 } from 'lucide-react';
+import { useState } from 'react';
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, CircleStop, Loader2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
@@ -340,23 +341,36 @@ function problemTextClass(status: TaskStep['status']): string {
 export function RunProgressCard({ summary, status, steps, progressEntries, liveText }: RunProgressCardProps) {
   const { t } = useTranslation('chat');
   const entries = buildRunProgressEntries(steps, progressEntries, liveText, t);
+  const live = status === 'running';
+  const [expanded, setExpanded] = useState(live);
   if (entries.length === 0) return null;
 
   return (
     <div
       data-testid="chat-run-progress"
+      data-expanded={expanded ? 'true' : 'false'}
       className="w-full py-0.5"
     >
-      <div className="mb-2 flex items-center gap-1.5 text-[11px] leading-5 text-muted-foreground">
+      <button
+        type="button"
+        data-testid="chat-run-progress-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        className="group mb-2 flex w-full items-center gap-1.5 rounded-sm py-0.5 text-left text-[11px] leading-5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
         <span className="shrink-0">
           <ActionStatusIcon status={status} />
         </span>
         <span className="font-medium text-foreground/70">{t('runtimeProgress.title')}</span>
+        <ChevronDown
+          className={cn('h-3.5 w-3.5 shrink-0 transition-transform', expanded && 'rotate-180')}
+          aria-hidden="true"
+        />
         <span aria-hidden="true">·</span>
-        <span className="truncate">{summary}</span>
-      </div>
+        <span className="min-w-0 flex-1 truncate">{summary}</span>
+      </button>
 
-      <div className="relative ml-[7px] border-l border-border/70">
+      {expanded && <div className="relative ml-[7px] border-l border-border/70">
         {entries.map((entry) => {
           if (entry.kind === 'narration') {
             return (
@@ -424,6 +438,7 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
           );
         })}
       </div>
+      }
     </div>
   );
 }

@@ -7807,6 +7807,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (eventForSession.type === 'run.ended') {
+      const sessionKeyAtTerminal = eventSessionKey ?? currentSessionKey;
+      if (matchesCurrentSession) {
+        // Gateway terminal events can arrive before, or instead of, the final
+        // assistant payload. Rehydrate the persisted transcript so normal
+        // replies and completion-wake replies share the same delivery path.
+        markSessionNeedsTerminalHistoryRefresh(sessionKeyAtTerminal);
+        [0, 500, 1500, 4000].forEach((delayMs) => {
+          setTimeout(() => {
+            if (get().currentSessionKey !== sessionKeyAtTerminal) return;
+            forceNextHistoryLoad(sessionKeyAtTerminal);
+            void get().loadHistory(true);
+          }, delayMs);
+        });
+      }
       if (isCompletionWake) {
         set(nextPatch);
         return;

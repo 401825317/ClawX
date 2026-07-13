@@ -1750,6 +1750,7 @@ export function Chat() {
                             <div key={`run-${currentSessionKey}:${card.triggerIndex}`} className="space-y-3">
                               {shouldShowTranscript && (
                                 <RunProgressCard
+                                  key={`progress:${card.runtimeRun?.runId ?? runKey}:${compactStatus}`}
                                   summary={transcriptSummary}
                                   status={compactStatus}
                                   steps={card.steps}

@@ -75,7 +75,6 @@ export async function handleMediaRoutes(
   if (url.pathname === '/api/media/image-generation' && req.method === 'PUT') {
     try {
       const body = await parseJsonBody<{
-        timeoutMs?: number | null;
         openAiRelayEnabled?: boolean;
         openAiRelayBaseUrl?: string | null;
         openAiRelayModel?: string | null;
@@ -100,9 +99,7 @@ export async function handleMediaRoutes(
       const next: ImageGenerationModelConfig = {
         primary: nextPrimary,
         fallbacks: [],
-        timeoutMs: body.timeoutMs !== undefined
-          ? (typeof body.timeoutMs === 'number' && body.timeoutMs > 0 ? Math.floor(body.timeoutMs) : null)
-          : current.config.timeoutMs,
+        timeoutMs: current.config.timeoutMs,
       };
 
       if (typeof body.openAiRelayEnabled === 'boolean') {
@@ -164,7 +161,6 @@ export async function handleMediaRoutes(
   if (url.pathname === '/api/media/video-generation' && req.method === 'PUT') {
     try {
       const body = await parseJsonBody<{
-        timeoutMs?: number | null;
         openAiRelayEnabled?: boolean;
         openAiRelayBaseUrl?: string | null;
         openAiRelayModel?: string | null;
@@ -189,9 +185,7 @@ export async function handleMediaRoutes(
       const next: VideoGenerationModelConfig = {
         primary: nextPrimary,
         fallbacks: nextFallbacks,
-        timeoutMs: body.timeoutMs !== undefined
-          ? (typeof body.timeoutMs === 'number' && body.timeoutMs > 0 ? Math.floor(body.timeoutMs) : null)
-          : current.config.timeoutMs,
+        timeoutMs: current.config.timeoutMs,
       };
 
       if (typeof body.openAiRelayEnabled === 'boolean') {
@@ -200,7 +194,6 @@ export async function handleMediaRoutes(
           baseUrl: body.openAiRelayBaseUrl,
           apiKey: body.openAiRelayApiKey,
           model: relayModel,
-          timeoutMs: next.timeoutMs,
         });
       }
 

@@ -1577,6 +1577,12 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       try {
         await ensureManagedOpenAiImageRelay();
         await ensureManagedOpenAiVideoRelay();
+        if (runtimeSyncGatewayManager?.getStatus().state === 'running') {
+          await runtimeSyncGatewayManager.reload({
+            reason: 'junfeiai-managed-media-timeout-sync',
+            source: 'junfeiai-runtime-sync',
+          });
+        }
       } catch (error) {
         logger.warn('[junfeiai] Failed to sync managed media relay runtime config:', error);
       }

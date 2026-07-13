@@ -1,4 +1,8 @@
 import { hostApiFetch } from '@/lib/host-api';
+import {
+  JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS,
+  JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS,
+} from '../../shared/junfeiai-endpoints';
 
 export interface ImageGenerationModelConfig {
   primary: string | null;
@@ -68,7 +72,6 @@ export async function clearImageGenerationSettings(): Promise<ImageGenerationSet
 export async function saveImageGenerationSettings(payload: {
   primary?: string | null;
   fallbacks?: string[];
-  timeoutMs?: number | null;
   openAiRelayEnabled?: boolean;
   openAiRelayBaseUrl?: string | null;
   openAiRelayModel?: string | null;
@@ -98,8 +101,9 @@ export async function fetchImageGenerationProviders(): Promise<ImageGenerationPr
   return response.providers ?? [];
 }
 
-/** Slightly above Main-process runtime cap (90s generate + buffer). */
-const IMAGE_GEN_CLIENT_TEST_TIMEOUT_MS = 100_000;
+/** Slightly above Main-process runtime cap. */
+const IMAGE_GEN_CLIENT_TEST_TIMEOUT_MS =
+  JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS + JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS;
 
 export async function runImageGenerationTest(payload: {
   agentId?: string;

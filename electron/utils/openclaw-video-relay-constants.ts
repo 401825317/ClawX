@@ -1,8 +1,10 @@
+import { JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS } from '../../shared/junfeiai-endpoints';
+
 export const CLAWX_OPENAI_VIDEO_PROVIDER_KEY = 'openai';
 export const CLAWX_OPENAI_VIDEO_DEFAULT_MODEL = 'grok-image-video';
 export const CLAWX_OPENAI_VIDEO_15_MODEL = 'grok-video-1.5';
 export const CLAWX_OPENAI_VIDEO_DEFAULT_REF = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
-export const CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+export const CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS = JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS;
 
 export type ClawXOpenAiVideoMode = 'text-to-video' | 'image-to-video';
 

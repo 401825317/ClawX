@@ -8,7 +8,7 @@
  * equivalents could stall for 500 ms – 2 s+ per call, causing "Not
  * Responding" hangs.
  */
-import { access, mkdir, readFile, readdir, writeFile } from 'fs/promises';
+import { access, mkdir, readFile, readdir } from 'fs/promises';
 import { constants, readdirSync, readFileSync, existsSync } from 'fs';
 import { execFile } from 'child_process';
 import { dirname, join } from 'path';
@@ -2707,7 +2707,6 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
   baseUrl?: string | null;
   apiKey?: string;
   videoModelIds?: string[];
-  timeoutMs?: number;
 }): Promise<void> {
   return withConfigLock(async () => {
     const config = await readOpenClawJson();
@@ -2752,7 +2751,7 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
     const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0]}`;
     const videoGenerationModel: Record<string, unknown> = {
       primary: primaryModel,
-      timeoutMs: params.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+      timeoutMs: CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
     };
     defaults.videoGenerationModel = videoGenerationModel;
     defaults.mediaGenerationAutoProviderFallback = false;

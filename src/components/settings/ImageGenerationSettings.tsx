@@ -42,7 +42,6 @@ export function ImageGenerationSettings() {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<ImageGenerationSettingsSnapshot | null>(null);
 
-  const [timeoutMs, setTimeoutMs] = useState('900000');
   const [relayBaseUrl, setRelayBaseUrl] = useState('');
   const [relayModel, setRelayModel] = useState('gpt-image-2');
   const [testAgentId, setTestAgentId] = useState('');
@@ -52,7 +51,6 @@ export function ImageGenerationSettings() {
     try {
       const settings = await fetchImageGenerationSettings();
       setSnapshot(settings);
-      setTimeoutMs(settings.config.timeoutMs ? String(settings.config.timeoutMs) : '900000');
       setRelayBaseUrl(settings.openAiRelay?.baseUrl ?? '');
       setRelayModel(settings.openAiRelay?.model || 'gpt-image-2');
       setTestAgentId(settings.defaultAgentId);
@@ -69,14 +67,11 @@ export function ImageGenerationSettings() {
 
   const dirty = useMemo(() => {
     if (!snapshot) return false;
-    const timeoutParsed = timeoutMs.trim() ? Number.parseInt(timeoutMs, 10) : null;
-    const savedTimeout = snapshot.config.timeoutMs;
     return (
-      timeoutParsed !== savedTimeout
-      || relayBaseUrl.trim() !== (snapshot.openAiRelay?.baseUrl ?? '').trim()
+      relayBaseUrl.trim() !== (snapshot.openAiRelay?.baseUrl ?? '').trim()
       || relayModel.trim() !== (snapshot.openAiRelay?.model ?? '').trim()
     );
-  }, [snapshot, timeoutMs, relayBaseUrl, relayModel]);
+  }, [snapshot, relayBaseUrl, relayModel]);
 
   const hasConfiguredRelay = useMemo(() => {
     if (!snapshot) return false;
@@ -90,10 +85,6 @@ export function ImageGenerationSettings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const timeoutParsed = timeoutMs.trim() ? Number.parseInt(timeoutMs, 10) : null;
-      if (timeoutParsed !== null && (!Number.isFinite(timeoutParsed) || timeoutParsed <= 0)) {
-        throw new Error(t('imageGeneration.errors.invalidTimeout'));
-      }
       if (!relayModel.trim()) {
         throw new Error(t('imageGeneration.errors.relayModelRequired'));
       }
@@ -101,7 +92,6 @@ export function ImageGenerationSettings() {
         throw new Error(t('imageGeneration.errors.relayModelInvalid'));
       }
       const next = await saveImageGenerationSettings({
-        timeoutMs: timeoutParsed,
         openAiRelayEnabled: true,
         openAiRelayBaseUrl: relayBaseUrl.trim(),
         openAiRelayModel: relayModel.trim(),
@@ -276,22 +266,6 @@ export function ImageGenerationSettings() {
                   </p>
                 </div>
             </div>
-          </div>
-
-          <div className="space-y-2 max-w-xs">
-            <Label htmlFor="image-gen-timeout" className={labelClasses}>
-              {t('imageGeneration.timeout')}
-            </Label>
-            <Input
-              id="image-gen-timeout"
-              type="number"
-              min={1000}
-              step={1000}
-              value={timeoutMs}
-              onChange={(e) => setTimeoutMs(e.target.value)}
-              className={inputClasses}
-              data-testid="image-generation-timeout"
-            />
           </div>
 
           <div className="space-y-3">

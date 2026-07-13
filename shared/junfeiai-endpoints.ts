@@ -33,3 +33,40 @@ if (!VALID_DEFAULT_THINKING_LEVELS.has(endpoints.defaultThinkingLevel)) {
 
 /** Shared default thinking level for managed JunFeiAI chat. */
 export const JUNFEIAI_DEFAULT_THINKING_LEVEL = endpoints.defaultThinkingLevel;
+
+function readPositiveTimeoutMs(value: unknown, key: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a positive integer`);
+  }
+  return value;
+}
+
+/** Canonical timeout for managed image generation requests. */
+export const JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS = readPositiveTimeoutMs(
+  endpoints.imageGenerationTimeoutMs,
+  'imageGenerationTimeoutMs',
+);
+
+/** Canonical timeout for managed video generation requests. */
+export const JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS = readPositiveTimeoutMs(
+  endpoints.videoGenerationTimeoutMs,
+  'videoGenerationTimeoutMs',
+);
+
+/** Canonical interval for managed video-generation status checks. */
+export const JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS = readPositiveTimeoutMs(
+  endpoints.videoGenerationPollIntervalMs,
+  'videoGenerationPollIntervalMs',
+);
+
+/** Bounded timeout for the explicit settings-page media connectivity test. */
+export const JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS = readPositiveTimeoutMs(
+  endpoints.mediaGenerationTestTimeoutMs,
+  'mediaGenerationTestTimeoutMs',
+);
+
+/** Extra time for the renderer to receive a completed media-test response. */
+export const JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS = readPositiveTimeoutMs(
+  endpoints.mediaGenerationClientTimeoutBufferMs,
+  'mediaGenerationClientTimeoutBufferMs',
+);

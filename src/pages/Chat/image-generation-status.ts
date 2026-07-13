@@ -1,4 +1,5 @@
 import type { ChatRuntimeRunState, RawMessage, ToolStatus } from '@/stores/chat';
+import { JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS } from '../../../shared/junfeiai-endpoints';
 import {
   extractImages,
   extractToolUse,
@@ -9,8 +10,8 @@ import {
 const IMAGE_GENERATE_TOOL = 'image_generate';
 const ASYNC_IMAGE_TASK_START_RE = /Background task started for image generation \(([0-9a-f-]{36})\)/i;
 const INTER_SESSION_IMAGE_TASK_RE = /sourceSession=image_generate:([0-9a-f-]{36})/i;
-/** Match OpenClaw agents.defaults.imageGenerationModel.timeoutMs default. */
-export const IMAGE_GENERATION_TIMEOUT_MS = 900_000;
+/** Match the canonical managed image-generation timeout. */
+export const IMAGE_GENERATION_TIMEOUT_MS = JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS;
 const IMAGE_GENERATION_TIMEOUT_BUFFER_MS = 15_000;
 const TERMINAL_RUNTIME_TASK_STATUSES = new Set(['completed', 'error', 'partial']);
 const CANCELLATION_MARKERS = new Set(['aborted', 'cancelled', 'canceled']);

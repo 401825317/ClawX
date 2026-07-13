@@ -62,7 +62,6 @@ export function VideoGenerationSettings() {
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<VideoGenerationSettingsSnapshot | null>(null);
 
-  const [timeoutMs, setTimeoutMs] = useState('600000');
   const [relayBaseUrl, setRelayBaseUrl] = useState('');
   const [relayModel, setRelayModel] = useState('grok-image-video');
   const [testAgentId, setTestAgentId] = useState('');
@@ -72,7 +71,6 @@ export function VideoGenerationSettings() {
     try {
       const settings = await fetchVideoGenerationSettings();
       setSnapshot(settings);
-      setTimeoutMs(settings.config.timeoutMs ? String(settings.config.timeoutMs) : '600000');
       setRelayBaseUrl(settings.openAiRelay?.baseUrl ?? '');
       setRelayModel(settings.openAiRelay?.model || 'grok-image-video');
       setTestAgentId(settings.defaultAgentId);
@@ -98,14 +96,11 @@ export function VideoGenerationSettings() {
 
   const dirty = useMemo(() => {
     if (!snapshot) return false;
-    const timeoutParsed = timeoutMs.trim() ? Number.parseInt(timeoutMs, 10) : null;
-    const savedTimeout = snapshot.config.timeoutMs;
     return (
-      timeoutParsed !== savedTimeout
-      || relayBaseUrl.trim() !== (snapshot.openAiRelay?.baseUrl ?? '').trim()
+      relayBaseUrl.trim() !== (snapshot.openAiRelay?.baseUrl ?? '').trim()
       || relayModel.trim() !== (snapshot.openAiRelay?.model ?? '').trim()
     );
-  }, [snapshot, timeoutMs, relayBaseUrl, relayModel]);
+  }, [snapshot, relayBaseUrl, relayModel]);
 
   const hasConfiguredRelay = useMemo(() => {
     if (!snapshot) return false;
@@ -119,15 +114,10 @@ export function VideoGenerationSettings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const timeoutParsed = timeoutMs.trim() ? Number.parseInt(timeoutMs, 10) : null;
-      if (timeoutParsed !== null && (!Number.isFinite(timeoutParsed) || timeoutParsed <= 0)) {
-        throw new Error(t('videoGeneration.errors.invalidTimeout', 'Timeout must be a positive number'));
-      }
       if (!modelOptions.some((option) => option.id === relayModel.trim())) {
         throw new Error(t('videoGeneration.errors.relayModelRequired', 'Select a video model'));
       }
       const next = await saveVideoGenerationSettings({
-        timeoutMs: timeoutParsed,
         openAiRelayEnabled: true,
         openAiRelayBaseUrl: relayBaseUrl.trim(),
         openAiRelayModel: relayModel.trim(),
@@ -326,22 +316,6 @@ export function VideoGenerationSettings() {
                 </p>
               </div>
             </div>
-          </div>
-
-          <div className="space-y-2 max-w-xs">
-            <Label htmlFor="video-gen-timeout" className={labelClasses}>
-              {t('videoGeneration.timeout', 'Timeout (ms)')}
-            </Label>
-            <Input
-              id="video-gen-timeout"
-              type="number"
-              min={1000}
-              step={1000}
-              value={timeoutMs}
-              onChange={(e) => setTimeoutMs(e.target.value)}
-              className={inputClasses}
-              data-testid="video-generation-timeout"
-            />
           </div>
 
           <div className="space-y-3">

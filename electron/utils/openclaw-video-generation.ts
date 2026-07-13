@@ -270,7 +270,7 @@ export async function setVideoGenerationConfig(
     const writeValue = buildVideoGenerationModelConfigWrite({
       primary: next.primary,
       fallbacks: [...new Set(next.fallbacks.map((ref) => ref.trim()).filter(Boolean))],
-      timeoutMs: next.timeoutMs,
+      timeoutMs: CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
     });
 
     if (writeValue) {
@@ -402,7 +402,6 @@ export async function applyOpenAiVideoRelaySettings(params: {
   baseUrl?: string | null;
   apiKey?: string;
   model?: string | null;
-  timeoutMs?: number | null;
 }): Promise<void> {
   const modelIds = orderedClawXOpenAiVideoModelIds(params.model);
   const managedDefaults = await getManagedVideoRelayDefaults();
@@ -412,7 +411,6 @@ export async function applyOpenAiVideoRelaySettings(params: {
     baseUrl: params.enabled ? ((params.baseUrl ?? '').trim() || managedDefaults.baseUrl) : null,
     apiKey: params.apiKey?.trim() || managedDefaults.apiKey || undefined,
     videoModelIds: modelIds,
-    timeoutMs: params.timeoutMs ?? undefined,
   });
 }
 
@@ -468,7 +466,7 @@ export async function runVideoGenerationTest(params: {
   const agentDir = resolveAgentDirForTest(agentId, snapshot);
   const prompt = params.prompt?.trim() || DEFAULT_TEST_PROMPT;
   const generateTimeoutMs = Math.min(
-    config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+    CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
     VIDEO_GEN_UI_TEST_MAX_TIMEOUT_MS,
   );
   const startedAt = Date.now();
@@ -526,7 +524,7 @@ export async function ensureManagedOpenAiVideoRelay(
   }
   const current = await getVideoGenerationSettingsSnapshot();
   const model = current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
-  const timeoutMs = current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
+  const timeoutMs = CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
   const modelIds = orderedClawXOpenAiVideoModelIds(model);
   const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0] ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
   const relayState = readOpenAiCompatibleVideoRelayState(config as Record<string, unknown>);
@@ -589,7 +587,7 @@ export async function generateVideoForChatSession(params: {
     agentDir: expandOpenClawPath(agent.agentDir),
     prompt: params.prompt.trim(),
     model: configuredModel,
-    timeoutMs: current.config.timeoutMs ?? CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+    timeoutMs: CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
     size: params.size?.trim() || DEFAULT_TEST_VIDEO_SIZE,
     durationSeconds: params.durationSeconds ?? DEFAULT_TEST_DURATION_SECONDS,
     inputImages,

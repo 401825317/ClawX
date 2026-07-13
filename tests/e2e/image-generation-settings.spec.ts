@@ -32,6 +32,7 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('image-generation-auto-sync')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-primary')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-fallbacks')).toHaveCount(0);
+    await expect(page.getByTestId('image-generation-timeout')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-save')).toBeVisible();
     await expect(page.getByTestId('image-generation-clear')).toBeDisabled();
   });

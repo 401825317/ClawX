@@ -1,4 +1,8 @@
 import { hostApiFetch } from '@/lib/host-api';
+import {
+  JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS,
+  JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS,
+} from '../../shared/junfeiai-endpoints';
 
 export interface VideoGenerationModelConfig {
   primary: string | null;
@@ -78,7 +82,6 @@ export async function clearVideoGenerationSettings(): Promise<VideoGenerationSet
 export async function saveVideoGenerationSettings(payload: {
   primary?: string | null;
   fallbacks?: string[];
-  timeoutMs?: number | null;
   openAiRelayEnabled?: boolean;
   openAiRelayBaseUrl?: string | null;
   openAiRelayModel?: string | null;
@@ -108,7 +111,8 @@ export async function fetchVideoGenerationProviders(): Promise<VideoGenerationPr
   return response.providers ?? [];
 }
 
-const VIDEO_GEN_CLIENT_TEST_TIMEOUT_MS = 650_000;
+const VIDEO_GEN_CLIENT_TEST_TIMEOUT_MS =
+  JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS + JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS;
 
 export async function runVideoGenerationTest(payload: {
   agentId?: string;

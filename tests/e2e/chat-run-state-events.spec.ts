@@ -66,6 +66,77 @@ async function installHistoryMocks(app: ElectronApplication, history: unknown[])
 }
 
 test.describe('ClawX chat run state events', () => {
+  test('rehydrates the persisted final reply when a normal run ends without a final event', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+      });
+      await app.evaluate(async () => {
+        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+        let history: unknown[] = [];
+        const sessions = { sessions: [{ key: 'agent:main:main', displayName: 'main' }] };
+        const response = (json: unknown) => ({ ok: true, data: { status: 200, ok: true, json } });
+
+        ipcMain.removeHandler('gateway:rpc');
+        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string) => {
+          if (method === 'sessions.list') return { success: true, result: sessions };
+          if (method === 'chat.history') return { success: true, result: { messages: history } };
+          return { success: true, result: {} };
+        });
+
+        ipcMain.removeHandler('hostapi:fetch');
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string }) => {
+          switch (request.path) {
+            case '/api/gateway/status': return response({ state: 'running', port: 18789, pid: 12345, gatewayReady: true });
+            case '/api/chat/sessions': return response({ success: true, result: sessions });
+            case '/api/chat/history': return response({ success: true, result: { messages: history } });
+            case '/api/agents': return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
+            default: return response({});
+          }
+        });
+
+        (globalThis as Record<string, unknown>).__setTerminalHistory = (nextHistory: unknown[]) => {
+          history = nextHistory;
+        };
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+
+      await app.evaluate(({ BrowserWindow }) => {
+        const setHistory = (globalThis as Record<string, unknown>).__setTerminalHistory as
+          | ((nextHistory: unknown[]) => void)
+          | undefined;
+        setHistory?.([{
+          id: 'final-video-timeout',
+          role: 'assistant',
+          content: '本次视频生成失败：生成服务处理超时，未产生可交付的视频文件。',
+          timestamp: Date.now() / 1000,
+        }]);
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('chat:runtime-event', {
+            type: 'run.ended',
+            runId: 'run-final-persisted-only-in-history',
+            sessionKey: 'agent:main:main',
+            status: 'error',
+            endedAt: Date.now(),
+          });
+        }
+      });
+
+      await expect(page.getByText('本次视频生成失败：生成服务处理超时，未产生可交付的视频文件。')).toBeVisible({ timeout: 10_000 });
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('keeps stop control active across non-terminal runtime events and clears it on run.ended', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
@@ -208,6 +279,7 @@ test.describe('ClawX chat run state events', () => {
       });
 
       await expect(page.getByTestId('chat-run-progress')).toBeVisible();
+      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'true');
       await expect(page.getByTestId('chat-run-progress')).toContainText(/completed|完成/i);
       await expect(page.getByTestId('chat-run-progress')).not.toContainText(/failed|失败/i);
       await expect(page.getByText(/No such file or directory/i)).toHaveCount(0);
@@ -224,6 +296,10 @@ test.describe('ClawX chat run state events', () => {
           });
         }
       });
+
+      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'false');
+      await page.getByTestId('chat-run-progress-toggle').click();
+      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'true');
 
       await installIpcMocks(app, {
         gatewayRpc: {
