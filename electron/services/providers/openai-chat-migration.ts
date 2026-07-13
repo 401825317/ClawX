@@ -41,6 +41,7 @@ import {
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
   getJunFeiAIOrigin,
   getJunFeiAIProviderBaseUrl,
+  isJunFeiAIManagedDistribution,
 } from '../../utils/junfeiai-distribution';
 import { logger } from '../../utils/logger';
 
@@ -62,7 +63,6 @@ export interface OpenAiChatMigrationResult {
 export type OpenAiChatStartupMigrationResult =
   | { status: 'already-migrated' }
   | { status: 'migrated'; result: OpenAiChatMigrationResult }
-  | { status: 'skipped-conflict'; error: string }
   | { status: 'failed'; error: string };
 
 type PreparedJsonWrite = {
@@ -78,6 +78,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeBaseUrl(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+}
+
+function getOpenAiRuntimeProvider(data: Record<string, unknown>): Record<string, unknown> | null {
+  const models = isRecord(data.models) ? data.models : {};
+  const providers = isRecord(models.providers) ? models.providers : {};
+  return isRecord(providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID])
+    ? providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID]
+    : null;
+}
+
+export function isManagedOpenAiRuntimeForMigration(value: unknown): boolean {
+  return isRecord(value)
+    && value.api === JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL
+    && normalizeBaseUrl(value.baseUrl) === normalizeBaseUrl(getJunFeiAIProviderBaseUrl());
 }
 
 export function isManagedOpenAiAccountForMigration(account: ProviderAccount | null): boolean {
@@ -236,26 +250,32 @@ async function preparePersistedModelRefWrites(): Promise<PreparedJsonWrite[]> {
 }
 
 async function assertNoPersonalOpenAiConflict(): Promise<void> {
+  // The managed build reserves the openai provider id for the signed-in relay.
+  // Other distributions keep the guard so a personal account is never replaced.
+  if (isJunFeiAIManagedDistribution()) {
+    return;
+  }
+
   const account = await getProviderAccount(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
   if (account && !isManagedOpenAiAccountForMigration(account)) {
     throw new Error('managed_openai_account_conflict: an existing personal OpenAI account uses the reserved provider id');
   }
-  if (account && isManagedOpenAiAccountForMigration(account)) {
-    return;
+
+  const document = await readJsonStrict(getOpenClawConfigPath(), true);
+  const runtimeOpenAi = document ? getOpenAiRuntimeProvider(document.data) : null;
+  if (runtimeOpenAi && !isManagedOpenAiRuntimeForMigration(runtimeOpenAi)) {
+    throw new Error('managed_openai_runtime_conflict: models.providers.openai points to a personal OpenAI endpoint');
+  }
+}
+
+async function shouldReplaceManagedOpenAiRuntime(): Promise<boolean> {
+  if (!isJunFeiAIManagedDistribution()) {
+    return false;
   }
 
   const document = await readJsonStrict(getOpenClawConfigPath(), true);
-  const models = document && isRecord(document.data.models) ? document.data.models : {};
-  const providers = isRecord(models.providers) ? models.providers : {};
-  const runtimeOpenAi = isRecord(providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID])
-    ? providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID]
-    : null;
-  if (
-    runtimeOpenAi
-    && normalizeBaseUrl(runtimeOpenAi.baseUrl) !== normalizeBaseUrl(getJunFeiAIProviderBaseUrl())
-  ) {
-    throw new Error('managed_openai_runtime_conflict: models.providers.openai points to a personal OpenAI endpoint');
-  }
+  const runtimeOpenAi = document ? getOpenAiRuntimeProvider(document.data) : null;
+  return Boolean(runtimeOpenAi && !isManagedOpenAiRuntimeForMigration(runtimeOpenAi));
 }
 
 function normalizeManagedOpenAiAccount(
@@ -263,28 +283,29 @@ function normalizeManagedOpenAiAccount(
   existing: ProviderAccount | null,
 ): ProviderAccount {
   const now = new Date().toISOString();
-  const model = source?.model || existing?.model || JUNFEIAI_DEFAULT_MODEL;
+  const managedExisting = isManagedOpenAiAccountForMigration(existing) ? existing : null;
+  const model = source?.model || managedExisting?.model || JUNFEIAI_DEFAULT_MODEL;
   return {
     id: JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
     vendorId: JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
-    label: existing?.label || OPENAI_ACCOUNT_LABEL,
+    label: managedExisting?.label || OPENAI_ACCOUNT_LABEL,
     authMode: 'api_key',
     baseUrl: getJunFeiAIProviderBaseUrl(),
     apiProtocol: JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
     model,
-    fallbackModels: source?.fallbackModels ?? existing?.fallbackModels ?? [],
+    fallbackModels: source?.fallbackModels ?? managedExisting?.fallbackModels ?? [],
     enabled: true,
     isDefault: true,
     metadata: {
       ...(source?.metadata ?? {}),
-      ...(existing?.metadata ?? {}),
+      ...(managedExisting?.metadata ?? {}),
       resourceUrl: getJunFeiAIOrigin(),
-      managedDefaultModel: source?.metadata?.managedDefaultModel || existing?.metadata?.managedDefaultModel || model,
-      managedAllowedModels: source?.metadata?.managedAllowedModels || existing?.metadata?.managedAllowedModels || [model],
+      managedDefaultModel: source?.metadata?.managedDefaultModel || managedExisting?.metadata?.managedDefaultModel || model,
+      managedAllowedModels: source?.metadata?.managedAllowedModels || managedExisting?.metadata?.managedAllowedModels || [model],
       managedTransport: JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
       managedRuntimeContractVersion: JUNFEIAI_RUNTIME_CONTRACT_VERSION,
     },
-    createdAt: existing?.createdAt ?? now,
+    createdAt: managedExisting?.createdAt ?? now,
     updatedAt: now,
   };
 }
@@ -317,6 +338,9 @@ export async function ensureManagedOpenAiChatAccount(
         ...relaySecret,
         accountId: JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
       });
+    } else {
+      // Do not leave a replaced personal key attached to the managed account.
+      await deleteProviderSecret(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
     }
   }
   return account;
@@ -329,17 +353,12 @@ export async function isManagedOpenAiChatMigrated(): Promise<boolean> {
   if (!isManagedOpenAiAccountForMigration(account)) return false;
 
   const document = await readJsonStrict(getOpenClawConfigPath(), true);
-  const models = document && isRecord(document.data.models) ? document.data.models : {};
-  const providers = isRecord(models.providers) ? models.providers : {};
-  const runtimeOpenAi = isRecord(providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID])
-    ? providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID]
-    : null;
+  const runtimeOpenAi = document ? getOpenAiRuntimeProvider(document.data) : null;
   const agents = document && isRecord(document.data.agents) ? document.data.agents : {};
   const defaults = isRecord(agents.defaults) ? agents.defaults : {};
   const model = isRecord(defaults.model) ? defaults.model : {};
   return Boolean(
-    runtimeOpenAi
-    && runtimeOpenAi.api === JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL
+    isManagedOpenAiRuntimeForMigration(runtimeOpenAi)
     && typeof model.primary === 'string'
     && model.primary.startsWith(`${JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID}/`),
   );
@@ -360,12 +379,6 @@ export async function autoMigrateManagedChatToOpenAiOnStartup(): Promise<OpenAiC
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (
-      message.includes('managed_openai_account_conflict')
-      || message.includes('managed_openai_runtime_conflict')
-    ) {
-      return { status: 'skipped-conflict', error: message };
-    }
     return { status: 'failed', error: message };
   }
 }
@@ -387,6 +400,7 @@ export async function syncManagedOpenAiChatAfterRelayRefresh(
 export async function migrateManagedChatToOpenAi(): Promise<OpenAiChatMigrationResult> {
   const alreadyMigrated = await isManagedOpenAiChatMigrated();
   await assertNoPersonalOpenAiConflict();
+  const replaceManagedOpenAiRuntime = await shouldReplaceManagedOpenAiRuntime();
 
   const sourceAccount = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
   const sourceSecret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
@@ -395,7 +409,9 @@ export async function migrateManagedChatToOpenAi(): Promise<OpenAiChatMigrationR
 
   // Prepare the target provider first. The legacy provider and key stay intact
   // so a failed or downgraded migration still has a compatible path.
-  await syncSavedProviderToRuntime(providerAccountToConfig(account), runtimeApiKey);
+  await syncSavedProviderToRuntime(providerAccountToConfig(account), runtimeApiKey, undefined, {
+    replaceManagedOpenAiRuntime,
+  });
 
   const writes = await withConfigLock(async () => {
     const prepared = await preparePersistedModelRefWrites();

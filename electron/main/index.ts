@@ -99,10 +99,6 @@ async function runManagedOpenAiStartupMigration(): Promise<void> {
     });
     return;
   }
-  if (migration.status === 'skipped-conflict') {
-    logger.warn('[provider-migration] Managed OpenAI Responses startup migration skipped because the OpenAI provider ownership is ambiguous:', migration.error);
-    return;
-  }
   logger.warn('[provider-migration] Managed OpenAI Responses startup migration failed; keeping the legacy provider active:', migration.error);
 }
 
@@ -591,15 +587,9 @@ async function initialize(): Promise<void> {
             logger.warn('Failed to synchronize the full managed provider contract before Gateway start:', error);
             try {
               const runtimeBootstrap = await ensureJunFeiAIManagedRuntimeBootstrap();
-              if (runtimeBootstrap.blockedReason) {
-                logger.warn(
-                  `Managed runtime bootstrap preserved an existing personal OpenAI provider (${runtimeBootstrap.blockedReason}).`,
-                );
-              } else {
-                logger.info(
-                  `Managed runtime bootstrap ready before Gateway start; migratedNow=${runtimeBootstrap.migratedNow}`,
-                );
-              }
+              logger.info(
+                `Managed runtime bootstrap ready before Gateway start; migratedNow=${runtimeBootstrap.migratedNow}`,
+              );
             } catch (bootstrapError) {
               logger.warn('Failed to bootstrap managed Responses and media providers before Gateway start:', bootstrapError);
             }

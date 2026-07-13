@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   isManagedOpenAiAccountForMigration,
+  isManagedOpenAiRuntimeForMigration,
   rewriteManagedChatModelRefsForMigration,
 } from '../electron/services/providers/openai-chat-migration';
 
@@ -59,5 +60,20 @@ test('recognizes managed OpenAI accounts by runtime metadata or the managed endp
   assert.equal(isManagedOpenAiAccountForMigration({
     ...baseAccount,
     baseUrl: 'https://api.openai.com/v1',
+  }), false);
+});
+
+test('recognizes only the managed Responses runtime provider', () => {
+  assert.equal(isManagedOpenAiRuntimeForMigration({
+    baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+    api: 'openai-responses',
+  }), true);
+  assert.equal(isManagedOpenAiRuntimeForMigration({
+    baseUrl: 'https://api.openai.com/v1',
+    api: 'openai-responses',
+  }), false);
+  assert.equal(isManagedOpenAiRuntimeForMigration({
+    baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    api: 'openai-completions',
   }), false);
 });

@@ -53,16 +53,17 @@ requiredRules:
   - active-config-guards
   - comms-regression
 expectedUserBehavior:
-  - Existing managed users are migrated automatically during startup before Gateway reads the runtime config; ambiguous personal OpenAI ownership is never overwritten and remains available for explicit user handling.
+  - Existing managed users are migrated automatically during startup before Gateway reads the runtime config; the managed distribution reserves `openai` for the signed-in Relay account and takes over stale personal account or runtime entries.
   - After migration, normal chat uses `openai/smart-latest` with `api: openai-responses`, the embedded `pi` Agent runtime, the configured thinking default, and `reasoningDefault: on`.
-  - Clean and existing managed UClaw environments automatically converge on `openai/smart-latest` before Gateway startup when the reserved `openai` provider is not occupied by a personal endpoint.
+  - Clean and existing managed UClaw environments automatically converge on `openai/smart-latest` before Gateway startup, including when an earlier personal endpoint used the reserved `openai` provider id.
   - Normal chat uses `api: openai-responses`, the embedded `pi` Agent runtime, a 372000-token managed context window, the configured thinking default, and `reasoningDefault: on`.
-  - A personal OpenAI provider is never overwritten; that conflict keeps the compatible legacy provider active and leaves the explicit migration action available for user resolution.
+  - Taking over `openai` replaces its account metadata, secret, runtime endpoint, headers, and model registry with the signed-in Relay configuration; malformed JSON, model-reference key collisions, and failed writes still stop the migration.
   - Managed image and video providers, plugins, authentication, and default models are ready before the first native Agent turn instead of depending on a prior settings-page save or media request.
   - Image, video, PPT, desktop, and long-task execution continue through the current unified OpenClaw Agent and Host Task paths; the migration does not restore renderer-owned media planners.
   - If the managed relay returns HTTP 404 before a Responses stream starts, the same Agent turn retries once through Chat Completions. No retry occurs after output starts, after cancellation, or for other errors.
 acceptance:
-  - The migration creates or updates the managed `openai` account with the JunFeiAI relay base URL and `openai-responses`, then rewrites only `lingzhiwuxian/*` model references in OpenClaw config, agent model files, and session indexes.
+- The migration creates or updates the managed `openai` account with the JunFeiAI relay base URL and `openai-responses`, then rewrites only `lingzhiwuxian/*` model references in OpenClaw config, agent model files, and session indexes.
+- In the managed distribution, an existing non-managed `openai` account or runtime entry is replaced rather than treated as an ownership conflict; non-managed distributions retain the conflict guard.
   - The target `openai` provider is ready before legacy provider refs or credentials are removed, and the migration completion flag is written only after all rewrites succeed.
   - Re-running the migration is idempotent and preserves unrelated providers, sessions, models, media providers, tools, plugins, and task state.
   - Managed OpenAI relay entries remain pinned to `agentRuntime.id = pi` and use the configured reasoning default.
@@ -93,10 +94,11 @@ docs:
 ## Compatibility
 
 - Legacy `lingzhiwuxian/*` accounts are migrated automatically on managed app
-  startup once auth and relay configuration are ready. Conflicting personal
-  OpenAI ownership is left unchanged for explicit user handling.
-- Legacy `lingzhiwuxian/*` accounts continue using Chat Completions whenever
-  automatic migration is blocked by a personal `openai` provider conflict.
+  startup once auth and relay configuration are ready. The managed app owns the
+  `openai` provider id and replaces earlier non-managed entries with the Relay
+  configuration.
+- Non-managed distributions keep the personal `openai` conflict guard and do
+  not run the managed bootstrap automatically.
 - Migrated `openai/*` accounts always start with Responses. The runtime fallback
   is a narrow availability fallback, not a persisted protocol downgrade.
 - Older packaged clients are unaffected because the server endpoint and legacy

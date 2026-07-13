@@ -65,6 +65,10 @@ type RuntimeProviderSyncContext = {
 
 type RuntimeApiKeyOverrides = Map<string, string | undefined>;
 
+type SavedProviderRuntimeSyncOptions = {
+  replaceManagedOpenAiRuntime?: boolean;
+};
+
 function normalizeProviderBaseUrl(
   config: ProviderConfig,
   baseUrl?: string,
@@ -493,6 +497,7 @@ async function syncRuntimeProviderConfig(
   config: ProviderConfig,
   context: RuntimeProviderSyncContext,
   apiKey: string | undefined,
+  options?: SavedProviderRuntimeSyncOptions,
 ): Promise<void> {
   const accountApiKey = isManagedRelayTextConfig(config)
     ? normalizeRuntimeApiKey(
@@ -506,6 +511,7 @@ async function syncRuntimeProviderConfig(
       baseUrl: normalizeProviderBaseUrl(config, config.baseUrl, context.api) || getJunFeiAIProviderBaseUrl(),
       apiKey: accountApiKey || undefined,
       modelIds: [normalizeRuntimeModelId(config, config.model)].filter((model): model is string => Boolean(model)),
+      replaceExistingProvider: options?.replaceManagedOpenAiRuntime,
     });
     return;
   }
@@ -550,6 +556,7 @@ async function syncCustomProviderAgentModel(
 async function syncProviderToRuntime(
   config: ProviderConfig,
   apiKey: string | undefined,
+  options?: SavedProviderRuntimeSyncOptions,
 ): Promise<RuntimeProviderSyncContext | null> {
   const context = await resolveRuntimeSyncContext(config);
   if (!context) {
@@ -557,7 +564,7 @@ async function syncProviderToRuntime(
   }
 
   await syncProviderSecretToRuntime(config, context.runtimeProviderKey, apiKey);
-  await syncRuntimeProviderConfig(config, context, apiKey);
+  await syncRuntimeProviderConfig(config, context, apiKey, options);
   await syncCustomProviderAgentModel(config, context.runtimeProviderKey, apiKey);
   return context;
 }
@@ -772,8 +779,9 @@ export async function syncSavedProviderToRuntime(
   config: ProviderConfig,
   apiKey: string | undefined,
   gatewayManager?: GatewayManager,
+  options?: SavedProviderRuntimeSyncOptions,
 ): Promise<void> {
-  const context = await syncProviderToRuntime(config, apiKey);
+  const context = await syncProviderToRuntime(config, apiKey, options);
   if (!context) {
     return;
   }

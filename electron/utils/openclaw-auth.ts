@@ -1735,6 +1735,7 @@ type ProviderEntryBuildOptions = {
   modelIds?: string[];
   includeRegistryModels?: boolean;
   mergeExistingModels?: boolean;
+  replaceExistingProvider?: boolean;
 };
 
 function normalizeModelRef(provider: string, modelOverride?: string): string | undefined {
@@ -2335,8 +2336,9 @@ function upsertOpenClawProviderEntry(
       : {}
   );
 
-  const existingModels = options.mergeExistingModels && Array.isArray(existingProvider.models)
-    ? (existingProvider.models as Array<Record<string, unknown>>)
+  const providerToMerge = options.replaceExistingProvider ? {} : existingProvider;
+  const existingModels = options.mergeExistingModels && Array.isArray(providerToMerge.models)
+    ? (providerToMerge.models as Array<Record<string, unknown>>)
     : [];
   const registryModels = options.includeRegistryModels
     ? ((getProviderConfig(provider)?.models ?? []).map((m) => ({ ...m })) as Array<Record<string, unknown>>)
@@ -2349,7 +2351,7 @@ function upsertOpenClawProviderEntry(
   mergedModels = normalizeProviderModelEntries(provider, mergedModels);
 
   const nextProvider: Record<string, unknown> = {
-    ...existingProvider,
+    ...providerToMerge,
     baseUrl: options.baseUrl,
     api: options.api,
     models: mergedModels,
@@ -2556,6 +2558,7 @@ export async function syncOpenAiProviderToManagedRelay(params: {
   baseUrl: string;
   apiKey?: string;
   modelIds?: string[];
+  replaceExistingProvider?: boolean;
 }): Promise<void> {
   const baseUrl = normalizeOpenAiRelayBaseUrl(params.baseUrl);
   const modelIds = [...new Set([
@@ -2574,6 +2577,7 @@ export async function syncOpenAiProviderToManagedRelay(params: {
       request: { allowPrivateNetwork: true },
       modelIds,
       mergeExistingModels: true,
+      replaceExistingProvider: params.replaceExistingProvider,
     });
     ensureJunFeiAIReasoningDefaultsInConfig(config);
     await writeOpenClawJson(config);

@@ -52,19 +52,17 @@ test('existing migrated runtime only heals media providers', async () => {
   assert.deepEqual(fixture.calls, ['isMigrated', 'ensureImage', 'ensureVideo']);
 });
 
-test('personal OpenAI conflicts preserve the existing provider and skip media writes', async () => {
+test('migration failures are surfaced and skip media writes', async () => {
   const fixture = dependencies({
     migrate: async () => {
       fixture.calls.push('migrate');
       throw new Error('managed_openai_runtime_conflict: personal endpoint');
     },
   });
-  const result = await ensureJunFeiAIManagedRuntimeBootstrap(fixture.value);
 
-  assert.deepEqual(result, {
-    ready: false,
-    migratedNow: false,
-    blockedReason: 'personal_openai_runtime',
-  });
+  await assert.rejects(
+    () => ensureJunFeiAIManagedRuntimeBootstrap(fixture.value),
+    /managed_openai_runtime_conflict/,
+  );
   assert.deepEqual(fixture.calls, ['isMigrated', 'migrate']);
 });

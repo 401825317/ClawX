@@ -8,7 +8,6 @@ import { ensureManagedOpenAiVideoRelay } from '../../utils/openclaw-video-genera
 export type ManagedRuntimeBootstrapResult = {
   ready: boolean;
   migratedNow: boolean;
-  blockedReason?: 'personal_openai_account' | 'personal_openai_runtime';
 };
 
 export type ManagedRuntimeBootstrapDependencies = {
@@ -25,19 +24,6 @@ const defaultDependencies: ManagedRuntimeBootstrapDependencies = {
   ensureVideo: () => ensureManagedOpenAiVideoRelay({ preserveExisting: true }),
 };
 
-function managedOpenAiConflictReason(
-  error: unknown,
-): ManagedRuntimeBootstrapResult['blockedReason'] | null {
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes('managed_openai_account_conflict')) {
-    return 'personal_openai_account';
-  }
-  if (message.includes('managed_openai_runtime_conflict')) {
-    return 'personal_openai_runtime';
-  }
-  return null;
-}
-
 export async function ensureJunFeiAIManagedRuntimeBootstrap(
   dependencies: ManagedRuntimeBootstrapDependencies = defaultDependencies,
 ): Promise<ManagedRuntimeBootstrapResult> {
@@ -45,15 +31,7 @@ export async function ensureJunFeiAIManagedRuntimeBootstrap(
   let migratedNow = false;
 
   if (!migrated) {
-    try {
-      await dependencies.migrate();
-    } catch (error) {
-      const blockedReason = managedOpenAiConflictReason(error);
-      if (blockedReason) {
-        return { ready: false, migratedNow: false, blockedReason };
-      }
-      throw error;
-    }
+    await dependencies.migrate();
     migrated = await dependencies.isMigrated();
     migratedNow = migrated;
   }
