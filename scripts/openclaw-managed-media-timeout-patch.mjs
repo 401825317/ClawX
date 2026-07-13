@@ -7,6 +7,7 @@ const ENDPOINTS_PATH = join(SCRIPT_DIR, '..', 'shared', 'junfeiai-endpoints.json
 const PATCH_MARKER = 'UCLAW_MANAGED_MEDIA_TIMEOUT_V1';
 const VIDEO_STATUS_MARKER = 'UCLAW_MANAGED_VIDEO_STATUS_V1';
 const VIDEO_OUTPUT_URL_MARKER = 'UCLAW_MANAGED_VIDEO_OUTPUT_URL_V1';
+const VIDEO_IMAGE_REFERENCE_MARKER = 'UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1';
 const MANAGED_VIDEO_COMPLETE_STATUS_EXPRESSION = '["completed", "done", "succeeded"].includes(payload.status) || Boolean(resolveOpenAIVideoOutputUrl(payload))';
 const MANAGED_VIDEO_OUTPUT_URL_HELPER = `// ${VIDEO_OUTPUT_URL_MARKER}
 function resolveOpenAIVideoOutputUrl(payload) {
@@ -87,13 +88,15 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
   const expectedCompletion = `isComplete: (payload) => ${MANAGED_VIDEO_COMPLETE_STATUS_EXPRESSION}, // ${VIDEO_STATUS_MARKER}`;
   const expectedDownloadStart = `\tconst outputUrl = normalizeOptionalString(params.outputUrl);\n\tconst url = outputUrl ? new URL(outputUrl) : new URL(\`${'${params.baseUrl}'}/videos/${'${params.videoId}'}/content\`);\n\tif (!outputUrl) url.searchParams.set("variant", "video");`;
   const expectedDownloadCall = '\t\t\t\t\t\toutputUrl: resolveOpenAIVideoOutputUrl(completed),';
+  const expectedImageReference = `image: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType), // ${VIDEO_IMAGE_REFERENCE_MARKER}`;
   if (content.includes(expectedTimeout)
     && content.includes(expectedPollInterval)
     && content.includes(expectedMaxAttempts)
     && content.includes(expectedCompletion)
     && content.includes(VIDEO_OUTPUT_URL_MARKER)
     && content.includes(expectedDownloadStart)
-    && content.includes(expectedDownloadCall)) {
+    && content.includes(expectedDownloadCall)
+    && content.includes(expectedImageReference)) {
     return { content, changed: false, category: 'openai-video-provider' };
   }
   const patchedTimeoutPattern = /const DEFAULT_TIMEOUT_MS = \d+; \/\/ UCLAW_MANAGED_MEDIA_TIMEOUT_V1/g;
@@ -121,7 +124,7 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
   patched = attemptsMatches.length === 1
     ? patched.replace(patchedAttemptsPattern, expectedMaxAttempts)
     : replaceUnique(patched, 'const MAX_POLL_ATTEMPTS = 120;', expectedMaxAttempts, 'OpenAI video provider poll limit', filePath);
-  const managedCompletionPattern = /isComplete: \(payload\) => \[[^\n]+\], \/\/ UCLAW_MANAGED_VIDEO_STATUS_V1/g;
+  const managedCompletionPattern = /isComplete: \(payload\) => [^\n]+\/\/ UCLAW_MANAGED_VIDEO_STATUS_V1/g;
   const completionMatches = patched.match(managedCompletionPattern) ?? [];
   if (completionMatches.length > 1) {
     throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one managed OpenAI video completion status in ${filePath}; found ${completionMatches.length}.`);
@@ -163,6 +166,20 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
       filePath,
     );
   }
+  const managedImageReferencePattern = /image: toOpenAIDataUrl\(referenceAsset\.buffer, referenceAsset\.mimeType\),? \/\/ UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1/g;
+  const imageReferenceMatches = patched.match(managedImageReferencePattern) ?? [];
+  if (imageReferenceMatches.length > 1) {
+    throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one managed OpenAI video image reference in ${filePath}; found ${imageReferenceMatches.length}.`);
+  }
+  patched = imageReferenceMatches.length === 1
+    ? patched.replace(managedImageReferencePattern, expectedImageReference)
+    : replaceUnique(
+      patched,
+      'input_reference: { image_url: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType) }',
+      expectedImageReference,
+      'OpenAI video image reference field',
+      filePath,
+    );
   return {
     content: patched,
     changed: true,
