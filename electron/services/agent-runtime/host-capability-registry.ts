@@ -1,5 +1,6 @@
 import type { ChatRuntimeArtifact, ChatRuntimeVerification } from '../../../shared/chat-runtime-events';
 import type {
+  HostTaskAcceptance,
   HostTaskExecutorContext,
   HostTaskLifecycleExecutor,
 } from './host-task-service';
@@ -16,10 +17,16 @@ export type HostCapabilityDescriptor = {
   reason?: string;
   inputSchema?: Record<string, unknown>;
   outputDescription?: string;
+  acceptance?: {
+    requiresArtifact?: boolean;
+    requiresVerification?: boolean;
+    requiredVerificationKinds?: string[];
+  };
 };
 
 export type ResolvedHostCapability = HostCapabilityDescriptor & {
   availability: HostCapabilityAvailability;
+  acceptance: HostTaskAcceptance;
   operations: {
     start: true;
     cancel: boolean;
@@ -59,9 +66,27 @@ export class HostCapabilityRegistry {
   }
 
   private async resolve(executor: HostCapabilityExecutor): Promise<ResolvedHostCapability> {
+    const requiredVerificationKinds = [...new Set(
+      (executor.descriptor.acceptance?.requiredVerificationKinds ?? [])
+        .map((kind) => kind.trim())
+        .filter(Boolean),
+    )];
+    const requiresArtifact = executor.descriptor.acceptance?.requiresArtifact
+      ?? ['local_artifact', 'remote_generation'].includes(executor.descriptor.sideEffect);
+    const requiresVerification = executor.descriptor.acceptance?.requiresVerification
+      ?? requiredVerificationKinds.length > 0;
     const baseline: ResolvedHostCapability = {
       ...executor.descriptor,
       availability: executor.descriptor.availability ?? 'available',
+      acceptance: {
+        source: 'host_capability',
+        requiresArtifact,
+        requiresVerification,
+        requiredVerificationKinds,
+        ...(executor.descriptor.outputDescription
+          ? { outputDescription: executor.descriptor.outputDescription }
+          : {}),
+      },
       operations: {
         start: true,
         cancel: typeof executor.cancel === 'function',

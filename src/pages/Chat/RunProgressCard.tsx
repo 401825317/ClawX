@@ -35,7 +35,6 @@ interface RunProgressCardProps {
   liveText?: string | null;
 }
 
-const NOISY_MESSAGE_LABELS = new Set(['gate', 'checkpoint']);
 const PROBLEM_STATUSES = new Set<TaskStep['status']>(['blocked', 'error', 'failed', 'aborted']);
 const MEANINGLESS_ACTION_TEXTS = new Set([
   '已运行',
@@ -180,18 +179,6 @@ function buildActionEntry(step: TaskStep, t: TFunction): RunProgressEntry {
   };
 }
 
-function buildStatusEntry(step: TaskStep): RunProgressEntry | null {
-  if (!PROBLEM_STATUSES.has(step.status)) return null;
-  const detail = normalizeText(step.detail);
-  if (!detail) return null;
-  return {
-    id: `${step.id}:status`,
-    kind: 'status',
-    status: step.status,
-    text: truncateText(sanitizeRuntimeDisplayText(detail), 180),
-  };
-}
-
 function shouldKeepNarration(step: TaskStep): boolean {
   if (step.kind !== 'message') return false;
   if (step.label !== 'Message') return false;
@@ -263,10 +250,6 @@ function buildRunProgressEntries(
       continue;
     }
 
-    if (step.kind === 'system' && NOISY_MESSAGE_LABELS.has(step.label.trim().toLowerCase())) {
-      const statusEntry = buildStatusEntry(step);
-      if (statusEntry) entries.push(statusEntry);
-    }
   }
 
   const normalizedLiveText = normalizeText(liveText);

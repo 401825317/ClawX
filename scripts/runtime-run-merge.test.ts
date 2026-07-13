@@ -142,19 +142,6 @@ test('same-turn assistant replies with different media attachments remain separa
 
 test('terminal task evidence wins over a later-loaded pending history alias', () => {
   const historyRun = run('history:session:message-1', 'completed', 20);
-  historyRun.turnContract = {
-    version: 1,
-    intent: 'media',
-    toolRequirement: 'required',
-    sideEffect: 'remote_generation',
-    sideEffectAuthorized: true,
-    acceptance: {
-      requiresArtifact: true,
-      requiresVerification: true,
-      requiresApproval: false,
-      requiresToolEvidence: true,
-    },
-  };
   historyRun.asyncTaskLedger = {
     'child:video': {
       id: 'child:video',
@@ -192,7 +179,6 @@ test('terminal task evidence wins over a later-loaded pending history alias', ()
 
   for (const merged of [forward, reverse]) {
     assert.equal(merged?.status, 'completed');
-    assert.equal(merged?.turnContract?.intent, 'media');
     assert.equal(merged?.tasks?.[0]?.status, 'completed');
     assert.equal(Object.keys(merged?.asyncTaskLedger ?? {}).length, 1);
     assert.equal(Object.values(merged?.asyncTaskLedger ?? {})[0]?.status, 'completed');

@@ -7,7 +7,6 @@ intent: Add explicit, verified desktop-operation and Blender 3D artifact executi
 touchedAreas:
   - harness/specs/tasks/uclaw-desktop-and-blender-runtime.md
   - shared/chat-runtime-events.ts
-  - shared/composite-run.ts
   - electron/api/server.ts
   - electron/api/routes/computer.ts
   - electron/api/routes/blender.ts
@@ -16,7 +15,6 @@ touchedAreas:
   - electron/services/computer/**
   - electron/services/blender/**
   - electron/shared/skills/bundled-allowlist.ts
-  - electron/utils/composite-run-coordinator.ts
   - electron/utils/openclaw-auth.ts
   - resources/openclaw-plugins/uclaw-desktop-control/**
   - resources/openclaw-plugins/uclaw-blender/**
@@ -69,7 +67,7 @@ acceptance:
   - The desktop plugin is a thin Host API client with no direct OS action implementation or embedded model-controlled approval bypass.
   - Main owns Blender executable discovery, a single-concurrency job queue, cancellation, job journal, output validation, and recovery state.
   - Blender jobs only execute the bundled trusted runner with fixed command arguments and a validated SceneSpec.
-  - Blender source, GLB, render preview, and verification events flow through the existing runtime artifact and completion-gate contract.
+  - Blender source, GLB, render preview, and verification events flow through the native runtime artifact stream, and capability-derived acceptance rejects missing or invalid outputs.
   - Renderer uses existing API client boundaries and provides a safe artifact preview/fallback for 3D outputs.
   - Bundled plugin lifecycle, package versions, skill allowlist, and packaged-runtime installation include the new plugins.
 docs:

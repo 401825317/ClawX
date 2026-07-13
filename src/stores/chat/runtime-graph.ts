@@ -263,16 +263,11 @@ function cloneRunState(runId: string, event: ChatRuntimeEvent): ChatRuntimeRunSt
     lastEventAt: eventTs,
     endedAt: event.type === 'run.ended' ? event.endedAt : undefined,
     objective: event.type === 'run.started' ? event.objective : undefined,
-    turnContract: undefined,
     planSummary: undefined,
     planSteps: [],
     tasks: [],
     artifacts: [],
     verifications: [],
-    issues: [],
-    checkpoints: [],
-    gateEvaluations: [],
-    gateResult: undefined,
     assistantText: '',
     thinkingText: '',
     progressEntries: [],
@@ -342,10 +337,6 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
       && right.summary === left.summary
       && stableRuntimeFingerprint(right.steps) === stableRuntimeFingerprint(left.steps);
   }
-  if (left.type === 'run.contract.updated') {
-    return right.type === left.type
-      && stableRuntimeFingerprint(right.contract) === stableRuntimeFingerprint(left.contract);
-  }
   if (left.type === 'run.step.updated') {
     return right.type === left.type
       && stableRuntimeFingerprint(right.step) === stableRuntimeFingerprint(left.step);
@@ -361,18 +352,6 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
   if (left.type === 'verification.completed') {
     return right.type === left.type
       && stableRuntimeFingerprint(right.verification) === stableRuntimeFingerprint(left.verification);
-  }
-  if (left.type === 'gate.issue') {
-    return right.type === left.type
-      && stableRuntimeFingerprint(right.issue) === stableRuntimeFingerprint(left.issue);
-  }
-  if (left.type === 'run.checkpoint') {
-    return right.type === left.type
-      && stableRuntimeFingerprint(right.checkpoint) === stableRuntimeFingerprint(left.checkpoint);
-  }
-  if (left.type === 'gate.evaluated') {
-    return right.type === left.type
-      && stableRuntimeFingerprint(right.gate) === stableRuntimeFingerprint(left.gate);
   }
   if (left.type === 'run.ended') return right.type === left.type && right.status === left.status && right.endedAt === left.endedAt;
   return false;
@@ -505,17 +484,6 @@ function updateTaskOnlyRunStatus(run: ChatRuntimeRunState): void {
   ) || undefined;
 }
 
-function isPartialTaskIssue(issue: NonNullable<ChatRuntimeRunState['issues']>[number], taskId: string): boolean {
-  return issue.code === 'task.partial' && issue.targetId === taskId;
-}
-
-function isPartialTaskCheckpoint(
-  checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number],
-  taskId: string,
-): boolean {
-  return checkpoint.kind === 'partial' && checkpoint.taskId === taskId;
-}
-
 function sortPlanSteps(steps: NonNullable<ChatRuntimeRunState['planSteps']>): NonNullable<ChatRuntimeRunState['planSteps']> {
   return [...steps].sort((left, right) => {
     const leftOrder = typeof left.order === 'number' ? left.order : Number.MAX_SAFE_INTEGER;
@@ -566,37 +534,17 @@ export function applyRuntimeEventToRuns(
       nextRun.startedAt = event.startedAt ?? nextRun.startedAt;
       nextRun.objective = event.objective ?? nextRun.objective;
       nextRun.endedAt = undefined;
-      nextRun.issues = [];
-      nextRun.checkpoints = [];
-      nextRun.gateEvaluations = [];
-      nextRun.gateResult = undefined;
       break;
     case 'run.plan.updated':
       nextRun.objective = event.objective ?? nextRun.objective;
       nextRun.planSummary = event.summary ?? nextRun.planSummary;
       nextRun.planSteps = sortPlanSteps(event.steps);
       break;
-    case 'run.contract.updated':
-      nextRun.turnContract = event.contract;
-      break;
     case 'run.step.updated':
       nextRun.planSteps = sortPlanSteps(upsertById(nextRun.planSteps ?? [], event.step));
       break;
     case 'task.updated':
       nextRun.tasks = upsertTaskProjection(nextRun.tasks ?? [], event.task, eventTs);
-      if (
-        event.task.status !== 'partial'
-        && (
-          existingTask?.status === 'partial'
-          || (nextRun.issues ?? []).some((issue) => isPartialTaskIssue(issue, event.task.taskId))
-          || (nextRun.checkpoints ?? []).some((checkpoint) => isPartialTaskCheckpoint(checkpoint, event.task.taskId))
-        )
-      ) {
-        nextRun.issues = (nextRun.issues ?? []).filter((issue) => !isPartialTaskIssue(issue, event.task.taskId));
-        nextRun.checkpoints = (nextRun.checkpoints ?? [])
-          .filter((checkpoint) => !isPartialTaskCheckpoint(checkpoint, event.task.taskId));
-        nextRun.gateResult = undefined;
-      }
       updateTaskOnlyRunStatus(nextRun);
       break;
     case 'run.ended':
@@ -611,17 +559,6 @@ export function applyRuntimeEventToRuns(
       break;
     case 'verification.completed':
       nextRun.verifications = upsertById(nextRun.verifications ?? [], event.verification);
-      break;
-    case 'gate.issue':
-      nextRun.issues = upsertById(nextRun.issues ?? [], event.issue);
-      break;
-    case 'run.checkpoint':
-      nextRun.checkpoints = upsertById(nextRun.checkpoints ?? [], event.checkpoint);
-      break;
-    case 'gate.evaluated':
-      nextRun.gateEvaluations = upsertById(nextRun.gateEvaluations ?? [], event.gate);
-      nextRun.gateResult = event.gate;
-      nextRun.issues = event.gate.issues;
       break;
     case 'assistant.delta': {
       const incoming = event.text ?? event.delta ?? '';

@@ -3,14 +3,12 @@ id: openclaw-ordinary-session-cwd-runtime
 title: Add per-session project directories across ClawX and OpenClaw
 scenario: gateway-backend-communication
 taskType: runtime-bridge
-intent: Let each ordinary chat session select, persist, restore, and safely execute inside its own project directory, while keeping renderer state, OpenClaw Agent and Task Flow execution, Host capability output, and legacy-run recovery on one cwd contract without changing subagent spawn lineage semantics.
+intent: Let each ordinary chat session select, persist, restore, and safely execute inside its own project directory, while keeping renderer state, OpenClaw Agent and Task Flow execution, and Host capability output on one cwd contract without changing subagent spawn lineage semantics.
 touchedAreas:
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
-  - electron/utils/composite-run-coordinator.ts
   - electron/utils/local-artifact-runtime.ts
-  - shared/composite-run.ts
   - scripts/openclaw-session-cwd-runtime-patch.mjs
   - scripts/patch-browser-hint.mjs
   - scripts/bundle-openclaw.mjs
@@ -37,7 +35,7 @@ expectedUserBehavior:
   - Agent and tool execution use the session cwd before falling back to immutable spawnedCwd lineage metadata.
   - Explicit command-level cwd remains higher priority than either persisted session field.
   - Fresh local file artifacts created by OpenClaw tools or Host capabilities are written under <session cwd>/outputs; sessions without an override keep the existing OpenClaw workspace output location.
-  - Task Flow and Host tasks keep the cwd captured when they start. Legacy composite snapshots retain their captured cwd only for restart recovery and cannot accept a fresh turn.
+  - Task Flow and Host tasks keep the cwd captured when they start and retain it across current-task restart recovery.
   - Development startup and packaged runtime bundling apply the same patch automatically.
 requiredProfiles:
   - fast
@@ -72,7 +70,6 @@ acceptance:
   - Runtime cwd precedence is explicit command cwd, then persisted ordinary-session cwd, then immutable spawnedCwd lineage metadata.
   - OpenClaw Task Flow and Host Task Bridge records carry the session cwd; Main rejects a supplied Host directory that is non-absolute, nonexistent, or inaccessible before execution.
   - Host artifact capabilities use path.join(cwd, 'outputs') as outputDir for PPTX, XLSX, HTML, and Markdown while retaining the existing default output directory when cwd is absent.
-  - Legacy composite snapshots and journals preserve cwd and outputDir only so pre-migration runs can recover in the original project; they cannot route a fresh user turn or silently retarget recovery to a later session cwd.
   - The patch is idempotent and fails clearly when a required bundled OpenClaw anchor drifts.
   - pnpm dev reapplies the installed runtime patch before Vite starts.
   - bundle-openclaw applies the same patch to the copied packaged runtime.
@@ -91,21 +88,20 @@ is never the source of truth.
 
 For fresh work, the cwd is captured by the OpenClaw Agent turn and propagated
 to Task Flow and Host capability records. Local file tools write to
-`<cwd>/outputs`. Legacy composite records preserve their historical cwd only
-for compatible recovery. Without a session override, Agent execution and Host
-artifact output retain their existing OpenClaw workspace fallbacks.
+`<cwd>/outputs`. Without a session override, Agent execution and Host artifact
+output retain their existing OpenClaw workspace fallbacks.
 
 ## Ordering And Recovery
 
 A cwd mutation and a send for the same session are ordered: the send waits for
 the mutation to settle before OpenClaw Agent execution starts. Once a run is
 active, the UI cannot change or clear that session's cwd. This keeps Task Flow,
-Host task, and legacy recovery records stable for retries and restart recovery.
+and Host task records stable for retries and restart recovery.
 
 Application restart recovery has two layers: `sessions.list` restores the cwd
-for future Agent turns and the project browser, while Task Ledger, Host journals,
-and legacy composite journals retain the captured cwd for already-started work.
-A later session-directory change must not retarget a recovered run.
+for future Agent turns and the project browser, while Task Ledger and Host
+journals retain the captured cwd for already-started work. A later
+session-directory change must not retarget a recovered run.
 
 ## Compatibility
 

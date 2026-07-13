@@ -50,31 +50,6 @@ assert.deepEqual(apply(base({
   result: { id: 'openclaw:core:video_generate', name: 'video_generate', label: 'Video Generation' },
 })), []);
 
-const contractCallId = 'call-turn-contract';
-assert.deepEqual(apply(base({
-  type: 'tool.started',
-  toolCallId: contractCallId,
-  name: 'tool_call',
-  args: {
-    id: 'uclaw_declare_turn_contract',
-    args: {
-      intent: 'media',
-      toolRequirement: 'required',
-      sideEffect: 'remote_generation',
-      sideEffectAuthorized: true,
-    },
-  },
-})), []);
-assert.deepEqual(apply(base({
-  type: 'tool.completed',
-  toolCallId: contractCallId,
-  name: 'tool_call',
-  result: {
-    tool: { name: 'uclaw_declare_turn_contract', label: 'Declare UClaw turn contract' },
-    result: { details: { ok: true } },
-  },
-})), []);
-
 const searchCallId = 'call-web-search';
 apply(base({
   type: 'tool.started',
@@ -169,7 +144,7 @@ assert.match(video?.command ?? '', /60s/u);
 assert.match(video?.command ?? '', /1920x1080/u);
 assert.doesNotMatch(video?.command ?? '', /制作电影级汽车宣传片/u);
 assert.equal(actions.some((entry) => entry.text === '已运行' || entry.text === '正在执行'), false);
-assert.equal(actions.some((entry) => /tool_call|tool_describe|uclaw_declare_turn_contract/iu.test(entry.text)), false);
+assert.equal(actions.some((entry) => /tool_call|tool_describe/iu.test(entry.text)), false);
 
 apply(base({
   type: 'task.updated',

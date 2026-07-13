@@ -30,6 +30,12 @@ export const PI_AI_OPENROUTER_REASONING_COMPAT = {
   supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
 } as const;
 
+export const PI_AI_RESPONSES_REASONING_COMPAT = {
+  ...PI_AI_PROMPT_CACHE_KEY_COMPAT,
+  supportsReasoningEffort: true,
+  supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+} as const;
+
 export const PI_AI_OPENROUTER_THINKING_LEVEL_MAP = {
   off: 'none',
   minimal: 'low',
@@ -39,7 +45,10 @@ export const PI_AI_OPENROUTER_THINKING_LEVEL_MAP = {
   xhigh: 'xhigh',
 } as const;
 
-export type PiAiModelCompat = PiAiPromptCacheKeyCompat | typeof PI_AI_OPENROUTER_REASONING_COMPAT;
+export type PiAiModelCompat =
+  | PiAiPromptCacheKeyCompat
+  | typeof PI_AI_OPENROUTER_REASONING_COMPAT
+  | typeof PI_AI_RESPONSES_REASONING_COMPAT;
 
 export type PiAiModelInputModality = 'text' | 'image';
 
@@ -91,6 +100,9 @@ function normalizePiAiModelCompat(compat: unknown): PiAiModelCompat | undefined 
   const record = compat as Record<string, unknown>;
   if (record.thinkingFormat === 'openrouter') {
     return PI_AI_OPENROUTER_REASONING_COMPAT;
+  }
+  if (record.supportsReasoningEffort === true) {
+    return PI_AI_RESPONSES_REASONING_COMPAT;
   }
   if (record.supportsPromptCacheKey === true) {
     return PI_AI_PROMPT_CACHE_KEY_COMPAT;

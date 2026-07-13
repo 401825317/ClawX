@@ -1,7 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
-import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../../shared/chat-runtime-events';
-import { normalizeAgentTurnContract, type AgentTurnContractInput } from '../../../shared/agent-turn-contract';
 import { hostTaskService, type HostTaskCreateRequest, type HostTaskSnapshot } from '../../services/agent-runtime/host-task-service';
 import { ensureDefaultHostCapabilities } from '../../services/agent-runtime/host-capability-defaults';
 import { hostCapabilityRegistry } from '../../services/agent-runtime/host-capability-registry';
@@ -39,6 +37,13 @@ function requiredTaskTitle(value: unknown): string {
   if (typeof value !== 'string') throw new Error('title is required');
   const normalized = value.trim();
   if (!normalized || normalized.length > 500) throw new Error('Invalid title');
+  return normalized;
+}
+
+function requiredReplanReason(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('completion.reason is required for replan delivery');
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 1_000) throw new Error('Invalid completion.reason');
   return normalized;
 }
 
@@ -90,6 +95,8 @@ async function bridgeTask(task: HostTaskSnapshot) {
       toolCallId: task.toolCallId,
       idempotencyKey: task.idempotencyKey,
     },
+    acceptance: task.acceptance,
+    completion: task.completion,
     progress,
     artifacts: task.artifacts.map((artifact) => ({ ...artifact, role: artifact.kind ?? 'output' })),
     verifications: task.verifications,
@@ -133,42 +140,6 @@ export async function handleRuntimeRoutes(
     return true;
   }
 
-  if (url.pathname === '/api/runtime/turn-contracts' && req.method === 'POST') {
-    try {
-      const body = await parseJsonBody<{
-        correlation?: { sessionKey?: unknown; runId?: unknown; toolCallId?: unknown };
-        contract?: AgentTurnContractInput;
-      }>(req);
-      const sessionKey = requiredCorrelationValue(body.correlation?.sessionKey, 'correlation.sessionKey');
-      const runId = requiredCorrelationValue(body.correlation?.runId, 'correlation.runId');
-      if (body.correlation?.toolCallId !== undefined) {
-        requiredCorrelationValue(body.correlation.toolCallId, 'correlation.toolCallId');
-      }
-      const contract = normalizeAgentTurnContract(body.contract ?? {});
-      const event: ChatRuntimeEvent = {
-        contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
-        producer: 'plugin',
-        runId,
-        sessionKey,
-        ts: Date.now(),
-        type: 'run.contract.updated',
-        contract,
-      };
-      publishHostTaskEvent(ctx, event);
-      sendJson(res, 200, {
-        success: true,
-        result: {
-          schema: 'uclaw.turn-contract.result/v1',
-          contract,
-          note: 'This records delivery requirements only. It is not execution or completion evidence.',
-        },
-      });
-    } catch (error) {
-      sendJson(res, 400, { success: false, error: error instanceof Error ? error.message : String(error) });
-    }
-    return true;
-  }
-
   if (url.pathname === '/api/task-bridge/capabilities' && req.method === 'GET') {
     const capabilities = await hostCapabilityRegistry.list();
     sendJson(res, 200, {
@@ -185,6 +156,7 @@ export async function handleRuntimeRoutes(
         kind?: string;
         title?: string;
         input?: unknown;
+        completion?: { mode?: 'direct' | 'replan'; reason?: string };
         correlation?: Partial<HostTaskCreateRequest>;
       }>(req);
       const kind = requiredTaskKind(body.kind);
@@ -212,6 +184,10 @@ export async function handleRuntimeRoutes(
         capability: kind,
         title: requiredTaskTitle(body.title),
         input: body.input ?? {},
+        acceptance: registration.capability.acceptance,
+        completion: body.completion?.mode === 'replan'
+          ? { mode: 'replan', reason: requiredReplanReason(body.completion.reason) }
+          : { mode: 'direct' },
       });
       let task = result.task;
       // Always attempt dispatch after an exact idempotent replay. If the Host

@@ -3,7 +3,6 @@ import {
   isGeneratingStatusNarration,
   isInternalAssistantReplyText,
   isOpenClawRuntimeEventPrompt,
-  stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
@@ -273,7 +272,7 @@ function stripInboundMediaVisionEnvelope(text: string): string {
 
 function stripGatewayUserMetadata(text: string): string {
   return stripInboundMediaVisionEnvelope(
-    stripCompositeExecutionContractEnvelope(text)
+    text
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
@@ -1580,9 +1579,7 @@ function isInternalMessage(msg: {
   text?: unknown;
   model?: unknown;
   idempotencyKey?: unknown;
-  syntheticLocalArtifactConversation?: unknown;
 }): boolean {
-  if (msg.syntheticLocalArtifactConversation === true) return true;
   if (msg.role === 'system') return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
@@ -1617,7 +1614,7 @@ function isInternalMessage(msg: {
  * text is internal narration (e.g. "生成中，稍等" + `image_generate`). Those
  * turns power the execution graph and run lifecycle detection.
  */
-function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown; syntheticLocalArtifactConversation?: unknown }): boolean {
+function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown }): boolean {
   if (isToolResultRole(msg.role)) return true;
   if (messageHasToolUse(msg)) return false;
   return isInternalMessage(msg);
@@ -1957,11 +1954,10 @@ function asyncTaskEvidenceFromRuntimeEvent(value: ChatRuntimeEvent | unknown, no
   const entry = asRecord(event.entry);
   const artifact = asRecord(event.artifact);
   const verification = asRecord(event.verification);
-  const checkpoint = asRecord(event.checkpoint);
   const result = asRecord(event.result);
   const details = result ? asRecord(result.details) : null;
   const task = details ? asRecord(details.task) : null;
-  const records = [event, step, entry, artifact, verification, checkpoint, result, details, task]
+  const records = [event, step, entry, artifact, verification, result, details, task]
     .filter((record): record is Record<string, unknown> => record != null);
   const taskId = records
     .map((record) => pickNonEmptyString(record, ['taskId', 'task_id']))
@@ -1981,10 +1977,8 @@ function asyncTaskEvidenceFromRuntimeEvent(value: ChatRuntimeEvent | unknown, no
     .map((record) => record.taskStatus ?? record.task_status ?? record.status ?? record.state)
     .find((status) => typeof status === 'string');
   let status = normalizeAsyncTaskStatus(nativeStatus, 'pending');
-  if (type === 'approval.updated' || checkpoint?.kind === 'approval') {
+  if (type === 'approval.updated') {
     status = 'pending';
-  } else if (type === 'gate.issue' || checkpoint?.kind === 'partial') {
-    status = 'error';
   } else if (type === 'tool.completed' && event.isError === true) {
     status = 'error';
   } else if (type === 'tool.completed' && normalizeAsyncTaskStatus(nativeStatus, 'pending') === 'pending') {
@@ -2028,31 +2022,7 @@ function extractAsyncTaskEvidence(value: unknown): AsyncTaskEvidence[] {
 
   const visit = (current: unknown, parent: Record<string, unknown> | null, depth: number): void => {
     if (depth > 7 || !current) return;
-    if (typeof current === 'string') {
-      // Legacy transcript fallback only. Native OpenClaw task events now carry
-      // task/run state through ChatRuntimeEvent and take precedence above.
-      const startedTaskId = current.match(/Background task started for (?:image|video) generation \(([0-9a-f-]{36})\)/iu)?.[1];
-      if (startedTaskId) {
-        add({
-          id: `task:${startedTaskId}`,
-          taskId: startedTaskId,
-          status: 'pending',
-          source: 'tool-result',
-          updatedAt: now,
-        });
-      }
-      const completedTaskId = current.match(/^\[Inter-session message\][\s\S]*?sourceSession=(?:image_generate|video_generate):([0-9a-f-]{36})/iu)?.[1];
-      if (completedTaskId) {
-        add({
-          id: `task:${completedTaskId}`,
-          taskId: completedTaskId,
-          status: 'completed',
-          source: 'continuation',
-          updatedAt: now,
-        });
-      }
-      return;
-    }
+    if (typeof current === 'string') return;
     if (typeof current !== 'object') return;
     if (visited.has(current as object)) return;
     visited.add(current as object);
@@ -2233,6 +2203,19 @@ function collectRunDetachedTaskIdsForAbort(
   return [...taskIds];
 }
 
+function collectRunHostTaskIdsForAbort(
+  runtimeRuns: Record<string, ChatRuntimeRunState>,
+  activeRunId: string | null,
+): string[] {
+  if (!activeRunId) return [];
+  return (runtimeRuns[activeRunId]?.tasks ?? [])
+    .filter((task) => (
+      task.runtime === 'uclaw-host-task'
+      && (task.status === 'pending' || task.status === 'running' || task.status === 'waiting_approval')
+    ))
+    .map((task) => task.taskId);
+}
+
 /**
  * True when an assistant message is still waiting on a tool result, i.e. it
  * represents an intermediate tool-use turn rather than a finished reply.
@@ -2361,6 +2344,7 @@ export {
   applyAsyncTaskEvidenceToRuns,
   runtimeRunHasPendingAsyncTasks,
   collectRunDetachedTaskIdsForAbort,
+  collectRunHostTaskIdsForAbort,
   hasNonToolAssistantContent,
   hasPendingToolUse,
   hasAssistantAfterLastRealUser,

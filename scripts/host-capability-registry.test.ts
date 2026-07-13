@@ -14,6 +14,10 @@ test('Host capability registry reports assessed availability and preserves execu
       description: 'Safe test executor',
       sideEffect: 'none',
       requiresApproval: false,
+      acceptance: {
+        requiresArtifact: false,
+        requiresVerification: false,
+      },
     },
     async assess() {
       return { availability: 'available' };
@@ -29,10 +33,16 @@ test('Host capability registry reports assessed availability and preserves execu
   const resolved = await registry.get('example.observe');
   assert.equal(resolved?.capability.availability, 'available');
   assert.equal(resolved?.capability.sideEffect, 'none');
+  assert.deepEqual(resolved?.capability.acceptance, {
+    source: 'host_capability',
+    requiresArtifact: false,
+    requiresVerification: false,
+    requiredVerificationKinds: [],
+  });
   assert.deepEqual(resolved?.capability.operations, { start: true, cancel: false, resume: true });
   await resolved?.executor.start({
     task: {
-      version: 2,
+      version: 3,
       taskId: 'task-example',
       sessionKey: 'agent:main:test',
       runId: 'run-test',
@@ -41,6 +51,13 @@ test('Host capability registry reports assessed availability and preserves execu
       capability: 'example.observe',
       title: 'Example',
       input: {},
+      acceptance: {
+        source: 'host_capability',
+        requiresArtifact: false,
+        requiresVerification: false,
+        requiredVerificationKinds: [],
+      },
+      completion: { mode: 'direct' },
       status: 'queued',
       createdAt: 1,
       updatedAt: 1,
@@ -58,7 +75,7 @@ test('Host capability registry reports assessed availability and preserves execu
   assert.equal(starts, 1);
   await resolved?.executor.resume?.({
     task: {
-      version: 2,
+      version: 3,
       taskId: 'task-example',
       sessionKey: 'agent:main:test',
       runId: 'run-test',
@@ -67,6 +84,13 @@ test('Host capability registry reports assessed availability and preserves execu
       capability: 'example.observe',
       title: 'Example',
       input: {},
+      acceptance: {
+        source: 'host_capability',
+        requiresArtifact: false,
+        requiresVerification: false,
+        requiredVerificationKinds: [],
+      },
+      completion: { mode: 'direct' },
       status: 'lost',
       createdAt: 1,
       updatedAt: 2,

@@ -109,31 +109,6 @@ function mergeTranscriptMetadata(
     next.model = transcriptMessage.model;
     changed = true;
   }
-  if (next.syntheticLocalArtifactConversation !== true && transcriptMessage.syntheticLocalArtifactConversation === true) {
-    next.syntheticLocalArtifactConversation = true;
-    changed = true;
-  }
-  if (!next.localArtifactResultKind && transcriptMessage.localArtifactResultKind) {
-    next.localArtifactResultKind = transcriptMessage.localArtifactResultKind;
-    changed = true;
-  }
-  if (!next.compositeArtifactManifest && transcriptMessage.compositeArtifactManifest) {
-    next.compositeArtifactManifest = {
-      ...transcriptMessage.compositeArtifactManifest,
-      tasks: transcriptMessage.compositeArtifactManifest.tasks.map((task) => ({
-        ...task,
-        artifactRefs: [...task.artifactRefs],
-      })),
-      ...(transcriptMessage.compositeArtifactManifest.runtimeEvents ? {
-        runtimeEvents: transcriptMessage.compositeArtifactManifest.runtimeEvents.map((event) => ({ ...event })),
-      } : {}),
-    };
-    changed = true;
-  }
-  if (!next.mediaGenerationSnapshot && transcriptMessage.mediaGenerationSnapshot) {
-    next.mediaGenerationSnapshot = structuredClone(transcriptMessage.mediaGenerationSnapshot);
-    changed = true;
-  }
   if ((next._attachedFiles?.length ?? 0) === 0 && (transcriptMessage._attachedFiles?.length ?? 0) > 0) {
     next._attachedFiles = cloneAttachedFilesFromTranscript(transcriptMessage);
     changed = true;
@@ -160,40 +135,6 @@ function buildTranscriptLookup(transcriptMessages: RawMessage[]): Map<string, Ra
   return lookup;
 }
 
-function isTranscriptOwnedResult(message: RawMessage): boolean {
-  if (message.role !== 'assistant') return false;
-  return message.localArtifactResultKind != null
-    || message.compositeArtifactManifest != null
-    || message.mediaGenerationSnapshot != null
-    || message.id?.startsWith('composite-result:') === true
-    || message.id?.startsWith('media-result:') === true
-    || (message.syntheticLocalArtifactConversation === true
-      && (message._attachedFiles?.length ?? 0) > 0);
-}
-
-function collectTranscriptOwnedConversationMessages(
-  transcriptMessages: RawMessage[],
-  consumedTranscriptMessages: Set<RawMessage>,
-): RawMessage[] {
-  const indexes = new Set<number>();
-  for (let index = 0; index < transcriptMessages.length; index += 1) {
-    const message = transcriptMessages[index]!;
-    if (!isTranscriptOwnedResult(message)) continue;
-    if (!consumedTranscriptMessages.has(message)) indexes.add(index);
-    const previous = transcriptMessages[index - 1];
-    if (
-      previous?.role === 'user'
-      && previous.syntheticLocalArtifactConversation === true
-      && !consumedTranscriptMessages.has(previous)
-    ) {
-      indexes.add(index - 1);
-    }
-  }
-  return [...indexes]
-    .sort((left, right) => left - right)
-    .map((index) => transcriptMessages[index]!);
-}
-
 function dedupeTranscriptMessages(messages: RawMessage[]): RawMessage[] {
   const seen = new Set<string>();
   return messages.filter((message) => {
@@ -209,27 +150,8 @@ function dedupeTranscriptMessages(messages: RawMessage[]): RawMessage[] {
   });
 }
 
-function timestampMs(message: RawMessage): number {
-  const value = typeof message.timestamp === 'number' ? message.timestamp : 0;
-  return value > 0 && value < 100_000_000_000 ? value * 1000 : value;
-}
-
 export function gatewayHistoryNeedsTranscriptHydration(messages: RawMessage[]): boolean {
-  return messages.some((message) => {
-    if (isTruncatedHistoryText(getMessageText(message.content))) return true;
-    if (message.role !== 'assistant') return false;
-    const isCompositeResult = message.localArtifactResultKind === 'composite'
-      || message.id?.startsWith('composite-result:') === true
-      || /^已完成\s+\d+\/\d+\s+项/u.test(getMessageText(message.content).trim());
-    if (isCompositeResult && !message.compositeArtifactManifest) return true;
-    const isMediaResult = message.localArtifactResultKind === 'image'
-      || message.localArtifactResultKind === 'video'
-      || message.id?.startsWith('media-result:') === true;
-    return isMediaResult && (
-      (message._attachedFiles?.length ?? 0) === 0
-      || !message.mediaGenerationSnapshot
-    );
-  });
+  return messages.some((message) => isTruncatedHistoryText(getMessageText(message.content)));
 }
 
 export function mergeGatewayHistoryWithTranscript(
@@ -259,22 +181,5 @@ export function mergeGatewayHistoryWithTranscript(
       : { ...mergedMetadata, content: nextContent };
   });
 
-  const knownPrimaryKeys = new Set(mergedGatewayMessages.map(messageMatchKey));
-  const knownRoleTimestampKeys = new Set(mergedGatewayMessages.map(messageRoleTimestampKey));
-  const transcriptOnlyResults = collectTranscriptOwnedConversationMessages(
-    transcriptMessages,
-    consumedTranscriptMessages,
-  ).filter((message) => {
-    if (knownPrimaryKeys.has(messageMatchKey(message))) return false;
-    return !knownRoleTimestampKeys.has(messageRoleTimestampKey(message));
-  });
-  if (transcriptOnlyResults.length === 0) return mergedGatewayMessages;
-
-  return [...mergedGatewayMessages, ...transcriptOnlyResults]
-    .map((message, index) => ({ message, index }))
-    .sort((left, right) => {
-      const delta = timestampMs(left.message) - timestampMs(right.message);
-      return delta !== 0 ? delta : left.index - right.index;
-    })
-    .map(({ message }) => message);
+  return mergedGatewayMessages;
 }

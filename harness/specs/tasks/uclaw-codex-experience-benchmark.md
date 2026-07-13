@@ -7,11 +7,10 @@ intent: Use one shared prompt suite to compare Codex desktop and UClaw across ro
 touchedAreas:
   - harness/specs/tasks/uclaw-codex-experience-benchmark.md
   - src/stores/chat.ts
-  - src/stores/chat/runtime-contract.ts
+  - src/stores/chat/runtime-evidence.ts
   - src/pages/Chat/index.tsx
   - src/pages/Chat/ChatMessage.tsx
   - tests/e2e/native-agent-media-routing.spec.ts
-  - electron/utils/media-generation-jobs.ts
   - electron/utils/local-artifact-runtime.ts
   - electron/services/agent-runtime/**
   - electron/api/routes/media.ts
@@ -42,7 +41,7 @@ acceptance:
   - PPT, Excel, and mini-program/web app prompts include a quality bar that rejects fixed-template-only artifacts.
   - PPT evidence records the studio engine, local visual assets, image/chart/table counts, layout signatures, and cross-topic composition differences.
   - Result log template records Codex actual behavior, UClaw actual behavior, scores, gap classification, required implementation, and evidence.
-  - Fresh UClaw turns are evaluated on the OpenClaw Agent, Task Flow, and Host capability path; legacy composite records are exercised only by explicit restart/history recovery cases.
+  - Fresh UClaw turns are evaluated on the OpenClaw Agent, Task Flow, and Host capability path; restart checks validate current runtime state and artifacts only.
 docs:
   required: false
 ---
@@ -104,7 +103,7 @@ UClaw is not release-ready if any P0 prompt:
 
 - ends with "I can only do one task, choose one";
 - produces no artifact for an artifact request;
-- shows only raw internal graph/tool/gate text to normal users;
+- shows only raw internal graph, tool, or validation text to normal users;
 - loses completed artifacts after refresh/restart;
 - mixes another user turn into the wrong task panel;
 - returns a broken video, expired media link, or 0-second playable output;
@@ -234,7 +233,7 @@ Mini-program can be HTML prototype or actual mini-program depending current prod
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
-| I01 | P0 | `根据图片修图，随便修一下` with no prior/attached image | Ask for image or use generated fallback only if task includes generation. | No fake edit, no blocked internal gate text. |
+| I01 | P0 | `根据图片修图，随便修一下` with no prior/attached image | Ask for image or use generated fallback only if task includes generation. | No fake edit or raw internal blocker text. |
 | I02 | P0 | `帮我打开微信并给某群发消息` | If capability unavailable, explain safe limitation and alternatives. | Must not rely on removed/disabled broken plugin. |
 | I03 | P0 | Force image provider failure | Partial failure should produce retry/clear error. | No stuck "进行中". |
 | I04 | P0 | Force video provider returns invalid/0s output | Detect and mark failed, retry or report. | Playback validation. |
@@ -255,8 +254,8 @@ Mini-program can be HTML prototype or actual mini-program depending current prod
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
-| K01 | P0 | Any ordinary chat prompt | No execution graph shown. | Avoid "Main Agent 执行 / Gate / 0ms". |
-| K02 | P0 | B01 image generation | One compact progress line, final image. | No raw branch/gate spam. |
+| K01 | P0 | Any ordinary chat prompt | No execution graph shown. | Avoid synthetic "Main Agent 执行 / 0ms" rows. |
+| K02 | P0 | B01 image generation | One compact progress line, final image. | No raw branch or validation spam. |
 | K03 | P0 | C01 multi-deliverable prompt | Compact progress plus final manifest. | Not a messy interleaving of cards. |
 | K04 | P1 | Failed artifact task | Friendly failure summary. | Hide internal codes by default. |
 | K05 | P1 | Developer mode enabled | Details available when intentionally expanded. | Raw graph remains useful for debugging. |
@@ -317,8 +316,8 @@ These prompts catch the difference between a UI mode hint and the user's actual 
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
-| Q01 | P0 | `普通聊天：你现在能做哪些文件类产物？` | Capability answer, no graph. | No Main Agent/Gate expansion. |
-| Q02 | P0 | `随便生成一张图片，不要展示技术细节` | Lightweight progress and final image. | No raw branch/gate spam. |
+| Q01 | P0 | `普通聊天：你现在能做哪些文件类产物？` | Capability answer, no graph. | No synthetic Main Agent execution expansion. |
+| Q02 | P0 | `随便生成一张图片，不要展示技术细节` | Lightweight progress and final image. | No raw branch or validation spam. |
 | Q03 | P1 | `生成失败的话，别卡住，告诉我失败原因和下一步` with forced provider failure | Friendly failure summary and retry path. | No permanent "进行中" or raw stack/code leak. |
 
 ### R. Long-Form Content Completion
@@ -331,11 +330,11 @@ These prompts catch the difference between a UI mode hint and the user's actual 
 
 ### X. External-Data Web Artifacts
 
-These prompts cover front-end/demo requests that need external data, live fetch fallbacks, preview validation, and clean artifact gates.
+These prompts cover front-end/demo requests that need external data, live fetch fallbacks, preview validation, and clean artifact acceptance.
 
 | ID | Priority | Prompt | Codex Expected Behavior | UClaw Observation Focus |
 | --- | --- | --- | --- | --- |
-| X01 | P0 | `你先帮我前端搭建一个demo，要求从中彩网拉取近100期，然后做个前端分析页面，主要出跨度、和值、前区后区的排列分布情况等基础的条件，不需要搭建后端sql数据库` | Build a runnable local front-end artifact. Attempt live data fetch, handle CORS/Referer failures with embedded snapshot or proxy guidance, verify rendered data and interactions. | Artifact intent/gate correctness, preview validation, recovered error collapse, and concise final manifest. |
+| X01 | P0 | `你先帮我前端搭建一个demo，要求从中彩网拉取近100期，然后做个前端分析页面，主要出跨度、和值、前区后区的排列分布情况等基础的条件，不需要搭建后端sql数据库` | Build a runnable local front-end artifact. Attempt live data fetch, handle CORS/Referer failures with embedded snapshot or proxy guidance, verify rendered data and interactions. | Artifact intent, capability acceptance, preview validation, recovered error collapse, and concise final manifest. |
 
 ## Quality Bar For PPT / Excel / Mini-Program
 
@@ -384,11 +383,11 @@ PPT, Excel, and mini-program/web-app tasks should treat the local file generator
 
 The acceptable target flow is:
 
-1. The OpenClaw Agent declares the turn contract and, when needed, creates typed Task Flow work.
+1. The OpenClaw Agent plans the requested work and, when needed, creates typed Task Flow tasks.
 2. Agent/skill reasoning prepares prompt-specific content, data model, app behavior, and file name.
 3. A registered OpenClaw tool or Host capability writes the real file.
 4. A validator opens or reads the file and records concrete evidence.
-5. Task Flow and the completion gate publish the final artifact manifest and verification result.
+5. Native task completion publishes the final artifact manifest and capability-derived verification result.
 
 Template-only fallback is allowed only as a recoverable degraded mode, and must be visible in the result log as a quality failure for P0/P1 artifact prompts.
 
@@ -400,12 +399,12 @@ Template-only fallback is allowed only as a recoverable degraded mode, and must 
 | Results appear live but disappear after restart | Persist durable artifact manifest or transcript entry for final result. |
 | Video blocks all other artifacts from being visible | Progressive artifact manifest updates, not final-only delivery. |
 | PPT/Excel/mini-program are fixed templates | Route these tasks through agent/skill generation and verification instead of local static generator defaults. |
-| Ordinary chat shows execution graph | Compact UI gating must hide graph unless real user-visible work exists or developer mode is on. |
+| Ordinary chat shows execution graph | Compact UI visibility rules must hide graph unless real user-visible work exists or developer mode is on. |
 | Second prompt enters first task panel | Run/session isolation, queued turns, and run ownership checks. |
 | Image/video local time far exceeds provider time | Add timing trace for Agent dispatch, Host queue, provider, download, save, history reload, and render. |
-| Broken video shown as success | Add media availability/playability validation before gate pass. |
+| Broken video shown as success | Require media availability and playability evidence before native success. |
 | Follow-up cannot find prior artifact | Artifact manifest lookup and revision routing. |
-| Internal gate/code text visible | Map gate failures to user-facing recovery summaries. |
+| Internal validation/code text visible | Map structured failures to user-facing recovery summaries. |
 
 ## First Manual Run Order
 

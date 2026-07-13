@@ -7,15 +7,19 @@ import { handleGatewayRoutes } from '../electron/api/routes/gateway.ts';
 import {
   applyAsyncTaskEvidenceToRuns,
   collectRunDetachedTaskIdsForAbort,
+  collectRunHostTaskIdsForAbort,
   extractAsyncTaskEvidence,
 } from '../src/stores/chat/helpers.ts';
 
-test('async media start notification exposes taskId before the tool result reaches the renderer', () => {
+test('structured async task evidence exposes taskId before completion', () => {
   const taskId = '11111111-2222-4333-8444-555555555555';
   const activeRunId = 'run-current';
-  const evidence = extractAsyncTaskEvidence(
-    `Background task started for image generation (${taskId}). Wait for the generated image completion event.`,
-  );
+  const evidence = extractAsyncTaskEvidence({
+    type: 'task.updated',
+    taskId,
+    runId: activeRunId,
+    status: 'running',
+  });
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0]?.taskId, taskId);
   assert.equal(evidence[0]?.status, 'pending');
@@ -37,6 +41,17 @@ test('async media start notification exposes taskId before the tool result reach
     'agent:main:session-1',
   );
   assert.deepEqual(collectRunDetachedTaskIdsForAbort(runtimeRuns, activeRunId), [taskId]);
+  assert.deepEqual(collectRunHostTaskIdsForAbort({
+    [activeRunId]: {
+      ...runtimeRuns[activeRunId]!,
+      tasks: [{
+        taskId: 'host-task-1',
+        runtime: 'uclaw-host-task',
+        title: 'Render locally',
+        status: 'running',
+      }],
+    },
+  }, activeRunId), ['host-task-1']);
 });
 
 test('chat abort cancels the current run detached tasks before aborting the chat controller', async () => {

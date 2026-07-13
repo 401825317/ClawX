@@ -1,6 +1,7 @@
 import type { ClientModelOptionsConfig } from '@/stores/client-config';
 
 export const MANAGED_TEXT_PROVIDER_KEY = 'lingzhiwuxian';
+export const MANAGED_TEXT_PROVIDER_KEYS = ['lingzhiwuxian', 'openai'] as const;
 export const DEFAULT_MANAGED_TEXT_MODEL_ID = 'smart-latest';
 
 type TextModelOptionLike = {
@@ -41,6 +42,7 @@ function uniqueModelIds(models: TextModelOptionLike[] | undefined): string[] {
 
 export function getManagedTextModelPolicy(
   modelOptions?: ManagedTextModelOptionsLike | ClientModelOptionsConfig,
+  providerKey: string = MANAGED_TEXT_PROVIDER_KEY,
 ): ManagedTextModelPolicy {
   const configuredDefault = normalizeModelId(modelOptions?.text?.defaultModel);
   const allowedModelIds = uniqueModelIds(modelOptions?.text?.models);
@@ -51,11 +53,11 @@ export function getManagedTextModelPolicy(
     : (resolvedAllowedIds[0] ?? DEFAULT_MANAGED_TEXT_MODEL_ID);
 
   return {
-    providerKey: MANAGED_TEXT_PROVIDER_KEY,
+    providerKey,
     defaultModelId,
-    defaultModelRef: `${MANAGED_TEXT_PROVIDER_KEY}/${defaultModelId}`,
+    defaultModelRef: `${providerKey}/${defaultModelId}`,
     allowedModelIds: resolvedAllowedIds,
-    allowedModelRefs: resolvedAllowedIds.map((modelId) => `${MANAGED_TEXT_PROVIDER_KEY}/${modelId}`),
+    allowedModelRefs: resolvedAllowedIds.map((modelId) => `${providerKey}/${modelId}`),
   };
 }
 
@@ -74,7 +76,8 @@ export function splitManagedTextModelRef(modelRef: string | null | undefined): {
 }
 
 export function isManagedTextModelRef(modelRef: string | null | undefined): boolean {
-  return splitManagedTextModelRef(modelRef)?.providerKey === MANAGED_TEXT_PROVIDER_KEY;
+  const providerKey = splitManagedTextModelRef(modelRef)?.providerKey;
+  return MANAGED_TEXT_PROVIDER_KEYS.includes(providerKey as typeof MANAGED_TEXT_PROVIDER_KEYS[number]);
 }
 
 export function isAllowedManagedTextModelRef(
@@ -82,10 +85,10 @@ export function isAllowedManagedTextModelRef(
   modelOptions?: ManagedTextModelOptionsLike | ClientModelOptionsConfig,
 ): boolean {
   const parsed = splitManagedTextModelRef(modelRef);
-  if (!parsed || parsed.providerKey !== MANAGED_TEXT_PROVIDER_KEY) {
+  if (!parsed || !MANAGED_TEXT_PROVIDER_KEYS.includes(parsed.providerKey as typeof MANAGED_TEXT_PROVIDER_KEYS[number])) {
     return true;
   }
-  return getManagedTextModelPolicy(modelOptions).allowedModelIds.includes(parsed.modelId);
+  return getManagedTextModelPolicy(modelOptions, parsed.providerKey).allowedModelIds.includes(parsed.modelId);
 }
 
 export function normalizeManagedTextModelRef(
@@ -94,17 +97,22 @@ export function normalizeManagedTextModelRef(
   options?: { fallbackEmpty?: boolean },
 ): string | null {
   const normalized = typeof modelRef === 'string' ? modelRef.trim() : '';
-  const policy = getManagedTextModelPolicy(modelOptions);
+  const parsed = splitManagedTextModelRef(normalized);
+  const providerKey = parsed && MANAGED_TEXT_PROVIDER_KEYS.includes(
+    parsed.providerKey as typeof MANAGED_TEXT_PROVIDER_KEYS[number],
+  )
+    ? parsed.providerKey
+    : MANAGED_TEXT_PROVIDER_KEY;
+  const policy = getManagedTextModelPolicy(modelOptions, providerKey);
   if (!normalized) {
     return options?.fallbackEmpty ? policy.defaultModelRef : null;
   }
 
-  const parsed = splitManagedTextModelRef(normalized);
-  if (!parsed || parsed.providerKey !== MANAGED_TEXT_PROVIDER_KEY) {
+  if (!parsed || !MANAGED_TEXT_PROVIDER_KEYS.includes(parsed.providerKey as typeof MANAGED_TEXT_PROVIDER_KEYS[number])) {
     return normalized;
   }
 
   return policy.allowedModelIds.includes(parsed.modelId)
-    ? `${MANAGED_TEXT_PROVIDER_KEY}/${parsed.modelId}`
+    ? `${parsed.providerKey}/${parsed.modelId}`
     : policy.defaultModelRef;
 }

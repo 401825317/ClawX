@@ -7,18 +7,19 @@
  */
 
 import { patchInstalledOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { cleanupInstalledOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchInstalledOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchInstalledOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
-import { patchInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-patch.mjs';
+import { cleanupInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchInstalledOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchInstalledOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchInstalledOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
-import { patchInstalledOpenClawRequiredContractToolRuntime } from './openclaw-required-contract-tool-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
+import { patchInstalledOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchInstalledOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -26,28 +27,26 @@ import { patchInstalledOpenClawTaskSummaryDeliveryRuntime } from './openclaw-tas
 import { patchInstalledOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
 
 const ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_BROWSER_PATCH === '1';
-const ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH === '1';
 
 try {
   if (ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH) {
     patchInstalledOpenClawBrowserRuntime();
   }
-  patchInstalledOpenClawFinalizeLocalActionRuntime(process.cwd(), {
-    allowLocalActionRevision: ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH,
-  });
+  patchInstalledOpenClawFinalizeLocalActionRuntime();
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawSessionCwdRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
+  patchInstalledOpenClawResponsesCompatibleFallbackRuntime();
   patchInstalledOpenClawSystemPromptReasoningLabelRuntime();
   patchInstalledOpenClawToolDirectoryI18nRuntime();
-  patchInstalledOpenClawRequiredContractToolRuntime();
+  cleanupInstalledOpenClawRequiredContractToolRuntime();
   patchInstalledOpenClawStreamingRuntime();
   patchInstalledOpenClawModelRequestContractRuntime();
   patchInstalledOpenClawRawToolSignalRuntime();
   patchInstalledOpenClawPluginToolRunContextRuntime();
   patchInstalledOpenClawNativeMediaCancellationRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
-  patchInstalledOpenClawNativeMediaAcceptanceRuntime();
+  cleanupInstalledOpenClawNativeMediaAcceptanceRuntime();
   patchInstalledOpenClawVideoSegmentDedupeRuntime();
   patchInstalledOpenClawVideoProviderCatalogRuntime();
   patchInstalledOpenClawTaskSummaryDeliveryRuntime();

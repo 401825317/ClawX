@@ -45,6 +45,10 @@ test('Host task bridge routes delegate safe resume and cancellation to the regis
       description: 'No-side-effect route integration executor',
       sideEffect: 'none',
       requiresApproval: false,
+      acceptance: {
+        requiresArtifact: false,
+        requiresVerification: false,
+      },
     },
     async start(context) {
       starts += 1;
@@ -112,9 +116,17 @@ test('Host task bridge routes delegate safe resume and cancellation to the regis
 
   try {
     const capabilitiesResponse = await fetch(`${origin}/api/task-bridge/capabilities`);
-    const capabilitiesPayload = await capabilitiesResponse.json() as { capabilities?: Array<{ kind?: string; operations?: unknown }> };
+    const capabilitiesPayload = await capabilitiesResponse.json() as {
+      capabilities?: Array<{ kind?: string; operations?: unknown; acceptance?: unknown }>;
+    };
     const capability = capabilitiesPayload.capabilities?.find((item) => item.kind === kind);
     assert.deepEqual(capability?.operations, { start: true, cancel: true, resume: true });
+    assert.deepEqual(capability?.acceptance, {
+      source: 'host_capability',
+      requiresArtifact: false,
+      requiresVerification: false,
+      requiredVerificationKinds: [],
+    });
 
     const orphanRequest = {
       sessionKey: SESSION_KEY,
@@ -124,6 +136,13 @@ test('Host task bridge routes delegate safe resume and cancellation to the regis
       capability: kind,
       title: 'Route task route-orphan',
       input: { mode: 'resume' },
+      acceptance: {
+        source: 'host_capability' as const,
+        requiresArtifact: false,
+        requiresVerification: false,
+        requiredVerificationKinds: [],
+      },
+      completion: { mode: 'direct' as const },
     };
     const orphan = await hostTaskService.create(orphanRequest);
     const orphanReplayResponse = await fetch(`${origin}/api/task-bridge/tasks`, {

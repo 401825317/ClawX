@@ -3,12 +3,18 @@ import { existsSync, statSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import JSZip from 'jszip';
-import type { CompositeRunTextLengthRequirement } from '../../shared/composite-run';
 import { getOpenClawConfigDir } from './paths';
 
 export type LocalArtifactKind = 'presentation' | 'spreadsheet' | 'mini_program' | 'copywriting';
 
 export type LocalArtifactPlanningMode = 'model' | 'provided' | 'prompt-heuristic' | 'fallback-template';
+
+export type LocalArtifactTextLengthRequirement = {
+  unit: 'characters';
+  targetCharacters: number;
+  minimumCharacters: number;
+  approximate: boolean;
+};
 
 export type PresentationThemeFamily =
   | 'product-launch'
@@ -78,7 +84,7 @@ export type LocalArtifactCreateRequest = {
   outputDir?: string;
   planningMode?: LocalArtifactPlanningMode;
   planningSummary?: string;
-  textLengthRequirement?: CompositeRunTextLengthRequirement;
+  textLengthRequirement?: LocalArtifactTextLengthRequirement;
   presentationDesign?: PresentationDesign;
   slides?: Array<{
     title?: string;
@@ -635,7 +641,7 @@ function parseChineseInteger(value: string): number | undefined {
   return parsed > 0 ? parsed : undefined;
 }
 
-export function resolveRequestedTextLength(prompt: string): CompositeRunTextLengthRequirement | undefined {
+export function resolveRequestedTextLength(prompt: string): LocalArtifactTextLengthRequirement | undefined {
   const normalized = cleanText(prompt);
   const match = normalized.match(/(约|大约|大概|近|至少|最少|不少于|不低于|最多|不超过)?\s*((?:\d+(?:\.\d+)?\s*(?:万|千|[kK]))|(?:\d{2,7})|(?:[零〇一二两三四五六七八九十百千万]{2,}))\s*(字|字符)\s*(左右|上下|以上|以内)?/u);
   if (!match?.[2]) return undefined;
@@ -666,7 +672,7 @@ export function resolveRequestedTextLength(prompt: string): CompositeRunTextLeng
   };
 }
 
-function normalizeTextLengthRequirement(request: LocalArtifactCreateRequest): CompositeRunTextLengthRequirement | undefined {
+function normalizeTextLengthRequirement(request: LocalArtifactCreateRequest): LocalArtifactTextLengthRequirement | undefined {
   const requirement = request.textLengthRequirement;
   if (
     requirement?.unit === 'characters'

@@ -1,8 +1,8 @@
 {
   "id": "uclaw-artifact-guard",
   "name": "UClaw Artifact Guard",
-  "description": "Prevents artifact and external-action tasks from ending with unexecuted future-tense promises.",
-  "version": "0.1.22",
+  "description": "Stages media inputs, projects runtime events, and deterministically verifies concrete artifact references.",
+  "version": "0.2.0",
   "entry": "index.mjs",
   "enabledByDefault": false,
   "contracts": {

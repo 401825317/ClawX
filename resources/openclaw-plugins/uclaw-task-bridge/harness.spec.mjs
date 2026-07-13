@@ -4,13 +4,17 @@ import pluginEntry, { __test } from './index.mjs';
 function makeApi() {
   const injections = [];
   const schedules = [];
+  const unschedules = [];
   const registeredTools = [];
   const services = [];
+  const agentEvents = [];
   return {
     injections,
     schedules,
+    unschedules,
     registeredTools,
     services,
+    agentEvents,
     logger: { warn() {} },
     registerTool(tool, options) {
       registeredTools.push({ tool, options });
@@ -30,6 +34,18 @@ function makeApi() {
         async scheduleSessionTurn(payload) {
           schedules.push(payload);
           return { id: 'scheduled-1', sessionKey: payload.sessionKey };
+        },
+        async unscheduleSessionTurnsByTag(payload) {
+          unschedules.push(payload);
+          return { removed: 0, failed: 0 };
+        },
+      },
+    },
+    agent: {
+      events: {
+        emitAgentEvent(payload) {
+          agentEvents.push(payload);
+          return { emitted: true, stream: payload.stream };
         },
       },
     },
@@ -52,9 +68,16 @@ const task = __test.normalizeTask({
     toolCallId: 'call-1',
     idempotencyKey: 'request-1',
   },
+  acceptance: {
+    source: 'host_capability',
+    requiresArtifact: true,
+    requiresVerification: true,
+    requiredVerificationKinds: ['media.playable'],
+  },
+  completion: { mode: 'direct' },
   progress: [{ stage: 'compose', status: 'completed', percent: 100 }],
   artifacts: [{ id: 'artifact-1', role: 'final', filePath: '/tmp/final.mp4', mimeType: 'video/mp4' }],
-  verifications: [{ id: 'verify-1', status: 'passed', kind: 'media.playable', required: true }],
+  verifications: [{ id: 'verify-1', status: 'passed', kind: 'media.playable', required: true, artifactId: 'artifact-1' }],
 });
 
 assert.equal(task.taskId, 'task-1');
@@ -63,6 +86,38 @@ assert.deepEqual(task.recovery.supported, ['status_only', 'resume_if_safe']);
 assert.equal(task.lifecycle.operations[0].kind, 'resume');
 assert.equal(__test.taskEvents(task).some((event) => event.type === 'task.succeeded'), true);
 assert.match(__test.buildTaskToolResult('status', task).content[0].text, /MEDIA:\/tmp\/final\.mp4/);
+const mixedVerificationTask = __test.normalizeTask({
+  ...task,
+  taskId: 'task-mixed-artifacts',
+  artifacts: [
+    ...task.artifacts,
+    { id: 'artifact-unverified', role: 'preview', filePath: '/tmp/unverified.mp4', mimeType: 'video/mp4' },
+  ],
+});
+assert.deepEqual(__test.deliverableArtifacts(mixedVerificationTask).map((artifact) => artifact.id), ['artifact-1']);
+const mixedDeliveryLines = __test.buildTaskToolResult('status', mixedVerificationTask).content[0].text
+  .split('\n')
+  .filter((line) => line.startsWith('MEDIA:'));
+assert.deepEqual(mixedDeliveryLines, ['MEDIA:/tmp/final.mp4']);
+const noVerificationTask = __test.normalizeTask({
+  ...task,
+  taskId: 'task-no-verification',
+  acceptance: {
+    source: 'host_capability',
+    requiresArtifact: true,
+    requiresVerification: false,
+    requiredVerificationKinds: [],
+  },
+  verifications: [],
+});
+assert.match(__test.buildTaskToolResult('status', noVerificationTask).content[0].text, /MEDIA:\/tmp\/final\.mp4/);
+const failedTask = __test.normalizeTask({
+  ...task,
+  taskId: 'task-failed-artifact',
+  status: 'blocked',
+  verifications: [{ id: 'verify-failed', status: 'blocked', kind: 'media.playable', required: true, artifactId: 'artifact-1' }],
+});
+assert.doesNotMatch(__test.buildTaskToolResult('status', failedTask).content[0].text, /MEDIA:/);
 
 const correlation = __test.correlationFromContext(
   { sessionKey: 'agent:main:session-1', runId: 'run-1' },
@@ -84,7 +139,10 @@ const bridge = __test.createBridge(api, {
 await bridge.deliverTerminalTask(task);
 assert.equal(api.injections.length, 1);
 assert.equal(api.injections[0].idempotencyKey, 'uclaw-task-bridge:completion:task-1:2');
-assert.equal(api.schedules.length, 1);
+assert.equal(api.schedules.length, 0);
+assert.equal(api.agentEvents.some((event) => event.stream === 'artifact'), true);
+assert.equal(api.agentEvents.some((event) => event.stream === 'verification'), true);
+assert.equal(api.agentEvents.some((event) => event.stream === 'tool'), true);
 assert.equal(ackCalls.length, 1);
 
 const pollingApi = makeApi();
@@ -105,9 +163,35 @@ const pollingBridge = __test.createBridge(pollingApi, {
 await pollingBridge.poll();
 await pollingBridge.poll();
 assert.equal(pollingApi.injections.length, 1);
-assert.equal(pollingApi.schedules.length, 1);
+assert.equal(pollingApi.schedules.length, 0);
 assert.equal(pollingRoutes.filter((route) => route.endsWith('/ack')).length, 1);
 
+const failedEventApi = makeApi();
+failedEventApi.agent.events.emitAgentEvent = () => ({ emitted: false, reason: 'event unavailable' });
+let failedEventAckCount = 0;
+let failedEventNow = 1_000;
+const failedEventBridge = __test.createBridge(failedEventApi, {
+  now: () => failedEventNow,
+  completionRetryBaseMs: 100,
+  completionRetryMaxMs: 1_000,
+  hostApiFetch: async (route) => {
+    if (route.endsWith('/ack')) failedEventAckCount += 1;
+    return { tasks: [task] };
+  },
+});
+await failedEventBridge.poll();
+await failedEventBridge.poll();
+assert.equal(failedEventApi.injections.length, 1);
+failedEventNow += 100;
+await failedEventBridge.poll();
+assert.equal(failedEventApi.injections.length, 2);
+assert.equal(failedEventAckCount, 0);
+
+const replanTask = __test.normalizeTask({
+  ...task,
+  taskId: 'task-replan',
+  completion: { mode: 'replan', reason: 'Continue the multi-step workflow after local rendering.' },
+});
 const failedWakeApi = makeApi();
 failedWakeApi.session.workflow.scheduleSessionTurn = async (payload) => {
   failedWakeApi.schedules.push(payload);
@@ -124,7 +208,7 @@ const failedWakeBridge = __test.createBridge(failedWakeApi, {
       failedWakeAckCount += 1;
       return { ok: true };
     }
-    return { tasks: [task] };
+    return { tasks: [replanTask] };
   },
 });
 await failedWakeBridge.poll();
@@ -137,6 +221,39 @@ assert.equal(failedWakeApi.schedules.length, 2);
 assert.equal(failedWakeApi.injections.length, 2);
 assert.equal(failedWakeApi.injections[0].idempotencyKey, failedWakeApi.injections[1].idempotencyKey);
 assert.equal(failedWakeAckCount, 0);
+
+const replanApi = makeApi();
+let replanAckCount = 0;
+const replanBridge = __test.createBridge(replanApi, {
+  hostApiFetch: async (route) => {
+    if (route.endsWith('/ack')) replanAckCount += 1;
+    return { tasks: [replanTask] };
+  },
+});
+await replanBridge.poll();
+assert.equal(replanApi.schedules.length, 1);
+assert.equal(replanApi.schedules[0].delayMs, 2_000);
+assert.equal(replanApi.schedules[0].deleteAfterRun, true);
+assert.equal(replanApi.unschedules.length, 1);
+assert.equal(replanApi.schedules[0].deliveryMode, 'announce');
+assert.match(replanApi.schedules[0].message, /multi-step workflow/);
+assert.equal(replanAckCount, 1);
+
+const replanAckFailureApi = makeApi();
+let replanAckFailureCount = 0;
+const replanAckFailureBridge = __test.createBridge(replanAckFailureApi, {
+  hostApiFetch: async (route) => {
+    if (route.endsWith('/ack')) {
+      replanAckFailureCount += 1;
+      throw new Error('ack unavailable');
+    }
+    return { tasks: [replanTask] };
+  },
+});
+await replanAckFailureBridge.deliverTerminalTask(replanTask);
+assert.equal(replanAckFailureApi.schedules.length, 1);
+assert.equal(replanAckFailureApi.unschedules.length, 2);
+assert.equal(replanAckFailureCount, 1);
 
 const missingInjectionApi = makeApi();
 let missingInjectionAckCount = 0;
@@ -174,7 +291,7 @@ const queuedDuplicateBridge = __test.createBridge(queuedDuplicateApi, {
   },
 });
 await queuedDuplicateBridge.poll();
-assert.equal(queuedDuplicateApi.schedules.length, 1);
+assert.equal(queuedDuplicateApi.schedules.length, 0);
 assert.equal(queuedDuplicateAckCount, 1);
 
 const waitingTask = __test.normalizeTask({
@@ -191,7 +308,6 @@ assert.equal(registrationApi.registeredTools.length, 1);
 assert.equal(typeof registrationApi.registeredTools[0].tool, 'function');
 assert.deepEqual(registrationApi.registeredTools[0].options.names, [
   'uclaw_get_runtime_capabilities',
-  'uclaw_declare_turn_contract',
   'uclaw_get_task_bridge_capabilities',
   'uclaw_start_host_task',
   'uclaw_get_host_task',
@@ -225,6 +341,7 @@ assert.equal(startCalls[0].route, '/api/task-bridge/tasks');
 assert.match(startCalls[0].options.body, /agent:main:session-2/);
 assert.match(startCalls[0].options.body, /run-2/);
 assert.match(startCalls[0].options.body, /call-2/);
+assert.match(startCalls[0].options.body, /"mode":"direct"/);
 
 const recoveryCalls = [];
 const recoveryBridge = __test.createBridge(makeApi(), {

@@ -15,7 +15,7 @@ touchedAreas:
   - electron/utils/openclaw-video-relay-constants.ts
   - resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - resources/openclaw-plugins/uclaw-task-bridge/**
-  - scripts/uclaw-contract-driven-gate.test.mjs
+  - scripts/uclaw-artifact-guard-runtime.test.mjs
   - tests/e2e/native-agent-media-routing.spec.ts
 requiredProfiles:
   - fast
@@ -36,7 +36,7 @@ acceptance:
   - The Host video capability selects `grok-image-video` when resolved `inputImages` is empty and `grok-video-1.5` when exactly one verified reference image is present.
   - Host validation rejects `grok-video-1.5` without exactly one readable reference image before calling the backend.
   - Task Flow preserves the edited-image dependency and does not silently downgrade a requested image-to-video task to text-to-video.
-  - Retired video intent and direct media endpoints cannot accept fresh turns; legacy media jobs remain readable/cancellable only for recovery compatibility.
+  - Retired video intent and direct media endpoints cannot accept fresh turns or provide an alternate execution path.
 docs:
   required: false
 ---

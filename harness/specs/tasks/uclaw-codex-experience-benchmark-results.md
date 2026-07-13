@@ -2,19 +2,19 @@
 
 Date: 2026-07-09
 
-Branch under review: `feature/uclaw-agent-runtime-contract`
+Branch under review: `feature/uclaw-general-agent-orchestration`
 
 UClaw package version observed in dev logs: `0.7.3`
 
 Current architecture note (2026-07-12): all fresh ordinary, image-mode,
 video-mode, file, desktop, and multi-deliverable turns enter the OpenClaw Agent
 through `/api/chat/send`. OpenClaw owns semantic tool selection and Task Flow;
-UClaw supplies current-turn preferences, registered Host capabilities, durable
-task projection, approvals, and verification. The legacy composite coordinator
-is recovery-only for pre-migration snapshots and history. References below to
-the removed media-routing modules, retired direct media endpoints, local fast paths, and old
-unit-test runner are historical evidence for the branch/date above, not the
-current execution contract.
+UClaw supplies current-turn preferences, registered Host capabilities,
+capability-derived acceptance, durable task projection, approvals, and
+verification. There is no second semantic completion layer. References below
+to removed routing modules, retired
+direct media endpoints, local fast paths, and old test runners are historical
+evidence only, not current behavior.
 
 ## Evidence Rules
 
@@ -28,15 +28,15 @@ current execution contract.
 | ID | Prompt Area | Current UClaw State | Codex Baseline Delta | Priority |
 | --- | --- | --- | --- | --- |
 | A01/K01 | ordinary chat / memory preference | Current session evidence shows no media/artifact side effects, but Electron UI still needs confirmation that the process graph is hidden by default. | Codex keeps this as a short conversational/memory confirmation without graph noise. | P0 |
-| B01/J01 | image generation timing | Current dev runs show image generation works, but timing varies widely: one smoke was about 29.9s total, H01 images took about 79s and 151s wall time with provider header waits of 68.6s and 132.2s. Provider-vs-local reconciliation remains required. | Codex shows calm progress and final artifact; it does not make the user debug raw gate internals. | P0 |
+| B01/J01 | image generation timing | Current dev runs show image generation works, but timing varies widely: one smoke was about 29.9s total, H01 images took about 79s and 151s wall time with provider header waits of 68.6s and 132.2s. Provider-vs-local reconciliation remains required. | Codex shows calm progress and final artifact; it does not make the user debug raw runtime internals. | P0 |
 | B05/I04 | video generation/playback | User observed a broken/0s video case before. Must re-run current build and require duration/playability evidence. | Codex should not mark a broken media artifact as successful. | P0 |
-| C01/G01/K03 | seven-item pack | Historical legacy runs showed messy layout, confusing task count, and final-only delivery; the fresh Agent/Task Flow path requires a new UI rerun. | Codex-style behavior is a compact manifest with completed/failed/pending items. | P0 |
+| C01/G01/K03 | seven-item pack | Historical retired-path runs showed messy layout, confusing task count, and final-only delivery; the current Agent/Task Flow path requires a new UI rerun. | Codex-style behavior is a compact manifest with completed/failed/pending items. | P0 |
 | D01 | PPT quality | Historical local-writer runs produced prompt-light template-like decks; current Agent/skill plus Host-writer quality requires re-benchmarking. | Codex-level output needs prompt-specific deck planning plus verification. | P0 |
 | E01 | Excel quality | Historical local-writer runs could create generic tables; current Agent/skill plus Host-writer quality requires re-benchmarking. | Codex-level output needs prompt-specific workbook planning, formulas, and sheet validation. | P0 |
 | F01 | mini-program quality | Code can create an HTML app, but default behavior is a fixed Todo-like template unless the agent plans content/behavior. | Codex-level output needs runnable, prompt-specific interactions and verification. | P0 |
 | H01/H02 | multi-run isolation | H01 produced separate cat/dog image tasks; H02 kept a normal chat turn independent while video generation was running. Both image and video completions still persisted internal/inter-session pseudo-user messages in the transcript. | Codex keeps turns/run ownership separate and hides internal completion plumbing from chat history. | P0 |
 | I01 | missing image for edit | Single image-edit without image should ask for input; a multi-deliverable Task Flow may use its own generated image dependency. | Codex does not block the whole batch on one missing optional input. | P0 |
-| X01 | front-end demo with external data | Observed ZHCW demo eventually delivered, but the run was noisy, slow, and artifact intent/gate state was inconsistent. | Codex-style behavior should hide recovered internal retries and deliver a verified runnable artifact with concise caveats. | P0 |
+| X01 | front-end demo with external data | Observed ZHCW demo eventually delivered, but the run was noisy, slow, and artifact acceptance state was inconsistent. | Codex-style behavior should hide recovered internal retries and deliver a verified runnable artifact with concise caveats. | P0 |
 
 ## Code Evidence Anchors
 
@@ -46,17 +46,15 @@ current execution contract.
 - Local artifact writing remains implemented in `electron/utils/local-artifact-runtime.ts` as a low-level Host capability.
 - Bundled low-level artifact tools exist in `resources/openclaw-plugins/uclaw-local-artifacts/index.mjs`.
 - Prompt-facing skill shims exist in `resources/openclaw-skill-shims/presentation-maker/SKILL.md` and `resources/openclaw-skill-shims/spreadsheet-maker/SKILL.md`.
-- The legacy composite coordinator is retained only to resume or finalize pre-migration snapshots.
+- Removed parallel routing and old-run recovery code is not part of the supported runtime.
 
 ## Current Key Finding
 
-The current system has one fresh-turn path plus one compatibility path:
-
-1. Fresh path: OpenClaw Agent/skill reasoning uses Task Flow and registered tools or Host capabilities, then validates delivery.
-2. Compatibility path: the legacy composite coordinator may recover an already-persisted old run, but cannot accept a new user turn.
-
-Historical quality failures from the compatibility implementation remain useful
-regression evidence, but must not be described as the current fresh-turn route.
+The current system has one execution path: OpenClaw Agent/skill reasoning uses
+Task Flow and registered tools or Host capabilities, while UClaw validates real
+structured outputs against capability-derived requirements. Historical quality
+failures remain useful product evidence, but removed code paths are not loaded,
+resumed, or tested as compatibility behavior.
 
 ## Historical Implementation Snapshot - 2026-07-09
 
@@ -64,18 +62,18 @@ Run kind: `uclaw-code-evidence`
 
 The branch observed on that date upgraded its then-current local composite path from fixed templates to a first-stage prompt-aware artifact runtime:
 
-- Legacy PPT/Excel/mini-program/copywriting tasks passed `sourcePrompt` into `/api/local-artifacts/create`.
+- The retired PPT/Excel/mini-program/copywriting path passed `sourcePrompt` into `/api/local-artifacts/create`.
 - `electron/utils/local-artifact-runtime.ts` plans prompt-specific content before writing files.
 - PPT verification opens the generated `.pptx` package, reads slide text, checks slide count, empty slides, and duplicate titles.
 - Excel verification opens the generated `.xlsx` package, reads sheet names, row count, formula count, and formula cell evidence.
 - Mini-program verification checks the generated HTML for required prompt-specific behaviors such as delete/filter/search/tags/persistence/form validation/success state/cart/Kanban/list.
-- The renderer emits required `artifact.content` verification events into the runtime contract, not just `artifact.availability`.
+- The renderer emitted `artifact.content` verification events in addition to `artifact.availability`.
 - A focused unit test now covers sourcePrompt-planned PPT, Excel, Todo app, idea collector, signup form, coffee menu/cart, and Kanban artifacts.
-- The historical branch used local guards for mode-hint non-media prompts; the current branch leaves those semantic decisions to the OpenClaw Agent turn contract.
+- The historical branch used local guards for mode-hint non-media prompts; the current branch leaves those semantic decisions to the OpenClaw Agent.
 
 Boundary:
 
-- This snapshot predates the current OpenClaw Agent/Task Flow/Host capability contract and is retained only as regression evidence.
+- This snapshot predates the current OpenClaw Agent/Task Flow/Host capability architecture and is retained only as regression evidence.
 - Manual UClaw UI runs are still required for process display, final manifest layout, history reload, media/video validity, and concurrent turn isolation.
 
 ## Required Implementation Items
@@ -96,7 +94,7 @@ Target behavior:
 Current status:
 
 - Prompt-aware artifact-content verification remains available in the Host runtime.
-- Fresh orchestration now belongs to OpenClaw Agent/Task Flow; legacy heuristic planning is recovery/degraded compatibility only.
+- Fresh orchestration belongs to OpenClaw Agent/Task Flow; the retired heuristic planner is not a supported fallback.
 
 ### P0. Add Artifact Validators
 
@@ -126,7 +124,7 @@ Mini-program/web validator:
 ### P0. Manifest And UI Cleanup
 
 - Keep one compact user-facing Task Flow progress card for a multi-deliverable turn.
-- Do not show raw branch/gate/error code details unless developer details are expanded.
+- Do not show raw branch, validation, or error-code details unless developer details are expanded.
 - Final message should use a stable manifest:
   - completed artifacts
   - failed or skipped subtasks
@@ -159,12 +157,12 @@ Mini-program/web validator:
 
 For requests like "build a front-end demo that pulls data from an external site/API", do not add one-off rules for the specific site. Treat this as a general artifact pattern:
 
-- The OpenClaw Agent turn contract must recognize "搭建 demo / 做页面 / 做小程序 / 分析页面" as artifact work with required file delivery.
+- The OpenClaw Agent must recognize "搭建 demo / 做页面 / 做小程序 / 分析页面" as artifact work with required file delivery.
 - The execution plan should expect CORS, Referer, anti-hotlink, or empty-200 responses from external data sources.
 - The default deliverable should include a robust fallback such as embedded snapshot data or a lightweight no-SQL proxy recommendation, while still attempting live fetch when feasible.
 - Verification should validate the generated file, local preview, rendered data count, and at least one interaction.
 - Recovered browser/server/tool failures should be collapsed from the normal user view; developer details can keep them.
-- Gate state must not end with contradictory `verificationPassed=true` and `verificationBlocked=true` semantics.
+- Native acceptance state must not contain contradictory passed and blocked verification semantics.
 
 ## Manual Run Queue
 
@@ -188,13 +186,13 @@ Run these next and append rows below:
 - Prompt: `生图，PPT，Excel，生视频，根据图片修图，做小程序，生成文案，每个事儿都随便给我来一个`
 - Codex baseline:
   - Intent: treat as a sample pack request, not a mode conflict.
-  - Progress display: compact progress, no raw routing/gate spam.
+  - Progress display: compact progress, no raw routing or validation spam.
   - Artifacts: image, PPT, Excel, video, edited image or clear fallback, runnable app, copywriting.
   - Final response: artifact manifest with verification summary.
 - UClaw actual from user-observed runs:
   - Earlier reply asked user to choose one task, which is a P0 failure.
-  - Later legacy composite execution produced artifacts, but final layout was messy and task count was confusing.
-  - A history regression showed only the video after reopening; that historical branch later persisted a legacy composite final transcript entry.
+  - Later retired-path execution produced artifacts, but final layout was messy and task count was confusing.
+  - A history regression showed only the video after reopening; that historical branch later persisted a final transcript entry.
 - Gap classification:
   - Existing bug: final manifest/UI quality and task count still need verification.
   - Product gap: progressive delivery and agent/skill-grade local artifacts are not complete.
@@ -214,11 +212,11 @@ Run these next and append rows below:
   - Plan content from the prompt, create durable artifact, verify the artifact, then summarize the result.
 - UClaw code evidence:
   - Low-level local writers exist for PPT/XLSX/HTML.
-  - The historical legacy composite execution could call these writers directly.
+  - The historical retired execution path could call these writers directly.
   - Direct writer fallback can satisfy "file exists" while failing prompt-specific quality.
 - Required implementation:
   - Treat the writer as a tool, not the agent.
-  - Add validators and require verification evidence before final gate passes.
+  - Add validators and require verification evidence before native success.
 
 ### Result: Local Artifact Runtime Upgrade - uclaw-code-evidence after implementation
 
@@ -297,7 +295,7 @@ Run these next and append rows below:
   - Product gap: video progress should surface provider timeout/retry options compactly and stop all pollers promptly.
 - Required implementation:
   - Normalize video task failure into the same run completion signal consumed by UI, history polling, and test waiters.
-  - Keep final media gate strict: no video file means no successful media artifact.
+  - Keep media acceptance strict: no video file means no successful media artifact.
   - Add duration/playability validation only for successful video outputs.
 
 ### Result: X01 External-Data Front-End Demo - observed
@@ -315,18 +313,18 @@ Run these next and append rows below:
   - The generated page includes 100 embedded ZHCW snapshot rows and a fallback message because direct local static JSONP can return empty body without the official Referer.
   - Runtime duration was about 11 minutes with 38 tool calls and 5 recovered internal errors.
   - Recovered errors included browser `targetId` mismatch, Node `require` plus top-level `await` ambiguity, and a local preview server connection refusal.
-  - Artifact guard classified the final run as `artifactRequest=false` even though the prompt required a demo file.
-  - Final gate evidence contained contradictory state: `verificationPassed=true`, `verificationBlocked=true`, `explicitBlocker=true`, and `shouldRevise=false`.
+  - The historical classifier marked `artifactRequest=false` even though the prompt required a demo file.
+  - Historical finalization evidence contained contradictory passed and blocked verification flags.
 - Gap classification:
   - Existing bug: artifact intent detection misses "front-end demo / analysis page" tasks.
-  - Existing bug: recovered blockers are not normalized before final gate status.
+  - Existing bug: recovered blockers were not normalized before terminal status.
   - Product gap: recovered internal tool/server failures are too visible/noisy in the process trace.
   - Product gap: external-data demo tasks need a default fallback/proxy pattern instead of discovering it through long trial-and-error.
 - Required implementation:
-  - Extend the OpenClaw Agent turn and artifact verification contract for front-end demo/web app/data-analysis pages.
+  - Ensure the OpenClaw Agent and artifact validators cover front-end demo, web app, and data-analysis pages.
   - Add a generic external-data artifact pattern with live fetch plus embedded snapshot or proxy recommendation.
   - Stabilize local preview server lifecycle during validation.
-  - Normalize final gate state after recovery and collapse recovered errors from the default UI.
+  - Normalize terminal acceptance after recovery and collapse recovered errors from the default UI.
 
 ### Result: Current Dev Self-Test Batch - observed via Gateway sessions
 
@@ -334,7 +332,7 @@ Run kind: `observed`
 
 Environment:
 
-- UClaw branch: `feature/uclaw-agent-runtime-contract`
+- UClaw branch: `feature/uclaw-general-agent-orchestration`
 - Dev mode: `pnpm run dev:junfeiai`
 - Host API: `127.0.0.1:13210`
 - OpenClaw Gateway: `127.0.0.1:18789`
@@ -466,7 +464,7 @@ Environment:
 - UClaw actual:
   - The historical runtime authorized `image_generate`.
   - Final assistant reply restored through `chat.history`.
-  - Gate passed with required artifact evidence.
+  - The native media task completed with required artifact evidence.
 - Current judgment:
   - Intent/artifact: pass.
   - Performance/UI: needs Electron-window confirmation for compact progress and provider-vs-local timing display.
@@ -564,7 +562,7 @@ Environment:
     - `AI 产品进展周报：功能迭代、用户反馈与下周计划`
     - `智能化产品周报：数据表现、能力更新与风险跟进`
     - `AI 产品运营周报：核心指标、版本动态与重点事项`
-  - Final gate had `artifactRequest=false`, `desktopActionRequest=false`, and no blockers.
+  - No artifact or desktop capability was invoked, and the run had no blockers.
 - Current judgment:
   - Intent: pass.
   - Side effects: pass.
@@ -659,7 +657,7 @@ Environment:
   - Memory/context: pass through fallback.
   - UI/product gap: embedding/provider failure should be normalized as an internal fallback detail and hidden from normal chat UI.
 
-#### D01 / Full PPT Quality And Gate Strictness
+#### D01 / Full PPT Quality And Acceptance Strictness
 
 - Prompt: `做一个 8 页 PPT：《AI 工作流如何提升团队效率》，要有目录、痛点、方案、案例、ROI、落地计划`
 - Session:
@@ -672,15 +670,15 @@ Environment:
   - Local package inspection showed the file had 9 slides, while the prompt requested 8.
   - The final assistant reply said: `刚才工具自动额外加了一页封面，实际生成了 9 页。我直接重做一个严格 8 页版本并重新校验。`
   - The run ended after that promise. There was no second artifact or successful re-verification in the transcript.
-  - The historical single-artifact prompt entered the legacy composite path with extra copywriting-like work, which likely contributed to confusing task counts.
+  - The historical single-artifact prompt entered a retired parallel path with extra copywriting-like work, which likely contributed to confusing task counts.
 - Current judgment:
   - Artifact existence: pass.
   - Quality/page-count compliance: fail.
-  - Completion gate: fail. A promise to redo is not a completed repair.
+  - Completion acceptance: fail. A promise to redo is not a completed repair.
   - Historical routing precision: fail. A single PPT request must not inflate into unrelated subtasks.
 - Required implementation:
   - Artifact validators must block final success when the actual deck violates requested page count.
-  - Final gate must treat promise-only responses such as "I will redo" as unfinished unless a repaired artifact lands.
+  - Native success requires the repaired artifact and successful re-verification; promise-only prose is not evidence.
   - The current OpenClaw Agent should keep a single PPT as one tool task; Task Flow should decompose only genuinely multi-deliverable requests.
 
 #### E02 / Sales Funnel Excel With Formula Evidence
@@ -860,10 +858,10 @@ Environment:
 - Current judgment:
   - Artifact existence: pass.
   - Self-check detection: pass.
-  - Delivery/gate: fail. It should not end with a promise to fix after detecting a blocker.
+  - Delivery acceptance: fail. It should not end with a promise to fix after detecting a blocker.
   - User experience: fail. Codex-style behavior would repair the file, re-run the interaction check, then deliver one final result.
 - Required implementation:
-  - Completion gate must treat "I will fix / I will continue" as unfinished when a validator has found a blocking artifact bug.
+  - A validator-found blocking artifact bug must keep the task non-successful until a repaired artifact passes verification.
   - Web artifact validator should encode hidden-state checks for common success/error panels.
   - Local HTML writer should include a safe base rule for `[hidden]`.
 
@@ -917,13 +915,13 @@ Environment:
   - G01 reload showing the unified manifest instead of split old rows;
   - media timing displayed as compact user-facing elapsed time.
 - Execution/runtime gaps still open:
-  - external-data web demo artifact intent and gate normalization (`X01`);
+  - external-data web demo artifact intent and acceptance normalization (`X01`);
   - async video failure completion propagation to all UI/test waiters (`B05`);
   - HTML writer/validator should reject empty shell output before final delivery (`F01`);
   - final delivery should survive a final-model 429 when artifacts already exist (`F02`) - code-side fallback added, Electron visual retest pending;
-  - promise-only repair text should not pass completion gate (`D01`);
+  - promise-only repair text should not count as successful completion (`D01`);
   - promise-only repair text should not end a web artifact run after a detected validation bug (`F03`);
-  - fresh single-artifact prompts must stay one Agent tool task, while legacy composite recovery remains isolated (`D01`);
+  - fresh single-artifact prompts must stay one Agent tool task (`D01`);
   - follow-up vision should produce exactly one final reply, not truncated/duplicated assistant rows (`G02`);
   - async media completion should attach to the owning run as artifact events, not persisted internal/inter-session pseudo-user messages (`H01/H02`);
   - Task Flow ownership should collapse one prompt into one visible result (`C01/G01`);

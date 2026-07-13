@@ -41,15 +41,6 @@ export function stripOpenClawRuntimeContinuationPrompt(text: string): string {
     .trim();
 }
 
-export function stripUClawExecutionContractEnvelope(text: string): string {
-  if (!text) return text;
-  return text
-    .replace(/\s*(?:【UClaw composite execution contract】|\[UClaw composite execution contract\]|【UClaw designed presentation execution contract v1\.】|\[UClaw designed presentation execution contract v1\.\])[\s\S]*$/i, '')
-    .trim();
-}
-
-export const stripCompositeExecutionContractEnvelope = stripUClawExecutionContractEnvelope;
-
 /**
  * Clean Gateway metadata from user message text for display.
  * Strips: [media attached: ... | ...], [message_id: ...],
@@ -57,7 +48,7 @@ export const stripCompositeExecutionContractEnvelope = stripUClawExecutionContra
  */
 function cleanUserText(text: string): string {
   return stripInboundMediaVisionEnvelope(
-    stripUClawExecutionContractEnvelope(text)
+    text
     // Remove OpenClaw internal recovery prompts that can be appended to
     // queued user messages after a Gateway restart.
     .replace(GATEWAY_RESTART_CONTINUATION_RE, '')

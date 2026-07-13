@@ -34,7 +34,6 @@ type RuntimeToolProgressContext = {
 const HIDDEN_TOOL_PROGRESS_NAMES = new Set([
   'tool_describe',
   'tool_search',
-  'uclaw_declare_turn_contract',
   'uclaw_get_runtime_capabilities',
   'uclaw_get_task_bridge_capabilities',
   'uclaw_get_host_task',
@@ -379,9 +378,8 @@ function semanticStateForTask(
   const terminalOutcome = normalizeText(task.terminalOutcome)?.toLowerCase();
   if (sourceStatus && /^(?:aborted|cancelled|canceled|stopped|terminated)$/u.test(sourceStatus)) return 'aborted';
   if (terminalOutcome && /^(?:aborted|cancelled|canceled)$/u.test(terminalOutcome)) return 'aborted';
-  // OpenClaw represents a generated intermediate artifact as a succeeded
-  // task with terminalOutcome=blocked. Check the outcome before the source
-  // status so the UI cannot turn an unmet contract into "completed".
+  // OpenClaw can represent an intermediate artifact as a succeeded task with
+  // terminalOutcome=blocked. The terminal outcome remains authoritative.
   if (terminalOutcome && /^(?:partial|blocked|partially_completed|partial_failure)$/u.test(terminalOutcome)) return 'partial';
   if (task.status === 'partial') return 'partial';
   if (task.status === 'completed') return 'completed';

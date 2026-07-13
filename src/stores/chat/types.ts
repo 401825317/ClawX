@@ -1,15 +1,11 @@
 import type {
   ChatRuntimeArtifact,
-  ChatRuntimeCheckpoint,
   ChatRuntimeEvent,
-  ChatRuntimeGateEvaluation,
-  ChatRuntimeGateIssue,
   ChatRuntimePlanStep,
   ChatRuntimeProgressEntry,
   ChatRuntimeTaskProjection,
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
-import type { AgentTurnContract } from '../../../shared/agent-turn-contract';
 
 /** Metadata for locally-attached files (not from Gateway) */
 export interface AttachedFileMeta {
@@ -34,22 +30,6 @@ export interface AttachedFileMeta {
   gatewayUrl?: string;
 }
 
-export interface CompositeArtifactManifest {
-  version: 1 | 2;
-  runId: string;
-  requestedTaskCount: number;
-  runStatus?: 'running' | 'completed' | 'error' | 'aborted';
-  runtimeEvents?: ChatRuntimeEvent[];
-  tasks: Array<{
-    id: string;
-    kind: string;
-    title: string;
-    status: 'completed' | 'failed' | 'blocked';
-    detail?: string;
-    artifactRefs: string[];
-  }>;
-}
-
 export type AsyncTaskLedgerStatus = 'pending' | 'completed' | 'error';
 
 export interface AsyncTaskLedgerEntry {
@@ -63,7 +43,7 @@ export interface AsyncTaskLedgerEntry {
   updatedAt: number;
 }
 
-export interface AsyncTaskEvidence extends AsyncTaskLedgerEntry {}
+export type AsyncTaskEvidence = AsyncTaskLedgerEntry;
 
 /** Raw message from OpenClaw chat.history */
 export interface RawMessage {
@@ -81,10 +61,6 @@ export interface RawMessage {
   stop_reason?: string;
   errorMessage?: string;
   error_message?: string;
-  syntheticLocalArtifactConversation?: boolean;
-  localArtifactResultKind?: 'image' | 'video' | 'composite';
-  compositeArtifactManifest?: CompositeArtifactManifest;
-  mediaGenerationSnapshot?: unknown;
   /** Local-only: file metadata for user-uploaded attachments (not sent to/from Gateway) */
   _attachedFiles?: AttachedFileMeta[];
 }
@@ -172,16 +148,11 @@ export interface ChatRuntimeRunState {
   lastEventAt?: number;
   endedAt?: number;
   objective?: string;
-  turnContract?: AgentTurnContract;
   planSummary?: string;
   planSteps?: ChatRuntimePlanStep[];
   tasks?: ChatRuntimeTaskProjection[];
   artifacts?: ChatRuntimeArtifact[];
   verifications?: ChatRuntimeVerification[];
-  issues?: ChatRuntimeGateIssue[];
-  checkpoints?: ChatRuntimeCheckpoint[];
-  gateEvaluations?: ChatRuntimeGateEvaluation[];
-  gateResult?: ChatRuntimeGateEvaluation;
   assistantText: string;
   thinkingText: string;
   progressEntries?: ChatRuntimeProgressEntry[];

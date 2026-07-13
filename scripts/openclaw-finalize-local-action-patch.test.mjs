@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  hasSuccessfulDesignedPresentationArtifact,
+  patchFinalizeLocalActionContent,
   patchArtifactRevisionToolChoiceContent,
 } from './openclaw-finalize-local-action-patch.mjs';
 
@@ -42,41 +42,17 @@ test('leaves unrelated runtime bundles unchanged', () => {
   assert.equal(result.changed, false);
 });
 
-test('only a passed designed or repaired PPT after the latest user releases the tool requirement', () => {
-  const passed = (toolId) => ({
-    role: 'toolResult',
-    content: JSON.stringify({
-      tool: { id: toolId },
-      result: {
-        ok: true,
-        kind: 'presentation',
-        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        verification: { status: 'passed' },
-      },
-    }),
-  });
-  assert.equal(hasSuccessfulDesignedPresentationArtifact([
-    { role: 'user', content: 'make a PPT' },
-    passed('openclaw:uclaw-local-artifacts:create_pptx_file'),
-  ]), false);
-  assert.equal(hasSuccessfulDesignedPresentationArtifact([
-    { role: 'user', content: 'make a PPT' },
-    {
-      role: 'toolResult',
-      content: JSON.stringify({
-        tool: { id: 'openclaw:uclaw-local-artifacts:create_designed_pptx_file' },
-        result: { ok: false, verification: { status: 'blocked' } },
-      }),
-    },
-    passed('openclaw:uclaw-local-artifacts:create_pptx_file'),
-  ]), false);
-  assert.equal(hasSuccessfulDesignedPresentationArtifact([
-    passed('openclaw:uclaw-local-artifacts:create_designed_pptx_file'),
-    { role: 'user', content: 'make another PPT' },
-    { role: 'toolResult', content: '{"ok":false,"verification":{"status":"blocked"}}' },
-  ]), false);
-  assert.equal(hasSuccessfulDesignedPresentationArtifact([
-    { role: 'user', content: 'make a PPT' },
-    passed('openclaw:uclaw-local-artifacts:repair_designed_pptx_file'),
-  ]), true);
+test('restores OpenClaw side-effect finalization instead of keeping a UClaw semantic override', () => {
+  const customized = `\t\t\t\tif (outcome.action !== "revise") return;
+\t\t\t\tconst allowUclawArtifactRevisionAfterSideEffect = event.hadDeterministicSideEffect && typeof outcome.reason === "string" && (outcome.reason.includes("UClaw artifact delivery final reply had no completed artifact evidence."));
+\t\t\t\tif (event.hadDeterministicSideEffect && !allowUclawArtifactRevisionAfterSideEffect) {
+\t\t\t\t\tlog$2.warn(\`before_agent_finalize requested revision after potential side effects; finalizing runId=\${params.runId} sessionId=\${params.sessionId}\`);
+\t\t\t\t\treturn;
+\t\t\t\t}
+\t\t\t\tbeforeAgentFinalizeRevisionReason = outcome.reason;
+`;
+  const cleaned = patchFinalizeLocalActionContent(customized);
+  assert.equal(cleaned.changed, true);
+  assert.doesNotMatch(cleaned.content, /allowUclawArtifactRevisionAfterSideEffect/);
+  assert.match(cleaned.content, /if \(event\.hadDeterministicSideEffect\)/);
 });

@@ -13,6 +13,19 @@ export type HostTaskData = null | boolean | number | string | HostTaskData[] | {
 export type HostTaskOperationKind = 'start' | 'resume' | 'cancel';
 export type HostTaskOperationStatus = 'running' | 'completed' | 'failed' | 'interrupted';
 
+export type HostTaskAcceptance = {
+  source: 'host_capability';
+  requiresArtifact: boolean;
+  requiresVerification: boolean;
+  requiredVerificationKinds: string[];
+  outputDescription?: string;
+};
+
+export type HostTaskCompletion = {
+  mode: 'direct' | 'replan';
+  reason?: string;
+};
+
 export type HostTaskOperation = {
   operationId: string;
   kind: HostTaskOperationKind;
@@ -25,7 +38,7 @@ export type HostTaskOperation = {
 };
 
 export type HostTaskSnapshot = {
-  version: 2;
+  version: 3;
   taskId: string;
   sessionKey: string;
   runId: string;
@@ -34,6 +47,8 @@ export type HostTaskSnapshot = {
   capability: string;
   title: string;
   input: HostTaskData;
+  acceptance: HostTaskAcceptance;
+  completion: HostTaskCompletion;
   checkpoint?: HostTaskData;
   status: HostTaskStatus;
   createdAt: number;
@@ -55,6 +70,8 @@ export type HostTaskCreateRequest = {
   capability: string;
   title: string;
   input?: unknown;
+  acceptance: HostTaskAcceptance;
+  completion?: HostTaskCompletion;
   status?: Extract<HostTaskStatus, 'queued' | 'running' | 'waiting'>;
 };
 
@@ -168,6 +185,30 @@ function normalizeProgress(value: HostTaskUpdateRequest['progress']): HostTaskSn
     : undefined;
 }
 
+function normalizeAcceptance(value: HostTaskAcceptance): HostTaskAcceptance {
+  if (!value || value.source !== 'host_capability') throw new Error('Host task acceptance must come from a Host capability');
+  const requiredVerificationKinds = [...new Set(
+    (Array.isArray(value.requiredVerificationKinds) ? value.requiredVerificationKinds : [])
+      .map((kind) => shortText(kind, 160))
+      .filter((kind): kind is string => Boolean(kind)),
+  )];
+  const requiresVerification = value.requiresVerification === true || requiredVerificationKinds.length > 0;
+  return {
+    source: 'host_capability',
+    requiresArtifact: value.requiresArtifact === true,
+    requiresVerification,
+    requiredVerificationKinds,
+    ...(shortText(value.outputDescription, 1_000) ? { outputDescription: shortText(value.outputDescription, 1_000) } : {}),
+  };
+}
+
+function normalizeCompletion(value: HostTaskCompletion | undefined): HostTaskCompletion {
+  const mode = value?.mode === 'replan' ? 'replan' : 'direct';
+  const reason = shortText(value?.reason, 1_000);
+  if (mode === 'replan' && !reason) throw new Error('Host task replan completion requires a reason');
+  return { mode, ...(reason ? { reason } : {}) };
+}
+
 function normalizeLifecycle(value: unknown): HostTaskSnapshot['lifecycle'] {
   const operations = value && typeof value === 'object' && Array.isArray((value as { operations?: unknown }).operations)
     ? (value as { operations: unknown[] }).operations
@@ -243,17 +284,19 @@ export class HostTaskService {
     await this.ensureInitialized();
     this.validateCreate(input);
     const normalizedInput = normalizeTaskData(input.input, 'Host task input') ?? {};
+    const acceptance = normalizeAcceptance(input.acceptance);
+    const completion = normalizeCompletion(input.completion);
     const key = `${input.sessionKey.trim()}:${input.idempotencyKey.trim()}`;
     const existingId = this.idempotency.get(key);
     const existing = existingId ? this.tasks.get(existingId) : undefined;
     if (existing) {
-      this.assertIdempotentReplay(existing, input, normalizedInput);
+      this.assertIdempotentReplay(existing, input, normalizedInput, acceptance, completion);
       return { task: clone(existing), idempotent: true };
     }
 
     const now = Date.now();
     const task: HostTaskSnapshot = {
-      version: 2,
+      version: 3,
       taskId: randomUUID(),
       sessionKey: input.sessionKey.trim(),
       runId: input.runId.trim(),
@@ -262,6 +305,8 @@ export class HostTaskService {
       capability: input.capability.trim(),
       title: input.title.trim(),
       input: normalizedInput,
+      acceptance,
+      completion,
       status: input.status ?? 'queued',
       createdAt: now,
       updatedAt: now,
@@ -352,17 +397,11 @@ export class HostTaskService {
       const verificationIdsBefore = new Set(task.verifications.map((verification) => verification.id));
       const knownArtifactIds = new Set(artifactIdsBefore);
       const knownVerificationIds = new Set(verificationIdsBefore);
-      if (update.status) {
-        task.status = update.status;
-        if ((update.status === 'running' || update.status === 'succeeded') && !shortText(update.error)) task.error = undefined;
-      }
       const progress = normalizeProgress(update.progress);
       if (progress) task.progress = progress;
       if (Object.hasOwn(update, 'checkpoint')) {
         task.checkpoint = normalizeTaskData(update.checkpoint, 'Host task checkpoint', true);
       }
-      const error = shortText(update.error);
-      if (error) task.error = error;
       if (Array.isArray(update.artifacts)) {
         for (const artifact of update.artifacts) {
           if (!artifact?.id || knownArtifactIds.has(artifact.id)) continue;
@@ -377,6 +416,18 @@ export class HostTaskService {
           knownVerificationIds.add(verification.id);
         }
       }
+      const requestedError = shortText(update.error);
+      const acceptanceError = update.status === 'succeeded'
+        ? await this.validateCompletion(task)
+        : undefined;
+      if (update.status) {
+        task.status = acceptanceError ? 'blocked' : update.status;
+        if ((update.status === 'running' || update.status === 'succeeded') && !requestedError && !acceptanceError) {
+          task.error = undefined;
+        }
+      }
+      if (requestedError) task.error = requestedError;
+      if (acceptanceError) task.error = acceptanceError;
       task.updatedAt = Date.now();
       task.revision += 1;
       await this.persist(task, 'task.updated');
@@ -384,6 +435,53 @@ export class HostTaskService {
       this.notify(task);
       return clone(task);
     });
+  }
+
+  private async validateCompletion(task: HostTaskSnapshot): Promise<string | undefined> {
+    const acceptance = task.acceptance;
+    if (acceptance.requiresArtifact && task.artifacts.length === 0) {
+      return `Host capability ${task.capability} requires an output artifact, but none was produced.`;
+    }
+
+    if (acceptance.requiresArtifact) {
+      for (const artifact of task.artifacts) {
+        if (!artifact.filePath) {
+          return `Host capability ${task.capability} requires a local artifact path for ${artifact.id}.`;
+        }
+        try {
+          const stat = await fs.stat(artifact.filePath);
+          if (!stat.isFile() || stat.size <= 0) {
+            return `Host artifact ${artifact.id} is missing or empty.`;
+          }
+          if (!artifact.sizeBytes) artifact.sizeBytes = stat.size;
+        } catch {
+          return `Host artifact ${artifact.id} is not available at ${artifact.filePath}.`;
+        }
+      }
+    }
+
+    const artifactIds = new Set(task.artifacts.map((artifact) => artifact.id));
+    const verificationMatchesProducedArtifact = (verification: ChatRuntimeVerification): boolean => (
+      !acceptance.requiresArtifact
+      || Boolean(verification.artifactId && artifactIds.has(verification.artifactId))
+    );
+    if (acceptance.requiresVerification && acceptance.requiredVerificationKinds.length === 0) {
+      const anyPassed = task.verifications.some((verification) => (
+        verification.status === 'passed'
+        && verificationMatchesProducedArtifact(verification)
+      ));
+      if (!anyPassed) return `Host capability ${task.capability} requires passed verification evidence.`;
+    }
+    for (const kind of acceptance.requiredVerificationKinds) {
+      const passed = task.verifications.some((verification) => (
+        verification.kind === kind
+        && verification.status === 'passed'
+        && verification.required !== false
+        && verificationMatchesProducedArtifact(verification)
+      ));
+      if (!passed) return `Host capability ${task.capability} requires a passed ${kind} verification.`;
+    }
+    return undefined;
   }
 
   async acknowledgeCompletion(taskId: string, deliveryKey: string): Promise<HostTaskSnapshot | undefined> {
@@ -470,12 +568,20 @@ export class HostTaskService {
     }
   }
 
-  private assertIdempotentReplay(existing: HostTaskSnapshot, input: HostTaskCreateRequest, normalizedInput: HostTaskData): void {
+  private assertIdempotentReplay(
+    existing: HostTaskSnapshot,
+    input: HostTaskCreateRequest,
+    normalizedInput: HostTaskData,
+    acceptance: HostTaskAcceptance,
+    completion: HostTaskCompletion,
+  ): void {
     const matches = existing.runId === input.runId.trim()
       && existing.toolCallId === input.toolCallId.trim()
       && existing.capability === input.capability.trim()
       && existing.title === input.title.trim()
-      && JSON.stringify(existing.input) === JSON.stringify(normalizedInput);
+      && JSON.stringify(existing.input) === JSON.stringify(normalizedInput)
+      && JSON.stringify(existing.acceptance) === JSON.stringify(acceptance)
+      && JSON.stringify(existing.completion) === JSON.stringify(completion);
     if (!matches) throw new Error('Host task idempotency key was reused with a different request');
   }
 
@@ -491,11 +597,13 @@ export class HostTaskService {
     await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
       try {
         const raw = JSON.parse(await fs.readFile(path.join(jobsRoot, entry.name, 'task.json'), 'utf8')) as Partial<HostTaskSnapshot> & { version?: number };
-        if (!raw?.taskId || !raw.sessionKey || !raw.runId || !raw.idempotencyKey || !raw.capability || !raw.title) return;
+        if (raw.version !== 3 || !raw?.taskId || !raw.sessionKey || !raw.runId || !raw.idempotencyKey || !raw.capability || !raw.title) return;
         const task: HostTaskSnapshot = {
           ...(raw as HostTaskSnapshot),
-          version: 2,
+          version: 3,
           input: normalizeTaskData(raw.input, 'Persisted Host task input') ?? {},
+          acceptance: normalizeAcceptance(raw.acceptance as HostTaskAcceptance),
+          completion: normalizeCompletion(raw.completion),
           checkpoint: normalizeTaskData(raw.checkpoint, 'Persisted Host task checkpoint', true),
           artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
           verifications: Array.isArray(raw.verifications) ? raw.verifications : [],
@@ -671,7 +779,7 @@ export class HostTaskService {
     await fs.rename(temporary, target);
     const operation = task.lifecycle.operations.at(-1);
     await fs.appendFile(path.join(directory, 'journal.jsonl'), `${JSON.stringify({
-      version: 2,
+      version: 3,
       ts: Date.now(),
       type,
       revision: task.revision,

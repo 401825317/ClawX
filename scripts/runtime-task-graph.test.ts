@@ -4,7 +4,6 @@ import test from 'node:test';
 import type { ChatRuntimeEvent, ChatRuntimeTaskProjection } from '../shared/chat-runtime-events.ts';
 import { normalizeGatewayChatRuntimeEvents } from '../electron/gateway/chat-runtime-events.ts';
 import { deriveRuntimeTaskSteps } from '../src/pages/Chat/runtime-task-visualization.ts';
-import { buildRuntimeCompletionGateEvents } from '../src/stores/chat/runtime-contract.ts';
 import {
   applyCompletionWakeEvidenceEventToOwners,
   applyRuntimeEventToRuns,
@@ -35,44 +34,7 @@ function applyEvents(events: ChatRuntimeEvent[]) {
   return events.reduce(applyRuntimeEventToRuns, {});
 }
 
-const partialIssue = {
-  id: 'issue:task:task-partial:partial',
-  code: 'task.partial',
-  severity: 'blocking' as const,
-  title: 'Task needs recovery',
-  targetId: 'task-partial',
-  recoverable: true,
-};
-
-test('a turn contract event is retained on the originating runtime run', () => {
-  const runs = applyRuntimeEventToRuns({}, {
-    contractVersion: 1,
-    producer: 'plugin',
-    runId: 'run-contract-graph',
-    sessionKey: 'agent:main:contract',
-    ts: 1,
-    type: 'run.contract.updated',
-    contract: {
-      version: 1,
-      intent: 'media',
-      toolRequirement: 'required',
-      sideEffect: 'remote_generation',
-      sideEffectAuthorized: true,
-      capabilityRefs: ['image-generation'],
-      acceptance: {
-        requiresArtifact: true,
-        requiresVerification: true,
-        requiresApproval: false,
-        requiresToolEvidence: true,
-      },
-    },
-  });
-
-  assert.equal(runs['run-contract-graph']?.turnContract?.intent, 'media');
-  assert.equal(runs['run-contract-graph']?.events[0]?.type, 'run.contract.updated');
-});
-
-test('detached task terminal updates fan out to the owning chat run and completion wake resolves to it', () => {
+test('detached task terminal updates fan out to the owning chat run', () => {
   const ownerRunId = 'run-owner-video';
   const taskId = 'ed0c981b-1925-4913-9799-04fb351a3fe5';
   let runtimeRuns = applyRuntimeEventToRuns({}, {
@@ -210,26 +172,6 @@ test('successful image completion wake closes the owner task and projects artifa
     startedAt: 100,
   });
   runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
-    type: 'run.contract.updated',
-    runId: ownerRunId,
-    sessionKey: SESSION_KEY,
-    ts: 101,
-    contract: {
-      version: 1,
-      intent: 'media',
-      toolRequirement: 'required',
-      sideEffect: 'remote_generation',
-      sideEffectAuthorized: true,
-      capabilityRefs: ['image_generate'],
-      acceptance: {
-        requiresArtifact: true,
-        requiresVerification: true,
-        requiresApproval: false,
-        requiresToolEvidence: true,
-      },
-    },
-  });
-  runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
     type: 'tool.completed',
     runId: ownerRunId,
     sessionKey: SESSION_KEY,
@@ -252,16 +194,6 @@ test('successful image completion wake closes the owner task and projects artifa
       updatedAt: 110,
     },
   });
-  runtimeRuns = buildRuntimeCompletionGateEvents(runtimeRuns[ownerRunId], {
-    runId: ownerRunId,
-    sessionKey: SESSION_KEY,
-    ts: 120,
-    status: 'completed',
-  }).reduce(applyRuntimeEventToRuns, runtimeRuns);
-  assert.equal(runtimeRuns[ownerRunId]?.gateResult?.decision, 'continue_required');
-  assert.ok(runtimeRuns[ownerRunId]?.gateResult?.issues.some((issue) => issue.code === 'task.unfinished'));
-  assert.ok(runtimeRuns[ownerRunId]?.gateResult?.issues.some((issue) => issue.code === 'artifact.required.missing'));
-
   const terminalTaskEvent = buildCompletionWakeTerminalTaskEvent({
     runtimeRuns,
     ownerRunId,
@@ -309,14 +241,6 @@ test('successful image completion wake closes the owner task and projects artifa
   assert.equal(runtimeRuns[ownerRunId]?.verifications?.[0]?.status, 'passed');
   assert.equal(runtimeRuns[wakeRunId]?.artifacts?.[0]?.id, artifactId);
 
-  runtimeRuns = buildRuntimeCompletionGateEvents(runtimeRuns[ownerRunId], {
-    runId: ownerRunId,
-    sessionKey: SESSION_KEY,
-    ts: 230,
-    status: 'completed',
-  }).reduce(applyRuntimeEventToRuns, runtimeRuns);
-  assert.equal(runtimeRuns[ownerRunId]?.gateResult?.decision, 'deliverable');
-  assert.equal(runtimeRuns[ownerRunId]?.gateResult?.issues.length, 0);
 });
 
 test('task projections are ordered by updatedAt and cannot regress from a terminal state', () => {
@@ -425,84 +349,6 @@ test('a task-ledger-only run follows the detached task terminal state', () => {
   assert.equal(completed['tool:detached:completed']?.endedAt, 300);
   assert.equal(failed['tool:detached:failed']?.status, 'error');
   assert.equal(failed['tool:detached:failed']?.endedAt, 400);
-});
-
-test('a new run attempt clears stale issues, checkpoints, and gate state', () => {
-  const gate = {
-    id: 'gate:old-attempt',
-    decision: 'continue_required' as const,
-    artifactCount: 0,
-    requiredVerificationCount: 0,
-    passedRequiredVerificationCount: 0,
-    blockingIssueCount: 1,
-    warningIssueCount: 0,
-    verificationCoverage: 0,
-    issues: [partialIssue],
-  };
-  const runs = applyEvents([
-    { type: 'run.started', runId: RUN_ID, sessionKey: SESSION_KEY, ts: 1, startedAt: 1 },
-    { type: 'gate.issue', runId: RUN_ID, sessionKey: SESSION_KEY, ts: 2, issue: partialIssue },
-    {
-      type: 'run.checkpoint',
-      runId: RUN_ID,
-      sessionKey: SESSION_KEY,
-      ts: 3,
-      checkpoint: {
-        id: 'checkpoint:old-attempt',
-        summary: 'Old checkpoint',
-        taskId: 'task-partial',
-        kind: 'partial',
-        recoverable: true,
-      },
-    },
-    { type: 'gate.evaluated', runId: RUN_ID, sessionKey: SESSION_KEY, ts: 4, gate },
-    { type: 'run.started', runId: RUN_ID, sessionKey: SESSION_KEY, ts: 5, startedAt: 5 },
-  ]);
-
-  const run = runs[RUN_ID];
-  assert.deepEqual(run?.issues, []);
-  assert.deepEqual(run?.checkpoints, []);
-  assert.deepEqual(run?.gateEvaluations, []);
-  assert.equal(run?.gateResult, undefined);
-});
-
-test('recovering a partial task removes its stale partial gate state', () => {
-  const gate = {
-    id: 'gate:partial',
-    decision: 'continue_required' as const,
-    artifactCount: 0,
-    requiredVerificationCount: 0,
-    passedRequiredVerificationCount: 0,
-    blockingIssueCount: 1,
-    warningIssueCount: 0,
-    verificationCoverage: 0,
-    issues: [partialIssue],
-  };
-  const runs = applyEvents([
-    taskEvent({ taskId: 'task-partial', title: 'Recover task', status: 'partial', updatedAt: 100 }, 100),
-    { type: 'gate.issue', runId: RUN_ID, sessionKey: SESSION_KEY, ts: 101, issue: partialIssue },
-    {
-      type: 'run.checkpoint',
-      runId: RUN_ID,
-      sessionKey: SESSION_KEY,
-      ts: 102,
-      checkpoint: {
-        id: 'checkpoint:task:task-partial:partial',
-        summary: 'Recover task',
-        taskId: 'task-partial',
-        kind: 'partial',
-        recoverable: true,
-      },
-    },
-    { type: 'gate.evaluated', runId: RUN_ID, sessionKey: SESSION_KEY, ts: 103, gate },
-    taskEvent({ taskId: 'task-partial', title: 'Recover task', status: 'completed', updatedAt: 200 }, 200),
-  ]);
-
-  const run = runs[RUN_ID];
-  assert.equal(run?.tasks?.[0]?.status, 'completed');
-  assert.deepEqual(run?.issues, []);
-  assert.deepEqual(run?.checkpoints, []);
-  assert.equal(run?.gateResult, undefined);
 });
 
 test('task.updated topology and terminal status remain authoritative over companion plan steps', () => {

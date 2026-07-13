@@ -7,26 +7,6 @@ const ARTIFACT_REVISION_REASON_MARKER = 'UClaw artifact delivery final reply had
 const PRESENTATION_FORCE_TOOL_CHOICE_MARKER = 'UClaw force artifact tool choice: create_designed_pptx_file.';
 const DESIGNED_PRESENTATION_EXECUTION_CONTRACT_MARKER = 'UClaw designed presentation execution contract v1.';
 
-export function hasSuccessfulDesignedPresentationArtifact(messages) {
-  const list = Array.isArray(messages) ? messages : [];
-  let latestUserIndex = -1;
-  for (let index = list.length - 1; index >= 0; index -= 1) {
-    if (String(list[index]?.role ?? '').toLowerCase() === 'user') {
-      latestUserIndex = index;
-      break;
-    }
-  }
-  return list.slice(latestUserIndex + 1).some((message) => {
-    const serialized = JSON.stringify(message).replaceAll('\\', '');
-    const hasDesignedTool = serialized.includes('openclaw:uclaw-local-artifacts:create_designed_pptx_file')
-      || serialized.includes('openclaw:uclaw-local-artifacts:repair_designed_pptx_file');
-    return hasDesignedTool
-      && serialized.includes('"ok":true')
-      && serialized.includes('"status":"passed"')
-      && serialized.includes('application/vnd.openxmlformats-officedocument.presentationml.presentation');
-  });
-}
-
 const SIDEEFFECT_FINALIZE_ANCHOR = `\t\t\t\tif (outcome.action !== "revise") return;
 \t\t\t\tif (event.hadDeterministicSideEffect) {
 \t\t\t\t\tlog$2.warn(\`before_agent_finalize requested revision after potential side effects; finalizing runId=\${params.runId} sessionId=\${params.sessionId}\`);
@@ -44,10 +24,7 @@ const LEGACY_SIDEEFFECT_FINALIZE_PATCH = `\t\t\t\tif (outcome.action !== "revise
 \t\t\t\tbeforeAgentFinalizeRevisionReason = outcome.reason;
 `;
 
-function sideEffectFinalizePatch(allowLocalActionRevision) {
-  const localActionCondition = allowLocalActionRevision
-    ? ` || outcome.reason.includes("${LOCAL_ACTION_REVISION_REASON_MARKER}")`
-    : '';
+function sideEffectFinalizePatch(localActionCondition = '') {
   return `\t\t\t\tif (outcome.action !== "revise") return;
 \t\t\t\tconst allowUclawArtifactRevisionAfterSideEffect = event.hadDeterministicSideEffect && typeof outcome.reason === "string" && (outcome.reason.includes("${ARTIFACT_REVISION_REASON_MARKER}")${localActionCondition});
 \t\t\t\tif (event.hadDeterministicSideEffect && !allowUclawArtifactRevisionAfterSideEffect) {
@@ -58,27 +35,24 @@ function sideEffectFinalizePatch(allowLocalActionRevision) {
 `;
 }
 
-export function patchFinalizeLocalActionContent(content, options = {}) {
+export function patchFinalizeLocalActionContent(content) {
   const normalizedContent = content.replaceAll(
     LEGACY_LOCAL_ACTION_REVISION_REASON_MARKER,
     LOCAL_ACTION_REVISION_REASON_MARKER,
   );
-  const desiredPatch = sideEffectFinalizePatch(options.allowLocalActionRevision === true);
-
-  if (normalizedContent.includes(desiredPatch)) {
+  if (normalizedContent.includes(SIDEEFFECT_FINALIZE_ANCHOR)) {
     return { content: normalizedContent, changed: normalizedContent !== content };
   }
 
   const candidates = [
-    SIDEEFFECT_FINALIZE_ANCHOR,
     LEGACY_SIDEEFFECT_FINALIZE_PATCH,
-    sideEffectFinalizePatch(false),
-    sideEffectFinalizePatch(true),
+    sideEffectFinalizePatch(),
+    sideEffectFinalizePatch(` || outcome.reason.includes("${LOCAL_ACTION_REVISION_REASON_MARKER}")`),
   ];
   for (const candidate of candidates) {
     if (!normalizedContent.includes(candidate)) continue;
     return {
-      content: normalizedContent.replace(candidate, desiredPatch),
+      content: normalizedContent.replace(candidate, SIDEEFFECT_FINALIZE_ANCHOR),
       changed: true,
     };
   }
@@ -269,11 +243,11 @@ export function patchOpenClawFinalizeLocalActionRuntime(distDir, options = {}) {
     if (!patched.changed) continue;
     writeFileSync(filePath, patched.content, 'utf8');
     patchedFiles++;
-    logger.log?.(`[openclaw-finalize-local-action-patch] Patched: ${file}`);
+    logger.log?.(`[openclaw-finalize-local-action-patch] Cleaned: ${file}`);
   }
 
   if (patchedFiles > 0) {
-    logger.log?.(`[openclaw-finalize-local-action-patch] Done. Patched ${patchedFiles} file(s).`);
+    logger.log?.(`[openclaw-finalize-local-action-patch] Done. Cleaned ${patchedFiles} file(s).`);
   }
 
   return { patchedFiles, distDir };

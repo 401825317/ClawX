@@ -4,7 +4,7 @@ import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import { resolve } from 'path';
 import { pathToFileURL } from 'node:url';
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import type { Plugin } from 'vite';
 
 function getExtensionPackages(): Set<string> {
@@ -50,24 +50,26 @@ const mainProcessBundledPackages = new Set([
 
 function copyGatewayStaticScripts(): Plugin {
   const sourceDir = resolve(__dirname, 'electron/gateway');
-  const electronDir = resolve(__dirname, 'electron');
   const outputDir = resolve(__dirname, 'dist-electron/main');
   const files = [
     'gateway-child-process-patch.cjs',
     'gateway-entry-wrapper.cjs',
     'gateway-fetch-preload.cjs',
   ];
-  const electronFiles = ['media-generation-worker.cjs'];
+  const retiredFiles = [
+    'media-generation-worker.cjs',
+    'media-generation-worker-entry.js',
+  ];
 
   return {
     name: 'copy-gateway-static-scripts',
     closeBundle() {
       mkdirSync(outputDir, { recursive: true });
+      for (const file of retiredFiles) {
+        rmSync(resolve(outputDir, file), { force: true });
+      }
       for (const file of files) {
         copyFileSync(resolve(sourceDir, file), resolve(outputDir, file));
-      }
-      for (const file of electronFiles) {
-        copyFileSync(resolve(electronDir, file), resolve(outputDir, file));
       }
     },
   };
@@ -133,17 +135,6 @@ export default defineConfig(({ mode }) => {
               outDir: 'dist-electron/preload',
               rollupOptions: {
                 external: ['electron'],
-              },
-            },
-          },
-        },
-        {
-          entry: 'electron/utils/media-generation-worker-entry.ts',
-          vite: {
-            build: {
-              outDir: 'dist-electron/main',
-              rollupOptions: {
-                external: isMainProcessExternal,
               },
             },
           },

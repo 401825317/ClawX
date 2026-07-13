@@ -20,18 +20,19 @@ import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { cleanupOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
-import { patchOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-patch.mjs';
+import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
-import { patchOpenClawRequiredContractToolRuntime } from './openclaw-required-contract-tool-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
+import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -44,7 +45,6 @@ const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
 const OPENCLAW_SKILL_SHIMS = path.join(ROOT, 'resources', 'openclaw-skill-shims');
 const ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_BROWSER_PATCH === '1';
-const ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH === '1';
 
 function isJunFeiAIManagedDistribution() {
   return process.env.CLAWX_MANAGED_PROVIDER !== '0';
@@ -1069,17 +1069,14 @@ function patchBundledRuntime(outputDir) {
     }
   }
 
-  // --- Local action finalization patch ---
-  // OpenClaw normally refuses before_agent_finalize revisions after
-  // deterministic side effects. UClaw needs one narrow exception for the
-  // artifact guard hook that catches final replies like "I will create it now"
-  // after browser/exec activity.
+  // --- Local action finalization cleanup ---
+  // Remove UClaw's former semantic-finalization and forced-tool-choice
+  // overrides so packaged runtimes keep OpenClaw's native agent loop.
   const localActionFinalizePatch = patchOpenClawFinalizeLocalActionRuntime(distDir, {
-    allowLocalActionRevision: ENABLE_OPENCLAW_LOCAL_ACTION_FINALIZE_PATCH,
     logger: { log: (message) => echo`   ${message}` },
   });
   if (localActionFinalizePatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${localActionFinalizePatch.patchedFiles} artifact finalize runtime file(s)`;
+    echo`   🧹 Cleaned ${localActionFinalizePatch.patchedFiles} artifact finalize runtime file(s)`;
   }
 
   // --- Reply session initialization conflict patch ---
@@ -1116,6 +1113,16 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
   }
 
+  // --- Native Responses compatibility fallback ---
+  // A managed relay that does not expose /responses may retry once through
+  // Chat Completions, but only before any response output has started.
+  const responsesFallbackPatch = patchOpenClawResponsesCompatibleFallbackRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (responsesFallbackPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${responsesFallbackPatch.patchedFiles} Responses fallback runtime file(s)`;
+  }
+
   // --- Thinking effort vs reasoning visibility prompt patch ---
   // OpenClaw exposes both values to the model. Label them unambiguously so
   // reasoning visibility=off cannot be misreported as model thinking=off.
@@ -1136,14 +1143,13 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${toolDirectoryI18nPatch.patchedFiles} tool directory intent runtime file(s)`;
   }
 
-  // --- Required UClaw turn-contract schema patch ---
-  // Keep the metadata contract directly callable while the remaining large
-  // tool catalog stays deferred behind OpenClaw's directory surface.
-  const requiredContractToolPatch = patchOpenClawRequiredContractToolRuntime(distDir, {
+  // Remove the retired UClaw contract-tool patch from previously patched
+  // node_modules before packaging. Clean installs are already unchanged.
+  const contractToolCleanup = cleanupOpenClawRequiredContractToolRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
-  if (requiredContractToolPatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${requiredContractToolPatch.patchedFiles} required contract tool runtime file(s)`;
+  if (contractToolCleanup.cleanedFiles > 0) {
+    echo`   🧹 Removed the retired required-contract tool runtime patch`;
   }
 
   // --- Visible stream smoothing and chat delta cadence patch ---
@@ -1204,11 +1210,11 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${nativeImageDeliveryPatch.patchedFiles} native image delivery runtime file(s)`;
   }
 
-  const nativeMediaAcceptancePatch = patchOpenClawNativeMediaAcceptanceRuntime(distDir, {
+  const nativeMediaAcceptanceCleanup = cleanupOpenClawNativeMediaAcceptanceRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
-  if (nativeMediaAcceptancePatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${nativeMediaAcceptancePatch.patchedFiles} native media acceptance runtime file(s)`;
+  if (nativeMediaAcceptanceCleanup.cleanedFiles > 0) {
+    echo`   🧹 Removed the retired native media acceptance override`;
   }
 
   // --- Segment-scoped native video idempotency patch ---

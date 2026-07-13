@@ -58,6 +58,20 @@ import { subscribeHostEvent } from '@/lib/host-events';
 const inputClasses = 'h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-sm text-foreground/80 font-bold';
 type ArkMode = 'apikey' | 'codeplan';
+const MANAGED_CHAT_PROVIDER_IDS = ['lingzhiwuxian', 'openai'] as const;
+
+function isManagedChatProviderId(value?: string | null): boolean {
+  return MANAGED_CHAT_PROVIDER_IDS.includes(value as typeof MANAGED_CHAT_PROVIDER_IDS[number]);
+}
+
+function isManagedOpenAiRelayAccount(account: ProviderAccount): boolean {
+  if (account.id !== 'openai' || account.vendorId !== 'openai') {
+    return false;
+  }
+  const metadata = account.metadata as Record<string, unknown> | undefined;
+  return metadata?.managedTransport === 'openai-responses'
+    || account.baseUrl?.includes('zz-cn.lingzhiwuxian.com') === true;
+}
 
 function normalizeFallbackProviderIds(ids?: string[]): string[] {
   return Array.from(new Set((ids ?? []).filter(Boolean)));
@@ -196,9 +210,20 @@ export function ProvidersSettings() {
 
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
+  const [migratingOpenAiChat, setMigratingOpenAiChat] = useState(false);
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
-  const managedProviderMode = vendors.length === 1 && vendors[0]?.id === 'lingzhiwuxian';
+  const managedProviderMode = vendors.length === 1 && isManagedChatProviderId(vendors[0]?.id);
+  const legacyManagedChatPresent = defaultAccountId === 'lingzhiwuxian'
+    || accounts.some((account) => account.id === 'lingzhiwuxian' || account.vendorId === 'lingzhiwuxian')
+    || statuses.some((status) => status.id === 'lingzhiwuxian' || status.type === 'lingzhiwuxian');
+  const managedOpenAiRelayAccountPresent = accounts.some(isManagedOpenAiRelayAccount);
+  const managedOpenAiChatActive = (managedProviderMode && vendors[0]?.id === 'openai')
+    || managedOpenAiRelayAccountPresent
+    || defaultAccountId === 'openai';
+  const showManagedOpenAiMigration = managedProviderMode
+    || legacyManagedChatPresent
+    || managedOpenAiRelayAccountPresent;
   const displayProviders = useMemo(
     () => buildProviderListItems(accounts, statuses, vendors, defaultAccountId),
     [accounts, statuses, vendors, defaultAccountId],
@@ -270,6 +295,25 @@ export function ProvidersSettings() {
     }
   };
 
+  const handleMigrateOpenAiChat = async () => {
+    setMigratingOpenAiChat(true);
+    try {
+      const payload = await hostApiFetch<{
+        success: boolean;
+        error?: string;
+      }>('/api/provider-accounts/migrate-openai-chat', {
+        method: 'POST',
+      });
+      if (!payload.success) {
+        throw new Error(payload.error || 'Migration failed');
+      }
+      toast.success(t('aiProviders.managedOpenAiMigration.toastSuccess'));
+    } catch (error) {
+      setMigratingOpenAiChat(false);
+      toast.error(`${t('aiProviders.managedOpenAiMigration.toastFailed')}: ${error}`);
+    }
+  };
+
   return (
     <div data-testid="providers-settings" className="space-y-6">
       <div className="flex items-center justify-between">
@@ -283,6 +327,42 @@ export function ProvidersSettings() {
           </Button>
         )}
       </div>
+
+      {showManagedOpenAiMigration && (
+        <Card data-testid="managed-openai-migration-card" className="rounded-3xl border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.03] shadow-none">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-medium">
+              {t('aiProviders.managedOpenAiMigration.title')}
+            </CardTitle>
+            <CardDescription>
+              {managedOpenAiChatActive
+                ? t('aiProviders.managedOpenAiMigration.activeDesc')
+                : t('aiProviders.managedOpenAiMigration.desc')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground">
+              {t('aiProviders.managedOpenAiMigration.note')}
+            </p>
+            <Button
+              data-testid="managed-openai-migration-button"
+              type="button"
+              variant={managedOpenAiChatActive ? 'secondary' : 'default'}
+              className="rounded-full px-5 h-9 shadow-none font-medium text-meta"
+              disabled={migratingOpenAiChat || managedOpenAiChatActive}
+              onClick={handleMigrateOpenAiChat}
+            >
+              {migratingOpenAiChat && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              {!migratingOpenAiChat && managedOpenAiChatActive && <Check className="h-4 w-4 mr-2" />}
+              {migratingOpenAiChat
+                ? t('aiProviders.managedOpenAiMigration.running')
+                : managedOpenAiChatActive
+                  ? t('aiProviders.managedOpenAiMigration.done')
+                  : t('aiProviders.managedOpenAiMigration.button')}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-12 text-muted-foreground bg-black/5 dark:bg-white/5 rounded-3xl border border-transparent border-dashed">
@@ -315,7 +395,7 @@ export function ProvidersSettings() {
               onCancelEdit={() => setEditingProvider(null)}
               onDelete={() => handleDeleteProvider(item.account.id)}
               onSetDefault={() => handleSetDefault(item.account.id)}
-              managed={managedProviderMode && item.account.vendorId === 'lingzhiwuxian'}
+              managed={showManagedOpenAiMigration && isManagedChatProviderId(item.account.vendorId)}
               onSaveEdits={async (payload) => {
                 const updates: Partial<ProviderAccount> = {};
                 if (payload.updates) {

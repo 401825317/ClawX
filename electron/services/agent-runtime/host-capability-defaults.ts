@@ -115,6 +115,11 @@ export function ensureDefaultHostCapabilities(): void {
       description: 'Capture a fresh managed desktop screenshot for the current run. It does not click, type, send, or change anything.',
       sideEffect: 'none',
       requiresApproval: false,
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: true,
+        requiredVerificationKinds: ['artifact.availability'],
+      },
     },
     async assess() {
       const capabilities = await desktopRunCoordinator.getCapabilities();
@@ -151,6 +156,11 @@ export function ensureDefaultHostCapabilities(): void {
         },
       },
       outputDescription: 'A verified MP4 artifact with measured duration, width, height, and audio-track evidence.',
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: true,
+        requiredVerificationKinds: ['media.metadata'],
+      },
     },
     async assess() {
       if (process.platform !== 'darwin') {
@@ -210,6 +220,11 @@ export function ensureDefaultHostCapabilities(): void {
         },
       },
       outputDescription: 'A verified MP4 artifact with measured duration, dimensions, audio presence, scene counts, caption counts, and transition counts.',
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: true,
+        requiredVerificationKinds: ['media.metadata'],
+      },
     },
     assess: assessLocalVideoTimelineAvailability,
     start: runLocalVideoTimelineRender,

@@ -32,25 +32,6 @@ __test.emitToolResultProgress(api, {
 assert.equal(progressEntries().length, 0);
 
 __test.emitToolCallProgress(api, {
-  toolCallId: 'declare-contract',
-  toolName: 'tool_call',
-  params: {
-    id: 'uclaw_declare_turn_contract',
-    args: { intent: 'media', sideEffect: 'remote_generation' },
-  },
-}, ctx);
-__test.emitToolResultProgress(api, {
-  toolCallId: 'declare-contract',
-  toolName: 'tool_call',
-  params: { id: 'uclaw_declare_turn_contract' },
-  result: {
-    tool: { name: 'uclaw_declare_turn_contract', label: 'Declare UClaw turn contract' },
-    result: { details: { ok: true } },
-  },
-}, ctx);
-assert.equal(progressEntries().length, 0);
-
-__test.emitToolCallProgress(api, {
   toolCallId: 'search-official-data',
   toolName: 'tool_call',
   params: {

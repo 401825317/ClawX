@@ -297,79 +297,9 @@ function artifactDetail(artifact: NonNullable<ChatRuntimeRunState['artifacts']>[
 }
 
 function verificationDetail(verification: NonNullable<ChatRuntimeRunState['verifications']>[number]): string | undefined {
-  const meta = [
-    verification.kind ? `kind=${verification.kind}` : undefined,
-    verification.required === false ? 'optional' : verification.required === true ? 'required' : undefined,
-    verification.severity ? `severity=${verification.severity}` : undefined,
-  ].filter(Boolean).join(' · ');
-  const lines = [meta || undefined, verification.detail, verification.evidence]
+  const lines = [verification.detail, verification.evidence]
     .filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
   return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function checkpointDetail(checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number]): string | undefined {
-  const issueLines = (checkpoint.issues ?? []).map((issue, index) => {
-    const meta = [
-      issue.severity,
-      `code=${issue.code}`,
-      typeof issue.recoverable === 'boolean' ? `recoverable=${issue.recoverable}` : undefined,
-    ].filter(Boolean).join(' · ');
-    const prefix = `${index + 1}. [${meta}] ${issue.title}`;
-    return [
-      issue.detail ? `${prefix}: ${issue.detail}` : prefix,
-      issue.suggestedRecovery ? `recovery=${issue.suggestedRecovery}` : undefined,
-    ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0).join('\n');
-  });
-  const lines = [
-    `checkpoint=${checkpoint.id}`,
-    typeof checkpoint.recoverable === 'boolean' ? `recoverable=${checkpoint.recoverable}` : undefined,
-    checkpoint.summary,
-    checkpoint.reason,
-    ...issueLines,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function gateIssueDetail(issue: NonNullable<ChatRuntimeRunState['issues']>[number]): string | undefined {
-  const lines = [
-    `code=${issue.code}`,
-    typeof issue.recoverable === 'boolean' ? `recoverable=${issue.recoverable}` : undefined,
-    issue.detail,
-    issue.suggestedRecovery ? `recovery=${issue.suggestedRecovery}` : undefined,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function gateEvaluationStatus(decision: NonNullable<ChatRuntimeRunState['gateResult']>['decision']): TaskStepStatus {
-  if (decision === 'deliverable') return 'completed';
-  if (decision === 'continue_required' || decision === 'blocked_needs_user') return 'blocked';
-  if (decision === 'failed') return 'failed';
-  if (decision === 'aborted') return 'aborted';
-  return 'error';
-}
-
-function gateEvaluationDetail(gate: NonNullable<ChatRuntimeRunState['gateResult']>): string | undefined {
-  const lines = [
-    gate.summary,
-    `decision=${gate.decision}`,
-    `artifacts=${gate.artifactCount}`,
-    `required_verifications=${gate.passedRequiredVerificationCount}/${gate.requiredVerificationCount}`,
-    `blocking=${gate.blockingIssueCount}`,
-    `warnings=${gate.warningIssueCount}`,
-    `coverage=${Math.round(gate.verificationCoverage * 100)}%`,
-  ].filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
-  return lines.length > 0 ? lines.join('\n') : undefined;
-}
-
-function gateIssueStatus(issue: NonNullable<ChatRuntimeRunState['issues']>[number]): TaskStepStatus {
-  if (issue.severity !== 'blocking') return 'completed';
-  return issue.recoverable === false ? 'failed' : 'blocked';
-}
-
-function checkpointStatus(checkpoint: NonNullable<ChatRuntimeRunState['checkpoints']>[number]): TaskStepStatus {
-  if (checkpoint.recoverable === false) return 'failed';
-  if (checkpoint.recoverable === true || (checkpoint.issues?.length ?? 0) > 0 || checkpoint.reason) return 'blocked';
-  return 'completed';
 }
 
 function sanitizeRuntimePlanSummary(summary: string | undefined): string | undefined {
@@ -397,16 +327,6 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
   const failedToolStepIdsByFamily = new Map<string, Set<string>>();
   const taskProjections = new Map<string, RuntimeTaskProjection>();
   const elapsedMs = runElapsedMs(runState);
-  const rebuildStepIndex = (): void => {
-    stepIndexById.clear();
-    steps.forEach((step, index) => stepIndexById.set(step.id, index));
-  };
-  const removeSteps = (predicate: (step: TaskStep) => boolean): void => {
-    const retained = steps.filter((step) => !predicate(step));
-    if (retained.length === steps.length) return;
-    steps.splice(0, steps.length, ...retained);
-    rebuildStepIndex();
-  };
   const upsertStep = (step: TaskStep): void => {
     const existingIndex = stepIndexById.get(step.id);
     if (existingIndex == null) {
@@ -489,9 +409,6 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
   for (const event of runState.events) {
     switch (event.type) {
       case 'run.started':
-        removeSteps((step) => step.id === 'gate-result'
-          || step.id.startsWith('gate-issue:')
-          || step.id.startsWith('checkpoint:'));
         break;
       case 'tool.started': {
         toolStartedAt.set(event.toolCallId, typeof event.ts === 'number' ? event.ts : Date.now());
@@ -663,64 +580,6 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
               : 'agent-run',
           taskId: parentTaskId,
         });
-        break;
-      }
-      case 'gate.issue': {
-        const issueTaskId = event.issue.code.startsWith('task.') ? event.issue.targetId : undefined;
-        upsertStep({
-          id: `gate-issue:${event.issue.id}`,
-          label: event.issue.title,
-          status: gateIssueStatus(event.issue),
-          kind: 'system',
-          detail: gateIssueDetail(event.issue),
-          depth: 2,
-          parentId: 'gate-result',
-          taskId: issueTaskId,
-        });
-        break;
-      }
-      case 'run.checkpoint': {
-        const parentTaskId = event.checkpoint.taskId ?? event.taskId;
-        upsertStep({
-          id: `checkpoint:${event.checkpoint.id}`,
-          label: 'Checkpoint',
-          status: checkpointStatus(event.checkpoint),
-          kind: 'message',
-          detail: checkpointDetail(event.checkpoint),
-          depth: parentTaskId ? 2 : 1,
-          parentId: parentTaskId ? runtimeTaskStepId(parentTaskId) : 'agent-run',
-          taskId: parentTaskId,
-        });
-        break;
-      }
-      case 'gate.evaluated': {
-        const currentIssueIds = new Set(event.gate.issues.map((issue) => `gate-issue:${issue.id}`));
-        for (let index = 0; index < steps.length; index += 1) {
-          const step = steps[index];
-          if (!step.id.startsWith('gate-issue:') || currentIssueIds.has(step.id)) continue;
-          if (step.status === 'running' || step.status === 'blocked' || step.status === 'error') {
-            steps[index] = { ...step, status: 'completed', detail: step.detail ?? '已解决' };
-          }
-        }
-        upsertStep({
-          id: 'gate-result',
-          label: 'Gate',
-          status: gateEvaluationStatus(event.gate.decision),
-          kind: 'system',
-          detail: gateEvaluationDetail(event.gate),
-          depth: 1,
-        });
-        for (const issue of event.gate.issues) {
-          upsertStep({
-            id: `gate-issue:${issue.id}`,
-            label: issue.title,
-            status: gateIssueStatus(issue),
-            kind: 'system',
-            detail: gateIssueDetail(issue),
-            depth: 2,
-            parentId: 'gate-result',
-          });
-        }
         break;
       }
       case 'command.output': {

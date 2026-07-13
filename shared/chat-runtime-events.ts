@@ -1,5 +1,3 @@
-import type { AgentTurnContract } from './agent-turn-contract';
-
 export const CHAT_RUNTIME_CONTRACT_VERSION = 1;
 
 export type ChatRuntimeEventProducer =
@@ -9,7 +7,6 @@ export type ChatRuntimeEventProducer =
   | 'plugin'
   | 'media'
   | 'history'
-  | 'gate'
   | string;
 
 export type ChatRuntimeEventBase = {
@@ -105,24 +102,9 @@ export type ChatRuntimeVerificationKind =
   | 'build'
   | 'ui.visual'
   | 'media.metadata'
-  | 'runtime.gate'
   | 'manual'
   | string;
 export type ChatRuntimeIssueSeverity = 'info' | 'warning' | 'blocking';
-
-export type ChatRuntimeGateIssue = {
-  id: string;
-  code: string;
-  severity: ChatRuntimeIssueSeverity;
-  title: string;
-  detail?: string;
-  targetId?: string;
-  artifactId?: string;
-  stepId?: string;
-  verificationId?: string;
-  recoverable?: boolean;
-  suggestedRecovery?: string;
-};
 
 export type ChatRuntimeVerification = {
   id: string;
@@ -137,36 +119,6 @@ export type ChatRuntimeVerification = {
   taskId?: string;
   evidence?: string;
   source?: string;
-};
-
-export type ChatRuntimeCheckpoint = {
-  id: string;
-  summary: string;
-  reason?: string;
-  taskId?: string;
-  kind?: 'approval' | 'partial' | 'recovery' | string;
-  recoverable?: boolean;
-  issues?: ChatRuntimeGateIssue[];
-};
-
-export type ChatRuntimeGateDecision =
-  | 'deliverable'
-  | 'continue_required'
-  | 'blocked_needs_user'
-  | 'failed'
-  | 'aborted';
-
-export type ChatRuntimeGateEvaluation = {
-  id: string;
-  decision: ChatRuntimeGateDecision;
-  summary?: string;
-  artifactCount: number;
-  requiredVerificationCount: number;
-  passedRequiredVerificationCount: number;
-  blockingIssueCount: number;
-  warningIssueCount: number;
-  verificationCoverage: number;
-  issues: ChatRuntimeGateIssue[];
 };
 
 export type ChatRuntimeProgressEntryKind = 'commentary' | 'action' | 'status';
@@ -201,10 +153,6 @@ export type ChatRuntimeEvent =
       objective?: string;
       summary?: string;
       steps: ChatRuntimePlanStep[];
-    })
-  | (ChatRuntimeEventBase & {
-      type: 'run.contract.updated';
-      contract: AgentTurnContract;
     })
   | (ChatRuntimeEventBase & {
       type: 'run.step.updated';
@@ -272,18 +220,6 @@ export type ChatRuntimeEvent =
       verification: ChatRuntimeVerification;
       toolCallId?: string;
       itemId?: string;
-    })
-  | (ChatRuntimeEventBase & {
-      type: 'gate.issue';
-      issue: ChatRuntimeGateIssue;
-    })
-  | (ChatRuntimeEventBase & {
-      type: 'run.checkpoint';
-      checkpoint: ChatRuntimeCheckpoint;
-    })
-  | (ChatRuntimeEventBase & {
-      type: 'gate.evaluated';
-      gate: ChatRuntimeGateEvaluation;
     })
   | (ChatRuntimeEventBase & {
       type: 'command.output';

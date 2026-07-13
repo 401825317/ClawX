@@ -114,7 +114,7 @@ test('renders and verifies a narrated image timeline on macOS', { skip: process.
       voice: 'Tingting',
     };
     const task: HostTaskSnapshot = {
-      version: 2,
+      version: 3,
       taskId: 'timeline-smoke-task',
       sessionKey: 'agent:main:timeline-smoke',
       runId: 'run-timeline-smoke',
@@ -123,6 +123,13 @@ test('renders and verifies a narrated image timeline on macOS', { skip: process.
       capability: 'local.video.timeline.render',
       title: 'Timeline smoke',
       input,
+      acceptance: {
+        source: 'host_capability',
+        requiresArtifact: true,
+        requiresVerification: true,
+        requiredVerificationKinds: ['media.metadata'],
+      },
+      completion: { mode: 'direct' },
       status: 'queued',
       createdAt: Date.now(),
       updatedAt: Date.now(),

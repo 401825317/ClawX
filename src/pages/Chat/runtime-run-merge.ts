@@ -256,7 +256,6 @@ export function mergeRuntimeRunStates(
     lastEventAt,
     endedAt: status === 'running' ? undefined : lastEventAt,
     objective: sortedRuns.find((run) => run.objective)?.objective,
-    turnContract: [...sortedRuns].reverse().find((run) => run.turnContract)?.turnContract,
     planSummary: [...sortedRuns].reverse().find((run) => run.planSummary)?.planSummary,
     planSteps: sortedRuns.flatMap((run) => run.planSteps ?? []).reduce(
       (items, step) => upsertById(items, step),
@@ -274,19 +273,6 @@ export function mergeRuntimeRunStates(
       (items, verification) => upsertById(items, verification),
       [] as NonNullable<ChatRuntimeRunState['verifications']>,
     ),
-    issues: sortedRuns.flatMap((run) => run.issues ?? []).reduce(
-      (items, issue) => upsertById(items, issue),
-      [] as NonNullable<ChatRuntimeRunState['issues']>,
-    ),
-    checkpoints: sortedRuns.flatMap((run) => run.checkpoints ?? []).reduce(
-      (items, checkpoint) => upsertById(items, checkpoint),
-      [] as NonNullable<ChatRuntimeRunState['checkpoints']>,
-    ),
-    gateEvaluations: sortedRuns.flatMap((run) => run.gateEvaluations ?? []).reduce(
-      (items, gate) => upsertById(items, gate),
-      [] as NonNullable<ChatRuntimeRunState['gateEvaluations']>,
-    ),
-    gateResult: [...sortedRuns].reverse().find((run) => run.gateResult)?.gateResult,
     assistantText: sortedRuns.map((run) => run.assistantText).filter(Boolean).join('\n\n'),
     thinkingText: sortedRuns.map((run) => run.thinkingText).filter(Boolean).join('\n\n'),
     progressEntries: synchronizeProgressWithTasks(

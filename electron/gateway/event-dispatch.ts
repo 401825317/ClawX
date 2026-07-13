@@ -176,46 +176,6 @@ function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatR
     return;
   }
 
-  if (event.type === 'gate.issue') {
-    logger.info('[metric] chat.runtime.event', {
-      ...base,
-      issueId: event.issue.id,
-      code: event.issue.code,
-      severity: event.issue.severity,
-      targetId: event.issue.targetId,
-      artifactId: event.issue.artifactId,
-      stepId: event.issue.stepId,
-      recoverable: event.issue.recoverable,
-    });
-    return;
-  }
-
-  if (event.type === 'run.checkpoint') {
-    logger.info('[metric] chat.runtime.event', {
-      ...base,
-      checkpointId: event.checkpoint.id,
-      recoverable: event.checkpoint.recoverable,
-      hasReason: Boolean(event.checkpoint.reason),
-      issueCount: event.checkpoint.issues?.length ?? 0,
-    });
-    return;
-  }
-
-  if (event.type === 'gate.evaluated') {
-    logger.info('[metric] chat.runtime.event', {
-      ...base,
-      gateId: event.gate.id,
-      decision: event.gate.decision,
-      artifactCount: event.gate.artifactCount,
-      requiredVerificationCount: event.gate.requiredVerificationCount,
-      passedRequiredVerificationCount: event.gate.passedRequiredVerificationCount,
-      blockingIssueCount: event.gate.blockingIssueCount,
-      warningIssueCount: event.gate.warningIssueCount,
-      verificationCoverage: event.gate.verificationCoverage,
-    });
-    return;
-  }
-
   if (event.type === 'command.output') {
     logger.info('[metric] chat.runtime.event', {
       ...base,

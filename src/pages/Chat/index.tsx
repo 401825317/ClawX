@@ -210,8 +210,6 @@ function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
   const taskFlowProblemStatus = getTaskFlowProblemStatus(taskFlowProgress)
     ?? getRuntimeTaskProblemStatus(card.runtimeRun);
   if (runtimeStatus === 'completed') {
-    const gateDecision = card.runtimeRun?.gateResult?.decision;
-    if (gateDecision === 'blocked_needs_user' || gateDecision === 'continue_required') return 'blocked';
     if (taskFlowProblemStatus) return taskFlowProblemStatus;
     if ((taskFlowProgress?.running ?? 0) > 0 || runtimeRunHasPendingAsyncTasks(card.runtimeRun ?? undefined)) {
       return 'running';
@@ -221,7 +219,6 @@ function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
   if (card.active) {
     if (runtimeStatus === 'aborted') return 'aborted';
     if (runtimeStatus === 'error') return 'error';
-    if (card.runtimeRun?.gateResult?.decision === 'blocked_needs_user') return 'blocked';
     if (taskFlowProgress && taskFlowProgress.running === 0 && taskFlowProblemStatus) {
       return taskFlowProblemStatus;
     }
@@ -234,26 +231,14 @@ function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
   return 'completed';
 }
 
-function isCompositeResultReplyMessage(message: RawMessage): boolean {
-  if (message.role !== 'assistant') return false;
-  if (message.localArtifactResultKind === 'composite') return true;
-  if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
-  const text = extractText(message);
-  return (message._attachedFiles?.length ?? 0) > 0
-    && /随机示例包/.test(text)
-    && /(?:统一)?产物清单/.test(text);
-}
-
 function taskStepSearchText(step: TaskStep): string {
   return `${step.label}\n${step.detail ?? ''}`.toLowerCase();
 }
 
 function isTaskFlowCompactStep(step: TaskStep): boolean {
   if (step.taskId && step.flowId && step.id === `plan-step:task:${step.taskId}`) return true;
-  if (step.id === 'plan-step:uclaw.composite') return false;
   const runtimeKind = typeof step.runtimeKind === 'string' ? step.runtimeKind.trim().toLowerCase() : '';
-  if (runtimeKind) return runtimeKind === 'composite-task';
-  return step.id.startsWith('plan-step:uclaw.composite.');
+  return runtimeKind === 'composite-task';
 }
 
 function getTaskFlowCompactProgress(steps: TaskStep[]): TaskFlowCompactProgress | null {
@@ -495,15 +480,6 @@ function isFilteredRuntimeToolName(name: string | undefined | null): boolean {
   return normalized === 'process';
 }
 
-function gateHasVisibleRuntimeWork(gate: NonNullable<ChatRuntimeRunState['gateResult']>): boolean {
-  return gate.artifactCount > 0
-    || gate.requiredVerificationCount > 0
-    || gate.blockingIssueCount > 0
-    || gate.warningIssueCount > 0
-    || gate.issues.length > 0
-    || gate.decision !== 'deliverable';
-}
-
 function hasRuntimeGraphActivity(run: ChatRuntimeRunState | null): boolean {
   return Boolean(run?.events.some((event) =>
     (event.type === 'run.plan.updated' && event.steps.some(isVisibleRuntimePlanStep))
@@ -513,9 +489,6 @@ function hasRuntimeGraphActivity(run: ChatRuntimeRunState | null): boolean {
     || (event.type === 'tool.completed' && !isFilteredRuntimeToolName(event.name))
     || event.type === 'artifact.produced'
     || event.type === 'verification.completed'
-    || event.type === 'gate.issue'
-    || event.type === 'run.checkpoint'
-    || (event.type === 'gate.evaluated' && gateHasVisibleRuntimeWork(event.gate))
     || (event.type === 'command.output' && !isFilteredRuntimeToolName(event.name))
     || event.type === 'patch.completed'
     || event.type === 'approval.updated',
@@ -1480,8 +1453,6 @@ export function Chat() {
     const map = new Map<number, RunSurfaceState>();
     for (const card of userRunCards) {
       const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
-      const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
-      const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
       const hasUserFacingActivity = runCardHasUserFacingActivity(card, generatedFiles);
       const hasProblem = runCardHasUserFacingProblem(card, generatedFiles);
       const hasElapsedSummary = getRunCardElapsedMs(card, runtimeNowMs) != null;
@@ -1525,7 +1496,9 @@ export function Chat() {
         && (
           card.active
           || hasProblem
-          || (!hasCompositeResultReply && (generatedFiles.length > 0 || hasElapsedSummary || hasVisibleProcessActivity))
+          || generatedFiles.length > 0
+          || hasElapsedSummary
+          || hasVisibleProcessActivity
         );
       map.set(card.triggerIndex, {
         shouldShowTranscript,
@@ -1762,12 +1735,10 @@ export function Chat() {
                     const reasoningPanel = reasoningPanelsByTriggerIndex.get(idx);
                     const hasVisibleRunSurface = Boolean(reasoningPanel) || runCardsForMessage.some((card) => {
                       const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
-                      const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
-                      const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
                       const surfaceState = runSurfaceStates.get(card.triggerIndex) ?? defaultRunSurfaceState();
                       return surfaceState.shouldShowTranscript
                         || surfaceState.shouldRenderExecutionGraph
-                        || (generatedFiles.length > 0 && !hasCompositeResultReply);
+                        || generatedFiles.length > 0;
                     });
                     if (!hasVisibleRunSurface && !hasRenderableChatMessageContent(msg, {
                       suppressAssistantText: isFoldedNarration,
@@ -1805,8 +1776,6 @@ export function Chat() {
                             : `${currentSessionKey}:trigger-${card.triggerIndex}`;
                           const userOverride = graphExpandedOverrides[runKey];
                           const generatedFiles = filesByRun.get(card.triggerIndex) ?? [];
-                          const segmentMessages = messages.slice(card.triggerIndex + 1, card.segmentEnd + 1);
-                          const hasCompositeResultReply = segmentMessages.some(isCompositeResultReplyMessage);
                           const compactStatus = getRunCompactStatus(card);
                           // The graph stays secondary by default, but it still
                           // needs to be inspectable in normal chat mode.
@@ -1847,7 +1816,7 @@ export function Chat() {
                                   }
                                 />
                               )}
-                              {generatedFiles.length > 0 && !hasCompositeResultReply && (
+                              {generatedFiles.length > 0 && (
                                 <GeneratedFilesPanel
                                   files={generatedFiles}
                                   onOpen={(file) => {

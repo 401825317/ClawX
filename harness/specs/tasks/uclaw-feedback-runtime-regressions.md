@@ -12,7 +12,6 @@ touchedAreas:
   - electron/gateway/supervisor.ts
   - electron/main/index.ts
   - electron/main/process-instance-lock.ts
-  - electron/utils/composite-run-coordinator.ts
   - electron/utils/local-artifact-openability.ts
   - electron/utils/local-artifact-planner.ts
   - electron/utils/local-artifact-runtime.ts
@@ -24,7 +23,6 @@ touchedAreas:
   - scripts/bundle-openclaw.mjs
   - scripts/openclaw-session-cwd-runtime-patch.mjs
   - scripts/patch-browser-hint.mjs
-  - shared/composite-run.ts
   - src/components/file-preview/ArtifactPanel.tsx
   - src/components/file-preview/WorkspaceBrowserBody.tsx
   - src/i18n/locales/en/chat.json
@@ -39,7 +37,7 @@ touchedAreas:
   - src/stores/chat/session-selection.ts
   - src/stores/chat/types.ts
   - scripts/host-task-lifecycle.test.ts
-  - scripts/uclaw-contract-driven-gate.test.mjs
+  - scripts/uclaw-artifact-guard-runtime.test.mjs
   - tests/e2e/native-agent-media-routing.spec.ts
   - harness/specs/tasks/openclaw-ordinary-session-cwd-runtime.md
   - harness/specs/tasks/uclaw-feedback-runtime-regressions.md
@@ -60,7 +58,7 @@ requiredRules:
 requiredTests:
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
   - pnpm exec tsx --test scripts/host-task-lifecycle.test.ts
-  - node scripts/uclaw-contract-driven-gate.test.mjs
+  - node scripts/uclaw-artifact-guard-runtime.test.mjs
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - pnpm run typecheck
   - Manual duplicate-portable-launch and Electron artifact-delivery regression
@@ -72,7 +70,7 @@ acceptance:
   - External media staging preserves the original file, uses a narrowly approved runtime directory, and does not broaden arbitrary filesystem access.
   - Final verification binds evidence to the current run, required artifact type, and successful tool result.
   - The Office skill accepts its documented references paths and presentation execution has a deterministic fallback when the model requests the legacy root create.md path.
-  - Existing chat, image-only, video-only, multi-deliverable Task Flow, legacy composite recovery, history recovery, and current session-cwd behavior remain covered.
+  - Existing chat, image-only, video-only, multi-deliverable Task Flow, history reload, and current session-cwd behavior remain covered.
 docs:
   required: false
 ---
@@ -84,7 +82,7 @@ versions used different Gateway tokens on the same port and repeatedly killed
 one another; a PPT request generated only an image; a desktop video path was
 rejected by local-media policy and the run still appeared complete; and a
 video request containing the word "prompt" was downgraded to chat and later
-split into an unrequested image plus video legacy composite run.
+split into an unrequested image plus video parallel execution path.
 
 ## Scope
 
@@ -92,5 +90,4 @@ This task fixes the general runtime contracts exposed by those examples. It
 must not special-case the reported Chinese sentences, relax local-media access
 globally, or make UI mode hints authoritative over current-turn intent.
 Fresh turns always remain OpenClaw Agent turns. Task Flow owns decomposition,
-Host capabilities own local execution and verification, and the legacy
-composite coordinator is restricted to resuming pre-migration records.
+and Host capabilities own local execution and deterministic verification.

@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
+import { app } from 'electron';
 import {
   type ProviderConfig,
 } from '../../utils/secure-storage';
@@ -20,6 +21,7 @@ import {
 import { validateApiKeyWithProvider } from '../../services/providers/provider-validation';
 import { getProviderService } from '../../services/providers/provider-service';
 import { providerAccountToConfig } from '../../services/providers/provider-store';
+import { migrateManagedChatToOpenAi } from '../../services/providers/openai-chat-migration';
 import type { ProviderAccount } from '../../shared/providers/types';
 import { logger } from '../../utils/logger';
 
@@ -131,6 +133,29 @@ export async function handleProviderRoutes(
       }));
     } catch (error) {
       sendJson(res, 500, { valid: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/provider-accounts/migrate-openai-chat' && req.method === 'POST') {
+    try {
+      const result = await migrateManagedChatToOpenAi();
+      await ctx.gatewayManager.restart({
+        reason: 'managed-openai-chat-migration',
+        source: 'provider-migration',
+      });
+      sendJson(res, 200, { success: true, relaunching: true, result });
+      setTimeout(() => {
+        try {
+          app.relaunch();
+          app.quit();
+        } catch (error) {
+          logger.warn('[provider-migration] Failed to relaunch app after Responses migration:', error);
+        }
+      }, 500);
+    } catch (error) {
+      logger.error('[provider-migration] Managed OpenAI Responses migration failed:', error);
+      sendJson(res, 500, { success: false, error: String(error) });
     }
     return true;
   }

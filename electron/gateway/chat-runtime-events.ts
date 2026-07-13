@@ -1,8 +1,5 @@
 import type {
   ChatRuntimeEvent,
-  ChatRuntimeGateDecision,
-  ChatRuntimeGateEvaluation,
-  ChatRuntimeGateIssue,
   ChatRuntimeIssueSeverity,
   ChatRuntimeProgressEntry,
   ChatRuntimeTaskProjection,
@@ -144,66 +141,6 @@ function readSeverity(value: unknown): ChatRuntimeIssueSeverity | undefined {
   return normalized === 'info' || normalized === 'warning' || normalized === 'blocking'
     ? normalized
     : undefined;
-}
-
-function readGateDecision(value: unknown): ChatRuntimeGateDecision | undefined {
-  const normalized = readString(value);
-  return normalized === 'deliverable'
-    || normalized === 'continue_required'
-    || normalized === 'blocked_needs_user'
-    || normalized === 'failed'
-    || normalized === 'aborted'
-    ? normalized
-    : undefined;
-}
-
-function normalizeGateIssue(value: unknown, index: number): ChatRuntimeGateIssue | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const code = readString(record.code) ?? 'runtime.issue';
-  const title = readString(record.title) ?? readString(record.summary) ?? readString(record.message);
-  if (!title) return null;
-  return {
-    id: readString(record.id) ?? `issue-${index + 1}`,
-    code,
-    severity: readSeverity(record.severity) ?? 'blocking',
-    title,
-    detail: readString(record.detail) ?? readString(record.reason),
-    targetId: readString(record.targetId),
-    artifactId: readString(record.artifactId),
-    stepId: readString(record.stepId),
-    verificationId: readString(record.verificationId),
-    recoverable: readBoolean(record.recoverable),
-    suggestedRecovery: readString(record.suggestedRecovery),
-  };
-}
-
-function normalizeGateIssues(value: unknown): ChatRuntimeGateIssue[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const issues = value
-    .map((issue, index) => normalizeGateIssue(issue, index))
-    .filter((issue): issue is ChatRuntimeGateIssue => issue != null);
-  return issues.length > 0 ? issues : undefined;
-}
-
-function normalizeGateEvaluation(value: unknown): ChatRuntimeGateEvaluation | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const decision = readGateDecision(record.decision);
-  if (!decision) return null;
-  const issues = normalizeGateIssues(record.issues) ?? [];
-  return {
-    id: readString(record.id) ?? 'gate:evaluation',
-    decision,
-    summary: readString(record.summary),
-    artifactCount: readNumber(record.artifactCount) ?? 0,
-    requiredVerificationCount: readNumber(record.requiredVerificationCount) ?? 0,
-    passedRequiredVerificationCount: readNumber(record.passedRequiredVerificationCount) ?? 0,
-    blockingIssueCount: readNumber(record.blockingIssueCount) ?? issues.filter((issue) => issue.severity === 'blocking').length,
-    warningIssueCount: readNumber(record.warningIssueCount) ?? issues.filter((issue) => issue.severity === 'warning').length,
-    verificationCoverage: readNumber(record.verificationCoverage) ?? 0,
-    issues,
-  };
 }
 
 function normalizePlanStep(value: unknown, index: number): NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']> | null {
@@ -403,31 +340,7 @@ function normalizeCommandVerificationEvents(event: ChatRuntimeEvent): ChatRuntim
 
   if (status === 'passed' || status === 'skipped') return [verificationEvent];
 
-  const issue: ChatRuntimeGateIssue = {
-    id: `issue:${verificationId}`,
-    code: 'verification.command.failed',
-    severity: 'blocking',
-    title: `${title} 验证未通过`,
-    detail: event.output ?? (typeof event.exitCode === 'number' ? `exitCode=${event.exitCode}` : event.status),
-    targetId,
-    stepId: event.toolCallId,
-    verificationId,
-    recoverable: true,
-    suggestedRecovery: '修复命令失败原因后重新执行验证。',
-  };
-
-  return [
-    verificationEvent,
-    {
-      contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
-      producer: event.producer ?? 'gateway',
-      type: 'gate.issue',
-      runId: event.runId,
-      sessionKey: event.sessionKey,
-      ts: event.ts,
-      issue,
-    },
-  ];
+  return [verificationEvent];
 }
 
 type NativeTaskLifecycle = ChatRuntimeTaskStatus;
@@ -740,21 +653,6 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
     });
   }
 
-  if (lifecycle === 'waiting_approval' || lifecycle === 'partial') {
-    events.push({
-      ...nativeBase,
-      type: 'run.checkpoint',
-      checkpoint: {
-        id: `checkpoint:task:${taskId}:${lifecycle}`,
-        summary: detail ?? title,
-        reason: detail,
-        taskId,
-        kind: lifecycle === 'waiting_approval' ? 'approval' : 'partial',
-        recoverable: true,
-      },
-    });
-  }
-
   if (lifecycle === 'waiting_approval') {
     const approval = nestedRecord(task, 'approval') ?? nestedRecord(context.data, 'approval');
     events.push({
@@ -770,23 +668,6 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
     });
   }
 
-  if (lifecycle === 'partial') {
-    events.push({
-      ...nativeBase,
-      type: 'gate.issue',
-      issue: {
-        id: `issue:task:${taskId}:partial`,
-        code: 'task.partial',
-        severity: 'blocking',
-        title,
-        detail,
-        targetId: taskId,
-        stepId,
-        recoverable: true,
-      },
-    });
-  }
-
   return events;
 }
 
@@ -796,8 +677,6 @@ function runtimeEventIdentity(event: ChatRuntimeEvent): string {
   if (event.type === 'progress.update') return `${event.type}:${event.runId}:${event.entry.id}:${event.entry.status}`;
   if (event.type === 'artifact.produced') return `${event.type}:${event.runId}:${event.artifact.id}`;
   if (event.type === 'verification.completed') return `${event.type}:${event.runId}:${event.verification.id}:${event.verification.status}`;
-  if (event.type === 'run.checkpoint') return `${event.type}:${event.runId}:${event.checkpoint.id}`;
-  if (event.type === 'gate.issue') return `${event.type}:${event.runId}:${event.issue.id}`;
   if (event.type === 'approval.updated') return `${event.type}:${event.runId}:${event.itemId ?? ''}:${event.status ?? ''}:${event.phase ?? ''}`;
   if (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed') return `${event.type}:${event.runId}:${event.toolCallId}`;
   return `${event.type}:${event.runId}:${event.seq ?? event.ts ?? ''}`;
@@ -925,45 +804,6 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
           },
           toolCallId: readString(data.toolCallId),
           itemId: readString(data.itemId),
-        }
-      : null;
-  }
-
-  if (stream === 'issue' || stream === 'gate_issue') {
-    const issue = normalizeGateIssue(data.issue ?? data, 0);
-    const base = withBase('gate.issue', raw);
-    return base && issue
-      ? {
-          ...base,
-          issue,
-        }
-      : null;
-  }
-
-  if (stream === 'gate' || stream === 'run_gate' || stream === 'gate_evaluated') {
-    const gate = normalizeGateEvaluation(data.gate ?? data);
-    const base = withBase('gate.evaluated', raw);
-    return base && gate
-      ? {
-          ...base,
-          gate,
-        }
-      : null;
-  }
-
-  if (stream === 'checkpoint') {
-    const summary = readString(data.summary) ?? readString(data.message);
-    const base = withBase('run.checkpoint', raw);
-    return base && summary
-      ? {
-          ...base,
-          checkpoint: {
-            id: readString(data.id) ?? readString(data.checkpointId) ?? `${base.runId}:${base.seq ?? base.ts ?? 'checkpoint'}`,
-            summary,
-            reason: readString(data.reason),
-            recoverable: readBoolean(data.recoverable),
-            issues: normalizeGateIssues(data.issues),
-          },
         }
       : null;
   }

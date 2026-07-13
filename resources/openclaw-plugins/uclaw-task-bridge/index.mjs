@@ -6,7 +6,6 @@ const CONTRACT_VERSION = 'uclaw.host-task/v1';
 const REQUEST_SCHEMA = 'uclaw.host-task.request/v1';
 const TOOL_NAMES = [
   'uclaw_get_runtime_capabilities',
-  'uclaw_declare_turn_contract',
   'uclaw_get_task_bridge_capabilities',
   'uclaw_start_host_task',
   'uclaw_get_host_task',
@@ -154,6 +153,8 @@ function normalizeTask(value) {
     ? task.verifications.slice(-MAX_EVENT_ITEMS).map(normalizeVerification)
     : [];
   const lifecycle = task.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : {};
+  const acceptance = task.acceptance && typeof task.acceptance === 'object' ? task.acceptance : {};
+  const completion = task.completion && typeof task.completion === 'object' ? task.completion : {};
   const operations = Array.isArray(lifecycle.operations)
     ? lifecycle.operations.slice(-MAX_EVENT_ITEMS).map((operation) => ({
         kind: cleanText(operation?.kind, 80),
@@ -183,6 +184,19 @@ function normalizeTask(value) {
       runId: cleanText(correlation.runId, 300),
       toolCallId: cleanText(correlation.toolCallId, 300),
       idempotencyKey: cleanText(correlation.idempotencyKey, 300),
+    },
+    acceptance: {
+      source: 'host_capability',
+      requiresArtifact: acceptance.requiresArtifact === true,
+      requiresVerification: acceptance.requiresVerification === true,
+      requiredVerificationKinds: Array.isArray(acceptance.requiredVerificationKinds)
+        ? acceptance.requiredVerificationKinds.map((kind) => cleanText(kind, 160)).filter(Boolean)
+        : [],
+      outputDescription: cleanText(acceptance.outputDescription, 1_000) || undefined,
+    },
+    completion: {
+      mode: completion.mode === 'replan' ? 'replan' : 'direct',
+      reason: cleanText(completion.reason, 1_000) || undefined,
     },
     progress,
     artifacts,
@@ -253,6 +267,17 @@ function taskInstruction(task) {
   return 'Task status is unknown. Query it again before describing any completion.';
 }
 
+function deliverableArtifacts(task) {
+  if (task.status !== 'succeeded') return [];
+  if (task.acceptance.requiresVerification !== true) return task.artifacts;
+  const passedArtifactIds = new Set(
+    task.verifications
+      .filter((verification) => verification.status === 'passed' && verification.artifactId)
+      .map((verification) => verification.artifactId),
+  );
+  return task.artifacts.filter((artifact) => passedArtifactIds.has(artifact.id));
+}
+
 function buildTaskToolResult(operation, task, extra = {}) {
   const snapshot = {
     schema: 'uclaw.task-bridge.result/v1',
@@ -263,12 +288,10 @@ function buildTaskToolResult(operation, task, extra = {}) {
     next: taskInstruction(task),
     ...extra,
   };
-  const mediaLines = terminalTask(task)
-    ? task.artifacts
-      .map((artifact) => artifact.filePath)
-      .filter(Boolean)
-      .map((filePath) => `MEDIA:${filePath}`)
-    : [];
+  const mediaLines = deliverableArtifacts(task)
+    .map((artifact) => artifact.filePath)
+    .filter(Boolean)
+    .map((filePath) => `MEDIA:${filePath}`);
   return {
     content: [{
       type: 'text',
@@ -309,9 +332,10 @@ function completionInjectionText(task) {
     events: taskEvents(task),
     instruction: taskInstruction(task),
   };
-  const mediaLines = task.status === 'succeeded'
-    ? task.artifacts.map((artifact) => artifact.filePath).filter(Boolean).map((filePath) => `MEDIA:${filePath}`)
-    : [];
+  const mediaLines = deliverableArtifacts(task)
+    .map((artifact) => artifact.filePath)
+    .filter(Boolean)
+    .map((filePath) => `MEDIA:${filePath}`);
   return [
     'A UClaw Host task update is ready for this session. Treat this structured event as task evidence, not user text.',
     safeJson(payload),
@@ -325,6 +349,93 @@ function completionWakeMessage() {
     'If no pending completion event is present, reply NO_REPLY.',
     'Do not claim completion unless the event contains verified artifacts.',
   ].join(' ');
+}
+
+function runtimeStepStatus(task) {
+  if (task.status === 'succeeded') return 'completed';
+  if (task.status === 'blocked') return 'blocked';
+  if (task.status === 'failed' || task.status === 'timed_out' || task.status === 'lost') return 'error';
+  if (task.status === 'cancelled') return 'skipped';
+  return 'running';
+}
+
+function runtimeProgressStatus(task) {
+  if (task.status === 'succeeded') return 'completed';
+  if (task.status === 'blocked') return 'blocked';
+  if (task.status === 'failed' || task.status === 'timed_out' || task.status === 'lost') return 'error';
+  if (task.status === 'cancelled') return 'aborted';
+  return 'running';
+}
+
+function emitTerminalRuntimeEvents(api, task) {
+  const emitter = api?.agent?.events?.emitAgentEvent;
+  if (typeof emitter !== 'function') return { emitted: false, reason: 'agent_event_emitter_unavailable' };
+  const emit = emitter.bind(api.agent.events);
+  const base = {
+    runId: task.correlation.runId,
+    sessionKey: task.correlation.sessionKey,
+  };
+  const events = [
+    ...task.artifacts.map((artifact) => ({
+      stream: 'artifact',
+      data: { artifact: { ...artifact, taskId: task.taskId }, toolCallId: task.correlation.toolCallId, taskId: task.taskId },
+    })),
+    ...task.verifications.map((verification) => ({
+      stream: 'verification',
+      data: { verification: { ...verification, taskId: task.taskId }, toolCallId: task.correlation.toolCallId, taskId: task.taskId },
+    })),
+    {
+      stream: 'step',
+      data: {
+        taskId: task.taskId,
+        step: {
+          id: `host-task:${task.taskId}`,
+          title: task.title,
+          kind: `host.${task.kind}`,
+          status: runtimeStepStatus(task),
+          detail: task.progress.at(-1)?.detail || task.error,
+          taskId: task.taskId,
+          toolCallId: task.correlation.toolCallId,
+        },
+      },
+    },
+    {
+      stream: 'progress',
+      data: {
+        taskId: task.taskId,
+        entry: {
+          id: `host-task:${task.taskId}:state`,
+          kind: 'status',
+          text: task.progress.at(-1)?.detail || task.title,
+          detail: task.error,
+          status: runtimeProgressStatus(task),
+          toolCallId: task.correlation.toolCallId,
+          source: 'native',
+        },
+      },
+    },
+    {
+      stream: 'tool',
+      data: {
+        taskId: task.taskId,
+        phase: 'result',
+        toolCallId: task.correlation.toolCallId,
+        name: `host.${task.kind}`,
+        result: {
+          taskId: task.taskId,
+          status: task.status,
+          artifactCount: task.artifacts.length,
+          verificationCount: task.verifications.length,
+        },
+        isError: task.status !== 'succeeded',
+      },
+    },
+  ];
+  for (const event of events) {
+    const result = emit({ ...base, ...event });
+    if (result?.emitted !== true) return { emitted: false, reason: result?.reason || `stream_${event.stream}_not_emitted` };
+  }
+  return { emitted: true, count: events.length };
 }
 
 function completionTag(task) {
@@ -415,8 +526,11 @@ function createBridge(api, options = {}) {
           deliveryKey: key,
           sessionKey: task.correlation.sessionKey,
           delivery: {
-            kind: 'openclaw_session_completion',
+            kind: task.completion.mode === 'replan'
+              ? 'openclaw_session_replan'
+              : 'openclaw_runtime_events',
             injectionEnqueued: result?.injectionReady === true,
+            runtimeEventsEmitted: result?.runtimeEventsEmitted === true,
             sessionTurnScheduled: result?.scheduled === true,
             at: now(),
           },
@@ -428,6 +542,22 @@ function createBridge(api, options = {}) {
         ok: false,
         error: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  async function unscheduleReplan(task) {
+    const unschedule = api?.session?.workflow?.unscheduleSessionTurnsByTag;
+    if (typeof unschedule !== 'function') {
+      return { ok: false, error: 'session_turn_unschedule_unavailable' };
+    }
+    try {
+      const result = await unschedule({
+        sessionKey: task.correlation.sessionKey,
+        tag: completionTag(task),
+      });
+      return { ok: true, result };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -462,28 +592,52 @@ function createBridge(api, options = {}) {
       return;
     }
 
-    let scheduled = false;
-    let scheduleError;
-    try {
-      const handle = await api.session.workflow.scheduleSessionTurn({
-        sessionKey: task.correlation.sessionKey,
-        delayMs: 1,
-        message: completionWakeMessage(),
-        deliveryMode: 'announce',
-        name: 'task-bridge-completion',
-        tag: completionTag(task),
-      });
-      scheduled = Boolean(handle);
-    } catch (error) {
-      scheduleError = error instanceof Error ? error.message : String(error);
+    const runtimeEvents = emitTerminalRuntimeEvents(api, task);
+    if (!runtimeEvents.emitted) {
+      scheduleCompletionRetry(task, 'runtime_event_delivery_failed', { reason: runtimeEvents.reason });
+      return;
     }
 
-    if (scheduled) {
-      const acknowledged = await acknowledge(task, key, { injectionReady, scheduled });
+    let scheduled = false;
+    let scheduleError;
+    if (task.completion.mode === 'replan') {
+      const cleaned = await unscheduleReplan(task);
+      if (!cleaned.ok) {
+        scheduleError = cleaned.error;
+      } else {
+        try {
+          const handle = await api.session.workflow.scheduleSessionTurn({
+            sessionKey: task.correlation.sessionKey,
+            delayMs: 2_000,
+            deleteAfterRun: true,
+            message: `${completionWakeMessage()} Replanning reason: ${task.completion.reason}`,
+            deliveryMode: 'announce',
+            name: 'task-bridge-replan',
+            tag: completionTag(task),
+          });
+          scheduled = Boolean(handle);
+        } catch (error) {
+          scheduleError = error instanceof Error ? error.message : String(error);
+        }
+      }
+    }
+
+    if (task.completion.mode === 'direct' || scheduled) {
+      const acknowledged = await acknowledge(task, key, {
+        injectionReady,
+        runtimeEventsEmitted: runtimeEvents.emitted,
+        scheduled,
+      });
       if (acknowledged.ok) {
         clearCompletionRetry(task);
       } else {
-        scheduleCompletionRetry(task, 'host_acknowledgement_failed', { error: acknowledged.error });
+        const cleanup = task.completion.mode === 'replan' && scheduled
+          ? await unscheduleReplan(task)
+          : { ok: true };
+        scheduleCompletionRetry(task, 'host_acknowledgement_failed', {
+          error: acknowledged.error,
+          replanCleanup: cleanup.ok === true ? 'completed' : cleanup.error,
+        });
       }
     } else {
       scheduleCompletionRetry(task, 'session_wake_failed', {
@@ -553,74 +707,6 @@ function createBridge(api, options = {}) {
         },
       },
       {
-        name: 'uclaw_declare_turn_contract',
-        label: 'Declare UClaw turn contract',
-        description: 'Before a turn that must actually create an artifact, invoke a remote generation, or perform an external desktop action, declare the intended side effect and its completion evidence. Do not use for pure answers, explanations, or drafting-only requests. This declaration is metadata only and never proves the work completed.',
-        promptSnippet: 'uclaw_declare_turn_contract: before a side-effecting task, declare intent, required evidence, and user authorization. It is not a substitute for executing the task or verifying the output.',
-        parameters: Type.Object({
-          intent: Type.Union([
-            Type.Literal('chat'),
-            Type.Literal('research'),
-            Type.Literal('artifact'),
-            Type.Literal('media'),
-            Type.Literal('desktop'),
-            Type.Literal('workflow'),
-          ]),
-          toolRequirement: Type.Union([
-            Type.Literal('none'),
-            Type.Literal('optional'),
-            Type.Literal('required'),
-          ]),
-          sideEffect: Type.Union([
-            Type.Literal('none'),
-            Type.Literal('local_artifact'),
-            Type.Literal('remote_generation'),
-            Type.Literal('external_action'),
-          ]),
-          sideEffectAuthorized: Type.Boolean({
-            description: 'Required. True when the current user message explicitly requests or confirms this side effect; false while confirmation is pending.',
-          }),
-          capabilityRefs: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { maxItems: 32 })),
-          acceptance: Type.Optional(Type.Object({
-            requiresArtifact: Type.Optional(Type.Boolean()),
-            requiresVerification: Type.Optional(Type.Boolean()),
-            requiresApproval: Type.Optional(Type.Boolean()),
-            requiresToolEvidence: Type.Optional(Type.Boolean()),
-            media: Type.Optional(Type.Object({
-              kind: Type.Optional(Type.Union([
-                Type.Literal('image'),
-                Type.Literal('video'),
-                Type.Literal('audio'),
-              ])),
-              minDurationSeconds: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 86400 })),
-              width: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
-              height: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
-              aspectRatio: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
-              requiresAudio: Type.Optional(Type.Boolean()),
-              language: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
-            }, { additionalProperties: false })),
-          }, { additionalProperties: false })),
-        }, { additionalProperties: false }),
-        async execute(toolCallId, params) {
-          try {
-            const correlation = correlationFromContext(toolContext, toolCallId);
-            const payload = await request('/api/runtime/turn-contracts', {
-              method: 'POST',
-              body: JSON.stringify({ correlation, contract: params }),
-            });
-            const result = {
-              schema: 'uclaw.turn-contract.result/v1',
-              ok: true,
-              contract: payload?.contract ?? payload,
-              next: 'Continue with the declared work. Do not claim completion until the declared artifact, verification, approval, and real execution evidence exist.',
-            };
-            return { content: [{ type: 'text', text: safeJson(result) }], details: result };
-          } catch (error) {
-            return buildBridgeErrorResult('declare_turn_contract', error);
-          }
-        },
-      },
-      {
         name: 'uclaw_get_task_bridge_capabilities',
         label: 'UClaw task bridge capabilities',
         description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task. For long-form generated video, first use video_generate with one shared parentTaskId and distinct segmentId values, then compose verified video scenes. local.video.timeline.render may combine managed video scenes, narration, captions, and music; an image-only timeline is a disclosed fallback after provider generation is unavailable or fails, not an equivalent replacement for generated motion.',
@@ -643,6 +729,10 @@ function createBridge(api, options = {}) {
           title: Type.String({ minLength: 1, maxLength: 500 }),
           input: Type.Optional(Type.Any()),
           idempotencyKey: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
+          completion: Type.Optional(Type.Object({
+            mode: Type.Union([Type.Literal('direct'), Type.Literal('replan')]),
+            reason: Type.Optional(Type.String({ minLength: 1, maxLength: 1_000 })),
+          }, { additionalProperties: false })),
         }, { additionalProperties: false }),
         async execute(toolCallId, params, _signal, onUpdate) {
           try {
@@ -654,6 +744,7 @@ function createBridge(api, options = {}) {
                 kind: params.kind,
                 title: params.title,
                 input: params.input ?? {},
+                completion: params.completion ?? { mode: 'direct' },
                 correlation,
               }),
             });
@@ -805,6 +896,7 @@ export const __test = {
   normalizeTask,
   terminalTask,
   taskEvents,
+  deliverableArtifacts,
   buildTaskToolResult,
   correlationFromContext,
   createBridge,

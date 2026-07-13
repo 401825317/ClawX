@@ -9,6 +9,10 @@ import {
   syncDefaultProviderToRuntime,
   syncSavedProviderToRuntime,
 } from '../providers/provider-runtime-sync';
+import {
+  isManagedOpenAiChatMigrated,
+  syncManagedOpenAiChatAfterRelayRefresh,
+} from '../providers/openai-chat-migration';
 import { removeProviderKeyFromOpenClaw } from '../../utils/openclaw-auth';
 import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
 import {
@@ -21,6 +25,7 @@ import {
   JUNFEIAI_DEFAULT_API_PROTOCOL,
   getJunFeiAIDefaultBaseUrl,
   JUNFEIAI_DEFAULT_MODEL,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_NAME,
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
@@ -1291,16 +1296,31 @@ async function applyJunFeiAIAuthSwitchToGateway(gatewayManager?: GatewayManager)
 async function clearJunFeiAIStaleRelayKeyForAuthSwitch(): Promise<void> {
   await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
   const account = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
+  const managedOpenAiChatActive = await isManagedOpenAiChatMigrated();
+  const managedOpenAiAccount = managedOpenAiChatActive
+    ? await getProviderAccount(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID)
+    : null;
+  if (managedOpenAiChatActive) {
+    await deleteProviderSecret(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
+  }
   try {
     if (account) {
       await syncSavedProviderToRuntime(providerAccountToConfig(account), '', undefined);
-      return;
+    } else {
+      await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
     }
-    await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+    if (managedOpenAiAccount) {
+      await syncSavedProviderToRuntime(providerAccountToConfig(managedOpenAiAccount), '', undefined);
+    } else if (managedOpenAiChatActive) {
+      await removeProviderKeyFromOpenClaw(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
+    }
   } catch (error) {
     logger.warn('[junfeiai] Failed to clear stale managed relay key from OpenClaw during account switch:', error);
     try {
       await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+      if (managedOpenAiChatActive) {
+        await removeProviderKeyFromOpenClaw(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
+      }
     } catch (fallbackError) {
       logger.warn('[junfeiai] Failed to clear stale managed relay auth profile during account switch:', fallbackError);
     }
@@ -1473,10 +1493,14 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await saveProviderAccount(account);
   }
 
+  const managedOpenAiChatActive = await isManagedOpenAiChatMigrated();
+  const targetDefaultProvider = managedOpenAiChatActive
+    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    : JUNFEIAI_PROVIDER_ID;
   const defaultProvider = await getDefaultProvider();
-  const defaultProviderChanged = defaultProvider !== JUNFEIAI_PROVIDER_ID;
-  if (defaultProvider !== JUNFEIAI_PROVIDER_ID) {
-    await setDefaultProvider(JUNFEIAI_PROVIDER_ID);
+  const defaultProviderChanged = defaultProvider !== targetDefaultProvider;
+  if (defaultProvider !== targetDefaultProvider) {
+    await setDefaultProvider(targetDefaultProvider);
   }
 
   let runtimeApiKey = options.relayToken?.trim() || undefined;
@@ -1567,7 +1591,9 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     if (shouldSyncProviderConfig) {
       await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, runtimeSyncGatewayManager);
     }
-    if ((defaultProviderChanged || options.syncRuntime === true) && !shouldClearRuntimeKey) {
+    if (managedOpenAiChatActive) {
+      await syncManagedOpenAiChatAfterRelayRefresh(account, apiKey, runtimeSyncGatewayManager);
+    } else if ((defaultProviderChanged || options.syncRuntime === true) && !shouldClearRuntimeKey) {
       await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, runtimeSyncGatewayManager);
     }
   }

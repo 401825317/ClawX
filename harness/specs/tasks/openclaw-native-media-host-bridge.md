@@ -5,6 +5,11 @@ scenario: gateway-backend-communication
 taskType: runtime-bridge
 intent: Keep OpenClaw as the sole owner of user-intent reasoning, tool selection, subagent coordination, session continuation, and async task lifecycle. UClaw remains the desktop Host: it supplies current-turn preferences, local capability adapters, task journals, UI projection, validation, and user approvals without creating a parallel planner-to-job-to-synthetic-transcript route.
 touchedAreas:
+  - README*.md
+  - harness/specs/tasks/**
+  - scripts/**
+  - shared/**
+  - src/**
   - harness/specs/tasks/openclaw-native-media-host-bridge.md
   - harness/specs/tasks/media-intent-image-edit-routing.md
   - harness/specs/tasks/video-generation-prompt-length-guard.md
@@ -18,6 +23,13 @@ touchedAreas:
   - electron/api/routes/gateway.ts
   - electron/api/routes/media.ts
   - electron/api/routes/runtime.ts
+  - electron/media-generation-worker.cjs
+  - electron/utils/chat-session-image-message.ts
+  - electron/utils/composite-run-coordinator.ts
+  - electron/utils/media-generation-job-journal.ts
+  - electron/utils/media-generation-jobs.ts
+  - electron/utils/media-generation-types.ts
+  - electron/utils/media-generation-worker-entry.ts
   - electron/services/agent-runtime/**
   - electron/gateway/chat-runtime-events.ts
   - electron/gateway/task-ledger-monitor.ts
@@ -37,23 +49,23 @@ touchedAreas:
   - scripts/host-task-lifecycle.test.ts
   - scripts/host-task-runtime-route.test.ts
   - scripts/gateway-task-ledger-monitor.test.ts
-  - scripts/uclaw-contract-driven-gate.test.mjs
+  - scripts/uclaw-artifact-guard-runtime.test.mjs
   - scripts/openclaw-native-image-delivery-patch.mjs
   - scripts/openclaw-native-image-delivery-patch.test.mjs
   - scripts/openclaw-native-image-delivery-runtime.mjs
   - scripts/clawx-openai-image-request-options.test.mjs
   - scripts/bundle-openclaw.mjs
   - scripts/junfeiai-reasoning-defaults.test.ts
-  - scripts/openclaw-native-media-acceptance-patch.mjs
+  - scripts/openclaw-native-media-acceptance-cleanup.mjs
+  - scripts/openclaw-native-media-acceptance-cleanup.test.mjs
   - scripts/openclaw-video-segment-dedupe-patch.mjs
   - scripts/openclaw-video-segment-dedupe-patch.test.mjs
   - scripts/patch-browser-hint.mjs
   - scripts/reasoning-projection.test.ts
   - scripts/runtime-progress-semantics.test.ts
-  - scripts/runtime-completion-gate.test.ts
-  - scripts/runtime-turn-contract-graph.test.ts
+  - scripts/runtime-native-evidence.test.ts
+  - scripts/runtime-task-graph.test.ts
   - scripts/uclaw-media-limit-default.test.ts
-  - shared/agent-turn-contract.ts
   - src/i18n/locales/en/chat.json
   - src/i18n/locales/ja/chat.json
   - src/i18n/locales/ru/chat.json
@@ -66,12 +78,13 @@ touchedAreas:
   - src/pages/Chat/runtime-run-merge.ts
   - src/stores/chat.ts
   - src/stores/chat/helpers.ts
-  - src/stores/chat/runtime-contract.ts
+  - src/stores/chat/runtime-evidence.ts
   - src/stores/chat/runtime-task-recovery.ts
   - src/pages/Chat/ChatInput.tsx
   - src/pages/Chat/ExecutionGraphCard.tsx
   - src/pages/Chat/task-visualization.ts
   - tests/e2e/**
+  - vite.config.ts
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
@@ -87,7 +100,7 @@ expectedUserBehavior:
   - Native image task terminal state from the task ledger closes the pending image UI and freezes elapsed time even when internal completion messages are intentionally absent from the visible transcript.
   - When remote video providers cannot produce clips, the Agent can select the advertised `local.video.timeline.render` Host capability to render managed image/video scenes with deterministic duration, basic motion, transitions, captions, narration, and optional background music.
   - `video_generate action=list` exposes the models configured in `agents.defaults.videoGenerationModel` and `models.providers.<id>.models`; the local timeline renderer is a fallback after those real configured candidates are unavailable, not a replacement for provider discovery.
-  - Long-form video plans may submit multiple native `video_generate` tasks with one shared `parentTaskId` and a unique `segmentId` per shot. The duplicate guard suppresses only the same logical segment, while legacy calls without segment identity retain their existing single-flight behavior.
+  - Long-form video plans may submit multiple native `video_generate` tasks with one shared `parentTaskId` and a unique `segmentId` per shot. The duplicate guard suppresses only the same logical segment, while calls without segment identity retain session-level single-flight behavior.
   - A still-image-only timeline is disclosed as a fallback after provider generation is unavailable or fails; it is never described as equivalent to provider-generated motion.
 requiredProfiles:
   - fast
@@ -104,12 +117,14 @@ requiredTests:
   - pnpm run comms:compare
   - pnpm exec tsc --noEmit --pretty false
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
+  - node scripts/uclaw-artifact-guard-runtime.test.mjs
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
   - pnpm exec tsx --test scripts/local-video-timeline.test.ts
   - node scripts/openclaw-native-image-delivery-patch.test.mjs
+  - node scripts/openclaw-native-media-acceptance-cleanup.test.mjs
   - node scripts/openclaw-video-segment-dedupe-patch.test.mjs
-  - pnpm exec tsx --test scripts/runtime-completion-gate.test.ts
-  - pnpm exec tsx --test scripts/runtime-turn-contract-graph.test.ts
+  - pnpm exec tsx --test scripts/runtime-native-evidence.test.ts
+  - pnpm exec tsx --test scripts/runtime-task-graph.test.ts
   - node scripts/clawx-openai-image-request-options.test.mjs
   - pnpm exec tsx scripts/uclaw-media-limit-default.test.ts
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
@@ -119,14 +134,13 @@ acceptance:
   - Image/video mode preferences reach the matching OpenClaw turn without being persisted as user-authored system instructions.
   - Native image_generate and video_generate retain their OpenClaw task ledger, duplicate guard, completion wake, and normal session delivery semantics.
   - Replaying one `parentTaskId + segmentId` pair reuses the active or recent successful video task, while a different `segmentId` under the same parent may start another planned shot.
-  - Calls that omit `parentTaskId` and `segmentId` preserve the legacy session-level native video single-flight guard.
+  - Calls that omit `parentTaskId` and `segmentId` preserve the session-level native video single-flight guard.
   - Fresh turns never call the retired UClaw media intent or video-route planners; OpenClaw performs semantic tool selection once.
   - The retired intent-plan and direct image/video endpoints fail closed with HTTP 410 and cannot enqueue duplicate media work.
-  - Media provider settings and existing job inspection/cancel/retry endpoints remain available for operations and legacy recovery; they are not fresh-turn entrypoints.
-  - The legacy composite coordinator can resume pre-migration records but cannot accept a fresh `/api/chat/send` turn or synthesize a new assistant result.
-  - The artifact guard validates the declared Agent turn contract and does not depend on a second UClaw planner.
+  - Media provider settings and existing job inspection/cancel/retry endpoints remain available for current operations; they are not fresh-turn entrypoints.
+  - The artifact guard validates real tool and artifact evidence and does not depend on model-declared metadata or a second UClaw planner.
   - Tool/task completion events create stable runtime artifacts and required availability verification before UClaw presents terminal success.
-  - Fresh Agent/Task Flow execution and legacy recovery cannot create duplicate side effects for one idempotency key.
+  - Fresh Agent/Task Flow execution cannot create duplicate side effects for one idempotency key.
   - Ordinary, image-mode, and video-mode composer sends all use `/api/chat/send`; only image/video preference fields differ.
   - Existing standalone PPT, file, desktop, Blender, browser, and MCP tool paths continue to use OpenClaw tools/plugins rather than gaining another front-end intent router.
   - New chat turns never persist an internal execution contract as user-authored text; the UI only renders the original user request and verified runtime artifacts.
@@ -163,5 +177,6 @@ Task Flow and subagents remain the orchestration control plane.
 - Removing the current image/video mode controls.
 - A privileged OpenClaw-core immediate-wake API for arbitrary third-party
   workers. The bridge uses the public durable injection plus scheduled
-  same-session turn contract; native media retains OpenClaw's internal fast
-  completion wake.
+  same-session structured completion context. A new Agent turn is scheduled only
+  when the capability explicitly requests replanning; native media retains
+  OpenClaw's internal fast completion wake.

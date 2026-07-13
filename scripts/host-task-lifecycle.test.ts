@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -27,6 +27,13 @@ function createRequest(idempotencyKey: string, input: unknown = {}) {
     capability: 'example.safe-observe',
     title: `Task ${idempotencyKey}`,
     input,
+    acceptance: {
+      source: 'host_capability' as const,
+      requiresArtifact: false,
+      requiresVerification: false,
+      requiredVerificationKinds: [],
+    },
+    completion: { mode: 'direct' as const },
   };
 }
 
@@ -73,7 +80,7 @@ test('Host task lifecycle persists bounded input/checkpoint and delegates start,
 
     const service = new HostTaskService(serviceOptions);
     const created = await service.create(createRequest('start-once', { request: { target: 'screen' } }));
-    assert.equal(created.task.version, 2);
+    assert.equal(created.task.version, 3);
     assert.deepEqual(created.task.input, { request: { target: 'screen' } });
 
     const firstStart = await service.dispatchStart(created.task.taskId, executor);
@@ -137,6 +144,135 @@ test('Host task lifecycle persists bounded input/checkpoint and delegates start,
   } finally {
     if (previousStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
     else process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host task success is blocked until capability-derived artifact and verification evidence pass', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-acceptance-'));
+  const service = new HostTaskService({ rootDir: path.join(root, 'host-tasks') });
+  const acceptance = {
+    source: 'host_capability' as const,
+    requiresArtifact: true,
+    requiresVerification: true,
+    requiredVerificationKinds: ['artifact.availability'],
+  };
+  try {
+    const blocked = await service.create({
+      ...createRequest('acceptance-blocked'),
+      acceptance,
+    });
+    const blockedExecutor: HostTaskLifecycleExecutor = {
+      async start(context) {
+        await context.update({ status: 'succeeded' });
+      },
+    };
+    await service.dispatchStart(blocked.task.taskId, blockedExecutor);
+    const blockedResult = await service.waitForTerminal(blocked.task.taskId, 2_000);
+    assert.equal(blockedResult?.status, 'blocked');
+    assert.match(blockedResult?.error ?? '', /requires an output artifact/);
+
+    const artifactPath = path.join(root, 'verified.txt');
+    await writeFile(artifactPath, 'verified output');
+    const missingVerification = await service.create({
+      ...createRequest('acceptance-missing-verification'),
+      acceptance,
+    });
+    const missingVerificationExecutor: HostTaskLifecycleExecutor = {
+      async start(context) {
+        await context.update({
+          status: 'succeeded',
+          artifacts: [{ id: 'artifact-unverified', kind: 'file', filePath: artifactPath }],
+        });
+      },
+    };
+    await service.dispatchStart(missingVerification.task.taskId, missingVerificationExecutor);
+    const missingVerificationResult = await service.waitForTerminal(missingVerification.task.taskId, 2_000);
+    assert.equal(missingVerificationResult?.status, 'blocked');
+    assert.match(missingVerificationResult?.error ?? '', /requires a passed artifact\.availability verification/);
+
+    const unrelatedVerification = await service.create({
+      ...createRequest('acceptance-unrelated-verification'),
+      acceptance,
+    });
+    await service.dispatchStart(unrelatedVerification.task.taskId, {
+      async start(context) {
+        await context.update({
+          status: 'succeeded',
+          artifacts: [{ id: 'artifact-target', kind: 'file', filePath: artifactPath }],
+          verifications: [{
+            id: 'verification-unrelated',
+            status: 'passed',
+            kind: 'artifact.availability',
+            required: true,
+            artifactId: 'artifact-other',
+          }],
+        });
+      },
+    });
+    const unrelatedVerificationResult = await service.waitForTerminal(unrelatedVerification.task.taskId, 2_000);
+    assert.equal(unrelatedVerificationResult?.status, 'blocked');
+    assert.match(unrelatedVerificationResult?.error ?? '', /requires a passed artifact\.availability verification/);
+
+    const passed = await service.create({
+      ...createRequest('acceptance-passed'),
+      acceptance,
+    });
+    const passedExecutor: HostTaskLifecycleExecutor = {
+      async start(context) {
+        const artifactId = 'artifact-verified';
+        await context.update({
+          status: 'succeeded',
+          artifacts: [{ id: artifactId, kind: 'file', filePath: artifactPath }],
+          verifications: [{
+            id: 'verification-verified',
+            status: 'passed',
+            kind: 'artifact.availability',
+            required: true,
+            artifactId,
+          }],
+        });
+      },
+    };
+    await service.dispatchStart(passed.task.taskId, passedExecutor);
+    const passedResult = await service.waitForTerminal(passed.task.taskId, 2_000);
+    assert.equal(passedResult?.status, 'succeeded');
+    assert.equal(passedResult?.artifacts[0]?.sizeBytes, 15);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host task v3 store does not load legacy v2 snapshots', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-v3-only-'));
+  const hostRoot = path.join(root, 'host-tasks');
+  const legacyTaskId = 'legacy-v2-task';
+  const legacyDir = path.join(hostRoot, 'jobs', legacyTaskId);
+  await mkdir(legacyDir, { recursive: true });
+  await writeFile(path.join(legacyDir, 'task.json'), JSON.stringify({
+    version: 2,
+    taskId: legacyTaskId,
+    sessionKey: 'agent:main:legacy',
+    runId: 'run-legacy',
+    toolCallId: 'tool-legacy',
+    idempotencyKey: 'legacy-key',
+    capability: 'legacy.capability',
+    title: 'Legacy task',
+    input: {},
+    status: 'succeeded',
+    createdAt: 1,
+    updatedAt: 1,
+    revision: 1,
+    artifacts: [],
+    verifications: [],
+    completionAcks: [],
+    lifecycle: { operations: [] },
+  }));
+  try {
+    const service = new HostTaskService({ rootDir: hostRoot });
+    assert.equal(await service.get(legacyTaskId), undefined);
+    assert.deepEqual(await service.list(), []);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -51,7 +51,7 @@ export function formatModelRefLabel(modelRef: string | null | undefined): string
 export function formatProviderModelIdLabel(providerKey: string, modelId: string): string {
   const normalizedProviderKey = providerKey.trim();
   const normalizedModelId = modelId.trim();
-  if (normalizedProviderKey === 'lingzhiwuxian') {
+  if (normalizedProviderKey === 'lingzhiwuxian' || normalizedProviderKey === 'openai') {
     const labels: Record<string, string> = {
       'smart-latest': '智能路由',
       'qwen-latest': '通义千问最新版',

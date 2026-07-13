@@ -40,8 +40,10 @@ POST /api/task-bridge/tasks/:taskId/ack
 
 The Host returns `uclaw.host-task/v1` records containing `progress`,
 `artifacts`, `verifications`, `revision`, `recovery`, lifecycle operations, and
-the same correlation object. The durable Host snapshot also stores a bounded
-JSON input and executor-owned checkpoint. It must treat `idempotencyKey` as
+the same correlation object. Acceptance is derived from the registered Host
+capability and persisted with the bounded JSON input, completion policy, and
+executor-owned checkpoint. A task cannot become `succeeded` until its required
+artifact and passed verification evidence exist. It must treat `idempotencyKey` as
 durable, reject a conflicting replay, and return the existing job for an exact
 replay. `ack` must be idempotent and record the supplied completion key.
 
@@ -54,18 +56,23 @@ request can delegate the stored input and checkpoint to a capability's
 
 ## Completion boundary
 
-The bridge persists a completion event into OpenClaw with
-`enqueueNextTurnInjection`, keyed by `taskId + revision`. This is the reliable
-model-visible completion record. In a packaged/bundled plugin, it also schedules
-a same-session Cron turn to consume that event promptly. OpenClaw's public SDK
-does not expose the core media task's privileged immediate wake API to arbitrary
-plugins; therefore, when the plugin is loaded as a workspace/external extension,
-the event is durable but waits for the next session turn/heartbeat.
+The bridge emits terminal `step`, `progress`, `artifact`, `verification`, and
+`tool` events directly into the originating OpenClaw run. It also persists the
+same structured completion with `enqueueNextTurnInjection`, keyed by
+`taskId + revision`, so a later user turn has exact task evidence without
+reconstructing it from assistant prose. The default `completion.mode=direct`
+does not schedule a model turn. A task may explicitly request
+`completion.mode=replan` with a concrete reason; only that path schedules one
+same-session `announce` turn.
 
-The two stores cannot share one transaction. A Host acknowledgement reduces
-duplicate wake scheduling after restart; delivery is at-least-once at the
-scheduler boundary and exactly-once for the injected completion context. A
-duplicate idempotent injection handle is valid evidence that the durable context
-already exists, so a successful same-session wake can acknowledge it. Failed
-injection, wake, or acknowledgement attempts use bounded exponential backoff
-instead of polling the same terminal task every monitor tick.
+The Host and OpenClaw stores cannot share one transaction. A Host acknowledgement
+prevents duplicate terminal replay after restart; runtime events are idempotent
+by stable task/artifact/verification ids, while the injected completion context
+is exactly-once. Failed event emission, injection, explicit replan wake, or
+acknowledgement attempts use bounded exponential backoff instead of polling the
+same terminal task every monitor tick.
+
+When the Renderer loads a conversation, it also reads the session's persisted
+Host tasks and projects their stable task, artifact, verification, and progress
+events back into the run view. This restores direct-completion UI after an app
+restart without parsing assistant prose or scheduling another model turn.

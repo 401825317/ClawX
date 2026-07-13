@@ -1,7 +1,7 @@
 {
   "name": "uclaw-artifact-guard-plugin",
-  "version": "0.1.22",
-  "description": "UClaw artifact delivery completion guard for OpenClaw",
+  "version": "0.2.0",
+  "description": "UClaw artifact evidence and runtime event bridge for OpenClaw",
   "private": true,
   "type": "module",
   "main": "index.mjs",

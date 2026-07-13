@@ -6,7 +6,6 @@ taskType: runtime-bridge
 intent: Keep the 4096-character provider boundary in the executable video worker while ensuring chat turns reach video generation only through OpenClaw's native Agent tool path.
 touchedAreas:
   - harness/specs/tasks/video-generation-prompt-length-guard.md
-  - electron/utils/media-generation-worker-entry.ts
   - electron/utils/video-generation-prompt-limits.ts
   - electron/api/routes/media.ts
 requiredProfiles:

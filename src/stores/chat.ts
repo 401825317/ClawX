@@ -13,13 +13,7 @@ import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
-import type { ChatRuntimeArtifact, ChatRuntimeEvent, ChatRuntimePlanStep } from '../../shared/chat-runtime-events';
-import type {
-  CompositeRunApiResponse,
-  CompositeRunRecord,
-  CompositeRunTaskInput,
-  CompositeRunTaskKind,
-} from '../../shared/composite-run';
+import type { ChatRuntimeArtifact, ChatRuntimeEvent } from '../../shared/chat-runtime-events';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -80,16 +74,20 @@ import {
 } from './chat/runtime-graph';
 import { buildRuntimeProgressEvents } from './chat/runtime-progress';
 import {
+  buildHostTaskRehydrationEvents,
+  parseHostTaskBridgeTasks,
+} from './chat/host-task-rehydration';
+import {
   buildRuntimeArtifactEventsFromAttachedFiles,
   buildRuntimeArtifactVerificationEvent,
-  buildRuntimeCheckpointEvent,
-  buildRuntimeCompletionGateEvents,
-  buildRuntimeStartContractEvents,
-} from './chat/runtime-contract';
+  buildRuntimeStartEvents,
+  hasDeliveredArtifactEvidence,
+} from './chat/runtime-evidence';
 import {
   applyAsyncTaskEvidenceToRuns,
   buildStreamingAssistantMessageFromRuntimeRun,
   collectRunDetachedTaskIdsForAbort,
+  collectRunHostTaskIdsForAbort,
   enrichWithToolCallAttachments,
   extractAsyncTaskEvidence,
   isInternalMessage as isHistoryInternalMessage,
@@ -103,13 +101,11 @@ import {
   isGeneratingStatusNarration,
   isInternalAssistantReplyText,
   isInternalProcessNarration,
-  stripCompositeExecutionContractEnvelope,
 } from '@/pages/Chat/message-utils';
 
 export type {
   AttachedFileMeta,
   ChatSession,
-  CompositeArtifactManifest,
   ContentBlock,
   RawMessage,
   ToolStatus,
@@ -213,9 +209,6 @@ type PendingImageInput = {
   preview: string | null;
 };
 
-type MediaIntentCompositeTaskKind = CompositeRunTaskKind;
-type MediaIntentCompositeTask = CompositeRunTaskInput;
-
 type GatewayTurnPreferences = {
   mode: ChatSendMode;
   image?: {
@@ -230,45 +223,6 @@ type GatewayTurnPreferences = {
     title: string;
   }>;
 };
-
-function sanitizeCompositeTaskId(value: string, index: number): string {
-  const cleaned = value.trim().replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '');
-  return cleaned || `task-${index + 1}`;
-}
-
-function compositeTaskKindLabel(kind: MediaIntentCompositeTaskKind): string {
-  switch (kind) {
-    case 'image_generate':
-      return '图片生成';
-    case 'image_edit':
-      return '图片编辑';
-    case 'video_generate':
-      return '视频生成';
-    case 'presentation':
-      return '演示文稿';
-    case 'spreadsheet':
-      return '表格';
-    case 'mini_program':
-      return '小程序';
-    case 'copywriting':
-      return '文案';
-    default:
-      return kind;
-  }
-}
-
-function describeCompositeTaskImages(task: MediaIntentCompositeTask): string {
-  const images = (task.sourceImages ?? []).filter((image) => image.filePath?.trim());
-  if (images.length === 0) {
-    return task.kind === 'image_edit'
-      ? '参考图：未指定；如本轮前序子任务刚生成图片，优先使用该图片作为修图输入，否则把该子任务标记为待补输入。'
-      : '参考图：无。';
-  }
-  return `参考图：${images.map((image, index) => {
-    const name = image.fileName?.trim() || `image-${index + 1}`;
-    return `${name} (${image.filePath})`;
-  }).join('；')}`;
-}
 
 function dimensionArea(value: string): number {
   const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
@@ -512,28 +466,6 @@ function inferHistoricalRunMode(artifactFiles: AttachedFileMeta[]): ChatSendMode
   return 'chat';
 }
 
-function looksLikeCompositeArtifactHistory(objective: string, artifactFiles: AttachedFileMeta[]): boolean {
-  if (artifactFiles.length <= 1) return false;
-  return artifactFiles.length >= 3
-    || /(?:每个|各(?:来|做|生成)|生图|修图|图片|视频|ppt|powerpoint|excel|表格|小程序|文案|以及|并且|同时|顺便|然后|另外|还有|和|与|\band\b|\bthen\b|\balso\b)/i.test(objective);
-}
-
-type HistoricalCompositeTaskSummary = {
-  title: string;
-  status: 'completed' | 'blocked';
-  detail?: string;
-};
-
-function isCompositeResultHistoryMessage(message: RawMessage): boolean {
-  if (message.role !== 'assistant') return false;
-  if (message.localArtifactResultKind === 'composite') return true;
-  if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
-  const text = getMessageText(message.content);
-  return (message._attachedFiles?.length ?? 0) > 0
-    && /随机示例包/.test(text)
-    && /(?:统一)?产物清单/.test(text);
-}
-
 function extractMessageArtifactFiles(message: RawMessage): AttachedFileMeta[] {
   const files: AttachedFileMeta[] = [...(message._attachedFiles ?? [])];
   const text = getMessageText(message.content);
@@ -551,165 +483,6 @@ function extractMessageArtifactFiles(message: RawMessage): AttachedFileMeta[] {
   return dedupeAttachedFiles(files);
 }
 
-function parseHistoricalCompositeTasks(message: RawMessage): HistoricalCompositeTaskSummary[] {
-  if (!isCompositeResultHistoryMessage(message)) return [];
-
-  const manifestTasks = message.compositeArtifactManifest?.tasks;
-  if (Array.isArray(manifestTasks) && manifestTasks.length > 0) {
-    return manifestTasks.map((task) => ({
-      title: task.title || task.kind || '产物任务',
-      status: task.status === 'completed' ? 'completed' : 'blocked',
-      ...(task.detail ? { detail: task.detail } : {}),
-    }));
-  }
-
-  const lines = getMessageText(message.content)
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const tasks: HistoricalCompositeTaskSummary[] = [];
-  let section: 'completed' | 'blocked' | null = null;
-
-  for (const line of lines) {
-    if (/^已完成\s+\d+(?:\/\d+)?\s+项/u.test(line)) {
-      section = 'completed';
-      continue;
-    }
-    if (/^(?:需要补充处理|未完成)[:：]?$/u.test(line)) {
-      section = 'blocked';
-      continue;
-    }
-    if (!line.startsWith('-')) {
-      if (/^(?:下面是|我也做了基础验证)/u.test(line)) {
-        section = null;
-      }
-      continue;
-    }
-    if (!section) continue;
-
-    const body = line.replace(/^-\s*/u, '').trim();
-    if (!body) continue;
-    if (section === 'completed') {
-      tasks.push({ title: body, status: 'completed' });
-      continue;
-    }
-
-    const [title, detail] = body.split(/[:：]/u, 2);
-    tasks.push({
-      title: title.trim(),
-      status: 'blocked',
-      detail: detail?.trim() || '需要补充处理。',
-    });
-  }
-
-  return tasks;
-}
-
-function historicalCompositeTaskTitle(file: AttachedFileMeta, index: number): string {
-  const mimeType = file.mimeType || '';
-  const fileName = file.fileName || file.filePath?.split(/[\\/]/).pop() || '';
-  const lowerName = fileName.toLowerCase();
-  if (mimeType.startsWith('image/')) return '图片产物';
-  if (mimeType.startsWith('video/')) return '视频产物';
-  if (mimeType.includes('presentation') || /\.pptx?$/i.test(lowerName)) return 'PPT 产物';
-  if (mimeType.includes('spreadsheet') || /\.xlsx?$/i.test(lowerName)) return 'Excel 产物';
-  if (mimeType.includes('html') || /\.html?$/i.test(lowerName)) return '小程序/网页产物';
-  if (mimeType.includes('markdown') || mimeType.startsWith('text/') || /\.md$/i.test(lowerName)) return '文案产物';
-  return `产物 ${index + 1}`;
-}
-
-function buildHistoricalCompositePlanEvent(params: {
-  runId: string;
-  sessionKey: string;
-  objective: string;
-  artifactFiles: AttachedFileMeta[];
-  taskSummaries?: HistoricalCompositeTaskSummary[];
-  ts: number;
-}): ChatRuntimeEvent {
-  const inferredCompletedTasks = params.artifactFiles.map((file, index): HistoricalCompositeTaskSummary => ({
-      title: historicalCompositeTaskTitle(file, index),
-      status: 'completed',
-    }));
-  const providedTasks = params.taskSummaries ?? [];
-  const taskSummaries = providedTasks.some((task) => task.status === 'completed')
-    ? providedTasks
-    : [...inferredCompletedTasks, ...providedTasks];
-  const steps: ChatRuntimePlanStep[] = [
-    {
-      id: 'uclaw.composite',
-      title: '执行组合任务',
-      status: 'completed',
-      detail: `${taskSummaries.length} 个历史子任务已从统一产物清单恢复。`,
-      kind: 'composite',
-      order: 1,
-    },
-    ...taskSummaries.map((task, index): ChatRuntimePlanStep => ({
-      id: `uclaw.composite.history.${sanitizeCompositeTaskId(task.title, index)}`,
-      title: task.title,
-      status: task.status,
-      detail: task.detail || '已从历史统一交付结果恢复。',
-      kind: 'composite-task',
-      order: 2 + index,
-      parentId: 'uclaw.composite',
-      requiresArtifact: false,
-    })),
-  ];
-  return {
-    contractVersion: 1,
-    producer: 'history',
-    runId: params.runId,
-    sessionKey: params.sessionKey,
-    ts: params.ts,
-    type: 'run.plan.updated',
-    objective: params.objective,
-    summary: '从历史产物恢复组合任务摘要。',
-    steps,
-  };
-}
-
-function collapseSupersededCompositeHistoryReplies(messages: RawMessage[]): RawMessage[] {
-  const result: RawMessage[] = [];
-  let segmentStart = 0;
-
-  const pushCollapsedSegment = (segment: RawMessage[]) => {
-    if (segment.length === 0) return;
-    const compositeIndex = (() => {
-      for (let index = segment.length - 1; index >= 0; index -= 1) {
-        if (isCompositeResultHistoryMessage(segment[index]!)) return index;
-      }
-      return -1;
-    })();
-    if (compositeIndex < 0) {
-      result.push(...segment);
-      return;
-    }
-
-    const canonicalArtifacts = extractMessageArtifactFiles(segment[compositeIndex]!);
-    const canonicalKeys = new Set(canonicalArtifacts.map(attachedFileKey));
-    if (canonicalKeys.size === 0) {
-      result.push(...segment);
-      return;
-    }
-
-    result.push(...segment.filter((message, index) => {
-      if (index >= compositeIndex) return true;
-      if (message.role !== 'assistant') return true;
-      const artifacts = extractMessageArtifactFiles(message);
-      if (artifacts.length === 0) return true;
-      return !artifacts.every((artifact) => canonicalKeys.has(attachedFileKey(artifact)));
-    }));
-  };
-
-  for (let index = 0; index < messages.length; index += 1) {
-    if (index > segmentStart && isRealUserBoundaryMessage(messages[index]!)) {
-      pushCollapsedSegment(messages.slice(segmentStart, index));
-      segmentStart = index;
-    }
-  }
-  pushCollapsedSegment(messages.slice(segmentStart));
-  return result;
-}
-
 function shouldDropMessageFromRuntimeReplay(message: RawMessage): boolean {
   if (isToolResultRole(message.role)) return false;
   if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
@@ -717,13 +490,11 @@ function shouldDropMessageFromRuntimeReplay(message: RawMessage): boolean {
 }
 
 function buildRuntimeReplayMessages(messages: RawMessage[]): RawMessage[] {
-  return collapseSupersededCompositeHistoryReplies(
-    dedupeAssistantRepliesForDisplay(
-      enrichWithCachedImages(
-        messages.filter((message, index) => (
-          !shouldDropMessageFromRuntimeReplay(message) || shouldRetainAssistantHistorySummary(messages, index)
-        )),
-      ),
+  return dedupeAssistantRepliesForDisplay(
+    enrichWithCachedImages(
+      messages.filter((message, index) => (
+        !shouldDropMessageFromRuntimeReplay(message) || shouldRetainAssistantHistorySummary(messages, index)
+      )),
     ),
   );
 }
@@ -971,7 +742,7 @@ function buildHistoricalToolRuntimeEventsFromSegment(params: {
   })();
   if (lastToolActivityIndex < 0) return [];
 
-  const events = buildRuntimeStartContractEvents(undefined, {
+  const events = buildRuntimeStartEvents(undefined, {
     runId: params.runId,
     sessionKey: params.sessionKey,
     objective: params.objective,
@@ -1074,40 +845,14 @@ function applyHistoricalRuntimeRunsFromMessages(
     const segmentEnd = nextUserIndex === -1 ? messages.length : nextUserIndex;
     const segment = messages.slice(index + 1, segmentEnd);
     if (segmentLooksLikeBackgroundHeartbeatRun(sessionKey, segment)) continue;
-    const compositeResultMessage = [...segment].reverse().find((message) => isCompositeResultHistoryMessage(message)) ?? null;
-    const mediaResultMessage = [...segment].reverse().find((message) => (
-      (message.localArtifactResultKind === 'image' || message.localArtifactResultKind === 'video')
-      && message.mediaGenerationSnapshot
-    ));
-    const mediaGenerationSnapshot = mediaResultMessage?.mediaGenerationSnapshot
-      && typeof mediaResultMessage.mediaGenerationSnapshot === 'object'
-      ? mediaResultMessage.mediaGenerationSnapshot as MediaGenerationJobSnapshot
-      : undefined;
-    const mediaRunStartedAt = optionalToMs(mediaGenerationSnapshot?.startedAt) ?? null;
-    const mediaRunCompletedAt = optionalToMs(mediaGenerationSnapshot?.completedAt) ?? null;
-    const artifactFiles = compositeResultMessage
-      ? extractMessageArtifactFiles(compositeResultMessage)
-      : segment
-        .filter((message) => message.role === 'assistant')
-        .flatMap((message) => extractMessageArtifactFiles(message));
+    const artifactFiles = segment
+      .filter((message) => message.role === 'assistant')
+      .flatMap((message) => extractMessageArtifactFiles(message));
     const uniqueArtifactFiles = dedupeAttachedFiles(artifactFiles);
     const objective = getMessageText(trigger.content).trim();
     const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
     const runId = buildHistoricalRunId(sessionKey, trigger, index);
     const historicalAsyncEvidence = segment.flatMap((message) => extractAsyncTaskEvidence(message));
-    const finalizedRuntimeEvents = compositeResultMessage?.compositeArtifactManifest?.runtimeEvents;
-    if (Array.isArray(finalizedRuntimeEvents) && finalizedRuntimeEvents.length > 0) {
-      const replayEvents = finalizedRuntimeEvents.map((event): ChatRuntimeEvent => ({
-        ...event,
-        runId,
-        sessionKey,
-        producer: 'history',
-      }));
-      nextRuns = applyRuntimeContractEvents(nextRuns, replayEvents);
-      nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
-      continue;
-    }
-
     if (uniqueArtifactFiles.length === 0) {
       const historicalToolEvents = buildHistoricalToolRuntimeEventsFromSegment({
         runId,
@@ -1119,33 +864,10 @@ function applyHistoricalRuntimeRunsFromMessages(
       if (historicalToolEvents.length === 0) continue;
       nextRuns = applyRuntimeContractEvents(nextRuns, historicalToolEvents);
       nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
-      const toolRun = nextRuns[runId];
-      const toolRunEnded = toolRun?.events.some((event) => event.type === 'run.ended') === true;
-      if (toolRunEnded && !runtimeRunHasPendingAsyncTasks(toolRun)) {
-        const completedStatus: Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'] = toolRun?.status === 'error'
-          ? 'error'
-          : toolRun?.status === 'aborted'
-            ? 'aborted'
-            : 'completed';
-        nextRuns = applyRuntimeContractEvents(
-          nextRuns,
-          buildRuntimeCompletionGateEvents(toolRun, {
-            runId,
-            sessionKey,
-            ts: toolRun.endedAt ?? toolRun.lastEventAt ?? ts,
-            status: completedStatus,
-          }),
-        );
-      }
       continue;
     }
 
-    const historicalCompositeTasks = compositeResultMessage
-      ? parseHistoricalCompositeTasks(compositeResultMessage)
-      : [];
-    const restoreCompositePlan = historicalCompositeTasks.length > 0
-      || looksLikeCompositeArtifactHistory(objective, uniqueArtifactFiles);
-    const mode = restoreCompositePlan ? 'chat' : inferHistoricalRunMode(uniqueArtifactFiles);
+    const mode = inferHistoricalRunMode(uniqueArtifactFiles);
     const historicalToolEvents = buildHistoricalToolRuntimeEventsFromSegment({
       runId,
       sessionKey,
@@ -1153,15 +875,12 @@ function applyHistoricalRuntimeRunsFromMessages(
       segment,
       ts,
     }).filter((event) => event.type !== 'run.started' && event.type !== 'run.ended');
-    const historicalMediaProgressEvents = mediaGenerationSnapshot
-      ? buildMediaRuntimeProgressEvents({ runId, sessionKey, job: mediaGenerationSnapshot })
-      : [];
-    const startEvents = buildRuntimeStartContractEvents(undefined, {
+    const startEvents = buildRuntimeStartEvents(undefined, {
       runId,
       sessionKey,
       objective,
       mode,
-      ts: mediaRunStartedAt ?? ts,
+      ts,
       producer: 'history',
     });
     const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
@@ -1171,61 +890,21 @@ function applyHistoricalRuntimeRunsFromMessages(
       producer: 'history',
       verificationDetail: '从历史消息产物卡片恢复的产物。',
     }, uniqueArtifactFiles);
-    const restoredArtifacts = artifactEvents
-      .filter((event): event is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
-        event.type === 'artifact.produced')
-      .map((event) => event.artifact);
-    const historicalAvailabilityEvents = restoredArtifacts.map((artifact) => buildRuntimeArtifactVerificationEvent({
-      runId,
-      sessionKey,
-      ts,
-      producer: 'history',
-    }, {
-      artifact,
-      status: 'passed',
-      kind: 'artifact.availability',
-      required: true,
-      severity: 'info',
-      detail: '已从历史消息恢复产物引用，按历史交付记录视为可交付。',
-      evidence: artifact.filePath ?? artifact.url,
-    }));
     nextRuns = applyRuntimeContractEvents(nextRuns, [
       ...startEvents,
-      ...(restoreCompositePlan
-        ? [buildHistoricalCompositePlanEvent({
-          runId,
-          sessionKey,
-          objective,
-          artifactFiles: uniqueArtifactFiles,
-          taskSummaries: historicalCompositeTasks,
-          ts,
-        })]
-        : []),
       ...historicalToolEvents,
-      ...historicalMediaProgressEvents,
       ...artifactEvents,
-      ...historicalAvailabilityEvents,
       {
         contractVersion: 1,
         producer: 'history',
         runId,
         sessionKey,
-        ts: mediaRunCompletedAt ?? ts,
+        ts,
         type: 'run.ended',
-        ...(mediaRunCompletedAt != null ? { endedAt: mediaRunCompletedAt } : {}),
         status: 'completed',
       },
     ]);
     nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
-    nextRuns = applyRuntimeContractEvents(
-      nextRuns,
-      buildRuntimeCompletionGateEvents(nextRuns[runId], {
-        runId,
-        sessionKey,
-        ts: mediaRunCompletedAt ?? ts,
-        status: 'completed',
-      }),
-    );
   }
   return nextRuns;
 }
@@ -1402,6 +1081,11 @@ const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
 const _sessionRunStateCache = new Map<string, SessionRunState>();
 let _sendGenerationCounter = 0;
 const _activeSendGenerationBySession = new Map<string, number>();
+
+function activeSendGenerationMatches(sessionKey: string, sendGeneration: number): boolean {
+  return _activeSendGenerationBySession.get(sessionKey) === sendGeneration;
+}
+
 const LOCALLY_ABORTED_RUN_TTL_MS = 30 * 60 * 1000;
 const _locallyAbortedRunIds = new Map<string, number>();
 
@@ -1427,7 +1111,6 @@ function wasLocallyAbortedRun(runId: string | null | undefined): boolean {
 type PendingRuntimeIntent = {
   objective?: string;
   mode: ChatSendMode;
-  compositeTasks?: MediaIntentCompositeTask[];
   createdAt: number;
 };
 const _pendingRuntimeIntentBySession = new Map<string, PendingRuntimeIntent>();
@@ -1445,7 +1128,6 @@ type QueuedChatSend = {
   mode: ChatSendMode;
   imageOptions?: ChatImageSendOptions;
   videoOptions?: ChatVideoSendOptions;
-  compositeClientRequestId?: string;
   enqueuedAt: number;
 };
 const MAX_QUEUED_SENDS_PER_SESSION = 20;
@@ -1456,898 +1138,13 @@ const _sessionsAwaitingBackendIdle = new Set<string>();
 const _sessionBackendIdleSettlementGeneration = new Map<string, number>();
 const _runtimeBackendIdleProbeGeneration = new Map<string, number>();
 const _lastAttemptedChatSendBySession = new Map<string, QueuedChatSend>();
-const _pendingCompositeClientRequestIdBySession = new Map<string, string>();
 
-type MediaGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-type MediaGenerationProgressEvent = {
-  id: string;
-  source: 'job' | 'worker' | 'runtime' | 'plugin';
-  event: string;
-  label: string;
-  status: 'pending' | 'running' | 'completed' | 'error';
-  timestampMs: number;
-  detail?: string;
-  durationMs?: number;
-  metadata?: Record<string, unknown>;
-};
-type MediaGenerationJobSnapshot = {
-  id: string;
-  kind?: 'image' | 'video';
-  sessionKey?: string;
-  runId?: string;
-  ownerKind?: 'standalone' | 'composite';
-  status: MediaGenerationJobStatus;
-  createdAt?: number;
-  startedAt?: number;
-  completedAt?: number;
-  queuePosition?: number;
-  activeJobs?: number;
-  maxActiveJobs?: number;
-  queueWaitMs?: number;
-  runDurationMs?: number;
-  progressEvents?: MediaGenerationProgressEvent[];
-  error?: string;
-  deliveryStatus?: 'pending' | 'succeeded' | 'failed' | 'skipped';
-  deliveryError?: string;
-  recoverable?: boolean;
-  outputs?: Array<Record<string, unknown>>;
-  result?: unknown;
-};
-const MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS = 500;
-const MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS = 1500;
-const MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS = 180_000;
-const _mediaRuntimeProgressSignatureByRun = new Map<string, Map<string, string>>();
-const _observedMediaGenerationJobIds = new Set<string>();
-
-class LocalRunCancelledError extends Error {
-  constructor() {
-    super('Local run cancelled');
-    this.name = 'LocalRunCancelledError';
-  }
-}
-
-function isLocalRunCancelledError(error: unknown): error is LocalRunCancelledError {
-  return error instanceof LocalRunCancelledError;
-}
-
-function activeSendGenerationMatches(sessionKey: string, sendGeneration: number): boolean {
-  return _activeSendGenerationBySession.get(sessionKey) === sendGeneration;
-}
-
-async function cancelMediaGenerationJobs(params: { jobId?: string; sessionKey?: string; runId?: string }): Promise<void> {
-  await hostApiFetch<{ success: boolean; error?: string; cancelledJobIds?: string[] }>(
-    '/api/media/generation-jobs/cancel',
-    {
-      method: 'POST',
-      body: JSON.stringify(params),
-    },
-  );
-}
-
-function mediaProgressSignature(progress: MediaGenerationProgressEvent): string {
-  return JSON.stringify({
-    id: progress.id,
-    event: progress.event,
-    status: progress.status,
-    detail: progress.detail,
-    durationMs: progress.durationMs,
-    timestampMs: progress.timestampMs,
-  });
-}
-
-function changedMediaProgressEvents(runId: string, job: MediaGenerationJobSnapshot | undefined): MediaGenerationProgressEvent[] {
-  if (!job?.progressEvents?.length) return [];
-  const signatures = _mediaRuntimeProgressSignatureByRun.get(runId) ?? new Map<string, string>();
-  const changed: MediaGenerationProgressEvent[] = [];
-  for (const progress of job.progressEvents) {
-    const key = `${job.id}:${progress.id}`;
-    const signature = mediaProgressSignature(progress);
-    if (signatures.get(key) === signature) continue;
-    signatures.set(key, signature);
-    changed.push(progress);
-  }
-  _mediaRuntimeProgressSignatureByRun.set(runId, signatures);
-  return changed;
-}
-
-function shouldDisplayMediaProgress(progress: MediaGenerationProgressEvent): boolean {
-  if (progress.status === 'error') return true;
-  if (progress.source === 'worker') return true;
-  if (progress.source !== 'job') return false;
-  if (progress.event !== 'queue_completed') return false;
-  const metadata = progress.metadata ?? {};
-  const queueWaitMs = typeof metadata.queueWaitMs === 'number' && Number.isFinite(metadata.queueWaitMs)
-    ? metadata.queueWaitMs
-    : progress.durationMs;
-  const activeJobs = typeof metadata.activeJobs === 'number' && Number.isFinite(metadata.activeJobs)
-    ? metadata.activeJobs
-    : undefined;
-  const maxActiveJobs = typeof metadata.maxActiveJobs === 'number' && Number.isFinite(metadata.maxActiveJobs)
-    ? metadata.maxActiveJobs
-    : undefined;
-  return (queueWaitMs ?? 0) >= 1000 || (activeJobs != null && maxActiveJobs != null && activeJobs >= maxActiveJobs);
-}
-
-async function waitForMediaGenerationJob(
-  jobId: string,
-  options?: {
-    onProgress?: (job: MediaGenerationJobSnapshot) => void;
-    isCancelled?: () => boolean;
-  },
-): Promise<MediaGenerationJobSnapshot> {
-  const startedAt = Date.now();
-  _observedMediaGenerationJobIds.add(jobId);
-  try {
-    for (;;) {
-    if (options?.isCancelled?.()) {
-      void cancelMediaGenerationJobs({ jobId }).catch((error) => {
-        console.warn('[media-generation] failed to cancel stale job:', error);
-      });
-      throw new LocalRunCancelledError();
-    }
-    const response = await hostApiFetch<{ success: boolean; error?: string; job?: MediaGenerationJobSnapshot }>(
-      `/api/media/generation-jobs/${encodeURIComponent(jobId)}`,
-    );
-    if (options?.isCancelled?.()) {
-      void cancelMediaGenerationJobs({ jobId }).catch((error) => {
-        console.warn('[media-generation] failed to cancel stale job:', error);
-      });
-      throw new LocalRunCancelledError();
-    }
-    if (response.success === false) {
-      throw new Error(response.error || 'Failed to check media generation job');
-    }
-    if (!response.job) {
-      throw new Error('Media generation job response missing job');
-    }
-    options?.onProgress?.(response.job);
-    if (response.job.status === 'succeeded' && response.job.deliveryStatus !== 'pending') {
-      return response.job;
-    }
-    if (response.job.status === 'failed') {
-      throw new Error(response.job.error || 'Media generation failed');
-    }
-    if (response.job.status === 'cancelled') {
-      throw new LocalRunCancelledError();
-    }
-    const pollInterval = Date.now() - startedAt < MEDIA_GENERATION_JOB_FAST_POLL_WINDOW_MS
-      ? MEDIA_GENERATION_JOB_FAST_POLL_INTERVAL_MS
-      : MEDIA_GENERATION_JOB_SLOW_POLL_INTERVAL_MS;
-      await sleep(pollInterval);
-    }
-  } finally {
-    _observedMediaGenerationJobIds.delete(jobId);
-  }
-}
-
-async function resumeStandaloneMediaJobsForSession(
-  set: ChatSet,
-  get: ChatGet,
-  sessionKey: string,
-): Promise<void> {
-  if (_sessionsCancelling.has(sessionKey)) return;
-  let response: { success: boolean; jobs?: MediaGenerationJobSnapshot[] };
-  try {
-    response = await hostApiFetch<{ success: boolean; jobs?: MediaGenerationJobSnapshot[] }>(
-      `/api/media/generation-jobs?sessionKey=${encodeURIComponent(sessionKey)}&activeOnly=true`,
-    );
-  } catch (error) {
-    console.warn('[media-generation] failed to discover resumable jobs:', error);
-    return;
-  }
-  const jobs = (response.jobs ?? []).filter((job) => (
-    job.ownerKind === 'standalone'
-    && Boolean(job.runId)
-    && !_observedMediaGenerationJobIds.has(job.id)
-  ));
-  for (const job of jobs) {
-    if (_observedMediaGenerationJobIds.has(job.id)) continue;
-    const runId = job.runId!;
-    const kind = job.kind === 'video' ? 'video' : 'image';
-    set((state) => ({
-      runtimeRuns: applyRuntimeContractEvents(
-        state.runtimeRuns,
-        buildRuntimeStartEventsForRun(state.runtimeRuns, {
-          runId,
-          sessionKey,
-          mode: kind,
-          ts: job.createdAt ?? Date.now(),
-        }),
-      ),
-    }));
-    commitSessionRunState(set, get, sessionKey, {
-      sending: true,
-      activeRunId: runId,
-      pendingFinal: true,
-      pendingImageGenerationLocal: kind === 'image',
-      pendingVideoGenerationLocal: kind === 'video',
-    });
-    applyMediaRuntimeProgress({ runId, sessionKey, job });
-
-    void waitForMediaGenerationJob(job.id, {
-      onProgress: (snapshot) => applyMediaRuntimeProgress({ runId, sessionKey, job: snapshot }),
-      isCancelled: () => wasLocallyAbortedRun(runId) || _sessionsCancelling.has(sessionKey),
-    }).then((completedJob) => {
-      if (wasLocallyAbortedRun(runId)) return;
-      const { decision, artifacts } = applyMediaRuntimeSuccess({
-        runId,
-        sessionKey,
-        job: completedJob,
-        kind,
-      });
-      if (artifacts.length > 0) scheduleRuntimeArtifactVerification(runId, sessionKey, artifacts);
-      if (completedJob.deliveryStatus === 'failed') {
-        appendMediaGenerationResultMessage({ set, get, sessionKey, job: completedJob, kind });
-      }
-      const shouldIdle = gateDecisionAllowsTerminalIdle(decision);
-      commitSessionRunState(set, get, sessionKey, {
-        sending: !shouldIdle,
-        pendingImageGenerationLocal: false,
-        pendingVideoGenerationLocal: false,
-        activeRunId: shouldIdle ? null : runId,
-        pendingFinal: !shouldIdle,
-        lastUserMessageAt: shouldIdle ? null : get().lastUserMessageAt,
-      });
-      if (shouldIdle) markSessionRunIdle(sessionKey);
-      if (get().currentSessionKey === sessionKey) {
-        forceNextHistoryLoad(sessionKey);
-        void get().loadHistory(true);
-      } else {
-        markSessionNeedsTerminalHistoryRefresh(sessionKey);
-      }
-    }).catch((error) => {
-      if (isLocalRunCancelledError(error) || wasLocallyAbortedRun(runId)) return;
-      applyMediaRuntimeFailure({ runId, sessionKey, error: error instanceof Error ? error.message : String(error) });
-      commitSessionRunState(set, get, sessionKey, {
-        sending: false,
-        pendingImageGenerationLocal: false,
-        pendingVideoGenerationLocal: false,
-        activeRunId: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-      });
-      markSessionRunIdle(sessionKey);
-    });
-  }
-}
-
-const COMPOSITE_RUN_POLL_INTERVAL_MS = 500;
-const _observedCompositeRunIds = new Set<string>();
-const _compositeRunObservers = new Map<string, Promise<CompositeRunRecord>>();
-const _compositeRecoveryScans = new Map<string, Promise<void>>();
-
-function compositeRunAttachedFiles(run: CompositeRunRecord): AttachedFileMeta[] {
-  return dedupeAttachedFiles(run.artifacts.map((artifact) => ({
-    fileName: artifact.title || artifact.filePath?.split(/[\\/]/u).pop() || 'artifact',
-    mimeType: artifact.mimeType || 'application/octet-stream',
-    fileSize: typeof artifact.sizeBytes === 'number' ? artifact.sizeBytes : 0,
-    preview: null,
-    filePath: artifact.filePath,
-    gatewayUrl: artifact.url,
-    source: 'tool-result' as const,
-  })).filter((file) => Boolean(file.filePath || file.gatewayUrl)));
-}
-
-function compositeRunDeliveryMessage(run: CompositeRunRecord): string {
-  const persistedText = run.delivery.text?.trim();
-  if (persistedText) return persistedText;
-  const completed = run.tasks.filter((task) => task.status === 'completed');
-  const incomplete = run.tasks.filter((task) => task.status !== 'completed');
-  const lines = [i18n.t('chat:runtimeDelivery.compositeSummary', {
-    completedCount: completed.length,
-    totalCount: run.tasks.length,
-  })];
-  if (incomplete.length > 0) {
-    lines.push('', i18n.t('chat:runtimeDelivery.incompleteHeading'));
-    lines.push(...incomplete.map((task) => (
-      `- ${task.title}：${task.error || i18n.t('chat:runtimeDelivery.missingInputOrFailed')}`
-    )));
-  }
-  if (completed.length > 0) {
-    lines.push('', i18n.t('chat:runtimeDelivery.verificationComplete'));
-  }
-  return lines.join('\n');
-}
-
-function applyCompositeRunSnapshot(set: ChatSet, get: ChatGet, run: CompositeRunRecord): void {
-  set((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, run.runtimeEvents ?? []),
-  }));
-
-  if (run.delivery.status !== 'succeeded' || !run.manifest) return;
-  const messageId = run.delivery.assistantMessageId || `composite-result:${run.runId}`;
-  const finalMessage: RawMessage = {
-    role: 'assistant',
-    content: compositeRunDeliveryMessage(run),
-    timestamp: (run.delivery.persistedAt ?? run.updatedAt) / 1000,
-    id: messageId,
-    localArtifactResultKind: 'composite',
-    compositeArtifactManifest: run.manifest,
-    _attachedFiles: compositeRunAttachedFiles(run),
-  };
-  appendLocalMessageForSession(set, get, run.sessionKey, finalMessage);
-}
-
-function compositeRunTerminalForRenderer(run: CompositeRunRecord): boolean {
-  if (run.delivery.status === 'succeeded' || run.delivery.status === 'failed') return true;
-  return run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
-}
-
-async function waitForCompositeRun(params: {
-  set: ChatSet;
-  get: ChatGet;
-  runId: string;
-  sessionKey: string;
-  isCancelled?: () => boolean;
-}): Promise<CompositeRunRecord> {
-  const existingObserver = _compositeRunObservers.get(params.runId);
-  if (existingObserver) return await existingObserver;
-
-  const observer = (async (): Promise<CompositeRunRecord> => {
-    _observedCompositeRunIds.add(params.runId);
-    try {
-      for (;;) {
-        if (
-          params.isCancelled?.()
-          || wasLocallyAbortedRun(params.runId)
-          || _sessionsCancelling.has(params.sessionKey)
-        ) {
-          throw new LocalRunCancelledError();
-        }
-        const response = await hostApiFetch<CompositeRunApiResponse>(
-          `/api/composite-runs/${encodeURIComponent(params.runId)}`,
-        );
-        if (!response.success || !response.run) {
-          throw new Error(response.error || 'Composite run not found');
-        }
-        applyCompositeRunSnapshot(params.set, params.get, response.run);
-        if (compositeRunTerminalForRenderer(response.run)) return response.run;
-        await sleep(COMPOSITE_RUN_POLL_INTERVAL_MS);
-      }
-    } finally {
-      _observedCompositeRunIds.delete(params.runId);
-    }
-  })();
-  _compositeRunObservers.set(params.runId, observer);
-  try {
-    return await observer;
-  } finally {
-    if (_compositeRunObservers.get(params.runId) === observer) {
-      _compositeRunObservers.delete(params.runId);
-    }
-  }
-}
-
-function settleCompositeRunLifecycle(
-  set: ChatSet,
-  get: ChatGet,
-  run: CompositeRunRecord,
-): void {
-  const deliveryFailed = run.delivery.status === 'failed';
-  const taskFailure = run.tasks.find((task) => task.status === 'failed' || task.status === 'blocked');
-  const runError = deliveryFailed
-    ? (run.delivery.error || i18n.t('chat:runtimeDelivery.historySyncFailedDetail'))
-    : (run.delivery.status === 'succeeded' ? null : taskFailure?.error || null);
-  const settledActiveRun = commitSessionRunStateIfActiveRun(set, get, run.sessionKey, run.runId, {
-    sending: false,
-    pendingImageGenerationLocal: false,
-    pendingVideoGenerationLocal: false,
-    activeRunId: null,
-    streamingText: '',
-    streamingMessage: null,
-    streamingTools: [],
-    pendingFinal: false,
-    lastUserMessageAt: null,
-    pendingToolImages: [],
-  });
-  if (!settledActiveRun) return;
-  if (get().currentSessionKey === run.sessionKey) {
-    set({ runError });
-  }
-  markSessionRunIdle(run.sessionKey);
-  clearPendingRuntimeIntent(run.sessionKey);
-  if (run.delivery.status === 'succeeded') {
-    if (get().currentSessionKey === run.sessionKey) {
-      forceNextHistoryLoad(run.sessionKey);
-      void get().loadHistory(true);
-    } else {
-      markSessionNeedsTerminalHistoryRefresh(run.sessionKey);
-    }
-  }
-}
-
-async function resumeCompositeRunsForSession(
-  set: ChatSet,
-  get: ChatGet,
-  sessionKey: string,
-): Promise<void> {
-  const existingScan = _compositeRecoveryScans.get(sessionKey);
-  if (existingScan) return await existingScan;
-
-  const scan = (async (): Promise<void> => {
-    if (_sessionsCancelling.has(sessionKey)) return;
-    let response: CompositeRunApiResponse;
-    try {
-      response = await hostApiFetch<CompositeRunApiResponse>(
-        `/api/composite-runs?sessionKey=${encodeURIComponent(sessionKey)}&activeOnly=true`,
-      );
-    } catch (error) {
-      console.warn('[composite-run] failed to discover active runs:', error);
-      return;
-    }
-    const runs = (response.runs ?? []).filter((run) => !_observedCompositeRunIds.has(run.runId));
-    for (const run of runs) {
-      applyCompositeRunSnapshot(set, get, run);
-      const sessionState = get().currentSessionKey === sessionKey
-        ? get()
-        : _sessionRunStateCache.get(sessionKey);
-      if (sessionState?.activeRunId == null || sessionState.activeRunId === run.runId) {
-        commitSessionRunState(set, get, sessionKey, {
-          sending: true,
-          activeRunId: run.runId,
-          pendingFinal: true,
-        });
-      }
-      void waitForCompositeRun({
-        set,
-        get,
-        runId: run.runId,
-        sessionKey,
-        isCancelled: () => wasLocallyAbortedRun(run.runId) || _sessionsCancelling.has(sessionKey),
-      }).then((completed) => {
-        if (!wasLocallyAbortedRun(run.runId)) settleCompositeRunLifecycle(set, get, completed);
-      }).catch((error) => {
-        if (isLocalRunCancelledError(error) || wasLocallyAbortedRun(run.runId)) return;
-        const clearedActiveRun = commitSessionRunStateIfActiveRun(set, get, sessionKey, run.runId, {
-          sending: false,
-          activeRunId: null,
-          pendingFinal: false,
-        });
-        if (!clearedActiveRun) return;
-        if (get().currentSessionKey === sessionKey) {
-          set({ runError: error instanceof Error ? error.message : String(error) });
-        }
-        markSessionRunIdle(sessionKey);
-      });
-    }
-  })();
-  _compositeRecoveryScans.set(sessionKey, scan);
-  try {
-    await scan;
-  } finally {
-    if (_compositeRecoveryScans.get(sessionKey) === scan) {
-      _compositeRecoveryScans.delete(sessionKey);
-    }
-  }
-}
-
-function mediaOutputRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function mediaResultOutputs(result: unknown): Record<string, unknown>[] {
-  const record = mediaOutputRecord(result);
-  const outputs = Array.isArray(record?.outputs) ? record.outputs : [];
-  return outputs
-    .map(mediaOutputRecord)
-    .filter((output): output is Record<string, unknown> => output !== null);
-}
-
-function mediaJobOutputs(job: MediaGenerationJobSnapshot | undefined): Record<string, unknown>[] {
-  if (Array.isArray(job?.outputs) && job.outputs.length > 0) {
-    return job.outputs
-      .map(mediaOutputRecord)
-      .filter((output): output is Record<string, unknown> => output !== null);
-  }
-  return mediaResultOutputs(job?.result);
-}
-
-function readPositiveNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? value
-    : undefined;
-}
-
-function basenameFromPathOrUrl(value: string, fallback: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return fallback;
-  if (/^https?:\/\//i.test(trimmed)) {
-    try {
-      const parsed = new URL(trimmed);
-      return parsed.pathname.split('/').filter(Boolean).pop()?.split(/[?#]/)[0] || fallback;
-    } catch {
-      // Fall through to path parsing.
-    }
-  }
-  return trimmed.split(/[\\/]/).pop()?.split(/[?#]/)[0] || fallback;
-}
-
-function attachedFilesFromMediaGenerationJob(
-  job: MediaGenerationJobSnapshot | undefined,
-  fallbackKind: 'image' | 'video',
-): AttachedFileMeta[] {
-  if (!job) return [];
-  const files: AttachedFileMeta[] = [];
-  const outputs = mediaJobOutputs(job);
-  for (const [index, output] of outputs.entries()) {
-    const path = typeof output.path === 'string' && output.path.trim() ? output.path.trim() : undefined;
-    const url = typeof output.url === 'string' && output.url.trim() ? output.url.trim() : undefined;
-    if (!path && !url) continue;
-    const mimeType = typeof output.mimeType === 'string' && output.mimeType.trim()
-      ? output.mimeType.trim()
-      : (fallbackKind === 'image' ? 'image/png' : 'video/mp4');
-    const size = typeof output.size === 'number' && Number.isFinite(output.size) && output.size > 0
-      ? Math.floor(output.size)
-      : 0;
-    const title = typeof output.fileName === 'string' && output.fileName.trim()
-      ? output.fileName.trim()
-      : basenameFromPathOrUrl(path ?? url ?? '', `${fallbackKind}-${index + 1}`);
-    files.push({
-      fileName: title,
-      mimeType,
-      fileSize: size,
-      preview: null,
-      width: readPositiveNumber(output.width),
-      height: readPositiveNumber(output.height),
-      filePath: path,
-      gatewayUrl: url,
-      source: 'tool-result',
-    });
-  }
-  return dedupeAttachedFiles(files);
-}
-
-function appendMediaGenerationResultMessage(params: {
-  set: ChatSet;
-  get: ChatGet;
-  sessionKey: string;
-  job: MediaGenerationJobSnapshot | undefined;
-  kind: 'image' | 'video';
-}): void {
-  const attachedFiles = attachedFilesFromMediaGenerationJob(params.job, params.kind);
-  if (attachedFiles.length === 0) return;
-  const message: RawMessage = {
-    role: 'assistant',
-    content: params.kind === 'image' ? '图片已生成。' : '视频已生成。',
-    timestamp: Date.now() / 1000,
-    id: params.job?.id ? `media-result:${params.job.id}` : crypto.randomUUID(),
-    _attachedFiles: attachedFiles,
-  };
-  appendLocalMessageForSession(params.set, params.get, params.sessionKey, message);
-}
-
-function isOptimisticMediaResultMessage(message: RawMessage): boolean {
-  return message.role === 'assistant'
-    && typeof message.id === 'string'
-    && (message.id.startsWith('media-result:') || message.id.startsWith('composite-result:'))
-    && (message._attachedFiles?.length ?? 0) > 0;
-}
-
-function preserveOptimisticMediaResultMessages(
-  currentMessages: RawMessage[],
-  loadedMessages: RawMessage[],
-): RawMessage[] {
-  const pendingMediaResults = currentMessages.filter(isOptimisticMediaResultMessage);
-  if (pendingMediaResults.length === 0) return loadedMessages;
-
-  const loadedAttachmentKeys = new Set(
-    loadedMessages
-      .flatMap((message) => message._attachedFiles ?? [])
-      .map((file) => file.filePath || file.gatewayUrl || `${file.fileName}|${file.mimeType}|${file.fileSize}`)
-      .filter(Boolean),
-  );
-  const loadedIds = new Set(loadedMessages.map((message) => message.id).filter(Boolean));
-  const missingResults = pendingMediaResults.filter((message) => {
-    if (message.id && loadedIds.has(message.id)) return false;
-    const files = message._attachedFiles ?? [];
-    return files.some((file) => {
-      const key = file.filePath || file.gatewayUrl || `${file.fileName}|${file.mimeType}|${file.fileSize}`;
-      return key && !loadedAttachmentKeys.has(key);
-    });
-  });
-  if (missingResults.length === 0) return loadedMessages;
-  return [...loadedMessages, ...missingResults].sort((left, right) => {
-    const leftTs = typeof left.timestamp === 'number' ? toMs(left.timestamp) : 0;
-    const rightTs = typeof right.timestamp === 'number' ? toMs(right.timestamp) : 0;
-    return leftTs - rightTs;
-  });
-}
-
-function buildMediaMetadataVerificationEvents(params: {
-  runId: string;
-  sessionKey: string;
-  ts: number;
-  job: MediaGenerationJobSnapshot | undefined;
-  artifacts: ChatRuntimeArtifact[];
-  kind: 'image' | 'video';
-}): ChatRuntimeEvent[] {
-  if (!params.job || params.artifacts.length === 0) return [];
-  const outputs = mediaJobOutputs(params.job);
-  return params.artifacts.flatMap((artifact, index): ChatRuntimeEvent[] => {
-    const output = outputs[index];
-    if (!output) return [];
-    const width = readPositiveNumber(output.width);
-    const height = readPositiveNumber(output.height);
-    const rawDurationSeconds = typeof output.durationSeconds === 'number' && Number.isFinite(output.durationSeconds)
-      ? output.durationSeconds
-      : undefined;
-    const durationSeconds = readPositiveNumber(output.durationSeconds);
-    const metadata = mediaOutputRecord(output.metadata);
-    const hasInvalidVideoDuration = params.kind === 'video'
-      && rawDurationSeconds !== undefined
-      && rawDurationSeconds <= 0;
-    const hasExpectedMetadata = params.kind === 'image'
-      ? Boolean(width || height || metadata)
-      : Boolean(width || height || durationSeconds || metadata);
-    const remoteOnlyArtifact = !artifact.filePath && Boolean(artifact.url);
-    const details = [
-      width && height ? `${Math.round(width)}x${Math.round(height)}` : undefined,
-      durationSeconds ? `${durationSeconds}s` : undefined,
-      metadata ? 'metadata present' : undefined,
-    ].filter(Boolean).join('; ');
-    const status = hasInvalidVideoDuration
-      ? 'blocked'
-      : (hasExpectedMetadata ? 'passed' : 'skipped');
-    return [{
-      contractVersion: 1,
-      producer: 'media',
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts: params.ts,
-      type: 'verification.completed',
-      toolCallId: params.job?.id,
-      verification: {
-        id: `verification:${artifact.id}:media.metadata`,
-        status,
-        kind: 'media.metadata',
-        required: hasInvalidVideoDuration || remoteOnlyArtifact,
-        severity: hasInvalidVideoDuration ? 'blocking' : (hasExpectedMetadata ? 'info' : 'warning'),
-        title: params.kind === 'image' ? '图片元数据' : '视频元数据',
-        detail: hasInvalidVideoDuration
-          ? '视频生成结果返回的时长为 0 秒，暂不满足可播放交付条件。'
-          : (details || '生成结果未返回可展示的媒体元数据。'),
-        artifactId: artifact.id,
-        targetId: artifact.id,
-        evidence: JSON.stringify({
-          width,
-          height,
-          durationSeconds,
-          metadata,
-        }),
-        source: 'media-generation-job',
-      },
-    }];
-  });
-}
-
-function buildMediaAvailabilityVerificationEvents(params: {
-  runId: string;
-  sessionKey: string;
-  ts: number;
-  artifacts: ChatRuntimeArtifact[];
-  kind: 'image' | 'video';
-}): ChatRuntimeEvent[] {
-  return params.artifacts.flatMap((artifact): ChatRuntimeEvent[] => {
-    const filePath = artifact.filePath?.trim();
-    if (!filePath) return [];
-    const hasVerifiedLocalFile = typeof artifact.sizeBytes === 'number' && artifact.sizeBytes > 0;
-    return [buildRuntimeArtifactVerificationEvent({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts: params.ts,
-      producer: 'media',
-    }, {
-      artifact,
-      status: hasVerifiedLocalFile ? 'passed' : 'blocked',
-      kind: 'artifact.availability',
-      required: true,
-      severity: hasVerifiedLocalFile ? 'info' : 'blocking',
-      detail: hasVerifiedLocalFile
-        ? (params.kind === 'image'
-            ? '图片生成 job 已保存可读取的本地产物。'
-            : '视频生成 job 已保存可读取的本地产物。')
-        : '媒体生成返回了本地路径，但文件大小验证未通过。',
-      evidence: `filePath=${filePath}; sizeBytes=${artifact.sizeBytes ?? 0}`,
-    })];
-  });
-}
-
-function gateDecisionAllowsTerminalIdle(decision: string | undefined): boolean {
-  return decision === 'deliverable'
-    || decision === 'blocked_needs_user'
-    || decision === 'failed'
-    || decision === 'aborted';
-}
-
-function applyMediaRuntimeFailure(params: {
-  runId: string;
-  sessionKey: string;
-  error: string;
-}): void {
-  const ts = Date.now();
-  useChatStore.setState((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(
-      state.runtimeRuns,
-      buildRuntimeCompletionGateEvents(state.runtimeRuns[params.runId], {
-        runId: params.runId,
-        sessionKey: params.sessionKey,
-        ts,
-        status: 'error',
-        error: params.error,
-      }),
-    ),
-  }));
-}
-
-function buildMediaRuntimeProgressEvents(params: {
-  runId: string;
-  sessionKey: string;
-  job: MediaGenerationJobSnapshot | undefined;
-}): ChatRuntimeEvent[] {
-  const changedEvents = changedMediaProgressEvents(params.runId, params.job)
-    .filter(shouldDisplayMediaProgress);
-  if (changedEvents.length === 0) return [];
-  const allProgressEvents = params.job?.progressEvents ?? [];
-  return changedEvents.map((progress, fallbackIndex) => {
-    const originalIndex = allProgressEvents.findIndex((item) => item.id === progress.id);
-    const order = 10 + (originalIndex >= 0 ? originalIndex : fallbackIndex);
-    return {
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      producer: 'media',
-      ts: progress.timestampMs || Date.now(),
-      type: 'run.step.updated',
-      step: {
-        id: `media.${params.job?.id ?? 'job'}.${progress.id}`,
-        title: progress.label,
-        status: progress.status,
-        detail: progress.detail,
-        durationMs: progress.durationMs,
-        kind: `media.${progress.source}.${progress.event}`,
-        order,
-        parentId: 'uclaw.execute',
-      },
-    } satisfies ChatRuntimeEvent;
-  });
-}
-
-function applyMediaRuntimeProgress(params: {
-  runId: string;
-  sessionKey: string;
-  job: MediaGenerationJobSnapshot | undefined;
-}): void {
-  const events = buildMediaRuntimeProgressEvents(params);
-  if (events.length === 0) return;
-  useChatStore.setState((state) => ({
-    runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
-  }));
-}
-
-function applyMediaRuntimeSuccess(params: {
-  runId: string;
-  sessionKey: string;
-  job: MediaGenerationJobSnapshot | undefined;
-  kind: 'image' | 'video';
-  stepId?: string;
-  sourceToolCallId?: string;
-  completeRun?: boolean;
-}): { decision?: string; artifacts: ChatRuntimeArtifact[] } {
-  const ts = Date.now();
-  const completedAt = optionalToMs(params.job?.completedAt) ?? ts;
-  const attachedFiles = attachedFilesFromMediaGenerationJob(params.job, params.kind);
-  let artifacts: ChatRuntimeArtifact[] = [];
-  let decision: string | undefined;
-  useChatStore.setState((state) => {
-    const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts,
-      producer: 'media',
-      toolCallId: params.sourceToolCallId ?? params.job?.id,
-      stepId: params.stepId,
-      verificationDetail: params.kind === 'image'
-        ? '图片生成 job 已返回产物输出。'
-        : '视频生成 job 已返回产物输出。',
-    }, attachedFiles);
-    artifacts = artifactEvents
-      .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
-        runtimeEvent.type === 'artifact.produced')
-      .map((runtimeEvent) => runtimeEvent.artifact);
-    const metadataEvents = buildMediaMetadataVerificationEvents({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts,
-      job: params.job,
-      artifacts,
-      kind: params.kind,
-    });
-    const availabilityEvents = buildMediaAvailabilityVerificationEvents({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts,
-      artifacts,
-      kind: params.kind,
-    });
-    let runtimeRuns = applyRuntimeContractEvents(
-      state.runtimeRuns,
-      [...artifactEvents, ...availabilityEvents, ...metadataEvents],
-    );
-    if (params.completeRun !== false) {
-      runtimeRuns = applyRuntimeContractEvents(
-        runtimeRuns,
-        [
-          ...buildRuntimeCompletionGateEvents(runtimeRuns[params.runId], {
-            runId: params.runId,
-            sessionKey: params.sessionKey,
-            ts: completedAt,
-            status: 'completed',
-          }),
-          {
-            runId: params.runId,
-            sessionKey: params.sessionKey,
-            producer: 'media',
-            ts: completedAt,
-            type: 'run.ended' as const,
-            endedAt: completedAt,
-            status: 'completed' as const,
-          },
-        ],
-      );
-    }
-    decision = runtimeRuns[params.runId]?.gateResult?.decision;
-    return { runtimeRuns };
-  });
-  return { decision, artifacts };
-}
-
-function getActiveCompletionGateDecision(state: Pick<ChatState, 'activeRunId' | 'runtimeRuns'>): string | undefined {
-  const runId = state.activeRunId;
-  return runId ? state.runtimeRuns[runId]?.gateResult?.decision : undefined;
-}
-
-function applyHistoryCompletionGateForActiveRun(sessionKey: string): string | undefined {
-  let decision: string | undefined;
-  useChatStore.setState((state) => {
-    const runId = state.activeRunId;
-    if (!runId) return {};
-    const runtimeRuns = applyRuntimeContractEvents(
-      state.runtimeRuns,
-      buildRuntimeCompletionGateEvents(state.runtimeRuns[runId], {
-        runId,
-        sessionKey,
-        ts: Date.now(),
-        status: 'completed',
-      }),
-    );
-    decision = runtimeRuns[runId]?.gateResult?.decision;
-    return { runtimeRuns };
-  });
-  return decision;
-}
-
-function shouldHoldActiveRunForCompletionGate(sessionKey: string): boolean {
+function shouldHoldActiveRunForPendingTasks(): boolean {
   const currentState = useChatStore.getState();
   const activeRun = currentState.activeRunId
     ? currentState.runtimeRuns[currentState.activeRunId]
     : undefined;
-  const decision = runtimeRunHasPendingAsyncTasks(activeRun)
-    ? 'continue_required'
-    : applyHistoryCompletionGateForActiveRun(sessionKey);
-  if (decision !== 'continue_required') return false;
-  useChatStore.setState((state) => ({
-    messages: suppressPrematureAssistantFinals(state.messages, state.lastUserMessageAt),
-    sending: true,
-    activeRunId: state.activeRunId,
-    pendingFinal: true,
-    pendingImageGenerationLocal: false,
-    pendingVideoGenerationLocal: false,
-    streamingText: '',
-    streamingMessage: null,
-    runError: null,
-  }));
-  return true;
+  return runtimeRunHasPendingAsyncTasks(activeRun);
 }
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const SESSION_LABEL_HYDRATION_BATCH_SIZE = 40;
@@ -2549,7 +1346,7 @@ async function refreshVisibleSessionSummaries(
 }
 
 function cleanSessionLabelText(text: string): string {
-  return stripCompositeExecutionContractEnvelope(text)
+  return text
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*\{[\s\S]*?\}\s*/i, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*[^\n]*(?:\n\s*)*/i, '')
@@ -2757,7 +1554,6 @@ function rememberPendingRuntimeIntent(sessionKey: string, intent: Omit<PendingRu
   _pendingRuntimeIntentBySession.set(sessionKey, {
     ...intent,
     objective: intent.objective?.trim() || undefined,
-    compositeTasks: intent.compositeTasks?.length ? intent.compositeTasks : undefined,
     createdAt: Date.now(),
   });
 }
@@ -2844,15 +1640,7 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
     const ts = Date.now();
     const runtimeRuns = applyRuntimeContractEvents(
       state.runtimeRuns,
-      [
-        ...buildRuntimeCompletionGateEvents(run, {
-          runId,
-          sessionKey: withheld.sessionKey,
-          ts,
-          status: terminalStatus,
-          ...(terminalError ? { error: terminalError } : {}),
-        }),
-        {
+      [{
           runId,
           sessionKey: withheld.sessionKey,
           ts,
@@ -2860,13 +1648,8 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
           status: terminalStatus,
           ...(terminalError ? { error: terminalError } : {}),
           stopReason: 'async_tasks_settled',
-        } satisfies ChatRuntimeEvent,
-      ],
+      } satisfies ChatRuntimeEvent],
     );
-    const decision = runtimeRuns[runId]?.gateResult?.decision;
-    if (!gateDecisionAllowsTerminalIdle(decision)) {
-      return { runtimeRuns };
-    }
 
     released = true;
     const isCurrentSession = state.currentSessionKey === withheld.sessionKey;
@@ -2921,7 +1704,6 @@ function buildRuntimeStartEventsForRun(
     sessionKey?: string;
     objective?: string;
     mode?: ChatSendMode;
-    compositeTasks?: MediaIntentCompositeTask[];
     ts?: number;
     includeStarted?: boolean;
   },
@@ -2929,8 +1711,7 @@ function buildRuntimeStartEventsForRun(
   if (!params.runId) return [];
   const intent = getPendingRuntimeIntent(params.sessionKey);
   const objective = params.objective ?? intent?.objective;
-  const compositeTasks = params.compositeTasks ?? intent?.compositeTasks;
-  const events = buildRuntimeStartContractEvents(runtimeRuns[params.runId], {
+  return buildRuntimeStartEvents(runtimeRuns[params.runId], {
     runId: params.runId,
     sessionKey: params.sessionKey,
     objective,
@@ -2938,64 +1719,6 @@ function buildRuntimeStartEventsForRun(
     ts: params.ts,
     includeStarted: params.includeStarted,
   });
-  if ((compositeTasks?.length ?? 0) > 0 && !runtimeRuns[params.runId]?.planSteps?.some((step) => step.kind === 'composite-task')) {
-    const baseTs = params.ts ?? Date.now();
-    events.push({
-      runId: params.runId,
-      sessionKey: params.sessionKey,
-      ts: baseTs,
-      type: 'run.plan.updated',
-      objective,
-      summary: 'UClaw 已接管组合任务，将按顺序执行所有子任务并逐项交付产物。',
-      steps: [
-        {
-          id: 'uclaw.objective',
-          title: '理解组合目标',
-          status: 'completed',
-          detail: objective,
-          kind: 'objective',
-          order: 0,
-        },
-        {
-          id: 'uclaw.composite',
-          title: '执行组合任务',
-          status: 'running',
-          detail: '按合同顺序执行，不要求用户选择先做哪个。',
-          kind: 'composite',
-          order: 1,
-        },
-        ...compositeTasks!.map((task, index) => ({
-          id: `uclaw.composite.${sanitizeCompositeTaskId(task.id, index)}`,
-          title: task.title || `子任务 ${index + 1}`,
-          status: 'pending' as const,
-          detail: [
-            `${compositeTaskKindLabel(task.kind)}：${task.prompt}`,
-            describeCompositeTaskImages(task),
-            '必须产出该子任务自己的可交付产物。',
-          ].join('\n'),
-          kind: 'composite-task',
-          parentId: 'uclaw.composite',
-          requiresArtifact: task.requiresArtifact !== false,
-          order: 2 + index,
-        })),
-        {
-          id: 'uclaw.verify',
-          title: '验证每项产物',
-          status: 'pending',
-          kind: 'verification',
-          order: 2 + compositeTasks!.length,
-        },
-        {
-          id: 'uclaw.deliver',
-          title: '交付组合结果',
-          status: 'pending',
-          kind: 'delivery',
-          order: 3 + compositeTasks!.length,
-        },
-      ],
-    });
-  }
-  return events;
 }
 
 type ThumbnailVerificationResult = {
@@ -3074,22 +1797,7 @@ function scheduleRuntimeArtifactVerification(
 
       if (events.length > 0) {
         useChatStore.setState((state) => ({
-          runtimeRuns: (() => {
-            let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, events);
-            const run = runtimeRuns[runId];
-            if (run?.status === 'completed') {
-              runtimeRuns = applyRuntimeContractEvents(
-                runtimeRuns,
-                buildRuntimeCompletionGateEvents(run, {
-                  runId,
-                  sessionKey,
-                  ts,
-                  status: 'completed',
-                }),
-              );
-            }
-            return runtimeRuns;
-          })(),
+          runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
         }));
         reevaluateWithheldFinalDelivery(runId);
       }
@@ -3103,22 +1811,7 @@ function scheduleRuntimeArtifactVerification(
         evidence: error instanceof Error ? error.message : String(error),
       }));
       useChatStore.setState((state) => ({
-        runtimeRuns: (() => {
-          let runtimeRuns = applyRuntimeContractEvents(state.runtimeRuns, events);
-          const run = runtimeRuns[runId];
-          if (run?.status === 'completed') {
-            runtimeRuns = applyRuntimeContractEvents(
-              runtimeRuns,
-              buildRuntimeCompletionGateEvents(run, {
-                runId,
-                sessionKey,
-                ts,
-                status: 'completed',
-              }),
-            );
-          }
-          return runtimeRuns;
-        })(),
+        runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
       }));
     })
     .finally(() => {
@@ -3319,7 +2012,6 @@ function hasQueuedChatSends(sessionKey: string): boolean {
 function clearQueuedChatSends(sessionKey: string): void {
   _queuedChatSendsBySession.delete(sessionKey);
   _queuedChatSendFlushScheduled.delete(sessionKey);
-  _pendingCompositeClientRequestIdBySession.delete(sessionKey);
 }
 
 function currentSessionCanFlushQueuedSend(sessionKey: string): boolean {
@@ -3347,9 +2039,6 @@ function scheduleQueuedChatSendFlush(sessionKey: string): void {
       _queuedChatSendsBySession.set(sessionKey, queue);
     } else {
       _queuedChatSendsBySession.delete(sessionKey);
-    }
-    if (next.compositeClientRequestId) {
-      _pendingCompositeClientRequestIdBySession.set(sessionKey, next.compositeClientRequestId);
     }
     void useChatStore.getState().sendMessage(
       next.text,
@@ -3396,53 +2085,6 @@ function commitSessionRunState(
   captureSessionRunState(
     sessionKey,
     mergeSessionRunStatePatch(getCachedSessionRunState(sessionKey), patch),
-  );
-}
-
-function commitSessionRunStateIfActiveRun(
-  set: ChatSet,
-  get: ChatGet,
-  sessionKey: string,
-  expectedRunId: string,
-  patch: Partial<SessionRunState>,
-): boolean {
-  if (get().currentSessionKey === sessionKey) {
-    let committed = false;
-    set((state) => {
-      if (state.currentSessionKey !== sessionKey || state.activeRunId !== expectedRunId) {
-        return {};
-      }
-      committed = true;
-      return patch;
-    });
-    return committed;
-  }
-
-  const cached = _sessionRunStateCache.get(sessionKey);
-  if (!cached || cached.activeRunId !== expectedRunId) return false;
-  captureSessionRunState(sessionKey, mergeSessionRunStatePatch(cached, patch));
-  return true;
-}
-
-function appendLocalMessageForSession(
-  set: ChatSet,
-  get: ChatGet,
-  sessionKey: string,
-  message: RawMessage,
-): void {
-  if (get().currentSessionKey === sessionKey) {
-    const state = get();
-    const nextMessages = [...state.messages, message];
-    set({ messages: nextMessages });
-    cacheSessionHistory(sessionKey, nextMessages, state.thinkingLevel ?? null);
-    return;
-  }
-
-  const cached = getCachedSessionHistory(sessionKey);
-  cacheSessionHistory(
-    sessionKey,
-    [...(cached?.messages ?? []), message],
-    cached?.thinkingLevel ?? null,
   );
 }
 
@@ -3821,7 +2463,7 @@ function stripInboundMediaVisionEnvelope(text: string): string {
 
 function stripGatewayUserMetadata(text: string): string {
   return stripInboundMediaVisionEnvelope(
-    stripCompositeExecutionContractEnvelope(text)
+    text
     .replace(/\s*\[media attached:[^\]]*\]/g, '')
     .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
     .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
@@ -4922,23 +3564,13 @@ function alignRuntimeRunsWithBackendSessionTerminalState(
   if (runtimeRunHasPendingAsyncTasks(runningRun)) return runtimeRuns;
 
   const ts = session?.updatedAt ?? Date.now();
-  let nextRuns = applyRuntimeContractEvents(runtimeRuns, [{
+  return applyRuntimeContractEvents(runtimeRuns, [{
     runId: runningRun.runId,
     sessionKey,
     ts,
     type: 'run.ended',
     status: terminalStatus,
   } satisfies ChatRuntimeEvent]);
-  nextRuns = applyRuntimeContractEvents(
-    nextRuns,
-    buildRuntimeCompletionGateEvents(nextRuns[runningRun.runId], {
-      runId: runningRun.runId,
-      sessionKey,
-      ts: nextRuns[runningRun.runId]?.endedAt ?? nextRuns[runningRun.runId]?.lastEventAt ?? ts,
-      status: terminalStatus,
-    }),
-  );
-  return nextRuns;
 }
 
 function reconcileCurrentSessionIdleFromBackend(
@@ -5760,36 +4392,6 @@ function hasPendingToolUse(message: RawMessage | undefined): boolean {
   if (Array.isArray(toolCalls) && toolCalls.length > 0) return true;
 
   return false;
-}
-
-function isTextOnlyAssistantFinal(message: RawMessage): boolean {
-  if (message.role !== 'assistant') return false;
-  if (hasPendingToolUse(message) || isToolOnlyMessage(message)) return false;
-  if (!messageHasDeliverableContent(message)) return false;
-  if ((message._attachedFiles ?? []).length > 0) return false;
-  const text = getMessageText(message.content);
-  if (extractMediaRefs(text).length > 0 || extractRawFilePaths(text).length > 0) return false;
-  return !messageHasImageContent(message);
-}
-
-function suppressPrematureAssistantFinals(messages: RawMessage[], lastUserMessageAt: number | null): RawMessage[] {
-  if (messages.length === 0) return messages;
-  const userMsTs = lastUserMessageAt != null ? toMs(lastUserMessageAt) : null;
-  const lastUserIndex = userMsTs == null
-    ? (() => {
-        for (let index = messages.length - 1; index >= 0; index -= 1) {
-          if (messages[index].role === 'user') return index;
-        }
-        return -1;
-      })()
-    : -1;
-  return messages.filter((message, index) => {
-    if (!isTextOnlyAssistantFinal(message)) return true;
-    const isAfterUser = userMsTs != null
-      ? (message.timestamp != null && toMs(message.timestamp) >= userMsTs)
-      : index > lastUserIndex;
-    return !isAfterUser;
-  });
 }
 
 function isDeduplicableAssistantFinal(message: RawMessage): boolean {
@@ -6880,6 +5482,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const loadPromise = (async () => {
       const isCurrentSession = isCurrentLoad;
+      const hostTaskBridgePayloadPromise = hostApiFetch<unknown>(
+        `/api/task-bridge/tasks?activeOnly=false&sessionKey=${encodeURIComponent(currentSessionKey)}`,
+      ).catch((error) => {
+        console.warn('[chat.history] failed to load durable Host tasks:', error);
+        return null;
+      });
       const getPreviewMergeKey = (message: RawMessage): string => (
         `${message.id ?? ''}|${message.role}|${message.timestamp ?? ''}|${getMessageText(message.content)}`
       );
@@ -6971,11 +5579,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
       };
 
-      const applyLoadedMessages = (
+      const applyLoadedMessages = async (
         rawMessages: RawMessage[],
         thinkingLevel: string | null,
         reasoningLevel: string | null,
-      ) => {
+      ): Promise<boolean> => {
       // Guard: if the user switched sessions while this async load was in
       // flight, discard the result to prevent overwriting the new session's
       // messages with stale data from the old session.
@@ -7005,9 +5613,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
       finalMessages = dropRedundantOptimisticUserMessages(currentSessionKey, finalMessages);
-      finalMessages = preserveOptimisticMediaResultMessages(get().messages, finalMessages);
       finalMessages = preserveExistingAttachmentPreviews(get().messages, finalMessages);
-      finalMessages = collapseSupersededCompositeHistoryReplies(finalMessages);
       finalMessages = dedupeAssistantRepliesForDisplay(finalMessages);
 
       const currentSessionRow = get().sessions.find((session) => session.key === currentSessionKey);
@@ -7059,10 +5665,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ? normalizeChatRunErrorMessage(latestTerminalAssistantErrorMessage)
         : null;
       const stateBeforeHistoryCommit = get();
-      const activeRuntimeRun = stateBeforeHistoryCommit.activeRunId
-        ? stateBeforeHistoryCommit.runtimeRuns[stateBeforeHistoryCommit.activeRunId]
-        : undefined;
-      const hasPendingAsyncTask = runtimeRunHasPendingAsyncTasks(activeRuntimeRun);
+      let nextRuntimeRuns = applyHistoricalRuntimeRunsFromMessages(
+        stateBeforeHistoryCommit.runtimeRuns,
+        currentSessionKey,
+        runtimeHistoryMessages,
+      );
+      nextRuntimeRuns = applyActiveRunArtifactEvidenceFromHistory(nextRuntimeRuns, {
+        runId: stateBeforeHistoryCommit.activeRunId,
+        sessionKey: currentSessionKey,
+        messages: finalMessages,
+        lastUserMessageAt: stateBeforeHistoryCommit.lastUserMessageAt,
+      });
+      const hostTasks = parseHostTaskBridgeTasks(await hostTaskBridgePayloadPromise);
+      nextRuntimeRuns = applyRuntimeContractEvents(
+        nextRuntimeRuns,
+        buildHostTaskRehydrationEvents(hostTasks, {
+          existingRunIds: Object.keys(nextRuntimeRuns),
+        }),
+      );
+      const hasPendingAsyncTask = Object.values(nextRuntimeRuns).some((run) => (
+        run.sessionKey === currentSessionKey && runtimeRunHasPendingAsyncTasks(run)
+      ));
       const hasConclusiveAssistantReply = openRunSegment.some((message) => (
         message.role === 'assistant'
         && !hasPendingToolUse(message)
@@ -7085,17 +5708,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ];
       }
 
-      let nextRuntimeRuns = applyHistoricalRuntimeRunsFromMessages(
-        get().runtimeRuns,
-        currentSessionKey,
-        runtimeHistoryMessages,
-      );
-      nextRuntimeRuns = applyActiveRunArtifactEvidenceFromHistory(nextRuntimeRuns, {
-        runId: stateBeforeHistoryCommit.activeRunId,
-        sessionKey: currentSessionKey,
-        messages: finalMessages,
-        lastUserMessageAt: stateBeforeHistoryCommit.lastUserMessageAt,
-      });
       if (backendSessionCanClose) {
         nextRuntimeRuns = alignRuntimeRunsWithBackendSessionTerminalState(
           nextRuntimeRuns,
@@ -7287,7 +5899,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return messageHasDeliverableContent(msg);
         });
         if (recentAssistant) {
-          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+          if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
           clearHistoryPoll();
@@ -7317,7 +5929,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         const hasDeliveredImageReply = openSegment.some((message) => message.role === 'assistant' && messageHasImageContent(message));
         if (hasDeliveredImageReply && !segmentHasOpenToolRun(openSegment)) {
-          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+          if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
           clearHistoryPoll();
@@ -7336,7 +5948,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
           markSessionRunIdle(currentSessionKey);
         } else if (hasConclusiveReply && !segmentHasOpenToolRun(openSegment)) {
-          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+          if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
           clearHistoryPoll();
@@ -7357,7 +5969,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // need an explicit conclusive-reply fallback for the case where
         // hasConclusiveReply is false (thinking-only terminal turn).
         if (!hasConclusiveReply && !segmentHasOpenToolRun(openSegment) && openSegment.length > 0) {
-          if (shouldHoldActiveRunForCompletionGate(currentSessionKey)) {
+          if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
           clearHistoryPoll();
@@ -7415,7 +6027,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (
         get().sending
         && !latestTerminalAssistantErrorMessage
-        && getActiveCompletionGateDecision(get()) !== 'continue_required'
         && !shouldTrackInboundRunLifecycle(get(), currentSessionKey)
       ) {
         clearHistoryPoll();
@@ -7449,7 +6060,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return false;
         }
 
-        const applied = applyLoadedMessages(fallbackMessages, null, null);
+        const applied = await applyLoadedMessages(fallbackMessages, null, null);
         if (!applied) return false;
 
         localFallbackApplied = true;
@@ -7553,7 +6164,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             return;
           }
 
-          const applied = applyLoadedMessages(rawMessages, thinkingLevel, reasoningLevel);
+          const applied = await applyLoadedMessages(rawMessages, thinkingLevel, reasoningLevel);
           if (applied) {
             if (isCurrentSession()) set({ hasMoreHistory: rawMessages.length >= HISTORY_PAGE_SIZE });
           }
@@ -7572,7 +6183,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           const appliedLateFallback = fallbackMessages.length > 0
-            ? applyLoadedMessages(fallbackMessages, null, null)
+            ? await applyLoadedMessages(fallbackMessages, null, null)
             : await applyLocalFallbackMessages();
           if (appliedLateFallback) {
             if (fallbackMessages.length > 0) {
@@ -7637,14 +6248,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           _lastHistoryLoadAtBySession.set(currentSessionKey, Date.now());
         }
       }
-      
+
       const active = _historyLoadInFlight.get(currentSessionKey);
       if (active === loadPromise) {
         _historyLoadInFlight.delete(currentSessionKey);
-      }
-      if (get().currentSessionKey === currentSessionKey) {
-        void resumeCompositeRunsForSession(set, get, currentSessionKey);
-        void resumeStandaloneMediaJobsForSession(set, get, currentSessionKey);
       }
     }
   },
@@ -7726,9 +6333,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId)
       ?? get().currentSessionKey;
-    const retriedCompositeClientRequestId = _pendingCompositeClientRequestIdBySession.get(targetSessionKey);
-    _pendingCompositeClientRequestIdBySession.delete(targetSessionKey);
-
     if (!attachments?.length && isInternalMessage({ role: 'user', content: trimmed })) {
       console.info('[sendMessage] Dropping internal user message before gateway send', {
         sessionKey: targetSessionKey,
@@ -7758,7 +6362,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         mode,
         imageOptions,
         videoOptions,
-        compositeClientRequestId: retriedCompositeClientRequestId,
       });
       return;
     }
@@ -7786,7 +6389,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         mode,
         imageOptions,
         videoOptions,
-        compositeClientRequestId: retriedCompositeClientRequestId,
       });
       return;
     }
@@ -7803,7 +6405,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       mode,
       imageOptions: imageOptions ? { ...imageOptions } : undefined,
       videoOptions: videoOptions ? { ...videoOptions } : undefined,
-      compositeClientRequestId: retriedCompositeClientRequestId,
       enqueuedAt: Date.now(),
     });
 
@@ -7873,18 +6474,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
-    // Every new turn belongs to the native OpenClaw agent loop. The legacy
-    // planner/composite coordinator remains only for already-started jobs;
-    // it must not turn a fresh user message into a synthetic user contract.
+    // Every new turn belongs to the native OpenClaw agent loop.
     const gatewayReferenceImages = explicitPendingImages;
-    const compositeTasks: MediaIntentCompositeTask[] | undefined = undefined;
     const runtimeMessage = trimmed;
     const effectiveMode: ChatSendMode = mode;
-    rememberPendingRuntimeIntent(currentSessionKey, {
-      objective: trimmed,
-      mode: effectiveMode,
-      compositeTasks,
-    });
     commitSessionRunState(set, get, currentSessionKey, {
       pendingImageGenerationLocal: false,
       pendingVideoGenerationLocal: false,
@@ -7987,15 +6580,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const noResponseRunId = state.activeRunId;
       const noResponseEvents = noResponseRunId
         ? [
-            buildRuntimeCheckpointEvent({
-              runId: noResponseRunId,
-              sessionKey: currentSessionKey,
-              ts: Date.now(),
-              id: `checkpoint:${noResponseRunId}:no-response`,
-              summary: '执行侧长时间没有产生新的可见进展。',
-              reason: buildNoResponseSafetyMessage(),
-              recoverable: true,
-            }),
             {
               runId: noResponseRunId,
               sessionKey: currentSessionKey,
@@ -8055,9 +6639,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const idempotencyKey = crypto.randomUUID();
       const thinkingLevel = get().thinkingLevel ?? undefined;
-      const chatMediaAttachments = compositeTasks
-        ? []
-        : (attachments ?? []);
+      const chatMediaAttachments = attachments ?? [];
       const hasMedia = chatMediaAttachments.length > 0;
       const clientPreferences = buildGatewayTurnPreferences({
         mode: effectiveMode,
@@ -8192,6 +6774,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const stateAtAbort = get();
     const { currentSessionKey, activeRunId } = stateAtAbort;
     const detachedTaskIds = collectRunDetachedTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
+    const hostTaskIds = collectRunHostTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
+    const hostTaskIdSet = new Set(hostTaskIds);
+    const nativeDetachedTaskIds = detachedTaskIds.filter((taskId) => !hostTaskIdSet.has(taskId));
     _sessionsCancelling.add(currentSessionKey);
     _activeSendGenerationBySession.delete(currentSessionKey);
     rememberLocallyAbortedRun(activeRunId);
@@ -8200,14 +6785,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ? applyRuntimeContractEvents(
             get().runtimeRuns,
             [
-              buildRuntimeCheckpointEvent({
-                runId: activeRunId,
-                sessionKey: currentSessionKey,
-                ts: Date.now(),
-                id: `checkpoint:${activeRunId}:user-abort`,
-                summary: '用户停止了当前任务。',
-                recoverable: true,
-              }),
               {
                 runId: activeRunId,
                 sessionKey: currentSessionKey,
@@ -8232,21 +6809,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearPendingRuntimeIntent(currentSessionKey);
 
     try {
-      if (activeRunId) {
-        await hostApiFetch<CompositeRunApiResponse>(
-          `/api/composite-runs/${encodeURIComponent(activeRunId)}/cancel`,
-          { method: 'POST', body: JSON.stringify({ source: 'chat_composer_stop' }) },
-        ).catch((err) => {
-          console.warn('[abortRun] Failed to cancel composite run:', err);
-        });
+      const hostCancellationResults = await Promise.allSettled(hostTaskIds.map(async (taskId) => {
+        await hostApiFetch(
+          `/api/task-bridge/tasks/${encodeURIComponent(taskId)}/cancel`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              reason: 'Cancelled from the UClaw composer.',
+              correlation: { sessionKey: currentSessionKey },
+            }),
+          },
+        );
+      }));
+      const failedHostCancellations = hostCancellationResults.filter((result) => result.status === 'rejected');
+      if (failedHostCancellations.length > 0) {
+        console.warn('[abortRun] Some Host tasks could not be cancelled:', failedHostCancellations.length);
       }
-      await cancelMediaGenerationJobs({ sessionKey: currentSessionKey, runId: activeRunId ?? undefined });
     } catch (err) {
-      console.warn('[abortRun] Failed to cancel local media jobs:', err);
+      console.warn('[abortRun] Failed to cancel one or more Host tasks:', err);
     }
 
     try {
-      await abortChatRunViaHostApi(currentSessionKey, activeRunId, detachedTaskIds);
+      await abortChatRunViaHostApi(currentSessionKey, activeRunId, nativeDetachedTaskIds);
     } catch (err) {
       set({ error: String(err) });
     } finally {
@@ -8284,9 +6868,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!previous) {
       set({ runError: i18n.t('chat:runError.retryUnavailable') });
       return;
-    }
-    if (previous.compositeClientRequestId) {
-      _pendingCompositeClientRequestIdBySession.set(sessionKey, previous.compositeClientRequestId);
     }
     set({ error: null, runError: null });
     await get().sendMessage(
@@ -8614,7 +7195,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const clearLifecycle = hasOutput || isEmptyTerminalResponse;
           const msgId = normalizedFinalMessage.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
           let finalArtifactsToVerify: ChatRuntimeArtifact[] = [];
-          let terminalGateDecision: string | undefined;
           let withheldFinalMessage: RawMessage | undefined;
           let emptyTerminalFailure: string | undefined;
           set((s) => {
@@ -8634,18 +7214,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // assistant-media bubble's `block.url`).
             const pendingImgs = s.pendingToolImages;
             const currentRuntimeRun = runId ? s.runtimeRuns[runId] : undefined;
-            const knownArtifacts = currentRuntimeRun?.artifacts ?? [];
-            const hasSuccessfulExecutionEvidence = (currentRuntimeRun?.events ?? []).some((runtimeEvent) => (
-              (runtimeEvent.type === 'tool.completed' && runtimeEvent.isError !== true)
-              || (runtimeEvent.type === 'command.output'
-                && (typeof runtimeEvent.exitCode !== 'number' || runtimeEvent.exitCode === 0))
-              || runtimeEvent.type === 'patch.completed'
-              || runtimeEvent.type === 'artifact.produced'
-            ));
+            const hasArtifactDelivery = hasDeliveredArtifactEvidence(currentRuntimeRun, pendingImgs);
             const synthesizedFinalText = isEmptyTerminalResponse
-              ? ((pendingImgs.length > 0 || knownArtifacts.length > 0)
-                  ? i18n.t('chat:executionGraph.compact.artifactDone')
-                  : (hasSuccessfulExecutionEvidence ? i18n.t('chat:executionGraph.compact.done') : ''))
+              ? (hasArtifactDelivery ? i18n.t('chat:executionGraph.compact.artifactDone') : '')
               : '';
             emptyTerminalFailure = isEmptyTerminalResponse && !synthesizedFinalText
               ? i18n.t('chat:runError.emptyFinal')
@@ -8696,18 +7267,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               emptyTerminalFailure
               || (correlatedCompletionWake && !hasPendingAsyncTask && settledAsyncStatus),
             );
-            if (runId && clearLifecycle && !toolOnly) {
+            if (runId && clearLifecycle && !toolOnly && shouldEndRuntimeRun) {
               runtimeRuns = applyRuntimeContractEvents(
                 runtimeRuns,
-                [
-                  ...buildRuntimeCompletionGateEvents(runtimeRuns[runId], {
-                    runId,
-                    sessionKey: eventSessionKey ?? currentSessionKey,
-                    ts: Date.now(),
-                    status: terminalStatus,
-                    ...(terminalError ? { error: terminalError } : {}),
-                  }),
-                  ...(shouldEndRuntimeRun ? [{
+                [{
                     runId,
                     sessionKey: eventSessionKey ?? currentSessionKey,
                     ts: Date.now(),
@@ -8717,18 +7280,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     stopReason: emptyTerminalFailure
                       ? 'empty_final_delivery'
                       : 'async_completion_wake',
-                  }] : []),
-                ],
+                }],
               );
-              terminalGateDecision = runtimeRuns[runId]?.gateResult?.decision;
             }
             const shouldHoldForContinuation = clearLifecycle
               && !toolOnly
-              && (terminalGateDecision === 'continue_required' || hasPendingAsyncTask);
+              && hasPendingAsyncTask;
             const shouldClearTerminalLifecycle = clearLifecycle
               && !toolOnly
-              && !hasPendingAsyncTask
-              && (!terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision));
+              && !hasPendingAsyncTask;
             if (shouldHoldForContinuation) {
               withheldFinalMessage = msgWithImages;
               return {
@@ -8811,9 +7371,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // Also reload for empty terminal responses (thinking-only) so the
           // delayed follow-up can pick up the Gateway's `assistant-media`
           // bubble that may still be getting written.
-          const shouldIdleAfterGate = !terminalGateDecision || gateDecisionAllowsTerminalIdle(terminalGateDecision);
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
-          if (clearLifecycle && !toolOnly && shouldIdleAfterGate) {
+          if (clearLifecycle && !toolOnly && !withheldFinalMessage) {
             clearHistoryPoll();
             beginSessionBackendIdleSettlement(sessionKeyAtFinal);
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
@@ -8945,23 +7504,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             runtimeRuns: runId
               ? applyRuntimeContractEvents(
                   get().runtimeRuns,
-                  [
-                    ...buildRuntimeCompletionGateEvents(get().runtimeRuns[runId], {
-                      runId,
-                      sessionKey: sessionKeyAtError,
-                      ts: Date.now(),
-                      status: 'error',
-                      error: normalizedErrorMsg,
-                    }),
-                    {
+                  [{
                       runId,
                       sessionKey: sessionKeyAtError,
                       ts: Date.now(),
                       type: 'run.ended',
                       status: 'error',
                       error: normalizedErrorMsg,
-                    } satisfies ChatRuntimeEvent,
-                  ],
+                  } satisfies ChatRuntimeEvent],
                 )
               : get().runtimeRuns,
             error: terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
@@ -9008,21 +7558,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           runtimeRuns: runId
             ? applyRuntimeContractEvents(
                 get().runtimeRuns,
-                [
-                  ...buildRuntimeCompletionGateEvents(get().runtimeRuns[runId], {
-                    runId,
-                    sessionKey: eventSessionKey ?? currentSessionKey,
-                    ts: Date.now(),
-                    status: 'aborted',
-                  }),
-                  {
+                [{
                     runId,
                     sessionKey: eventSessionKey ?? currentSessionKey,
                     ts: Date.now(),
                     type: 'run.ended',
                     status: 'aborted',
-                  } satisfies ChatRuntimeEvent,
-                ],
+                } satisfies ChatRuntimeEvent],
               )
             : get().runtimeRuns,
           sending: false,
@@ -9145,25 +7687,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (hasPendingAsyncTask) {
         if (appliesToActiveUi) nextPatch.pendingFinal = true;
       } else {
-      runtimeRuns = applyRuntimeContractEvents(
-        runtimeRuns,
-        buildRuntimeCompletionGateEvents(runtimeRuns[eventForSession.runId], {
-          runId: eventForSession.runId,
-          sessionKey: eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
-          ts: eventForSession.endedAt ?? eventForSession.ts ?? Date.now(),
-          status: eventForSession.status,
-          error: eventForSession.error,
-        }),
-      );
-      nextPatch.runtimeRuns = runtimeRuns;
-      const terminalGateDecision = runtimeRuns[eventForSession.runId]?.gateResult?.decision;
-      if (terminalGateDecision === 'continue_required') {
-        if (appliesToActiveUi) {
-          nextPatch.pendingFinal = true;
-        }
-      } else {
         clearPendingRuntimeIntent(eventSessionKey);
-      }
       }
     }
 
@@ -9256,9 +7780,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const shouldClearActiveRun = terminalMatchesActiveRun || terminalIsForCurrentUntrackedSend || terminalMatchesActiveTurn;
 
       if (shouldClearActiveRun) {
-        const terminalGateDecision = runtimeRuns[eventForSession.runId]?.gateResult?.decision;
-        const shouldHoldForContinuation = terminalGateDecision === 'continue_required'
-          || runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]);
+        const shouldHoldForContinuation = runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]);
         const shouldAwaitFinalDelivery = eventForSession.status === 'completed' && !shouldHoldForContinuation;
         const shouldKeepLifecycle = shouldHoldForContinuation || shouldAwaitFinalDelivery;
         nextPatch.sending = shouldKeepLifecycle;

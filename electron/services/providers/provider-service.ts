@@ -43,8 +43,13 @@ import type { ProviderWithKeyInfo } from '../../shared/providers/types';
 import { logger } from '../../utils/logger';
 import {
   isJunFeiAIManagedDistribution,
+  JUNFEIAI_DEFAULT_MODEL,
+  JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_ID,
+  getJunFeiAIProviderBaseUrl,
 } from '../../utils/junfeiai-distribution';
+import { isManagedOpenAiChatMigrated } from './openai-chat-migration';
 
 function maskApiKey(apiKey: string | null): string | null {
   if (!apiKey) return null;
@@ -83,6 +88,24 @@ function inferProviderVendorIdFromOpenClawEntry(
 export class ProviderService {
   async listVendors(): Promise<ProviderDefinition[]> {
     if (isJunFeiAIManagedDistribution()) {
+      if (await isManagedOpenAiChatMigrated()) {
+        return PROVIDER_DEFINITIONS
+          .filter((definition) => definition.id === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID)
+          .map((definition) => ({
+            ...definition,
+            placeholder: '由零至无限中转自动管理',
+            requiresApiKey: false,
+            defaultModelId: JUNFEIAI_DEFAULT_MODEL,
+            showBaseUrl: false,
+            showModelId: false,
+            supportsMultipleAccounts: false,
+            providerConfig: {
+              ...(definition.providerConfig ?? {}),
+              baseUrl: getJunFeiAIProviderBaseUrl(),
+              api: JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
+            },
+          }));
+      }
       return PROVIDER_DEFINITIONS.filter((definition) => definition.id === JUNFEIAI_PROVIDER_ID);
     }
     return PROVIDER_DEFINITIONS;
@@ -97,8 +120,13 @@ export class ProviderService {
 
     const { providers: openClawProviders, defaultModel } = await getOpenClawProvidersConfig();
     const activeProviders = await getActiveOpenClawProviders();
-    const visibleActiveProviders = isJunFeiAIManagedDistribution()
-      ? new Set([...activeProviders].filter((provider) => provider === JUNFEIAI_PROVIDER_ID))
+    const managedDistribution = isJunFeiAIManagedDistribution();
+    const useManagedOpenAiChat = managedDistribution ? await isManagedOpenAiChatMigrated() : false;
+    const managedChatProvider = useManagedOpenAiChat
+      ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+      : JUNFEIAI_PROVIDER_ID;
+    const visibleActiveProviders = managedDistribution
+      ? new Set([...activeProviders].filter((provider) => provider === managedChatProvider))
       : activeProviders;
 
     if (visibleActiveProviders.size === 0) {

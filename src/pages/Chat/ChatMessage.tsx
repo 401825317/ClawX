@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils';
 import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
 import { createAuthenticatedHostApiUrl } from '@/lib/host-api';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
-import type { RawMessage, AttachedFileMeta, CompositeArtifactManifest } from '@/stores/chat';
+import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
 import { extractText, extractImages, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
 import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
 
@@ -65,16 +65,6 @@ function isRemoteHttpUrl(filePath: string | undefined): boolean {
 
 function attachmentOpenTarget(file: AttachedFileMeta): string | undefined {
   return file.filePath?.trim() || file.gatewayUrl?.trim() || undefined;
-}
-
-function isCompositeResultMessage(message: RawMessage): boolean {
-  if (message.role !== 'assistant') return false;
-  if (message.localArtifactResultKind === 'composite') return true;
-  if (typeof message.id === 'string' && message.id.startsWith('composite-result:')) return true;
-  const text = extractText(message);
-  return (message._attachedFiles?.length ?? 0) > 0
-    && /随机示例包/.test(text)
-    && /(?:统一)?产物清单/.test(text);
 }
 
 function isChatPreviewDocument(file: AttachedFileMeta): boolean {
@@ -382,7 +372,6 @@ export const ChatMessage = memo(function ChatMessage({
   onUseImageAsReference,
 }: ChatMessageProps) {
   const isUser = message.role === 'user';
-  const isCompositeResult = isCompositeResultMessage(message);
   const role = typeof message.role === 'string' ? message.role.toLowerCase() : '';
   const isToolResult = role === 'toolresult' || role === 'tool_result';
   const text = textOverride ?? extractText(message);
@@ -622,25 +611,8 @@ export const ChatMessage = memo(function ChatMessage({
           </div>
         )}
 
-        {/* Composite result attachments — compact Codex-style manifest. */}
-        {!isUser && isCompositeResult && (
-          attachedFiles.length > 0 || (message.compositeArtifactManifest?.tasks.length ?? 0) > 0
-        ) && (
-          <CompositeArtifactGrid
-            files={attachedFiles}
-            manifest={message.compositeArtifactManifest}
-            onOpenFile={onOpenFile}
-            onPreviewImage={(file, src) => setLightboxImg({
-              src,
-              fileName: file.fileName,
-              filePath: file.filePath,
-              mimeType: file.mimeType,
-            })}
-          />
-        )}
-
         {/* File attachments — assistant messages (below text) */}
-        {!isUser && !isCompositeResult && attachedFiles.length > 0 && (
+        {!isUser && attachedFiles.length > 0 && (
           <div className="flex flex-wrap items-start gap-2">
             {attachedFiles.map((file, i) => {
               const isImage = file.mimeType.startsWith('image/');
@@ -761,32 +733,6 @@ function ToolStatusBar({
   );
 }
 
-function artifactTypeLabel(file: AttachedFileMeta, t: (key: string) => string): string {
-  const mime = file.mimeType.toLowerCase();
-  const name = file.fileName.toLowerCase();
-  if (mime.startsWith('image/')) return t('artifactManifest.types.image');
-  if (mime.startsWith('video/')) return t('artifactManifest.types.video');
-  if (name.endsWith('.ppt') || name.endsWith('.pptx')) return t('artifactManifest.types.presentation');
-  if (name.endsWith('.xls') || name.endsWith('.xlsx')) return t('artifactManifest.types.spreadsheet');
-  if (name.endsWith('.html') || name.endsWith('.htm')) return t('artifactManifest.types.miniProgram');
-  if (name.endsWith('.md') || name.endsWith('.markdown') || mime === 'text/markdown') return t('artifactManifest.types.copywriting');
-  return t('artifactManifest.types.file');
-}
-
-function openAttachment(file: AttachedFileMeta, onOpenFile?: (file: AttachedFileMeta) => void): void {
-  const target = attachmentOpenTarget(file);
-  if (!target) return;
-  if (onOpenFile && file.filePath) {
-    onOpenFile(file);
-    return;
-  }
-  if (isRemoteHttpUrl(target)) {
-    void invokeIpc('shell:openExternal', target);
-  } else {
-    void invokeIpc('shell:openPath', target);
-  }
-}
-
 type MediaSrcResolveOptions = {
   mimeType?: string;
   proxyRemote?: boolean;
@@ -815,193 +761,6 @@ function useResolvedMediaSrc(target: string | undefined, options: MediaSrcResolv
   }, [key, immediate, target, options.mimeType, options.proxyRemote]);
 
   return resolved.key === key ? resolved.src : immediate;
-}
-
-function CompactImageArtifact({
-  file,
-  onPreview,
-}: {
-  file: AttachedFileMeta;
-  onPreview: (src: string) => void;
-}) {
-  const src = useResolvedMediaSrc(attachmentOpenTarget(file));
-
-  if (!src) {
-    return (
-      <div className="flex h-14 w-16 shrink-0 items-center justify-center rounded-md bg-black/5 dark:bg-white/10">
-        <FileIcon mimeType={file.mimeType} className="h-4 w-4 text-muted-foreground" />
-      </div>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      className="h-14 w-16 shrink-0 overflow-hidden rounded-md bg-black/5 dark:bg-white/10"
-      onClick={() => onPreview(src)}
-      title={file.fileName}
-    >
-      <img src={src} alt="" className="h-full w-full object-cover" />
-    </button>
-  );
-}
-
-function CompositeArtifactGrid({
-  files,
-  manifest,
-  onOpenFile,
-  onPreviewImage,
-}: {
-  files: AttachedFileMeta[];
-  manifest?: CompositeArtifactManifest;
-  onOpenFile?: (file: AttachedFileMeta) => void;
-  onPreviewImage: (file: AttachedFileMeta, src: string) => void;
-}) {
-  const { t } = useTranslation('chat');
-  const visibleFiles = dedupeAttachedFiles(files).filter((file) => attachmentOpenTarget(file));
-  const manifestTasks = manifest?.tasks ?? [];
-  const referencedTargets = new Set<string>();
-  const rows: Array<{
-    id: string;
-    title: string;
-    status: 'completed' | 'failed' | 'blocked';
-    detail?: string;
-    file?: AttachedFileMeta;
-  }> = manifestTasks.flatMap((task) => {
-    const refs = new Set(task.artifactRefs.map((ref) => ref.trim()).filter(Boolean));
-    const taskFiles = visibleFiles.filter((file) => {
-      const target = attachmentOpenTarget(file);
-      const matches = Boolean(
-        (target && refs.has(target))
-        || refs.has(file.fileName)
-        || (file.filePath && refs.has(file.filePath))
-        || (file.gatewayUrl && refs.has(file.gatewayUrl)),
-      );
-      if (matches && target) referencedTargets.add(target);
-      return matches;
-    });
-    if (taskFiles.length === 0) {
-      return [{ id: task.id, title: task.title, status: task.status, detail: task.detail }];
-    }
-    return taskFiles.map((file, index) => ({
-      id: `${task.id}:${index}`,
-      title: task.title,
-      status: task.status,
-      detail: task.detail,
-      file,
-    }));
-  });
-  for (const [index, file] of visibleFiles.entries()) {
-    const target = attachmentOpenTarget(file);
-    if (target && referencedTargets.has(target)) continue;
-    rows.push({
-      id: `artifact:${index}:${target ?? file.fileName}`,
-      title: artifactTypeLabel(file, t),
-      status: 'completed',
-      file,
-    });
-  }
-  if (rows.length === 0) return null;
-  const hasProblems = rows.some((row) => row.status !== 'completed');
-  const statusLabel = (status: 'completed' | 'failed' | 'blocked') => t(`artifactManifest.${status}`);
-
-  return (
-    <div className="w-full max-w-2xl space-y-2">
-      <div className="flex items-center gap-2 text-xs font-medium text-foreground/80">
-        {hasProblems
-          ? <AlertCircle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-          : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />}
-        <span>{t('artifactManifest.title')}</span>
-        <span className="text-muted-foreground">{t('artifactManifest.count', { count: manifestTasks.length || rows.length })}</span>
-      </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="list">
-        {rows.map((row) => {
-          const file = row.file;
-          if (!file) {
-            const completedWithoutFile = row.status === 'completed';
-            return (
-              <div
-                key={row.id}
-                className={cn(
-                  'flex min-w-0 items-start gap-2 rounded-lg border p-3',
-                  completedWithoutFile
-                    ? 'border-emerald-500/15 bg-emerald-500/[0.035]'
-                    : 'border-amber-500/20 bg-amber-500/[0.04]',
-                )}
-                role="listitem"
-              >
-                {completedWithoutFile
-                  ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  : <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />}
-                <div className="min-w-0">
-                  <p className="truncate text-xs font-medium text-foreground">{row.title}</p>
-                  <p className="mt-0.5 text-2xs text-muted-foreground">
-                    {statusLabel(row.status)}
-                    {(row.detail || !completedWithoutFile) && (
-                      <> · {row.detail || t('artifactManifest.noArtifact')}</>
-                    )}
-                  </p>
-                </div>
-              </div>
-            );
-          }
-          const isImage = file.mimeType.startsWith('image/');
-          const isVideo = file.mimeType.startsWith('video/');
-          const target = attachmentOpenTarget(file);
-          return (
-            <div
-              key={row.id}
-              className="group/artifact flex min-w-0 items-center gap-3 rounded-lg border border-black/8 bg-background/70 p-2 transition-colors hover:bg-black/[0.04] dark:border-white/10 dark:bg-white/[0.035] dark:hover:bg-white/[0.06]"
-              role="listitem"
-            >
-              {isImage ? (
-                <CompactImageArtifact
-                  file={file}
-                  onPreview={(src) => onPreviewImage(file, src)}
-                />
-              ) : (
-                <button
-                  type="button"
-                  className="flex h-14 w-16 shrink-0 items-center justify-center rounded-md bg-black/5 text-muted-foreground transition-colors hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15"
-                  onClick={() => openAttachment(file, onOpenFile)}
-                  title={target}
-                >
-                  <FileIcon mimeType={file.mimeType} className="h-5 w-5" />
-                </button>
-              )}
-              <button
-                type="button"
-                className="min-w-0 flex-1 text-left"
-                onClick={() => {
-                  if (!isImage) openAttachment(file, onOpenFile);
-                }}
-                title={target}
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground dark:bg-white/10">
-                    {artifactTypeLabel(file, t)}
-                  </span>
-                  {isVideo && (
-                    <span className="shrink-0 rounded bg-black/5 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground dark:bg-white/10">
-                      {t('artifactManifest.playable')}
-                    </span>
-                  )}
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{statusLabel(row.status)}</span>
-                </div>
-                <p className="mt-1 truncate text-xs font-medium text-foreground">{row.title}</p>
-                <p className="mt-0.5 truncate text-2xs text-foreground/70">{file.fileName}</p>
-                <p className="mt-0.5 truncate text-2xs text-muted-foreground">
-                  {file.fileSize > 0
-                    ? formatFileSize(file.fileSize)
-                    : (isVideo ? t('artifactManifest.videoLink') : t('artifactManifest.generated'))}
-                </p>
-              </button>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
 }
 
 function resolvePrimaryImageCopyTarget(
