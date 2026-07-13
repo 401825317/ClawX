@@ -153,7 +153,7 @@ async function readJsonStrict(path: string, missingAsEmpty = false): Promise<{
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return missingAsEmpty ? { original: null, data: {} } : null;
     }
-    throw new Error(`Cannot read migration JSON ${path}: ${String(error)}`);
+    throw new Error(`Cannot read migration JSON ${path}: ${String(error)}`, { cause: error });
   }
 }
 

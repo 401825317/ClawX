@@ -1062,32 +1062,34 @@ function AsyncImageAttachmentCard({
   onPreview: (src: string) => void;
   onUseAsReference?: () => void;
 }) {
-  const [src, setSrc] = useState<string | null>(() => immediateMediaSrcFromFilePath(file.filePath));
-  const [unavailable, setUnavailable] = useState(false);
+  const key = file.filePath ?? '';
+  const immediate = immediateMediaSrcFromFilePath(file.filePath);
+  const [resolved, setResolved] = useState<{
+    key: string;
+    src: string | null;
+    unavailable: boolean;
+  }>(() => ({ key, src: immediate, unavailable: false }));
 
   useEffect(() => {
     let cancelled = false;
-    const immediate = immediateMediaSrcFromFilePath(file.filePath);
-    setSrc(immediate);
-    setUnavailable(false);
-    if (immediate) {
-      return () => {
-        cancelled = true;
-      };
-    }
+    if (immediate) return undefined;
     void mediaSrcFromFilePath(file.filePath)
-      .then((resolved) => {
+      .then((src) => {
         if (cancelled) return;
-        setSrc(resolved);
-        setUnavailable(!resolved);
+        setResolved({ key, src, unavailable: !src });
       })
       .catch(() => {
-        if (!cancelled) setUnavailable(true);
+        if (!cancelled) setResolved({ key, src: null, unavailable: true });
       });
     return () => {
       cancelled = true;
     };
-  }, [file.filePath]);
+  }, [file.filePath, immediate, key]);
+
+  const current = resolved.key === key
+    ? resolved
+    : { key, src: immediate, unavailable: false };
+  const { src, unavailable } = current;
 
   if (!src) {
     return (
@@ -1275,17 +1277,19 @@ function ImageLightbox({
   onClose: () => void;
 }) {
   void base64;
-  const [originalSrc, setOriginalSrc] = useState<string | null>(null);
+  const originalKey = filePath && !isRemoteHttpUrl(filePath)
+    ? `${filePath}\n${mimeType ?? ''}`
+    : '';
+  const [resolvedOriginal, setResolvedOriginal] = useState<{
+    key: string;
+    src: string | null;
+  }>({ key: '', src: null });
 
   useEffect(() => {
-    if (!filePath || isRemoteHttpUrl(filePath)) {
-      setOriginalSrc(null);
-      return;
-    }
+    if (!originalKey || !filePath) return undefined;
 
     let cancelled = false;
     let objectUrl: string | null = null;
-    setOriginalSrc(null);
     void (async () => {
       try {
         const result = await readBinaryFile(filePath);
@@ -1297,9 +1301,9 @@ function ImageLightbox({
           URL.revokeObjectURL(objectUrl);
           return;
         }
-        setOriginalSrc(objectUrl);
+        setResolvedOriginal({ key: originalKey, src: objectUrl });
       } catch {
-        if (!cancelled) setOriginalSrc(null);
+        if (!cancelled) setResolvedOriginal({ key: originalKey, src: null });
       }
     })();
 
@@ -1307,7 +1311,11 @@ function ImageLightbox({
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [filePath, mimeType]);
+  }, [filePath, mimeType, originalKey]);
+
+  const originalSrc = resolvedOriginal.key === originalKey
+    ? resolvedOriginal.src
+    : null;
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
