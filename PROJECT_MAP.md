@@ -81,11 +81,13 @@ pnpm run init
 pnpm dev
 ```
 
-联调本地 new-api：
+JunFeiAI 开发与打包使用相同端点配置：
 
 ```bash
-pnpm run dev:junfeiai -- --backend=http://127.0.0.1:3000 --provider=http://127.0.0.1:3000/v1
+pnpm run dev:junfeiai
 ```
+
+端点、上下文窗口和协议统一由 `shared/junfeiai-endpoints.json` 定义；开发模式不接受环境变量或命令行的临时端点覆盖。
 
 质量检查：
 
@@ -105,8 +107,6 @@ pnpm run comms:compare
 ## 环境变量
 
 - `CLAWX_MANAGED_PROVIDER=1`：启用托管供应商模式。
-- `CLAWX_JUNFEIAI_BACKEND_ORIGIN`：认证、bootstrap、billing 后端，例如 `http://127.0.0.1:3000`。
-- `CLAWX_JUNFEIAI_PROVIDER_BASE_URL`：写入 OpenClaw runtime 的模型 API base URL，例如 `http://127.0.0.1:3000/v1`。
 - `VITE_DEV_SERVER_PORT`：Vite dev server 端口，默认 `5173`。
 - `OPENCLAW_GATEWAY_PORT`：OpenClaw Gateway 端口，默认 `18789`。
 

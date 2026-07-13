@@ -8,6 +8,7 @@ touchedAreas:
   - harness/specs/tasks/media-intent-image-edit-routing.md
   - harness/specs/tasks/openclaw-native-media-host-bridge.md
   - electron/api/routes/media.ts
+  - src/stores/chat.ts
   - tests/e2e/native-agent-media-routing.spec.ts
 requiredProfiles:
   - fast
@@ -20,16 +21,20 @@ expectedUserBehavior:
   - Ordinary, image-mode, and video-mode messages enter one OpenClaw Agent turn through `/api/chat/send`.
   - Image/video modes contribute current-turn preferences and selected artifacts, but do not authorize or enqueue media work themselves.
   - OpenClaw resolves references such as the current or previous image from session context and invokes the native image tool when appropriate.
+  - For a clear image-edit request without an explicit image attachment, the renderer passes the latest usable image in the current session as a selected artifact and media path to the same Agent turn.
+  - When an image-edit request has neither an explicit attachment nor a usable session image, the renderer asks the user to select or upload an image and does not start an Agent run.
   - Existing provider settings/tests and media job inspection/cancel/retry remain available after the bypass is retired.
 acceptance:
   - The renderer never calls `/api/media/intent-plan`, `/api/media/image-generation/chat-send`, or `/api/media/video-generation/chat-send` for a user turn.
   - All three retired POST routes return HTTP 410 with `code=media_agent_bypass_retired` and point callers to `/api/chat/send`.
   - A retired route cannot call a model planner, enqueue a media job, or append a synthetic assistant transcript.
+  - An implicitly selected historical image is sent only through `/api/chat/send-with-media`, with `inlineAttachments=false` and a matching `clientPreferences.selectedArtifacts` entry.
+  - The no-reference clarification path sends neither `/api/chat/send` nor `/api/chat/send-with-media`.
   - Existing session artifacts and persisted media job records remain readable and cancellable.
   - Image and video provider configuration, provider discovery, and provider test routes are unchanged.
 requiredTests:
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
-  - pnpm harness validate --spec harness/specs/tasks/media-intent-image-edit-routing.md --since HEAD
+  - pnpm harness validate --spec harness/specs/tasks/media-intent-image-edit-routing.md
   - pnpm exec tsc --noEmit --pretty false
 docs:
   required: false

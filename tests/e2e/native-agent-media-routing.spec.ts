@@ -42,6 +42,57 @@ async function installChatBootstrapMocks(app: ElectronApplication): Promise<void
   });
 }
 
+async function installImageEditRoutingMocks(
+  app: ElectronApplication,
+  options: { runId: string; historyMessages: unknown[] },
+): Promise<void> {
+  await installChatBootstrapMocks(app);
+  await app.evaluate(({ app: _app }, { sessionKey, runId, historyMessages }) => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    const requests: Array<{ path?: string; method?: string; body?: string }> = [];
+    (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests = requests;
+    ipcMain.removeHandler('hostapi:fetch');
+    ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string; body?: string }) => {
+      requests.push(request);
+      if (request.path === '/api/chat/send' || request.path === '/api/chat/send-with-media') {
+        return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { runId } } } };
+      }
+      if (request.path === '/api/chat/sessions') {
+        return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { sessions: [{ key: sessionKey, displayName: 'main', model: 'openai/smart-latest', hasActiveRun: false }] } } } };
+      }
+      if (request.path === '/api/chat/history') {
+        return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { messages: historyMessages } } } };
+      }
+      if (request.path === '/api/gateway/status') {
+        return { ok: true, data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true } } };
+      }
+      if (request.path === '/api/junfeiai/status' || request.path === '/api/junfeiai/status/local') {
+        return { ok: true, data: { status: 200, ok: true, json: { managed: false } } };
+      }
+      if (request.path === '/api/provider-accounts'
+        || request.path === '/api/provider-accounts/key-info'
+        || request.path === '/api/provider-vendors'
+        || request.path === '/api/providers') {
+        return { ok: true, data: { status: 200, ok: true, json: [] } };
+      }
+      if (request.path === '/api/provider-accounts/default') {
+        return { ok: true, data: { status: 200, ok: true, json: { accountId: null } } };
+      }
+      if (request.path?.startsWith('/api/sessions/transcript?')) {
+        return { ok: true, data: { status: 200, ok: true, json: { messages: [] } } };
+      }
+      if (request.path === '/api/agents') {
+        return { ok: true, data: { status: 200, ok: true, json: { success: true, agents: [{ id: 'main', name: 'Main' }] } } };
+      }
+      return { ok: true, data: { status: 200, ok: true, json: {} } };
+    });
+  }, {
+    sessionKey: SESSION_KEY,
+    runId: options.runId,
+    historyMessages: options.historyMessages,
+  });
+}
+
 test.describe('Native OpenClaw media routing', () => {
   const cases = [
     {
@@ -177,70 +228,24 @@ test.describe('Native OpenClaw media routing', () => {
     }
   });
 
-  test('attaches a historical image only after the user explicitly selects it as a reference', async ({ launchElectronApp }) => {
+  test('uses the latest session image for an explicit edit request without requiring a manual selection', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     try {
-      await installChatBootstrapMocks(app);
-      await app.evaluate(({ app: _app }, { sessionKey, runId }) => {
-        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
-        const requests: Array<{ path?: string; method?: string; body?: string }> = [];
-        (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests = requests;
-        ipcMain.removeHandler('hostapi:fetch');
-        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string; body?: string }) => {
-          requests.push(request);
-          if (request.path === '/api/chat/send-with-media') {
-            return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { runId } } } };
-          }
-          if (request.path === '/api/chat/sessions') {
-            return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { sessions: [{ key: sessionKey, displayName: 'main', model: 'lingzhiwuxian/smart-latest', hasActiveRun: false }] } } } };
-          }
-          if (request.path === '/api/chat/history') {
-            return {
-              ok: true,
-              data: {
-                status: 200,
-                ok: true,
-                json: {
-                  success: true,
-                  result: {
-                    messages: [{
-                      role: 'assistant',
-                      content: 'Earlier image result',
-                      timestamp: 1,
-                      _attachedFiles: [{
-                        fileName: 'prior.png',
-                        mimeType: 'image/png',
-                        fileSize: 1024,
-                        filePath: '/tmp/prior.png',
-                        preview: null,
-                      }],
-                    }],
-                  },
-                },
-              },
-            };
-          }
-          if (request.path === '/api/gateway/status') {
-            return { ok: true, data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true } } };
-          }
-          if (request.path === '/api/provider-accounts'
-            || request.path === '/api/provider-accounts/key-info'
-            || request.path === '/api/provider-vendors'
-            || request.path === '/api/providers') {
-            return { ok: true, data: { status: 200, ok: true, json: [] } };
-          }
-          if (request.path === '/api/provider-accounts/default') {
-            return { ok: true, data: { status: 200, ok: true, json: { accountId: null } } };
-          }
-          if (request.path?.startsWith('/api/sessions/transcript?')) {
-            return { ok: true, data: { status: 200, ok: true, json: { messages: [] } } };
-          }
-          if (request.path === '/api/agents') {
-            return { ok: true, data: { status: 200, ok: true, json: { success: true, agents: [{ id: 'main', name: 'Main' }] } } };
-          }
-          return { ok: true, data: { status: 200, ok: true, json: {} } };
-        });
-      }, { sessionKey: SESSION_KEY, runId: 'explicit-image-reference-run' });
+      await installImageEditRoutingMocks(app, {
+        runId: 'implicit-image-reference-run',
+        historyMessages: [{
+          role: 'assistant',
+          content: 'Earlier image result',
+          timestamp: 1,
+          _attachedFiles: [{
+            fileName: 'prior.png',
+            mimeType: 'image/png',
+            fileSize: 1024,
+            filePath: '/tmp/prior.png',
+            preview: null,
+          }],
+        }],
+      });
 
       const page = await getStableWindow(app);
       try {
@@ -251,19 +256,18 @@ test.describe('Native OpenClaw media routing', () => {
       await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
       const referenceButton = page.getByTestId('image-edit-reference-button');
       await expect(referenceButton).toHaveCount(1);
-      await referenceButton.click();
-      await expect(page.getByTestId('chat-image-edit-reference')).toContainText('prior.png');
+      await expect(page.getByTestId('chat-image-edit-reference')).toHaveCount(0);
 
-      await page.getByTestId('chat-composer-input').fill('保留构图，把它改成白天晴天');
+      await page.getByTestId('chat-composer-input').fill('保留构图，把上一张图改成白天晴天');
       await page.getByTestId('chat-composer-send').click();
       await page.waitForTimeout(1_000);
 
       const requests = await app.evaluate(() => (
         (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests as Array<{ path?: string; body?: string }> ?? []
       ));
-      const explicitTurn = requests.find((request) => request.path === '/api/chat/send-with-media');
-      expect(explicitTurn, JSON.stringify(requests, null, 2)).toBeTruthy();
-      const payload = JSON.parse(explicitTurn?.body ?? '{}') as {
+      const implicitTurn = requests.find((request) => request.path === '/api/chat/send-with-media');
+      expect(implicitTurn, JSON.stringify(requests, null, 2)).toBeTruthy();
+      const payload = JSON.parse(implicitTurn?.body ?? '{}') as {
         inlineAttachments?: boolean;
         media?: Array<{ filePath?: string; mimeType?: string; fileName?: string }>;
         clientPreferences?: {
@@ -271,12 +275,42 @@ test.describe('Native OpenClaw media routing', () => {
           selectedArtifacts?: Array<{ filePath?: string; mimeType?: string; title?: string }>;
         };
       };
-      expect(payload.inlineAttachments).toBe(true);
+      expect(payload.inlineAttachments).toBe(false);
       expect(payload.media).toEqual([{ filePath: '/tmp/prior.png', mimeType: 'image/png', fileName: 'prior.png' }]);
       expect(payload.clientPreferences).toEqual({
         mode: 'chat',
         selectedArtifacts: [{ filePath: '/tmp/prior.png', mimeType: 'image/png', title: 'prior.png' }],
       });
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('asks for a reference image instead of starting an agent run when none is available', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    try {
+      await installImageEditRoutingMocks(app, {
+        runId: 'missing-image-reference-run',
+        historyMessages: [],
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-input').fill('把这张图片改成白天晴天');
+      await page.getByTestId('chat-composer-send').click();
+
+      await expect(page.getByText(/你想编辑哪张图片|Which image would you like to edit/)).toBeVisible();
+      const requests = await app.evaluate(() => (
+        (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests as Array<{ path?: string }> ?? []
+      ));
+      expect(requests.some((request) => (
+        request.path === '/api/chat/send' || request.path === '/api/chat/send-with-media'
+      )), JSON.stringify(requests, null, 2)).toBeFalsy();
     } finally {
       await closeElectronApp(app);
     }

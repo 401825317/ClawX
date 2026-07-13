@@ -5,9 +5,11 @@ import type {
   ProviderTypeInfo,
 } from './types';
 import { PI_AI_OPENROUTER_REASONING_COMPAT, PI_AI_PROMPT_CACHE_KEY_COMPAT } from '../pi-ai-model-cost';
-import { JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW } from '../../utils/junfeiai-distribution';
-
-const LINGZHIWUXIAN_PRODUCTION_BASE_URL = 'https://zz-cn.lingzhiwuxian.com/v1';
+import {
+  JUNFEIAI_DEFAULT_API_PROTOCOL,
+  JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+} from '../../utils/junfeiai-distribution';
+import { JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL } from '../../../shared/junfeiai-endpoints';
 
 export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
@@ -58,7 +60,7 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     requiresApiKey: false,
     category: 'compatible',
     envVar: 'LINGZHIWUXIAN_API_KEY',
-    defaultBaseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
+    defaultBaseUrl: JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL,
     defaultModelId: 'smart-latest',
     showBaseUrl: false,
     showModelId: false,
@@ -66,8 +68,8 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     defaultAuthMode: 'api_key',
     supportsMultipleAccounts: false,
     providerConfig: {
-      baseUrl: LINGZHIWUXIAN_PRODUCTION_BASE_URL,
-      api: 'openai-completions',
+      baseUrl: JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL,
+      api: JUNFEIAI_DEFAULT_API_PROTOCOL,
       apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
       models: [
         {

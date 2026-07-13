@@ -1,11 +1,21 @@
+import {
+  JUNFEIAI_DEFAULT_API_PROTOCOL,
+  JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_PRODUCTION_ORIGIN as productionOrigin,
+  JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL,
+} from '../../shared/junfeiai-endpoints';
+
+export {
+  JUNFEIAI_DEFAULT_API_PROTOCOL,
+  JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+} from '../../shared/junfeiai-endpoints';
+
 export const JUNFEIAI_PROVIDER_ID = 'lingzhiwuxian';
 export const JUNFEIAI_PROVIDER_NAME = '零至无限';
-export const JUNFEIAI_PRODUCTION_ORIGIN = 'https://zz-cn.lingzhiwuxian.com';
+export const JUNFEIAI_PRODUCTION_ORIGIN = productionOrigin;
 export const JUNFEIAI_DEFAULT_MODEL = 'smart-latest';
-export const JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW = 372_000;
-export const JUNFEIAI_DEFAULT_API_PROTOCOL = 'openai-completions';
 export const JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID = 'openai';
-export const JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL = 'openai-responses';
+export const JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL = JUNFEIAI_DEFAULT_API_PROTOCOL;
 export const JUNFEIAI_PROVIDER_TIMEOUT_SECONDS = 300;
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'lingzhiwuxian-auth';
 export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 2;
@@ -16,54 +26,16 @@ export function normalizeJunFeiAIModelContextWindow(value: unknown): number | un
     : undefined;
 }
 
-function normalizeOrigin(value: string): string {
-  return value
-    .trim()
-    .replace(/\/+$/, '');
-}
-
-function normalizeProviderBaseUrl(value: string): string {
-  const normalized = normalizeOrigin(value);
-  return normalized.endsWith('/v1') ? normalized : `${normalized}/v1`;
-}
-
-function getJunFeiAIDefaultOrigin(): string {
-  return JUNFEIAI_PRODUCTION_ORIGIN;
-}
-
 export function getJunFeiAIDefaultBaseUrl(): string {
-  return `${getJunFeiAIDefaultOrigin()}/v1`;
-}
-
-export function isJunFeiAIDevOverrideEnabled(): boolean {
-  return Boolean(process.env.VITE_DEV_SERVER_URL);
-}
-
-function getDevEnvOverride(...keys: string[]): string {
-  if (!isJunFeiAIDevOverrideEnabled()) {
-    return '';
-  }
-  for (const key of keys) {
-    const value = process.env[key]?.trim();
-    if (value) {
-      return value;
-    }
-  }
-  return '';
+  return JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL;
 }
 
 export function getJunFeiAIBackendOrigin(): string {
-  return normalizeOrigin(
-    getDevEnvOverride('CLAWX_JUNFEIAI_BACKEND_ORIGIN', 'CLAWX_JUNFEIAI_ORIGIN')
-      || getJunFeiAIDefaultOrigin(),
-  );
+  return JUNFEIAI_PRODUCTION_ORIGIN;
 }
 
 export function getJunFeiAIProviderBaseUrl(): string {
-  return normalizeProviderBaseUrl(
-    getDevEnvOverride('CLAWX_JUNFEIAI_PROVIDER_BASE_URL', 'CLAWX_JUNFEIAI_BASE_URL')
-      || `${getJunFeiAIBackendOrigin()}/v1`,
-  );
+  return JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL;
 }
 
 export function getJunFeiAIOrigin(): string {

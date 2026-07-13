@@ -60,6 +60,8 @@ expectedUserBehavior:
   - Ordinary chat can answer directly without fabricating a plan, task, or execution panel.
   - Real tool and task activity appears as concise progress with stable identifiers rather than repeated generic "已运行" rows.
   - Produced artifacts and deterministic verification results can appear before the final assistant reply.
+  - Transcript entries marked `provenance.kind=inter_session` remain internal and are not rendered as conversation history.
+  - A late tool-terminal error does not replace a user-visible final reply from the same turn; errors remain visible when no final reply exists.
   - Native task failure, cancellation, partial completion, and success remain authoritative across live events and history reload.
   - Host work is accepted only when the registered capability's required artifacts and verifications are satisfied by real structured results.
   - Async Host completion reaches the same run and session directly; another model turn occurs only when the capability explicitly requests replanning and supplies a reason.

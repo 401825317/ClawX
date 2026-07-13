@@ -1,6 +1,5 @@
 import type { GatewayManager } from '../../gateway/manager';
 import type { ProviderAccount } from '../../shared/providers/types';
-import { OPENCLAW_API_PROTOCOLS } from '../../shared/providers/types';
 import { saveProviderAccount, getProviderAccount, providerAccountToConfig } from '../providers/provider-store';
 import { getClawXProviderStore } from '../providers/store-instance';
 import { setProviderSecret, getProviderSecret, deleteProviderSecret } from '../secrets/secret-store';
@@ -20,7 +19,6 @@ import {
   getJunFeiAIOrigin,
   getJunFeiAIProviderBaseUrl,
   isJunFeiAIManagedDistribution,
-  isJunFeiAIDevOverrideEnabled,
   JUNFEIAI_AUTH_ACCOUNT_ID,
   JUNFEIAI_DEFAULT_API_PROTOCOL,
   getJunFeiAIDefaultBaseUrl,
@@ -36,8 +34,6 @@ import {
   readJunFeiAIDeviceActivationState,
 } from '../../utils/junfeiai-device';
 import { logger } from '../../utils/logger';
-
-type ProviderProtocol = NonNullable<ProviderAccount['apiProtocol']>;
 
 interface Sub2APIEnvelope<T> {
   code?: number;
@@ -740,14 +736,7 @@ function normalizeJunFeiAIProviderDisplayName(raw?: string): string {
 }
 
 function getLocalProviderBaseUrlOverride(): string {
-  if (!isJunFeiAIDevOverrideEnabled()) {
-    return '';
-  }
-  return (
-    process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL
-    || process.env.CLAWX_JUNFEIAI_BASE_URL
-    || ''
-  ).trim();
+  return getJunFeiAIProviderBaseUrl();
 }
 
 function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunFeiAIBootstrapPayload {
@@ -782,21 +771,6 @@ function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunF
         .filter((model) => allowedClientModels.includes(model) && model !== clientDefault),
     },
   };
-}
-
-function normalizeProviderProtocol(raw?: string): ProviderProtocol {
-  if (
-    raw === 'openai-completions'
-    || raw === 'openai-responses'
-  ) {
-    return raw;
-  }
-  if (raw && (OPENCLAW_API_PROTOCOLS as readonly string[]).includes(raw)) {
-    logger.warn(`[junfeiai] Ignoring non-OpenAI api protocol from bootstrap: ${raw}`);
-  } else if (raw) {
-    logger.warn(`[junfeiai] Ignoring unsupported api protocol from bootstrap: ${raw}`);
-  }
-  return JUNFEIAI_DEFAULT_API_PROTOCOL as ProviderProtocol;
 }
 
 function normalizeFallbackModels(models?: string[]): string[] {
@@ -864,7 +838,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     label: providerName,
     authMode: 'api_key',
     baseUrl: normalizeBaseUrl(runtime.baseUrl),
-    apiProtocol: normalizeProviderProtocol(runtime.apiProtocol),
+    apiProtocol: JUNFEIAI_DEFAULT_API_PROTOCOL,
     model: resolveRuntimeDefaultModel(bootstrap),
     fallbackModels: normalizeFallbackModels(runtime.fallbackModels),
     enabled: true,

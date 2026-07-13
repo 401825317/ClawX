@@ -209,6 +209,44 @@ type PendingImageInput = {
   preview: string | null;
 };
 
+function toPendingImageInput(file: NonNullable<RawMessage['_attachedFiles']>[number]): PendingImageInput | null {
+  const stagedPath = file.filePath?.trim();
+  if (!file.mimeType.startsWith('image/') || !stagedPath) return null;
+  return {
+    fileName: file.fileName || stagedPath.split(/[\\/]/).pop() || 'image',
+    mimeType: file.mimeType,
+    fileSize: file.fileSize,
+    stagedPath,
+    preview: file.preview,
+  };
+}
+
+/** Resolve the chronologically latest usable image in the current session. */
+function findLatestSessionImage(messages: RawMessage[]): PendingImageInput | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const files = messages[messageIndex]?._attachedFiles ?? [];
+    for (let fileIndex = files.length - 1; fileIndex >= 0; fileIndex -= 1) {
+      const image = toPendingImageInput(files[fileIndex]!);
+      if (image) return image;
+    }
+  }
+  return null;
+}
+
+/** Restrict implicit media reuse to clear requests that edit an existing image. */
+function isImageEditRequest(prompt: string): boolean {
+  const normalized = prompt.trim();
+  if (!normalized) return false;
+  const editAction = /(?:修改|编辑|修图|美化|重绘|去掉|删除|移除|替换|改成|调整|换成|变成|edit|modify|retouch|remove|replace|change|adjust)/i;
+  const addAction = /(?:添加|加上|add)/i;
+  const imageTarget = /(?:图片|图像|照片|画面|这张图|这幅图|上一张图|刚才的图|这张照片|上一张照片|image|picture|photo|this image|this picture|this photo|previous image|last image)/i;
+  const chinesePriorReference = /(?:这张|这幅|上一张|刚才那张|它)/;
+  const englishPriorReference = /\b(?:this|that|previous|last|it)\b/i;
+  const refersToExistingImage = chinesePriorReference.test(normalized) || englishPriorReference.test(normalized);
+  return (editAction.test(normalized) && (imageTarget.test(normalized) || refersToExistingImage))
+    || (addAction.test(normalized) && imageTarget.test(normalized) && refersToExistingImage);
+}
+
 type GatewayTurnPreferences = {
   mode: ChatSendMode;
   image?: {
@@ -3742,6 +3780,24 @@ function upsertSessionWithModel(
   ];
 }
 
+function upsertSessionWithThinking(
+  sessions: ChatSession[],
+  sessionKey: string,
+  thinkingLevel: string | null,
+  updatedAt: number,
+): ChatSession[] {
+  const normalizedThinkingLevel = thinkingLevel?.trim() || undefined;
+  let found = false;
+  const nextSessions = sessions.map((session) => {
+    if (session.key !== sessionKey) return session;
+    found = true;
+    return { ...session, thinkingLevel: normalizedThinkingLevel, updatedAt };
+  });
+  return found
+    ? nextSessions
+    : [...nextSessions, { key: sessionKey, displayName: sessionKey, thinkingLevel: normalizedThinkingLevel, updatedAt }];
+}
+
 function upsertSessionWithCwd(
   sessions: ChatSession[],
   sessionKey: string,
@@ -3798,6 +3854,30 @@ async function persistSessionModelSelection(
     model: normalizedModelRef,
   });
   return buildEffectiveSessionModelRef(patched) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+}
+
+async function persistSessionThinkingSelection(
+  sessionKey: string,
+  thinkingLevel: string | null,
+): Promise<string | null> {
+  const normalizedThinkingLevel = thinkingLevel?.trim() || null;
+  if (_pendingLocalSessionKeys.has(sessionKey)) {
+    const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+      key: sessionKey,
+      agentId: getAgentIdFromSessionKey(sessionKey),
+      thinkingLevel: normalizedThinkingLevel,
+    });
+    _pendingLocalSessionKeys.delete(sessionKey);
+    const resolved = created.entry?.thinkingLevel;
+    return typeof resolved === 'string' && resolved.trim() ? resolved.trim() : normalizedThinkingLevel;
+  }
+
+  const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+    key: sessionKey,
+    thinkingLevel: normalizedThinkingLevel,
+  });
+  const resolved = patched.entry?.thinkingLevel;
+  return typeof resolved === 'string' && resolved.trim() ? resolved.trim() : normalizedThinkingLevel;
 }
 
 function mergeSessionRowWithLocalState(
@@ -4600,6 +4680,37 @@ function postUserSegmentMessages(filteredMessages: RawMessage[]): RawMessage[] {
   return [];
 }
 
+/** A tool failure is non-blocking only after the same turn has produced a visible final reply. */
+function hasToolActivityAfterLastUser(messages: RawMessage[]): boolean {
+  return postUserSegmentMessages(messages).some((message) => (
+    message.role === 'assistant'
+    && (hasPendingToolUse(message) || isToolOnlyMessage(message))
+  ));
+}
+
+function hasUserVisibleFinalReplyAfterLastUser(messages: RawMessage[]): boolean {
+  return postUserSegmentMessages(messages).some((message) => (
+    message.role === 'assistant'
+    && !hasPendingToolUse(message)
+    && !isToolOnlyMessage(message)
+    && !isInternalMessage(message)
+    && messageHasDeliverableContent(message)
+  ));
+}
+
+function shouldSuppressToolTerminalError(
+  messages: RawMessage[],
+  streamingMessage: RawMessage | null,
+  runId: string,
+): boolean {
+  const streamSnapshot = snapshotStreamingAssistantMessage(streamingMessage, messages, runId);
+  const messagesWithStreamSnapshot = streamSnapshot.length > 0
+    ? [...messages, ...streamSnapshot]
+    : messages;
+  return hasToolActivityAfterLastUser(messagesWithStreamSnapshot)
+    && hasUserVisibleFinalReplyAfterLastUser(messagesWithStreamSnapshot);
+}
+
 /** Segment after the user turn that matches the in-flight send (not prior history). */
 function getOpenRunSegmentFromHistory(
   filteredMessages: RawMessage[],
@@ -5019,6 +5130,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
               derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
               lastMessagePreview: s.lastMessagePreview ? String(s.lastMessagePreview) : undefined,
               thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
+              thinkingLevels: Array.isArray(s.thinkingLevels)
+                ? s.thinkingLevels.flatMap((level) => {
+                    if (typeof level === 'string' && level.trim()) return [{ id: level.trim() }];
+                    if (level && typeof level === 'object' && typeof (level as { id?: unknown }).id === 'string') {
+                      const id = (level as { id: string }).id.trim();
+                      if (!id) return [];
+                      const label = typeof (level as { label?: unknown }).label === 'string'
+                        ? (level as { label: string }).label.trim()
+                        : undefined;
+                      return [{ id, ...(label ? { label } : {}) }];
+                    }
+                    return [];
+                  })
+                : undefined,
+              thinkingDefault: typeof s.thinkingDefault === 'string' && s.thinkingDefault.trim()
+                ? s.thinkingDefault.trim()
+                : undefined,
               reasoningLevel: s.reasoningLevel ? String(s.reasoningLevel) : undefined,
               model: buildSessionModelRef(s.model, s.modelProvider),
               cwd: typeof s.cwd === 'string' && s.cwd.trim() ? s.cwd.trim() : undefined,
@@ -5370,6 +5498,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     } catch (error) {
       set({ sessions: previousSessions });
+      throw error;
+    }
+  },
+
+  updateSessionThinking: async (key: string, thinkingLevel: string | null) => {
+    const normalizedThinkingLevel = thinkingLevel?.trim() || null;
+    const previousSessions = get().sessions;
+    const previousThinkingLevel = get().thinkingLevel;
+    set((state) => ({
+      sessions: upsertSessionWithThinking(state.sessions, key, normalizedThinkingLevel, Date.now()),
+      ...(state.currentSessionKey === key ? { thinkingLevel: normalizedThinkingLevel } : {}),
+    }));
+
+    try {
+      const effectiveThinkingLevel = await persistSessionThinkingSelection(key, normalizedThinkingLevel);
+      set((state) => ({
+        sessions: upsertSessionWithThinking(state.sessions, key, effectiveThinkingLevel, Date.now()),
+        ...(state.currentSessionKey === key ? { thinkingLevel: effectiveThinkingLevel } : {}),
+      }));
+    } catch (error) {
+      set({ sessions: previousSessions, thinkingLevel: previousThinkingLevel });
       throw error;
     }
   },
@@ -6418,6 +6567,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         stagedPath: file.stagedPath,
         preview: file.preview,
       }));
+    const requestedImageEdit = isImageEditRequest(trimmed);
+    const latestSessionImage = requestedImageEdit && explicitPendingImages.length === 0
+      ? findLatestSessionImage(enrichWithCachedImages(get().messages))
+      : null;
 
     // Add user message optimistically before planner/tool routing so the UI
     // acknowledges the submitted intent immediately.
@@ -6458,6 +6611,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     };
 
+    if (requestedImageEdit && explicitPendingImages.length === 0 && !latestSessionImage) {
+      const { default: i18n } = await import('@/i18n');
+      const assistantMsg: RawMessage = {
+        role: 'assistant',
+        content: i18n.t('composer.imageEditMissingReference', { ns: 'chat' }),
+        timestamp: Date.now() / 1000,
+        id: crypto.randomUUID(),
+      };
+      set((state) => ({
+        messages: [...state.messages, assistantMsg],
+        sending: false,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
+        activeRunId: null,
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+      }));
+      clearSendGenerationIfCurrent();
+      markSessionRunIdle(currentSessionKey);
+      return;
+    }
+
     rememberPendingRuntimeIntent(currentSessionKey, {
       objective: trimmed,
       mode,
@@ -6475,7 +6654,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
     // Every new turn belongs to the native OpenClaw agent loop.
-    const gatewayReferenceImages = explicitPendingImages;
+    const gatewayReferenceImages = explicitPendingImages.length > 0
+      ? explicitPendingImages
+      : (latestSessionImage ? [latestSessionImage] : []);
     const runtimeMessage = trimmed;
     const effectiveMode: ChatSendMode = mode;
     commitSessionRunState(set, get, currentSessionKey, {
@@ -6639,7 +6820,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const idempotencyKey = crypto.randomUUID();
       const thinkingLevel = get().thinkingLevel ?? undefined;
-      const chatMediaAttachments = attachments ?? [];
+      const chatMediaAttachments = [
+        ...(attachments ?? []),
+        ...gatewayReferenceImages
+          .filter((image) => !(attachments ?? []).some((attachment) => attachment.stagedPath === image.stagedPath))
+          .map((image) => ({
+            fileName: image.fileName,
+            mimeType: image.mimeType,
+            fileSize: image.fileSize,
+            stagedPath: image.stagedPath,
+            preview: image.preview,
+          })),
+      ];
       const hasMedia = chatMediaAttachments.length > 0;
       const clientPreferences = buildGatewayTurnPreferences({
         mode: effectiveMode,
@@ -7489,18 +7681,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const commitRuntimeError = () => {
           const currentStream = get().streamingMessage as RawMessage | null;
+          const currentMessages = get().messages;
           const errorSnapshot = snapshotStreamingAssistantMessage(
             currentStream,
-            get().messages,
+            currentMessages,
             `error-${runId || Date.now()}`,
           );
-          if (errorSnapshot.length > 0) {
-            set((s) => ({
-              messages: [...s.messages, ...errorSnapshot],
-            }));
-          }
+          const messagesWithErrorSnapshot = errorSnapshot.length > 0
+            ? [...currentMessages, ...errorSnapshot]
+            : currentMessages;
+          const suppressGlobalError = !terminalAssistantError
+            && !replySessionInitConflict
+            && shouldSuppressToolTerminalError(messagesWithErrorSnapshot, null, `error-${runId || Date.now()}`);
 
           set({
+            ...(errorSnapshot.length > 0 ? { messages: messagesWithErrorSnapshot } : {}),
             runtimeRuns: runId
               ? applyRuntimeContractEvents(
                   get().runtimeRuns,
@@ -7514,8 +7709,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   } satisfies ChatRuntimeEvent],
                 )
               : get().runtimeRuns,
-            error: terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
-            runError: terminalAssistantError || replySessionInitConflict ? normalizedErrorMsg : null,
+            error: suppressGlobalError || terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
+            runError: suppressGlobalError
+              ? null
+              : terminalAssistantError || replySessionInitConflict
+                ? normalizedErrorMsg
+                : null,
             sending: false,
             pendingImageGenerationLocal: false,
             pendingVideoGenerationLocal: false,
@@ -7790,7 +7989,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         nextPatch.streamingTools = shouldKeepLifecycle ? latestState.streamingTools : [];
         if (eventForSession.status === 'error' && eventForSession.error) {
           nextPatch.error = null;
-          nextPatch.runError = normalizeChatRunErrorMessage(eventForSession.error);
+          nextPatch.runError = shouldSuppressToolTerminalError(
+            latestState.messages,
+            latestState.streamingMessage as RawMessage | null,
+            eventForSession.runId,
+          )
+            ? null
+            : normalizeChatRunErrorMessage(eventForSession.error);
         }
         if (eventForSession.status === 'aborted') {
           nextPatch.streamingMessage = null;

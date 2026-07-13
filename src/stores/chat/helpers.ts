@@ -1572,6 +1572,22 @@ function messageHasToolUse(msg: { role?: unknown; content?: unknown; tool_calls?
   return Array.isArray(toolCalls) && toolCalls.length > 0;
 }
 
+/** OpenClaw marks inter-session internal context with structured provenance metadata. */
+function hasInternalProvenance(msg: { provenance?: unknown }): boolean {
+  const provenance = msg.provenance;
+  return Boolean(
+    provenance
+    && typeof provenance === 'object'
+    && (provenance as { kind?: unknown }).kind === 'inter_session',
+  );
+}
+
+function messageHasRenderableMedia(msg: { content?: unknown; _attachedFiles?: unknown }): boolean {
+  if (Array.isArray(msg._attachedFiles) && msg._attachedFiles.length > 0) return true;
+  if (!Array.isArray(msg.content)) return false;
+  return (msg.content as ContentBlock[]).some((block) => block.type === 'image');
+}
+
 /** True for internal plumbing messages that should never be shown in the UI. */
 function isInternalMessage(msg: {
   role?: unknown;
@@ -1579,12 +1595,18 @@ function isInternalMessage(msg: {
   text?: unknown;
   model?: unknown;
   idempotencyKey?: unknown;
+  provenance?: unknown;
+  _attachedFiles?: unknown;
+  tool_calls?: unknown;
+  toolCalls?: unknown;
 }): boolean {
   if (msg.role === 'system') return true;
+  if (hasInternalProvenance(msg)) return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
     if (isInternalAssistantReplyText(text)) return true;
     if (isGeneratingStatusNarration(text)) return true;
+    if (!text.trim() && !messageHasToolUse(msg) && !messageHasRenderableMedia(msg)) return true;
     const idempotencyKey = typeof msg.idempotencyKey === 'string' ? msg.idempotencyKey : '';
     const isGatewayInjectedFallback = msg.model === 'gateway-injected'
       && idempotencyKey.endsWith(':assistant-media');
@@ -1614,7 +1636,8 @@ function isInternalMessage(msg: {
  * text is internal narration (e.g. "生成中，稍等" + `image_generate`). Those
  * turns power the execution graph and run lifecycle detection.
  */
-function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown }): boolean {
+function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; provenance?: unknown; _attachedFiles?: unknown; tool_calls?: unknown; toolCalls?: unknown }): boolean {
+  if (hasInternalProvenance(msg)) return true;
   if (isToolResultRole(msg.role)) return true;
   if (messageHasToolUse(msg)) return false;
   return isInternalMessage(msg);

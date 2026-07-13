@@ -1,7 +1,7 @@
 import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
 
-const alphaModelRef = 'lingzhiwuxian/smart-latest';
-const betaModelRef = 'lingzhiwuxian/qwen-latest';
+const alphaModelRef = 'openai/smart-latest';
+const betaModelRef = 'openai/qwen-latest';
 const managedClientModelOptions = {
   text: {
     defaultModel: 'smart-latest',
@@ -50,6 +50,7 @@ test.describe('ClawX chat model picker', () => {
         const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
         let currentSessionModelRef = refs.alphaModelRef;
+        let currentSessionThinkingLevel: string | null = null;
         const hostRequests: Array<{ path: string; method: string; body: unknown }> = [];
         const now = new Date().toISOString();
         const makeResponse = (json: unknown, status = 200) => ({
@@ -97,19 +98,27 @@ test.describe('ClawX chat model picker', () => {
                   key: 'agent:main:main',
                   displayName: 'main',
                   model: currentSessionModelRef,
+                  thinkingLevel: currentSessionThinkingLevel ?? undefined,
+                  thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'],
+                  thinkingDefault: 'high',
                 }],
               },
             };
           }
           if (method === 'sessions.patch') {
-            const request = params as { key?: string; model?: string | null };
-            currentSessionModelRef = request.model ?? refs.alphaModelRef;
+            const request = params as { key?: string; model?: string | null; thinkingLevel?: string | null };
+            if ('model' in request) {
+              currentSessionModelRef = request.model ?? refs.alphaModelRef;
+            }
+            if ('thinkingLevel' in request) {
+              currentSessionThinkingLevel = request.thinkingLevel ?? null;
+            }
             return {
               success: true,
               result: {
                 ok: true,
                 key: request.key ?? 'agent:main:main',
-                entry: {},
+                entry: currentSessionThinkingLevel ? { thinkingLevel: currentSessionThinkingLevel } : {},
                 resolved: {
                   modelProvider: currentSessionModelRef.split('/')[0],
                   model: currentSessionModelRef.split('/').slice(1).join('/'),
@@ -226,7 +235,13 @@ test.describe('ClawX chat model picker', () => {
       await expect(page.getByTestId('chat-image-options')).toBeVisible();
       await expect(page.getByTestId('chat-video-options')).toHaveCount(0);
       await expect(page.getByTestId('chat-image-model')).toHaveCount(0);
-      await expect(await page.getByTestId('chat-image-size').locator('option').allTextContents()).toEqual(['1K', '2K', '4K']);
+      await page.getByTestId('chat-image-aspect-trigger').click();
+      const aspectMenu = page.getByTestId('chat-image-aspect-menu');
+      await expect(aspectMenu).toBeVisible();
+      await expect(aspectMenu.getByRole('menuitemradio')).toHaveCount(5);
+      await expect(aspectMenu).toHaveCSS('width', '138px');
+      await page.getByTestId('chat-image-aspect-9-16').click();
+      await expect(page.getByTestId('chat-image-aspect-trigger')).toContainText('9:16');
 
       await page.getByTestId('chat-composer-mode-video').click();
       await expect(page.getByTestId('chat-video-options')).toBeVisible();
@@ -238,6 +253,10 @@ test.describe('ClawX chat model picker', () => {
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
       await expect(page.getByTestId('chat-model-picker-menu')).toContainText('通义千问');
       await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: '通义千问' }).click();
+
+      await page.getByTestId('chat-thinking-picker-button').click();
+      await expect(page.getByTestId('chat-thinking-picker-menu')).toBeVisible();
+      await page.getByTestId('chat-thinking-option-medium').click();
 
       await expect.poll(async () => app.evaluate(() => (
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []
@@ -262,6 +281,11 @@ test.describe('ClawX chat model picker', () => {
         path: 'gateway:sessions.patch',
         method: 'RPC',
         body: { key: 'agent:main:main', model: betaModelRef },
+      });
+      expect(requests).toContainEqual({
+        path: 'gateway:sessions.patch',
+        method: 'RPC',
+        body: { key: 'agent:main:main', thinkingLevel: 'medium' },
       });
       expect(requests.some((request) =>
         request.path === '/api/agents/main/model'

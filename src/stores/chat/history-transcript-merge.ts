@@ -109,6 +109,10 @@ function mergeTranscriptMetadata(
     next.model = transcriptMessage.model;
     changed = true;
   }
+  if (!next.provenance && transcriptMessage.provenance) {
+    next.provenance = { ...transcriptMessage.provenance };
+    changed = true;
+  }
   if ((next._attachedFiles?.length ?? 0) === 0 && (transcriptMessage._attachedFiles?.length ?? 0) > 0) {
     next._attachedFiles = cloneAttachedFilesFromTranscript(transcriptMessage);
     changed = true;

@@ -499,6 +499,15 @@ function ensureFreeWebSearchProviderInConfig(config: Record<string, unknown>): b
   return modified;
 }
 
+/** Enable the compact Tool Search directory mode unless the user configured it. */
+function ensureToolSearchDirectoryDefaultInConfig(config: Record<string, unknown>): boolean {
+  const tools = isPlainRecord(config.tools) ? { ...config.tools } : {};
+  if (tools.toolSearch !== undefined) return false;
+  tools.toolSearch = { enabled: true, mode: 'directory' };
+  config.tools = tools;
+  return true;
+}
+
 function removePluginRegistrations(
   config: Record<string, unknown>,
   pluginIds: string[],
@@ -3342,6 +3351,9 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     }
     // ── web_search provider (key-free default) ──
     if (ensureFreeWebSearchProviderInConfig(config)) {
+      modified = true;
+    }
+    if (ensureToolSearchDirectoryDefaultInConfig(config)) {
       modified = true;
     }
     if (ensureManagedHeartbeatIsolationInConfig(config)) {

@@ -1,7 +1,7 @@
 import type { ClientModelOptionsConfig } from '@/stores/client-config';
 
-export const MANAGED_TEXT_PROVIDER_KEY = 'lingzhiwuxian';
-export const MANAGED_TEXT_PROVIDER_KEYS = ['lingzhiwuxian', 'openai'] as const;
+export const MANAGED_TEXT_PROVIDER_KEY = 'openai';
+export const MANAGED_TEXT_PROVIDER_KEYS = ['openai', 'lingzhiwuxian'] as const;
 export const DEFAULT_MANAGED_TEXT_MODEL_ID = 'smart-latest';
 
 type TextModelOptionLike = {

@@ -6,6 +6,7 @@ taskType: runtime-bridge
 intent: Migrate the ClawBox-style startup, activation, authorization, built-in model provider, skill list, WeChat plugin install, and Windows portable experience into ClawX without requiring users to manually add a provider or paste an API key.
 touchedAreas:
   - harness/specs/tasks/junfeiai-built-in-provider.md
+  - PROJECT_MAP.md
   - .env.example
   - src/lib/host-api.ts
   - src/lib/providers.ts
@@ -35,6 +36,8 @@ touchedAreas:
   - electron/utils/junfeiai-device.ts
   - electron/utils/junfeiai-distribution.ts
   - electron/utils/openclaw-auth.ts
+  - shared/junfeiai-endpoints.json
+  - shared/junfeiai-endpoints.ts
   - electron/utils/secure-storage.ts
   - electron/utils/skill-config.ts
   - electron-builder.yml
@@ -67,7 +70,8 @@ expectedUserBehavior:
   - A clean Windows install or portable unzip starts with JunFeiAI as the built-in model provider and does not require users to add a provider or paste an API key.
   - Startup calls `https://zz-cn.lingzhiwuxian.com/api/clawx/bootstrap`, then uses `/api/clawx/*` for activation, login/register, verify, device unregister, and relay-token flows.
   - The returned relay credential is saved through ClawX secure secret storage and never shown in plaintext settings, logs, or UI.
-  - The runtime writes a Gateway-valid JunFeiAI provider entry pointing at `https://zz-cn.lingzhiwuxian.com/v1`, with the server-provided default model and API protocol.
+  - The runtime writes a Gateway-valid JunFeiAI provider entry pointing at the shared configured origin's `/v1`, with the server-provided default model and the shared `openai-responses` protocol.
+  - Development and packaged execution read the same JunFeiAI origin, context window, and protocol from `shared/junfeiai-endpoints.json`; environment-only development overrides are not applied.
   - If the authorization server is unreachable, ClawX allows short offline use only when the last successful verify is inside the server-provided grace window.
   - If the server rejects auth, entitlement, or device state, ClawX does not use offline grace and blocks model access.
   - The Settings provider add/manual-key flow is hidden or disabled for the JunFeiAI distribution while the app still keeps provider internals testable.
@@ -97,7 +101,7 @@ requiredTests:
   - tests/e2e/provider-lifecycle.spec.ts
   - tests/e2e/skills-gateway-readiness.spec.ts
 acceptance:
-  - JunFeiAI provider metadata is represented as a first-class built-in/provider-account type or as a locked managed account with `baseUrl=https://zz-cn.lingzhiwuxian.com/v1`, a Gateway-valid `apiProtocol`, and a server-provided default model.
+  - JunFeiAI provider metadata is represented as a first-class built-in/provider-account type or as a locked managed account with the shared configured `/v1` base URL, `apiProtocol=openai-responses`, and a server-provided default model.
   - Manual provider creation and API-key entry are hidden for the JunFeiAI distribution, but renderer code still respects the Main-owned provider/account APIs instead of adding direct IPC or direct Gateway HTTP calls.
   - A ClawX auth client in the Main process calls `/api/clawx/bootstrap`, `/api/clawx/activation/check`, `/api/clawx/register`, `/api/clawx/login`, `/api/clawx/auth/verify`, `/api/clawx/auth/unregister-device`, and `/api/clawx/relay-token` through a single transport module with redacted logging.
   - Relay credentials are stored through `electron/services/secrets/secret-store.ts` and injected into OpenClaw runtime only through existing provider runtime sync helpers.
@@ -131,7 +135,7 @@ The backend compatibility contract is tracked in Sub2API as
 ## Scope
 
 - Add a Main-owned ClawX auth/activation client for `https://zz-cn.lingzhiwuxian.com/api/clawx/*`.
-- Bootstrap and lock the JunFeiAI provider configuration before Gateway startup.
+- Bootstrap the managed account before Gateway startup while taking its origin, context window, and `openai-responses` protocol from the shared endpoint configuration.
 - Persist relay credentials only through the existing secret-store path.
 - Record authorization verify state for offline grace without storing secrets in plaintext.
 - Hide or disable manual provider add/API-key entry for the JunFeiAI distribution.
@@ -149,9 +153,10 @@ The backend compatibility contract is tracked in Sub2API as
 
 ## Implementation Notes
 
-- Prefer `openai-responses` for JunFeiAI/Sub2API. Use a server-provided OpenAI
-  protocol from bootstrap only after validating it against the OpenClaw allowlist
-  before writing config.
+- Use `openai-responses` for JunFeiAI/Sub2API from
+  `shared/junfeiai-endpoints.json`. Bootstrap values cannot override the
+  configured origin or protocol, so development and packaged runtime behavior
+  remains identical.
 - Device id is not a secret. Access token, refresh token, relay token, and API key
   are secrets.
 - Offline grace is a client-side availability rule, not a license bypass. It must
