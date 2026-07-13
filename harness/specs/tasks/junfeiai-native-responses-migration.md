@@ -13,21 +13,35 @@ touchedAreas:
   - electron/services/providers/provider-runtime-sync.ts
   - electron/services/providers/provider-service.ts
   - electron/utils/junfeiai-distribution.ts
+  - electron/utils/json-file-io.ts
+  - electron/utils/channel-config.ts
   - electron/utils/openclaw-image-generation.ts
   - electron/utils/openclaw-video-generation.ts
   - electron/utils/openclaw-auth.ts
+  - electron/utils/skill-config.ts
+  - electron/gateway/reload-policy.ts
   - shared/junfeiai-endpoints.json
+  - shared/junfeiai-endpoints.ts
   - scripts/openclaw-responses-compatible-fallback-patch.mjs
   - scripts/junfeiai-distribution-defaults.test.ts
+  - scripts/junfeiai-reasoning-defaults.test.ts
   - scripts/managed-runtime-bootstrap.test.ts
+  - scripts/json-file-io.test.ts
   - scripts/bundle-openclaw.mjs
   - scripts/openai-chat-migration.test.ts
   - scripts/patch-browser-hint.mjs
+  - src/pages/Chat/ChatInput.tsx
+  - src/stores/chat.ts
   - src/components/settings/ProvidersSettings.tsx
+  - tests/e2e/chat-model-picker.spec.ts
   - src/i18n/locales/en/settings.json
   - src/i18n/locales/zh/settings.json
   - src/i18n/locales/ja/settings.json
   - src/i18n/locales/ru/settings.json
+  - README.md
+  - README.zh-CN.md
+  - README.ja-JP.md
+  - README.ru-RU.md
 requiredProfiles:
   - fast
   - comms
@@ -40,9 +54,9 @@ requiredRules:
   - comms-regression
 expectedUserBehavior:
   - Existing managed users are migrated automatically during startup before Gateway reads the runtime config; ambiguous personal OpenAI ownership is never overwritten and remains available for explicit user handling.
-  - After migration, normal chat uses `openai/smart-latest` with `api: openai-responses`, the embedded `pi` Agent runtime, `thinkingDefault: xhigh`, and `reasoningDefault: on`.
+  - After migration, normal chat uses `openai/smart-latest` with `api: openai-responses`, the embedded `pi` Agent runtime, the configured thinking default, and `reasoningDefault: on`.
   - Clean and existing managed UClaw environments automatically converge on `openai/smart-latest` before Gateway startup when the reserved `openai` provider is not occupied by a personal endpoint.
-  - Normal chat uses `api: openai-responses`, the embedded `pi` Agent runtime, a 372000-token managed context window, `thinkingDefault: xhigh`, and `reasoningDefault: on`.
+  - Normal chat uses `api: openai-responses`, the embedded `pi` Agent runtime, a 372000-token managed context window, the configured thinking default, and `reasoningDefault: on`.
   - A personal OpenAI provider is never overwritten; that conflict keeps the compatible legacy provider active and leaves the explicit migration action available for user resolution.
   - Managed image and video providers, plugins, authentication, and default models are ready before the first native Agent turn instead of depending on a prior settings-page save or media request.
   - Image, video, PPT, desktop, and long-task execution continue through the current unified OpenClaw Agent and Host Task paths; the migration does not restore renderer-owned media planners.
@@ -51,9 +65,11 @@ acceptance:
   - The migration creates or updates the managed `openai` account with the JunFeiAI relay base URL and `openai-responses`, then rewrites only `lingzhiwuxian/*` model references in OpenClaw config, agent model files, and session indexes.
   - The target `openai` provider is ready before legacy provider refs or credentials are removed, and the migration completion flag is written only after all rewrites succeed.
   - Re-running the migration is idempotent and preserves unrelated providers, sessions, models, media providers, tools, plugins, and task state.
-  - Managed OpenAI relay entries remain pinned to `agentRuntime.id = pi` and retain UClaw's `xhigh` reasoning defaults.
+  - Managed OpenAI relay entries remain pinned to `agentRuntime.id = pi` and use the configured reasoning default.
   - New managed bootstrap remains compatible with legacy accounts; startup migration changes persisted provider/model references only after managed auth and relay configuration are ready.
   - Managed startup runs the migration and media bootstrap idempotently before Gateway auto-start when authentication and the relay token are ready.
+  - OpenClaw config writers atomically replace complete JSON documents, and readers retry a transient parse failure instead of treating a partial file as an empty configuration.
+  - Gateway auto-start reuses an already completed managed-provider preflight result instead of immediately running a second equivalent runtime sync.
   - Legacy `lingzhiwuxian` remains a Chat Completions compatibility provider, while managed `openai` remains the only native Responses provider and the only provider eligible for the narrow 404 fallback.
   - The managed runtime contract version changes when the shipped protocol or context defaults change, forcing existing persisted accounts to resync.
   - A clean state receives `clawx-openai-image/gpt-image-2`, the managed OpenAI video models, disabled automatic media-provider fallback, and the required plugin registrations without a manual settings action.
@@ -68,7 +84,7 @@ docs:
 
 - Import the provider migration and native Responses transport behavior from
   `feature/weige-1.0.0`.
-- Keep the current branch's context window, `xhigh` reasoning, native media
+- Keep the current branch's context window, configured reasoning default, native media
   Agent loop, durable Host Tasks, idempotency, recovery, and artifact checks.
 - Do not import the weige renderer media-intent planner, video route planner,
   in-memory media job ownership, fixed production-only development endpoints,

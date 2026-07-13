@@ -17,6 +17,7 @@ import * as logger from './logger';
 import { proxyAwareFetch } from './proxy-fetch';
 import { withConfigLock } from './config-mutex';
 import { parseJsonWithBom } from './json';
+import { readJsonFileWithRetry, writeJsonFileAtomically } from './json-file-io';
 import {
     OPENCLAW_WECHAT_CHANNEL_TYPE,
     isWechatChannelType,
@@ -487,38 +488,35 @@ export async function readOpenClawConfig(): Promise<OpenClawConfig> {
     await ensureConfigDir();
 
     const configFile = getOpenClawConfigPath();
-    if (!(await fileExists(configFile))) {
-        return {};
-    }
-
     try {
-        const content = await readFile(configFile, 'utf-8');
-        return parseJsonWithBom<OpenClawConfig>(content);
+        return (await readJsonFileWithRetry<OpenClawConfig>(configFile)) ?? {};
     } catch (error) {
         logger.error('Failed to read OpenClaw config', error);
         console.error('Failed to read OpenClaw config:', error);
-        return {};
+        throw error;
     }
 }
 
 export async function writeOpenClawConfig(config: OpenClawConfig): Promise<void> {
-    await ensureConfigDir();
+    return withConfigLock(async () => {
+        await ensureConfigDir();
 
-    try {
-        // Enable graceful in-process reload authorization for SIGUSR1 flows.
-        const commands =
-            config.commands && typeof config.commands === 'object'
-                ? { ...(config.commands as Record<string, unknown>) }
-                : {};
-        commands.restart = true;
-        config.commands = commands;
+        try {
+            // Enable graceful in-process reload authorization for SIGUSR1 flows.
+            const commands =
+                config.commands && typeof config.commands === 'object'
+                    ? { ...(config.commands as Record<string, unknown>) }
+                    : {};
+            commands.restart = true;
+            config.commands = commands;
 
-        await writeFile(getOpenClawConfigPath(), JSON.stringify(config, null, 2), 'utf-8');
-    } catch (error) {
-        logger.error('Failed to write OpenClaw config', error);
-        console.error('Failed to write OpenClaw config:', error);
-        throw error;
-    }
+            await writeJsonFileAtomically(getOpenClawConfigPath(), config);
+        } catch (error) {
+            logger.error('Failed to write OpenClaw config', error);
+            console.error('Failed to write OpenClaw config:', error);
+            throw error;
+        }
+    });
 }
 
 // ── Channel operations ───────────────────────────────────────────

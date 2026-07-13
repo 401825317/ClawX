@@ -35,6 +35,7 @@ import { toast } from 'sonner';
 import { rendererExtensionRegistry } from '@/extensions/registry';
 import { collectDroppedFiles } from '@/lib/collect-dropped-files';
 import type { ChatImageSendOptions, ChatSendMode, ChatVideoSendOptions } from '@/stores/chat/types';
+import { JUNFEIAI_DEFAULT_THINKING_LEVEL } from '../../../shared/junfeiai-endpoints';
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -94,7 +95,7 @@ const IMAGE_EDIT_SUPPORTED_EXTENSIONS = /\.(jpe?g|jfif|png|webp)$/i;
 const KNOWN_IMAGE_EXTENSIONS = /\.(avif|bmp|gif|heic|heif|jfif|jpe?g|png|svg|tiff?|webp)$/i;
 const COMPOSER_MEDIA_SELECT_CLASS =
   'h-8 rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none';
-const DEFAULT_THINKING_LEVEL = 'high';
+const DEFAULT_THINKING_LEVEL = JUNFEIAI_DEFAULT_THINKING_LEVEL;
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high'] as const;
 const DEFAULT_IMAGE_ASPECT_SIZE = '1024x1024';
 const IMAGE_ASPECT_OPTIONS = [

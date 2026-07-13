@@ -1,5 +1,6 @@
 {
   "productionOrigin": "https://zz-cn.lingzhiwuxian.com",
   "defaultModelContextWindow": 258000,
-  "defaultApiProtocol": "openai-responses"
+  "defaultApiProtocol": "openai-responses",
+  "defaultThinkingLevel": "medium"
 }

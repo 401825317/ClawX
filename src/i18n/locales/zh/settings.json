@@ -94,7 +94,7 @@
     },
     "managedOpenAiMigration": {
       "title": "启用原生 Responses 协议",
-      "desc": "将现有零至无限聊天迁移到 OpenAI Responses，保留当前模型、xhigh 推理和本地 Agent 能力。",
+      "desc": "将现有零至无限聊天迁移到 OpenAI Responses，使用当前模型、配置的推理默认等级和本地 Agent 能力。",
       "activeDesc": "当前聊天已经通过零至无限中转使用原生 OpenAI Responses 协议。",
       "note": "迁移会保留旧协议配置作为兼容回退，完成后自动重启 UClaw。",
       "button": "启用 Responses",

@@ -94,7 +94,7 @@
     },
     "managedOpenAiMigration": {
       "title": "ネイティブ Responses を有効化",
-      "desc": "現在のモデル、xhigh 推論、ローカル Agent 機能を維持したまま、管理チャットを OpenAI Responses に移行します。",
+      "desc": "現在のモデル、設定された推論の既定値、ローカル Agent 機能を使用して、管理チャットを OpenAI Responses に移行します。",
       "activeDesc": "管理チャットは JunFeiAI リレー経由でネイティブ OpenAI Responses を使用しています。",
       "note": "互換用に旧プロトコル設定を保持し、移行後に UClaw を再起動します。",
       "button": "Responses を有効化",

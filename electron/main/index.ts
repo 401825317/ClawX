@@ -110,13 +110,16 @@ async function runManagedOpenAiStartupMigration(): Promise<void> {
 // before the runtime process reads ~/.openclaw/openclaw.json.
 async function syncProviderRuntimeBeforeGatewayStart(
   gatewayManager: GatewayManager,
+  preparedSeed?: Awaited<ReturnType<typeof ensureJunFeiAIProviderSeeded>> | null,
 ): Promise<boolean> {
   if (!isJunFeiAIManagedDistribution()) {
     await syncAllProviderAuthToRuntime();
     return true;
   }
 
-  const seed = await ensureJunFeiAIProviderSeeded({
+  // Reuse the completed preflight seed so Gateway startup does not rewrite the
+  // same runtime config a second time immediately before the process reads it.
+  const seed = preparedSeed ?? await ensureJunFeiAIProviderSeeded({
     gatewayManager,
     syncRuntime: true,
     syncRuntimeOnAuthChange: true,
@@ -700,7 +703,10 @@ async function initialize(): Promise<void> {
   const gatewayAutoStart = await getSetting('gatewayAutoStart');
   if (!isE2EMode && gatewayAutoStart && managedProviderReadyForGateway) {
     try {
-      const runtimeReady = await syncProviderRuntimeBeforeGatewayStart(gatewayManager);
+      const runtimeReady = await syncProviderRuntimeBeforeGatewayStart(
+        gatewayManager,
+        managedProviderStartupSeed,
+      );
       if (runtimeReady) {
         logger.debug('Auto-starting Gateway...');
         await gatewayManager.start({
@@ -745,7 +751,7 @@ async function initialize(): Promise<void> {
         && gatewayManager.getStatus().state === 'stopped'
       ) {
         try {
-          const runtimeReady = await syncProviderRuntimeBeforeGatewayStart(gatewayManager);
+          const runtimeReady = await syncProviderRuntimeBeforeGatewayStart(gatewayManager, seed);
           if (runtimeReady) {
             logger.debug('Auto-starting Gateway after JunFeiAI background verification...');
             await gatewayManager.start({

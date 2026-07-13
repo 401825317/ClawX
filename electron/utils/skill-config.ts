@@ -15,6 +15,7 @@ import { cpAsyncSafe } from './plugin-install';
 import { withConfigLock } from './config-mutex';
 import { isJunFeiAIManagedDistribution } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
+import { readJsonFileWithRetry, writeJsonFileAtomically } from './json-file-io';
 import {
     UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILLS,
     UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET,
@@ -54,15 +55,11 @@ async function fileExists(p: string): Promise<boolean> {
  */
 async function readConfig(): Promise<OpenClawConfig> {
     const configPath = getOpenClawConfigPath();
-    if (!(await fileExists(configPath))) {
-        return {};
-    }
     try {
-        const raw = await readFile(configPath, 'utf-8');
-        return parseJsonWithBom<OpenClawConfig>(raw);
+        return (await readJsonFileWithRetry<OpenClawConfig>(configPath)) ?? {};
     } catch (err) {
         console.error('Failed to read openclaw config:', err);
-        return {};
+        throw err;
     }
 }
 
@@ -70,8 +67,9 @@ async function readConfig(): Promise<OpenClawConfig> {
  * Write the OpenClaw config
  */
 async function writeConfig(config: OpenClawConfig): Promise<void> {
-    const json = JSON.stringify(config, null, 2);
-    await writeFile(getOpenClawConfigPath(), json, 'utf-8');
+    return withConfigLock(async () => {
+        await writeJsonFileAtomically(getOpenClawConfigPath(), config);
+    });
 }
 
 /**

@@ -1,6 +1,7 @@
 import {
   JUNFEIAI_DEFAULT_API_PROTOCOL,
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_DEFAULT_THINKING_LEVEL,
   JUNFEIAI_PRODUCTION_ORIGIN as productionOrigin,
   JUNFEIAI_PRODUCTION_PROVIDER_BASE_URL,
 } from '../../shared/junfeiai-endpoints';
@@ -8,6 +9,7 @@ import {
 export {
   JUNFEIAI_DEFAULT_API_PROTOCOL,
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_DEFAULT_THINKING_LEVEL,
 } from '../../shared/junfeiai-endpoints';
 
 export const JUNFEIAI_PROVIDER_ID = 'lingzhiwuxian';
@@ -18,7 +20,7 @@ export const JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID = 'openai';
 export const JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL = 'openai-responses';
 export const JUNFEIAI_PROVIDER_TIMEOUT_SECONDS = 300;
 export const JUNFEIAI_AUTH_ACCOUNT_ID = 'lingzhiwuxian-auth';
-export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 3;
+export const JUNFEIAI_RUNTIME_CONTRACT_VERSION = 4;
 
 export function normalizeJunFeiAIModelContextWindow(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0

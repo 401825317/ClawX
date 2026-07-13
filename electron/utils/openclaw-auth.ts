@@ -62,6 +62,7 @@ import {
 import {
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_DEFAULT_THINKING_LEVEL,
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_ID,
@@ -70,6 +71,7 @@ import {
   normalizeJunFeiAIModelContextWindow,
 } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
+import { readJsonFileWithRetry, writeJsonFileAtomically } from './json-file-io';
 
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -584,9 +586,7 @@ async function ensureDir(dir: string): Promise<void> {
 /** Read a JSON file, returning `null` on any error. */
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
   try {
-    if (!(await fileExists(filePath))) return null;
-    const raw = await readFile(filePath, 'utf-8');
-    return parseJsonWithBom<T>(raw);
+    return await readJsonFileWithRetry<T>(filePath);
   } catch {
     return null;
   }
@@ -594,8 +594,7 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 
 /** Write a JSON file, creating parent directories if needed. */
 async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
-  await ensureDir(join(filePath, '..'));
-  await writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+  await writeJsonFileAtomically(filePath, data);
 }
 
 // ── Types ────────────────────────────────────────────────────────
@@ -1130,7 +1129,7 @@ async function collectActiveProviderIdsFromConfig(config: Record<string, unknown
 }
 
 async function readOpenClawJson(): Promise<Record<string, unknown>> {
-  return (await readJsonFile<Record<string, unknown>>(getOpenClawConfigPath())) ?? {};
+  return (await readJsonFileWithRetry<Record<string, unknown>>(getOpenClawConfigPath())) ?? {};
 }
 
 async function resolveInstalledFeishuPluginId(): Promise<string | null> {
@@ -1248,18 +1247,20 @@ function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>):
 }
 
 async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
-  normalizeAgentsDefaultsCompactionMode(config);
+  return withConfigLock(async () => {
+    normalizeAgentsDefaultsCompactionMode(config);
 
-  // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
-  const commands = (
-    config.commands && typeof config.commands === 'object'
-      ? { ...(config.commands as Record<string, unknown>) }
-      : {}
-  ) as Record<string, unknown>;
-  commands.restart = true;
-  config.commands = commands;
+    // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
+    const commands = (
+      config.commands && typeof config.commands === 'object'
+        ? { ...(config.commands as Record<string, unknown>) }
+        : {}
+    ) as Record<string, unknown>;
+    commands.restart = true;
+    config.commands = commands;
 
-  await writeJsonFile(getOpenClawConfigPath(), config);
+    await writeJsonFile(getOpenClawConfigPath(), config);
+  });
 }
 
 // ── Exported Functions (all async) ───────────────────────────────
@@ -1481,7 +1482,7 @@ export async function removeProviderFromOpenClaw(provider: string): Promise<void
         const providers = data.providers as Record<string, unknown> | undefined;
         if (providers && providers[provider]) {
           delete providers[provider];
-          await writeFile(modelsPath, JSON.stringify(data, null, 2), 'utf-8');
+          await writeJsonFileAtomically(modelsPath, data);
           console.log(`Removed models.json entry for provider "${provider}" (agent "${id}")`);
         }
       }
@@ -1654,7 +1655,7 @@ export async function setOpenClawDefaultModel(
       fallbacks: fallbackModels,
     };
     if (provider === JUNFEIAI_PROVIDER_ID) {
-      defaults.thinkingDefault = 'xhigh';
+      defaults.thinkingDefault = JUNFEIAI_DEFAULT_THINKING_LEVEL;
       defaults.reasoningDefault = 'on';
     }
     agents.defaults = defaults;
@@ -2056,8 +2057,8 @@ export function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, u
   const agents = isPlainRecord(config.agents) ? config.agents : {};
   const defaults = isPlainRecord(agents.defaults) ? agents.defaults : {};
   let modified = false;
-  if (defaults.thinkingDefault !== 'xhigh') {
-    defaults.thinkingDefault = 'xhigh';
+  if (defaults.thinkingDefault !== JUNFEIAI_DEFAULT_THINKING_LEVEL) {
+    defaults.thinkingDefault = JUNFEIAI_DEFAULT_THINKING_LEVEL;
     agents.defaults = defaults;
     config.agents = agents;
     modified = true;
@@ -2177,7 +2178,7 @@ async function ensureJunFeiAIReasoningCompatInAgentModels(): Promise<void> {
 
     data.providers = providers;
     await writeJsonFile(modelsPath, data);
-    console.log(`Synced xhigh reasoning compatibility for agent "${agentId}"`);
+    console.log(`Synced managed reasoning compatibility for agent "${agentId}"`);
   }
 }
 
@@ -2841,7 +2842,7 @@ export async function setOpenClawDefaultModelWithOverride(
           === getJunFeiAIProviderBaseUrl().replace(/\/+$/, '')
       )
     ) {
-      defaults.thinkingDefault = 'xhigh';
+      defaults.thinkingDefault = JUNFEIAI_DEFAULT_THINKING_LEVEL;
       defaults.reasoningDefault = 'on';
     }
     agents.defaults = defaults;

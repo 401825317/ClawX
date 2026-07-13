@@ -3879,14 +3879,12 @@ async function persistSessionThinkingSelection(
 ): Promise<string | null> {
   const normalizedThinkingLevel = thinkingLevel?.trim() || null;
   if (_pendingLocalSessionKeys.has(sessionKey)) {
-    const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+    // OpenClaw creates the session before it accepts a thinking-level override.
+    await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
       key: sessionKey,
       agentId: getAgentIdFromSessionKey(sessionKey),
-      thinkingLevel: normalizedThinkingLevel,
     });
     _pendingLocalSessionKeys.delete(sessionKey);
-    const resolved = created.entry?.thinkingLevel;
-    return typeof resolved === 'string' && resolved.trim() ? resolved.trim() : normalizedThinkingLevel;
   }
 
   const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {

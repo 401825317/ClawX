@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import { parseJsonWithBom } from '../utils/json';
+import { readJsonFileWithRetry } from '../utils/json-file-io';
 import { getOpenClawConfigPath } from '../utils/paths';
 
 export type GatewayReloadMode = 'hybrid' | 'reload' | 'restart' | 'off';
@@ -53,8 +52,8 @@ export function parseGatewayReloadPolicy(config: unknown): GatewayReloadPolicy {
 
 export async function loadGatewayReloadPolicy(): Promise<GatewayReloadPolicy> {
   try {
-    const raw = await readFile(getOpenClawConfigPath(), 'utf-8');
-    return parseGatewayReloadPolicy(parseJsonWithBom(raw));
+    const config = await readJsonFileWithRetry<unknown>(getOpenClawConfigPath());
+    return parseGatewayReloadPolicy(config);
   } catch {
     return { ...DEFAULT_GATEWAY_RELOAD_POLICY };
   }

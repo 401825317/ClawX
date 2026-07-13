@@ -94,7 +94,7 @@
     },
     "managedOpenAiMigration": {
       "title": "Enable native Responses",
-      "desc": "Migrate managed chat to OpenAI Responses while preserving the current model, xhigh reasoning, and local Agent capabilities.",
+      "desc": "Migrate managed chat to OpenAI Responses with the current model, configured reasoning default, and local Agent capabilities.",
       "activeDesc": "Managed chat is already using native OpenAI Responses through the JunFeiAI relay.",
       "note": "Legacy protocol configuration is retained as a compatibility fallback. UClaw restarts after migration.",
       "button": "Enable Responses",

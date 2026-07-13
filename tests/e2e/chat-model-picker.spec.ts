@@ -1,7 +1,16 @@
 import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
+import endpoints from '../../shared/junfeiai-endpoints.json';
+import zhChat from '../../src/i18n/locales/zh/chat.json';
 
 const alphaModelRef = 'openai/smart-latest';
 const betaModelRef = 'openai/qwen-latest';
+const managedDefaultThinkingLevel = endpoints.defaultThinkingLevel;
+const managedDefaultThinkingLabel = zhChat.composer.thinkingInherit.replace(
+  '{{level}}',
+  zhChat.composer.thinkingLevels[
+    managedDefaultThinkingLevel as keyof typeof zhChat.composer.thinkingLevels
+  ],
+);
 const managedClientModelOptions = {
   text: {
     defaultModel: 'smart-latest',
@@ -42,7 +51,7 @@ const managedClientModelOptions = {
 };
 
 test.describe('ClawX chat model picker', () => {
-  test('switches only the current session model without mutating the agent default', async ({ launchElectronApp }) => {
+  test('switches only the current session model and initializes a new session before setting thinking', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -100,8 +109,22 @@ test.describe('ClawX chat model picker', () => {
                   model: currentSessionModelRef,
                   thinkingLevel: currentSessionThinkingLevel ?? undefined,
                   thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'],
-                  thinkingDefault: 'high',
+                  thinkingDefault: refs.defaultThinkingLevel,
                 }],
+              },
+            };
+          }
+          if (method === 'sessions.create') {
+            const request = params as Record<string, unknown>;
+            if ('thinkingLevel' in request) {
+              return { success: false, error: 'Invalid params for sessions.create: thinkingLevel' };
+            }
+            return {
+              success: true,
+              result: {
+                ok: true,
+                key: typeof request.key === 'string' ? request.key : 'agent:main:main',
+                entry: {},
               },
             };
           }
@@ -127,7 +150,12 @@ test.describe('ClawX chat model picker', () => {
             };
           }
           if (method === 'chat.history') {
-            return { success: true, result: { messages: [] } };
+            return {
+              success: true,
+              result: {
+                messages: [{ role: 'user', content: 'Existing conversation', timestamp: Date.now() }],
+              },
+            };
           }
           return { success: true, result: {} };
         });
@@ -197,7 +225,12 @@ test.describe('ClawX chat model picker', () => {
         });
 
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: typeof hostRequests }).__chatModelPickerRequests = hostRequests;
-      }, { alphaModelRef, betaModelRef, clientModelOptions: managedClientModelOptions });
+      }, {
+        alphaModelRef,
+        betaModelRef,
+        clientModelOptions: managedClientModelOptions,
+        defaultThinkingLevel: managedDefaultThinkingLevel,
+      });
 
       const page = await getStableWindow(app);
       await page.evaluate((modelOptions) => {
@@ -255,7 +288,9 @@ test.describe('ClawX chat model picker', () => {
       await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: '通义千问' }).click();
 
       await page.getByTestId('chat-thinking-picker-button').click();
-      await expect(page.getByTestId('chat-thinking-picker-menu')).toBeVisible();
+      const thinkingMenu = page.getByTestId('chat-thinking-picker-menu');
+      await expect(thinkingMenu).toBeVisible();
+      await expect(thinkingMenu.getByRole('button', { name: managedDefaultThinkingLabel })).toBeVisible();
       await page.getByTestId('chat-thinking-option-medium').click();
 
       await expect.poll(async () => app.evaluate(() => (
@@ -273,6 +308,23 @@ test.describe('ClawX chat model picker', () => {
         win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
       });
       await expect(page.getByTestId('chat-model-picker-button')).toContainText('通义千问');
+      await expect(page.getByText('Existing conversation')).toBeVisible();
+
+      await page.getByTestId('sidebar-new-chat').click();
+      await expect(page.getByTestId('session-bucket-today').getByText(/agent:main:session-/)).toBeVisible();
+      await page.getByTestId('chat-thinking-picker-button').click();
+      await page.getByTestId('chat-thinking-option-high').click();
+      await expect.poll(async () => await app.evaluate(() => (
+        ((globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []).some((request) => (
+          request.path === 'gateway:sessions.patch'
+          && request.method === 'RPC'
+          && typeof request.body === 'object'
+          && request.body !== null
+          && (request.body as Record<string, unknown>).thinkingLevel === 'high'
+        ))
+      ))).toBe(true);
 
       const requests = await app.evaluate(() => (
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []
@@ -286,6 +338,22 @@ test.describe('ClawX chat model picker', () => {
         path: 'gateway:sessions.patch',
         method: 'RPC',
         body: { key: 'agent:main:main', thinkingLevel: 'medium' },
+      });
+      const newSessionCreate = requests.find((request) => (
+        request.path === 'gateway:sessions.create'
+        && request.method === 'RPC'
+        && typeof request.body === 'object'
+        && request.body !== null
+        && typeof (request.body as Record<string, unknown>).key === 'string'
+        && (request.body as Record<string, unknown>).key.startsWith('agent:main:session-')
+      ));
+      expect(newSessionCreate).toBeDefined();
+      const newSessionKey = (newSessionCreate!.body as Record<string, unknown>).key as string;
+      expect(newSessionCreate!.body).toEqual({ key: newSessionKey, agentId: 'main' });
+      expect(requests).toContainEqual({
+        path: 'gateway:sessions.patch',
+        method: 'RPC',
+        body: { key: newSessionKey, thinkingLevel: 'high' },
       });
       expect(requests.some((request) =>
         request.path === '/api/agents/main/model'

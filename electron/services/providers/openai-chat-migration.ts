@@ -1,14 +1,10 @@
 import { constants } from 'fs';
 import {
   access,
-  mkdir,
-  readFile,
   readdir,
-  rename,
   unlink,
-  writeFile,
 } from 'fs/promises';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import type { GatewayManager } from '../../gateway/manager';
 import type { ProviderAccount } from '../../shared/providers/types';
 import { setDefaultProvider } from '../../utils/secure-storage';
@@ -16,7 +12,10 @@ import {
   getOpenClawConfigPath,
   getOpenClawAgentsDir,
 } from '../../utils/paths';
-import { parseJsonWithBom } from '../../utils/json';
+import {
+  readJsonDocumentWithRetry,
+  writeTextFileAtomically,
+} from '../../utils/json-file-io';
 import { withConfigLock } from '../../utils/config-mutex';
 import {
   syncDefaultProviderToRuntime,
@@ -156,15 +155,15 @@ async function readJsonStrict(path: string, missingAsEmpty = false): Promise<{
   data: Record<string, unknown>;
 } | null> {
   try {
-    const original = await readFile(path, 'utf8');
-    return {
-      original,
-      data: original.trim() ? parseJsonWithBom<Record<string, unknown>>(original) : {},
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    const document = await readJsonDocumentWithRetry<Record<string, unknown>>(path);
+    if (document === null) {
       return missingAsEmpty ? { original: null, data: {} } : null;
     }
+    return {
+      original: document.raw,
+      data: document.data,
+    };
+  } catch (error) {
     throw new Error(`Cannot read migration JSON ${path}: ${String(error)}`, { cause: error });
   }
 }
@@ -185,18 +184,6 @@ async function prepareJsonRewrite(path: string, missingAsEmpty = false): Promise
   };
 }
 
-async function writeTextAtomically(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tempPath = `${path}.uclaw-responses-${process.pid}-${Date.now()}.tmp`;
-  await writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600 });
-  try {
-    await rename(tempPath, path);
-  } catch (error) {
-    await unlink(tempPath).catch(() => undefined);
-    throw error;
-  }
-}
-
 async function writePreparedFiles(writes: PreparedJsonWrite[]): Promise<void> {
   const applied: PreparedJsonWrite[] = [];
   try {
@@ -204,10 +191,10 @@ async function writePreparedFiles(writes: PreparedJsonWrite[]): Promise<void> {
       if (write.original !== null) {
         const backupPath = `${write.path}${BACKUP_SUFFIX}`;
         if (!(await pathExists(backupPath))) {
-          await writeFile(backupPath, write.original, { encoding: 'utf8', mode: 0o600 });
+          await writeTextFileAtomically(backupPath, write.original);
         }
       }
-      await writeTextAtomically(write.path, write.next);
+      await writeTextFileAtomically(write.path, write.next);
       applied.push(write);
     }
   } catch (error) {
@@ -215,7 +202,7 @@ async function writePreparedFiles(writes: PreparedJsonWrite[]): Promise<void> {
       if (write.original === null) {
         await unlink(write.path).catch(() => undefined);
       } else {
-        await writeTextAtomically(write.path, write.original).catch(() => undefined);
+        await writeTextFileAtomically(write.path, write.original).catch(() => undefined);
       }
     }
     throw error;
