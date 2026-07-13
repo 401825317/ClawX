@@ -146,6 +146,28 @@ assert.doesNotMatch(video?.command ?? '', /制作电影级汽车宣传片/u);
 assert.equal(actions.some((entry) => entry.text === '已运行' || entry.text === '正在执行'), false);
 assert.equal(actions.some((entry) => /tool_call|tool_describe/iu.test(entry.text)), false);
 
+const failedExecCallId = 'call-failed-exec';
+apply(base({
+  type: 'tool.started',
+  toolCallId: failedExecCallId,
+  name: 'exec',
+  args: { command: 'cat /tmp/missing-result.txt' },
+}));
+apply(base({
+  type: 'tool.completed',
+  toolCallId: failedExecCallId,
+  name: 'exec',
+  result: 'cat: /tmp/missing-result.txt: No such file or directory',
+  isError: true,
+}));
+const failedExec = actionEntries().find((entry) => entry.toolCallId === failedExecCallId);
+assert.equal(failedExec?.translationKey, 'runtimeProgress.toolFailed');
+assert.equal(failedExec?.status, 'error');
+assert.equal(
+  (runs[runId]?.progressEntries ?? []).some((entry) => /No such file or directory/iu.test(entry.text)),
+  false,
+);
+
 apply(base({
   type: 'task.updated',
   task: {

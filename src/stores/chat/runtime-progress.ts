@@ -468,19 +468,6 @@ function recoveredToolProgressEvents(
   });
 }
 
-function buildToolStatusDetail(
-  event: Extract<ChatRuntimeEvent, { type: 'tool.completed' }>,
-  context: RuntimeToolProgressContext,
-): string | undefined {
-  if (toolSemanticState(event, context) !== 'error') return undefined;
-  const envelope = structuredRecordFromUnknown(event.result) ?? structuredRecordFromUnknown(event.meta);
-  const delegated = asRecord(envelope?.result) ?? envelope;
-  const detail = firstString(context.details, ['error', 'message', 'reason', 'detail'])
-    ?? firstString(delegated, ['error', 'message', 'reason', 'detail'])
-    ?? (typeof event.result === 'string' ? normalizeText(event.result) : undefined);
-  return detail ? truncateText(sanitizeRuntimeDisplayText(detail), 180) : undefined;
-}
-
 function commandOutputStatus(event: Extract<ChatRuntimeEvent, { type: 'command.output' }>): ChatRuntimeProgressEntry['status'] {
   const normalized = normalizeText(event.status)?.toLowerCase();
   if (typeof event.exitCode === 'number') return event.exitCode === 0 ? 'completed' : 'error';
@@ -642,21 +629,6 @@ export function buildRuntimeProgressEvents(
       taskId: context.taskId,
       source: 'derived',
     }));
-    const detail = event.type === 'tool.completed'
-      ? buildToolStatusDetail(event, context)
-        ?? (semanticState !== 'completed' ? normalizeText(knownTask?.detail) : undefined)
-      : undefined;
-    if (detail) {
-      nextEvents.push(buildProgressEntryEvent(event, {
-        id: `progress:tool:${progressToolCallId}:status`,
-        kind: 'status',
-        text: detail,
-        status: 'error',
-        toolCallId: progressToolCallId,
-        taskId: context.taskId,
-        source: 'derived',
-      }));
-    }
     return [...recoveryEvents, ...nextEvents];
   }
 

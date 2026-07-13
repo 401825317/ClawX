@@ -185,6 +185,31 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
+      await app.evaluate(({ BrowserWindow }) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('chat:runtime-event', {
+            type: 'tool.started',
+            runId: 'run-e2e',
+            sessionKey: 'agent:main:main',
+            toolCallId: 'call-failed-exec',
+            name: 'exec',
+            args: { command: 'cat /tmp/missing-result.txt' },
+          });
+          win.webContents.send('chat:runtime-event', {
+            type: 'tool.completed',
+            runId: 'run-e2e',
+            sessionKey: 'agent:main:main',
+            toolCallId: 'call-failed-exec',
+            name: 'exec',
+            result: 'cat: /tmp/missing-result.txt: No such file or directory',
+            isError: true,
+          });
+        }
+      });
+
+      await expect(page.getByTestId('chat-run-progress')).toBeVisible();
+      await expect(page.getByTestId('chat-run-progress')).toContainText(/failed|失败/i);
+      await expect(page.getByText(/No such file or directory/i)).toHaveCount(0);
       await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
 
       await app.evaluate(({ BrowserWindow }) => {
