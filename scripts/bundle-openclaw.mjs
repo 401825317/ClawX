@@ -35,6 +35,7 @@ import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
+import { patchOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -1092,6 +1093,17 @@ function patchBundledRuntime(outputDir) {
   });
   if (replySessionInitConflictPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${replySessionInitConflictPatch.patchedFiles} reply-session init runtime file(s)`;
+  }
+
+  // --- Compaction session-state refresh patch ---
+  // When OpenClaw compacts and exits a run before a fresh deliverable usage
+  // snapshot is persisted, keep the session metadata aligned with the post-
+  // compaction state instead of leaving the pre-compaction token count stale.
+  const compactionSessionStatePatch = patchOpenClawCompactionSessionStateRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (compactionSessionStatePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${compactionSessionStatePatch.patchedFiles} compaction session-state runtime file(s)`;
   }
 
   // --- Ordinary session cwd patch ---
