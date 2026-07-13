@@ -3,20 +3,12 @@ id: media-intent-image-edit-routing
 title: Media intent image edit routing
 scenario: gateway-backend-communication
 taskType: runtime-bridge
-intent: Route UClaw chat composer media requests through a Main-owned intent planner so current-image edits use image edit inputs instead of silently becoming text-to-image generation.
+intent: Keep current-image edits in the native Agent turn while binding an unselected edit request to the latest usable image from the same session.
 touchedAreas:
   - harness/specs/tasks/media-intent-image-edit-routing.md
   - src/stores/chat.ts
-  - electron/api/routes/media.ts
-  - electron/utils/media-intent-planner.ts
-  - resources/openclaw-plugins/clawx-openai-image/index.mjs
-  - resources/openclaw-plugins/clawx-openai-image/openclaw.plugin.json
-  - resources/openclaw-plugins/clawx-openai-image/package.json
-  - tests/unit/media-intent-planner.test.ts
-  - tests/unit/chat-target-routing.test.ts
-  - tests/unit/chat-session-model-switch.test.ts
-  - tests/unit/clawx-openai-image-plugin.test.ts
-  - tests/unit/image-generation-chat-send-route.test.ts
+  - electron/api/routes/chat.ts
+  - tests/e2e/native-agent-media-routing.spec.ts
 requiredProfiles:
   - fast
   - comms
@@ -25,31 +17,22 @@ requiredRules:
   - renderer-main-boundary
   - api-client-transport-policy
 expectedUserBehavior:
-  - Chat composer sends prompt, explicit image attachments, recent message image candidates, and recent text context to a Main-owned media intent planner before selecting chat, image, video, screenshot, or clarification behavior.
-  - Prompts that refer to editing the current, previous, or selected image route to image edit only when the planner binds them to a concrete explicit or candidate image.
-  - Current-image edit requests with no usable image context ask the user to upload or select an image instead of falling back to text-to-image generation.
-  - OpenAI-compatible image responses that return image URLs still produce local image outputs instead of being parsed as empty results.
+  - A regular chat request that clearly edits an image and has no explicit image attachment uses the chronologically latest usable image from the same session.
+  - The bound image travels through the existing `gatewayReferenceImages`, media attachment, and client preference contract of one native Agent turn.
+  - A current-image edit request with no usable image context asks the user to upload or select an image and does not start an Agent run.
 acceptance:
-  - Renderer media routing no longer depends on local keyword or regular-expression heuristics for image generation, image editing, or desktop screenshot selection.
-  - POST /api/media/intent-plan returns a normalized plan from Main process and logs the selected action, selected image source, and selected image count.
-  - For `这个图片上能不能加一条狗？` with a recent assistant image, chat send calls image generation chat-send with `inputImages` populated from that image.
-  - For the same prompt without any image context, chat send appends a clarification message and does not call chat send or image generation.
-  - The bundled OpenAI image plugin parses both `b64_json` and URL-based image outputs.
+  - For `把这张图片加一条狗` with a recent session image, the native chat send includes that image as a media reference.
+  - For the same prompt without any image context, the UI appends a clarification message and does not call the native chat send route.
+  - Image/video mode keeps its existing reference resolution and no legacy `/api/media/image-generation/chat-send` route is restored.
 requiredTests:
-  - tests/unit/media-intent-planner.test.ts
-  - tests/unit/chat-target-routing.test.ts
-  - tests/unit/chat-session-model-switch.test.ts
-  - tests/unit/clawx-openai-image-plugin.test.ts
-  - tests/unit/image-generation-chat-send-route.test.ts
+  - tests/e2e/native-agent-media-routing.spec.ts
 docs:
   required: false
 ---
 
 ## Contract
 
-- Prompt text is user intent only. Routing must combine prompt, current
-  composer attachments, recent message image context, and planner output.
-- If the selected action is image edit, a concrete source image is mandatory.
-  Missing source images become clarification, never text-to-image generation.
-- Renderer stays behind `hostApiFetch`; model-backed intent planning and
-  media route logging live in Electron Main.
+- Explicit attachments always take precedence. Only a clear image-edit request
+  may implicitly select the latest session image.
+- Missing source images become clarification, never an implicit text-to-image
+  request. Renderer-to-Main communication remains behind `hostApiFetch`.

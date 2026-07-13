@@ -60,7 +60,12 @@ import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
 import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
-import { ensureJunFeiAIProviderSeeded, getJunFeiAILocalStatus, isJunFeiAISeedReady } from '../services/junfeiai/junfeiai-service';
+import {
+  ensureJunFeiAIProviderSeeded,
+  getJunFeiAILocalStatus,
+  isJunFeiAISeedReady,
+  syncJunFeiAIManagedProviderEndpoint,
+} from '../services/junfeiai/junfeiai-service';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
@@ -514,6 +519,14 @@ async function initialize(): Promise<void> {
     }).catch((error) => {
       logger.warn('[plugin] Failed to preinstall WeChat plugin:', error);
     });
+  }
+
+  if (!isE2EMode && isJunFeiAIManagedDistribution()) {
+    try {
+      await syncJunFeiAIManagedProviderEndpoint();
+    } catch (error) {
+      logger.warn('Failed to migrate managed chat provider to OpenAI Responses:', error);
+    }
   }
 
   let managedProviderReadyForGateway = true;

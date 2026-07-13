@@ -67,7 +67,7 @@ expectedUserBehavior:
   - A clean Windows install or portable unzip starts with JunFeiAI as the built-in model provider and does not require users to add a provider or paste an API key.
   - Startup calls `https://zz-cn.lingzhiwuxian.com/api/clawx/bootstrap`, then uses `/api/clawx/*` for activation, login/register, verify, device unregister, and relay-token flows.
   - The returned relay credential is saved through ClawX secure secret storage and never shown in plaintext settings, logs, or UI.
-  - The runtime writes a Gateway-valid JunFeiAI provider entry pointing at `https://zz-cn.lingzhiwuxian.com/v1`, with the server-provided default model and API protocol.
+  - The runtime writes a Gateway-valid managed `openai` provider entry pointing at `https://zz-cn.lingzhiwuxian.com/v1`, with the server-provided default model and `openai-responses` protocol.
   - If the authorization server is unreachable, ClawX allows short offline use only when the last successful verify is inside the server-provided grace window.
   - If the server rejects auth, entitlement, or device state, ClawX does not use offline grace and blocks model access.
   - The Settings provider add/manual-key flow is hidden or disabled for the JunFeiAI distribution while the app still keeps provider internals testable.
@@ -97,7 +97,7 @@ requiredTests:
   - tests/e2e/provider-lifecycle.spec.ts
   - tests/e2e/skills-gateway-readiness.spec.ts
 acceptance:
-  - JunFeiAI provider metadata is represented as a first-class built-in/provider-account type or as a locked managed account with `baseUrl=https://zz-cn.lingzhiwuxian.com/v1`, a Gateway-valid `apiProtocol`, and a server-provided default model.
+  - JunFeiAI provider metadata is represented as a first-class built-in/provider-account type or as a locked managed `openai` account with `baseUrl=https://zz-cn.lingzhiwuxian.com/v1`, `apiProtocol=openai-responses`, and a server-provided default model.
   - Manual provider creation and API-key entry are hidden for the JunFeiAI distribution, but renderer code still respects the Main-owned provider/account APIs instead of adding direct IPC or direct Gateway HTTP calls.
   - A ClawX auth client in the Main process calls `/api/clawx/bootstrap`, `/api/clawx/activation/check`, `/api/clawx/register`, `/api/clawx/login`, `/api/clawx/auth/verify`, `/api/clawx/auth/unregister-device`, and `/api/clawx/relay-token` through a single transport module with redacted logging.
   - Relay credentials are stored through `electron/services/secrets/secret-store.ts` and injected into OpenClaw runtime only through existing provider runtime sync helpers.

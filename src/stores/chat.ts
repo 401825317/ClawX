@@ -9,7 +9,7 @@ import i18n from '@/i18n';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { getManagedAuthStateKey, isManagedAuthLocallyReady, isManagedAuthReady } from '@/lib/managed-auth';
-import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
+import { MANAGED_TEXT_PROVIDER_KEY, normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
@@ -163,7 +163,12 @@ function ensureManagedAuthReadyForSend(): Promise<void> | null {
   const providerAccounts = Array.isArray(providerState.accounts) ? providerState.accounts : [];
   const shouldEnforce = store.status?.managed === true
     || providerState.defaultAccountId === 'lingzhiwuxian'
-    || providerAccounts.some((account) => account.id === 'lingzhiwuxian');
+    || providerAccounts.some((account) => account.id === 'lingzhiwuxian')
+    || providerAccounts.some((account) => (
+      account.id === MANAGED_TEXT_PROVIDER_KEY
+      && typeof account.metadata?.resourceUrl === 'string'
+      && account.metadata.resourceUrl.includes('lingzhiwuxian.com')
+    ));
   if (!shouldEnforce) {
     return null;
   }
@@ -246,6 +251,18 @@ function normalizePendingImageInput(
   };
 }
 
+/** Resolve the chronologically latest usable image in the current session. */
+function findLatestSessionImage(messages: RawMessage[]): PendingImageInput | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const files = messages[messageIndex]?._attachedFiles ?? [];
+    for (let fileIndex = files.length - 1; fileIndex >= 0; fileIndex -= 1) {
+      const file = files[fileIndex];
+      if (isImageAttachmentFile(file)) return normalizePendingImageInput(file);
+    }
+  }
+  return null;
+}
+
 function resolveImageModeReferenceInputs(
   explicitAttachments: PendingImageInput[] | undefined,
   messages: RawMessage[],
@@ -282,13 +299,24 @@ function shouldLoadFamilyImageReferences(prompt: string, mode: ChatSendMode): bo
   if (mode === 'image' || mode === 'video') {
     return referencesImage || asksAboutImage || editsImage;
   }
-  return referencesImage;
+  return referencesImage || editsImage;
+}
+
+/** Restrict implicit media reuse in chat mode to clear image-edit requests. */
+function isImageEditRequest(prompt: string): boolean {
+  const normalized = prompt.trim();
+  if (!normalized) return false;
+  const editAction = /(?:修改|编辑|修图|美化|重绘|去掉|删除|移除|替换|添加|加上|改成|调整|换成|变成|edit|modify|retouch|remove|replace|add|change|adjust)/i;
+  const imageTarget = /(?:图片|图像|照片|画面|这张图|这幅图|上一张图|刚才的图|这张照片|上一张照片|image|picture|photo|this image|this picture|this photo|previous image|last image)/i;
+  const priorReference = /(?:这张|这幅|上一张|刚才那张|它|this|that|previous|last|it)/i;
+  return editAction.test(normalized) && (imageTarget.test(normalized) || priorReference.test(normalized));
 }
 
 async function loadFamilyImageReferenceInputs(
   sessionKey: string,
   prompt: string,
   mode: ChatSendMode,
+  preferLatest = false,
 ): Promise<PendingImageInput[]> {
   if (!shouldLoadFamilyImageReferences(prompt, mode)) return [];
 
@@ -299,6 +327,10 @@ async function loadFamilyImageReferenceInputs(
     );
     const messagesWithToolImages = enrichWithToolResultFiles(transcriptMessages);
     const enrichedMessages = enrichWithCachedImages(messagesWithToolImages);
+    if (preferLatest) {
+      const latest = findLatestSessionImage(enrichedMessages);
+      return latest ? [latest] : [];
+    }
     return resolveImageModeReferenceInputs([], enrichedMessages);
   } catch (error) {
     console.warn('[chat.media] family image reference fallback failed:', error);
@@ -5155,6 +5187,24 @@ function upsertSessionWithModel(
   ];
 }
 
+function upsertSessionWithThinking(
+  sessions: ChatSession[],
+  sessionKey: string,
+  thinkingLevel: string | null,
+  updatedAt: number,
+): ChatSession[] {
+  const normalizedThinkingLevel = thinkingLevel?.trim() || undefined;
+  let found = false;
+  const nextSessions = sessions.map((session) => {
+    if (session.key !== sessionKey) return session;
+    found = true;
+    return { ...session, thinkingLevel: normalizedThinkingLevel, updatedAt };
+  });
+  return found
+    ? nextSessions
+    : [...nextSessions, { key: sessionKey, displayName: sessionKey, thinkingLevel: normalizedThinkingLevel, updatedAt }];
+}
+
 function upsertSessionWithCwd(
   sessions: ChatSession[],
   sessionKey: string,
@@ -5211,6 +5261,28 @@ async function persistSessionModelSelection(
     model: normalizedModelRef,
   });
   return buildEffectiveSessionModelRef(patched) ?? normalizedModelRef ?? resolveEffectiveAgentModelRefForSession(sessionKey);
+}
+
+async function ensurePendingLocalSessionRegistered(sessionKey: string): Promise<void> {
+  if (!_pendingLocalSessionKeys.has(sessionKey)) return;
+  await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+    key: sessionKey,
+    agentId: getAgentIdFromSessionKey(sessionKey),
+  });
+  _pendingLocalSessionKeys.delete(sessionKey);
+}
+
+async function persistSessionThinkingSelection(
+  sessionKey: string,
+  thinkingLevel: string | null,
+): Promise<string | null> {
+  await ensurePendingLocalSessionRegistered(sessionKey);
+  const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+    key: sessionKey,
+    thinkingLevel,
+  });
+  const resolved = patched.entry?.thinkingLevel;
+  return typeof resolved === 'string' && resolved.trim() ? resolved.trim() : thinkingLevel;
 }
 
 function mergeSessionRowWithLocalState(
@@ -5968,6 +6040,37 @@ function postUserSegmentMessages(filteredMessages: RawMessage[]): RawMessage[] {
   return [];
 }
 
+/** A tool failure is non-blocking only after the same turn has produced a visible final reply. */
+function hasToolActivityAfterLastUser(messages: RawMessage[]): boolean {
+  return postUserSegmentMessages(messages).some((message) => (
+    message.role === 'assistant'
+    && (hasPendingToolUse(message) || isToolOnlyMessage(message))
+  ));
+}
+
+function hasUserVisibleFinalReplyAfterLastUser(messages: RawMessage[]): boolean {
+  return postUserSegmentMessages(messages).some((message) => (
+    message.role === 'assistant'
+    && !hasPendingToolUse(message)
+    && !isToolOnlyMessage(message)
+    && !isInternalMessage(message)
+    && messageHasDeliverableContent(message)
+  ));
+}
+
+function shouldSuppressToolTerminalError(
+  messages: RawMessage[],
+  streamingMessage: RawMessage | null,
+  runId: string,
+): boolean {
+  const streamSnapshot = snapshotStreamingAssistantMessage(streamingMessage, messages, runId);
+  const messagesWithStreamSnapshot = streamSnapshot.length > 0
+    ? [...messages, ...streamSnapshot]
+    : messages;
+  return hasToolActivityAfterLastUser(messagesWithStreamSnapshot)
+    && hasUserVisibleFinalReplyAfterLastUser(messagesWithStreamSnapshot);
+}
+
 /** Segment after the user turn that matches the in-flight send (not prior history). */
 function getOpenRunSegmentFromHistory(
   filteredMessages: RawMessage[],
@@ -6328,6 +6431,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
               derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
               lastMessagePreview: s.lastMessagePreview ? String(s.lastMessagePreview) : undefined,
               thinkingLevel: s.thinkingLevel ? String(s.thinkingLevel) : undefined,
+              thinkingLevels: Array.isArray(s.thinkingLevels)
+                ? s.thinkingLevels.flatMap((level) => {
+                    if (typeof level === 'string' && level.trim()) {
+                      return [{ id: level.trim() }];
+                    }
+                    if (level && typeof level === 'object' && typeof (level as { id?: unknown }).id === 'string') {
+                      const id = (level as { id: string }).id.trim();
+                      if (!id) return [];
+                      const label = typeof (level as { label?: unknown }).label === 'string'
+                        ? (level as { label: string }).label.trim()
+                        : undefined;
+                      return [{ id, ...(label ? { label } : {}) }];
+                    }
+                    return [];
+                  })
+                : undefined,
+              thinkingDefault: typeof s.thinkingDefault === 'string' && s.thinkingDefault.trim()
+                ? s.thinkingDefault.trim()
+                : undefined,
               model: buildSessionModelRef(s.model, s.modelProvider),
               cwd: typeof s.cwd === 'string' && s.cwd.trim() ? s.cwd.trim() : undefined,
               updatedAt: parseSessionUpdatedAtMs(s.updatedAt),
@@ -6678,6 +6800,27 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     } catch (error) {
       set({ sessions: previousSessions });
+      throw error;
+    }
+  },
+
+  updateSessionThinking: async (key: string, thinkingLevel: string | null) => {
+    const normalizedThinkingLevel = thinkingLevel?.trim() || null;
+    const previousSessions = get().sessions;
+    const previousThinkingLevel = get().thinkingLevel;
+    set((state) => ({
+      sessions: upsertSessionWithThinking(state.sessions, key, normalizedThinkingLevel, Date.now()),
+      ...(state.currentSessionKey === key ? { thinkingLevel: normalizedThinkingLevel } : {}),
+    }));
+
+    try {
+      const effectiveThinkingLevel = await persistSessionThinkingSelection(key, normalizedThinkingLevel);
+      set((state) => ({
+        sessions: upsertSessionWithThinking(state.sessions, key, effectiveThinkingLevel, Date.now()),
+        ...(state.currentSessionKey === key ? { thinkingLevel: effectiveThinkingLevel } : {}),
+      }));
+    } catch (error) {
+      set({ sessions: previousSessions, thinkingLevel: previousThinkingLevel });
       throw error;
     }
   },
@@ -7757,14 +7900,47 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     };
 
-    const referencesPriorImage = mode === 'image' || mode === 'video';
+    const requestedImageEdit = isImageEditRequest(trimmed);
+    const latestSessionImage = requestedImageEdit ? findLatestSessionImage(currentMessages) : null;
+    const referencesPriorImage = mode === 'image' || mode === 'video' || requestedImageEdit;
     let candidateImageInputs = referencesPriorImage
-      ? resolveImageModeReferenceInputs([], currentMessages)
+      ? requestedImageEdit
+        ? (latestSessionImage ? [latestSessionImage] : [])
+        : resolveImageModeReferenceInputs([], currentMessages)
       : [];
     if (referencesPriorImage && candidateImageInputs.length === 0 && explicitPendingImages.length === 0) {
-      candidateImageInputs = await loadFamilyImageReferenceInputs(currentSessionKey, trimmed, mode);
+      candidateImageInputs = await loadFamilyImageReferenceInputs(
+        currentSessionKey,
+        trimmed,
+        mode,
+        requestedImageEdit,
+      );
     }
     if (!sendGenerationIsCurrent()) return;
+    if (requestedImageEdit && explicitPendingImages.length === 0 && candidateImageInputs.length === 0) {
+      const assistantMsg: RawMessage = {
+        role: 'assistant',
+        content: i18n.t('chat:composer.imageEditMissingReference'),
+        timestamp: Date.now() / 1000,
+        id: crypto.randomUUID(),
+      };
+      set((state) => ({
+        messages: [...state.messages, assistantMsg],
+        sending: false,
+        pendingImageGenerationLocal: false,
+        pendingVideoGenerationLocal: false,
+        activeRunId: null,
+        streamingText: '',
+        streamingMessage: null,
+        streamingTools: [],
+        pendingFinal: false,
+        lastUserMessageAt: null,
+        pendingToolImages: [],
+      }));
+      clearSendGenerationIfCurrent();
+      markSessionRunIdle(currentSessionKey);
+      return;
+    }
     rememberPendingRuntimeIntent(currentSessionKey, {
       objective: trimmed,
       mode,
@@ -8770,11 +8946,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         const commitRuntimeError = () => {
           const currentStream = get().streamingMessage as RawMessage | null;
+          const currentMessages = get().messages;
           const errorSnapshot = snapshotStreamingAssistantMessage(
             currentStream,
-            get().messages,
+            currentMessages,
             `error-${runId || Date.now()}`,
           );
+          const messagesWithErrorSnapshot = errorSnapshot.length > 0
+            ? [...currentMessages, ...errorSnapshot]
+            : currentMessages;
+          const suppressGlobalError = !terminalAssistantError
+            && !replySessionInitConflict
+            && shouldSuppressToolTerminalError(messagesWithErrorSnapshot, null, `error-${runId || Date.now()}`);
           if (errorSnapshot.length > 0) {
             set((s) => ({
               messages: [...s.messages, ...errorSnapshot],
@@ -8804,8 +8987,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ],
                 )
               : get().runtimeRuns,
-            error: terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
-            runError: terminalAssistantError || replySessionInitConflict ? normalizedErrorMsg : null,
+            error: suppressGlobalError || terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
+            runError: suppressGlobalError
+              ? null
+              : terminalAssistantError || replySessionInitConflict
+                ? normalizedErrorMsg
+                : null,
             sending: false,
             pendingImageGenerationLocal: false,
             pendingVideoGenerationLocal: false,
@@ -9104,7 +9291,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         nextPatch.streamingTools = shouldKeepLifecycle ? latestState.streamingTools : [];
         if (eventForSession.status === 'error' && eventForSession.error) {
           nextPatch.error = null;
-          nextPatch.runError = normalizeChatRunErrorMessage(eventForSession.error);
+          nextPatch.runError = shouldSuppressToolTerminalError(
+            latestState.messages,
+            latestState.streamingMessage as RawMessage | null,
+            eventForSession.runId,
+          )
+            ? null
+            : normalizeChatRunErrorMessage(eventForSession.error);
         }
         if (eventForSession.status === 'aborted') {
           nextPatch.streamingMessage = null;

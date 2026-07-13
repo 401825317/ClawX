@@ -2,8 +2,9 @@ import { getProviderAccount } from '../services/providers/provider-store';
 import { getProviderSecret } from '../services/secrets/secret-store';
 import {
   getJunFeiAIProviderBaseUrl,
+  JUNFEIAI_DEFAULT_API_PROTOCOL,
   JUNFEIAI_DEFAULT_MODEL,
-  JUNFEIAI_PROVIDER_ID,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
 } from './junfeiai-distribution';
 import { logger } from './logger';
 import type {
@@ -12,7 +13,10 @@ import type {
   VideoGenerationRouteDecision,
   VideoGenerationRouteMode,
 } from './media-generation-types';
-import { proxyAwareFetch } from './proxy-fetch';
+import {
+  extractOpenAiPlannerText,
+  fetchOpenAiPlannerResponse,
+} from './openai-planner-request';
 import {
   countVideoPromptCharacters,
   MAX_VIDEO_GENERATION_PROMPT_CHARS,
@@ -356,14 +360,14 @@ export async function planVideoGenerationRoute(
   }
 
   try {
-    const secret = await getProviderSecret(JUNFEIAI_PROVIDER_ID);
+    const secret = await getProviderSecret(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
     const apiKey = getApiKey(secret);
     if (!apiKey) {
       return fallback('router_api_key_unavailable');
     }
 
-    const account = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
-    const endpoint = toChatCompletionsEndpoint(account?.baseUrl || getJunFeiAIProviderBaseUrl());
+    const account = await getProviderAccount(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
+    const apiProtocol = JUNFEIAI_DEFAULT_API_PROTOCOL;
     const model = account?.model?.trim() || JUNFEIAI_DEFAULT_MODEL;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), VIDEO_ROUTE_PLANNER_TIMEOUT_MS);
@@ -376,19 +380,17 @@ export async function planVideoGenerationRoute(
     });
 
     try {
-      const response = await proxyAwareFetch(endpoint, {
-        method: 'POST',
+      const response = await fetchOpenAiPlannerResponse({
+        baseUrl: account?.baseUrl || getJunFeiAIProviderBaseUrl(),
+        fallbackBaseUrl: getJunFeiAIProviderBaseUrl(),
         headers: {
           ...(account?.headers ?? {}),
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model,
-          messages: buildPlannerMessages({ prompt, inputImages, candidateImages }),
-          temperature: 0,
-          max_tokens: 350,
-        }),
+        model,
+        messages: buildPlannerMessages({ prompt, inputImages, candidateImages }),
+        protocol: apiProtocol,
         signal: controller.signal,
       });
 
@@ -402,11 +404,8 @@ export async function planVideoGenerationRoute(
         return fallback(`router_http_${response.status}`);
       }
 
-      const payload = await response.json() as {
-        choices?: Array<{ message?: { content?: unknown } }>;
-      };
-      const content = payload.choices?.[0]?.message?.content;
-      const parsed = typeof content === 'string' ? parseJsonObject(content) : null;
+      const content = extractOpenAiPlannerText(await response.json());
+      const parsed = content ? parseJsonObject(content) : null;
       if (!parsed) {
         logger.warn('[video-route-planner] invalid_json', {
           durationMs: Date.now() - startedAt,

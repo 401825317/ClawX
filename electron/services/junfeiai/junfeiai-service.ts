@@ -1,6 +1,5 @@
 import type { GatewayManager } from '../../gateway/manager';
 import type { ProviderAccount } from '../../shared/providers/types';
-import { OPENCLAW_API_PROTOCOLS } from '../../shared/providers/types';
 import { saveProviderAccount, getProviderAccount, providerAccountToConfig } from '../providers/provider-store';
 import { getClawXProviderStore } from '../providers/store-instance';
 import { setProviderSecret, getProviderSecret, deleteProviderSecret } from '../secrets/secret-store';
@@ -9,6 +8,12 @@ import {
   syncDefaultProviderToRuntime,
   syncSavedProviderToRuntime,
 } from '../providers/provider-runtime-sync';
+import {
+  ensureManagedOpenAiChatAccount,
+  isManagedOpenAiChatMigrated,
+  migrateManagedChatToOpenAi,
+  syncManagedOpenAiChatRuntime,
+} from '../providers/openai-chat-migration';
 import { removeProviderKeyFromOpenClaw } from '../../utils/openclaw-auth';
 import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
 import {
@@ -16,9 +21,9 @@ import {
   getJunFeiAIOrigin,
   getJunFeiAIProviderBaseUrl,
   isJunFeiAIManagedDistribution,
-  isJunFeiAIDevOverrideEnabled,
   JUNFEIAI_AUTH_ACCOUNT_ID,
   JUNFEIAI_DEFAULT_API_PROTOCOL,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   getJunFeiAIDefaultBaseUrl,
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_PROVIDER_ID,
@@ -31,8 +36,6 @@ import {
   readJunFeiAIDeviceActivationState,
 } from '../../utils/junfeiai-device';
 import { logger } from '../../utils/logger';
-
-type ProviderProtocol = NonNullable<ProviderAccount['apiProtocol']>;
 
 interface Sub2APIEnvelope<T> {
   code?: number;
@@ -735,14 +738,7 @@ function normalizeJunFeiAIProviderDisplayName(raw?: string): string {
 }
 
 function getLocalProviderBaseUrlOverride(): string {
-  if (!isJunFeiAIDevOverrideEnabled()) {
-    return '';
-  }
-  return (
-    process.env.CLAWX_JUNFEIAI_PROVIDER_BASE_URL
-    || process.env.CLAWX_JUNFEIAI_BASE_URL
-    || ''
-  ).trim();
+  return getJunFeiAIProviderBaseUrl();
 }
 
 function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunFeiAIBootstrapPayload {
@@ -777,21 +773,6 @@ function applyLocalBootstrapOverrides(bootstrap: JunFeiAIBootstrapPayload): JunF
         .filter((model) => allowedClientModels.includes(model) && model !== clientDefault),
     },
   };
-}
-
-function normalizeProviderProtocol(raw?: string): ProviderProtocol {
-  if (
-    raw === 'openai-completions'
-    || raw === 'openai-responses'
-  ) {
-    return raw;
-  }
-  if (raw && (OPENCLAW_API_PROTOCOLS as readonly string[]).includes(raw)) {
-    logger.warn(`[junfeiai] Ignoring non-OpenAI api protocol from bootstrap: ${raw}`);
-  } else if (raw) {
-    logger.warn(`[junfeiai] Ignoring unsupported api protocol from bootstrap: ${raw}`);
-  }
-  return JUNFEIAI_DEFAULT_API_PROTOCOL as ProviderProtocol;
 }
 
 function normalizeFallbackModels(models?: string[]): string[] {
@@ -859,7 +840,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     label: providerName,
     authMode: 'api_key',
     baseUrl: normalizeBaseUrl(runtime.baseUrl),
-    apiProtocol: normalizeProviderProtocol(runtime.apiProtocol),
+    apiProtocol: JUNFEIAI_DEFAULT_API_PROTOCOL,
     model: resolveRuntimeDefaultModel(bootstrap),
     fallbackModels: normalizeFallbackModels(runtime.fallbackModels),
     enabled: true,
@@ -1034,6 +1015,20 @@ export async function getJunFeiAILocalStatus(): Promise<JunFeiAILocalStatusResul
     lastVerifiedAt: verificationCache.lastVerifiedAt,
     offlineGraceExpiresAt: verificationCache.offlineGraceExpiresAt,
   };
+}
+
+/**
+ * Keeps the managed text account on the configured OpenAI Responses endpoint
+ * before the Gateway can restore an obsolete legacy provider reference.
+ */
+export async function syncJunFeiAIManagedProviderEndpoint(): Promise<void> {
+  if (!isJunFeiAIManagedDistribution()) return;
+
+  const result = await migrateManagedChatToOpenAi();
+  logger.info('[junfeiai] Synced managed OpenAI provider endpoint', {
+    baseUrl: result.baseUrl,
+    alreadyMigrated: result.alreadyMigrated,
+  });
 }
 
 async function storeJunFeiAIAuthSession(auth: JunFeiAIAuthPayload): Promise<void> {
@@ -1290,17 +1285,24 @@ async function applyJunFeiAIAuthSwitchToGateway(gatewayManager?: GatewayManager)
 
 async function clearJunFeiAIStaleRelayKeyForAuthSwitch(): Promise<void> {
   await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
-  const account = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
+  const useManagedOpenAiChat = await isManagedOpenAiChatMigrated();
+  const runtimeAccountId = useManagedOpenAiChat
+    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    : JUNFEIAI_PROVIDER_ID;
+  if (useManagedOpenAiChat) {
+    await deleteProviderSecret(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
+  }
+  const account = await getProviderAccount(runtimeAccountId);
   try {
     if (account) {
       await syncSavedProviderToRuntime(providerAccountToConfig(account), '', undefined);
       return;
     }
-    await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+    await removeProviderKeyFromOpenClaw(runtimeAccountId);
   } catch (error) {
     logger.warn('[junfeiai] Failed to clear stale managed relay key from OpenClaw during account switch:', error);
     try {
-      await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+      await removeProviderKeyFromOpenClaw(runtimeAccountId);
     } catch (fallbackError) {
       logger.warn('[junfeiai] Failed to clear stale managed relay auth profile during account switch:', fallbackError);
     }
@@ -1473,10 +1475,14 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await saveProviderAccount(account);
   }
 
+  const useManagedOpenAiChat = await isManagedOpenAiChatMigrated();
+  const defaultProviderId = useManagedOpenAiChat
+    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    : JUNFEIAI_PROVIDER_ID;
   const defaultProvider = await getDefaultProvider();
-  const defaultProviderChanged = defaultProvider !== JUNFEIAI_PROVIDER_ID;
-  if (defaultProvider !== JUNFEIAI_PROVIDER_ID) {
-    await setDefaultProvider(JUNFEIAI_PROVIDER_ID);
+  const defaultProviderChanged = defaultProvider !== defaultProviderId;
+  if (defaultProviderChanged) {
+    await setDefaultProvider(defaultProviderId);
   }
 
   let runtimeApiKey = options.relayToken?.trim() || undefined;
@@ -1542,6 +1548,10 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     relaySecretChanged = relaySecretChanged || hadRelaySecret;
   }
 
+  const openAiChatAccount = useManagedOpenAiChat
+    ? await ensureManagedOpenAiChatAccount(account, runtimeApiKey)
+    : null;
+
   const runtimeChanged = providerChanged || defaultProviderChanged || relaySecretChanged || shouldClearRuntimeKey;
   const shouldSyncRuntime = options.syncRuntime === true
     || (
@@ -1565,10 +1575,14 @@ export async function ensureJunFeiAIProviderSeeded(options: {
       || relaySecretChanged
       || shouldClearRuntimeKey;
     if (shouldSyncProviderConfig) {
-      await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, runtimeSyncGatewayManager);
+      if (openAiChatAccount) {
+        await syncManagedOpenAiChatRuntime(openAiChatAccount, apiKey);
+      } else {
+        await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, runtimeSyncGatewayManager);
+      }
     }
     if ((defaultProviderChanged || options.syncRuntime === true) && !shouldClearRuntimeKey) {
-      await syncDefaultProviderToRuntime(JUNFEIAI_PROVIDER_ID, runtimeSyncGatewayManager);
+      await syncDefaultProviderToRuntime(defaultProviderId, runtimeSyncGatewayManager);
     }
   }
   if (shouldApplyRuntimeAuthImmediately) {
@@ -1940,7 +1954,9 @@ export async function logoutJunFeiAI(gatewayManager?: GatewayManager): Promise<v
   }
   await deleteProviderSecret(JUNFEIAI_AUTH_ACCOUNT_ID);
   await deleteProviderSecret(JUNFEIAI_PROVIDER_ID);
+  await deleteProviderSecret(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
   await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+  await removeProviderKeyFromOpenClaw(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
   await clearVerificationCache();
   await gatewayManager?.stop();
 }

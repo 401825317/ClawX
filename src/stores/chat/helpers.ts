@@ -1573,6 +1573,16 @@ function messageHasToolUse(msg: { role?: unknown; content?: unknown; tool_calls?
   return Array.isArray(toolCalls) && toolCalls.length > 0;
 }
 
+/** OpenClaw marks inter-session internal context with structured provenance metadata. */
+function hasInternalProvenance(msg: { provenance?: unknown }): boolean {
+  const provenance = msg.provenance;
+  return Boolean(
+    provenance
+    && typeof provenance === 'object'
+    && (provenance as { kind?: unknown }).kind === 'inter_session',
+  );
+}
+
 /** True for internal plumbing messages that should never be shown in the UI. */
 function isInternalMessage(msg: {
   role?: unknown;
@@ -1581,9 +1591,11 @@ function isInternalMessage(msg: {
   model?: unknown;
   idempotencyKey?: unknown;
   syntheticLocalArtifactConversation?: unknown;
+  provenance?: unknown;
 }): boolean {
   if (msg.syntheticLocalArtifactConversation === true) return true;
   if (msg.role === 'system') return true;
+  if (hasInternalProvenance(msg)) return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
     if (isInternalAssistantReplyText(text)) return true;
@@ -1617,7 +1629,8 @@ function isInternalMessage(msg: {
  * text is internal narration (e.g. "生成中，稍等" + `image_generate`). Those
  * turns power the execution graph and run lifecycle detection.
  */
-function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown; syntheticLocalArtifactConversation?: unknown }): boolean {
+function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; text?: unknown; tool_calls?: unknown; toolCalls?: unknown; syntheticLocalArtifactConversation?: unknown; provenance?: unknown }): boolean {
+  if (hasInternalProvenance(msg)) return true;
   if (isToolResultRole(msg.role)) return true;
   if (messageHasToolUse(msg)) return false;
   return isInternalMessage(msg);

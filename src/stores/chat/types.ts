@@ -69,6 +69,13 @@ export interface RawMessage {
   content: unknown; // string | ContentBlock[]
   timestamp?: number;
   id?: string;
+  provenance?: {
+    kind?: string;
+    sourceSessionKey?: string;
+    sourceChannel?: string;
+    sourceTool?: string;
+    [key: string]: unknown;
+  };
   idempotencyKey?: string;
   model?: string;
   toolCallId?: string;
@@ -144,11 +151,18 @@ export interface ChatSession {
   derivedTitle?: string;
   lastMessagePreview?: string;
   thinkingLevel?: string;
+  thinkingLevels?: ThinkingLevelOption[];
+  thinkingDefault?: string;
   model?: string;
   cwd?: string;
   updatedAt?: number;
   status?: string;
   hasActiveRun?: boolean;
+}
+
+export interface ThinkingLevelOption {
+  id: string;
+  label?: string;
 }
 
 export interface ToolStatus {
@@ -248,6 +262,7 @@ export interface ChatState {
   deleteSession: (key: string) => Promise<void>;
   renameSession: (key: string, label: string) => Promise<void>;
   updateSessionModel: (key: string, modelRef: string | null) => Promise<void>;
+  updateSessionThinking: (key: string, thinkingLevel: string | null) => Promise<void>;
   updateSessionCwd: (key: string, cwd: string | null) => Promise<void>;
   healManagedTextModels: () => void;
   cleanupEmptySession: () => void;

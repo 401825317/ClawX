@@ -60,7 +60,9 @@ import {
 } from './openclaw-video-relay-constants';
 import {
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_ID,
+  getJunFeiAIProviderBaseUrl,
   normalizeJunFeiAIModelContextWindow,
 } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
@@ -1990,12 +1992,24 @@ function applyOpenClawProviderAgentRuntimePinsToConfig(config: Record<string, un
   return pinned;
 }
 
+function isManagedJunFeiAIProviderEntry(providerKey: string, baseUrl: unknown): boolean {
+  if (providerKey === JUNFEIAI_PROVIDER_ID) return true;
+  return providerKey === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    && typeof baseUrl === 'string'
+    && baseUrl.trim().replace(/\/+$/, '') === getJunFeiAIProviderBaseUrl().replace(/\/+$/, '');
+}
+
 function isJunFeiAIDefaultModel(config: Record<string, unknown>): boolean {
   const agents = isPlainRecord(config.agents) ? config.agents : {};
   const defaults = isPlainRecord(agents.defaults) ? agents.defaults : {};
   const model = isPlainRecord(defaults.model) ? defaults.model : {};
   const primary = typeof model.primary === 'string' ? model.primary.trim() : '';
-  return primary.startsWith(`${JUNFEIAI_PROVIDER_ID}/`);
+  const providerKey = primary.split('/')[0] || '';
+  if (providerKey === JUNFEIAI_PROVIDER_ID) return true;
+  const models = isPlainRecord(config.models) ? config.models : {};
+  const providers = isPlainRecord(models.providers) ? models.providers : {};
+  const provider = isPlainRecord(providers[providerKey]) ? providers[providerKey] : null;
+  return Boolean(provider && isManagedJunFeiAIProviderEntry(providerKey, provider.baseUrl));
 }
 
 function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>): boolean {
@@ -2015,8 +2029,14 @@ function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>
 
   const models = isPlainRecord(config.models) ? config.models : {};
   const providers = isPlainRecord(models.providers) ? models.providers : {};
-  const provider = isPlainRecord(providers[JUNFEIAI_PROVIDER_ID])
-    ? providers[JUNFEIAI_PROVIDER_ID]
+  const defaultProviderKey = (() => {
+    const primary = isPlainRecord(defaults.model) && typeof defaults.model.primary === 'string'
+      ? defaults.model.primary.trim()
+      : '';
+    return primary.split('/')[0] || JUNFEIAI_PROVIDER_ID;
+  })();
+  const provider = isPlainRecord(providers[defaultProviderKey])
+    ? providers[defaultProviderKey]
     : null;
   if (!provider || !Array.isArray(provider.models)) {
     return modified;
@@ -2042,7 +2062,7 @@ function ensureJunFeiAIReasoningDefaultsInConfig(config: Record<string, unknown>
   });
   if (modified) {
     provider.models = nextModels;
-    providers[JUNFEIAI_PROVIDER_ID] = provider;
+    providers[defaultProviderKey] = provider;
     models.providers = providers;
     config.models = models;
   }
@@ -2055,8 +2075,12 @@ async function ensureJunFeiAIReasoningCompatInAgentModels(): Promise<void> {
     const modelsPath = join(getOpenClawAgentDir(agentId), 'models.json');
     const data = await readJsonFile<Record<string, unknown>>(modelsPath);
     const providers = data && isPlainRecord(data.providers) ? data.providers : null;
-    const provider = providers && isPlainRecord(providers[JUNFEIAI_PROVIDER_ID])
-      ? providers[JUNFEIAI_PROVIDER_ID]
+    const providerKey = providers && isPlainRecord(providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID])
+      && isManagedJunFeiAIProviderEntry(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID, providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID].baseUrl)
+      ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+      : JUNFEIAI_PROVIDER_ID;
+    const provider = providers && isPlainRecord(providers[providerKey])
+      ? providers[providerKey]
       : null;
     if (!data || !providers || !provider || !Array.isArray(provider.models)) {
       continue;
@@ -2086,7 +2110,7 @@ async function ensureJunFeiAIReasoningCompatInAgentModels(): Promise<void> {
     }
 
     provider.models = models;
-    providers[JUNFEIAI_PROVIDER_ID] = provider;
+    providers[providerKey] = provider;
     data.providers = providers;
     await writeJsonFile(modelsPath, data);
     console.log(`Synced xhigh reasoning compatibility for agent "${agentId}"`);
@@ -2175,13 +2199,16 @@ function stripUnsupportedModelCompatFieldsFromConfig(config: Record<string, unkn
 function normalizeProviderModelEntries(
   provider: string,
   models: Array<Record<string, unknown>>,
+  managedJunFeiAI = false,
 ): Array<Record<string, unknown>> {
   const { models: sanitizedModels } = stripUnsupportedModelCompatFields(models);
-  if (provider !== JUNFEIAI_PROVIDER_ID) {
+  if (!managedJunFeiAI) {
     return sanitizedModels;
   }
 
-  const registryModels = getProviderConfig(provider)?.models ?? [];
+  const registryModels = getProviderConfig(
+    managedJunFeiAI ? JUNFEIAI_PROVIDER_ID : provider,
+  )?.models ?? [];
   return sanitizedModels.map((model) => {
     const registryModel = registryModels.find((entry) => entry.id === model.id);
     const contextWindow = normalizeJunFeiAIModelContextWindow(model.contextWindow)
@@ -2242,7 +2269,11 @@ function upsertOpenClawProviderEntry(
   if (options.api === 'anthropic-messages') {
     mergedModels = mergedModels.map((model) => ensureAnthropicMessagesModelEntry(model, provider, existingProvider));
   }
-  mergedModels = normalizeProviderModelEntries(provider, mergedModels);
+  mergedModels = normalizeProviderModelEntries(
+    provider,
+    mergedModels,
+    isManagedJunFeiAIProviderEntry(provider, options.baseUrl),
+  );
 
   const nextProvider: Record<string, unknown> = {
     ...existingProvider,
@@ -2259,7 +2290,7 @@ function upsertOpenClawProviderEntry(
     } else {
       delete nextProvider.apiKey;
     }
-  } else if (provider === JUNFEIAI_PROVIDER_ID) {
+  } else if (isManagedJunFeiAIProviderEntry(provider, options.baseUrl)) {
     delete nextProvider.apiKey;
   } else if (options.apiKeyEnv) {
     nextProvider.apiKey = options.apiKeyEnv;
@@ -2692,7 +2723,7 @@ export async function setOpenClawDefaultModelWithOverride(
       primary: model,
       fallbacks: fallbackModels,
     };
-    if (provider === JUNFEIAI_PROVIDER_ID) {
+    if (isManagedJunFeiAIProviderEntry(provider, override.baseUrl)) {
       defaults.thinkingDefault = 'xhigh';
     }
     agents.defaults = defaults;
@@ -3306,6 +3337,7 @@ function normalizeAgentModelProviderEntry(
   const models = normalizeProviderModelEntries(
     providerType,
     entry.models as Array<Record<string, unknown>>,
+    isManagedJunFeiAIProviderEntry(providerType, entry.baseUrl),
   );
 
   return {

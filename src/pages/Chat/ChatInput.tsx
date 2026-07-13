@@ -7,7 +7,7 @@
  * are sent with the message (no base64 over WebSocket).
  */
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Image as ImageIcon } from 'lucide-react';
+import { SendHorizontal, Square, X, Paperclip, FileText, Film, Music, FileArchive, File, FolderOpen, Loader2, AtSign, Search, ChevronDown, Image as ImageIcon, Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Select } from '@/components/ui/select';
@@ -27,6 +27,7 @@ import {
   formatProviderModelIdLabel,
   toModelOptionTestId,
 } from '@/lib/model-options';
+import { MANAGED_TEXT_PROVIDER_KEY } from '@/lib/managed-model-options';
 import type { AgentSummary } from '@/types/agent';
 import type { QuickAccessSkill } from '@/types/skill';
 import { useTranslation } from 'react-i18next';
@@ -83,16 +84,27 @@ export interface ImageEditReference {
 
 const DIRECTORY_MIME_TYPE = 'application/x-directory';
 const DEFAULT_TEXT_MODEL_OPTION: RemoteModelOption = {
-  modelRef: `lingzhiwuxian/${DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel}`,
-  label: formatProviderModelIdLabel('lingzhiwuxian', DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel),
-  runtimeProviderKey: 'lingzhiwuxian',
-  accountId: 'lingzhiwuxian',
+  modelRef: `${MANAGED_TEXT_PROVIDER_KEY}/${DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel}`,
+  label: formatProviderModelIdLabel(MANAGED_TEXT_PROVIDER_KEY, DEFAULT_CLIENT_MODEL_OPTIONS.text.defaultModel),
+  runtimeProviderKey: MANAGED_TEXT_PROVIDER_KEY,
+  accountId: MANAGED_TEXT_PROVIDER_KEY,
 };
 const IMAGE_EDIT_SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const IMAGE_EDIT_SUPPORTED_EXTENSIONS = /\.(jpe?g|jfif|png|webp)$/i;
 const KNOWN_IMAGE_EXTENSIONS = /\.(avif|bmp|gif|heic|heif|jfif|jpe?g|png|svg|tiff?|webp)$/i;
 const COMPOSER_MEDIA_SELECT_CLASS =
   'h-8 rounded-lg border-black/10 bg-transparent px-2 pr-7 text-xs text-foreground [background-image:none] appearance-none';
+const DEFAULT_THINKING_LEVEL = 'high';
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high'] as const;
+const DEFAULT_IMAGE_ASPECT_SIZE = '1024x1024';
+const IMAGE_ASPECT_OPTIONS = [
+  { ratio: '2:3', size: '1024x1536', labelKey: 'composer.imageAspectTall', previewClassName: 'h-6 w-4', testId: 'chat-image-aspect-2-3' },
+  { ratio: '3:2', size: '1536x1024', labelKey: 'composer.imageAspectWide', previewClassName: 'h-4 w-6', testId: 'chat-image-aspect-3-2' },
+  { ratio: '1:1', size: DEFAULT_IMAGE_ASPECT_SIZE, labelKey: 'composer.imageAspectSquare', previewClassName: 'h-5 w-5', testId: 'chat-image-aspect-1-1' },
+  { ratio: '9:16', size: '2160x3840', labelKey: 'composer.imageAspectVertical', previewClassName: 'h-6 w-3.5', testId: 'chat-image-aspect-9-16' },
+  { ratio: '16:9', size: '3840x2160', labelKey: 'composer.imageAspectWidescreen', previewClassName: 'h-3.5 w-6', testId: 'chat-image-aspect-16-9' },
+] as const;
+const IMAGE_ASPECT_SIZES = new Set<string>(IMAGE_ASPECT_OPTIONS.map((option) => option.size));
 
 type ImageEditReferenceCandidate = {
   fileName?: string;
@@ -181,27 +193,6 @@ function strongestSizeOption(options: string[] | undefined, fallback: string): s
 function strongestDurationOption(options: number[] | undefined, fallback: number): number {
   const candidates = (options ?? []).filter((value) => Number.isFinite(value) && value > 0);
   return candidates.length > 0 ? Math.max(...candidates) : fallback;
-}
-
-function formatImageSizeLabel(value: string): string {
-  switch (value) {
-    case '1024x1024':
-      return '1K 1:1';
-    case '1536x1024':
-      return '1.5K 3:2';
-    case '1024x1536':
-      return '1.5K 2:3';
-    case '2048x2048':
-      return '2K 1:1';
-    case '2048x1152':
-      return '2K 16:9';
-    case '3840x2160':
-      return '4K 16:9';
-    case '2160x3840':
-      return '4K 9:16';
-    default:
-      return value;
-  }
 }
 
 function formatVideoSizeLabel(value: string): string {
@@ -377,12 +368,15 @@ export function ChatInput({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [skillPickerOpen, setSkillPickerOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [thinkingPickerOpen, setThinkingPickerOpen] = useState(false);
+  const [imageAspectPickerOpen, setImageAspectPickerOpen] = useState(false);
   const [skillQuery, setSkillQuery] = useState('');
   const [quickSkills, setQuickSkills] = useState<QuickAccessSkill[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
+  const [thinkingUpdating, setThinkingUpdating] = useState(false);
   const [remoteModelOptions, setRemoteModelOptions] = useState<RemoteModelOption[]>([]);
   const [sessionSendModes, setSessionSendModes] = useState<Record<string, ChatSendMode>>({});
   const [sessionImageOptions, setSessionImageOptions] = useState<Record<string, ChatImageSendOptions>>({});
@@ -391,6 +385,8 @@ export function ChatInput({
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+  const thinkingPickerRef = useRef<HTMLDivElement>(null);
+  const imageAspectPickerRef = useRef<HTMLDivElement>(null);
   const modelChangeVersionRef = useRef(0);
   const isComposingRef = useRef(false);
   const gatewayStatus = useGatewayStore((s) => s.status);
@@ -402,7 +398,9 @@ export function ChatInput({
   const currentAgentId = useChatStore((s) => s.currentAgentId);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
   const sessions = useChatStore((s) => s.sessions);
+  const thinkingLevel = useChatStore((s) => s.thinkingLevel);
   const updateSessionModel = useChatStore((s) => s.updateSessionModel);
+  const updateSessionThinking = useChatStore((s) => s.updateSessionThinking);
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
@@ -412,6 +410,31 @@ export function ChatInput({
     [currentSessionKey, sessions],
   );
   const hasImageEditReference = !!imageEditReference?.filePath;
+  const selectedThinkingLevel = (currentSession?.thinkingLevel ?? thinkingLevel ?? '').trim();
+  const thinkingOptions = useMemo(() => {
+    const configured: Array<{ id: string; label?: string }> = currentSession?.thinkingLevels ?? [];
+    const options = configured.length > 0
+      ? configured
+      : THINKING_LEVELS.map((id) => ({ id, label: undefined }));
+    if (selectedThinkingLevel && !options.some((option) => option.id === selectedThinkingLevel)) {
+      return [...options, { id: selectedThinkingLevel }];
+    }
+    return options;
+  }, [currentSession?.thinkingLevels, selectedThinkingLevel]);
+  const thinkingLevelLabel = useCallback((id: string, fallback?: string) => (
+    t(`composer.thinkingLevels.${id}`, fallback || id)
+  ), [t]);
+  const inheritedThinkingLabel = useMemo(() => {
+    const defaultLevel = currentSession?.thinkingDefault || DEFAULT_THINKING_LEVEL;
+    return thinkingLevelLabel(defaultLevel, thinkingOptions.find((option) => option.id === defaultLevel)?.label);
+  }, [currentSession?.thinkingDefault, thinkingLevelLabel, thinkingOptions]);
+  const thinkingButtonLabel = useMemo(() => {
+    if (!selectedThinkingLevel) return inheritedThinkingLabel;
+    return thinkingLevelLabel(
+      selectedThinkingLevel,
+      thinkingOptions.find((option) => option.id === selectedThinkingLevel)?.label,
+    );
+  }, [inheritedThinkingLabel, selectedThinkingLevel, thinkingLevelLabel, thinkingOptions]);
   const sendMode = sessionSendModes[currentSessionKey] ?? 'chat';
   const imageModelOptions = useMemo(() => {
     const configured = clientModelOptions.image.models.length > 0
@@ -430,19 +453,16 @@ export function ChatInput({
   const defaultImageOptions = useMemo<ChatImageSendOptions>(() => {
     const configuredDefault = imageModelOptions.find((model) => model.id === clientModelOptions.image.defaultModel);
     const model = configuredDefault ?? firstEnabled(imageModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.models[0];
-    const configuredFallbackSize = model?.defaultSize ?? clientModelOptions.image.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize;
     const configuredFallbackQuality = model?.defaultQuality ?? clientModelOptions.image.defaultQuality ?? DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality;
-    const fallbackSize = preferredOptionValue(configuredFallbackSize, model?.sizes ?? [], DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultSize);
     const fallbackQuality = preferredOptionValue(configuredFallbackQuality, model?.qualities ?? [], DEFAULT_CLIENT_MODEL_OPTIONS.image.defaultQuality);
     return {
       model: model?.id ?? clientModelOptions.image.defaultModel,
-      size: fallbackSize,
+      size: DEFAULT_IMAGE_ASPECT_SIZE,
       quality: fallbackQuality,
     };
   }, [
     clientModelOptions.image.defaultModel,
     clientModelOptions.image.defaultQuality,
-    clientModelOptions.image.defaultSize,
     imageModelOptions,
   ]);
   const defaultVideoOptions = useMemo<ChatVideoSendOptions>(() => {
@@ -476,7 +496,9 @@ export function ChatInput({
     ...sessionImageOptions[currentSessionKey],
   };
   imageOptions.model = selectedImageModel?.id ?? imageOptions.model;
-  imageOptions.size = optionValue(imageOptions.size, selectedImageModel?.sizes ?? [], defaultImageOptions.size);
+  imageOptions.size = IMAGE_ASPECT_SIZES.has(imageOptions.size)
+    ? imageOptions.size
+    : defaultImageOptions.size;
   imageOptions.quality = optionValue(imageOptions.quality, selectedImageModel?.qualities ?? [], defaultImageOptions.quality);
   const videoOptions: ChatVideoSendOptions = {
     ...defaultVideoOptions,
@@ -507,10 +529,10 @@ export function ChatInput({
         enabled: true,
       }];
     return textModels.map((model) => ({
-      modelRef: `lingzhiwuxian/${model.id}`,
-      label: model.label || formatProviderModelIdLabel('lingzhiwuxian', model.id),
-      runtimeProviderKey: 'lingzhiwuxian',
-      accountId: 'lingzhiwuxian',
+      modelRef: `${MANAGED_TEXT_PROVIDER_KEY}/${model.id}`,
+      label: model.label || formatProviderModelIdLabel(MANAGED_TEXT_PROVIDER_KEY, model.id),
+      runtimeProviderKey: MANAGED_TEXT_PROVIDER_KEY,
+      accountId: MANAGED_TEXT_PROVIDER_KEY,
     }));
   }, [clientModelOptions.text.models]);
   const modelOptions = useMemo(() => {
@@ -553,7 +575,7 @@ export function ChatInput({
   const showModelPicker = true;
   const chatComposerStatusComponents = rendererExtensionRegistry.getChatComposerStatusComponents();
   const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
-  const inputDisabled = disabled || !isGatewayUsable;
+  const inputDisabled = disabled || !isGatewayUsable || thinkingUpdating;
   const skillTokenRanges = useMemo(() => findSkillTokenRanges(input), [input]);
   const openArtifactPreview = useArtifactPanel((s) => s.openPreview);
 
@@ -585,7 +607,7 @@ export function ChatInput({
   useEffect(() => {
     let cancelled = false;
     const safeProviderAccounts = Array.isArray(providerAccounts) ? providerAccounts : [];
-    const junfeiaiAccount = safeProviderAccounts.find((account) => account.id === 'lingzhiwuxian' && account.enabled);
+    const junfeiaiAccount = safeProviderAccounts.find((account) => account.id === MANAGED_TEXT_PROVIDER_KEY && account.enabled);
     if (!junfeiaiAccount || clientModelOptions.text.models.length > 0) {
       setRemoteModelOptions([]);
       return () => {
@@ -602,10 +624,10 @@ export function ChatInput({
               .map((model) => (typeof model === 'string' ? model.trim() : ''))
               .filter(Boolean),
           )).map((modelId) => ({
-            modelRef: `lingzhiwuxian/${modelId}`,
-            label: formatProviderModelIdLabel('lingzhiwuxian', modelId),
-            runtimeProviderKey: 'lingzhiwuxian',
-            accountId: 'lingzhiwuxian',
+            modelRef: `${MANAGED_TEXT_PROVIDER_KEY}/${modelId}`,
+            label: formatProviderModelIdLabel(MANAGED_TEXT_PROVIDER_KEY, modelId),
+            runtimeProviderKey: MANAGED_TEXT_PROVIDER_KEY,
+            accountId: MANAGED_TEXT_PROVIDER_KEY,
           }))
           : [];
         setRemoteModelOptions(next);
@@ -650,23 +672,27 @@ export function ChatInput({
   }, [agents, currentAgentId, targetAgentId]);
 
   useEffect(() => {
-    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen) return;
+    if (!pickerOpen && !skillPickerOpen && !modelPickerOpen && !thinkingPickerOpen && !imageAspectPickerOpen) return;
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       const insideAgentPicker = pickerRef.current?.contains(target);
       const insideSkillPicker = skillPickerRef.current?.contains(target);
       const insideModelPicker = modelPickerRef.current?.contains(target);
-      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker) {
+      const insideThinkingPicker = thinkingPickerRef.current?.contains(target);
+      const insideImageAspectPicker = imageAspectPickerRef.current?.contains(target);
+      if (!insideAgentPicker && !insideSkillPicker && !insideModelPicker && !insideThinkingPicker && !insideImageAspectPicker) {
         setPickerOpen(false);
         setSkillPickerOpen(false);
         setModelPickerOpen(false);
+        setThinkingPickerOpen(false);
+        setImageAspectPickerOpen(false);
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [modelPickerOpen, pickerOpen, skillPickerOpen]);
+  }, [imageAspectPickerOpen, modelPickerOpen, pickerOpen, skillPickerOpen, thinkingPickerOpen]);
 
   useEffect(() => {
     setSelectedSkill((prev) => {
@@ -798,10 +824,32 @@ export function ChatInput({
     })();
   }, [currentSessionKey, defaultModelRef, effectiveModelRef, requestedModelRef, t, updateSessionModel]);
 
+  const handleSelectThinking = useCallback(async (nextThinkingLevel: string) => {
+    const normalizedThinkingLevel = nextThinkingLevel.trim() || null;
+    if (normalizedThinkingLevel === (selectedThinkingLevel || null)) {
+      setThinkingPickerOpen(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
+    setThinkingUpdating(true);
+    setThinkingPickerOpen(false);
+    try {
+      await updateSessionThinking(currentSessionKey, normalizedThinkingLevel);
+    } catch (error) {
+      toast.error(t('composer.thinkingSwitchFailed', { error: String(error) }));
+    } finally {
+      setThinkingUpdating(false);
+      textareaRef.current?.focus();
+    }
+  }, [currentSessionKey, selectedThinkingLevel, t, updateSessionThinking]);
+
   const toggleMediaMode = useCallback((mode: Exclude<ChatSendMode, 'chat'>) => {
     setPickerOpen(false);
     setSkillPickerOpen(false);
     setModelPickerOpen(false);
+    setThinkingPickerOpen(false);
+    setImageAspectPickerOpen(false);
     setSessionSendModes((current) => ({
       ...current,
       [currentSessionKey]: current[currentSessionKey] === mode ? 'chat' : mode,
@@ -1517,6 +1565,70 @@ export function ChatInput({
               </div>
             )}
 
+            <div ref={thinkingPickerRef} className="relative shrink-0">
+              <button
+                type="button"
+                data-testid="chat-thinking-picker-button"
+                className={cn(
+                  'inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors',
+                  thinkingPickerOpen
+                    ? 'bg-black/5 text-foreground dark:bg-white/10'
+                    : 'hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
+                )}
+                onClick={() => {
+                  setPickerOpen(false);
+                  setSkillPickerOpen(false);
+                  setModelPickerOpen(false);
+                  setImageAspectPickerOpen(false);
+                  setThinkingPickerOpen((open) => !open);
+                }}
+                disabled={inputDisabled || sending || !currentAgent}
+                title={t('composer.pickThinking')}
+                aria-label={t('composer.pickThinking')}
+                aria-expanded={thinkingPickerOpen}
+              >
+                <Brain className="h-3.5 w-3.5 shrink-0" />
+                <span className="max-w-16 truncate">{thinkingButtonLabel}</span>
+                <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', thinkingPickerOpen && 'rotate-180')} />
+              </button>
+              {thinkingPickerOpen && (
+                <div
+                  className="absolute left-0 bottom-full z-20 mb-2 w-48 overflow-hidden rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
+                  data-testid="chat-thinking-picker-menu"
+                >
+                  <button
+                    type="button"
+                    onClick={() => void handleSelectThinking('')}
+                    className={cn(
+                      'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',
+                      !selectedThinkingLevel ? 'bg-black/5 text-foreground dark:bg-white/10' : 'hover:bg-black/5 dark:hover:bg-white/5',
+                    )}
+                  >
+                    <span className="truncate">{t('composer.thinkingInherit', { level: inheritedThinkingLabel })}</span>
+                    {!selectedThinkingLevel && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                  </button>
+                  {thinkingOptions.map((option) => {
+                    const label = thinkingLevelLabel(option.id, option.label);
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        data-testid={`chat-thinking-option-${option.id}`}
+                        onClick={() => void handleSelectThinking(option.id)}
+                        className={cn(
+                          'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',
+                          option.id === selectedThinkingLevel ? 'bg-black/5 text-foreground dark:bg-white/10' : 'hover:bg-black/5 dark:hover:bg-white/5',
+                        )}
+                      >
+                        <span className="truncate">{label}</span>
+                        {option.id === selectedThinkingLevel && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
             <div className="ml-1 flex items-center">
               <button
                 type="button"
@@ -1554,19 +1666,75 @@ export function ChatInput({
 
             {sendMode === 'image' && (
               <div className="ml-2 flex items-center gap-2" data-testid="chat-image-options">
-                <Select
-                  value={imageOptions.size}
-                  onChange={(event) => updateImageOptions({ size: event.target.value })}
-                  className={cn(COMPOSER_MEDIA_SELECT_CLASS, 'w-[96px]')}
-                  data-testid="chat-image-size"
-                  aria-label={t('composer.imageSizeLabel')}
-                >
-                  {(selectedImageModel?.sizes ?? [imageOptions.size]).map((size) => (
-                    <option key={size} value={size}>
-                      {formatImageSizeLabel(size)}
-                    </option>
-                  ))}
-                </Select>
+                <div ref={imageAspectPickerRef} className="relative shrink-0">
+                  <button
+                    type="button"
+                    className={cn(
+                      'inline-flex h-8 min-w-[76px] items-center justify-center gap-1.5 rounded-lg border border-black/10 bg-transparent px-2 text-xs font-medium text-foreground transition-colors dark:border-white/10',
+                      imageAspectPickerOpen
+                        ? 'bg-black/5 dark:bg-white/10'
+                        : 'hover:bg-black/5 dark:hover:bg-white/10',
+                    )}
+                    onClick={() => {
+                      setPickerOpen(false);
+                      setSkillPickerOpen(false);
+                      setModelPickerOpen(false);
+                      setThinkingPickerOpen(false);
+                      setImageAspectPickerOpen((open) => !open);
+                    }}
+                    disabled={inputDisabled || sending}
+                    data-testid="chat-image-aspect-trigger"
+                    aria-label={t('composer.imageSizeLabel')}
+                    aria-haspopup="menu"
+                    aria-expanded={imageAspectPickerOpen}
+                  >
+                    <span>{IMAGE_ASPECT_OPTIONS.find((option) => option.size === imageOptions.size)?.ratio ?? '1:1'}</span>
+                    <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', imageAspectPickerOpen && 'rotate-180')} />
+                  </button>
+                  {imageAspectPickerOpen && (
+                    <div
+                      className="absolute bottom-full left-0 z-20 mb-2 w-[138px] rounded-lg border border-black/10 bg-surface-modal p-1 shadow-xl dark:border-white/10"
+                      data-testid="chat-image-aspect-menu"
+                      role="menu"
+                    >
+                      {IMAGE_ASPECT_OPTIONS.map((option) => {
+                        const selected = option.size === imageOptions.size;
+                        return (
+                          <button
+                            key={option.size}
+                            type="button"
+                            className={cn(
+                              'flex h-9 w-full items-center gap-2 rounded-md px-2 text-left transition-colors',
+                              selected
+                                ? 'bg-black/5 text-foreground dark:bg-white/10'
+                                : 'text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/5',
+                            )}
+                            onClick={() => {
+                              updateImageOptions({ size: option.size });
+                              setImageAspectPickerOpen(false);
+                              requestAnimationFrame(() => textareaRef.current?.focus());
+                            }}
+                            data-testid={option.testId}
+                            role="menuitemradio"
+                            aria-checked={selected}
+                          >
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center" aria-hidden="true">
+                              <span className={cn(
+                                'block rounded-[3px]',
+                                option.previewClassName,
+                                selected ? 'bg-foreground' : 'bg-muted-foreground/40',
+                              )} />
+                            </span>
+                            <span className="w-8 shrink-0 text-xs font-medium text-foreground">{option.ratio}</span>
+                            <span className="min-w-0 truncate text-xs text-muted-foreground">
+                              {t(option.labelKey)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
                 <Select
                   value={imageOptions.quality}
                   onChange={(event) => updateImageOptions({ quality: event.target.value })}

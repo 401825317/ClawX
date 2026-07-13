@@ -18,7 +18,11 @@ import {
 } from './agent-profile';
 import { appendAgentWelcomeMessage } from './chat-session-welcome-message';
 import { getProviderBackendConfig } from '../shared/providers/registry';
-import { JUNFEIAI_DEFAULT_MODEL, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
+import {
+  JUNFEIAI_DEFAULT_MODEL,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
+  JUNFEIAI_PROVIDER_ID,
+} from './junfeiai-distribution';
 
 const MAIN_AGENT_ID = 'main';
 const MAIN_AGENT_NAME = 'Main Agent';
@@ -162,7 +166,7 @@ function getManagedTextModelPolicy(modelOptions?: ManagedTextModelOptionsConfig)
     : (resolvedAllowedModelIds[0] || JUNFEIAI_DEFAULT_MODEL);
 
   return {
-    defaultModelRef: `${JUNFEIAI_PROVIDER_ID}/${defaultModelId}`,
+    defaultModelRef: `${JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID}/${defaultModelId}`,
     allowedModelIds: resolvedAllowedModelIds,
   };
 }
@@ -183,11 +187,11 @@ function normalizeManagedTextModelRefForConfig(
 
   const providerKey = normalized.slice(0, separatorIndex);
   const modelId = normalized.slice(separatorIndex + 1);
-  if (providerKey !== JUNFEIAI_PROVIDER_ID) {
+  if (providerKey !== JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID && providerKey !== JUNFEIAI_PROVIDER_ID) {
     return normalized;
   }
   return policy.allowedModelIds.includes(modelId)
-    ? `${JUNFEIAI_PROVIDER_ID}/${modelId}`
+    ? `${JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID}/${modelId}`
     : policy.defaultModelRef;
 }
 
@@ -209,8 +213,8 @@ function formatModelLabel(model: unknown): string | null {
     if (separatorIndex > 0 && separatorIndex < trimmed.length - 1) {
       const providerKey = trimmed.slice(0, separatorIndex);
       const modelId = trimmed.slice(separatorIndex + 1);
-      if (providerKey === 'lingzhiwuxian') {
-        const providerModel = getProviderBackendConfig(providerKey)?.models?.find((entry) => entry.id === modelId);
+      if (providerKey === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID) {
+        const providerModel = getProviderBackendConfig(JUNFEIAI_PROVIDER_ID)?.models?.find((entry) => entry.id === modelId);
         return providerModel?.name || modelId;
       }
       return modelId;

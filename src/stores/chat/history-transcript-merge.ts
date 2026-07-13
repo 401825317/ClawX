@@ -109,6 +109,10 @@ function mergeTranscriptMetadata(
     next.model = transcriptMessage.model;
     changed = true;
   }
+  if (!next.provenance && transcriptMessage.provenance) {
+    next.provenance = { ...transcriptMessage.provenance };
+    changed = true;
+  }
   if (next.syntheticLocalArtifactConversation !== true && transcriptMessage.syntheticLocalArtifactConversation === true) {
     next.syntheticLocalArtifactConversation = true;
     changed = true;

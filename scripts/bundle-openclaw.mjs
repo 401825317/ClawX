@@ -25,6 +25,7 @@ import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-reque
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
+import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
@@ -1084,6 +1085,13 @@ function patchBundledRuntime(outputDir) {
   });
   if (replySessionInitConflictPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${replySessionInitConflictPatch.patchedFiles} reply-session init runtime file(s)`;
+  }
+
+  const responsesCompatibleFallbackPatch = patchOpenClawResponsesCompatibleFallbackRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (responsesCompatibleFallbackPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${responsesCompatibleFallbackPatch.patchedFiles} OpenAI Responses fallback runtime file(s)`;
   }
 
   // --- Ordinary session cwd patch ---

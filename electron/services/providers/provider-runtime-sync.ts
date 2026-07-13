@@ -28,8 +28,10 @@ import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
 import {
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
+  JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
+  getJunFeiAIProviderBaseUrl,
   normalizeJunFeiAIModelContextWindow,
 } from '../../utils/junfeiai-distribution';
 import {
@@ -96,11 +98,22 @@ function shouldUseExplicitDefaultOverride(config: ProviderConfig, runtimeProvide
 }
 
 function getRuntimeApiKeyEnv(config: ProviderConfig, apiKeyEnv?: string): string | undefined {
-  return config.type === JUNFEIAI_PROVIDER_ID ? undefined : apiKeyEnv;
+  return isManagedRelayTextConfig(config) ? undefined : apiKeyEnv;
+}
+
+function isManagedOpenAiChatConfig(config: ProviderConfig): boolean {
+  if (config.type !== JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID || config.id !== JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID) {
+    return false;
+  }
+  return config.baseUrl?.trim().replace(/\/+$/, '') === getJunFeiAIProviderBaseUrl().replace(/\/+$/, '');
+}
+
+function isManagedRelayTextConfig(config: ProviderConfig): boolean {
+  return config.type === JUNFEIAI_PROVIDER_ID || isManagedOpenAiChatConfig(config);
 }
 
 function getManagedAllowedModelIds(config: ProviderConfig): string[] {
-  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+  if (!isManagedRelayTextConfig(config)) {
     return [];
   }
   const models = config.metadata?.managedAllowedModels;
@@ -111,7 +124,7 @@ function getManagedAllowedModelIds(config: ProviderConfig): string[] {
 }
 
 function getManagedDefaultModelId(config: ProviderConfig): string | undefined {
-  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+  if (!isManagedRelayTextConfig(config)) {
     return undefined;
   }
   const fromMetadata = config.metadata?.managedDefaultModel?.trim();
@@ -124,7 +137,7 @@ function getManagedDefaultModelId(config: ProviderConfig): string | undefined {
 
 function normalizeRuntimeModelId(config: ProviderConfig, modelId?: string): string | undefined {
   const normalized = modelId?.trim();
-  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+  if (!isManagedRelayTextConfig(config)) {
     return normalized || undefined;
   }
 
@@ -140,10 +153,10 @@ function runtimeModelEntryForProvider(
   config: ProviderConfig,
   modelId: string,
 ): PiAiModelsJsonModelEntry {
-  if (config.type !== JUNFEIAI_PROVIDER_ID) {
+  if (!isManagedRelayTextConfig(config)) {
     return piAiModelsJsonModelEntry(modelId);
   }
-  const registryModel = getProviderConfig(config.type)?.models?.find((model) => model.id === modelId);
+  const registryModel = getProviderConfig(JUNFEIAI_PROVIDER_ID)?.models?.find((model) => model.id === modelId);
   const contextWindow = normalizeJunFeiAIModelContextWindow(registryModel?.contextWindow)
     ?? JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW;
   const metadata = {
@@ -180,7 +193,7 @@ function normalizeRuntimeApiKey(
   if (!trimmed) {
     return null;
   }
-  if (config.type === JUNFEIAI_PROVIDER_ID && apiKeyEnv && trimmed === apiKeyEnv) {
+  if (isManagedRelayTextConfig(config) && apiKeyEnv && trimmed === apiKeyEnv) {
     return null;
   }
   return trimmed;
@@ -342,15 +355,27 @@ export async function syncProviderApiKeyToRuntime(
 
 export async function syncAllProviderAuthToRuntime(): Promise<void> {
   const accounts = await listProviderAccounts();
+  const hasManagedOpenAiAccount = accounts.some((account) => (
+    account.id === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    && account.vendorId === JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    && account.baseUrl?.trim().replace(/\/+$/, '') === getJunFeiAIProviderBaseUrl().replace(/\/+$/, '')
+  ));
   for (const account of accounts) {
+    if (account.id === JUNFEIAI_PROVIDER_ID && hasManagedOpenAiAccount) {
+      await removeProviderKeyFromOpenClaw(JUNFEIAI_PROVIDER_ID);
+      continue;
+    }
     const config: ProviderConfig = {
       id: account.id,
       name: account.label,
       type: account.vendorId,
       baseUrl: account.baseUrl,
+      apiProtocol: account.apiProtocol,
+      headers: account.headers,
       model: account.model,
       fallbackModels: account.fallbackModels,
       fallbackProviderIds: account.fallbackAccountIds,
+      metadata: account.metadata,
       enabled: account.enabled,
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,
@@ -467,7 +492,7 @@ async function syncRuntimeProviderConfig(
   context: RuntimeProviderSyncContext,
   apiKey: string | undefined,
 ): Promise<void> {
-  const accountApiKey = config.type === JUNFEIAI_PROVIDER_ID
+  const accountApiKey = isManagedRelayTextConfig(config)
     ? normalizeRuntimeApiKey(
       config,
       apiKey !== undefined ? apiKey : await getApiKey(config.id),
@@ -478,9 +503,9 @@ async function syncRuntimeProviderConfig(
     baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
     api: context.api,
     apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
-    apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (accountApiKey || null) : undefined,
+    apiKey: isManagedRelayTextConfig(config) ? (accountApiKey || null) : undefined,
     headers: config.headers ?? context.meta?.headers,
-    timeoutSeconds: config.type === JUNFEIAI_PROVIDER_ID ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
+    timeoutSeconds: isManagedRelayTextConfig(config) ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
   });
 }
 
@@ -613,9 +638,9 @@ async function buildAgentModelProviderEntry(
     baseUrl,
     api,
     models: runtimeModelId ? [runtimeModelEntryForProvider(config, runtimeModelId)] : [],
-    apiKey: apiKey ?? (config.type === JUNFEIAI_PROVIDER_ID ? null : undefined),
+    apiKey: apiKey ?? (isManagedRelayTextConfig(config) ? null : undefined),
     authHeader,
-    timeoutSeconds: config.type === JUNFEIAI_PROVIDER_ID ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
+    timeoutSeconds: isManagedRelayTextConfig(config) ? JUNFEIAI_PROVIDER_TIMEOUT_SECONDS : undefined,
   };
 }
 
@@ -707,14 +732,17 @@ async function syncManagedRelayAgentModelsAcrossDiscoveredAgents(
   }, { createIfMissing: false });
 }
 
-async function syncManagedRelayAuthProfiles(apiKey: string | undefined): Promise<void> {
+async function syncManagedRelayAuthProfiles(
+  apiKey: string | undefined,
+  chatProviderKey: string,
+): Promise<void> {
   if (apiKey === undefined) {
     return;
   }
 
   const managedApiKey = apiKey.trim();
   const providers = [
-    JUNFEIAI_PROVIDER_ID,
+    chatProviderKey,
     CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
     CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   ];
@@ -751,8 +779,8 @@ export async function syncSavedProviderToRuntime(
 
   try {
     await syncProviderAgentModelsAcrossDiscoveredAgents(config, context.runtimeProviderKey, apiKeyOverrides);
-    if (config.type === JUNFEIAI_PROVIDER_ID) {
-      await syncManagedRelayAuthProfiles(apiKey);
+    if (isManagedRelayTextConfig(config)) {
+      await syncManagedRelayAuthProfiles(apiKey, context.runtimeProviderKey);
       await syncManagedRelayAgentModelsAcrossDiscoveredAgents(config, apiKey);
     }
   } catch (err) {
@@ -794,7 +822,7 @@ export async function syncUpdatedProviderToRuntime(
           baseUrl: normalizeProviderBaseUrl(config, config.baseUrl || context.meta?.baseUrl, context.api),
           api: context.api,
           apiKeyEnv: getRuntimeApiKeyEnv(config, context.meta?.apiKeyEnv),
-          apiKey: config.type === JUNFEIAI_PROVIDER_ID ? (runtimeApiKey || null) : undefined,
+          apiKey: isManagedRelayTextConfig(config) ? (runtimeApiKey || null) : undefined,
           headers: config.headers ?? context.meta?.headers,
         }, fallbackModels);
       } else {
@@ -932,7 +960,7 @@ export async function syncDefaultProviderToRuntime(
         ),
         api: provider.apiProtocol || providerMeta?.api,
         apiKeyEnv: getRuntimeApiKeyEnv(provider, providerMeta?.apiKeyEnv),
-        apiKey: provider.type === JUNFEIAI_PROVIDER_ID ? (providerKey || null) : undefined,
+        apiKey: isManagedRelayTextConfig(provider) ? (providerKey || null) : undefined,
         headers: provider.headers ?? providerMeta?.headers,
       }, fallbackModels);
     } else {

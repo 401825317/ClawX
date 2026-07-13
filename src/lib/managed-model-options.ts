@@ -1,6 +1,7 @@
 import type { ClientModelOptionsConfig } from '@/stores/client-config';
 
-export const MANAGED_TEXT_PROVIDER_KEY = 'lingzhiwuxian';
+export const MANAGED_TEXT_PROVIDER_KEY = 'openai';
+const LEGACY_MANAGED_TEXT_PROVIDER_KEY = 'lingzhiwuxian';
 export const DEFAULT_MANAGED_TEXT_MODEL_ID = 'smart-latest';
 
 type TextModelOptionLike = {
@@ -74,7 +75,8 @@ export function splitManagedTextModelRef(modelRef: string | null | undefined): {
 }
 
 export function isManagedTextModelRef(modelRef: string | null | undefined): boolean {
-  return splitManagedTextModelRef(modelRef)?.providerKey === MANAGED_TEXT_PROVIDER_KEY;
+  const providerKey = splitManagedTextModelRef(modelRef)?.providerKey;
+  return providerKey === MANAGED_TEXT_PROVIDER_KEY || providerKey === LEGACY_MANAGED_TEXT_PROVIDER_KEY;
 }
 
 export function isAllowedManagedTextModelRef(
@@ -82,7 +84,7 @@ export function isAllowedManagedTextModelRef(
   modelOptions?: ManagedTextModelOptionsLike | ClientModelOptionsConfig,
 ): boolean {
   const parsed = splitManagedTextModelRef(modelRef);
-  if (!parsed || parsed.providerKey !== MANAGED_TEXT_PROVIDER_KEY) {
+  if (!parsed || (parsed.providerKey !== MANAGED_TEXT_PROVIDER_KEY && parsed.providerKey !== LEGACY_MANAGED_TEXT_PROVIDER_KEY)) {
     return true;
   }
   return getManagedTextModelPolicy(modelOptions).allowedModelIds.includes(parsed.modelId);
@@ -100,7 +102,7 @@ export function normalizeManagedTextModelRef(
   }
 
   const parsed = splitManagedTextModelRef(normalized);
-  if (!parsed || parsed.providerKey !== MANAGED_TEXT_PROVIDER_KEY) {
+  if (!parsed || (parsed.providerKey !== MANAGED_TEXT_PROVIDER_KEY && parsed.providerKey !== LEGACY_MANAGED_TEXT_PROVIDER_KEY)) {
     return normalized;
   }
 
