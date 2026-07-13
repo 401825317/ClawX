@@ -62,6 +62,7 @@ import { whatsAppLoginManager } from '../utils/whatsapp-login';
 import { syncAllProviderAuthToRuntime } from '../services/providers/provider-runtime-sync';
 import { ensureJunFeiAIProviderSeeded, getJunFeiAILocalStatus, isJunFeiAISeedReady } from '../services/junfeiai/junfeiai-service';
 import { autoMigrateManagedChatToOpenAiOnStartup } from '../services/providers/openai-chat-migration';
+import { ensureJunFeiAIManagedRuntimeBootstrap } from '../services/junfeiai/managed-runtime-bootstrap';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
@@ -564,6 +565,7 @@ async function initialize(): Promise<void> {
   }
 
   let managedProviderReadyForGateway = true;
+  let managedProviderStartupSeed: Awaited<ReturnType<typeof ensureJunFeiAIProviderSeeded>> | null = null;
   if (!isE2EMode) {
     try {
       const localStatus = await getJunFeiAILocalStatus();
@@ -572,6 +574,34 @@ async function initialize(): Promise<void> {
         logger.info(
           `JunFeiAI local startup status; authToken=${localStatus.hasAuthToken ? 'present' : 'missing'} relayToken=${localStatus.hasRelayToken ? 'present' : 'missing'} activation=${localStatus.activationRequired ? 'required' : 'ready'} cachedAuth=${localStatus.authValid ? 'valid' : 'pending'}`,
         );
+        if (managedProviderReadyForGateway) {
+          try {
+            managedProviderStartupSeed = await ensureJunFeiAIProviderSeeded({
+              bootstrap: localStatus.bootstrap,
+              syncRuntime: true,
+              syncRuntimeOnAuthChange: true,
+              markDeviceActivatedFromStoredAuth: false,
+            });
+            managedProviderReadyForGateway = isJunFeiAISeedReady(managedProviderStartupSeed);
+            logger.info('Managed provider contract and media runtime synchronized before Gateway start');
+          } catch (error) {
+            logger.warn('Failed to synchronize the full managed provider contract before Gateway start:', error);
+            try {
+              const runtimeBootstrap = await ensureJunFeiAIManagedRuntimeBootstrap();
+              if (runtimeBootstrap.blockedReason) {
+                logger.warn(
+                  `Managed runtime bootstrap preserved an existing personal OpenAI provider (${runtimeBootstrap.blockedReason}).`,
+                );
+              } else {
+                logger.info(
+                  `Managed runtime bootstrap ready before Gateway start; migratedNow=${runtimeBootstrap.migratedNow}`,
+                );
+              }
+            } catch (bootstrapError) {
+              logger.warn('Failed to bootstrap managed Responses and media providers before Gateway start:', bootstrapError);
+            }
+          }
+        }
       }
     } catch (error) {
       managedProviderReadyForGateway = !isJunFeiAIManagedDistribution();
@@ -692,11 +722,14 @@ async function initialize(): Promise<void> {
   }
 
   if (!isE2EMode) {
-    void ensureJunFeiAIProviderSeeded({
-      gatewayManager,
-      syncRuntime: false,
-      syncRuntimeOnAuthChange: true,
-    }).then(async (seed) => {
+    const seedPromise = managedProviderStartupSeed
+      ? Promise.resolve(managedProviderStartupSeed)
+      : ensureJunFeiAIProviderSeeded({
+        gatewayManager,
+        syncRuntime: false,
+        syncRuntimeOnAuthChange: true,
+      });
+    void seedPromise.then(async (seed) => {
       if (!seed.managed) {
         return;
       }

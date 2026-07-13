@@ -16,6 +16,8 @@ export interface AttachedFileMeta {
   previewStatus?: 'unavailable';
   width?: number;
   height?: number;
+  durationSeconds?: number;
+  hasAudio?: boolean;
   filePath?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
   /**

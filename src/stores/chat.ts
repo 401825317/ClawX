@@ -14,6 +14,7 @@ import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
 import type { ChatRuntimeArtifact, ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -66,6 +67,7 @@ import {
   applyRuntimeEventToRuns,
   applyRuntimeTaskEventToOwners,
   buildCompletionWakeTerminalTaskEvent,
+  completionWakeTaskIdFromRunId,
   extractToolCompletedFiles,
   resolveCompletionWakeOwnerRunId,
   settledRuntimeRunError,
@@ -3380,7 +3382,7 @@ function collectMissingPreviewRefs(messages: RawMessage[]): PreviewRef[] {
 
 function applyPreviewResults(
   messages: RawMessage[],
-  thumbnails: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }>,
+  thumbnails: Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata>,
 ): boolean {
   let updated = false;
   for (const msg of messages) {
@@ -3397,6 +3399,8 @@ function applyPreviewResults(
         if (thumb.filePath) file.filePath = thumb.filePath;
         if (thumb.width) file.width = thumb.width;
         if (thumb.height) file.height = thumb.height;
+        if (typeof thumb.durationSeconds === 'number') file.durationSeconds = thumb.durationSeconds;
+        if (typeof thumb.hasAudio === 'boolean') file.hasAudio = thumb.hasAudio;
         delete file.previewStatus;
         if (file.filePath) {
           _imageCache.set(file.filePath, { ...file });
@@ -3420,6 +3424,8 @@ function applyPreviewResults(
           if (thumb.filePath) file.filePath = thumb.filePath;
           if (thumb.width) file.width = thumb.width;
           if (thumb.height) file.height = thumb.height;
+          if (typeof thumb.durationSeconds === 'number') file.durationSeconds = thumb.durationSeconds;
+          if (typeof thumb.hasAudio === 'boolean') file.hasAudio = thumb.hasAudio;
           delete file.previewStatus;
           _imageCache.set(ref.filePath, { ...file });
           updated = true;
@@ -3468,7 +3474,7 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
     }
 
     try {
-      const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }>>(
+      const thumbnails = await hostApiFetch<Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata>>(
         '/api/files/thumbnails',
         {
           method: 'POST',
@@ -7810,7 +7816,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       : event;
     const matchesCurrentSession = eventSessionKey != null && eventSessionKey === currentSessionKey;
     const matchesActiveRun = activeRunId != null && event.runId === activeRunId;
-    const matchesActiveTurn = runtimeEventBelongsToActiveTurn(initialState, eventForSession, eventSessionKey);
+    const isCompletionWake = completionWakeTaskIdFromRunId(eventForSession.runId) != null;
+    const completionWakeOwnerRunId = resolveCompletionWakeOwnerRunId({
+      runtimeRuns: initialState.runtimeRuns,
+      activeRunId,
+      eventRunId: eventForSession.runId,
+      currentSessionKey,
+      eventSessionKey,
+    });
+    const matchesActiveTurn = !isCompletionWake
+      && runtimeEventBelongsToActiveTurn(initialState, eventForSession, eventSessionKey);
 
     if (shouldFilterRuntimeExecutionGraphEvent(eventForSession)) {
       if (matchesCurrentSession || matchesActiveRun || matchesActiveTurn) {
@@ -7842,8 +7857,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }),
       );
     }
+    if (eventForSession.type === 'run.ended' && completionWakeOwnerRunId) {
+      const terminalTaskEvent = buildCompletionWakeTerminalTaskEvent({
+        runtimeRuns,
+        ownerRunId: completionWakeOwnerRunId,
+        eventRunId: eventForSession.runId,
+        sessionKey: eventSessionKey ?? currentSessionKey,
+        state: eventForSession.status === 'error'
+          ? 'error'
+          : eventForSession.status === 'aborted'
+            ? 'aborted'
+            : 'final',
+        error: eventForSession.error,
+        ts: eventForSession.ts ?? eventForSession.endedAt ?? Date.now(),
+      });
+      if (terminalTaskEvent) {
+        runtimeRuns = applyRuntimeContractEvents(runtimeRuns, [terminalTaskEvent]);
+      }
+    }
     const nextPatch: Partial<ChatState> = { runtimeRuns };
-    const appliesToActiveUi = matchesActiveRun || matchesActiveTurn || (activeRunId == null && matchesCurrentSession);
+    const appliesToActiveUi = completionWakeOwnerRunId != null
+      || matchesActiveRun
+      || matchesActiveTurn
+      || (activeRunId == null && matchesCurrentSession && !isCompletionWake);
     let completedToolFiles: AttachedFileMeta[] = [];
 
     if (eventForSession.type === 'artifact.produced' || eventForSession.type === 'verification.completed') {
@@ -7910,6 +7946,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     _lastChatEventAt = Date.now();
 
     if (eventForSession.type === 'run.started') {
+      if (isCompletionWake) {
+        set(nextPatch);
+        return;
+      }
       const activeRunIsHistoricalPlaceholder = Boolean(activeRunId?.startsWith(`history:${currentSessionKey}:`));
       if (matchesCurrentSession && (activeRunId == null || matchesActiveRun || activeRunIsHistoricalPlaceholder)) {
         nextPatch.activeRunId = eventForSession.runId;
@@ -7962,6 +8002,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (eventForSession.type === 'run.ended') {
+      if (isCompletionWake) {
+        set(nextPatch);
+        return;
+      }
       const latestState = get();
       const terminalMatchesActiveRun = latestState.activeRunId != null && eventForSession.runId === latestState.activeRunId;
       const terminalIsForCurrentUntrackedSend = latestState.activeRunId == null

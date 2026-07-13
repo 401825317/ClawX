@@ -14,6 +14,7 @@ import {
 } from '../providers/openai-chat-migration';
 import { ensureManagedOpenAiImageRelay } from '../../utils/openclaw-image-generation';
 import { ensureManagedOpenAiVideoRelay } from '../../utils/openclaw-video-generation';
+import { ensureJunFeiAIManagedRuntimeBootstrap } from './managed-runtime-bootstrap';
 import { removeProviderKeyFromOpenClaw } from '../../utils/openclaw-auth';
 import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
 import {
@@ -1583,6 +1584,21 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   }
   if (shouldApplyRuntimeAuthImmediately) {
     await applyJunFeiAIAuthSwitchToGateway(options.gatewayManager);
+  }
+
+  if (hasRelayToken && effectiveAuthStatus.authValid && !activation.activationRequired) {
+    try {
+      const runtimeBootstrap = await ensureJunFeiAIManagedRuntimeBootstrap();
+      if (runtimeBootstrap.blockedReason) {
+        logger.warn(
+          `[junfeiai] Automatic native Responses bootstrap blocked by ${runtimeBootstrap.blockedReason}; preserving the existing OpenAI provider.`,
+        );
+      } else if (runtimeBootstrap.migratedNow) {
+        logger.info('[junfeiai] Managed runtime migrated to native Responses and media providers were initialized.');
+      }
+    } catch (error) {
+      logger.warn('[junfeiai] Failed to complete managed Responses and media runtime bootstrap:', error);
+    }
   }
 
   return {

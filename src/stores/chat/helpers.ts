@@ -6,6 +6,7 @@ import {
 } from '@/pages/Chat/message-utils';
 import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
+import type { VideoAttachmentMetadata } from '../../../shared/video-attachment-metadata';
 import type {
   AsyncTaskEvidence,
   AsyncTaskLedgerEntry,
@@ -1377,7 +1378,7 @@ function collectMissingPreviewRefs(messages: RawMessage[]): PreviewRef[] {
 
 function applyPreviewResults(
   messages: RawMessage[],
-  thumbnails: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }>,
+  thumbnails: Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata>,
 ): boolean {
   let updated = false;
 
@@ -1395,6 +1396,8 @@ function applyPreviewResults(
         if (thumb.filePath) file.filePath = thumb.filePath;
         if (thumb.width) file.width = thumb.width;
         if (thumb.height) file.height = thumb.height;
+        if (typeof thumb.durationSeconds === 'number') file.durationSeconds = thumb.durationSeconds;
+        if (typeof thumb.hasAudio === 'boolean') file.hasAudio = thumb.hasAudio;
         delete file.previewStatus;
         // Only persist local-path entries to the localStorage cache.
         // Gateway outgoing URLs are tied to a specific session/attachment
@@ -1421,6 +1424,8 @@ function applyPreviewResults(
           if (thumb.filePath) file.filePath = thumb.filePath;
           if (thumb.width) file.width = thumb.width;
           if (thumb.height) file.height = thumb.height;
+          if (typeof thumb.durationSeconds === 'number') file.durationSeconds = thumb.durationSeconds;
+          if (typeof thumb.hasAudio === 'boolean') file.hasAudio = thumb.hasAudio;
           delete file.previewStatus;
           _imageCache.set(ref.filePath, { ...file });
           updated = true;
@@ -1469,7 +1474,7 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
       const thumbnails = await invokeIpc(
         'media:getThumbnails',
         needPreview,
-      ) as Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }>;
+      ) as Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata>;
       if (applyPreviewResults(messages, thumbnails)) {
         updatedAny = true;
       }

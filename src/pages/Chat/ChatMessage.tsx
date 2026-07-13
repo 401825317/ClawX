@@ -19,6 +19,10 @@ import { invokeIpc, readBinaryFile, statFile } from '@/lib/api-client';
 import { createAuthenticatedHostApiUrl } from '@/lib/host-api';
 import { DEFAULT_AGENT_AVATAR_SRC } from '@/lib/agent-avatars';
 import type { RawMessage, AttachedFileMeta } from '@/stores/chat';
+import {
+  formatVideoAttachmentMetadata,
+  type VideoAttachmentMetadata,
+} from '../../../shared/video-attachment-metadata';
 import { extractText, extractImages, formatTimestamp, isUnresolvableImageUrl } from './message-utils';
 import { copyImageToClipboard, type ImageCopyTarget } from './copy-image';
 
@@ -934,6 +938,9 @@ function FileIcon({ mimeType, className }: { mimeType: string; className?: strin
 }
 
 function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
+  const videoMetadataLabel = file.mimeType.startsWith('video/')
+    ? formatVideoAttachmentMetadata(file)
+    : null;
   const handleOpen = useCallback(() => {
     const target = attachmentOpenTarget(file);
     if (!target) return;
@@ -959,7 +966,11 @@ function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: At
       <div className="min-w-0 overflow-hidden">
         <p className="text-xs font-medium truncate">{file.fileName}</p>
         <p className="text-2xs text-muted-foreground">
-          {file.mimeType === DIRECTORY_MIME_TYPE ? '文件夹' : file.fileSize > 0 ? formatFileSize(file.fileSize) : 'File'}
+          {file.mimeType === DIRECTORY_MIME_TYPE
+            ? '文件夹'
+            : [file.fileSize > 0 ? formatFileSize(file.fileSize) : null, videoMetadataLabel]
+              .filter(Boolean)
+              .join(' · ') || 'File'}
         </p>
       </div>
     </div>
@@ -1008,6 +1019,7 @@ function immediateMediaSrcFromFilePath(
 }
 
 function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: AttachedFileMeta) => void }) {
+  const [elementMetadata, setElementMetadata] = useState<VideoAttachmentMetadata>({});
   const mediaTarget = attachmentOpenTarget(file);
   const src = useResolvedMediaSrc(mediaTarget, {
     mimeType: file.mimeType,
@@ -1025,6 +1037,12 @@ function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (
       void invokeIpc('shell:openPath', target);
     }
   }, [file, onOpen]);
+  const metadataLabel = formatVideoAttachmentMetadata({
+    width: elementMetadata.width ?? file.width,
+    height: elementMetadata.height ?? file.height,
+    durationSeconds: elementMetadata.durationSeconds ?? file.durationSeconds,
+    hasAudio: file.hasAudio,
+  });
 
   if (!src) {
     return <FileCard file={file} onOpen={onOpen} />;
@@ -1036,6 +1054,16 @@ function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (
         src={src}
         controls
         preload="metadata"
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          setElementMetadata({
+            width: video.videoWidth > 0 ? video.videoWidth : undefined,
+            height: video.videoHeight > 0 ? video.videoHeight : undefined,
+            durationSeconds: Number.isFinite(video.duration) && video.duration > 0
+              ? video.duration
+              : undefined,
+          });
+        }}
         className="aspect-video w-full bg-black object-contain"
       />
       <button
@@ -1045,7 +1073,12 @@ function VideoPreviewCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (
         title={mediaTarget}
       >
         <Film className="h-4 w-4 shrink-0" />
-        <span className="truncate">{file.fileName}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-foreground">{file.fileName}</span>
+          <span className="block truncate text-2xs">
+            {[file.fileSize > 0 ? formatFileSize(file.fileSize) : null, metadataLabel].filter(Boolean).join(' · ') || 'Video'}
+          </span>
+        </span>
       </button>
     </div>
   );

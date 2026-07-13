@@ -3,16 +3,23 @@ id: junfeiai-native-responses-migration
 title: Migrate managed JunFeiAI chat to native OpenAI Responses
 scenario: gateway-backend-communication
 taskType: runtime-bridge
-intent: Move managed `smart-latest` chat from the legacy `lingzhiwuxian/*` Chat Completions compatibility path to the native `openai/*` Responses adapter without replacing UClaw's unified Agent loop, durable task runtime, or artifact verification.
+intent: Deterministically bootstrap managed `smart-latest` chat and media capabilities so clean and existing UClaw development or packaged environments converge on the native `openai/*` Responses adapter before Gateway startup, without replacing UClaw's unified Agent loop, durable task runtime, or artifact verification.
 touchedAreas:
   - electron/main/index.ts
   - electron/api/routes/providers.ts
+  - electron/services/junfeiai/junfeiai-service.ts
+  - electron/services/junfeiai/managed-runtime-bootstrap.ts
   - electron/services/providers/openai-chat-migration.ts
   - electron/services/providers/provider-runtime-sync.ts
   - electron/services/providers/provider-service.ts
   - electron/utils/junfeiai-distribution.ts
+  - electron/utils/openclaw-image-generation.ts
+  - electron/utils/openclaw-video-generation.ts
   - electron/utils/openclaw-auth.ts
+  - shared/junfeiai-endpoints.json
   - scripts/openclaw-responses-compatible-fallback-patch.mjs
+  - scripts/junfeiai-distribution-defaults.test.ts
+  - scripts/managed-runtime-bootstrap.test.ts
   - scripts/bundle-openclaw.mjs
   - scripts/openai-chat-migration.test.ts
   - scripts/patch-browser-hint.mjs
@@ -34,6 +41,10 @@ requiredRules:
 expectedUserBehavior:
   - Existing managed users are migrated automatically during startup before Gateway reads the runtime config; ambiguous personal OpenAI ownership is never overwritten and remains available for explicit user handling.
   - After migration, normal chat uses `openai/smart-latest` with `api: openai-responses`, the embedded `pi` Agent runtime, `thinkingDefault: xhigh`, and `reasoningDefault: on`.
+  - Clean and existing managed UClaw environments automatically converge on `openai/smart-latest` before Gateway startup when the reserved `openai` provider is not occupied by a personal endpoint.
+  - Normal chat uses `api: openai-responses`, the embedded `pi` Agent runtime, a 372000-token managed context window, `thinkingDefault: xhigh`, and `reasoningDefault: on`.
+  - A personal OpenAI provider is never overwritten; that conflict keeps the compatible legacy provider active and leaves the explicit migration action available for user resolution.
+  - Managed image and video providers, plugins, authentication, and default models are ready before the first native Agent turn instead of depending on a prior settings-page save or media request.
   - Image, video, PPT, desktop, and long-task execution continue through the current unified OpenClaw Agent and Host Task paths; the migration does not restore renderer-owned media planners.
   - If the managed relay returns HTTP 404 before a Responses stream starts, the same Agent turn retries once through Chat Completions. No retry occurs after output starts, after cancellation, or for other errors.
 acceptance:
@@ -42,6 +53,11 @@ acceptance:
   - Re-running the migration is idempotent and preserves unrelated providers, sessions, models, media providers, tools, plugins, and task state.
   - Managed OpenAI relay entries remain pinned to `agentRuntime.id = pi` and retain UClaw's `xhigh` reasoning defaults.
   - New managed bootstrap remains compatible with legacy accounts; startup migration changes persisted provider/model references only after managed auth and relay configuration are ready.
+  - Managed startup runs the migration and media bootstrap idempotently before Gateway auto-start when authentication and the relay token are ready.
+  - Legacy `lingzhiwuxian` remains a Chat Completions compatibility provider, while managed `openai` remains the only native Responses provider and the only provider eligible for the narrow 404 fallback.
+  - The managed runtime contract version changes when the shipped protocol or context defaults change, forcing existing persisted accounts to resync.
+  - A clean state receives `clawx-openai-image/gpt-image-2`, the managed OpenAI video models, disabled automatic media-provider fallback, and the required plugin registrations without a manual settings action.
+  - Automatic bootstrap repairs missing or UClaw-managed media defaults but does not replace an explicitly selected third-party image or video provider, and relay credential rotation refreshes the managed image provider key.
   - The fallback patch is version-gated to the bundled OpenClaw runtime and fails packaging validation if its anchors no longer match.
   - Renderer uses `hostApiFetch` for migration and introduces no direct Gateway or IPC transport.
 docs:
@@ -63,6 +79,8 @@ docs:
 - Legacy `lingzhiwuxian/*` accounts are migrated automatically on managed app
   startup once auth and relay configuration are ready. Conflicting personal
   OpenAI ownership is left unchanged for explicit user handling.
+- Legacy `lingzhiwuxian/*` accounts continue using Chat Completions whenever
+  automatic migration is blocked by a personal `openai` provider conflict.
 - Migrated `openai/*` accounts always start with Responses. The runtime fallback
   is a narrow availability fallback, not a persisted protocol downgrade.
 - Older packaged clients are unaffected because the server endpoint and legacy
