@@ -70,8 +70,6 @@ import {
   completionWakeTaskIdFromRunId,
   extractToolCompletedFiles,
   resolveCompletionWakeOwnerRunId,
-  settledRuntimeRunError,
-  settledRuntimeRunStatus,
   shouldFilterRuntimeExecutionGraphEvent,
 } from './chat/runtime-graph';
 import { buildRuntimeProgressEvents } from './chat/runtime-progress';
@@ -1126,28 +1124,6 @@ function activeSendGenerationMatches(sessionKey: string, sendGeneration: number)
   return _activeSendGenerationBySession.get(sessionKey) === sendGeneration;
 }
 
-const LOCALLY_ABORTED_RUN_TTL_MS = 30 * 60 * 1000;
-const _locallyAbortedRunIds = new Map<string, number>();
-
-function rememberLocallyAbortedRun(runId: string | null): void {
-  if (!runId) return;
-  const now = Date.now();
-  _locallyAbortedRunIds.set(runId, now);
-  for (const [candidateRunId, abortedAt] of _locallyAbortedRunIds) {
-    if (now - abortedAt > LOCALLY_ABORTED_RUN_TTL_MS) {
-      _locallyAbortedRunIds.delete(candidateRunId);
-    }
-  }
-}
-
-function wasLocallyAbortedRun(runId: string | null | undefined): boolean {
-  if (!runId) return false;
-  const abortedAt = _locallyAbortedRunIds.get(runId);
-  if (abortedAt == null) return false;
-  if (Date.now() - abortedAt <= LOCALLY_ABORTED_RUN_TTL_MS) return true;
-  _locallyAbortedRunIds.delete(runId);
-  return false;
-}
 type PendingRuntimeIntent = {
   objective?: string;
   mode: ChatSendMode;
@@ -1665,7 +1641,7 @@ function applyRuntimeContractEvents(
 
 function reevaluateWithheldFinalDelivery(runId: string): void {
   const withheld = _withheldFinalDeliveryByRun.get(runId);
-  if (!withheld || wasLocallyAbortedRun(runId)) {
+  if (!withheld) {
     _withheldFinalDeliveryByRun.delete(runId);
     return;
   }
@@ -1675,42 +1651,20 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
   useChatStore.setState((state) => {
     const run = state.runtimeRuns[runId];
     if (!run || runtimeRunHasPendingAsyncTasks(run)) return {};
-    const terminalStatus = settledRuntimeRunStatus(run) ?? 'completed';
-    const terminalError = terminalStatus === 'error' ? settledRuntimeRunError(run) : undefined;
-    const ts = Date.now();
-    const runtimeRuns = applyRuntimeContractEvents(
-      state.runtimeRuns,
-      [{
-          runId,
-          sessionKey: withheld.sessionKey,
-          ts,
-          type: 'run.ended',
-          status: terminalStatus,
-          ...(terminalError ? { error: terminalError } : {}),
-          stopReason: 'async_tasks_settled',
-      } satisfies ChatRuntimeEvent],
-    );
-
     released = true;
     const isCurrentSession = state.currentSessionKey === withheld.sessionKey;
     controlsActiveLifecycle = isCurrentSession
       && (state.activeRunId === runId || (state.activeRunId == null && state.pendingFinal));
     const alreadyExists = state.messages.some((message) => message.id === withheld.message.id);
     return {
-      runtimeRuns,
       ...(isCurrentSession && !alreadyExists
         ? { messages: [...state.messages, withheld.message] }
         : {}),
       ...(controlsActiveLifecycle
         ? {
-            sending: false,
-            activeRunId: null,
-            pendingFinal: false,
-            lastUserMessageAt: null,
+            pendingFinal: true,
             streamingText: '',
             streamingMessage: null,
-            streamingTools: [],
-            pendingToolImages: [],
           }
         : {}),
     };
@@ -1718,8 +1672,7 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
 
   if (!released) return;
   _withheldFinalDeliveryByRun.delete(runId);
-  clearPendingRuntimeIntent(withheld.sessionKey);
-  if (controlsActiveLifecycle) markSessionRunIdle(withheld.sessionKey);
+  if (controlsActiveLifecycle) beginSessionBackendIdleSettlement(withheld.sessionKey, runId);
   if (useChatStore.getState().currentSessionKey === withheld.sessionKey) {
     forceNextHistoryLoad(withheld.sessionKey);
     void useChatStore.getState().loadHistory(true);
@@ -1946,9 +1899,10 @@ function scheduleRuntimeBackendIdleReconciliation(
         const backendSession = parseGatewaySessionProbe(data, sessionKey);
         if (backendSession) {
           const latestSessions = mergeBackendSessionProbe(get().sessions, backendSession);
+          set({ sessions: latestSessions });
+          reconcileCurrentSessionLifecycleFromBackend(set, get, latestSessions);
           if (shouldTrustBackendSessionIdle(backendSession, get().lastUserMessageAt)) {
             _runtimeBackendIdleProbeGeneration.delete(sessionKey);
-            reconcileCurrentSessionIdleFromBackend(set, get, latestSessions);
             return;
           }
         }
@@ -1968,26 +1922,39 @@ function scheduleRuntimeBackendIdleReconciliation(
   })();
 }
 
-function beginSessionBackendIdleSettlement(sessionKey: string): void {
+/** Keeps the local controls active until OpenClaw confirms this session is idle. */
+function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: string | null): void {
   const generation = (_sessionBackendIdleSettlementGeneration.get(sessionKey) ?? 0) + 1;
   _sessionBackendIdleSettlementGeneration.set(sessionKey, generation);
   _sessionsAwaitingBackendIdle.add(sessionKey);
   clearActiveSendGeneration(sessionKey);
-  captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
-  if (useChatStore.getState().currentSessionKey === sessionKey) {
-    useChatStore.setState(DEFAULT_SESSION_RUN_STATE);
-  }
 
   void (async () => {
     const startedAt = Date.now();
     let delayMs = 50;
+    let backendConfirmedIdle = false;
+    let confirmedSessions: ChatSession[] | null = null;
     while (
       _sessionBackendIdleSettlementGeneration.get(sessionKey) === generation
       && Date.now() - startedAt < 30_000
     ) {
       try {
         const data = await fetchChatSessionsList();
-        if (gatewaySessionIsIdle(data, sessionKey)) break;
+        const backendSession = parseGatewaySessionProbe(data, sessionKey);
+        if (backendSession) {
+          const sessions = mergeBackendSessionProbe(useChatStore.getState().sessions, backendSession);
+          useChatStore.setState({ sessions });
+          reconcileCurrentSessionLifecycleFromBackend(
+            useChatStore.setState,
+            useChatStore.getState,
+            sessions,
+          );
+          if (gatewaySessionIsIdle(data, sessionKey)) {
+            backendConfirmedIdle = true;
+            confirmedSessions = sessions;
+            break;
+          }
+        }
       } catch (error) {
         console.warn('[chat.queue] backend idle probe failed', {
           sessionKey,
@@ -2001,7 +1968,28 @@ function beginSessionBackendIdleSettlement(sessionKey: string): void {
     if (_sessionBackendIdleSettlementGeneration.get(sessionKey) !== generation) return;
     _sessionBackendIdleSettlementGeneration.delete(sessionKey);
     _sessionsAwaitingBackendIdle.delete(sessionKey);
-    markSessionRunIdle(sessionKey);
+    if (!backendConfirmedIdle) return;
+
+    const state = useChatStore.getState();
+    if (
+      state.currentSessionKey === sessionKey
+      && expectedRunId
+      && state.activeRunId != null
+      && state.activeRunId !== expectedRunId
+    ) {
+      return;
+    }
+    reconcileCurrentSessionLifecycleFromBackend(
+      useChatStore.setState,
+      useChatStore.getState,
+      confirmedSessions ?? useChatStore.getState().sessions,
+    );
+    if (useChatStore.getState().currentSessionKey === sessionKey) {
+      forceNextHistoryLoad(sessionKey);
+      void useChatStore.getState().loadHistory(true);
+    } else {
+      markSessionNeedsTerminalHistoryRefresh(sessionKey);
+    }
   })();
 }
 
@@ -3658,6 +3646,29 @@ function reconcileCurrentSessionIdleFromBackend(
   clearPendingRuntimeIntent(state.currentSessionKey);
 }
 
+/** Reconciles the visible session lifecycle from OpenClaw's authoritative session row. */
+function reconcileCurrentSessionLifecycleFromBackend(
+  set: (partial: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>)) => void,
+  get: () => ChatState,
+  sessions: ChatSession[],
+): void {
+  const state = get();
+  const current = sessions.find((session) => session.key === state.currentSessionKey);
+  if (current?.hasActiveRun === true) {
+    if (state.sending || state.activeRunId != null || state.pendingFinal) return;
+    set({
+      sending: true,
+      lastUserMessageAt: state.lastUserMessageAt ?? current.updatedAt ?? Date.now(),
+      error: null,
+      runError: null,
+    });
+    captureSessionRunState(state.currentSessionKey, get());
+    return;
+  }
+
+  reconcileCurrentSessionIdleFromBackend(set, get, sessions);
+}
+
 async function loadCronFallbackMessages(sessionKey: string, limit = 200): Promise<RawMessage[]> {
   if (!isCronSessionKey(sessionKey)) return [];
   try {
@@ -5243,7 +5254,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               },
             }));
           }
-          reconcileCurrentSessionIdleFromBackend(set, get, sessionsWithCurrent);
+          reconcileCurrentSessionLifecycleFromBackend(set, get, sessionsWithCurrent);
           applySessionBackendLabels(set, sessionsWithCurrent);
 
           // Background: fetch first user message for every non-main session to populate labels upfront.
@@ -5979,16 +5990,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
 
       if (latestTerminalAssistantErrorMessage && !historyErrorIsTransient) {
-        clearHistoryPoll();
-        set({
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          pendingFinal: false,
-          lastUserMessageAt: null,
-        });
-        markSessionRunIdle(currentSessionKey);
+        beginSessionBackendIdleSettlement(currentSessionKey, get().activeRunId);
         return true;
       }
 
@@ -6057,16 +6059,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
-          clearHistoryPoll();
-          set({
-            sending: false,
-            pendingImageGenerationLocal: false,
-            pendingVideoGenerationLocal: false,
-            activeRunId: null,
-            pendingFinal: false,
-            runError: null,
-          });
-          markSessionRunIdle(currentSessionKey);
+          beginSessionBackendIdleSettlement(currentSessionKey, get().activeRunId);
+          return true;
         }
       }
 
@@ -6087,36 +6081,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
-          clearHistoryPoll();
-          set({
-            sending: false,
-            pendingImageGenerationLocal: false,
-            pendingVideoGenerationLocal: false,
-            activeRunId: null,
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            runError: null,
-            streamingMessage: null,
-            streamingText: '',
-            streamingTools: [],
-            pendingToolImages: [],
-          });
-          markSessionRunIdle(currentSessionKey);
+          beginSessionBackendIdleSettlement(currentSessionKey, get().activeRunId);
+          return true;
         } else if (hasConclusiveReply && !segmentHasOpenToolRun(openSegment)) {
           if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
-          clearHistoryPoll();
-          set({
-            sending: false,
-            pendingImageGenerationLocal: false,
-            pendingVideoGenerationLocal: false,
-            activeRunId: null,
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            runError: null,
-          });
-          markSessionRunIdle(currentSessionKey);
+          beginSessionBackendIdleSettlement(currentSessionKey, get().activeRunId);
+          return true;
         }
         // Also unstick when all tool calls are resolved but the model's
         // terminal response was thinking-only (no visible content). The
@@ -6127,17 +6099,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (shouldHoldActiveRunForPendingTasks()) {
             return true;
           }
-          clearHistoryPoll();
-          set({
-            sending: false,
-            pendingImageGenerationLocal: false,
-            pendingVideoGenerationLocal: false,
-            activeRunId: null,
-            pendingFinal: false,
-            lastUserMessageAt: null,
-            runError: null,
-          });
-          markSessionRunIdle(currentSessionKey);
+          beginSessionBackendIdleSettlement(currentSessionKey, get().activeRunId);
+          return true;
         }
       }
 
@@ -6184,16 +6147,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         && !latestTerminalAssistantErrorMessage
         && !shouldTrackInboundRunLifecycle(get(), currentSessionKey)
       ) {
-        clearHistoryPoll();
-        set({
-          sending: false,
-          pendingImageGenerationLocal: false,
-          pendingVideoGenerationLocal: false,
-          activeRunId: null,
-          pendingFinal: false,
-          lastUserMessageAt: null,
-        });
-        markSessionRunIdle(currentSessionKey);
+        beginSessionBackendIdleSettlement(currentSessionKey, get().activeRunId);
+        return true;
       }
       return true;
       };
@@ -6765,33 +6720,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       clearHistoryPoll();
       const noResponseRunId = state.activeRunId;
-      const noResponseEvents = noResponseRunId
-        ? [
-            {
-              runId: noResponseRunId,
-              sessionKey: currentSessionKey,
-              ts: Date.now(),
-              type: 'run.ended' as const,
-              status: 'error' as const,
-              error: buildNoResponseSafetyMessage(),
-              stopReason: 'no_response_safety_timeout',
-            },
-          ]
-        : [];
       set({
-        runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, noResponseEvents),
         error: buildNoResponseSafetyMessage(),
-        sending: false,
-        pendingImageGenerationLocal: false,
-        pendingVideoGenerationLocal: false,
-        activeRunId: null,
-        lastUserMessageAt: null,
-        pendingFinal: false,
+        pendingFinal: true,
         streamingMessage: null,
         streamingText: '',
       });
-      markSessionRunIdle(currentSessionKey);
-      clearPendingRuntimeIntent(currentSessionKey);
+      beginSessionBackendIdleSettlement(currentSessionKey, noResponseRunId);
     };
     setTimeout(checkStuck, 30_000);
 
@@ -6967,44 +6902,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Abort active run ──
 
   abortRun: async () => {
-    clearHistoryPoll();
-    clearErrorRecoveryTimer();
     const stateAtAbort = get();
     const { currentSessionKey, activeRunId } = stateAtAbort;
+    if (_sessionsCancelling.has(currentSessionKey)) return;
+
+    clearErrorRecoveryTimer();
     const detachedTaskIds = collectRunDetachedTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
     const hostTaskIds = collectRunHostTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
     const hostTaskIdSet = new Set(hostTaskIds);
     const nativeDetachedTaskIds = detachedTaskIds.filter((taskId) => !hostTaskIdSet.has(taskId));
     _sessionsCancelling.add(currentSessionKey);
     _activeSendGenerationBySession.delete(currentSessionKey);
-    rememberLocallyAbortedRun(activeRunId);
-    set({
-      runtimeRuns: activeRunId
-        ? applyRuntimeContractEvents(
-            get().runtimeRuns,
-            [
-              {
-                runId: activeRunId,
-                sessionKey: currentSessionKey,
-                ts: Date.now(),
-                type: 'run.ended',
-                status: 'aborted',
-              } satisfies ChatRuntimeEvent,
-            ],
-          )
-        : get().runtimeRuns,
-      sending: false,
-      pendingImageGenerationLocal: false,
-      pendingVideoGenerationLocal: false,
-      activeRunId: null,
-      streamingText: '',
-      streamingMessage: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      pendingToolImages: [],
-    });
-    set({ streamingTools: [] });
-    clearPendingRuntimeIntent(currentSessionKey);
+    // Cancellation is only a request. Keep the controls in the running state
+    // until OpenClaw emits a terminal lifecycle event or reports an idle session.
+    set({ sending: true, pendingFinal: true });
 
     try {
       const hostCancellationResults = await Promise.allSettled(hostTaskIds.map(async (taskId) => {
@@ -7033,7 +6944,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ error: String(err) });
     } finally {
       _sessionsCancelling.delete(currentSessionKey);
-      markSessionRunIdle(currentSessionKey);
+      beginSessionBackendIdleSettlement(currentSessionKey, activeRunId);
     }
   },
 
@@ -7101,7 +7012,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     const correlatedCompletionWake = completionWakeOwnerRunId != null;
     const runId = completionWakeOwnerRunId ?? eventRunId;
-    if (wasLocallyAbortedRun(eventRunId) || (runId !== eventRunId && wasLocallyAbortedRun(runId))) return;
     const asyncTaskEvidence = extractAsyncTaskEvidence(event.message ?? event);
     if (asyncTaskEvidence.length > 0) {
       const ownerRunId = runId || activeRunId;
@@ -7285,16 +7195,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
             set({
               streamingText: '',
               streamingMessage: null,
-              sending: false,
-              pendingImageGenerationLocal: false,
-              pendingVideoGenerationLocal: false,
-              activeRunId: null,
-              pendingFinal: false,
+              pendingFinal: true,
               streamingTools: [],
-              pendingToolImages: [],
             });
             clearHistoryPoll();
-            markSessionRunIdle(sessionKeyForReload);
+            beginSessionBackendIdleSettlement(sessionKeyForReload, runId ?? get().activeRunId);
             forceNextHistoryLoad(sessionKeyForReload);
             void get().loadHistory(true);
             break;
@@ -7453,38 +7358,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             const hasPendingAsyncTask = runId
               ? runtimeRunHasPendingAsyncTasks(runtimeRuns[runId])
               : false;
-            const settledAsyncStatus = runId && correlatedCompletionWake && !hasPendingAsyncTask
-              ? settledRuntimeRunStatus(runtimeRuns[runId])
-              : null;
-            const terminalStatus = emptyTerminalFailure
-              ? 'error'
-              : settledAsyncStatus ?? 'completed';
-            const terminalError = emptyTerminalFailure
-              ?? (terminalStatus === 'error' ? settledRuntimeRunError(runtimeRuns[runId]) : undefined);
-            const shouldEndRuntimeRun = Boolean(
-              emptyTerminalFailure
-              || (correlatedCompletionWake && !hasPendingAsyncTask && settledAsyncStatus),
-            );
-            if (runId && clearLifecycle && !toolOnly && shouldEndRuntimeRun) {
-              runtimeRuns = applyRuntimeContractEvents(
-                runtimeRuns,
-                [{
-                    runId,
-                    sessionKey: eventSessionKey ?? currentSessionKey,
-                    ts: Date.now(),
-                    type: 'run.ended' as const,
-                    status: terminalStatus,
-                    ...(terminalError ? { error: terminalError } : {}),
-                    stopReason: emptyTerminalFailure
-                      ? 'empty_final_delivery'
-                      : 'async_completion_wake',
-                }],
-              );
-            }
             const shouldHoldForContinuation = clearLifecycle
               && !toolOnly
               && hasPendingAsyncTask;
-            const shouldClearTerminalLifecycle = clearLifecycle
+            const shouldAwaitBackendIdle = clearLifecycle
               && !toolOnly
               && !hasPendingAsyncTask;
             if (shouldHoldForContinuation) {
@@ -7502,9 +7379,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               return {
                 streamingText: '',
                 streamingMessage: null,
-                sending: false,
-                activeRunId: null,
-                pendingFinal: false,
+                pendingFinal: true,
                 streamingTools: [],
                 runtimeRuns,
                 runError: emptyTerminalFailure,
@@ -7524,9 +7399,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               } : {
                 streamingText: '',
                 streamingMessage: null,
-                sending: shouldClearTerminalLifecycle ? false : s.sending,
-                activeRunId: shouldClearTerminalLifecycle ? null : s.activeRunId,
-                pendingFinal: shouldClearTerminalLifecycle ? false : true,
+                sending: s.sending,
+                activeRunId: s.activeRunId,
+                pendingFinal: shouldAwaitBackendIdle || s.pendingFinal,
                 streamingTools,
                 runtimeRuns,
                 ...clearPendingImages,
@@ -7544,9 +7419,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
               messages: [...s.messages, msgWithImages],
               streamingText: '',
               streamingMessage: null,
-              sending: shouldClearTerminalLifecycle ? false : s.sending,
-              activeRunId: shouldClearTerminalLifecycle ? null : s.activeRunId,
-              pendingFinal: shouldClearTerminalLifecycle ? false : true,
+              sending: s.sending,
+              activeRunId: s.activeRunId,
+              pendingFinal: shouldAwaitBackendIdle || s.pendingFinal,
               streamingTools,
               runtimeRuns,
               ...clearPendingImages,
@@ -7564,63 +7439,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (runId && finalArtifactsToVerify.length > 0) {
             scheduleRuntimeArtifactVerification(runId, eventSessionKey ?? currentSessionKey, finalArtifactsToVerify);
           }
-          // After the final response, quietly reload history to surface all intermediate
-          // tool-use turns (thinking + tool blocks) from the Gateway's authoritative record.
-          // Also reload for empty terminal responses (thinking-only) so the
-          // delayed follow-up can pick up the Gateway's `assistant-media`
-          // bubble that may still be getting written.
+          // Defer the transcript refresh until OpenClaw confirms the session is idle.
+          // A snapshot fetched while the final payload is still being persisted can
+          // otherwise erase the live final reply from the renderer.
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
           if (clearLifecycle && !toolOnly && !withheldFinalMessage) {
             clearHistoryPoll();
-            beginSessionBackendIdleSettlement(sessionKeyAtFinal);
+            beginSessionBackendIdleSettlement(sessionKeyAtFinal, runId ?? get().activeRunId);
             markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-            clearPendingRuntimeIntent(sessionKeyAtFinal);
-            void get().loadHistory(true);
 
-            // OpenClaw's gateway processes `MEDIA:/path` markers in the
-            // assistant reply asynchronously, in the `dispatch.deliver` of
-            // the `final` payload (see openclaw/dist/chat-DM9hSaNV.js's
-            // `appendWebchatAgentMediaTranscriptIfNeeded`):
-            //   1. copy the original file under
-            //      `~/.openclaw/media/outgoing/originals/<uuid>`
-            //   2. write the record JSON under
-            //      `~/.openclaw/media/outgoing/records/<id>.json`
-            //   3. `appendAssistantTranscriptMessage` writes a follow-up
-            //      `assistant-media` message to the session JSONL, with
-            //      `idempotencyKey: "<runId>:assistant-media"`.
-            // That follow-up message is **only persisted**  - it is NOT
-            // re-broadcast as a streaming event. The streaming `final`
-            // we just consumed only contains the agent's text. The
-            // assistant-media bubble can only be retrieved via
-            // `chat.history`, and the persistence runs on the order of
-            // ~400-500ms after the streaming final.
-            //
-            // The immediate `loadHistory(true)` above therefore races the
-            // gateway's write and almost always misses the bubble.
-            //
-            // CRITICAL: we cannot detect from the streaming final alone
-            // whether the agent emitted a `MEDIA:/path` marker  - OpenClaw's
-            // `splitTrailingDirective` (selection-D8_ELZa7.js line ~904)
-            // strips `MEDIA:/...` lines from the broadcast text BEFORE it
-            // reaches the client, so the streaming `final` text is always
-            // the user-facing prose without the marker. The MEDIA: marker
-            // only appears in the persisted JSONL transcript (msg N) and
-            // its companion `assistant-media` bubble (msg N+1).
-            //
-            // We therefore unconditionally schedule ONE follow-up quiet
-            // reload ~1500ms after every assistant `final`. The cost is
-            // a single extra in-process RPC per assistant turn (cheap);
-            // when there's no media the second reload returns the same
-            // history snapshot and is a no-op for the UI.
-            // `forceNextHistoryLoad` bypasses `HISTORY_LOAD_MIN_INTERVAL_MS`
-            // so the call is not suppressed by the throttle.
-            setTimeout(() => {
-              if (get().currentSessionKey !== sessionKeyAtFinal) {
-                return;
-              }
-              forceNextHistoryLoad(sessionKeyAtFinal);
-              void get().loadHistory(true);
-            }, 1500);
           } else if (clearLifecycle && !toolOnly && correlatedCompletionWake) {
             // Completion-wake finals have their MEDIA directives removed from
             // the live chat payload. Keep the gate closed, but reload the
@@ -7640,27 +7467,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
           const latestState = get();
           const terminalRunId = runId || latestState.activeRunId;
-          const terminalRun = terminalRunId ? latestState.runtimeRuns[terminalRunId] : undefined;
-          const hasPendingAsyncTask = runtimeRunHasPendingAsyncTasks(terminalRun);
-          const backendAlreadyTerminal = Boolean(terminalRun && terminalRun.status !== 'running');
-          const lifecycleAlreadyIdle = !latestState.sending
-            && latestState.activeRunId == null
-            && !latestState.pendingFinal;
-          if (lifecycleAlreadyIdle || (backendAlreadyTerminal && !hasPendingAsyncTask)) {
-            set({
-              streamingText: '',
-              streamingMessage: null,
-              streamingTools: [],
-              sending: false,
-              activeRunId: null,
-              pendingFinal: false,
-              lastUserMessageAt: null,
-            });
-            markSessionRunIdle(sessionKeyAtFinal);
-            clearPendingRuntimeIntent(sessionKeyAtFinal);
-          } else {
-            set({ streamingText: '', streamingMessage: null, pendingFinal: true });
-          }
+          set({ streamingText: '', streamingMessage: null, pendingFinal: true });
+          beginSessionBackendIdleSettlement(sessionKeyAtFinal, terminalRunId);
           markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
           [0, 500, 1500, 4000].forEach((delayMs) => {
             setTimeout(() => {
@@ -7807,7 +7615,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   handleRuntimeEvent: (event: ChatRuntimeEvent) => {
-    if (wasLocallyAbortedRun(event.runId)) return;
     const initialState = get();
     const { activeRunId, currentSessionKey } = initialState;
     const eventSessionKey = inferSessionKeyForRun(initialState, event.runId, event.sessionKey ?? null);

@@ -908,7 +908,6 @@ export function Chat() {
   const hasStreamImages = streamImages.length > 0;
   const hasStreamToolStatus = streamingTools.length > 0;
   const hasRunningStreamToolStatus = streamingTools.some((tool) => tool.status === 'running');
-  const currentRuntimeHasToolActivity = hasRuntimeGraphActivity(currentRuntimeRun);
   const hasRunningRuntimeToolStatus = hasRunningRuntimeTool(currentRuntimeRun);
   const shouldRenderStreaming = sending && (hasStreamText || hasStreamTools || hasStreamImages || hasStreamToolStatus);
   const hasAnyStreamContent = hasStreamText || hasStreamThinking || hasStreamTools || hasStreamImages || hasStreamToolStatus;
@@ -1345,20 +1344,12 @@ export function Chat() {
     sending,
     userRunCardsByTriggerIndex,
   ]);
-  let latestRunSegmentCompletion = { hasFinalReply: false, hasToolActivity: false };
   let pendingImageGeneration = false;
   let pendingVideoGeneration = false;
-  let imageGenerationSettledInHistory = false;
   for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
     if (!isRealUserMessage(messages[idx]) || subagentCompletionInfos[idx]) continue;
     const nextUserIndex = nextUserMessageIndexes[idx];
     const postTrigger = getPostTriggerSegmentMessages(messages, idx, nextUserIndex);
-    latestRunSegmentCompletion = {
-      hasFinalReply: segmentHasFinalReply(postTrigger),
-      hasToolActivity: postTrigger.some((m) =>
-        m.role === 'assistant' && extractToolUse(m).length > 0,
-      ),
-    };
     pendingImageGeneration = (nextUserIndex === -1 && pendingImageGenerationLocal)
       || isImageGenerationPending(
         postTrigger,
@@ -1366,42 +1357,8 @@ export function Chat() {
         { runtimeRun: currentRuntimeRun },
       );
     pendingVideoGeneration = nextUserIndex === -1 && pendingVideoGenerationLocal;
-    imageGenerationSettledInHistory = nextUserIndex === -1
-      && hasDeliveredImageGenerationResult(postTrigger)
-      && !pendingImageGeneration;
     break;
   }
-  const streamBlocksHistoryCompletion = hasHistoryCompletionBlockingStream && !imageGenerationSettledInHistory;
-  const runSettledInHistory = imageGenerationSettledInHistory || (latestRunSegmentCompletion.hasFinalReply
-    && !pendingImageGeneration
-    && !pendingVideoGeneration
-    && !streamBlocksHistoryCompletion
-    && (
-      latestRunSegmentCompletion.hasToolActivity
-      || currentRuntimeHasToolActivity
-      || !sending
-    ));
-  const shouldClearStoreLifecycleFromHistory = sending
-    && runSettledInHistory
-    && (
-      imageGenerationSettledInHistory
-      || (!hasRunningRuntimeToolStatus && !hasRunningStreamToolStatus)
-    );
-  useEffect(() => {
-    if (!shouldClearStoreLifecycleFromHistory) return;
-    useChatStore.setState({
-      sending: false,
-      activeRunId: null,
-      pendingFinal: false,
-      lastUserMessageAt: null,
-      streamingText: '',
-      streamingMessage: null,
-      streamingTools: [],
-      pendingToolImages: [],
-      runError: null,
-    });
-  }, [shouldClearStoreLifecycleFromHistory]);
-
   const replyTextOverrides = useMemo(() => {
     const map = new Map<number, string>();
     for (const card of userRunCards) {
@@ -1565,7 +1522,7 @@ export function Chat() {
     }
     return indices;
   }, [runSurfaceStates, userRunCards]);
-  const inputRunActive = sending || pendingImageGeneration || pendingVideoGeneration || (hasVisibleActiveExecutionGraph && !runSettledInHistory);
+  const inputRunActive = sending;
   const shouldShowThinkingActivity = inputRunActive
     && hasStreamThinking
     && !hasStreamText

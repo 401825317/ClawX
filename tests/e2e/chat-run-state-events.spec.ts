@@ -163,6 +163,7 @@ test.describe('ClawX chat run state events', () => {
           win.webContents.send('chat:runtime-event', {
             type: 'tool.started',
             runId: 'run-e2e',
+            sessionKey: 'agent:main:main',
             toolCallId: 'call-1',
             name: 'read',
             args: { filePath: '/tmp/demo.md' },
@@ -170,13 +171,12 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
-      await expect(page.getByTestId('chat-execution-graph')).toBeVisible();
-
       await app.evaluate(({ BrowserWindow }) => {
         for (const win of BrowserWindow.getAllWindows()) {
           win.webContents.send('chat:runtime-event', {
             type: 'tool.completed',
             runId: 'run-e2e',
+            sessionKey: 'agent:main:main',
             toolCallId: 'call-1',
             name: 'read',
             result: { summary: 'done' },
@@ -192,13 +192,226 @@ test.describe('ClawX chat run state events', () => {
           win.webContents.send('chat:runtime-event', {
             type: 'run.ended',
             runId: 'run-e2e',
+            sessionKey: 'agent:main:main',
             status: 'completed',
             endedAt: Date.now(),
           });
         }
       });
 
+      await installIpcMocks(app, {
+        gatewayRpc: {
+          [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
+            success: true,
+            result: {
+              sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main', hasActiveRun: false }],
+            },
+          },
+        },
+        hostApi: {
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                result: {
+                  sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main', hasActiveRun: false }],
+                },
+              },
+            },
+          },
+        },
+      });
+
       await expect(sendButton).toHaveAttribute('title', /Send|发送/);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps the session running after a final reply until OpenClaw reports it idle', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+      });
+      await app.evaluate(async ({ app: _app }) => {
+        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+        let hasActiveRun = false;
+        const sessionResult = () => ({
+          sessions: [{ key: 'agent:main:main', displayName: 'main', hasActiveRun }],
+        });
+        const response = (json: unknown) => ({
+          ok: true,
+          data: { status: 200, ok: true, json },
+        });
+
+        ipcMain.removeHandler('gateway:rpc');
+        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string) => {
+          if (method === 'sessions.list') return { success: true, result: sessionResult() };
+          if (method === 'chat.history') return { success: true, result: { messages: [] } };
+          if (method === 'chat.send') {
+            hasActiveRun = true;
+            return { success: true, result: { runId: 'run-authoritative-state' } };
+          }
+          return { success: true, result: {} };
+        });
+
+        ipcMain.removeHandler('hostapi:fetch');
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string }) => {
+          switch (request.path) {
+            case '/api/gateway/status':
+              return response({ state: 'running', port: 18789, pid: 12345, gatewayReady: true });
+            case '/api/chat/sessions':
+              return response({ success: true, result: sessionResult() });
+            case '/api/chat/history':
+              return response({ success: true, result: { messages: [] } });
+            case '/api/chat/send':
+              hasActiveRun = true;
+              return response({ success: true, result: { runId: 'run-authoritative-state' } });
+            case '/api/agents':
+              return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
+            default:
+              return response({});
+          }
+        });
+
+        (globalThis as Record<string, unknown>).__setOpenClawSessionActive = (active: boolean) => {
+          hasActiveRun = active;
+        };
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      const sendButton = page.getByTestId('chat-composer-send');
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-input').fill('wait for authoritative session state');
+      await sendButton.click();
+      await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      await app.evaluate(({ BrowserWindow }) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'final',
+              runId: 'run-authoritative-state',
+              sessionKey: 'agent:main:main',
+              message: {
+                id: 'final-before-idle',
+                role: 'assistant',
+                content: 'The final reply arrived before the session became idle.',
+                timestamp: Date.now() / 1000,
+              },
+            },
+          });
+        }
+      });
+
+      await expect(page.getByText('The final reply arrived before the session became idle.')).toBeVisible();
+      await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      await app.evaluate(() => {
+        const setActive = (globalThis as Record<string, unknown>).__setOpenClawSessionActive as
+          | ((active: boolean) => void)
+          | undefined;
+        setActive?.(false);
+      });
+
+      await expect(sendButton).toHaveAttribute('title', /Send|发送/, { timeout: 10_000 });
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps the session running after cancellation until OpenClaw reports it idle', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+      });
+      await app.evaluate(async () => {
+        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+        let hasActiveRun = false;
+        const sessionResult = () => ({
+          sessions: [{ key: 'agent:main:main', displayName: 'main', hasActiveRun }],
+        });
+        const response = (json: unknown) => ({
+          ok: true,
+          data: { status: 200, ok: true, json },
+        });
+
+        ipcMain.removeHandler('gateway:rpc');
+        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string) => {
+          if (method === 'sessions.list') return { success: true, result: sessionResult() };
+          if (method === 'chat.history') return { success: true, result: { messages: [] } };
+          if (method === 'chat.send') {
+            hasActiveRun = true;
+            return { success: true, result: { runId: 'run-cancellation-state' } };
+          }
+          if (method === 'chat.abort') return { success: true, result: {} };
+          return { success: true, result: {} };
+        });
+
+        ipcMain.removeHandler('hostapi:fetch');
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string }) => {
+          switch (request.path) {
+            case '/api/gateway/status':
+              return response({ state: 'running', port: 18789, pid: 12345, gatewayReady: true });
+            case '/api/chat/sessions':
+              return response({ success: true, result: sessionResult() });
+            case '/api/chat/history':
+              return response({ success: true, result: { messages: [] } });
+            case '/api/chat/send':
+              hasActiveRun = true;
+              return response({ success: true, result: { runId: 'run-cancellation-state' } });
+            case '/api/chat/abort':
+              return response({ success: true, result: {} });
+            case '/api/agents':
+              return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
+            default:
+              return response({});
+          }
+        });
+
+        (globalThis as Record<string, unknown>).__setOpenClawCancellationSessionActive = (active: boolean) => {
+          hasActiveRun = active;
+        };
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      const sendButton = page.getByTestId('chat-composer-send');
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-input').fill('cancel only when OpenClaw is idle');
+      await sendButton.click();
+      await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      await sendButton.click();
+      await page.waitForTimeout(500);
+      await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      await app.evaluate(() => {
+        const setActive = (globalThis as Record<string, unknown>).__setOpenClawCancellationSessionActive as
+          | ((active: boolean) => void)
+          | undefined;
+        setActive?.(false);
+      });
+
+      await expect(sendButton).toHaveAttribute('title', /Send|发送/, { timeout: 10_000 });
     } finally {
       await closeElectronApp(app);
     }

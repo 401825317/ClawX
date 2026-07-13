@@ -54,6 +54,7 @@ touchedAreas:
   - src/stores/chat/runtime-graph.ts
   - src/stores/chat/runtime-progress.ts
   - src/stores/chat/types.ts
+  - tests/e2e/chat-run-state-events.spec.ts
   - vite.config.ts
 expectedUserBehavior:
   - Every fresh ordinary, media, file, desktop, browser, Blender, MCP, and multi-deliverable request enters the same OpenClaw Agent loop.
@@ -63,6 +64,7 @@ expectedUserBehavior:
   - Transcript entries marked `provenance.kind=inter_session` remain internal and are not rendered as conversation history.
   - A late tool-terminal error does not replace a user-visible final reply from the same turn; errors remain visible when no final reply exists.
   - Native task failure, cancellation, partial completion, and success remain authoritative across live events and history reload.
+  - A final assistant reply never ends a session by itself; ClawX keeps the session active until OpenClaw emits a terminal run event or reports `hasActiveRun: false` through `sessions.list`.
   - Host work is accepted only when the registered capability's required artifacts and verifications are satisfied by real structured results.
   - Async Host completion reaches the same run and session directly; another model turn occurs only when the capability explicitly requests replanning and supplies a reason.
   - Internal execution instructions, provider diagnostics, and runtime plumbing are never persisted as user-authored transcript text.
@@ -105,6 +107,7 @@ acceptance:
   - Direct Host completion emits artifact, verification, step, progress, tool, and terminal run events to the owning run without an unconditional model wake.
   - Explicit replan completion schedules at most one same-session Agent continuation and records why replanning is required.
   - Native OpenClaw task and tool terminal states are authoritative; the renderer does not perform a second semantic completion decision.
+  - When `sessions.list` reports `hasActiveRun: true`, ClawX keeps or restores the active session controls even if history already contains a final reply.
   - A fresh run begins with `run.started` only. Plan and step rows appear only when real runtime events provide them.
   - Runtime task and artifact updates use stable identifiers and merge monotonically across live delivery and history hydration.
   - The renderer waits only for actual pending async work it already knows about and does not invent a missing-execution blocker from assistant prose.
