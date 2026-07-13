@@ -433,6 +433,208 @@ test.describe('ClawX chat run state events', () => {
     }
   });
 
+  test('does not restore a stale run after backend idle settles while the session is offscreen', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const otherSessionKey = 'agent:main:offscreen-idle-control';
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 32345, gatewayReady: true },
+      });
+      await app.evaluate(async () => {
+        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+        let mainActive = false;
+        let mainIdleObserved = false;
+        let mainHistory: unknown[] = [];
+        const otherHistory = [
+          {
+            id: 'user-offscreen-control',
+            role: 'user',
+            content: '切换到这个会话。',
+            timestamp: Math.floor(Date.now() / 1000) - 30,
+          },
+          {
+            id: 'assistant-offscreen-control',
+            role: 'assistant',
+            content: '这个会话处于空闲状态。',
+            timestamp: Math.floor(Date.now() / 1000) - 29,
+          },
+        ];
+        const sessionResult = () => ({
+          sessions: [
+            { key: 'agent:main:main', displayName: 'Main', hasActiveRun: mainActive, updatedAt: Date.now() },
+            {
+              key: 'agent:main:offscreen-idle-control',
+              displayName: 'Idle control',
+              hasActiveRun: false,
+              updatedAt: Date.now() - 1_000,
+            },
+          ],
+        });
+        const historyFor = (sessionKey: string | undefined) => (
+          sessionKey === 'agent:main:main' ? mainHistory : sessionKey === 'agent:main:offscreen-idle-control' ? otherHistory : []
+        );
+        const response = (json: unknown) => ({
+          ok: true,
+          data: { status: 200, ok: true, json },
+        });
+
+        ipcMain.removeHandler('gateway:rpc');
+        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: { sessionKey?: string } = {}) => {
+          if (method === 'sessions.list') {
+            if (!mainActive) mainIdleObserved = true;
+            return { success: true, result: sessionResult() };
+          }
+          if (method === 'chat.history') {
+            return {
+              success: true,
+              result: {
+                messages: historyFor(params.sessionKey),
+                sessionInfo: { hasActiveRun: mainActive, status: mainActive ? 'running' : 'done' },
+                ...(mainActive && params.sessionKey === 'agent:main:main'
+                  ? { inFlightRun: { runId: 'run-offscreen-idle', text: '' } }
+                  : {}),
+              },
+            };
+          }
+          if (method === 'chat.send') {
+            mainActive = true;
+            return { success: true, result: { runId: 'run-offscreen-idle' } };
+          }
+          return { success: true, result: {} };
+        });
+
+        ipcMain.removeHandler('hostapi:fetch');
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; body?: string }) => {
+          if (request.path === '/api/gateway/status') {
+            return response({ state: 'running', port: 18789, pid: 32345, gatewayReady: true });
+          }
+          if (request.path === '/api/chat/sessions') {
+            if (!mainActive) mainIdleObserved = true;
+            return response({ success: true, result: sessionResult() });
+          }
+          if (request.path === '/api/chat/history') {
+            const body = request.body ? JSON.parse(request.body) as { sessionKey?: string } : {};
+            return response({
+              success: true,
+              result: {
+                messages: historyFor(body.sessionKey),
+                sessionInfo: { hasActiveRun: mainActive, status: mainActive ? 'running' : 'done' },
+                ...(mainActive && body.sessionKey === 'agent:main:main'
+                  ? { inFlightRun: { runId: 'run-offscreen-idle', text: '' } }
+                  : {}),
+              },
+            });
+          }
+          if (request.path === '/api/chat/send') {
+            mainActive = true;
+            return response({ success: true, result: { runId: 'run-offscreen-idle' } });
+          }
+          if (request.path?.startsWith('/api/task-bridge/tasks')) {
+            return response({ success: true, tasks: [] });
+          }
+          if (request.path === '/api/agents') {
+            return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
+          }
+          return response({});
+        });
+
+        (globalThis as Record<string, unknown>).__persistMainOffscreenFinal = (history: unknown[]) => {
+          mainHistory = history;
+        };
+        (globalThis as Record<string, unknown>).__setMainOffscreenIdle = () => {
+          mainActive = false;
+          mainIdleObserved = false;
+        };
+        (globalThis as Record<string, unknown>).__mainOffscreenIdleObserved = () => mainIdleObserved;
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      const sendButton = page.getByTestId('chat-composer-send');
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-input').fill('后台完成后不要恢复旧运行态');
+      await sendButton.click();
+      await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      const finalTimestamp = Date.now() / 1000;
+      const settledHistory = [
+        {
+          id: 'user-offscreen-idle',
+          role: 'user',
+          content: '后台完成后不要恢复旧运行态',
+          timestamp: finalTimestamp - 1,
+        },
+        {
+          id: 'assistant-offscreen-idle-final',
+          role: 'assistant',
+          content: '任务已经完成。',
+          timestamp: finalTimestamp,
+        },
+      ];
+      await app.evaluate(({ BrowserWindow }, history) => {
+        const persist = (globalThis as Record<string, unknown>).__persistMainOffscreenFinal as
+          | ((messages: unknown[]) => void)
+          | undefined;
+        persist?.(history);
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'final',
+              runId: 'run-offscreen-idle',
+              sessionKey: 'agent:main:main',
+              message: history[1],
+            },
+          });
+        }
+      }, settledHistory);
+
+      await expect(page.getByText('任务已经完成。')).toBeVisible();
+      await page.getByTestId(`sidebar-session-${otherSessionKey}`).click();
+      await expect(page.getByText('这个会话处于空闲状态。')).toBeVisible();
+      await app.evaluate(() => {
+        const setIdle = (globalThis as Record<string, unknown>).__setMainOffscreenIdle as
+          | (() => void)
+          | undefined;
+        setIdle?.();
+      });
+      await expect.poll(async () => await app.evaluate(() => {
+        const observed = (globalThis as Record<string, unknown>).__mainOffscreenIdleObserved as
+          | (() => boolean)
+          | undefined;
+        return observed?.() ?? false;
+      })).toBe(true);
+
+      await page.evaluate(() => {
+        const state = globalThis as unknown as Record<string, unknown>;
+        state.__staleOffscreenRunObserved = false;
+        const check = () => {
+          const send = document.querySelector<HTMLElement>('[data-testid="chat-composer-send"]');
+          if (send?.getAttribute('title') === 'Stop' || document.body.textContent?.includes('正在整理执行结果…')) {
+            state.__staleOffscreenRunObserved = true;
+          }
+        };
+        const observer = new MutationObserver(check);
+        observer.observe(document.body, { subtree: true, childList: true, attributes: true });
+        state.__staleOffscreenRunObserver = observer;
+      });
+
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(page.getByText('任务已经完成。')).toBeVisible();
+      await expect(sendButton).toHaveAttribute('title', /Send|发送/);
+      expect(await page.evaluate(() => (
+        (globalThis as unknown as Record<string, unknown>).__staleOffscreenRunObserved
+      ))).toBe(false);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('keeps the session running after cancellation until OpenClaw reports it idle', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
@@ -726,6 +928,144 @@ test.describe('ClawX chat run state events', () => {
     }
   });
 
+  test('does not revive an interrupted historical tool run without backend active evidence', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const otherSessionKey = 'agent:main:completed-session';
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 22345, gatewayReady: true },
+      });
+      await app.evaluate(async () => {
+        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+        const sessionKeys = ['agent:main:main', 'agent:main:completed-session'];
+        const sessionResult = () => ({
+          sessions: sessionKeys.map((key) => ({
+            key,
+            displayName: key === 'agent:main:main' ? 'Interrupted run' : 'Completed session',
+            updatedAt: key === 'agent:main:main' ? Date.now() : Date.now() - 1_000,
+          })),
+        });
+        const timestamp = Math.floor(Date.now() / 1000) - 60;
+        const historiesBySession = {
+          'agent:main:main': [
+            {
+              id: 'user-interrupted-history-run',
+              role: 'user',
+              content: [{ type: 'text', text: '生成一个视频，然后我会强制退出应用。' }],
+              timestamp,
+            },
+            {
+              id: 'assistant-interrupted-history-tool',
+              role: 'assistant',
+              content: [{
+                type: 'toolCall',
+                id: 'call-interrupted-video',
+                name: 'video_generate',
+                arguments: { prompt: 'snow mountain' },
+              }],
+              timestamp: timestamp + 1,
+            },
+            {
+              role: 'toolResult',
+              toolCallId: 'call-interrupted-video',
+              toolName: 'video_generate',
+              content: [{ type: 'text', text: 'render process disconnected' }],
+              details: {
+                async: true,
+                status: 'started',
+                taskId: 'task-interrupted-video',
+              },
+              isError: false,
+              timestamp: timestamp + 2,
+            },
+          ],
+          'agent:main:completed-session': [
+            {
+              id: 'user-completed-session',
+              role: 'user',
+              content: '这是另一个会话。',
+              timestamp: timestamp - 20,
+            },
+            {
+              id: 'assistant-completed-session',
+              role: 'assistant',
+              content: '另一个会话已经完成。',
+              timestamp: timestamp - 19,
+            },
+          ],
+        } as Record<string, unknown[]>;
+        const response = (json: unknown) => ({
+          ok: true,
+          data: { status: 200, ok: true, json },
+        });
+
+        ipcMain.removeHandler('gateway:rpc');
+        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: { sessionKey?: string } = {}) => {
+          if (method === 'sessions.list') return { success: true, result: sessionResult() };
+          if (method === 'chat.history') {
+            return {
+              success: true,
+              result: {
+                messages: historiesBySession[params.sessionKey ?? ''] ?? [],
+                sessionInfo: { hasActiveRun: false, status: 'done' },
+              },
+            };
+          }
+          return { success: true, result: {} };
+        });
+
+        ipcMain.removeHandler('hostapi:fetch');
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; body?: string }) => {
+          if (request.path === '/api/gateway/status') {
+            return response({ state: 'running', port: 18789, pid: 22345, gatewayReady: true });
+          }
+          if (request.path === '/api/chat/sessions') {
+            return response({ success: true, result: sessionResult() });
+          }
+          if (request.path === '/api/chat/history') {
+            const body = request.body ? JSON.parse(request.body) as { sessionKey?: string } : {};
+            return response({
+              success: true,
+              result: {
+                messages: historiesBySession[body.sessionKey ?? ''] ?? [],
+                sessionInfo: { hasActiveRun: false, status: 'done' },
+              },
+            });
+          }
+          if (request.path?.startsWith('/api/task-bridge/tasks')) {
+            return response({ success: true, tasks: [] });
+          }
+          if (request.path === '/api/agents') {
+            return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
+          }
+          return response({});
+        });
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      const sendButton = page.getByTestId('chat-composer-send');
+      await expect(page.getByText('生成一个视频，然后我会强制退出应用。')).toBeVisible({ timeout: 30_000 });
+      await expect(sendButton).toHaveAttribute('title', /Send|发送/);
+      await expect(page.getByText('正在整理执行结果…')).toHaveCount(0);
+
+      await page.getByTestId(`sidebar-session-${otherSessionKey}`).click();
+      await expect(page.getByText('另一个会话已经完成。')).toBeVisible();
+      await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
+      await expect(page.getByText('生成一个视频，然后我会强制退出应用。')).toBeVisible();
+      await expect(sendButton).toHaveAttribute('title', /Send|发送/);
+      await expect(page.getByText('正在整理执行结果…')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('keeps an open historical tool run active on reopen', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     const historyTimestamp = Math.floor(Date.now() / 1000);
@@ -764,7 +1104,17 @@ test.describe('ClawX chat run state events', () => {
         timestamp: historyTimestamp + 2,
       },
     ];
-
+    const activeSession = {
+      key: MAIN_SESSION_KEY,
+      displayName: 'main',
+      status: 'done',
+      hasActiveRun: true,
+    };
+    const activeHistory = {
+      messages: history,
+      sessionInfo: { status: 'done', hasActiveRun: true },
+      inFlightRun: { runId: 'run-open-history-live', text: '' },
+    };
     try {
       await installIpcMocks(app, {
         gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
@@ -772,12 +1122,12 @@ test.describe('ClawX chat run state events', () => {
           [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
             success: true,
             result: {
-              sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
+              sessions: [activeSession],
             },
           },
           [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: history },
+            result: activeHistory,
           },
         },
         hostApi: {
@@ -797,7 +1147,7 @@ test.describe('ClawX chat run state events', () => {
               json: {
                 success: true,
                 result: {
-                  sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
+                  sessions: [activeSession],
                 },
               },
             },
@@ -809,7 +1159,7 @@ test.describe('ClawX chat run state events', () => {
               ok: true,
               json: {
                 success: true,
-                result: { messages: history },
+                result: activeHistory,
               },
             },
           },
@@ -835,7 +1185,6 @@ test.describe('ClawX chat run state events', () => {
 
       await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByText('我先查看相关内容。')).toBeVisible();
-      await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/);
     } finally {
       await closeElectronApp(app);

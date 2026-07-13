@@ -49,9 +49,12 @@ export function hasDeliveredArtifactEvidence(
   pendingFiles: AttachedFileMeta[],
 ): boolean {
   const hasPendingAttachment = pendingFiles.some((file) => (
-    file.fileSize > 0
-    || Boolean(normalizeText(file.gatewayUrl))
-    || Boolean(normalizeText(file.preview))
+    file.disposition !== 'input-reference'
+    && (
+      file.fileSize > 0
+      || Boolean(normalizeText(file.gatewayUrl))
+      || Boolean(normalizeText(file.preview))
+    )
   ));
   if (hasPendingAttachment) return true;
 
@@ -131,6 +134,7 @@ export function buildRuntimeArtifactEventsFromAttachedFiles(
   const events: ChatRuntimeEvent[] = [];
 
   for (const file of files) {
+    if (file.disposition === 'input-reference') continue;
     const key = artifactDedupeKey(file);
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -150,6 +154,7 @@ export function buildRuntimeArtifactEventsFromAttachedFiles(
       sizeBytes: file.fileSize > 0 ? file.fileSize : undefined,
       stepId: normalizeText(base.stepId),
       sourceToolCallId: normalizeText(base.toolCallId),
+      source: file.source,
     };
 
     events.push({

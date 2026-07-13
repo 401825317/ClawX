@@ -20,6 +20,8 @@ export interface AttachedFileMeta {
   hasAudio?: boolean;
   filePath?: string;
   source?: 'user-upload' | 'tool-result' | 'message-ref' | 'gateway-media';
+  /** Input references are renderable, but must never be promoted to produced artifacts. */
+  disposition?: 'input-reference' | 'output-delivery' | 'intermediate';
   /**
    * For Gateway-injected outgoing media (assistant-media). The Gateway emits
    * an `image` content block with a relative URL like

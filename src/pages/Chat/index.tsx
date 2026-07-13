@@ -327,20 +327,51 @@ function hasFinalAssistantDeltaAfterLatestTool(run: ChatRuntimeRunState | null):
   return !['analysis', 'commentary', 'preamble', 'progress', 'thinking'].includes(latestAssistantPhase);
 }
 
+function inferMediaOperationKind(text: string): 'image' | 'video' | null {
+  if (/(?:video[_ .-]?generate|video[_ .-]?generation|media\.video|视频任务)/i.test(text)) return 'video';
+  if (/(?:image[_ .-]?generate|image[_ .-]?generation|image[_ .-]?edit|media\.image|图片任务|修图任务)/i.test(text)) return 'image';
+  return null;
+}
+
 function inferRunCompactKind(card: UserRunCard, generatedFiles: GeneratedFile[]): RunCompactKind {
   if (getTaskFlowCompactProgress(card.steps)) return 'task-flow';
   const structuredStepText = card.steps
     .map((step) => `${step.label}\n${step.runtimeKind ?? ''}`)
     .join('\n');
+  const runtimeTaskText = (card.runtimeRun?.tasks ?? [])
+    .map((task) => `${task.kind ?? ''}\n${task.runtime ?? ''}\n${task.title}`)
+    .join('\n');
+  let mediaOperationKind = inferMediaOperationKind(`${structuredStepText}\n${runtimeTaskText}`);
+  if (!mediaOperationKind) {
+    for (const event of card.runtimeRun?.events ?? []) {
+      if (event.type !== 'tool.started' && event.type !== 'tool.updated' && event.type !== 'tool.completed') continue;
+      const hints = [event.name];
+      if (event.type === 'tool.started' && event.args && typeof event.args === 'object' && !Array.isArray(event.args)) {
+        const args = event.args as Record<string, unknown>;
+        for (const key of ['id', 'name', 'tool', 'kind']) {
+          if (typeof args[key] === 'string') hints.push(args[key]);
+        }
+      }
+      mediaOperationKind = inferMediaOperationKind(hints.join('\n'));
+      if (mediaOperationKind) break;
+    }
+  }
   const artifactKinds = (card.runtimeRun?.artifacts ?? [])
     .map((artifact) => `${artifact.kind ?? ''}\n${artifact.mimeType ?? ''}`)
     .join('\n');
-  if (/(?:video_generate|video generation|media\.video|video\/|^video$|视频任务)/im.test(`${structuredStepText}\n${artifactKinds}`)) return 'video';
-  if (/(?:image_generate|image_edit|image generation|media\.image|image\/|^image$|图片任务|修图任务)/im.test(`${structuredStepText}\n${artifactKinds}`)) return 'image';
+  if (mediaOperationKind) return mediaOperationKind;
   if (generatedFiles.length > 0 || /(?:artifact|presentation|spreadsheet|document|pdf|产物任务|文档任务|表格任务|小程序任务)/i.test(`${structuredStepText}\n${artifactKinds}`)) {
     return 'artifact';
   }
+  if ((card.runtimeRun?.artifacts?.length ?? 0) > 0) return 'artifact';
   return 'generic';
+}
+
+function runHasMediaArtifact(card: UserRunCard, kind: 'image' | 'video'): boolean {
+  return (card.runtimeRun?.artifacts ?? []).some((artifact) => (
+    artifact.kind?.toLowerCase() === kind
+    || artifact.mimeType?.toLowerCase().startsWith(`${kind}/`)
+  ));
 }
 
 function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile[], t: Translate, nowMs: number): string {
@@ -373,8 +404,9 @@ function buildRunCompactSummary(card: UserRunCard, generatedFiles: GeneratedFile
       totalCount: taskFlowProgress?.total ?? generatedFiles.length,
     }));
   }
-  if (kind === 'image') return withElapsed(t('executionGraph.compact.imageDone'));
-  if (kind === 'video') return withElapsed(t('executionGraph.compact.videoDone'));
+  if (kind === 'image' && runHasMediaArtifact(card, 'image')) return withElapsed(t('executionGraph.compact.imageDone'));
+  if (kind === 'video' && runHasMediaArtifact(card, 'video')) return withElapsed(t('executionGraph.compact.videoDone'));
+  if ((card.runtimeRun?.artifacts?.length ?? 0) > 0) return withElapsed(t('executionGraph.compact.artifactDone'));
   if (kind === 'artifact') return withElapsed(t('executionGraph.compact.artifactDone'));
   return withElapsed(t('executionGraph.compact.done'));
 }

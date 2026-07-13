@@ -7,7 +7,10 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { GatewayHealth, GatewayStatus } from '../types/gateway';
-import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import {
+  CHAT_SYNTHETIC_TERMINAL_PRODUCER,
+  type ChatRuntimeEvent,
+} from '../../shared/chat-runtime-events';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
@@ -214,6 +217,10 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
       if (shouldRefreshSessions) {
         maybeLoadSessions(nextState, true);
       }
+
+      // The matching legacy final is dispatched immediately after this
+      // synthesized terminal event and owns backend-idle history settlement.
+      if (event.producer === CHAT_SYNTHETIC_TERMINAL_PRODUCER) return;
 
       const matchesCurrentSession = resolvedSessionKey != null && resolvedSessionKey === nextState.currentSessionKey;
       const matchesActiveRun = nextState.activeRunId != null && event.runId === nextState.activeRunId;

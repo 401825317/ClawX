@@ -885,6 +885,13 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
   return refs;
 }
 
+function hasExplicitMediaDeliveryDirective(text: string, filePath: string): boolean {
+  const normalizedText = text.toLowerCase();
+  const normalizedPath = filePath.trim().toLowerCase();
+  return normalizedText.includes(`media:${normalizedPath}`)
+    || normalizedText.includes(`media: ${normalizedPath}`);
+}
+
 /**
  * Extract images from a content array (including nested tool_result content).
  * Converts them to AttachedFileMeta entries with preview set to data URL or remote URL.
@@ -952,6 +959,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           height: block.height,
           gatewayUrl: block.url,
           source: 'gateway-media',
+          disposition: 'output-delivery',
         });
       }
     }
@@ -970,6 +978,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           preview: null,
           ...(filePath ? { filePath } : { gatewayUrl: url }),
           source: url ? 'gateway-media' : 'message-ref',
+          disposition: 'output-delivery',
         });
       }
     }
@@ -987,6 +996,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
 function makeAttachedFile(
   ref: { filePath: string; mimeType: string },
   source: AttachedFileMeta['source'] = 'message-ref',
+  disposition: AttachedFileMeta['disposition'] = 'output-delivery',
 ): AttachedFileMeta {
   if (isRemoteMediaUrl(ref.filePath)) {
     return {
@@ -996,12 +1006,13 @@ function makeAttachedFile(
       preview: null,
       gatewayUrl: ref.filePath,
       source,
+      disposition,
     };
   }
   const cached = _imageCache.get(ref.filePath);
-  if (cached) return { ...cached, filePath: ref.filePath, source };
+  if (cached) return { ...cached, filePath: ref.filePath, source, disposition };
   const fileName = fileNameFromMediaRef(ref.filePath, ref.mimeType);
-  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source };
+  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source, disposition };
 }
 
 /**
@@ -1200,7 +1211,20 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     return extractImagesAsAttachedFiles(next.content).some(f => f.gatewayUrl);
   });
 
-  return messages.map((msg, idx) => {
+  let currentUserInputPaths = new Set<string>();
+  return messages.map((rawMessage, idx) => {
+    const msg = rawMessage.role === 'user' && rawMessage._attachedFiles?.some((file) => (
+      file.disposition !== 'input-reference'
+    ))
+      ? {
+        ...rawMessage,
+        _attachedFiles: rawMessage._attachedFiles.map((file) => ({
+          ...file,
+          source: file.source ?? 'user-upload',
+          disposition: 'input-reference' as const,
+        })),
+      }
+      : rawMessage;
     // Only process user and assistant messages. Messages may already carry
     // attachments from tool-result enrichment; still merge in raw paths from
     // the visible assistant text so `/path/to/report.xlsx` becomes a card.
@@ -1220,17 +1244,30 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     // Path 1: [media attached: path (mime) | path] — guaranteed format from attachment button
     const mediaRefs = extractMediaRefs(text);
     const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
+    if (msg.role === 'user') {
+      currentUserInputPaths = new Set([
+        ...mediaRefs.map((ref) => ref.filePath.trim()),
+        ...extractRawFilePaths(text).map((ref) => ref.filePath.trim()),
+        ...(msg._attachedFiles ?? []).map((file) => file.filePath?.trim() ?? '').filter(Boolean),
+      ]);
+    }
 
-    // Path 2: Raw file paths.
-    // For assistant messages: scan own text AND the nearest preceding user message text,
-    // but only for non-tool-only assistant messages (i.e. the final answer turn).
+    // Path 2: Raw file paths explicitly present in this assistant message.
+    // Input paths belong to the user turn and must not be inherited by the
+    // assistant, otherwise a reference image becomes a fake output artifact.
     // Tool-only messages (thinking + tool calls) should not show file previews — those
     // belong to the final answer message that comes after the tool results.
     // User messages never get raw-path previews so the image is not shown twice.
     let rawRefs: Array<{ filePath: string; mimeType: string }> = [];
     if (msg.role === 'assistant' && !isToolOnlyMessage(msg)) {
       // Own text
-      const ownRawRefs = extractRawFilePaths(text).filter(r => !mediaRefPaths.has(r.filePath));
+      const ownRawRefs = extractRawFilePaths(text).filter((ref) => (
+        !mediaRefPaths.has(ref.filePath)
+        && (
+          !currentUserInputPaths.has(ref.filePath.trim())
+          || hasExplicitMediaDeliveryDirective(text, ref.filePath)
+        )
+      ));
       rawRefs = ownRawRefs;
       const rawPathSet = new Set(rawRefs.map((ref) => ref.filePath));
       for (const ref of extractMarkdownImageRefs(text)) {
@@ -1240,24 +1277,6 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
         }
       }
 
-      // Nearest preceding user message text (look back up to 5 messages)
-      if (!ownRawRefs.some((ref) => ref.mimeType.startsWith('image/'))) {
-        const seenPaths = new Set(rawRefs.map(r => r.filePath));
-        for (let i = idx - 1; i >= Math.max(0, idx - 5); i--) {
-          const prev = messages[i];
-          if (!prev) break;
-          if (prev.role === 'user') {
-            const prevText = getMessageText(prev.content);
-            for (const ref of extractRawFilePaths(prevText)) {
-              if (!mediaRefPaths.has(ref.filePath) && !seenPaths.has(ref.filePath)) {
-                seenPaths.add(ref.filePath);
-                rawRefs.push(ref);
-              }
-            }
-            break; // only use the nearest user message
-          }
-        }
-      }
     }
 
     // Dedup vs Gateway-injected bubble: when the very next assistant
@@ -1287,7 +1306,11 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     const files: AttachedFileMeta[] = allRefs
       .filter(ref => !existingPaths.has(ref.filePath))
       .filter(ref => !isRemoteMediaUrl(ref.filePath) || !existingGatewayUrls.has(ref.filePath))
-      .map(ref => makeAttachedFile(ref, 'message-ref'));
+      .map(ref => makeAttachedFile(
+        ref,
+        msg.role === 'user' ? 'user-upload' : 'message-ref',
+        msg.role === 'user' ? 'input-reference' : 'output-delivery',
+      ));
     const dedupedGatewayMedia = gatewayMediaFiles.filter(
       file => file.gatewayUrl && !existingGatewayUrls.has(file.gatewayUrl),
     );
@@ -1301,6 +1324,7 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
         preview: null,
         gatewayUrl: ref.gatewayUrl,
         source: 'gateway-media' as const,
+        disposition: 'output-delivery' as const,
       }));
     if (files.length === 0 && dedupedGatewayMedia.length === 0 && markdownGatewayMedia.length === 0) return msg;
     return {
@@ -1501,6 +1525,10 @@ function getCanonicalPrefixFromSessions(sessions: ChatSession[]): string | null 
   return `${parts[0]}:${parts[1]}`;
 }
 
+function isUserVisibleMediaBlockType(type: ContentBlock['type']): boolean {
+  return type === 'image' || type === 'video' || type === 'audio' || type === 'file';
+}
+
 function isToolOnlyMessage(message: RawMessage | undefined): boolean {
   if (!message) return false;
   if (isToolResultRole(message.role)) return true;
@@ -1536,10 +1564,10 @@ function isToolOnlyMessage(message: RawMessage | undefined): boolean {
       hasText = true;
       continue;
     }
-    // Only actual image output disqualifies a tool-only message.
+    // User-visible media output disqualifies a tool-only message.
     // Thinking blocks are internal reasoning that can accompany tool_use — they
     // should NOT prevent the message from being treated as an intermediate tool step.
-    if (block.type === 'image') {
+    if (isUserVisibleMediaBlockType(block.type)) {
       hasNonToolContent = true;
     }
   }
@@ -1554,7 +1582,7 @@ function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
   if (!Array.isArray(content)) return false;
   return (content as ContentBlock[]).some((block) => {
     if (block.type === 'text') return Boolean(block.text?.trim());
-    if (block.type === 'image') return true;
+    if (isUserVisibleMediaBlockType(block.type)) return true;
     return false;
   });
 }
@@ -1590,7 +1618,7 @@ function hasInternalProvenance(msg: { provenance?: unknown }): boolean {
 function messageHasRenderableMedia(msg: { content?: unknown; _attachedFiles?: unknown }): boolean {
   if (Array.isArray(msg._attachedFiles) && msg._attachedFiles.length > 0) return true;
   if (!Array.isArray(msg.content)) return false;
-  return (msg.content as ContentBlock[]).some((block) => block.type === 'image');
+  return (msg.content as ContentBlock[]).some((block) => isUserVisibleMediaBlockType(block.type));
 }
 
 /** True for internal plumbing messages that should never be shown in the UI. */
@@ -1616,11 +1644,12 @@ function isInternalMessage(msg: {
     const isGatewayInjectedFallback = msg.model === 'gateway-injected'
       && idempotencyKey.endsWith(':assistant-media');
     if (isGatewayInjectedFallback) {
-      const hasImageUrlBlock = Array.isArray(msg.content)
+      const hasMediaBlock = Array.isArray(msg.content)
         && (msg.content as ContentBlock[]).some(
-          (block) => block.type === 'image' && typeof block.url === 'string' && !!block.url,
+          (block) => isUserVisibleMediaBlockType(block.type)
+            && Boolean(block.url || block.filePath || block.source?.url),
         );
-      if (!hasImageUrlBlock) return true;
+      if (!hasMediaBlock) return true;
     }
     if (!text.trim() && Array.isArray(msg.content)) {
       const blocks = msg.content as ContentBlock[];
@@ -1864,8 +1893,6 @@ function collectToolUpdates(message: unknown, eventState: string): ToolStatus[] 
   return updates;
 }
 
-const DELIVERABLE_CONTENT_BLOCK_TYPES = new Set(['image', 'video', 'audio', 'file']);
-
 function isValidAttachedFile(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
   const file = value as Record<string, unknown>;
@@ -1891,7 +1918,7 @@ function messageHasDeliverableContent(
   if (Array.isArray(content)) {
     for (const block of content as ContentBlock[]) {
       if (includeText && block.type === 'text' && block.text?.trim()) return true;
-      if (DELIVERABLE_CONTENT_BLOCK_TYPES.has(block.type)) return true;
+      if (isUserVisibleMediaBlockType(block.type)) return true;
     }
   }
 
@@ -2118,16 +2145,24 @@ function mergeAsyncTaskLedgerEntry(
   evidence: AsyncTaskLedgerEntry,
 ): AsyncTaskLedgerEntry {
   if (!previous) return { ...evidence };
+  const previousTerminal = previous.status !== 'pending';
+  const evidenceTerminal = evidence.status !== 'pending';
+  if (previousTerminal !== evidenceTerminal) {
+    const terminal = evidenceTerminal ? evidence : previous;
+    const pending = evidenceTerminal ? previous : evidence;
+    return {
+      ...pending,
+      ...terminal,
+      status: terminal.status,
+      updatedAt: Math.max(previous.updatedAt, evidence.updatedAt),
+    };
+  }
   if (evidence.updatedAt < previous.updatedAt) {
     return { ...evidence, ...previous, updatedAt: previous.updatedAt };
   }
-  const status = previous.status !== 'pending' && evidence.status === 'pending'
-    ? previous.status
-    : evidence.status;
   return {
     ...previous,
     ...evidence,
-    status,
     updatedAt: Math.max(previous.updatedAt, evidence.updatedAt),
   };
 }

@@ -1,4 +1,5 @@
 export const CHAT_RUNTIME_CONTRACT_VERSION = 1;
+export const CHAT_SYNTHETIC_TERMINAL_PRODUCER = 'gateway-chat-terminal';
 
 export type ChatRuntimeEventProducer =
   | 'gateway'

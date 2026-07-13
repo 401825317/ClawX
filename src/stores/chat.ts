@@ -13,7 +13,11 @@ import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
-import type { ChatRuntimeArtifact, ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import {
+  CHAT_SYNTHETIC_TERMINAL_PRODUCER,
+  type ChatRuntimeArtifact,
+  type ChatRuntimeEvent,
+} from '../../shared/chat-runtime-events';
 import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
@@ -51,6 +55,7 @@ import {
 import {
   DEFAULT_CANONICAL_PREFIX,
   DEFAULT_SESSION_KEY,
+  type AsyncTaskEvidence,
   type AttachedFileMeta,
   type ChatImageSendOptions,
   type ChatSendAttachment,
@@ -504,21 +509,60 @@ function inferHistoricalRunMode(artifactFiles: AttachedFileMeta[]): ChatSendMode
   return 'chat';
 }
 
-function extractMessageArtifactFiles(message: RawMessage): AttachedFileMeta[] {
-  const files: AttachedFileMeta[] = [...(message._attachedFiles ?? [])];
+function extractExplicitMessageArtifactFiles(
+  message: RawMessage,
+  inputAttachmentKeys: ReadonlySet<string>,
+): AttachedFileMeta[] {
+  const files: AttachedFileMeta[] = [];
   const text = getMessageText(message.content);
-  if (!text) return dedupeAttachedFiles(files);
+  if (!text) return files;
 
   const mediaRefs = extractMediaRefs(text);
   const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
   for (const ref of mediaRefs) {
-    files.push({ ...makeAttachedFile(ref), source: 'message-ref' });
+    files.push(makeAttachedFile(ref, 'message-ref', 'output-delivery'));
   }
   for (const ref of extractRawFilePaths(text)) {
     if (mediaRefPaths.has(ref.filePath)) continue;
-    files.push({ ...makeAttachedFile(ref), source: 'message-ref' });
+    const file = makeAttachedFile(ref, 'message-ref', 'output-delivery');
+    const matchesInput = getAttachedFileNormalizedIdentityKeys(file).some((key) => inputAttachmentKeys.has(key));
+    if (matchesInput && !hasExplicitMediaDeliveryDirective(text, ref.filePath)) continue;
+    files.push(file);
   }
   return dedupeAttachedFiles(files);
+}
+
+function collectMessageAttachmentIdentityKeys(message: RawMessage): Set<string> {
+  const keys = new Set<string>();
+  const remember = (file: AttachedFileMeta): void => {
+    for (const key of getAttachedFileNormalizedIdentityKeys(file)) keys.add(key);
+  };
+  for (const file of message._attachedFiles ?? []) remember(file);
+
+  const text = getMessageText(message.content);
+  const mediaRefs = extractMediaRefs(text);
+  const mediaRefPaths = new Set(mediaRefs.map((ref) => ref.filePath));
+  for (const ref of mediaRefs) remember(makeAttachedFile(ref, 'user-upload', 'input-reference'));
+  for (const ref of extractRawFilePaths(text)) {
+    if (!mediaRefPaths.has(ref.filePath)) remember(makeAttachedFile(ref, 'user-upload', 'input-reference'));
+  }
+  return keys;
+}
+
+function extractMessageArtifactFiles(
+  message: RawMessage,
+  inputAttachmentKeys: ReadonlySet<string> = new Set(),
+): AttachedFileMeta[] {
+  const explicitFiles = extractExplicitMessageArtifactFiles(message, inputAttachmentKeys);
+  const explicitKeys = new Set(explicitFiles.flatMap(getAttachedFileNormalizedIdentityKeys));
+  const carriedFiles = (message._attachedFiles ?? []).filter((file) => {
+    if (file.disposition === 'input-reference' || file.source === 'user-upload') return false;
+    const keys = getAttachedFileNormalizedIdentityKeys(file);
+    if (!keys.some((key) => inputAttachmentKeys.has(key))) return true;
+    if (file.source === 'gateway-media' || file.source === 'tool-result') return true;
+    return keys.some((key) => explicitKeys.has(key));
+  });
+  return dedupeAttachedFiles([...carriedFiles, ...explicitFiles]);
 }
 
 function shouldDropMessageFromRuntimeReplay(message: RawMessage): boolean {
@@ -868,11 +912,45 @@ function buildHistoricalToolRuntimeEventsFromSegment(params: {
   return events;
 }
 
+function collectTerminalAsyncTaskEvidence(
+  runtimeRuns: ChatState['runtimeRuns'],
+  sessionKey: string,
+): AsyncTaskEvidence[] {
+  const evidenceByTask = new Map<string, AsyncTaskEvidence>();
+  const remember = (evidence: AsyncTaskEvidence): void => {
+    const existing = evidenceByTask.get(evidence.id);
+    if (!existing || evidence.updatedAt >= existing.updatedAt) {
+      evidenceByTask.set(evidence.id, { ...evidence });
+    }
+  };
+
+  for (const run of Object.values(runtimeRuns)) {
+    if (run.sessionKey !== sessionKey) continue;
+    for (const evidence of Object.values(run.asyncTaskLedger ?? {})) {
+      if (evidence.status !== 'pending') remember(evidence);
+    }
+    for (const task of run.tasks ?? []) {
+      if (task.status !== 'completed' && task.status !== 'error' && task.status !== 'partial') continue;
+      remember({
+        id: `task:${task.taskId}`,
+        taskId: task.taskId,
+        childSessionKey: task.childSessionKey,
+        status: task.status === 'completed' ? 'completed' : 'error',
+        source: 'task-completion',
+        updatedAt: task.updatedAt ?? task.endedAt ?? run.lastEventAt ?? Date.now(),
+      });
+    }
+  }
+
+  return [...evidenceByTask.values()];
+}
+
 function applyHistoricalRuntimeRunsFromMessages(
   runtimeRuns: ChatState['runtimeRuns'],
   sessionKey: string,
   messages: RawMessage[],
 ): ChatState['runtimeRuns'] {
+  const terminalTaskEvidence = collectTerminalAsyncTaskEvidence(runtimeRuns, sessionKey);
   let nextRuns = stripHistoricalRunsForSession(runtimeRuns, sessionKey);
   for (let index = 0; index < messages.length; index += 1) {
     const trigger = messages[index];
@@ -883,9 +961,10 @@ function applyHistoricalRuntimeRunsFromMessages(
     const segmentEnd = nextUserIndex === -1 ? messages.length : nextUserIndex;
     const segment = messages.slice(index + 1, segmentEnd);
     if (segmentLooksLikeBackgroundHeartbeatRun(sessionKey, segment)) continue;
+    const inputAttachmentKeys = collectMessageAttachmentIdentityKeys(trigger);
     const artifactFiles = segment
       .filter((message) => message.role === 'assistant')
-      .flatMap((message) => extractMessageArtifactFiles(message));
+      .flatMap((message) => extractMessageArtifactFiles(message, inputAttachmentKeys));
     const uniqueArtifactFiles = dedupeAttachedFiles(artifactFiles);
     const objective = getMessageText(trigger.content).trim();
     const ts = trigger.timestamp ? toMs(trigger.timestamp) : Date.now();
@@ -944,7 +1023,12 @@ function applyHistoricalRuntimeRunsFromMessages(
     ]);
     nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, runId, historicalAsyncEvidence, sessionKey);
   }
-  return nextRuns;
+  return applyAsyncTaskEvidenceToRuns(
+    nextRuns,
+    null,
+    terminalTaskEvidence,
+    sessionKey,
+  );
 }
 
 function applyActiveRunArtifactEvidenceFromHistory(
@@ -958,10 +1042,13 @@ function applyActiveRunArtifactEvidenceFromHistory(
 ): ChatState['runtimeRuns'] {
   if (!params.runId || params.lastUserMessageAt == null || !runtimeRuns[params.runId]) return runtimeRuns;
   const segment = getOpenRunSegmentFromHistory(params.messages, params.lastUserMessageAt);
+  const inputAttachmentKeys = collectMessageAttachmentIdentityKeys(
+    findLastRealUserMessage(params.messages) ?? { role: 'user', content: '' },
+  );
   const files = dedupeAttachedFiles(
     segment
       .filter((message) => message.role === 'assistant' && !hasPendingToolUse(message))
-      .flatMap((message) => extractMessageArtifactFiles(message)),
+      .flatMap((message) => extractMessageArtifactFiles(message, inputAttachmentKeys)),
   );
   if (files.length === 0) return runtimeRuns;
 
@@ -1971,12 +2058,20 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
     if (!backendConfirmedIdle) return;
 
     const state = useChatStore.getState();
+    const settledRunState = state.currentSessionKey === sessionKey
+      ? state
+      : _sessionRunStateCache.get(sessionKey);
     if (
-      state.currentSessionKey === sessionKey
-      && expectedRunId
-      && state.activeRunId != null
-      && state.activeRunId !== expectedRunId
+      expectedRunId
+      && settledRunState?.activeRunId != null
+      && settledRunState.activeRunId !== expectedRunId
     ) {
+      return;
+    }
+    if (state.currentSessionKey !== sessionKey) {
+      markSessionRunIdle(sessionKey);
+      markSessionNeedsTerminalHistoryRefresh(sessionKey);
+      clearPendingRuntimeIntent(sessionKey);
       return;
     }
     reconcileCurrentSessionLifecycleFromBackend(
@@ -1984,12 +2079,8 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
       useChatStore.getState,
       confirmedSessions ?? useChatStore.getState().sessions,
     );
-    if (useChatStore.getState().currentSessionKey === sessionKey) {
-      forceNextHistoryLoad(sessionKey);
-      void useChatStore.getState().loadHistory(true);
-    } else {
-      markSessionNeedsTerminalHistoryRefresh(sessionKey);
-    }
+    forceNextHistoryLoad(sessionKey);
+    void useChatStore.getState().loadHistory(true);
   })();
 }
 
@@ -2928,6 +3019,13 @@ function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: 
   return refs;
 }
 
+function hasExplicitMediaDeliveryDirective(text: string, filePath: string): boolean {
+  const normalizedText = text.toLowerCase();
+  const normalizedPath = filePath.trim().toLowerCase();
+  return normalizedText.includes(`media:${normalizedPath}`)
+    || normalizedText.includes(`media: ${normalizedPath}`);
+}
+
 /**
  * Extract images from a content array (including nested tool_result content).
  * Converts them to AttachedFileMeta entries with preview set to data URL or remote URL.
@@ -2983,6 +3081,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           preview: null,
           gatewayUrl: block.url,
           source: 'gateway-media',
+          disposition: 'output-delivery',
         });
       }
     }
@@ -3001,6 +3100,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
           preview: null,
           ...(filePath ? { filePath } : { gatewayUrl: url }),
           source: url ? 'gateway-media' : 'message-ref',
+          disposition: 'output-delivery',
         });
       }
     }
@@ -3018,6 +3118,7 @@ function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
 function makeAttachedFile(
   ref: { filePath: string; mimeType: string },
   source: AttachedFileMeta['source'] = 'message-ref',
+  disposition: AttachedFileMeta['disposition'] = 'output-delivery',
 ): AttachedFileMeta {
   if (looksLikeRemoteMediaUrl(ref.filePath)) {
     return {
@@ -3027,12 +3128,13 @@ function makeAttachedFile(
       preview: null,
       gatewayUrl: ref.filePath,
       source,
+      disposition,
     };
   }
   const cached = _imageCache.get(ref.filePath);
-  if (cached) return { ...cached, filePath: ref.filePath, source };
+  if (cached) return { ...cached, filePath: ref.filePath, source, disposition };
   const fileName = fileNameFromMediaRef(ref.filePath, ref.mimeType);
-  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source };
+  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source, disposition };
 }
 
 /**
@@ -3236,7 +3338,20 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     return extractImagesAsAttachedFiles(next.content).some(f => f.gatewayUrl);
   });
 
-  return messages.map((msg, idx) => {
+  let currentUserInputPaths = new Set<string>();
+  return messages.map((rawMessage, idx) => {
+    const msg = rawMessage.role === 'user' && rawMessage._attachedFiles?.some((file) => (
+      file.disposition !== 'input-reference'
+    ))
+      ? {
+        ...rawMessage,
+        _attachedFiles: rawMessage._attachedFiles.map((file) => ({
+          ...file,
+          source: file.source ?? 'user-upload',
+          disposition: 'input-reference' as const,
+        })),
+      }
+      : rawMessage;
     // Only process user and assistant messages.
     if (msg.role !== 'user' && msg.role !== 'assistant') return msg;
     const text = getMessageText(msg.content);
@@ -3250,34 +3365,28 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     // Path 1: [media attached: path (mime) | path]  - guaranteed format from attachment button
     const mediaRefs = extractMediaRefs(text);
     const mediaRefPaths = new Set(mediaRefs.map(r => r.filePath));
+    if (msg.role === 'user') {
+      currentUserInputPaths = new Set([
+        ...mediaRefs.map((ref) => ref.filePath.trim()),
+        ...extractRawFilePaths(text).map((ref) => ref.filePath.trim()),
+        ...(msg._attachedFiles ?? []).map((file) => file.filePath?.trim() ?? '').filter(Boolean),
+      ]);
+    }
 
-    // Path 2: Raw file paths.
-    // For assistant messages: scan own text AND the nearest preceding user message text,
-    // but only for non-tool-only assistant messages (i.e. the final answer turn).
+    // Path 2: Raw file paths explicitly present in this assistant message.
+    // Never inherit paths from the preceding user turn: those are inputs.
     let rawRefs: Array<{ filePath: string; mimeType: string }> = [];
     if (msg.role === 'assistant' && !isToolOnlyMessage(msg)) {
       // Own text
-      const ownRawRefs = extractRawFilePaths(text).filter(r => !mediaRefPaths.has(r.filePath));
+      const ownRawRefs = extractRawFilePaths(text).filter((ref) => (
+        !mediaRefPaths.has(ref.filePath)
+        && (
+          !currentUserInputPaths.has(ref.filePath.trim())
+          || hasExplicitMediaDeliveryDirective(text, ref.filePath)
+        )
+      ));
       rawRefs = ownRawRefs;
 
-      // Nearest preceding user message text (look back up to 5 messages)
-      if (!ownRawRefs.some((ref) => ref.mimeType.startsWith('image/'))) {
-        const seenPaths = new Set(rawRefs.map(r => r.filePath));
-        for (let i = idx - 1; i >= Math.max(0, idx - 5); i--) {
-          const prev = messages[i];
-          if (!prev) break;
-          if (prev.role === 'user') {
-            const prevText = getMessageText(prev.content);
-            for (const ref of extractRawFilePaths(prevText)) {
-              if (!mediaRefPaths.has(ref.filePath) && !seenPaths.has(ref.filePath)) {
-                seenPaths.add(ref.filePath);
-                rawRefs.push(ref);
-              }
-            }
-            break; // only use the nearest user message
-          }
-        }
-      }
     }
 
     // Dedup vs Gateway-injected bubble: if the very next assistant message
@@ -3303,7 +3412,11 @@ function enrichWithCachedImages(messages: RawMessage[]): RawMessage[] {
     const files: AttachedFileMeta[] = allRefs
       .filter(ref => !existingPaths.has(ref.filePath))
       .filter(ref => !looksLikeRemoteMediaUrl(ref.filePath) || !existingGatewayUrls.has(ref.filePath))
-      .map(ref => makeAttachedFile(ref, 'message-ref'));
+      .map(ref => makeAttachedFile(
+        ref,
+        msg.role === 'user' ? 'user-upload' : 'message-ref',
+        msg.role === 'user' ? 'input-reference' : 'output-delivery',
+      ));
     const dedupedGatewayMedia = gatewayMediaFiles.filter(
       file => file.gatewayUrl && !existingGatewayUrls.has(file.gatewayUrl),
     );
@@ -3518,6 +3631,56 @@ function parseSessionStatus(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
+type GatewayHistorySessionAuthority = {
+  session: ChatSession;
+  inFlightRunId?: string;
+  requestStartedAt: number;
+  explicitlyActive: boolean;
+  explicitlyIdle: boolean;
+};
+
+function parseGatewayHistorySessionAuthority(
+  data: Record<string, unknown>,
+  sessionKey: string,
+  requestStartedAt: number,
+): GatewayHistorySessionAuthority | undefined {
+  const sessionInfo = data.sessionInfo && typeof data.sessionInfo === 'object' && !Array.isArray(data.sessionInfo)
+    ? data.sessionInfo as Record<string, unknown>
+    : undefined;
+  const inFlightRun = data.inFlightRun && typeof data.inFlightRun === 'object' && !Array.isArray(data.inFlightRun)
+    ? data.inFlightRun as Record<string, unknown>
+    : undefined;
+  const inFlightRunId = typeof inFlightRun?.runId === 'string' && inFlightRun.runId.trim()
+    ? inFlightRun.runId.trim()
+    : undefined;
+  const reportedActive = typeof sessionInfo?.hasActiveRun === 'boolean'
+    ? sessionInfo.hasActiveRun
+    : undefined;
+  const status = parseSessionStatus(sessionInfo?.status);
+  const statusReportsActive = reportedActive == null && (status === 'running' || status === 'active');
+  const terminalStatus = getSessionTerminalRuntimeStatus(status);
+  const explicitlyActive = Boolean(inFlightRunId || reportedActive === true || statusReportsActive);
+  const explicitlyIdle = !explicitlyActive
+    && (reportedActive === false || (reportedActive == null && terminalStatus != null));
+  if (!sessionInfo && !inFlightRunId) return undefined;
+
+  const updatedAt = parseSessionUpdatedAtMs(sessionInfo?.updatedAt);
+  return {
+    session: {
+      key: sessionKey,
+      ...(updatedAt != null ? { updatedAt } : {}),
+      ...(status ? { status } : {}),
+      ...(reportedActive != null || inFlightRunId
+        ? { hasActiveRun: explicitlyActive }
+        : {}),
+    },
+    inFlightRunId,
+    requestStartedAt,
+    explicitlyActive,
+    explicitlyIdle,
+  };
+}
+
 function getSessionTerminalRuntimeStatus(
   status: string | undefined,
 ): Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'] | undefined {
@@ -3533,13 +3696,26 @@ function getBackendSessionLifecycle(session: ChatSession | undefined): {
 } {
   if (!session) return { idle: false };
   const terminalStatus = getSessionTerminalRuntimeStatus(session.status);
+  if (session.hasActiveRun === true) {
+    return { idle: false };
+  }
   if (session.hasActiveRun === false) {
     return { idle: true, terminalStatus };
+  }
+  if (session.status === 'running' || session.status === 'active') {
+    return { idle: false };
   }
   if (terminalStatus) {
     return { idle: true, terminalStatus };
   }
   return { idle: false };
+}
+
+function backendSessionReportsActive(session: ChatSession | undefined): boolean {
+  if (!session) return false;
+  if (session.hasActiveRun === true) return true;
+  if (session.hasActiveRun === false) return false;
+  return session.status === 'running' || session.status === 'active';
 }
 
 function shouldTrustBackendSessionIdle(
@@ -3612,13 +3788,6 @@ function reconcileCurrentSessionIdleFromBackend(
 ): void {
   const state = get();
   if (!state.sending && state.activeRunId == null && !state.pendingFinal) return;
-  const pendingAsyncRun = state.activeRunId
-    ? state.runtimeRuns[state.activeRunId]
-    : Object.values(state.runtimeRuns).find((run) => (
-        run.sessionKey === state.currentSessionKey && runtimeRunHasPendingAsyncTasks(run)
-      ));
-  if (runtimeRunHasPendingAsyncTasks(pendingAsyncRun)) return;
-
   const current = sessions.find((session) => session.key === state.currentSessionKey);
   if (!shouldTrustBackendSessionIdle(current, state.lastUserMessageAt)) return;
 
@@ -3654,11 +3823,11 @@ function reconcileCurrentSessionLifecycleFromBackend(
 ): void {
   const state = get();
   const current = sessions.find((session) => session.key === state.currentSessionKey);
-  if (current?.hasActiveRun === true) {
+  if (backendSessionReportsActive(current)) {
     if (state.sending || state.activeRunId != null || state.pendingFinal) return;
     set({
       sending: true,
-      lastUserMessageAt: state.lastUserMessageAt ?? current.updatedAt ?? Date.now(),
+      lastUserMessageAt: state.lastUserMessageAt ?? current?.updatedAt ?? Date.now(),
       error: null,
       runError: null,
     });
@@ -4134,6 +4303,10 @@ function getCanonicalPrefixFromSessionKey(sessionKey: string): string | null {
   return `${parts[0]}:${parts[1]}`;
 }
 
+function isUserVisibleMediaBlockType(type: ContentBlock['type']): boolean {
+  return type === 'image' || type === 'video' || type === 'audio' || type === 'file';
+}
+
 function isToolOnlyMessage(message: RawMessage | undefined): boolean {
   if (!message) return false;
   if (isToolResultRole(message.role)) return true;
@@ -4169,10 +4342,10 @@ function isToolOnlyMessage(message: RawMessage | undefined): boolean {
       hasText = true;
       continue;
     }
-    // Only actual image output disqualifies a tool-only message.
+    // User-visible media output disqualifies a tool-only message.
     // Thinking blocks are internal reasoning that can accompany tool_use  - they
     // should NOT prevent the message from being treated as an intermediate tool step.
-    if (block.type === 'image') {
+    if (isUserVisibleMediaBlockType(block.type)) {
       hasNonToolContent = true;
     }
   }
@@ -4662,7 +4835,7 @@ function hasMeaningfulStreamingActivity(
       if (block.type === 'text' && block.text?.trim()) return true;
       if (block.type === 'thinking' && block.thinking?.trim()) return true;
       if (block.type === 'tool_use' || block.type === 'toolCall') return true;
-      if (block.type === 'image') return true;
+      if (isUserVisibleMediaBlockType(block.type)) return true;
     }
   }
 
@@ -5747,6 +5920,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         rawMessages: RawMessage[],
         thinkingLevel: string | null,
         reasoningLevel: string | null,
+        historyAuthority?: GatewayHistorySessionAuthority,
       ): Promise<boolean> => {
       // Guard: if the user switched sessions while this async load was in
       // flight, discard the result to prevent overwriting the new session's
@@ -5780,9 +5954,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       finalMessages = preserveExistingAttachmentPreviews(get().messages, finalMessages);
       finalMessages = dedupeAssistantRepliesForDisplay(finalMessages);
 
-      const currentSessionRow = get().sessions.find((session) => session.key === currentSessionKey);
-      const backendSessionIdle = shouldTrustBackendSessionIdle(currentSessionRow, get().lastUserMessageAt);
       const { pendingFinal, lastUserMessageAt, sending: isSendingNow } = get();
+      const listedSessionRow = get().sessions.find((session) => session.key === currentSessionKey);
+      const currentSessionRow = historyAuthority
+        ? { ...listedSessionRow, ...historyAuthority.session, key: currentSessionKey }
+        : listedSessionRow;
+      const historyIdleMatchesCurrentTurn = historyAuthority?.explicitlyIdle === true
+        && (
+          lastUserMessageAt == null
+          || toMs(lastUserMessageAt) <= historyAuthority.requestStartedAt
+        );
+      const backendSessionIdle = historyAuthority?.explicitlyActive
+        ? false
+        : historyAuthority?.explicitlyIdle
+          ? historyIdleMatchesCurrentTurn
+          : shouldTrustBackendSessionIdle(currentSessionRow, lastUserMessageAt);
+      const backendSessionActive = historyAuthority?.explicitlyIdle
+        ? false
+        : historyAuthority?.explicitlyActive === true || backendSessionReportsActive(currentSessionRow);
       const userMsTs = lastUserMessageAt != null ? toMs(lastUserMessageAt) : 0;
       const isAfterUserMsg = (msg: RawMessage): boolean => {
         if (lastUserMessageAt == null) return true;
@@ -5847,17 +6036,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           existingRunIds: Object.keys(nextRuntimeRuns),
         }),
       );
-      const hasPendingAsyncTask = Object.values(nextRuntimeRuns).some((run) => (
-        run.sessionKey === currentSessionKey && runtimeRunHasPendingAsyncTasks(run)
-      ));
       const hasConclusiveAssistantReply = openRunSegment.some((message) => (
         message.role === 'assistant'
         && !hasPendingToolUse(message)
         && messageHasDeliverableContent(message)
       ));
+      const hasRendererOwnedSend = _activeSendGenerationBySession.has(currentSessionKey);
       const backendSessionCanClose = backendSessionIdle
-        && !hasPendingAsyncTask
-        && (!isSendingNow || hasConclusiveAssistantReply || Boolean(latestTerminalAssistantErrorMessage));
+        && (
+          !isSendingNow
+          || !hasRendererOwnedSend
+          || hasConclusiveAssistantReply
+          || Boolean(latestTerminalAssistantErrorMessage)
+        );
       const terminalArtifactFallbackMessage = latestTerminalAssistantErrorMessage && !historyErrorIsTransient
         ? buildArtifactFallbackAssistantMessage(
             isSendingNow && lastUserMessageAt != null
@@ -5894,6 +6085,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
             objective: getMessageText(findLastRealUserMessage(filteredMessages)?.content).trim(),
             mode: 'chat',
             ts: inferredHistoricalOpenRun.lastUserMessageAt,
+          }),
+        );
+      }
+      const authoritativeActiveRunId = backendSessionActive
+        ? historyAuthority?.inFlightRunId
+        : undefined;
+      if (authoritativeActiveRunId && !nextRuntimeRuns[authoritativeActiveRunId]) {
+        const lastUser = findLastRealUserMessage(filteredMessages);
+        nextRuntimeRuns = applyRuntimeContractEvents(
+          nextRuntimeRuns,
+          buildRuntimeStartEventsForRun(nextRuntimeRuns, {
+            runId: authoritativeActiveRunId,
+            sessionKey: currentSessionKey,
+            objective: getMessageText(lastUser?.content).trim(),
+            mode: 'chat',
+            ts: optionalToMs(lastUser?.timestamp ?? null) ?? Date.now(),
           }),
         );
       }
@@ -6102,10 +6309,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      // After session switch the renderer may have reset run lifecycle flags even
-      // though the Gateway is still executing a user-initiated turn. Re-arm only
-      // when this session had an active cached run (e.g. user switched away
-      // mid-send). Do not re-arm from stale :main heartbeat/tool history alone.
+      // Immutable transcript gaps describe an interrupted historical turn, not
+      // current liveness. Re-arm from them only when the current Gateway reports
+      // an active run; same-process session switches may also use the bounded
+      // in-memory cache while the backend signal is unavailable.
       if (!get().sending && !latestTerminalAssistantErrorMessage) {
         const cachedRunState = getCachedSessionRunState(currentSessionKey);
         const cachedOpenSegment = postUserSegmentMessages(filteredMessages);
@@ -6113,23 +6320,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
           cachedRunState.sending
           || cachedRunState.activeRunId != null
           || cachedRunState.pendingFinal
-        ) && segmentHasOpenToolRun(cachedOpenSegment);
+        ) && !backendSessionIdle
+          && segmentHasOpenToolRun(cachedOpenSegment);
         const inferredOpenRun = inferredHistoricalOpenRun;
-        const shouldRearmFromInferredRun = inferredOpenRun != null && (
-          !currentSessionKey.endsWith(':main')
-          || shouldTrackInboundRunLifecycle({
-            sending: false,
-            activeRunId: null,
-            pendingFinal: false,
-            lastUserMessageAt: inferredOpenRun.lastUserMessageAt,
-          }, currentSessionKey)
-        );
-        if (shouldRearmFromCachedRun || shouldRearmFromInferredRun) {
+        const shouldRearmFromInferredRun = inferredOpenRun != null && backendSessionActive;
+        if (shouldRearmFromCachedRun || backendSessionActive) {
+          const restoredActiveRunId = authoritativeActiveRunId
+            ?? (shouldRearmFromInferredRun ? inferredOpenRun!.runId : cachedRunState.activeRunId);
           _lastChatEventAt = Date.now();
           set({
             sending: true,
-            activeRunId: shouldRearmFromInferredRun ? inferredOpenRun!.runId : cachedRunState.activeRunId,
-            pendingFinal: true,
+            activeRunId: restoredActiveRunId,
+            pendingFinal: cachedRunState.pendingFinal
+              || shouldRearmFromInferredRun
+              || hasConclusiveAssistantReply,
             lastUserMessageAt: (shouldRearmFromInferredRun ? inferredOpenRun!.lastUserMessageAt : null)
               ?? cachedRunState.lastUserMessageAt
               ?? optionalToMs(findLastRealUserMessage(filteredMessages)?.timestamp ?? null)
@@ -6208,6 +6412,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         let data: Record<string, unknown> | null = null;
         let lastError: unknown = null;
+        let historyRequestStartedAt = Date.now();
 
         for (let attempt = 0; attempt <= CHAT_HISTORY_STARTUP_RETRY_DELAYS_MS.length; attempt += 1) {
           if (!isCurrentSession()) {
@@ -6215,6 +6420,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           try {
+            historyRequestStartedAt = Date.now();
             data = await fetchChatHistory(
               currentSessionKey,
               HISTORY_PAGE_SIZE,
@@ -6254,6 +6460,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           let rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
           const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
           const reasoningLevel = data.reasoningLevel ? String(data.reasoningLevel) : null;
+          const historyAuthority = parseGatewayHistorySessionAuthority(
+            data,
+            currentSessionKey,
+            historyRequestStartedAt,
+          );
           if (rawMessages.length === 0 && isCronSessionKey(currentSessionKey)) {
             rawMessages = fallbackMessages.length > 0
               ? fallbackMessages
@@ -6272,7 +6483,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
             return;
           }
 
-          const applied = await applyLoadedMessages(rawMessages, thinkingLevel, reasoningLevel);
+          const applied = await applyLoadedMessages(
+            rawMessages,
+            thinkingLevel,
+            reasoningLevel,
+            historyAuthority,
+          );
           if (applied) {
             if (isCurrentSession()) set({ hasMoreHistory: rawMessages.length >= HISTORY_PAGE_SIZE });
           }
@@ -6545,6 +6761,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         fileSize: a.fileSize,
         preview: a.preview,
         filePath: a.stagedPath,
+        source: 'user-upload',
+        disposition: 'input-reference',
       })),
     };
     rememberPendingOptimisticUserMessage(currentSessionKey, userMsg, nowMs);
@@ -6791,6 +7009,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             mimeType: a.mimeType,
             fileSize: a.fileSize,
             preview: a.preview,
+            source: 'user-upload',
+            disposition: 'input-reference',
           });
         }
         saveImageCache(_imageCache);
@@ -7808,7 +8028,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (eventForSession.type === 'run.ended') {
       const sessionKeyAtTerminal = eventSessionKey ?? currentSessionKey;
-      if (matchesCurrentSession) {
+      if (matchesCurrentSession && eventForSession.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER) {
         // Gateway terminal events can arrive before, or instead of, the final
         // assistant payload. Rehydrate the persisted transcript so normal
         // replies and completion-wake replies share the same delivery path.
@@ -7869,7 +8089,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           markSessionRunIdle(currentSessionKey);
           markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
           clearPendingRuntimeIntent(currentSessionKey);
-        } else if (matchesCurrentSession) {
+        } else if (matchesCurrentSession && eventForSession.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER) {
           scheduleRuntimeBackendIdleReconciliation(
             set,
             get,

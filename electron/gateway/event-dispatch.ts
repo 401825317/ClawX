@@ -1,10 +1,94 @@
 import { GatewayEventType, type JsonRpcNotification } from './protocol';
 import { logger } from '../utils/logger';
-import { normalizeGatewayChatRuntimeEvent, normalizeGatewayChatRuntimeEvents } from './chat-runtime-events';
+import {
+  CHAT_SYNTHETIC_TERMINAL_PRODUCER,
+  type ChatRuntimeEvent,
+} from '../../shared/chat-runtime-events';
+import {
+  normalizeGatewayChatTerminalRuntimeEvent,
+  normalizeGatewayChatRuntimeEvent,
+  normalizeGatewayChatRuntimeEvents,
+} from './chat-runtime-events';
 
 type GatewayEventEmitter = {
   emit: (event: string, payload: unknown) => boolean;
 };
+
+type TerminalRuntimeEvent = Extract<ChatRuntimeEvent, { type: 'run.ended' }>;
+type TerminalRunRecord = {
+  status: TerminalRuntimeEvent['status'];
+  authoritative: boolean;
+  endedAt?: number;
+};
+
+const MAX_TERMINAL_RUNS_PER_EMITTER = 2_048;
+const emittedTerminalRuns = new WeakMap<GatewayEventEmitter, Map<string, TerminalRunRecord>>();
+
+function terminalRunKey(event: Pick<ChatRuntimeEvent, 'runId' | 'sessionKey'>): string {
+  const sessionKey = event.sessionKey ?? '';
+  return `${sessionKey.length}:${sessionKey}${event.runId}`;
+}
+
+function terminalStatusRank(status: TerminalRuntimeEvent['status']): number {
+  if (status === 'error') return 3;
+  if (status === 'aborted') return 2;
+  return 1;
+}
+
+function runtimeTimestampMs(value: number | undefined): number | undefined {
+  if (value == null || !Number.isFinite(value)) return undefined;
+  return value > 0 && value < 100_000_000_000 ? value * 1_000 : value;
+}
+
+function markTerminalRunEmitted(
+  emitter: GatewayEventEmitter,
+  event: TerminalRuntimeEvent,
+): boolean {
+  if (event.producer === 'history') return true;
+
+  let runs = emittedTerminalRuns.get(emitter);
+  if (!runs) {
+    runs = new Map<string, TerminalRunRecord>();
+    emittedTerminalRuns.set(emitter, runs);
+  }
+
+  const key = terminalRunKey(event);
+  const existing = runs.get(key);
+  const authoritative = event.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER;
+  const endedAt = runtimeTimestampMs(event.endedAt ?? event.ts);
+  if (existing) {
+    if (existing.status === event.status) {
+      if (authoritative && !existing.authoritative) {
+        runs.set(key, { status: event.status, authoritative: true, endedAt: endedAt ?? existing.endedAt });
+      }
+      return false;
+    }
+    if (existing.authoritative && !authoritative) return false;
+    if (!existing.authoritative && authoritative) {
+      runs.set(key, { status: event.status, authoritative: true, endedAt: endedAt ?? existing.endedAt });
+      return true;
+    }
+    if (terminalStatusRank(event.status) <= terminalStatusRank(existing.status)) return false;
+  }
+
+  runs.set(key, { status: event.status, authoritative, endedAt });
+  if (runs.size > MAX_TERMINAL_RUNS_PER_EMITTER) {
+    const oldest = runs.keys().next().value;
+    if (oldest != null) runs.delete(oldest);
+  }
+  return true;
+}
+
+function beginRuntimeRun(emitter: GatewayEventEmitter, event: Extract<ChatRuntimeEvent, { type: 'run.started' }>): void {
+  const runs = emittedTerminalRuns.get(emitter);
+  const existing = runs?.get(terminalRunKey(event));
+  if (!runs || !existing) return;
+
+  const startedAt = runtimeTimestampMs(event.startedAt ?? event.ts);
+  if (startedAt == null || existing.endedAt == null || startedAt > existing.endedAt) {
+    runs.delete(terminalRunKey(event));
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -225,9 +309,20 @@ function dispatchChatRuntimeEvents(
 ): void {
   const normalizedEvents = normalizeGatewayChatRuntimeEvents(payload);
   for (const normalized of normalizedEvents) {
-    logChatRuntimeDiagnostic(normalized);
-    emitter.emit('chat:runtime-event', normalized);
+    emitChatRuntimeEvent(emitter, normalized);
   }
+}
+
+function emitChatRuntimeEvent(emitter: GatewayEventEmitter, event: NonNullable<ReturnType<typeof normalizeGatewayChatRuntimeEvent>>): void {
+  if (event.type === 'run.started') beginRuntimeRun(emitter, event);
+  if (event.type === 'run.ended' && !markTerminalRunEmitted(emitter, event)) return;
+  logChatRuntimeDiagnostic(event);
+  emitter.emit('chat:runtime-event', event);
+}
+
+function dispatchChatTerminalRuntimeEvent(emitter: GatewayEventEmitter, payload: unknown): void {
+  const terminalEvent = normalizeGatewayChatTerminalRuntimeEvent(payload);
+  if (terminalEvent) emitChatRuntimeEvent(emitter, terminalEvent);
 }
 
 export function dispatchProtocolEvent(
@@ -246,6 +341,7 @@ export function dispatchProtocolEvent(
       break;
     case 'chat':
       logChatMessageDiagnostic(payload);
+      dispatchChatTerminalRuntimeEvent(emitter, payload);
       emitter.emit('chat:message', { message: payload });
       break;
     case 'channel.status':
@@ -281,6 +377,7 @@ export function dispatchJsonRpcNotification(
       break;
     case GatewayEventType.MESSAGE_RECEIVED:
       logChatMessageDiagnostic(notification.params);
+      dispatchChatTerminalRuntimeEvent(emitter, notification.params);
       emitter.emit('chat:message', notification.params as { message: unknown });
       break;
     case GatewayEventType.ERROR: {

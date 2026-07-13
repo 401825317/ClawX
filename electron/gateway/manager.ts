@@ -202,7 +202,13 @@ export class GatewayManager extends EventEmitter {
   private recentStartupStderrLines: string[] = [];
   private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
   private readonly blockingRpcRequestIds = new Set<string>();
-  private readonly activeRuntimeRuns = new Map<string, { startedAt: number; lastEventAt: number; sessionKey?: string }>();
+  private readonly activeRuntimeRuns = new Map<string, {
+    startedAt: number;
+    lastEventAt: number;
+    sessionKey?: string;
+    acceptsUnscopedTerminal: boolean;
+  }>();
+  private readonly activeRuntimeRunKeysByRunId = new Map<string, Set<string>>();
   private deviceIdentity: DeviceIdentity | null = null;
   private restartInFlight: Promise<void> | null = null;
   private readonly connectionMonitor = new GatewayConnectionMonitor();
@@ -453,20 +459,57 @@ export class GatewayManager extends EventEmitter {
       return;
     }
 
+    const sessionKey = typeof event.sessionKey === 'string' ? event.sessionKey : '';
+    const runtimeWorkKey = `${sessionKey.length}:${sessionKey}${event.runId}`;
+
     if (event.type === 'run.ended') {
-      if (this.activeRuntimeRuns.delete(event.runId)) {
+      let deleted = false;
+      if (sessionKey) {
+        deleted = this.activeRuntimeRuns.delete(runtimeWorkKey);
+        const runKeys = this.activeRuntimeRunKeysByRunId.get(event.runId);
+        runKeys?.delete(runtimeWorkKey);
+        if (!deleted) {
+          const unscopedKey = `0:${event.runId}`;
+          deleted = this.activeRuntimeRuns.delete(unscopedKey);
+          runKeys?.delete(unscopedKey);
+        }
+        if (runKeys?.size === 0) this.activeRuntimeRunKeysByRunId.delete(event.runId);
+      } else {
+        const runKeys = this.activeRuntimeRunKeysByRunId.get(event.runId);
+        if (runKeys) {
+          for (const key of runKeys) {
+            if (!this.activeRuntimeRuns.get(key)?.acceptsUnscopedTerminal) continue;
+            deleted = this.activeRuntimeRuns.delete(key) || deleted;
+            runKeys.delete(key);
+          }
+          if (runKeys.size === 0) this.activeRuntimeRunKeysByRunId.delete(event.runId);
+        }
+      }
+      if (deleted) {
         this.flushDeferredRestartIfIdle(`runtime:${event.type}`);
       }
       return;
     }
 
     const now = Date.now();
-    const existing = this.activeRuntimeRuns.get(event.runId);
-    this.activeRuntimeRuns.set(event.runId, {
+    let existing = this.activeRuntimeRuns.get(runtimeWorkKey);
+    if (!existing && sessionKey) {
+      const unscopedKey = `0:${event.runId}`;
+      existing = this.activeRuntimeRuns.get(unscopedKey);
+      if (existing) {
+        this.activeRuntimeRuns.delete(unscopedKey);
+        this.activeRuntimeRunKeysByRunId.get(event.runId)?.delete(unscopedKey);
+      }
+    }
+    this.activeRuntimeRuns.set(runtimeWorkKey, {
       startedAt: existing?.startedAt ?? now,
       lastEventAt: now,
-      sessionKey: typeof event.sessionKey === 'string' ? event.sessionKey : existing?.sessionKey,
+      sessionKey: sessionKey || existing?.sessionKey,
+      acceptsUnscopedTerminal: existing?.acceptsUnscopedTerminal ?? !sessionKey,
     });
+    const runKeys = this.activeRuntimeRunKeysByRunId.get(event.runId) ?? new Set<string>();
+    runKeys.add(runtimeWorkKey);
+    this.activeRuntimeRunKeysByRunId.set(event.runId, runKeys);
   }
 
   /**
@@ -759,6 +802,7 @@ export class GatewayManager extends EventEmitter {
     clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
     this.blockingRpcRequestIds.clear();
     this.activeRuntimeRuns.clear();
+    this.activeRuntimeRunKeysByRunId.clear();
 
     this.restartController.resetDeferredRestart();
     this.isAutoReconnectStart = false;

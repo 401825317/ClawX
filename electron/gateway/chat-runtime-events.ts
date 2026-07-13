@@ -6,7 +6,10 @@ import type {
   ChatRuntimeTaskStatus,
   ChatRuntimeVerificationKind,
 } from '../../shared/chat-runtime-events';
-import { CHAT_RUNTIME_CONTRACT_VERSION } from '../../shared/chat-runtime-events';
+import {
+  CHAT_RUNTIME_CONTRACT_VERSION,
+  CHAT_SYNTHETIC_TERMINAL_PRODUCER,
+} from '../../shared/chat-runtime-events';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? value as Record<string, unknown> : null;
@@ -349,6 +352,105 @@ function normalizeMarker(value: unknown): string {
   return typeof value === 'string'
     ? value.trim().toLowerCase().replace(/[\s.-]+/g, '_')
     : '';
+}
+
+function chatFinalHasPendingToolUse(message: Record<string, unknown>): boolean {
+  const stopReason = normalizeMarker(
+    message.stopReason
+      ?? message.stop_reason
+      ?? message.finishReason
+      ?? message.finish_reason,
+  );
+  if (
+    stopReason === 'tool_use'
+    || stopReason === 'tooluse'
+    || stopReason === 'tool_calls'
+    || stopReason === 'toolcalls'
+    || stopReason === 'function_call'
+    || stopReason === 'functioncall'
+  ) return true;
+
+  const contentBlocks = Array.isArray(message.content) ? message.content : undefined;
+  const outputBlocks = Array.isArray(message.output) ? message.output : undefined;
+  if (contentBlocks || outputBlocks) {
+    let hasToolResult = false;
+    let hasVisibleText = false;
+    let hasImage = false;
+    for (let sourceIndex = 0; sourceIndex < 2; sourceIndex += 1) {
+      const blocks = sourceIndex === 0 ? contentBlocks : outputBlocks;
+      if (!blocks) continue;
+      for (const block of blocks) {
+        const record = asRecord(block);
+        const type = normalizeMarker(record?.type);
+        if (
+          type === 'tool_use'
+          || type === 'tooluse'
+          || type === 'tool_call'
+          || type === 'toolcall'
+          || type === 'function_call'
+          || type === 'functioncall'
+        ) return true;
+        if (
+          type === 'tool_result'
+          || type === 'toolresult'
+          || type === 'function_call_output'
+          || type === 'functioncalloutput'
+        ) hasToolResult = true;
+        if ((type === 'text' || type === 'output_text') && readString(record?.text)) hasVisibleText = true;
+        if (type === 'image' || type === 'image_url') hasImage = true;
+      }
+    }
+    if (hasToolResult && !hasVisibleText && !hasImage) return true;
+  }
+
+  const toolCalls = message.tool_calls ?? message.toolCalls;
+  return (Array.isArray(toolCalls) && toolCalls.length > 0)
+    || asRecord(message.function_call ?? message.functionCall) != null;
+}
+
+export function normalizeGatewayChatTerminalRuntimeEvent(
+  payload: unknown,
+): Extract<ChatRuntimeEvent, { type: 'run.ended' }> | null {
+  const raw = asRecord(payload);
+  if (!raw) return null;
+  const state = normalizeMarker(raw.state);
+  if (state !== 'final' && state !== 'error' && state !== 'aborted') {
+    return null;
+  }
+
+  const message = asRecord(raw.message);
+  const role = readString(message?.role) ?? readString(raw.role);
+  if (state === 'final' && role && role.toLowerCase() !== 'assistant') return null;
+  if (state === 'final' && (chatFinalHasPendingToolUse(raw) || (message && chatFinalHasPendingToolUse(message)))) {
+    return null;
+  }
+
+  const base = withBase('run.ended', raw);
+  if (!base?.sessionKey) return null;
+
+  const stopReason = readFirstString([raw, message], [
+    'stopReason',
+    'stop_reason',
+    'finishReason',
+    'finish_reason',
+  ]);
+  const status = state === 'error'
+    ? 'error'
+    : state === 'aborted'
+      ? 'aborted'
+      : 'completed';
+  const endedAt = readTimestamp(raw.ts) ?? readTimestamp(message?.timestamp) ?? Date.now();
+  return {
+    ...base,
+    producer: CHAT_SYNTHETIC_TERMINAL_PRODUCER,
+    ts: endedAt,
+    status,
+    endedAt,
+    error: status === 'error'
+      ? readFirstString([raw, message], ['errorMessage', 'error_message', 'error'])
+      : undefined,
+    stopReason,
+  };
 }
 
 function isNativeTaskRecord(record: Record<string, unknown> | null): record is Record<string, unknown> {
