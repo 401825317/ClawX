@@ -31,7 +31,17 @@ export function runtimeRunOwnsTaskId(
 ): boolean {
   if (!run || !taskId) return false;
   if ((run.tasks ?? []).some((task) => task.taskId === taskId)) return true;
+  if ((run.progressEntries ?? []).some((entry) => entry.taskId === taskId)) return true;
   return Object.values(run.asyncTaskLedger ?? {}).some((entry) => entry.taskId === taskId);
+}
+
+function completionWakeOwnerScore(runId: string, run: ChatRuntimeRunState, taskId: string): number {
+  let score = 0;
+  if ((run.progressEntries ?? []).some((entry) => entry.kind === 'action' && entry.taskId === taskId)) score += 8;
+  if (Object.values(run.asyncTaskLedger ?? {}).some((entry) => entry.taskId === taskId)) score += 4;
+  if ((run.tasks ?? []).some((task) => task.taskId === taskId)) score += 2;
+  if (!runId.startsWith('tool:')) score += 1;
+  return score;
 }
 
 export function resolveCompletionWakeOwnerRunId(params: {
@@ -41,13 +51,33 @@ export function resolveCompletionWakeOwnerRunId(params: {
   currentSessionKey: string;
   eventSessionKey: string | null;
 }): string | null {
-  if (!params.activeRunId) return null;
   if (params.eventSessionKey && params.eventSessionKey !== params.currentSessionKey) return null;
   const taskId = completionWakeTaskIdFromRunId(params.eventRunId);
   if (!taskId) return null;
-  return runtimeRunOwnsTaskId(params.runtimeRuns[params.activeRunId], taskId)
-    ? params.activeRunId
-    : null;
+  const belongsToCurrentSession = (run: ChatRuntimeRunState): boolean => (
+    !run.sessionKey || run.sessionKey === params.currentSessionKey
+  );
+  const activeRun = params.activeRunId ? params.runtimeRuns[params.activeRunId] : undefined;
+  if (
+    params.activeRunId
+    && params.activeRunId !== params.eventRunId
+    && activeRun
+    && belongsToCurrentSession(activeRun)
+    && runtimeRunOwnsTaskId(activeRun, taskId)
+  ) {
+    return params.activeRunId;
+  }
+
+  const owners = Object.entries(params.runtimeRuns)
+    .filter(([runId, run]) => (
+      runId !== params.eventRunId
+      && belongsToCurrentSession(run)
+      && runtimeRunOwnsTaskId(run, taskId)
+    ))
+    .sort(([leftId, left], [rightId, right]) => (
+      completionWakeOwnerScore(rightId, right, taskId) - completionWakeOwnerScore(leftId, left, taskId)
+    ));
+  return owners[0]?.[0] ?? null;
 }
 
 export function buildCompletionWakeTerminalTaskEvent(params: {

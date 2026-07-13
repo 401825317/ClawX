@@ -10,6 +10,8 @@ import { Readable } from 'node:stream';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 import { expandFilePreviewPath, getOpenClawMediaDir } from '../../utils/paths';
+import { probeVideoAttachmentMetadata } from '../../utils/video-attachment-metadata';
+import type { VideoAttachmentMetadata } from '../../../shared/video-attachment-metadata';
 
 const EXT_MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
@@ -445,7 +447,7 @@ export async function handleFileRoutes(
         paths: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }>;
       }>(req);
       const fsP = await import('node:fs/promises');
-      const results: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }> = {};
+      const results: Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata> = {};
       for (const entry of body.paths) {
         if (entry.filePath) {
           try {
@@ -453,7 +455,12 @@ export async function handleFileRoutes(
             const preview = entry.mimeType.startsWith('image/')
               ? await generateImagePreview(entry.filePath, entry.mimeType)
               : null;
-            results[entry.filePath] = { preview, fileSize: s.size, ...getImageDimensions(entry.filePath, entry.mimeType) };
+            results[entry.filePath] = {
+              preview,
+              fileSize: s.size,
+              ...getImageDimensions(entry.filePath, entry.mimeType),
+              ...await probeVideoAttachmentMetadata(entry.filePath, entry.mimeType),
+            };
           } catch {
             results[entry.filePath] = { preview: null, fileSize: 0 };
           }
@@ -475,6 +482,7 @@ export async function handleFileRoutes(
               fileSize: s.size,
               filePath: resolved.path,
               ...getImageDimensions(resolved.path, resolved.mimeType),
+              ...await probeVideoAttachmentMetadata(resolved.path, resolved.mimeType),
             };
           } catch {
             results[entry.gatewayUrl] = { preview: null, fileSize: 0 };

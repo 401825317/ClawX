@@ -92,6 +92,8 @@ import { appUpdater } from './updater';
 import { GatewayRpcBackpressure } from '../gateway/rpc-backpressure';
 import { registerHostApiProxyHandlers } from './ipc/host-api-proxy';
 import { desktopRunCoordinator } from '../services/computer';
+import { probeVideoAttachmentMetadata } from '../utils/video-attachment-metadata';
+import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
 import {
   isLaunchAtStartupKey,
   isProxyKey,
@@ -2998,7 +3000,7 @@ function registerFileHandlers(): void {
     paths: Array<{ filePath?: string; gatewayUrl?: string; mimeType: string }>,
   ) => {
     const fsP = await import('fs/promises');
-    const results: Record<string, { preview: string | null; fileSize: number; filePath?: string; width?: number; height?: number }> = {};
+    const results: Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata> = {};
     for (const entry of paths) {
       // Local on-disk file (the original code path).
       if (entry.filePath) {
@@ -3008,7 +3010,12 @@ function registerFileHandlers(): void {
           if (entry.mimeType.startsWith('image/')) {
             preview = await generateImagePreview(entry.filePath, entry.mimeType);
           }
-          results[entry.filePath] = { preview, fileSize: s.size, ...getImageDimensions(entry.filePath, entry.mimeType) };
+          results[entry.filePath] = {
+            preview,
+            fileSize: s.size,
+            ...getImageDimensions(entry.filePath, entry.mimeType),
+            ...await probeVideoAttachmentMetadata(entry.filePath, entry.mimeType),
+          };
         } catch {
           results[entry.filePath] = { preview: null, fileSize: 0 };
         }
@@ -3036,6 +3043,7 @@ function registerFileHandlers(): void {
             fileSize: s.size,
             filePath: resolved.path,
             ...getImageDimensions(resolved.path, resolved.mimeType),
+            ...await probeVideoAttachmentMetadata(resolved.path, resolved.mimeType),
           };
         } catch {
           results[entry.gatewayUrl] = { preview: null, fileSize: 0 };

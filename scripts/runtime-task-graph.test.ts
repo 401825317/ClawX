@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { ChatRuntimeEvent, ChatRuntimeTaskProjection } from '../shared/chat-runtime-events.ts';
 import { normalizeGatewayChatRuntimeEvents } from '../electron/gateway/chat-runtime-events.ts';
 import { deriveRuntimeTaskSteps } from '../src/pages/Chat/runtime-task-visualization.ts';
+import { buildRuntimeProgressEvents } from '../src/stores/chat/runtime-progress.ts';
 import {
   applyCompletionWakeEvidenceEventToOwners,
   applyRuntimeEventToRuns,
@@ -101,6 +102,93 @@ test('detached task terminal updates fan out to the owning chat run', () => {
     currentSessionKey: SESSION_KEY,
     eventSessionKey: SESSION_KEY,
   }), null);
+
+  runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+    type: 'run.started',
+    runId: wakeRunId,
+    sessionKey: SESSION_KEY,
+    ts: 130,
+    startedAt: 130,
+  });
+  assert.equal(resolveCompletionWakeOwnerRunId({
+    runtimeRuns,
+    activeRunId: wakeRunId,
+    eventRunId: wakeRunId,
+    currentSessionKey: SESSION_KEY,
+    eventSessionKey: SESSION_KEY,
+  }), ownerRunId);
+});
+
+test('successful video completion wake settles the submitted progress entry', () => {
+  const ownerRunId = 'run-owner-video-success';
+  const taskId = '90c29618-f41f-4dd5-bd0a-eecf49df08e6';
+  const toolCallId = 'call-video-generate';
+  const wakeRunId = `video_generate:${taskId}:ok`;
+  let runtimeRuns = applyRuntimeEventToRuns({}, {
+    type: 'run.started',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 100,
+    startedAt: 100,
+  });
+
+  const applyWithProgress = (event: ChatRuntimeEvent): void => {
+    runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, event);
+    for (const progressEvent of buildRuntimeProgressEvents(runtimeRuns[event.runId], event)) {
+      runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, progressEvent);
+    }
+  };
+
+  applyWithProgress({
+    type: 'tool.started',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 105,
+    toolCallId,
+    name: 'tool_call',
+    args: {
+      id: 'video_generate',
+      args: { action: 'generate', size: '720x1280', durationSeconds: 15 },
+    },
+  });
+  applyWithProgress({
+    type: 'tool.completed',
+    runId: ownerRunId,
+    sessionKey: SESSION_KEY,
+    ts: 110,
+    toolCallId,
+    name: 'tool_call',
+    result: {
+      tool: { name: 'video_generate', label: 'Video Generation' },
+      result: { details: { async: true, status: 'started', taskId } },
+    },
+    isError: false,
+  });
+  const submitted = runtimeRuns[ownerRunId]?.progressEntries?.find((entry) => entry.taskId === taskId);
+  assert.equal(submitted?.status, 'running');
+  assert.equal(submitted?.translationKey, 'runtimeProgress.toolSubmitted');
+
+  const terminalTaskEvent = buildCompletionWakeTerminalTaskEvent({
+    runtimeRuns,
+    ownerRunId,
+    eventRunId: wakeRunId,
+    sessionKey: SESSION_KEY,
+    state: 'final',
+    ts: 200,
+  });
+  assert.ok(terminalTaskEvent);
+  const applied = applyRuntimeTaskEventToOwners(runtimeRuns, terminalTaskEvent);
+  runtimeRuns = applied.runtimeRuns;
+  for (const appliedEvent of applied.appliedEvents) {
+    for (const progressEvent of buildRuntimeProgressEvents(runtimeRuns[appliedEvent.runId], appliedEvent)) {
+      runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, progressEvent);
+    }
+  }
+
+  const completed = runtimeRuns[ownerRunId]?.progressEntries?.find((entry) => entry.taskId === taskId);
+  assert.equal(completed?.status, 'completed');
+  assert.equal(completed?.translationKey, 'runtimeProgress.toolCompleted');
+  assert.equal(completed?.command, '');
 });
 
 test('a successful retry settles only the matching logical video segment failure', () => {

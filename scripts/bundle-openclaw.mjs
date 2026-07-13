@@ -26,6 +26,8 @@ import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-reque
 import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
 import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
+import { patchOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
+import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
 import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
@@ -1232,6 +1234,26 @@ function patchBundledRuntime(outputDir) {
   });
   if (videoProviderCatalogPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${videoProviderCatalogPatch.patchedFiles} video provider catalog runtime file(s)`;
+  }
+
+  // --- Provider/model-aware native video contract ---
+  // Keep the Agent-facing schema and wire normalization aligned with the
+  // selected model instead of exposing a provider-wide union of controls.
+  const videoCapabilityContractPatch = patchOpenClawVideoCapabilityContractRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (videoCapabilityContractPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${videoCapabilityContractPatch.patchedFiles} video capability contract runtime file(s)`;
+  }
+
+  // --- Requested/applied/actual native video specification ---
+  // Probe the delivered file without turning metadata drift into a delivery
+  // failure, and retain the result in the task summary and structured details.
+  const videoActualSpecPatch = patchOpenClawVideoActualSpecRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (videoActualSpecPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${videoActualSpecPatch.patchedFiles} video actual specification runtime file(s)`;
   }
 
   // --- Public task delivery outcome patch ---
