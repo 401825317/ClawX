@@ -5,6 +5,7 @@ scenario: gateway-backend-communication
 taskType: runtime-bridge
 intent: Move managed `smart-latest` chat from the legacy `lingzhiwuxian/*` Chat Completions compatibility path to the native `openai/*` Responses adapter without replacing UClaw's unified Agent loop, durable task runtime, or artifact verification.
 touchedAreas:
+  - electron/main/index.ts
   - electron/api/routes/providers.ts
   - electron/services/providers/openai-chat-migration.ts
   - electron/services/providers/provider-runtime-sync.ts
@@ -13,6 +14,7 @@ touchedAreas:
   - electron/utils/openclaw-auth.ts
   - scripts/openclaw-responses-compatible-fallback-patch.mjs
   - scripts/bundle-openclaw.mjs
+  - scripts/openai-chat-migration.test.ts
   - scripts/patch-browser-hint.mjs
   - src/components/settings/ProvidersSettings.tsx
   - src/i18n/locales/en/settings.json
@@ -30,7 +32,7 @@ requiredRules:
   - active-config-guards
   - comms-regression
 expectedUserBehavior:
-  - Existing managed users see an explicit migration action instead of having their provider and stored session model references rewritten silently.
+  - Existing managed users are migrated automatically during startup before Gateway reads the runtime config; ambiguous personal OpenAI ownership is never overwritten and remains available for explicit user handling.
   - After migration, normal chat uses `openai/smart-latest` with `api: openai-responses`, the embedded `pi` Agent runtime, `thinkingDefault: xhigh`, and `reasoningDefault: on`.
   - Image, video, PPT, desktop, and long-task execution continue through the current unified OpenClaw Agent and Host Task paths; the migration does not restore renderer-owned media planners.
   - If the managed relay returns HTTP 404 before a Responses stream starts, the same Agent turn retries once through Chat Completions. No retry occurs after output starts, after cancellation, or for other errors.
@@ -39,7 +41,7 @@ acceptance:
   - The target `openai` provider is ready before legacy provider refs or credentials are removed, and the migration completion flag is written only after all rewrites succeed.
   - Re-running the migration is idempotent and preserves unrelated providers, sessions, models, media providers, tools, plugins, and task state.
   - Managed OpenAI relay entries remain pinned to `agentRuntime.id = pi` and retain UClaw's `xhigh` reasoning defaults.
-  - New managed bootstrap remains compatible with legacy accounts; only the explicit migration action changes persisted provider/model references.
+  - New managed bootstrap remains compatible with legacy accounts; startup migration changes persisted provider/model references only after managed auth and relay configuration are ready.
   - The fallback patch is version-gated to the bundled OpenClaw runtime and fails packaging validation if its anchors no longer match.
   - Renderer uses `hostApiFetch` for migration and introduces no direct Gateway or IPC transport.
 docs:
@@ -58,8 +60,9 @@ docs:
 
 ## Compatibility
 
-- Legacy `lingzhiwuxian/*` accounts continue using Chat Completions until the
-  user explicitly migrates.
+- Legacy `lingzhiwuxian/*` accounts are migrated automatically on managed app
+  startup once auth and relay configuration are ready. Conflicting personal
+  OpenAI ownership is left unchanged for explicit user handling.
 - Migrated `openai/*` accounts always start with Responses. The runtime fallback
   is a narrow availability fallback, not a persisted protocol downgrade.
 - Older packaged clients are unaffected because the server endpoint and legacy

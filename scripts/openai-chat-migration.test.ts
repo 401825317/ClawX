@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { rewriteManagedChatModelRefsForMigration } from '../electron/services/providers/openai-chat-migration';
+import {
+  isManagedOpenAiAccountForMigration,
+  rewriteManagedChatModelRefsForMigration,
+} from '../electron/services/providers/openai-chat-migration';
 
 test('rewrites only managed model references and preserves unrelated providers', () => {
   const input = {
@@ -29,4 +32,32 @@ test('blocks a model-reference key collision instead of overwriting data', () =>
     }),
     /already exists/,
   );
+});
+
+test('recognizes managed OpenAI accounts by runtime metadata or the managed endpoint', () => {
+  const baseAccount = {
+    id: 'openai',
+    vendorId: 'openai' as const,
+    label: 'OpenAI',
+    authMode: 'api_key' as const,
+    apiProtocol: 'openai-responses' as const,
+    enabled: true,
+    isDefault: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+
+  assert.equal(isManagedOpenAiAccountForMigration({
+    ...baseAccount,
+    baseUrl: 'http://127.0.0.1:8083/v1',
+    metadata: { managedRuntimeContractVersion: 2 },
+  }), true);
+  assert.equal(isManagedOpenAiAccountForMigration({
+    ...baseAccount,
+    baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+  }), true);
+  assert.equal(isManagedOpenAiAccountForMigration({
+    ...baseAccount,
+    baseUrl: 'https://api.openai.com/v1',
+  }), false);
 });
