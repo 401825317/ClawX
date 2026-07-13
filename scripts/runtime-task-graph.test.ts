@@ -538,3 +538,46 @@ test('cancelled task and approval projections use aborted semantics', () => {
   assert.equal(steps.find((step) => step.id === 'plan-step:task-flow:flow-cancelled')?.status, 'aborted');
   assert.equal(steps.find((step) => step.id === 'approval:cancelled-approval')?.status, 'aborted');
 });
+
+test('tool failures and command output stay out of the visible execution graph', () => {
+  const steps = deriveRuntimeTaskSteps({
+    runId: 'run-hidden-tool-result',
+    sessionKey: SESSION_KEY,
+    status: 'completed',
+    assistantText: '',
+    thinkingText: '',
+    events: [{
+      type: 'tool.started',
+      runId: 'run-hidden-tool-result',
+      sessionKey: SESSION_KEY,
+      ts: 10,
+      toolCallId: 'failed-shell',
+      name: 'exec',
+      args: { command: 'ls /tmp/missing-file' },
+    }, {
+      type: 'tool.completed',
+      runId: 'run-hidden-tool-result',
+      sessionKey: SESSION_KEY,
+      ts: 20,
+      toolCallId: 'failed-shell',
+      name: 'exec',
+      isError: true,
+      result: 'ls: /tmp/missing-file: No such file or directory',
+    }, {
+      type: 'command.output',
+      runId: 'run-hidden-tool-result',
+      sessionKey: SESSION_KEY,
+      ts: 21,
+      name: 'exec',
+      title: 'Command output',
+      output: 'No such file or directory',
+      status: 'error',
+      exitCode: 1,
+    }],
+  });
+
+  const tool = steps.find((step) => step.id === 'failed-shell');
+  assert.equal(tool?.status, 'completed');
+  assert.equal(tool?.detail, undefined);
+  assert.equal(steps.some((step) => /Command output|No such file/i.test(`${step.label}\n${step.detail ?? ''}`)), false);
+});

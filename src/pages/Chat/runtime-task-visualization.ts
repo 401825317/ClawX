@@ -1,4 +1,3 @@
-import { appendToolErrorHint } from '../../lib/tool-error-messages';
 import { stringifyRuntimeDisplayValue } from '../../lib/runtime-display-sanitizer';
 import type { ChatRuntimeRunState } from '../../stores/chat/types';
 
@@ -144,59 +143,6 @@ function runtimeDetail(value: unknown): string | undefined {
   return rendered.length > 4000 ? `${rendered.slice(0, 4000)}…` : rendered;
 }
 
-function parseJsonObjectText(value: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function firstTextBlock(content: unknown): string | undefined {
-  if (!Array.isArray(content)) return undefined;
-  for (const entry of content) {
-    if (!entry || typeof entry !== 'object') continue;
-    const text = (entry as { text?: unknown }).text;
-    if (typeof text === 'string' && text.trim()) return text.trim();
-  }
-  return undefined;
-}
-
-function extractToolErrorText(value: unknown): string | undefined {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return undefined;
-    const parsed = parseJsonObjectText(trimmed);
-    return parsed ? extractToolErrorText(parsed) ?? trimmed : trimmed;
-  }
-  if (!value || typeof value !== 'object') return undefined;
-
-  const record = value as Record<string, unknown>;
-  const details = record.details;
-  if (details && typeof details === 'object') {
-    const detailsRecord = details as Record<string, unknown>;
-    const detailsError = extractToolErrorText(detailsRecord.error);
-    if (detailsError) return detailsError;
-    const detailsMessage = extractToolErrorText(detailsRecord.message);
-    if (detailsMessage) return detailsMessage;
-  }
-  const directError = extractToolErrorText(record.error);
-  if (directError) return directError;
-  const directMessage = extractToolErrorText(record.message);
-  if (directMessage) return directMessage;
-  const contentText = firstTextBlock(record.content);
-  if (!contentText) return undefined;
-  const parsed = parseJsonObjectText(contentText);
-  return parsed ? extractToolErrorText(parsed) ?? contentText : contentText;
-}
-
-function getToolErrorDetail(value: unknown): string | undefined {
-  return appendToolErrorHint(extractToolErrorText(value) ?? runtimeDetail(value), 'zh');
-}
-
 function formatDuration(durationMs: number | undefined): string | undefined {
   if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return undefined;
   if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
@@ -324,7 +270,6 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
   const steps: TaskStep[] = [];
   const stepIndexById = new Map<string, number>();
   const toolStartedAt = new Map<string, number>();
-  const failedToolStepIdsByFamily = new Map<string, Set<string>>();
   const taskProjections = new Map<string, RuntimeTaskProjection>();
   const elapsedMs = runElapsedMs(runState);
   const upsertStep = (step: TaskStep): void => {
@@ -420,7 +365,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           label: event.name,
           status: 'running',
           kind: 'tool',
-          detail: runtimeDetail(event.args),
+          detail: undefined,
           depth: 1,
           url,
         });
@@ -500,54 +445,25 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
             label: event.name,
             status: 'running',
             kind: 'tool',
-            detail: runtimeDetail(event.partialResult),
+            detail: undefined,
             depth: 1,
           });
         }
         break;
       case 'tool.completed': {
         if (isFilteredExecutionGraphTool(event.name)) break;
-        const existingIndex = stepIndexById.get(event.toolCallId);
-        const previousDetail = existingIndex != null ? steps[existingIndex]?.detail : undefined;
         const startedAt = toolStartedAt.get(event.toolCallId);
         const completedAt = typeof event.ts === 'number' ? event.ts : Date.now();
         const inferredDurationMs = startedAt != null && completedAt >= startedAt ? completedAt - startedAt : undefined;
-        const normalizedToolName = event.name.trim().toLowerCase();
-        const recoveryFamily = normalizedToolName === 'create_designed_pptx_file' || normalizedToolName === 'repair_designed_pptx_file'
-          ? 'designed_pptx_file'
-          : normalizedToolName;
-        const nextDetail = event.isError
-          ? getToolErrorDetail(event.result)
-          : normalizedToolName === 'exec'
-            ? previousDetail ?? runtimeDetail(event.result)
-            : runtimeDetail(event.result) ?? previousDetail;
         upsertStep({
           id: event.toolCallId,
           label: event.name,
-          status: event.isError ? 'error' : 'completed',
+          status: 'completed',
           kind: 'tool',
-          detail: nextDetail,
+          detail: undefined,
           durationMs: event.durationMs ?? inferredDurationMs,
           depth: 1,
         });
-        if (event.isError) {
-          const failedIds = failedToolStepIdsByFamily.get(recoveryFamily) ?? new Set<string>();
-          failedIds.add(event.toolCallId);
-          failedToolStepIdsByFamily.set(recoveryFamily, failedIds);
-        } else {
-          for (const failedId of failedToolStepIdsByFamily.get(recoveryFamily) ?? []) {
-            const failedIndex = stepIndexById.get(failedId);
-            if (failedIndex == null || !steps[failedIndex]) continue;
-            steps[failedIndex] = {
-              ...steps[failedIndex],
-              status: 'completed',
-              detail: recoveryFamily === 'designed_pptx_file'
-                ? '版式问题已由增量修复恢复，并通过完整质量检查。'
-                : '后续重试已恢复该步骤。',
-            };
-          }
-          failedToolStepIdsByFamily.delete(recoveryFamily);
-        }
         break;
       }
       case 'artifact.produced': {
@@ -583,24 +499,6 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         break;
       }
       case 'command.output': {
-        if (isFilteredExecutionGraphTool(event.name)) break;
-        const id = event.itemId || `${event.toolCallId || event.name || 'command'}:output`;
-        const statusMarker = event.status?.trim().toLowerCase();
-        upsertStep({
-          id,
-          label: event.title || `${event.name || 'Command'} output`,
-          status: statusMarker && CANCELLATION_MARKERS.has(statusMarker)
-            ? 'aborted'
-            : statusMarker === 'failed' || statusMarker === 'error'
-              ? 'error'
-              : event.phase === 'end'
-                ? 'completed'
-                : 'running',
-          kind: 'message',
-          detail: runtimeDetail(event.output),
-          durationMs: event.durationMs,
-          depth: 1,
-        });
         break;
       }
       case 'patch.completed': {

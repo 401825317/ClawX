@@ -208,7 +208,8 @@ test.describe('ClawX chat run state events', () => {
       });
 
       await expect(page.getByTestId('chat-run-progress')).toBeVisible();
-      await expect(page.getByTestId('chat-run-progress')).toContainText(/failed|失败/i);
+      await expect(page.getByTestId('chat-run-progress')).toContainText(/completed|完成/i);
+      await expect(page.getByTestId('chat-run-progress')).not.toContainText(/failed|失败/i);
       await expect(page.getByText(/No such file or directory/i)).toHaveCount(0);
       await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
 

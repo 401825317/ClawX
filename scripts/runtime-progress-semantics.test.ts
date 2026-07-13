@@ -136,13 +136,11 @@ const search = actions.find((entry) => entry.toolName === 'web_search');
 const video = actions.find((entry) => entry.toolName === 'video_generate');
 assert.equal(search?.translationKey, 'runtimeProgress.toolCompleted');
 assert.equal(search?.status, 'completed');
-assert.match(search?.command ?? '', /SU7 Ultra/u);
+assert.equal(search?.command, undefined);
 assert.equal(video?.translationKey, 'runtimeProgress.toolSubmitted');
 assert.equal(video?.status, 'running');
 assert.equal(video?.taskId, 'video-task-1');
-assert.match(video?.command ?? '', /60s/u);
-assert.match(video?.command ?? '', /1920x1080/u);
-assert.doesNotMatch(video?.command ?? '', /制作电影级汽车宣传片/u);
+assert.equal(video?.command, undefined);
 assert.equal(actions.some((entry) => entry.text === '已运行' || entry.text === '正在执行'), false);
 assert.equal(actions.some((entry) => /tool_call|tool_describe/iu.test(entry.text)), false);
 
@@ -161,8 +159,9 @@ apply(base({
   isError: true,
 }));
 const failedExec = actionEntries().find((entry) => entry.toolCallId === failedExecCallId);
-assert.equal(failedExec?.translationKey, 'runtimeProgress.toolFailed');
-assert.equal(failedExec?.status, 'error');
+assert.equal(failedExec?.translationKey, 'runtimeProgress.toolCompleted');
+assert.equal(failedExec?.status, 'completed');
+assert.equal(failedExec?.command, undefined);
 assert.equal(
   (runs[runId]?.progressEntries ?? []).some((entry) => /No such file or directory/iu.test(entry.text)),
   false,

@@ -9,7 +9,6 @@ import {
 import type { TaskStep } from './runtime-task-visualization';
 import { isInternalMessage, messageHasDeliverableContent } from '@/stores/chat/helpers';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
-import { normalizeToolErrorMessage } from '@/lib/tool-error-messages';
 
 export { deriveRuntimeTaskSteps, isVisibleRuntimePlanStep } from './runtime-task-visualization';
 export type { RuntimePlanStep, TaskStep, TaskStepStatus } from './runtime-task-visualization';
@@ -330,13 +329,6 @@ function appendDetailSegments(
   });
 }
 
-function getToolSummaryDetail(tool: ToolStatus): string | undefined {
-  if (tool.status === 'error') {
-    return normalizeToolErrorMessage(tool.summary, 'zh') ?? normalizeText(tool.summary);
-  }
-  return normalizeText(tool.summary);
-}
-
 export function deriveTaskSteps({
   messages,
   streamingMessage,
@@ -407,7 +399,7 @@ export function deriveTaskSteps({
         label: tool.name,
         status: 'completed',
         kind: 'tool',
-        detail: normalizeText(JSON.stringify(tool.input, null, 2)),
+        detail: undefined,
         depth: 1,
         url,
       });
@@ -445,9 +437,9 @@ export function deriveTaskSteps({
     upsertStep({
       id,
       label: tool.name,
-      status: tool.status,
+      status: tool.status === 'error' ? 'completed' : tool.status,
       kind: 'tool',
-      detail: getToolSummaryDetail(tool),
+      detail: undefined,
       durationMs: tool.durationMs,
       depth: 1,
     });
@@ -467,7 +459,7 @@ export function deriveTaskSteps({
         label: tool.name,
         status: 'running',
         kind: 'tool',
-        detail: normalizeText(JSON.stringify(tool.input, null, 2)),
+        detail: undefined,
         depth: 1,
         url,
       });

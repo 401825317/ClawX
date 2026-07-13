@@ -366,7 +366,11 @@ function toolSemanticState(
   const status = firstString(context.details, ['status', 'state'])?.toLowerCase();
   if (status && /^(?:aborted|cancelled|canceled|stopped|terminated)$/u.test(status)) return 'aborted';
   if (status && /^(?:blocked|waiting_approval|approval_required|pending_approval)$/u.test(status)) return 'blocked';
-  if (event.isError || (status && /^(?:error|failed|failure|timed_out|timeout)$/u.test(status))) return 'error';
+  // Tool failures are retained in the runtime event stream for orchestration
+  // and diagnostics, but the chat timeline only communicates that the tool ran.
+  // The assistant's final reply is the user-facing place for any actionable
+  // failure explanation.
+  if (event.isError || (status && /^(?:error|failed|failure|timed_out|timeout)$/u.test(status))) return 'completed';
   if (context.asyncStarted) return 'submitted';
   return 'completed';
 }
@@ -466,25 +470,6 @@ function recoveredToolProgressEvents(
       }),
     ];
   });
-}
-
-function commandOutputStatus(event: Extract<ChatRuntimeEvent, { type: 'command.output' }>): ChatRuntimeProgressEntry['status'] {
-  const normalized = normalizeText(event.status)?.toLowerCase();
-  if (typeof event.exitCode === 'number') return event.exitCode === 0 ? 'completed' : 'error';
-  if (normalized === 'failed' || normalized === 'failure' || normalized === 'error') return 'error';
-  if (normalized === 'aborted' || normalized === 'cancelled' || normalized === 'canceled' || normalized === 'stopped') return 'aborted';
-  if (normalized === 'blocked') return 'blocked';
-  if (normalized === 'passed' || normalized === 'success' || normalized === 'succeeded' || normalized === 'completed' || normalized === 'ok') return 'completed';
-  const phase = normalizeText(event.phase)?.toLowerCase();
-  if (phase === 'end' || phase === 'result' || phase === 'done' || phase === 'completed') return 'completed';
-  return 'running';
-}
-
-function buildCommandTargetId(event: Extract<ChatRuntimeEvent, { type: 'command.output' }>): string {
-  return event.itemId
-    ?? event.name
-    ?? event.title
-    ?? `command:${event.seq ?? event.ts ?? 'runtime'}`;
 }
 
 function buildProgressEntryEvent(
@@ -624,7 +609,7 @@ export function buildRuntimeProgressEvents(
       translationParams: { tool: fallbackToolLabel(context) },
       toolName: context.name,
       toolLabel: context.label,
-      command,
+      command: undefined,
       toolCallId: progressToolCallId,
       taskId: context.taskId,
       source: 'derived',
@@ -632,37 +617,7 @@ export function buildRuntimeProgressEvents(
     return [...recoveryEvents, ...nextEvents];
   }
 
-  if (event.type === 'command.output' && !event.toolCallId) {
-    const command = normalizeText(event.title) ?? normalizeText(event.name);
-    const summarizedCommand = command ? summarizeShellCommand(command) : undefined;
-    const status = commandOutputStatus(event);
-    const semanticState: ToolProgressSemanticState = status === 'error'
-      ? 'error'
-      : status === 'blocked' ? 'blocked'
-        : status === 'aborted' ? 'aborted'
-          : status === 'completed' ? 'completed' : 'running';
-    const commandContext: RuntimeToolProgressContext = {
-      outerName: 'command',
-      name: 'command',
-      label: 'Command',
-      params: {},
-      details: {},
-      hidden: false,
-      asyncStarted: false,
-    };
-    return [buildProgressEntryEvent(event, {
-      id: `progress:${buildCommandTargetId(event)}`,
-      kind: 'action',
-      text: fallbackTextForSemanticState(semanticState, commandContext),
-      status,
-      translationKey: translationKeyForSemanticState(semanticState),
-      translationParams: { tool: 'Command' },
-      toolName: 'command',
-      toolLabel: 'Command',
-      command: summarizedCommand,
-      source: 'derived',
-    })];
-  }
+  if (event.type === 'command.output') return [];
 
   if (event.type === 'approval.updated') {
     const normalized = normalizeText(event.status)?.toLowerCase();
