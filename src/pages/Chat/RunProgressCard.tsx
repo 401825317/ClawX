@@ -321,6 +321,16 @@ function ProblemStatusIcon({ status }: { status: TaskStep['status'] }) {
   return <AlertCircle data-status-icon={status} className="h-3.5 w-3.5" />;
 }
 
+function StatusEntryIcon({ status }: { status: TaskStep['status'] }) {
+  if (PROBLEM_STATUSES.has(status)) return <ProblemStatusIcon status={status} />;
+  return <CheckCircle2 data-status-icon="completed" className="h-3.5 w-3.5" />;
+}
+
+function statusEntryTextClass(status: TaskStep['status']): string {
+  if (PROBLEM_STATUSES.has(status)) return problemTextClass(status);
+  return 'text-green-700 dark:text-green-400';
+}
+
 function problemTextClass(status: TaskStep['status']): string {
   if (status === 'aborted') return 'text-muted-foreground';
   if (status === 'blocked') return 'text-amber-700 dark:text-amber-400';
@@ -363,10 +373,10 @@ export function RunProgressCard({ summary, status, steps, progressEntries, liveT
             return (
               <div
                 key={entry.id}
-                className={cn('relative flex items-start gap-1.5 pb-2.5 pl-5 text-xs last:pb-0', problemTextClass(entry.status))}
+                className={cn('relative flex items-start gap-1.5 pb-2.5 pl-5 text-xs last:pb-0', statusEntryTextClass(entry.status))}
               >
                 <span className="absolute -left-[7px] top-0.5 shrink-0 bg-background">
-                  <ProblemStatusIcon status={entry.status} />
+                  <StatusEntryIcon status={entry.status} />
                 </span>
                 <span className="min-w-0 break-words leading-5">{entry.text}</span>
               </div>

@@ -45,6 +45,29 @@ function isFilteredExecutionGraphTool(name: string | undefined | null): boolean 
   return normalized === 'process';
 }
 
+type ExecutionDescriptor = {
+  id?: string;
+  title?: string;
+  kind?: string;
+  runtime?: string;
+  toolCallId?: string;
+};
+
+function isToolExecutionDescriptor(value: ExecutionDescriptor): boolean {
+  if (value.toolCallId) return true;
+  const text = [value.id, value.title, value.kind, value.runtime]
+    .filter((entry): entry is string => typeof entry === 'string')
+    .join(' ')
+    .toLowerCase();
+  return /(?:^|[\s_:-])(?:command|tool|exec|shell|bash|terminal)(?:$|[\s_:-])/u.test(text);
+}
+
+function visibleExecutionStatus(status: TaskStepStatus, descriptor: ExecutionDescriptor): TaskStepStatus {
+  return isToolExecutionDescriptor(descriptor) && (status === 'error' || status === 'failed')
+    ? 'completed'
+    : status;
+}
+
 function runtimeStepRequiresArtifact(step: RuntimePlanStep): boolean {
   return step.requiresArtifact === true
     || step.requiredArtifact === true
@@ -322,7 +345,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         flowId: task.flowId,
       });
     }
-    const taskStatus = runtimeTaskStatus(task);
+    const taskStatus = visibleExecutionStatus(runtimeTaskStatus(task), task);
     upsertStep({
       id: runtimeTaskStepId(task.taskId),
       label: task.title,
@@ -383,13 +406,14 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           depth: 1,
         });
         for (const planStep of visiblePlanSteps) {
+          const descriptor = { ...planStep };
           upsertStep({
             id: `plan-step:${planStep.id}`,
             label: planStep.title,
-            status: runtimeStepStatus(planStep.status),
+            status: visibleExecutionStatus(runtimeStepStatus(planStep.status), descriptor),
             kind: 'system',
             runtimeKind: typeof planStep.kind === 'string' ? planStep.kind : undefined,
-            detail: planStep.detail,
+            detail: isToolExecutionDescriptor(descriptor) ? undefined : planStep.detail,
             durationMs: planStep.durationMs,
             depth: planStep.parentId ? 2 : 1,
             parentId: planStep.parentId ? `plan-step:${planStep.parentId}` : 'run-plan',
@@ -410,7 +434,8 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           ? stepIndexById.get(runtimeTaskStepId(event.step.taskId))
           : undefined;
         const existingStatus = existingIndex != null ? steps[existingIndex]?.status : undefined;
-        const incomingStatus = runtimeStepStatus(event.step.status);
+        const descriptor = { ...event.step };
+        const incomingStatus = visibleExecutionStatus(runtimeStepStatus(event.step.status), descriptor);
         const status = existingStatus && TERMINAL_STEP_STATUSES.has(existingStatus)
           && !TERMINAL_STEP_STATUSES.has(incomingStatus)
           ? existingStatus
@@ -423,7 +448,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           status,
           kind: 'system',
           runtimeKind: typeof event.step.kind === 'string' ? event.step.kind : undefined,
-          detail: event.step.detail,
+          detail: isToolExecutionDescriptor(descriptor) ? undefined : event.step.detail,
           durationMs: event.step.durationMs,
           depth: event.step.parentId ? 2 : 1,
           parentId: event.step.parentId

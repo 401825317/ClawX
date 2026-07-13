@@ -573,6 +573,18 @@ test('tool failures and command output stay out of the visible execution graph',
       output: 'No such file or directory',
       status: 'error',
       exitCode: 1,
+    }, {
+      type: 'run.step.updated',
+      runId: 'run-hidden-tool-result',
+      sessionKey: SESSION_KEY,
+      ts: 22,
+      step: {
+        id: 'command-show-missing-file',
+        title: 'command show /tmp/missing-file (agent)',
+        kind: 'command',
+        status: 'error',
+        detail: 'cat: /tmp/missing-file: No such file or directory',
+      },
     }],
   });
 
@@ -580,4 +592,7 @@ test('tool failures and command output stay out of the visible execution graph',
   assert.equal(tool?.status, 'completed');
   assert.equal(tool?.detail, undefined);
   assert.equal(steps.some((step) => /Command output|No such file/i.test(`${step.label}\n${step.detail ?? ''}`)), false);
+  const commandStep = steps.find((step) => step.id === 'plan-step:command-show-missing-file');
+  assert.equal(commandStep?.status, 'completed');
+  assert.equal(commandStep?.detail, undefined);
 });
