@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,7 +8,10 @@ import {
   patchOpenClawNativeImageDeliveryContent,
   patchOpenClawNativeImageDeliveryRuntime,
 } from './openclaw-native-image-delivery-patch.mjs';
-import { normalizeGeneratedImageForDelivery } from './openclaw-native-image-delivery-runtime.mjs';
+import {
+  normalizeGeneratedImageForDelivery,
+  saveGeneratedImageForDelivery,
+} from './openclaw-native-image-delivery-runtime.mjs';
 
 const SAVE_ANCHOR = '\tconst mediaMaxBytes = resolveGeneratedMediaMaxBytes(params.effectiveCfg, "image");\n\tconst savedImages = await Promise.all(result.images.map((image) => saveMediaBuffer(image.buffer, image.mimeType, "tool-image-generation", mediaMaxBytes, params.filename || image.fileName)));';
 
@@ -18,6 +21,7 @@ test('patch injects generated-image delivery normalization before persistence', 
   assert.equal(result.changed, true);
   assert.match(result.content, /UCLAW_NATIVE_IMAGE_DELIVERY/u);
   assert.match(result.content, /normalizeGeneratedImageForDeliveryUClaw/u);
+  assert.match(result.content, /saveGeneratedImageForDeliveryUClaw/u);
   assert.match(result.content, /params\.providerOptions\?\.openai\?\.outputCompression/u);
   assert.equal(patchOpenClawNativeImageDeliveryContent(result.content).changed, false);
 });
@@ -34,6 +38,18 @@ test('runtime patch copies the delivery helper beside the OpenClaw runtime', () 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('patch upgrades the previous delivery normalization in place', () => {
+  const legacy = `import { normalizeGeneratedImageForDelivery as normalizeGeneratedImageForDeliveryUClaw } from "./uclaw-native-image-delivery-runtime.mjs"; // UCLAW_NATIVE_IMAGE_DELIVERY
+async function executeImageGenerationJob(params) {
+\tconst deliveryImages = [];
+\tconst savedImages = await Promise.all(deliveryImages.map((image) => saveMediaBuffer(image.buffer, image.mimeType, "tool-image-generation", mediaMaxBytes, params.filename || image.fileName)));
+}`;
+  const result = patchOpenClawNativeImageDeliveryContent(legacy);
+  assert.equal(result.changed, true);
+  assert.match(result.content, /saveGeneratedImageForDeliveryUClaw/u);
+  assert.equal(patchOpenClawNativeImageDeliveryContent(result.content).changed, false);
 });
 
 test('oversized PNG is converted to the requested JPEG below the delivery cap', async () => {
@@ -108,4 +124,40 @@ test('delivery detects actual PNG bytes when provider metadata falsely says JPEG
   assert.equal(normalized.mimeType, 'image/jpeg');
   assert.equal(normalized.fileName, 'lying-provider.jpg');
   assert.equal((await sharp(normalized.buffer).metadata()).format, 'jpeg');
+});
+
+test('Windows path-mismatch writes fall back to the OpenClaw local temp root', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'uclaw-image-fallback-'));
+  const image = {
+    buffer: Buffer.from('generated-image-bytes'),
+    mimeType: 'image/png',
+    fileName: 'poster.png',
+  };
+  try {
+    const error = Object.assign(new Error('store directory changed during write'), { code: 'path-mismatch' });
+    const saved = await saveGeneratedImageForDelivery(
+      async () => { throw error; },
+      image,
+      { maxBytes: 10_000, platform: 'win32', tempRoot },
+    );
+    assert.equal(saved.contentType, 'image/png');
+    assert.equal(saved.size, image.buffer.byteLength);
+    assert.match(saved.path, /openclaw[/\\]tool-image-generation/u);
+    assert.equal(existsSync(saved.path), true);
+    assert.deepEqual(readFileSync(saved.path), image.buffer);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('non-Windows media-store errors are not hidden by the fallback', async () => {
+  const expected = Object.assign(new Error('store directory changed during write'), { code: 'path-mismatch' });
+  await assert.rejects(
+    saveGeneratedImageForDelivery(
+      async () => { throw expected; },
+      { buffer: Buffer.from('x'), mimeType: 'image/png', fileName: 'x.png' },
+      { maxBytes: 10_000, platform: 'darwin' },
+    ),
+    (error) => error === expected,
+  );
 });

@@ -92,6 +92,15 @@ const PATCH_RULES = [
 \t\tspawnedBy: persistedSpawnedBy ?? baseEntry?.spawnedBy,`,
   },
   {
+    id: 'agent-tools-current-cwd-workspace',
+    search: `\t\t\tfsPolicy,
+\t\t\tworkspaceDir: workspaceRoot,
+\t\t\tspawnWorkspaceDir: options?.spawnWorkspaceDir ? resolveWorkspaceRoot(options.spawnWorkspaceDir) : void 0,`,
+    replace: `\t\t\tfsPolicy,
+\t\t\tworkspaceDir: codingRoot,
+\t\t\tspawnWorkspaceDir: options?.spawnWorkspaceDir ? resolveWorkspaceRoot(options.spawnWorkspaceDir) : void 0,`,
+  },
+  {
     id: 'embedded-system-prompt-runtime-cwd',
     search: `\t\t\tembeddedSystemPrompt: {
 \t\t\t\tconfig: params.config,
@@ -132,7 +141,7 @@ const PATCH_RULES = [
   },
 ];
 
-function patchOpenClawSessionCwdContent(content) {
+export function patchOpenClawSessionCwdContent(content) {
   let next = content;
   const matchedRules = [];
   const changedRules = [];

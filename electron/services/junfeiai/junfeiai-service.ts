@@ -827,7 +827,11 @@ function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string
   return JUNFEIAI_DEFAULT_MODEL;
 }
 
-function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAccount | null): ProviderAccount {
+function buildAccount(
+  bootstrap: JunFeiAIBootstrapPayload,
+  existing: ProviderAccount | null | undefined,
+  isDefault: boolean,
+): ProviderAccount {
   const runtime = bootstrap.runtime ?? {};
   const now = new Date().toISOString();
   const providerName = normalizeJunFeiAIProviderDisplayName(runtime.providerName)
@@ -845,7 +849,7 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     model: resolveRuntimeDefaultModel(bootstrap),
     fallbackModels: normalizeFallbackModels(runtime.fallbackModels),
     enabled: true,
-    isDefault: true,
+    isDefault,
     metadata: {
       resourceUrl: bootstrap.service?.apiOrigin || getJunFeiAIOrigin(),
       ...modelMetadata,
@@ -1458,8 +1462,16 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   const activation = await applyLocalDeviceActivationState(bootstrap, authUser);
   bootstrap = activation.bootstrap;
 
+  const managedOpenAiChatActive = await isManagedOpenAiChatMigrated();
+  const targetDefaultProvider = managedOpenAiChatActive
+    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    : JUNFEIAI_PROVIDER_ID;
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
-  const account = buildAccount(bootstrap, existing);
+  const account = buildAccount(
+    bootstrap,
+    existing,
+    targetDefaultProvider === JUNFEIAI_PROVIDER_ID,
+  );
   try {
     await selfHealManagedTextModelsFromClientConfig(bootstrap.client?.modelOptions);
   } catch (error) {
@@ -1470,10 +1482,6 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await saveProviderAccount(account);
   }
 
-  const managedOpenAiChatActive = await isManagedOpenAiChatMigrated();
-  const targetDefaultProvider = managedOpenAiChatActive
-    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
-    : JUNFEIAI_PROVIDER_ID;
   const defaultProvider = await getDefaultProvider();
   const defaultProviderChanged = defaultProvider !== targetDefaultProvider;
   if (defaultProvider !== targetDefaultProvider) {

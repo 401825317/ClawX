@@ -9,6 +9,7 @@ touchedAreas:
   - README.zh-CN.md
   - README.ja-JP.md
   - electron/gateway/manager.ts
+  - electron/services/junfeiai/junfeiai-service.ts
   - electron/gateway/supervisor.ts
   - electron/main/index.ts
   - electron/main/process-instance-lock.ts
@@ -21,7 +22,11 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-artifact-guard/package.json
   - resources/openclaw-skill-shims/office-toolkit
   - scripts/bundle-openclaw.mjs
+  - scripts/openclaw-native-image-delivery-patch.mjs
+  - scripts/openclaw-native-image-delivery-patch.test.mjs
+  - scripts/openclaw-native-image-delivery-runtime.mjs
   - scripts/openclaw-session-cwd-runtime-patch.mjs
+  - scripts/openclaw-session-cwd-runtime-patch.test.mjs
   - scripts/patch-browser-hint.mjs
   - src/components/file-preview/ArtifactPanel.tsx
   - src/components/file-preview/WorkspaceBrowserBody.tsx
@@ -48,6 +53,10 @@ expectedUserBehavior:
   - A user-selected image or video outside the OpenClaw workspace is staged into an approved per-run directory before a media tool reads it.
   - A failed media tool cannot be treated as successful because older files, extracted frames, or prior-turn artifacts exist.
   - A presentation request finishes only after a new, openable PPTX from the current run is produced; a generated illustration alone is not completion.
+  - Managed provider status refreshes do not toggle the legacy and Responses accounts back and forth or restart the Gateway after ordinary sends.
+  - A chat accepted by the Gateway remains restart-protected until its first runtime event arrives.
+  - Generated images remain deliverable when a Windows USB filesystem rejects the OpenClaw media-store identity check.
+  - Media inspection tools use the current session cwd as their allowed workspace root.
 requiredProfiles:
   - fast
   - comms
@@ -59,6 +68,8 @@ requiredTests:
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
   - pnpm exec tsx --test scripts/host-task-lifecycle.test.ts
   - node scripts/uclaw-artifact-guard-runtime.test.mjs
+  - node --test scripts/openclaw-native-image-delivery-patch.test.mjs
+  - node --test scripts/openclaw-session-cwd-runtime-patch.test.mjs
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - pnpm run typecheck
   - Manual duplicate-portable-launch and Electron artifact-delivery regression
@@ -71,6 +82,9 @@ acceptance:
   - Final verification binds evidence to the current run, required artifact type, and successful tool result.
   - The Office skill accepts its documented references paths and presentation execution has a deterministic fallback when the model requests the legacy root create.md path.
   - Existing chat, image-only, video-only, multi-deliverable Task Flow, history reload, and current session-cwd behavior remain covered.
+  - Provider refresh is idempotent after managed OpenAI migration and cannot interrupt an accepted chat between RPC acknowledgement and run.started.
+  - Windows media-store path-mismatch failures fall back only for generated in-memory images and do not relax arbitrary local-file access.
+  - Built-in media tools receive the same current cwd used by coding tools while sandbox roots remain authoritative in sandboxed runs.
 docs:
   required: false
 ---

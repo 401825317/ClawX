@@ -202,6 +202,10 @@ export class GatewayManager extends EventEmitter {
   private recentStartupStderrLines: string[] = [];
   private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
   private readonly blockingRpcRequestIds = new Set<string>();
+  private readonly acceptedChatRuns = new Map<string, {
+    sessionKey?: string;
+    timeout: NodeJS.Timeout;
+  }>();
   private readonly activeRuntimeRuns = new Map<string, {
     startedAt: number;
     lastEventAt: number;
@@ -228,6 +232,7 @@ export class GatewayManager extends EventEmitter {
   private static readonly HEARTBEAT_INTERVAL_MS = 60_000;
   private static readonly HEARTBEAT_TIMEOUT_MS = 30_000;
   private static readonly HEARTBEAT_MAX_MISSES = 4;
+  private static readonly ACCEPTED_CHAT_RUN_EVENT_GRACE_MS = 30_000;
   public static readonly RESTART_COOLDOWN_MS = 5_000;
   private static readonly GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS = [1_500, 3_000, 5_000, 8_000, 12_000, 30_000] as const;
   private static readonly INITIAL_READY_HEARTBEAT_RECOVERY_GRACE_MS = 5 * 60_000;
@@ -408,7 +413,9 @@ export class GatewayManager extends EventEmitter {
   }
 
   private hasInFlightGatewayWork(): boolean {
-    return this.blockingRpcRequestIds.size > 0 || this.activeRuntimeRuns.size > 0;
+    return this.blockingRpcRequestIds.size > 0
+      || this.acceptedChatRuns.size > 0
+      || this.activeRuntimeRuns.size > 0;
   }
 
   private getRestartDeferralState(context?: GatewayLifecycleContext): {
@@ -423,9 +430,49 @@ export class GatewayManager extends EventEmitter {
       state: this.status.state,
       startLock: this.startLock,
       hasInFlightWork,
-      activeRunCount: this.activeRuntimeRuns.size,
+      activeRunCount: this.activeRuntimeRuns.size + this.acceptedChatRuns.size,
       blockingRpcCount: this.blockingRpcRequestIds.size,
     };
+  }
+
+  private clearAcceptedChatRun(runId: string): boolean {
+    const accepted = this.acceptedChatRuns.get(runId);
+    if (!accepted) return false;
+    clearTimeout(accepted.timeout);
+    this.acceptedChatRuns.delete(runId);
+    return true;
+  }
+
+  private clearAcceptedChatRuns(): void {
+    for (const accepted of this.acceptedChatRuns.values()) {
+      clearTimeout(accepted.timeout);
+    }
+    this.acceptedChatRuns.clear();
+  }
+
+  private trackAcceptedChatRun(result: unknown, params: unknown): void {
+    if (typeof result !== 'object' || result === null) return;
+    const runId = (result as { runId?: unknown }).runId;
+    if (typeof runId !== 'string' || !runId.trim()) return;
+    if (this.activeRuntimeRunKeysByRunId.has(runId)) return;
+
+    this.clearAcceptedChatRun(runId);
+    const sessionKey = typeof params === 'object' && params !== null
+      && typeof (params as { sessionKey?: unknown }).sessionKey === 'string'
+      ? (params as { sessionKey: string }).sessionKey
+      : undefined;
+    const timeout = setTimeout(() => {
+      const accepted = this.acceptedChatRuns.get(runId);
+      if (!accepted || accepted.timeout !== timeout) return;
+      this.acceptedChatRuns.delete(runId);
+      logger.warn(
+        `[gateway-refresh] accepted chat run event grace expired runId=${runId} `
+        + `sessionKey=${accepted.sessionKey ?? 'n/a'}`,
+      );
+      this.flushDeferredRestartIfIdle(`chat.accepted:${runId}:expired`);
+    }, GatewayManager.ACCEPTED_CHAT_RUN_EVENT_GRACE_MS);
+    timeout.unref?.();
+    this.acceptedChatRuns.set(runId, { sessionKey, timeout });
   }
 
   private flushDeferredRestartIfIdle(trigger: string): void {
@@ -459,6 +506,8 @@ export class GatewayManager extends EventEmitter {
       return;
     }
 
+    const acceptedRunCleared = this.clearAcceptedChatRun(event.runId);
+
     const sessionKey = typeof event.sessionKey === 'string' ? event.sessionKey : '';
     const runtimeWorkKey = `${sessionKey.length}:${sessionKey}${event.runId}`;
 
@@ -485,7 +534,7 @@ export class GatewayManager extends EventEmitter {
           if (runKeys.size === 0) this.activeRuntimeRunKeysByRunId.delete(event.runId);
         }
       }
-      if (deleted) {
+      if (deleted || acceptedRunCleared) {
         this.flushDeferredRestartIfIdle(`runtime:${event.type}`);
       }
       return;
@@ -801,6 +850,7 @@ export class GatewayManager extends EventEmitter {
 
     clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
     this.blockingRpcRequestIds.clear();
+    this.clearAcceptedChatRuns();
     this.activeRuntimeRuns.clear();
     this.activeRuntimeRunKeysByRunId.clear();
 
@@ -1311,6 +1361,9 @@ export class GatewayManager extends EventEmitter {
       const capability = classifyCapabilityMethod(method);
       if (capability) {
         this.capabilityMonitor.recordCapabilitySuccess(capability, result, Date.now() - startedAt);
+      }
+      if (trackBlockingRequest) {
+        this.trackAcceptedChatRun(result, params);
       }
       return result;
     }).catch((error) => {
