@@ -5,8 +5,13 @@ scenario: gateway-backend-communication
 taskType: runtime-bridge
 intent: Migrate the ClawBox-style startup, activation, authorization, built-in model provider, skill list, WeChat plugin install, and Windows portable experience into ClawX without requiring users to manually add a provider or paste an API key.
 touchedAreas:
+  - .github/workflows/package-win-manual.yml
   - harness/specs/tasks/junfeiai-built-in-provider.md
+  - harness/specs/scenarios/gateway-startup-diagnostics.md
   - PROJECT_MAP.md
+  - README.md
+  - README.zh-CN.md
+  - README.ja-JP.md
   - .env.example
   - src/lib/host-api.ts
   - src/lib/providers.ts
@@ -15,15 +20,20 @@ touchedAreas:
   - src/pages/Setup/index.tsx
   - src/pages/Skills/index.tsx
   - src/i18n/locales/en/settings.json
+  - src/i18n/locales/en/setup.json
   - src/i18n/locales/zh/settings.json
+  - src/i18n/locales/zh/setup.json
   - src/i18n/locales/ja/settings.json
+  - src/i18n/locales/ja/setup.json
   - src/i18n/locales/ru/settings.json
+  - src/i18n/locales/ru/setup.json
   - electron/api/routes/providers.ts
   - electron/api/routes/junfeiai.ts
   - electron/api/routes/skills.ts
   - electron/api/server.ts
   - electron/extensions/builtin/clawhub-marketplace.ts
   - electron/gateway/clawhub.ts
+  - electron/gateway/config-sync.ts
   - electron/main/index.ts
   - electron/services/junfeiai/junfeiai-service.ts
   - electron/services/providers/provider-service.ts
@@ -35,24 +45,34 @@ touchedAreas:
   - electron/shared/providers/types.ts
   - electron/utils/junfeiai-device.ts
   - electron/utils/junfeiai-distribution.ts
+  - electron/utils/json-file-io.ts
   - electron/utils/openclaw-auth.ts
+  - electron/utils/plugin-install.ts
+  - electron/utils/portable-mode.ts
   - shared/junfeiai-endpoints.json
   - shared/junfeiai-endpoints.ts
   - electron/utils/secure-storage.ts
   - electron/utils/skill-config.ts
+  - electron/utils/store.ts
   - electron-builder.yml
   - package.json
   - harness/src/specs.mjs
   - scripts/after-pack.cjs
+  - scripts/build-usb-release.mjs
   - scripts/bundle-openclaw.mjs
+  - scripts/bundle-openclaw-plugins.mjs
   - scripts/bundle-preinstalled-skills.mjs
   - scripts/dev-junfeiai.mjs
   - scripts/download-bundled-agent-browser.mjs
   - scripts/download-bundled-node.mjs
   - scripts/download-bundled-uv.mjs
   - scripts/patch-nsis-extract.mjs
+  - scripts/prepare-usb-portable.mjs
   - scripts/pnpm.cmd
   - scripts/run-electron-builder.mjs
+  - scripts/openclaw-bundle-config.mjs
+  - scripts/windows-support/UClaw-SelfCheck.mjs
+  - resources/openclaw-plugins/uclaw-task-bridge/package.json
   - vite.config.ts
   - tests/unit/harness-specs.test.ts
   - tests/unit/junfeiai-service.test.ts
@@ -65,7 +85,11 @@ touchedAreas:
   - tests/unit/skill-config-bundled-defaults.test.ts
   - tests/unit/clawhub-service.test.ts
   - tests/e2e/provider-lifecycle.spec.ts
+  - tests/e2e/app-smoke.spec.ts
+  - tests/e2e/fixtures/electron.ts
   - tests/e2e/skills-gateway-readiness.spec.ts
+  - src/App.tsx
+  - src/stores/settings.ts
 expectedUserBehavior:
   - A clean Windows install or portable unzip starts with JunFeiAI as the built-in model provider and does not require users to add a provider or paste an API key.
   - Startup calls `https://zz-cn.lingzhiwuxian.com/api/clawx/bootstrap`, then uses `/api/clawx/*` for activation, login/register, verify, device unregister, and relay-token flows.

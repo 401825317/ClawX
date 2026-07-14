@@ -25,7 +25,9 @@ requiredRules:
 
 Use this spec when ClawX shows the Gateway as starting/running but UI data does not refresh, Dreams cannot load, or Gateway RPC calls time out after a restart.
 
-For a distributed Windows USB build, start with the root-level `UClaw-SelfCheck.cmd`. It must use the bundled `resources/bin/node.exe` and must not require system Node.js, Python, Git, PowerShell execution-policy changes, or administrator privileges. The check separates package defects from host-machine state by validating packaged files and plugin dependencies before it probes writable directories, processes, ports, zz-cn connectivity, OpenClaw Doctor, and recent error signatures.
+For a distributed Windows USB build, start with the root-level `UClaw-SelfCheck.cmd`. It must use the bundled `resources/bin/node.exe` and must not require system Node.js, Python, Git, PowerShell execution-policy changes, or administrator privileges. Before probing host state, the check validates `uclaw-usb-build.json` against the packaged build identity and all four shipped x64 PE executables, then verifies the metadata, entrypoint, version, and declared runtime dependencies of all 12 bundled UClaw and channel/search plugins. Installed plugin copies are checked separately so a package defect can be distinguished from an interrupted first-run install or upgrade. Dynamic log scanning is limited to the last 24 hours and must not include logs older than the packaged build.
+
+The Windows USB finalizer must require a committed, clean source tree, start from a freshly generated `win-unpacked`, reset `UClawData` to an empty portable layout, and reject stale or mixed artifacts when the source version, Git commit, `app.asar` version, build ID, target architecture, executable PE machine, bundled plugin metadata, or plugin runtime dependencies disagree. The release artifact includes both the ZIP and its companion JSON identity/checksum metadata.
 
 ClawX should prefer OpenClaw-native signals over stderr string matching:
 

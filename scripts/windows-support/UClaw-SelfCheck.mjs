@@ -10,7 +10,37 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import dns from 'node:dns/promises';
 
-const SELF_CHECK_VERSION = '3';
+const SELF_CHECK_VERSION = '4';
+const PACKAGED_PLUGINS = [
+  { pluginId: 'dingtalk', manifestId: 'dingtalk', packageNames: ['@soimy/dingtalk'] },
+  { pluginId: 'wecom', manifestId: 'wecom-openclaw-plugin', packageNames: ['@wecom/wecom-openclaw-plugin', '@wecom/wecom'] },
+  { pluginId: 'feishu-openclaw-plugin', manifestId: 'openclaw-lark', packageNames: ['@larksuite/openclaw-lark'] },
+  { pluginId: 'qqbot', manifestId: 'qqbot', packageNames: ['@openclaw/qqbot'] },
+  { pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin', packageNames: ['@tencent-weixin/openclaw-weixin'] },
+  { pluginId: 'parallel', manifestId: 'parallel', packageNames: ['@openclaw/parallel-plugin'] },
+  ...[
+    'clawx-openai-image',
+    'uclaw-artifact-guard',
+    'uclaw-local-artifacts',
+    'uclaw-desktop-control',
+    'uclaw-blender',
+    'uclaw-task-bridge',
+  ].map((pluginId) => ({
+    pluginId,
+    manifestId: pluginId,
+    packageNames: [pluginId, `${pluginId}-plugin`],
+    strictLocalMetadata: true,
+  })),
+];
+const BUILD_IDENTITY_FILE = 'uclaw-usb-build.json';
+const PACKAGED_BUILD_IDENTITY_FILE = path.join('resources', 'uclaw-build.json');
+const WINDOWS_PE_FILES = [
+  'UClaw.exe',
+  path.join('resources', 'bin', 'node.exe'),
+  path.join('resources', 'bin', 'uv.exe'),
+  path.join('resources', 'bin', 'agent-browser.exe'),
+];
+const LOG_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const args = process.argv.slice(2);
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRoot = path.dirname(scriptPath);
@@ -41,6 +71,7 @@ const reportName = `UClaw-Windows-Diagnostic-${timestamp}.txt`;
 let diagnosticsDir = portableDiagnosticsDir;
 let reportPath = path.join(diagnosticsDir, reportName);
 const records = [];
+let packagedBuildTimeMs = 0;
 const SENSITIVE_KEY_PATTERN = /^(?:api[_-]?key|.*token|password|secret|authorization|cookie|credential|private[_-]?key|client[_-]?secret|signature)$/i;
 
 function redactText(value) {
@@ -181,24 +212,123 @@ function createOpenClawEnv() {
   };
 }
 
-async function checkPlugin(pluginId, requiresTypebox = true) {
-  const pluginDir = path.join(rootDir, 'resources', 'openclaw-plugins', pluginId);
-  const packageJsonPath = path.join(pluginDir, 'package.json');
-  if (!fs.existsSync(packageJsonPath)) {
-    record('FAIL', `插件 ${pluginId}`, '插件目录缺失，属于 USB 打包问题，不要让用户自行安装 npm 依赖');
-    return;
-  }
-  if (!requiresTypebox) {
-    record('PASS', `插件 ${pluginId}`, '插件包存在');
-    return;
-  }
+function readJsonSafe(filePath) {
   try {
-    const requireFromPlugin = createRequire(packageJsonPath);
-    const typebox = requireFromPlugin('@sinclair/typebox');
-    if (typeof typebox?.Type?.Object !== 'function') throw new Error('Type.Object 不可用');
-    record('PASS', `插件 ${pluginId}`, '@sinclair/typebox 已实际加载，Type.Object 可用');
-  } catch (error) {
-    record('FAIL', `插件 ${pluginId}`, `@sinclair/typebox 不可解析，USB 包不完整：${error instanceof Error ? error.message : String(error)}`);
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function inspectPluginCopy(pluginDir, plugin) {
+  const { pluginId } = plugin;
+  const packageJsonPath = path.join(pluginDir, 'package.json');
+  const manifestPath = path.join(pluginDir, 'openclaw.plugin.json');
+  const pkg = readJsonSafe(packageJsonPath);
+  const manifest = readJsonSafe(manifestPath);
+  const errors = [];
+  if (!pkg) errors.push('package.json 缺失或 JSON 无效');
+  if (!manifest) errors.push('openclaw.plugin.json 缺失或 JSON 无效');
+  if (pkg && manifest) {
+    if (manifest.id !== plugin.manifestId && manifest.id !== plugin.pluginId) {
+      errors.push(`目录/Manifest id 不一致：${String(manifest.id)}`);
+    }
+    if (!plugin.packageNames.includes(pkg.name)) {
+      errors.push(`package name 与插件 id 不一致：${String(pkg.name)}`);
+    }
+    if (!pkg.version || (manifest.version !== undefined && pkg.version !== manifest.version)) {
+      errors.push(`版本不一致：package=${String(pkg.version)} manifest=${String(manifest.version)}`);
+    }
+    if (plugin.strictLocalMetadata && (!manifest.version || !pkg.main || pkg.main !== manifest.entry)) {
+      errors.push(`入口或版本不一致：package.main=${String(pkg.main)} manifest.entry=${String(manifest.entry)}`);
+    }
+    const declaredEntries = [...new Set([
+      manifest.entry,
+      pkg.main,
+      pkg.module,
+      ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+      ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+    ].filter((entry) => typeof entry === 'string' && entry.trim()))];
+    if (declaredEntries.length === 0 || !declaredEntries.some((entry) => fs.existsSync(path.join(pluginDir, entry)))) {
+      errors.push(`没有可用的声明入口：${declaredEntries.join(', ') || 'none'}`);
+    }
+    if (plugin.strictLocalMetadata && pkg.openclaw?.extensions !== undefined
+      && (!Array.isArray(pkg.openclaw.extensions) || !pkg.openclaw.extensions.includes(`./${manifest.entry}`))) {
+      errors.push('package.json 的 OpenClaw 入口声明不一致');
+    }
+  }
+  return { packageJsonPath, pkg, manifest, errors };
+}
+
+function checkPluginDependencies(pluginDir, pluginId, pkg, packageJsonPath) {
+  const dependencies = Object.keys(pkg?.dependencies || {});
+  const missing = dependencies.filter((dependencyName) => (
+    !fs.existsSync(path.join(pluginDir, 'node_modules', ...dependencyName.split('/'), 'package.json'))
+  ));
+  if (missing.length > 0) return `运行依赖缺失：${missing.join(', ')}`;
+  if (pkg?.dependencies?.['@sinclair/typebox']) {
+    try {
+      const requireFromPlugin = createRequire(packageJsonPath);
+      const typebox = requireFromPlugin('@sinclair/typebox');
+      if (typeof typebox?.Type?.Object !== 'function') throw new Error('Type.Object 不可用');
+    } catch (error) {
+      return `@sinclair/typebox 无法加载：${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+  return '';
+}
+
+function checkPluginCopy(pluginDir, plugin, label, missingLevel = 'FAIL') {
+  const { pluginId } = plugin;
+  if (!fs.existsSync(pluginDir)) {
+    record(missingLevel, `${label} ${pluginId}`, missingLevel === 'FAIL'
+      ? '目录缺失，插件已配置但运行副本不完整'
+      : '尚未生成；首次启动完成配置同步后才会出现');
+    return null;
+  }
+  const inspection = inspectPluginCopy(pluginDir, plugin);
+  const dependencyError = inspection.pkg
+    ? checkPluginDependencies(pluginDir, pluginId, inspection.pkg, inspection.packageJsonPath)
+    : '';
+  if (dependencyError) inspection.errors.push(dependencyError);
+  if (inspection.errors.length > 0) {
+    record('FAIL', `${label} ${pluginId}`, inspection.errors.join('；'));
+    return null;
+  }
+  record('PASS', `${label} ${pluginId}`, `id=${pluginId}，version=${inspection.pkg.version}，入口与运行依赖完整`);
+  return { version: inspection.pkg.version, id: inspection.manifest.id };
+}
+
+function checkAllPackagedPlugins() {
+  const bundled = new Map();
+  for (const plugin of PACKAGED_PLUGINS) {
+    const { pluginId } = plugin;
+    const result = checkPluginCopy(
+      path.join(rootDir, 'resources', 'openclaw-plugins', pluginId),
+      plugin,
+      '包内插件',
+      'FAIL',
+    );
+    if (result) bundled.set(pluginId, result);
+  }
+
+  const config = readJsonSafe(openClawConfigPath);
+  const configuredEntries = config?.plugins?.entries && typeof config.plugins.entries === 'object'
+    ? config.plugins.entries
+    : {};
+  for (const plugin of PACKAGED_PLUGINS) {
+    const { pluginId } = plugin;
+    const installedDir = path.join(openClawStateDir, 'extensions', pluginId);
+    const configured = configuredEntries[pluginId] ?? configuredEntries[plugin.manifestId];
+    const missingLevel = configured?.enabled === true ? 'FAIL' : 'INFO';
+    const installed = checkPluginCopy(installedDir, plugin, '已安装插件', missingLevel);
+    const packaged = bundled.get(pluginId);
+    if (installed && packaged) {
+      record(installed.version === packaged.version ? 'PASS' : 'FAIL', `插件副本版本 ${pluginId}`,
+        installed.version === packaged.version
+          ? `包内与已安装版本一致：${installed.version}`
+          : `包内=${packaged.version}，已安装=${installed.version}；升级复制未完成`);
+    }
   }
 }
 
@@ -214,6 +344,78 @@ function checkOpenClawSharp() {
   } catch (error) {
     record('FAIL', 'OpenClaw sharp', `win32-x64 原生运行时不可用，USB 包不完整：${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function readPeMachine(executablePath) {
+  const descriptor = fs.openSync(executablePath, 'r');
+  try {
+    const dosHeader = Buffer.alloc(64);
+    if (fs.readSync(descriptor, dosHeader, 0, dosHeader.length, 0) !== dosHeader.length) {
+      throw new Error('DOS header 不完整');
+    }
+    if (dosHeader.readUInt16LE(0) !== 0x5a4d) throw new Error('缺少 MZ header');
+    const peOffset = dosHeader.readUInt32LE(0x3c);
+    const peHeader = Buffer.alloc(6);
+    if (fs.readSync(descriptor, peHeader, 0, peHeader.length, peOffset) !== peHeader.length) {
+      throw new Error('PE header 不完整');
+    }
+    if (peHeader.readUInt32LE(0) !== 0x00004550) throw new Error('缺少 PE signature');
+    return peHeader.readUInt16LE(4);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function checkBuildIdentity() {
+  const usbIdentityPath = path.join(rootDir, BUILD_IDENTITY_FILE);
+  const packagedIdentityPath = path.join(rootDir, PACKAGED_BUILD_IDENTITY_FILE);
+  const usbIdentity = readJsonSafe(usbIdentityPath);
+  const packagedIdentity = readJsonSafe(packagedIdentityPath);
+  if (!usbIdentity) {
+    record('FAIL', 'USB 构建身份', `${BUILD_IDENTITY_FILE} 缺失或无效，无法证明 ZIP 内容来自当前构建`);
+    return;
+  }
+  if (!packagedIdentity) {
+    record('FAIL', '应用构建身份', `${PACKAGED_BUILD_IDENTITY_FILE} 缺失或无效，可能混入旧 win-unpacked`);
+    return;
+  }
+
+  const identityErrors = [];
+  if (usbIdentity.schemaVersion !== 2 || packagedIdentity.schemaVersion !== 2) identityErrors.push('schemaVersion 不是 2');
+  if (usbIdentity.product !== 'UClaw' || packagedIdentity.product !== 'UClaw') identityErrors.push('product 不是 UClaw');
+  if (!/^[0-9a-f]{40}$/i.test(String(usbIdentity.gitCommit || ''))) identityErrors.push('gitCommit 无效');
+  if (usbIdentity.sourceTreeState !== 'clean' || packagedIdentity.sourceTreeState !== 'clean') {
+    identityErrors.push('构建源码不是 clean 状态');
+  }
+  if (!usbIdentity.buildId || usbIdentity.buildId !== packagedIdentity.buildId) identityErrors.push('buildId 不一致');
+  if (usbIdentity.gitCommit !== packagedIdentity.gitCommit) identityErrors.push('gitCommit 不一致');
+  if (usbIdentity.appVersion !== packagedIdentity.appVersion) identityErrors.push('appVersion 不一致');
+  if (usbIdentity.appAsarVersion !== usbIdentity.appVersion) identityErrors.push('app.asar 版本与应用版本不一致');
+  if (usbIdentity.platform !== 'win32' || usbIdentity.arch !== 'x64') identityErrors.push('构建目标不是 win32/x64');
+  if (usbIdentity.packageType !== 'portable_zip') identityErrors.push('packageType 不是 portable_zip');
+  const createdAt = Date.parse(String(usbIdentity.createdAt || ''));
+  const finalizedAt = Date.parse(String(usbIdentity.finalizedAt || ''));
+  if (!Number.isFinite(createdAt) || !Number.isFinite(finalizedAt) || finalizedAt < createdAt) {
+    identityErrors.push('构建时间无效');
+  } else {
+    packagedBuildTimeMs = createdAt;
+  }
+
+  for (const relativePath of WINDOWS_PE_FILES) {
+    const identityKey = relativePath.replace(/\\/g, '/');
+    try {
+      const peMachine = readPeMachine(path.join(rootDir, relativePath));
+      if (peMachine !== 0x8664 || usbIdentity.executableMachines?.[identityKey] !== '0x8664') {
+        identityErrors.push(`${identityKey} 架构错误：PE=0x${peMachine.toString(16)} identity=${String(usbIdentity.executableMachines?.[identityKey])}`);
+      }
+    } catch (error) {
+      identityErrors.push(`${identityKey} PE 校验失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  record(identityErrors.length === 0 ? 'PASS' : 'FAIL', 'USB 构建身份', identityErrors.length === 0
+    ? `version=${usbIdentity.appVersion}，commit=${usbIdentity.gitCommit.slice(0, 12)}，buildId=${usbIdentity.buildId}`
+    : identityErrors.join('；'));
 }
 
 async function validateJsonFile(filePath, label) {
@@ -402,7 +604,9 @@ async function scanRecentLogs() {
     }
   }
   stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
-  const recent = stats.slice(0, 20);
+  const cutoff = Math.max(Date.now() - LOG_LOOKBACK_MS, packagedBuildTimeMs || 0);
+  const eligible = stats.filter(({ stat }) => stat.mtimeMs >= cutoff);
+  const recent = eligible.slice(0, 20);
   const patterns = [
     ['EPERM rename', /EPERM[^\n]*rename/gi],
     ['429 Too Many Requests', /429 Too Many Requests/gi],
@@ -430,7 +634,8 @@ async function scanRecentLogs() {
       // Ignore files that become unavailable during the scan.
     }
   }
-  record(recent.length > 0 ? 'PASS' : 'INFO', '近期日志扫描', `扫描 ${recent.length} 个日志文件，仅统计错误类型，不输出原始日志`);
+  record(recent.length > 0 ? 'PASS' : 'INFO', '近期日志扫描',
+    `扫描最近 24 小时且不早于当前构建的 ${recent.length} 个日志文件，忽略旧日志 ${stats.length - eligible.length} 个，仅统计错误类型`);
   for (const [label, count] of counts) {
     record(count > 0 ? 'WARN' : 'PASS', `日志：${label}`, `${count} 次`);
   }
@@ -522,10 +727,13 @@ async function main() {
     'resources/cli/openclaw.cmd',
     'resources/openclaw/openclaw.mjs',
     'resources/openclaw/package.json',
+    PACKAGED_BUILD_IDENTITY_FILE,
+    BUILD_IDENTITY_FILE,
   ];
   const requiredResults = [];
   for (const relativePath of required) requiredResults.push(await checkRequiredPath(relativePath));
   await checkRequiredPath('UClawData', 'dir');
+  checkBuildIdentity();
 
   const portableReportWritable = await prepareDiagnosticsDir();
   if (!portableReportWritable) {
@@ -542,11 +750,7 @@ async function main() {
   await validateJsonFile(openClawConfigPath, 'openclaw.json');
   await checkAuthProfiles();
 
-  await checkPlugin('uclaw-local-artifacts');
-  await checkPlugin('uclaw-desktop-control');
-  await checkPlugin('uclaw-blender');
-  await checkPlugin('uclaw-task-bridge');
-  await checkPlugin('uclaw-artifact-guard', false);
+  checkAllPackagedPlugins();
   checkOpenClawSharp();
 
   const nodeExe = path.join(rootDir, 'resources', 'bin', 'node.exe');
@@ -621,7 +825,8 @@ async function main() {
     record('INFO', '动态运行检查', staticOnly ? '静态模式已跳过进程、端口、网络和 Doctor' : '仅在 Windows 上执行');
   }
 
-  await scanRecentLogs();
+  if (staticOnly) record('INFO', '近期日志扫描', '静态模式不读取本机历史日志');
+  else await scanRecentLogs();
 }
 
 async function finish() {

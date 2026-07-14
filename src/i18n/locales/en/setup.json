@@ -240,7 +240,8 @@
         "components": "Components",
         "gateway": "Gateway",
         "running": "Running",
-        "footer": "You can customize skills and connect channels in Settings"
+    "footer": "You can customize skills and connect channels in Settings",
+    "persistError": "Setup could not be saved. Check that the UClawData folder is writable, then try again."
     },
     "nav": {
         "next": "Next",

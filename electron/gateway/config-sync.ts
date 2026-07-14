@@ -35,7 +35,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { copyPluginFromNodeModules, fixupPluginManifest, cpSyncSafe, buildCandidateSources, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureUClawDesktopControlPluginInstalled, ensureUClawBlenderPluginInstalled, ensureUClawTaskBridgePluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
+import { buildCandidateSources, ensurePluginInstalled, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureUClawDesktopControlPluginInstalled, ensureUClawBlenderPluginInstalled, ensureUClawTaskBridgePluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -87,43 +87,32 @@ const PARALLEL_WEB_SEARCH_PROVIDERS = new Set(['parallel', 'parallel-free']);
 const ENABLE_UCLAW_ARTIFACT_GUARD_CORE_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 
 function ensureCoreUClawPluginsInstalled(): boolean {
-  let installed = false;
+  let succeeded = true;
+
+  const recordResult = (
+    label: string,
+    result: { installed: boolean; warning?: string },
+  ): void => {
+    if (result.warning) {
+      logger.warn(`[plugin] ${label}: ${result.warning}`);
+    }
+    if (!result.installed) {
+      succeeded = false;
+    }
+  };
 
   if (ENABLE_UCLAW_ARTIFACT_GUARD_CORE_PLUGIN) {
-    const result = ensureUClawArtifactGuardPluginInstalled();
-    if (result.warning) {
-      logger.warn(`[plugin] UClaw Artifact Guard: ${result.warning}`);
-    }
-    installed = result.installed || installed;
+    recordResult('UClaw Artifact Guard', ensureUClawArtifactGuardPluginInstalled());
   } else {
     logger.info('[plugin] UClaw Artifact Guard disabled; skipping core plugin install');
   }
 
-  const localArtifactsResult = ensureUClawLocalArtifactsPluginInstalled();
-  if (localArtifactsResult.warning) {
-    logger.warn(`[plugin] UClaw Local Artifacts: ${localArtifactsResult.warning}`);
-  }
-  installed = localArtifactsResult.installed || installed;
+  recordResult('UClaw Local Artifacts', ensureUClawLocalArtifactsPluginInstalled());
+  recordResult('UClaw Desktop Control', ensureUClawDesktopControlPluginInstalled());
+  recordResult('UClaw Blender', ensureUClawBlenderPluginInstalled());
+  recordResult('UClaw Task Bridge', ensureUClawTaskBridgePluginInstalled());
 
-  const desktopControlResult = ensureUClawDesktopControlPluginInstalled();
-  if (desktopControlResult.warning) {
-    logger.warn(`[plugin] UClaw Desktop Control: ${desktopControlResult.warning}`);
-  }
-  installed = desktopControlResult.installed || installed;
-
-  const blenderResult = ensureUClawBlenderPluginInstalled();
-  if (blenderResult.warning) {
-    logger.warn(`[plugin] UClaw Blender: ${blenderResult.warning}`);
-  }
-  installed = blenderResult.installed || installed;
-
-  const taskBridgeResult = ensureUClawTaskBridgePluginInstalled();
-  if (taskBridgeResult.warning) {
-    logger.warn(`[plugin] UClaw Task Bridge: ${taskBridgeResult.warning}`);
-  }
-  installed = taskBridgeResult.installed || installed;
-
-  return installed;
+  return succeeded;
 }
 
 function isParallelWebSearchConfigured(config: unknown): boolean {
@@ -209,62 +198,16 @@ function ensureConfiguredPluginsUpgraded(configuredChannels: string[]): boolean 
   for (const channelType of configuredChannels) {
     const pluginInfo = CHANNEL_PLUGIN_MAP[channelType];
     if (!pluginInfo) continue;
-    const { dirName, npmName } = pluginInfo;
-
-    const extensionsRoot = getOpenClawExtensionsDir();
-    const targetDir = join(extensionsRoot, dirName);
-    const targetManifest = join(targetDir, 'openclaw.plugin.json');
-    const isInstalled = existsSync(fsPath(targetManifest));
-    const installedVersion = isInstalled ? readPluginVersion(join(targetDir, 'package.json')) : null;
-
-    // Try bundled sources first (packaged mode or if bundle-plugins was run)
-    const bundledSources = buildCandidateSources(dirName);
-    const bundledDir = findBestBundledPluginSource(bundledSources, targetDir);
-
-    if (bundledDir) {
-      const sourceVersion = readPluginVersion(join(bundledDir, 'package.json'));
-      // Install or upgrade if version differs or plugin not installed
-      if (!isInstalled || (sourceVersion && installedVersion && sourceVersion !== installedVersion)) {
-        logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (bundled)`);
-        try {
-          mkdirSync(fsPath(extensionsRoot), { recursive: true });
-          rmSync(fsPath(targetDir), { recursive: true, force: true });
-          cpSyncSafe(bundledDir, targetDir);
-          fixupPluginManifest(targetDir);
-        } catch (err) {
-          logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin:`, err);
-          succeeded = false;
-        }
-      } else if (isInstalled) {
-        // Same version already installed — still patch manifest ID in case it was
-        // never corrected (e.g. installed before MANIFEST_ID_FIXES included this plugin).
-        fixupPluginManifest(targetDir);
-      }
-      continue;
+    const result = ensurePluginInstalled(
+      pluginInfo.dirName,
+      buildCandidateSources(pluginInfo.dirName),
+      channelType,
+    );
+    if (result.warning) {
+      logger.warn(`[plugin] ${channelType}: ${result.warning}`);
     }
-
-    // Dev mode fallback: copy from node_modules/ with pnpm dep resolution
-    if (!app.isPackaged) {
-      const npmPkgPath = join(process.cwd(), 'node_modules', ...npmName.split('/'));
-      if (!existsSync(fsPath(join(npmPkgPath, 'openclaw.plugin.json')))) continue;
-      const sourceVersion = readPluginVersion(join(npmPkgPath, 'package.json'));
-      if (!sourceVersion) continue;
-      // Skip only if installed AND same version — but still patch manifest ID.
-      if (isInstalled && installedVersion && sourceVersion === installedVersion) {
-        fixupPluginManifest(targetDir);
-        continue;
-      }
-
-      logger.info(`[plugin] ${isInstalled ? 'Auto-upgrading' : 'Installing'} ${channelType} plugin${isInstalled ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (dev/node_modules)`);
-
-      try {
-        mkdirSync(fsPath(extensionsRoot), { recursive: true });
-        copyPluginFromNodeModules(npmPkgPath, targetDir, npmName);
-        fixupPluginManifest(targetDir);
-      } catch (err) {
-        logger.warn(`[plugin] Failed to ${isInstalled ? 'auto-upgrade' : 'install'} ${channelType} plugin from node_modules:`, err);
-        succeeded = false;
-      }
+    if (!result.installed) {
+      succeeded = false;
     }
   }
   return succeeded;
@@ -568,10 +511,15 @@ export async function syncGatewayConfigBeforeLaunch(
     logger.warn('Failed to auto-upgrade plugins:', err);
   }
 
-  try {
-    measureSync(timingsMs, 'uclawCorePluginMaintenanceMs', ensureCoreUClawPluginsInstalled);
-  } catch (err) {
-    logger.warn('Failed to install UClaw core plugins:', err);
+  const corePluginsReady = measureSync(
+    timingsMs,
+    'uclawCorePluginMaintenanceMs',
+    ensureCoreUClawPluginsInstalled,
+  );
+  if (!corePluginsReady) {
+    throw new Error(
+      'UClaw core plugin installation is incomplete. Gateway startup was stopped to avoid a partially functional runtime.',
+    );
   }
 
   // Batch gateway token, browser config, and session idle into one read+write cycle.

@@ -12,6 +12,14 @@ import { basename, dirname, join } from 'node:path';
 import { parseJsonWithBom } from './json';
 
 const DEFAULT_JSON_READ_RETRY_DELAYS_MS = [25, 75, 150] as const;
+const WINDOWS_ATOMIC_RENAME_RETRY_DELAYS_MS = [25, 75, 150, 300, 500] as const;
+const WINDOWS_TRANSIENT_RENAME_ERROR_CODES = new Set([
+  'EACCES',
+  'EBUSY',
+  'EEXIST',
+  'ENOTEMPTY',
+  'EPERM',
+]);
 
 export type JsonFileDocument<T> = {
   raw: string;
@@ -45,6 +53,29 @@ function isJsonParseError(error: unknown): boolean {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientWindowsRenameError(error: unknown): boolean {
+  if (process.platform !== 'win32') return false;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === 'string' && WINDOWS_TRANSIENT_RENAME_ERROR_CODES.has(code);
+}
+
+async function renameWithRetry(sourcePath: string, targetPath: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(sourcePath, targetPath);
+      return;
+    } catch (error) {
+      if (
+        !isTransientWindowsRenameError(error)
+        || attempt >= WINDOWS_ATOMIC_RENAME_RETRY_DELAYS_MS.length
+      ) {
+        throw error;
+      }
+      await wait(WINDOWS_ATOMIC_RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
 }
 
 /**
@@ -143,7 +174,7 @@ export async function writeTextFileAtomically(filePath: string, content: string)
     await handle.sync();
     await handle.close();
     handle = null;
-    await rename(tempPath, targetPath);
+    await renameWithRetry(tempPath, targetPath);
     await syncDirectory(directory);
   } catch (error) {
     await handle?.close().catch(() => undefined);

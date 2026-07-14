@@ -145,12 +145,16 @@ if (requestedRemoteDebuggingPort) {
   app.commandLine.appendSwitch('remote-debugging-port', requestedRemoteDebuggingPort);
 }
 
+if (portableModeInfo.enabled && portableModeInfo.runtimeElectronCacheDir) {
+  app.commandLine.appendSwitch('disk-cache-dir', portableModeInfo.runtimeElectronCacheDir);
+}
+
 app.setName(DISPLAY_APP_NAME);
 
 if (portableModeInfo.enabled && portableModeInfo.clawxDataDir) {
   app.setPath('userData', portableModeInfo.clawxDataDir);
-  if (portableModeInfo.runtimeSessionDataDir) {
-    app.setPath('sessionData', portableModeInfo.runtimeSessionDataDir);
+  if (portableModeInfo.sessionDataDir) {
+    app.setPath('sessionData', portableModeInfo.sessionDataDir);
   }
   if (portableModeInfo.runtimeLogsDir) {
     app.setPath('logs', portableModeInfo.runtimeLogsDir);

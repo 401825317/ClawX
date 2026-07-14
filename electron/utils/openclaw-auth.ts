@@ -1246,18 +1246,22 @@ function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>):
   }
 }
 
+function prepareOpenClawJsonForWrite(config: Record<string, unknown>): void {
+  normalizeAgentsDefaultsCompactionMode(config);
+
+  // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
+  const commands = (
+    config.commands && typeof config.commands === 'object'
+      ? { ...(config.commands as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  commands.restart = true;
+  config.commands = commands;
+}
+
 async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
   return withConfigLock(async () => {
-    normalizeAgentsDefaultsCompactionMode(config);
-
-    // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
-    const commands = (
-      config.commands && typeof config.commands === 'object'
-        ? { ...(config.commands as Record<string, unknown>) }
-        : {}
-    ) as Record<string, unknown>;
-    commands.restart = true;
-    config.commands = commands;
+    prepareOpenClawJsonForWrite(config);
 
     await writeJsonFile(getOpenClawConfigPath(), config);
   });
@@ -3285,12 +3289,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 
   await withConfigLock(async () => {
     const config = await readOpenClawJson();
-    let modified = true;
+    const serializedConfigBeforeSync = JSON.stringify(config);
 
     shouldSyncJunFeiAIReasoningCompat = Boolean(getJunFeiAIDefaultProvider(config));
-    if (ensureJunFeiAIReasoningDefaultsInConfig(config)) {
-      modified = true;
-    }
+    ensureJunFeiAIReasoningDefaultsInConfig(config);
 
     // ── Gateway token + controlUi ──
     const gateway = (
@@ -3328,80 +3330,47 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (browser.enabled === undefined) {
       browser.enabled = true;
       config.browser = browser;
-      modified = true;
     }
     if (browser.defaultProfile === undefined) {
       browser.defaultProfile = 'openclaw';
       config.browser = browser;
-      modified = true;
     }
     // Default ssrfPolicy to allow private network access for enterprise/internal use
     if (browser.ssrfPolicy == null) {
       browser.ssrfPolicy = { dangerouslyAllowPrivateNetwork: true };
       config.browser = browser;
-      modified = true;
     } else if (
       typeof browser.ssrfPolicy === 'object' &&
       (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork === undefined
     ) {
       (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork = true;
       config.browser = browser;
-      modified = true;
     }
 
     // ── web_fetch SSRF policy (fake-IP / transparent-proxy environments) ──
-    if (ensureWebFetchSsrfPolicyInConfig(config)) {
-      modified = true;
-    }
+    ensureWebFetchSsrfPolicyInConfig(config);
     // ── web_search provider (key-free default) ──
-    if (ensureFreeWebSearchProviderInConfig(config)) {
-      modified = true;
-    }
-    if (ensureToolSearchDirectoryDefaultInConfig(config)) {
-      modified = true;
-    }
-    if (ensureManagedHeartbeatIsolationInConfig(config)) {
-      modified = true;
-    }
-    if (ensureManagedMediaLimitInConfig(config)) {
-      modified = true;
-    }
-    if (ensureManagedToolDirectoryInConfig(config)) {
-      modified = true;
-    }
+    ensureFreeWebSearchProviderInConfig(config);
+    ensureToolSearchDirectoryDefaultInConfig(config);
+    ensureManagedHeartbeatIsolationInConfig(config);
+    ensureManagedMediaLimitInConfig(config);
+    ensureManagedToolDirectoryInConfig(config);
 
-    if (removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID])) {
-      modified = true;
-    }
+    removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID]);
     if (ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN) {
-      if (ensurePluginEntryEnabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
-        modified = true;
-      }
-      if (ensurePluginHookAccess(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
-        modified = true;
-      }
-    } else if (ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
-      modified = true;
+      ensurePluginEntryEnabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID);
+      ensurePluginHookAccess(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID);
+    } else {
+      ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID);
     }
-    if (ensurePluginEntryEnabled(config, UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensurePluginEntryEnabled(config, UCLAW_DESKTOP_CONTROL_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensurePluginEntryEnabled(config, UCLAW_BLENDER_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensurePluginEntryEnabled(config, UCLAW_TASK_BRIDGE_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensureParallelWebSearchPluginRegistration(config)) {
-      modified = true;
-    }
+    ensurePluginEntryEnabled(config, UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_DESKTOP_CONTROL_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_BLENDER_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_TASK_BRIDGE_PLUGIN_ID);
+    ensureParallelWebSearchPluginRegistration(config);
 
     const pinnedProviderRuntimes = applyOpenClawProviderAgentRuntimePinsToConfig(config);
     if (pinnedProviderRuntimes.length > 0) {
-      modified = true;
       console.log(`[batch-sync] Pinned embedded agent runtime for models.providers entries: ${pinnedProviderRuntimes.join(', ')}`);
     }
 
@@ -3418,10 +3387,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (!hasExplicitSessionConfig) {
       session.idleMinutes = DEFAULT_IDLE_MINUTES;
       config.session = session;
-      modified = true;
     }
 
-    if (modified) {
+    prepareOpenClawJsonForWrite(config);
+    if (JSON.stringify(config) !== serializedConfigBeforeSync) {
       await writeOpenClawJson(config);
       console.log('Synced gateway token, browser config, web_fetch/web_search config, and session idle to openclaw.json');
     }

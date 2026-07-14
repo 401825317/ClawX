@@ -18,9 +18,10 @@ export type PortableModeInfo = {
   openclawHomeDir: string | null;
   openclawConfigDir: string | null;
   updatesDir: string | null;
+  sessionDataDir: string | null;
   runtimeRootDir: string | null;
   runtimeUpdatesDir: string | null;
-  runtimeSessionDataDir: string | null;
+  runtimeElectronCacheDir: string | null;
   runtimeLogsDir: string | null;
   runtimeCrashDumpsDir: string | null;
   runtimePythonDir: string | null;
@@ -118,9 +119,10 @@ export function getPortableModeInfo(): PortableModeInfo {
         openclawHomeDir: path.join(dataDir, 'openclaw-home'),
         openclawConfigDir: path.join(dataDir, 'openclaw-home', '.openclaw'),
         updatesDir: path.join(dataDir, 'updates'),
+        sessionDataDir: path.join(dataDir, 'clawx', 'electron-session'),
         runtimeRootDir,
         runtimeUpdatesDir: path.join(runtimeRootDir, 'updates'),
-        runtimeSessionDataDir: path.join(runtimeRootDir, 'electron-session'),
+        runtimeElectronCacheDir: path.join(runtimeRootDir, 'electron-cache'),
         runtimeLogsDir: path.join(runtimeRootDir, 'logs'),
         runtimeCrashDumpsDir: path.join(runtimeRootDir, 'crash-dumps'),
         runtimePythonDir: path.join(runtimeRootDir, 'python'),
@@ -141,9 +143,10 @@ export function getPortableModeInfo(): PortableModeInfo {
         openclawHomeDir: null,
         openclawConfigDir: null,
         updatesDir: null,
+        sessionDataDir: null,
         runtimeRootDir: null,
         runtimeUpdatesDir: null,
-        runtimeSessionDataDir: null,
+        runtimeElectronCacheDir: null,
         runtimeLogsDir: null,
         runtimeCrashDumpsDir: null,
         runtimePythonDir: null,
@@ -175,9 +178,10 @@ export function ensurePortableDataDirs(): PortableModeInfo {
     info.openclawHomeDir,
     info.openclawConfigDir,
     info.updatesDir,
+    info.sessionDataDir,
     info.runtimeRootDir,
     info.runtimeUpdatesDir,
-    info.runtimeSessionDataDir,
+    info.runtimeElectronCacheDir,
     info.runtimeLogsDir,
     info.runtimeCrashDumpsDir,
     info.runtimePythonDir,

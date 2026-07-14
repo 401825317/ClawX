@@ -37,6 +37,16 @@ export const ELECTRON_MAIN_RUNTIME_PACKAGES = [
   'qrcode-terminal',
 ];
 
+/** Third-party channel/provider plugins copied into every packaged runtime. */
+export const BUNDLED_OPENCLAW_PLUGINS = [
+  { npmName: '@soimy/dingtalk', pluginId: 'dingtalk', manifestId: 'dingtalk' },
+  { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom', manifestId: 'wecom-openclaw-plugin' },
+  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin', manifestId: 'openclaw-lark' },
+  { npmName: '@openclaw/qqbot', pluginId: 'qqbot', manifestId: 'qqbot' },
+  { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin' },
+  { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel', manifestId: 'parallel' },
+];
+
 /** Local UClaw plugins that must be mirrored and copied into every packaged runtime. */
 export const LOCAL_OPENCLAW_PLUGIN_IDS = [
   'clawx-openai-image',

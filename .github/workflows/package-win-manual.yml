@@ -5,8 +5,6 @@ on:
     branches:
       - feature/uclaw-agent-runtime-contract
       - feature/uclaw-general-agent-orchestration
-    paths:
-      - .github/workflows/package-win-manual.yml
   workflow_dispatch:
     inputs:
       ref:
@@ -69,7 +67,7 @@ jobs:
           git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Read app version
         shell: pwsh
@@ -94,7 +92,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: UClaw-${{ env.APP_VERSION }}-win-x64-usb
-          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
+          path: |
+            release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
+            release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.json
           if-no-files-found: error
           retention-days: 7
 

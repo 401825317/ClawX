@@ -6,9 +6,9 @@
  * stale plugins) and when a user configures a channel.
  */
 import { app } from 'electron';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { existsSync, cpSync, copyFileSync, statSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, cpSync, copyFileSync, statSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync, realpathSync, renameSync } from 'node:fs';
 import { readdir, stat, copyFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from './logger';
@@ -109,6 +109,35 @@ function toErrorDiagnostic(error: unknown): { code?: string; name?: string; mess
     name: errno.name,
     message: errno.message || String(error),
   };
+}
+
+const WINDOWS_TRANSIENT_FS_ERRORS = new Set(['EACCES', 'EBUSY', 'EEXIST', 'ENOTEMPTY', 'EPERM']);
+const WINDOWS_FS_RETRY_DELAYS_MS = [0, 50, 150, 300, 600] as const;
+const SYNC_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(delayMs: number): void {
+  if (delayMs > 0) {
+    Atomics.wait(SYNC_SLEEP_BUFFER, 0, 0, delayMs);
+  }
+}
+
+function runWithTransientFsRetry(operation: () => void): void {
+  const delays = process.platform === 'win32' ? WINDOWS_FS_RETRY_DELAYS_MS : [0] as const;
+  let lastError: unknown;
+  for (const delayMs of delays) {
+    sleepSync(delayMs);
+    try {
+      operation();
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = asErrnoException(error)?.code;
+      if (process.platform !== 'win32' || !code || !WINDOWS_TRANSIENT_FS_ERRORS.has(code)) {
+        throw error;
+      }
+    }
+  }
+  throw lastError;
 }
 
 // ── Known plugin-ID corrections ─────────────────────────────────────────────
@@ -250,6 +279,100 @@ function readPluginVersion(pkgJsonPath: string): string | null {
   }
 }
 
+type PluginPackageMetadata = {
+  name?: string;
+  version?: string;
+  main?: string;
+  module?: string;
+  dependencies?: Record<string, unknown>;
+  openclaw?: {
+    extensions?: string[];
+    runtimeExtensions?: string[];
+  };
+};
+
+type PluginManifestMetadata = {
+  id?: string;
+  version?: string;
+  entry?: string;
+};
+
+function readPluginMetadata(pluginDir: string): {
+  pkg: PluginPackageMetadata;
+  manifest: PluginManifestMetadata;
+} {
+  const packageRaw = readFileSync(fsPath(join(pluginDir, 'package.json')), 'utf-8');
+  const manifestRaw = readFileSync(fsPath(join(pluginDir, 'openclaw.plugin.json')), 'utf-8');
+  const pkg = JSON.parse(packageRaw) as unknown;
+  const manifest = JSON.parse(manifestRaw) as unknown;
+  if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
+    throw new Error('package.json must contain an object');
+  }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('openclaw.plugin.json must contain an object');
+  }
+  return {
+    pkg: pkg as PluginPackageMetadata,
+    manifest: manifest as PluginManifestMetadata,
+  };
+}
+
+function getDeclaredPluginEntries(pkg: PluginPackageMetadata, manifest: PluginManifestMetadata): string[] {
+  return [...new Set([
+    manifest.entry,
+    pkg.main,
+    pkg.module,
+    ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+    ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
+}
+
+function assertPluginPackageReady(pluginDir: string, pluginDirName: string, pluginLabel: string): void {
+  let metadata: ReturnType<typeof readPluginMetadata>;
+  try {
+    metadata = readPluginMetadata(pluginDir);
+  } catch (error) {
+    throw new Error(`${pluginLabel} plugin metadata is invalid: ${toErrorDiagnostic(error).message}`, {
+      cause: error,
+    });
+  }
+
+  const { pkg, manifest } = metadata;
+  if (typeof manifest.id !== 'string' || !manifest.id.trim()) {
+    throw new Error(`${pluginLabel} plugin manifest id is missing`);
+  }
+  if (typeof pkg.name !== 'string' || !pkg.name.trim()) {
+    throw new Error(`${pluginLabel} plugin package name is missing`);
+  }
+  if (typeof pkg.version !== 'string' || !pkg.version.trim()) {
+    throw new Error(`${pluginLabel} plugin package version is missing`);
+  }
+
+  const entries = getDeclaredPluginEntries(pkg, manifest);
+  if (entries.length === 0 || !entries.some((entry) => existsSync(fsPath(join(pluginDir, entry))))) {
+    throw new Error(`${pluginLabel} plugin has no existing declared entrypoint (${entries.join(', ') || 'none'})`);
+  }
+
+  if (pluginDirName === 'clawx-openai-image' || pluginDirName.startsWith('uclaw-')) {
+    if (manifest.id !== pluginDirName) {
+      throw new Error(`${pluginLabel} plugin id mismatch: expected ${pluginDirName}, got ${manifest.id}`);
+    }
+    if (pkg.name !== pluginDirName && pkg.name !== `${pluginDirName}-plugin`) {
+      throw new Error(`${pluginLabel} plugin package name mismatch: ${pkg.name}`);
+    }
+    if (!manifest.version || manifest.version !== pkg.version) {
+      throw new Error(
+        `${pluginLabel} plugin version mismatch: package=${pkg.version}, manifest=${String(manifest.version)}`,
+      );
+    }
+    if (!pkg.main || !manifest.entry || pkg.main !== manifest.entry) {
+      throw new Error(
+        `${pluginLabel} plugin entry mismatch: package.main=${String(pkg.main)}, manifest.entry=${String(manifest.entry)}`,
+      );
+    }
+  }
+}
+
 function readPluginContentFingerprint(pluginDir: string): string | null {
   try {
     const manifestPath = join(pluginDir, 'openclaw.plugin.json');
@@ -260,7 +383,7 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
     const pkg = JSON.parse(packageRaw) as {
       main?: string;
       module?: string;
-      openclaw?: { extensions?: string[] };
+      openclaw?: { extensions?: string[]; runtimeExtensions?: string[] };
     };
 
     const entryFiles = [...new Set([
@@ -268,6 +391,7 @@ function readPluginContentFingerprint(pluginDir: string): string | null {
       pkg.main,
       pkg.module,
       ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+      ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
     ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
 
     const hash = createHash('sha256');
@@ -332,9 +456,14 @@ export function findBestBundledPluginSource(candidateSources: string[], _targetD
       const pkg = JSON.parse(raw) as {
         main?: string;
         module?: string;
-        openclaw?: { extensions?: string[] };
+        openclaw?: { extensions?: string[]; runtimeExtensions?: string[] };
       };
-        return [pkg.main, pkg.module, ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : [])];
+        return [
+          pkg.main,
+          pkg.module,
+          ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+          ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+        ];
       } catch {
         return [];
       }
@@ -565,6 +694,88 @@ function ensurePluginRuntimeDependencies(targetDir: string, pluginLabel: string)
 
 // ── Core install / upgrade logic ─────────────────────────────────────────────
 
+function prepareAndActivatePlugin(
+  targetDir: string,
+  pluginLabel: string,
+  prepareStaging: (stagingDir: string) => void,
+): void {
+  const parentDir = path.dirname(targetDir);
+  const targetName = path.basename(targetDir);
+  const nonce = `${process.pid}-${randomUUID()}`;
+  const stagingDir = join(parentDir, `.${targetName}.uclaw-staging-${nonce}`);
+  const backupDir = join(parentDir, `.${targetName}.uclaw-backup-${nonce}`);
+  let oldVersionMoved = false;
+  let newVersionActivated = false;
+
+  mkdirSync(fsPath(parentDir), { recursive: true });
+  rmSync(fsPath(stagingDir), { recursive: true, force: true });
+  rmSync(fsPath(backupDir), { recursive: true, force: true });
+
+  try {
+    prepareStaging(stagingDir);
+    if (!existsSync(fsPath(join(stagingDir, 'openclaw.plugin.json')))) {
+      throw new Error(`Failed to stage ${pluginLabel} plugin mirror (manifest missing).`);
+    }
+    if (!existsSync(fsPath(join(stagingDir, 'package.json')))) {
+      throw new Error(`Failed to stage ${pluginLabel} plugin mirror (package.json missing).`);
+    }
+
+    fixupPluginManifest(stagingDir);
+    assertPluginPackageReady(stagingDir, path.basename(targetDir), pluginLabel);
+    const missingRuntimeDeps = ensurePluginRuntimeDependencies(stagingDir, pluginLabel);
+    if (missingRuntimeDeps.length > 0) {
+      throw new Error(
+        `Failed to stage ${pluginLabel} plugin mirror (runtime dependencies missing: ${missingRuntimeDeps.join(', ')})`,
+      );
+    }
+    if (existsSync(fsPath(targetDir))) {
+      runWithTransientFsRetry(() => renameSync(fsPath(targetDir), fsPath(backupDir)));
+      oldVersionMoved = true;
+    }
+
+    runWithTransientFsRetry(() => renameSync(fsPath(stagingDir), fsPath(targetDir)));
+    newVersionActivated = true;
+
+    if (oldVersionMoved) {
+      try {
+        runWithTransientFsRetry(() => rmSync(fsPath(backupDir), { recursive: true, force: true }));
+      } catch (error) {
+        logger.warn(`[plugin] ${pluginLabel} upgraded but its backup could not be removed`, {
+          backupDir,
+          ...toErrorDiagnostic(error),
+        });
+      }
+    }
+  } catch (error) {
+    if (!newVersionActivated && oldVersionMoved && !existsSync(fsPath(targetDir)) && existsSync(fsPath(backupDir))) {
+      try {
+        runWithTransientFsRetry(() => renameSync(fsPath(backupDir), fsPath(targetDir)));
+        oldVersionMoved = false;
+      } catch (rollbackError) {
+        logger.error(`[plugin] Failed to roll back ${pluginLabel} after install failure`, {
+          backupDir,
+          targetDir,
+          ...toErrorDiagnostic(rollbackError),
+        });
+      }
+    }
+    throw error;
+  } finally {
+    try {
+      runWithTransientFsRetry(() => rmSync(fsPath(stagingDir), { recursive: true, force: true }));
+    } catch {
+      // A unique staging directory is harmless and can be cleaned on the next run.
+    }
+    if (!oldVersionMoved && existsSync(fsPath(backupDir))) {
+      try {
+        runWithTransientFsRetry(() => rmSync(fsPath(backupDir), { recursive: true, force: true }));
+      } catch {
+        // Preserve the recovered target even if stale backup cleanup is blocked.
+      }
+    }
+  }
+}
+
 export function ensurePluginInstalled(
   pluginDirName: string,
   candidateSources: string[],
@@ -579,31 +790,54 @@ export function ensurePluginInstalled(
 
   // If already installed, check whether an upgrade is available
   if (existsSync(fsPath(targetManifest))) {
-    if (!sourceDir) return { installed: true }; // no bundled source to compare, keep existing
-    const installedVersion = readPluginVersion(targetPkgJson);
-    const sourceVersion = readPluginVersion(join(sourceDir, 'package.json'));
-    if (!sourceVersion || !installedVersion) {
-      return { installed: true }; // unable to compare
+    let installedPackageReady = true;
+    try {
+      assertPluginPackageReady(targetDir, pluginDirName, pluginLabel);
+    } catch (error) {
+      installedPackageReady = false;
+      logger.info(`[plugin] Refreshing ${pluginLabel} plugin: ${toErrorDiagnostic(error).message}`);
     }
-    if (sourceVersion !== installedVersion) {
-      logger.info(
-        `[plugin] Upgrading ${pluginLabel} plugin: ${installedVersion} → ${sourceVersion}`,
-      );
-    } else {
-      const installedFingerprint = readPluginContentFingerprint(targetDir);
-      const sourceFingerprint = readPluginContentFingerprint(sourceDir);
+    if (!sourceDir && app.isPackaged) {
+      const installedVersion = readPluginVersion(targetPkgJson);
       const missingRuntimeDeps = findMissingPluginRuntimeDependencies(targetDir);
-      if (missingRuntimeDeps.length === 0 && (!installedFingerprint || !sourceFingerprint || installedFingerprint === sourceFingerprint)) {
-        return { installed: true };
-      }
-      if (missingRuntimeDeps.length > 0) {
+      return installedPackageReady && installedVersion && missingRuntimeDeps.length === 0
+        ? { installed: true }
+        : {
+            installed: false,
+            warning: `${pluginLabel} plugin metadata or runtime dependencies are incomplete and no bundled repair source is available${missingRuntimeDeps.length > 0 ? `: ${missingRuntimeDeps.join(', ')}` : ''}`,
+          };
+    }
+    if (sourceDir) {
+      const installedVersion = readPluginVersion(targetPkgJson);
+      const sourceVersion = readPluginVersion(join(sourceDir, 'package.json'));
+      if (!sourceVersion || !installedVersion) {
+        logger.info(`[plugin] Refreshing ${pluginLabel} plugin: package metadata is missing or unreadable`);
+      } else if (sourceVersion !== installedVersion) {
         logger.info(
-          `[plugin] Refreshing ${pluginLabel} plugin: runtime deps missing (${missingRuntimeDeps.join(', ')})`,
+          `[plugin] Upgrading ${pluginLabel} plugin: ${installedVersion} → ${sourceVersion}`,
         );
       } else {
-        logger.info(
-          `[plugin] Refreshing ${pluginLabel} plugin: bundled content changed without version bump`,
-        );
+        const installedFingerprint = readPluginContentFingerprint(targetDir);
+        const sourceFingerprint = readPluginContentFingerprint(sourceDir);
+        const missingRuntimeDeps = findMissingPluginRuntimeDependencies(targetDir);
+        if (
+          installedPackageReady
+          && missingRuntimeDeps.length === 0
+          && installedFingerprint
+          && sourceFingerprint
+          && installedFingerprint === sourceFingerprint
+        ) {
+          return { installed: true };
+        }
+        if (missingRuntimeDeps.length > 0) {
+          logger.info(
+            `[plugin] Refreshing ${pluginLabel} plugin: runtime deps missing (${missingRuntimeDeps.join(', ')})`,
+          );
+        } else {
+          logger.info(
+            `[plugin] Refreshing ${pluginLabel} plugin: bundled content changed without version bump`,
+          );
+        }
       }
     }
   }
@@ -615,32 +849,15 @@ export function ensurePluginInstalled(
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        mkdirSync(fsPath(extensionsRoot), { recursive: true });
-        rmSync(fsPath(targetDir), { recursive: true, force: true });
-        cpSyncSafe(sourceDir, targetDir);
-        if (!existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
-          return { installed: false, warning: `Failed to install ${pluginLabel} plugin mirror (manifest missing).` };
-        }
-        const missingRuntimeDeps = ensurePluginRuntimeDependencies(targetDir, pluginLabel);
-        if (missingRuntimeDeps.length > 0) {
-          return {
-            installed: false,
-            warning: `Failed to install ${pluginLabel} plugin mirror (runtime dependencies missing: ${missingRuntimeDeps.join(', ')})`,
-          };
-        }
-        fixupPluginManifest(targetDir);
+        prepareAndActivatePlugin(targetDir, pluginLabel, (stagingDir) => {
+          cpSyncSafe(sourceDir, stagingDir);
+        });
         logger.info(`Installed ${pluginLabel} plugin from bundled mirror: ${sourceDir}`);
         return { installed: true };
       } catch (error) {
         const diagnostic = toErrorDiagnostic(error);
         attempts.push({ attempt, ...diagnostic });
-        if (attempt < maxAttempts) {
-          try {
-            rmSync(fsPath(targetDir), { recursive: true, force: true });
-          } catch {
-            // Ignore cleanup failures before retry.
-          }
-        }
+        if (attempt < maxAttempts) sleepSync(150 * attempt);
       }
     }
 
@@ -667,15 +884,31 @@ export function ensurePluginInstalled(
       if (existsSync(fsPath(join(npmPkgPath, 'openclaw.plugin.json')))) {
         const installedVersion = existsSync(fsPath(targetPkgJson)) ? readPluginVersion(targetPkgJson) : null;
         const sourceVersion = readPluginVersion(join(npmPkgPath, 'package.json'));
-        if (sourceVersion && (!installedVersion || sourceVersion !== installedVersion)) {
+        const installedFingerprint = existsSync(fsPath(targetManifest))
+          ? readPluginContentFingerprint(targetDir)
+          : null;
+        const sourceFingerprint = readPluginContentFingerprint(npmPkgPath);
+        const missingRuntimeDeps = existsSync(fsPath(targetManifest))
+          ? findMissingPluginRuntimeDependencies(targetDir)
+          : [];
+        const needsRefresh = !existsSync(fsPath(targetManifest))
+          || !sourceVersion
+          || !installedVersion
+          || sourceVersion !== installedVersion
+          || missingRuntimeDeps.length > 0
+          || !installedFingerprint
+          || !sourceFingerprint
+          || installedFingerprint !== sourceFingerprint;
+
+        if (needsRefresh) {
           logger.info(
             `[plugin] ${installedVersion ? 'Upgrading' : 'Installing'} ${pluginLabel} plugin` +
             `${installedVersion ? `: ${installedVersion} → ${sourceVersion}` : `: ${sourceVersion}`} (dev/node_modules)`,
           );
           try {
-            mkdirSync(fsPath(extensionsRoot), { recursive: true });
-            copyPluginFromNodeModules(npmPkgPath, targetDir, npmName);
-            fixupPluginManifest(targetDir);
+            prepareAndActivatePlugin(targetDir, pluginLabel, (stagingDir) => {
+              copyPluginFromNodeModules(npmPkgPath, stagingDir, npmName);
+            });
             if (existsSync(fsPath(join(targetDir, 'openclaw.plugin.json')))) {
               return { installed: true };
             }
@@ -693,8 +926,8 @@ export function ensurePluginInstalled(
               },
             );
           }
-        } else if (existsSync(fsPath(targetManifest))) {
-          return { installed: true }; // same version, already installed
+        } else {
+          return { installed: true };
         }
       }
     }

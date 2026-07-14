@@ -21,7 +21,8 @@
 
 const { cpSync, existsSync, readdirSync, rmSync, statSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename, relative } = require('path');
-const { ELECTRON_MAIN_RUNTIME_PACKAGES, LOCAL_OPENCLAW_PLUGIN_IDS } = require('./openclaw-bundle-config.mjs');
+const { execFileSync } = require('child_process');
+const { BUNDLED_OPENCLAW_PLUGINS, ELECTRON_MAIN_RUNTIME_PACKAGES, LOCAL_OPENCLAW_PLUGIN_IDS } = require('./openclaw-bundle-config.mjs');
 const { patchNsisExtractTemplate } = require('./patch-nsis-extract.mjs');
 const { patchNsisInstallSectionTemplate } = require('./patch-nsis-install-section.mjs');
 const { patchNsisUninstallTemplate } = require('./patch-nsis-uninstall.mjs');
@@ -62,6 +63,141 @@ function listPackageDeps(pkgJson) {
 function readInstalledPackageVersion(packageDir) {
   const pkg = readJsonSafe(join(packageDir, 'package.json'));
   return typeof pkg?.version === 'string' ? pkg.version.trim() : null;
+}
+
+function assertLocalPluginMetadata(pluginDir, expectedId) {
+  const packagePath = join(pluginDir, 'package.json');
+  const manifestPath = join(pluginDir, 'openclaw.plugin.json');
+  const pkg = readJsonSafe(packagePath);
+  const manifest = readJsonSafe(manifestPath);
+  if (!pkg) throw new Error(`[after-pack] Local plugin ${expectedId} has no valid package.json: ${packagePath}`);
+  if (!manifest) throw new Error(`[after-pack] Local plugin ${expectedId} has no valid openclaw.plugin.json: ${manifestPath}`);
+  if (manifest.id !== expectedId) {
+    throw new Error(`[after-pack] Local plugin directory/id mismatch: expected ${expectedId}, manifest has ${String(manifest.id)}`);
+  }
+  const expectedPackageNames = new Set([expectedId, `${expectedId}-plugin`]);
+  if (!expectedPackageNames.has(pkg.name)) {
+    throw new Error(`[after-pack] Local plugin ${expectedId} package name mismatch: ${String(pkg.name)}`);
+  }
+  if (!pkg.version || pkg.version !== manifest.version) {
+    throw new Error(
+      `[after-pack] Local plugin ${expectedId} version mismatch: package=${String(pkg.version)} manifest=${String(manifest.version)}`,
+    );
+  }
+  if (!pkg.main || pkg.main !== manifest.entry) {
+    throw new Error(
+      `[after-pack] Local plugin ${expectedId} entry mismatch: package.main=${String(pkg.main)} manifest.entry=${String(manifest.entry)}`,
+    );
+  }
+  if (!existsSync(join(pluginDir, manifest.entry))) {
+    throw new Error(`[after-pack] Local plugin ${expectedId} entry file is missing: ${String(manifest.entry)}`);
+  }
+  const declaredExtensions = pkg.openclaw?.extensions;
+  if (declaredExtensions !== undefined
+    && (!Array.isArray(declaredExtensions) || !declaredExtensions.includes(`./${manifest.entry}`))) {
+    throw new Error(`[after-pack] Local plugin ${expectedId} package.json declares an inconsistent OpenClaw entry`);
+  }
+  return { packageName: pkg.name, version: pkg.version, id: manifest.id, entry: manifest.entry };
+}
+
+function getDeclaredPluginEntries(pkg, manifest) {
+  return [...new Set([
+    manifest.entry,
+    pkg.main,
+    pkg.module,
+    ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+    ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+  ].filter((entry) => typeof entry === 'string' && entry.trim()))];
+}
+
+function assertBundledPluginMetadata(pluginDir, plugin) {
+  const pkg = readJsonSafe(join(pluginDir, 'package.json'));
+  const manifest = readJsonSafe(join(pluginDir, 'openclaw.plugin.json'));
+  if (!pkg || !manifest) {
+    throw new Error(`[after-pack] Bundled plugin ${plugin.pluginId} has invalid package or manifest JSON`);
+  }
+  if (pkg.name !== plugin.npmName) {
+    throw new Error(`[after-pack] Bundled plugin ${plugin.pluginId} package name mismatch: ${String(pkg.name)}`);
+  }
+  if (manifest.id !== plugin.manifestId) {
+    throw new Error(`[after-pack] Bundled plugin ${plugin.pluginId} manifest id mismatch: ${String(manifest.id)}`);
+  }
+  if (!pkg.version) throw new Error(`[after-pack] Bundled plugin ${plugin.pluginId} package version is missing`);
+  if (manifest.version !== undefined && manifest.version !== pkg.version) {
+    throw new Error(
+      `[after-pack] Bundled plugin ${plugin.pluginId} version mismatch: package=${String(pkg.version)} manifest=${String(manifest.version)}`,
+    );
+  }
+  const entries = getDeclaredPluginEntries(pkg, manifest);
+  if (entries.length === 0 || !entries.some((entry) => existsSync(join(pluginDir, entry)))) {
+    throw new Error(
+      `[after-pack] Bundled plugin ${plugin.pluginId} has no existing declared entrypoint: ${entries.join(', ') || 'none'}`,
+    );
+  }
+  const missingDependencies = listPackageDeps(pkg).filter((dependencyName) => (
+    !existsSync(join(pluginDir, 'node_modules', ...dependencyName.split('/'), 'package.json'))
+  ));
+  if (missingDependencies.length > 0) {
+    throw new Error(
+      `[after-pack] Bundled plugin ${plugin.pluginId} is missing runtime dependencies: ${missingDependencies.join(', ')}`,
+    );
+  }
+}
+
+function resolveSourceCommit(projectDir) {
+  try {
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (/^[0-9a-f]{40}$/i.test(commit)) return commit.toLowerCase();
+  } catch { /* handled below */ }
+  const fallback = String(process.env.UCLAW_BUILD_COMMIT || process.env.GITHUB_SHA || '').trim();
+  if (/^[0-9a-f]{40}$/i.test(fallback)) return fallback.toLowerCase();
+  throw new Error('[after-pack] Cannot resolve the source git commit for build identity.');
+}
+
+function resolveSourceTreeState(projectDir) {
+  try {
+    const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return status ? 'dirty' : 'clean';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function writeBuildIdentity(resourcesDir, context, platform, arch) {
+  const projectDir = context.packager.projectDir || join(__dirname, '..');
+  const gitCommit = resolveSourceCommit(projectDir);
+  const sourceTreeState = resolveSourceTreeState(projectDir);
+  const createdAt = new Date().toISOString();
+  const runId = process.env.GITHUB_RUN_ID
+    ? `github-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT || '1'}`
+    : `local-${createdAt.replace(/[^0-9]/g, '')}`;
+  const identity = {
+    schemaVersion: 2,
+    product: 'UClaw',
+    appVersion: context.packager.appInfo.version,
+    gitCommit,
+    gitRef: process.env.GITHUB_REF_NAME || null,
+    sourceTreeState,
+    buildId: `${gitCommit.slice(0, 12)}-${runId}`,
+    createdAt,
+    platform,
+    arch,
+    source: 'electron-builder-afterPack',
+  };
+  const outputPath = join(resourcesDir, 'uclaw-build.json');
+  writeFileSync(outputPath, `${JSON.stringify(identity, null, 2)}\n`, 'utf8');
+  console.log(`[after-pack] Build identity: ${identity.buildId} (${identity.appVersion}, ${platform}/${arch})`);
+  return identity;
 }
 
 // ── General cleanup ──────────────────────────────────────────────────────────
@@ -694,34 +830,28 @@ exports.default = async function afterPack(context) {
   //     - electron-builder silently skips extraResources entries whose source
   //       directory doesn't exist (build/openclaw-plugins/ may not be pre-generated)
   //     - node_modules/ is excluded by .gitignore so the deps copy must be manual
-  const BUNDLED_PLUGINS = [
-    { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
-    { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
-    { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
-    { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-    { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-    { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel' },
-  ];
-
   mkdirSync(pluginsDestRoot, { recursive: true });
-  for (const { npmName, pluginId } of BUNDLED_PLUGINS) {
+  for (const plugin of BUNDLED_OPENCLAW_PLUGINS) {
+    const { npmName, pluginId } = plugin;
     const pluginDestDir = join(pluginsDestRoot, pluginId);
     console.log(`[after-pack] Bundling plugin ${npmName} -> ${pluginDestDir}`);
     const ok = bundlePlugin(nodeModulesRoot, npmName, pluginDestDir);
-    if (ok) {
-      const pluginNM = join(pluginDestDir, 'node_modules');
-      cleanupUnnecessaryFiles(pluginDestDir);
-      if (existsSync(pluginNM)) {
-        const pluginJunkRemoved = cleanupKnownRuntimeJunk(pluginDestDir, platform, arch);
-        if (pluginJunkRemoved > 0) {
-          console.log(`[after-pack] ✅ ${pluginId}: removed ${pluginJunkRemoved} known runtime junk files/directories.`);
-        }
-        cleanupKoffi(pluginNM, platform, arch);
-        cleanupNativePlatformPackages(pluginNM, platform, arch);
-      }
-      // Fix hardcoded plugin ID mismatches in compiled JS
-      patchPluginIds(pluginDestDir, pluginId);
+    if (!ok) {
+      throw new Error(`[after-pack] Required bundled plugin is missing: ${npmName} (${pluginId})`);
     }
+    const pluginNM = join(pluginDestDir, 'node_modules');
+    cleanupUnnecessaryFiles(pluginDestDir);
+    if (existsSync(pluginNM)) {
+      const pluginJunkRemoved = cleanupKnownRuntimeJunk(pluginDestDir, platform, arch);
+      if (pluginJunkRemoved > 0) {
+        console.log(`[after-pack] ✅ ${pluginId}: removed ${pluginJunkRemoved} known runtime junk files/directories.`);
+      }
+      cleanupKoffi(pluginNM, platform, arch);
+      cleanupNativePlatformPackages(pluginNM, platform, arch);
+    }
+    // Fix hardcoded plugin ID mismatches in compiled JS.
+    patchPluginIds(pluginDestDir, pluginId);
+    assertBundledPluginMetadata(pluginDestDir, plugin);
   }
 
   for (const pluginId of LOCAL_OPENCLAW_PLUGIN_IDS) {
@@ -732,6 +862,7 @@ exports.default = async function afterPack(context) {
         `[after-pack] Missing bundled local plugin mirror: ${buildPluginDir}. Run \`pnpm run package\` before electron-builder.`,
       );
     }
+    assertLocalPluginMetadata(buildPluginDir, pluginId);
     console.log(`[after-pack] Copying local plugin ${pluginId} -> ${pluginDestDir}`);
     rmSync(pluginDestDir, { recursive: true, force: true });
     cpSync(buildPluginDir, pluginDestDir, { recursive: true, dereference: true });
@@ -742,6 +873,7 @@ exports.default = async function afterPack(context) {
       cleanupNativePlatformPackages(pluginNM, platform, arch);
     }
     patchPluginIds(pluginDestDir, pluginId);
+    assertLocalPluginMetadata(pluginDestDir, pluginId);
   }
 
   // 1.2 Copy built-in extension node_modules that electron-builder skipped.
@@ -976,13 +1108,17 @@ exports.default = async function afterPack(context) {
   if (platform === 'win32') {
     if (process.env.CLAWX_SKIP_NSIS_PATCH === '1') {
       console.log('[after-pack] Skipping NSIS install template patches for this Windows target.');
-      return;
-    }
-    const extractOk = patchNsisExtractTemplate();
-    const installSectionOk = patchNsisInstallSectionTemplate();
-    const uninstallOk = patchNsisUninstallTemplate();
-    if (extractOk && installSectionOk && uninstallOk) {
-      console.log('[after-pack] ⚡ NSIS install templates ready (overwrite upgrade).');
+    } else {
+      const extractOk = patchNsisExtractTemplate();
+      const installSectionOk = patchNsisInstallSectionTemplate();
+      const uninstallOk = patchNsisUninstallTemplate();
+      if (extractOk && installSectionOk && uninstallOk) {
+        console.log('[after-pack] ⚡ NSIS install templates ready (overwrite upgrade).');
+      }
     }
   }
+
+  // Write this only after every packaging and validation step above has completed.
+  // Its presence is the completion marker consumed by the USB finalizer.
+  writeBuildIdentity(resourcesDir, context, platform, arch);
 };

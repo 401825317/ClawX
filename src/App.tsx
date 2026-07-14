@@ -108,6 +108,7 @@ function App() {
   const theme = useSettingsStore((state) => state.theme);
   const language = useSettingsStore((state) => state.language);
   const setupComplete = useSettingsStore((state) => state.setupComplete);
+  const settingsInitialized = useSettingsStore((state) => state.initialized);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const initGateway = useGatewayStore((state) => state.init);
   const initUpdate = useUpdateStore((state) => state.init);
@@ -143,13 +144,6 @@ function App() {
   useEffect(() => {
     void initProviders();
   }, [initProviders]);
-
-  // Redirect to setup wizard if not complete
-  useEffect(() => {
-    if (!setupComplete && !skipSetupForE2E && !location.pathname.startsWith('/setup')) {
-      navigate('/setup');
-    }
-  }, [setupComplete, skipSetupForE2E, location.pathname, navigate]);
 
   // Listen for navigation events from main process
   useEffect(() => {
@@ -197,6 +191,14 @@ function App() {
   }, []);
 
   const extraRoutes = rendererExtensionRegistry.getExtraRoutes();
+
+  if (!settingsInitialized) {
+    return <div data-testid="app-initializing" className="h-screen bg-background" />;
+  }
+
+  if (!setupComplete && !skipSetupForE2E && !location.pathname.startsWith('/setup')) {
+    return <Navigate to="/setup" replace />;
+  }
 
   return (
     <ErrorBoundary>
