@@ -89,12 +89,19 @@ jobs:
 
       - name: Upload Windows USB ZIP
         if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: UClaw-${{ env.APP_VERSION }}-win-x64-usb
-          path: |
-            release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
-            release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.json
+          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows USB metadata
+        if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.json
+          archive: false
           if-no-files-found: error
           retention-days: 7
 
