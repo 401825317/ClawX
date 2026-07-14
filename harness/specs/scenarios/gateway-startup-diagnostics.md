@@ -6,6 +6,9 @@ ownedPaths:
   - electron/gateway/**
   - electron/utils/openclaw-auth.ts
   - electron/utils/paths.ts
+  - scripts/after-pack.cjs
+  - scripts/build-usb-release.mjs
+  - scripts/windows-support/**
   - src/stores/gateway.ts
   - src/pages/Dreams/**
 requiredProfiles:
@@ -21,6 +24,8 @@ requiredRules:
 ---
 
 Use this spec when ClawX shows the Gateway as starting/running but UI data does not refresh, Dreams cannot load, or Gateway RPC calls time out after a restart.
+
+For a distributed Windows USB build, start with the root-level `UClaw-SelfCheck.cmd`. It must use the bundled `resources/bin/node.exe` and must not require system Node.js, Python, Git, PowerShell execution-policy changes, or administrator privileges. The check separates package defects from host-machine state by validating packaged files and plugin dependencies before it probes writable directories, processes, ports, zz-cn connectivity, OpenClaw Doctor, and recent error signatures.
 
 ClawX should prefer OpenClaw-native signals over stderr string matching:
 
@@ -253,6 +258,11 @@ pnpm exec openclaw gateway call status >/tmp/clawx-status.json
 
 ## Acceptance Criteria
 
+- A Windows USB ZIP contains one standalone `UClaw-SelfCheck.cmd` at its root; its embedded payload is extracted with the bundled Node runtime and deleted after execution.
+- USB packaging fails before ZIP creation when the bundled Node, uv, agent-browser, OpenClaw runtime, app archive, or required local plugin TypeBox dependencies are missing.
+- The self-check produces a redacted report under `UClawData/diagnostics/`, or under the host temporary directory when the USB data directory is not writable.
+- The report does not read or print credential-file contents, raw logs, API keys, passwords, bearer tokens, cookies, or signed URLs.
+- Multiple `UClaw.exe` processes are reported as Electron's normal process model, not as an automatic duplicate-instance failure.
 - Gateway starts without restart loops.
 - `configSyncMs` stays small relative to total startup time.
 - `system-presence` succeeds after startup settles.

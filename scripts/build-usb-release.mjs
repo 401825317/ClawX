@@ -3,8 +3,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import JSZip from 'jszip';
+import { buildWindowsSelfCheck } from './build-windows-self-check.mjs';
+import { LOCAL_OPENCLAW_PLUGIN_IDS } from './openclaw-bundle-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -15,6 +18,10 @@ const platform = process.argv.includes('--mac') ? 'mac'
     : process.platform === 'darwin' ? 'mac' : 'win';
 const archArg = readArg('--arch');
 const arch = archArg || process.arch;
+const WINDOWS_SELF_CHECK_FILE = 'UClaw-SelfCheck.cmd';
+const fileName = `UClaw-${packageJson.version}-${platform}-${arch}-usb.zip`;
+const outputPath = path.join(releaseDir, fileName);
+const metadataPath = path.join(releaseDir, fileName.replace(/\.zip$/i, '.json'));
 
 function readArg(name) {
   const prefixed = `${name}=`;
@@ -57,6 +64,61 @@ function ensurePortableMarkers(portableRoot) {
   fs.mkdirSync(path.join(dataDir, 'updates'), { recursive: true });
   fs.writeFileSync(path.join(portableRoot, 'portable.flag'), 'UClaw USB portable mode\n', 'utf-8');
   fs.writeFileSync(path.join(dataDir, '.keep'), '', 'utf-8');
+}
+
+function cleanExistingArtifacts() {
+  fs.rmSync(outputPath, { force: true });
+  fs.rmSync(metadataPath, { force: true });
+}
+
+function installWindowsSelfCheck(portableRoot) {
+  buildWindowsSelfCheck(path.join(portableRoot, WINDOWS_SELF_CHECK_FILE));
+}
+
+function assertWindowsPortableContents(portableRoot) {
+  const requiredFiles = [
+    'UClaw.exe',
+    'portable.flag',
+    'resources/app.asar',
+    'resources/bin/node.exe',
+    'resources/bin/uv.exe',
+    'resources/bin/agent-browser.exe',
+    'resources/cli/openclaw.cmd',
+    'resources/openclaw/openclaw.mjs',
+    WINDOWS_SELF_CHECK_FILE,
+  ];
+  const typeboxPlugins = new Set();
+  for (const pluginId of LOCAL_OPENCLAW_PLUGIN_IDS) {
+    const packageJsonPath = path.join(portableRoot, 'resources', 'openclaw-plugins', pluginId, 'package.json');
+    requiredFiles.push(
+      `resources/openclaw-plugins/${pluginId}/index.mjs`,
+      `resources/openclaw-plugins/${pluginId}/openclaw.plugin.json`,
+      `resources/openclaw-plugins/${pluginId}/package.json`,
+    );
+    if (fs.existsSync(packageJsonPath)) {
+      const pluginPackage = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+      for (const dependencyName of Object.keys(pluginPackage.dependencies ?? {})) {
+        requiredFiles.push(
+          `resources/openclaw-plugins/${pluginId}/node_modules/${dependencyName}/package.json`,
+        );
+      }
+      if (pluginPackage.dependencies?.['@sinclair/typebox']) typeboxPlugins.add(pluginId);
+    }
+  }
+
+  const missing = requiredFiles.filter((relativePath) => !fs.existsSync(path.join(portableRoot, relativePath)));
+  if (missing.length > 0) {
+    throw new Error(`Windows USB package is incomplete. Missing: ${missing.join(', ')}`);
+  }
+
+  for (const pluginId of typeboxPlugins) {
+    const packageJsonPath = path.join(portableRoot, 'resources', 'openclaw-plugins', pluginId, 'package.json');
+    const requireFromPlugin = createRequire(packageJsonPath);
+    const typebox = requireFromPlugin('@sinclair/typebox');
+    if (typeof typebox?.Type?.Object !== 'function') {
+      throw new Error(`Windows USB package plugin ${pluginId} cannot load @sinclair/typebox Type.Object.`);
+    }
+  }
 }
 
 function shouldSkipEntry(relativePath) {
@@ -116,9 +178,14 @@ function writeMetadata(fileName, buffer) {
     sha512: sha512(buffer),
     releaseDate: new Date().toISOString(),
   };
-  const metadataPath = path.join(releaseDir, fileName.replace(/\.zip$/i, '.json'));
   fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
   return { metadata, metadataPath };
+}
+
+if (process.argv.includes('--clean-only')) {
+  cleanExistingArtifacts();
+  console.log(`[build-usb-release] Removed stale ${path.relative(ROOT, outputPath)} and metadata.`);
+  process.exit(0);
 }
 
 if (!fs.existsSync(releaseDir)) {
@@ -127,10 +194,13 @@ if (!fs.existsSync(releaseDir)) {
 }
 
 try {
+  cleanExistingArtifacts();
   const portableRoot = resolvePortableRoot();
   ensurePortableMarkers(portableRoot);
-  const fileName = `UClaw-${packageJson.version}-${platform}-${arch}-usb.zip`;
-  const outputPath = path.join(releaseDir, fileName);
+  if (platform === 'win') {
+    installWindowsSelfCheck(portableRoot);
+    assertWindowsPortableContents(portableRoot);
+  }
   const buffer = await writeZip(portableRoot, outputPath);
   const { metadata, metadataPath } = writeMetadata(fileName, buffer);
 

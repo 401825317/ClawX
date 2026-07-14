@@ -21,6 +21,7 @@ import 'zx/globals';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { LOCAL_OPENCLAW_PLUGIN_IDS } from './openclaw-bundle-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -47,14 +48,10 @@ const PLUGINS = [
   { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel' },
 ];
 
-const LOCAL_PLUGINS = [
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'), pluginId: 'clawx-openai-image' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-artifact-guard'), pluginId: 'uclaw-artifact-guard' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-local-artifacts'), pluginId: 'uclaw-local-artifacts' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-desktop-control'), pluginId: 'uclaw-desktop-control' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-blender'), pluginId: 'uclaw-blender' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-task-bridge'), pluginId: 'uclaw-task-bridge' },
-];
+const LOCAL_PLUGINS = LOCAL_OPENCLAW_PLUGIN_IDS.map((pluginId) => ({
+  sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', pluginId),
+  pluginId,
+}));
 
 function getVirtualStoreNodeModules(realPkgPath) {
   let dir = realPkgPath;

@@ -21,7 +21,7 @@
 
 const { cpSync, existsSync, readdirSync, rmSync, statSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename, relative } = require('path');
-const { ELECTRON_MAIN_RUNTIME_PACKAGES } = require('./openclaw-bundle-config.mjs');
+const { ELECTRON_MAIN_RUNTIME_PACKAGES, LOCAL_OPENCLAW_PLUGIN_IDS } = require('./openclaw-bundle-config.mjs');
 const { patchNsisExtractTemplate } = require('./patch-nsis-extract.mjs');
 const { patchNsisInstallSectionTemplate } = require('./patch-nsis-install-section.mjs');
 const { patchNsisUninstallTemplate } = require('./patch-nsis-uninstall.mjs');
@@ -724,13 +724,7 @@ exports.default = async function afterPack(context) {
     }
   }
 
-  const LOCAL_PLUGIN_IDS = [
-    'clawx-openai-image',
-    'uclaw-artifact-guard',
-    'uclaw-local-artifacts',
-  ];
-
-  for (const pluginId of LOCAL_PLUGIN_IDS) {
+  for (const pluginId of LOCAL_OPENCLAW_PLUGIN_IDS) {
     const buildPluginDir = join(__dirname, '..', 'build', 'openclaw-plugins', pluginId);
     const pluginDestDir = join(pluginsDestRoot, pluginId);
     if (!existsSync(buildPluginDir)) {

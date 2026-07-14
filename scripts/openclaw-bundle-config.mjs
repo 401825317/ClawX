@@ -36,3 +36,13 @@ export const ELECTRON_MAIN_RUNTIME_PACKAGES = [
   '@whiskeysockets/baileys',
   'qrcode-terminal',
 ];
+
+/** Local UClaw plugins that must be mirrored and copied into every packaged runtime. */
+export const LOCAL_OPENCLAW_PLUGIN_IDS = [
+  'clawx-openai-image',
+  'uclaw-artifact-guard',
+  'uclaw-local-artifacts',
+  'uclaw-desktop-control',
+  'uclaw-blender',
+  'uclaw-task-bridge',
+];

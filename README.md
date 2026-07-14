@@ -151,6 +151,8 @@ ClawX can automatically check for new versions on startup. When an update is ava
 ### 💾 High-Performance Portable Mode
 Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in state, OpenClaw config, agents, sessions, skills, channel credentials, and update packages in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable runtime data such as Python, uv, temp files, browser cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth.
 
+The Windows USB ZIP includes `UClaw-SelfCheck.cmd` at its root. Users can double-click it without installing Node.js, Python, or Git to verify the bundled runtime, writable directories, plugin dependencies, local ports, zz-cn connectivity, and OpenClaw Doctor status. A redacted support report is saved under `UClawData/diagnostics/`, with a local temporary-directory fallback when the USB drive is not writable.
+
 ---
 
 ## Getting Started

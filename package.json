@@ -31,6 +31,10 @@
   "author": "UClaw Team",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=24 <26",
+    "pnpm": "10.33.4"
+  },
   "scripts": {
     "postinstall": "node scripts/patch-browser-hint.mjs",
     "init": "pnpm install && pnpm run uv:download && pnpm run agent-browser:download",
@@ -80,7 +84,7 @@
     "package:mac:usb": "pnpm run prep:mac-binaries && pnpm run updater:build:mac && pnpm run package && node scripts/run-electron-builder.mjs --mac dir --publish never && node scripts/build-usb-release.mjs --mac",
     "package:win": "pnpm run prep:win-binaries && pnpm run package && node scripts/patch-nsis-win.mjs && node scripts/run-electron-builder.mjs --win --publish never",
     "package:win:portable": "pnpm run prep:win-binaries && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win portable --publish never",
-    "package:win:usb": "pnpm run prep:win-binaries && pnpm run updater:build:win && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win dir --publish never && node scripts/build-usb-release.mjs --win --arch=x64",
+    "package:win:usb": "node scripts/build-usb-release.mjs --clean-only --win --arch=x64 && pnpm run prep:win-binaries && pnpm run updater:build:win && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win dir --x64 --publish never && node scripts/build-usb-release.mjs --win --arch=x64",
     "package:linux": "pnpm run package && node scripts/run-electron-builder.mjs --linux --publish never",
     "release": "pnpm run uv:download && pnpm run agent-browser:download && pnpm run package && node scripts/run-electron-builder.mjs --publish always",
     "preversion": "node scripts/pre-version-fetch-tags.mjs",
