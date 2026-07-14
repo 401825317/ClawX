@@ -19,6 +19,7 @@ const NATIVE_MEDIA_PROMPT_MAX_CHARACTERS = 4_096;
 const HIDDEN_PROGRESS_TOOLS = new Set([
   'tool_describe',
   'tool_search',
+  'update_plan',
   'uclaw_get_runtime_capabilities',
   'uclaw_get_task_bridge_capabilities',
   'uclaw_get_host_task',
@@ -2039,9 +2040,6 @@ function buildNativeToolCommentary(toolName, command) {
     if (/\b(?:pgrep|ps)\b/iu.test(command)) {
       return '我再确认应用是否仍在运行。';
     }
-    if (/\b(?:cat|sed|awk|jq|plutil|defaults)\b/iu.test(command)) {
-      return '我先查看相关信息。';
-    }
     return undefined;
   }
   if (label === 'web_fetch' || label === 'browser') return '我先继续查看相关页面和内容。';
@@ -2123,12 +2121,19 @@ function canonicalProgressToolCallId(event, ctx) {
   const nested = /^tool_search_code:(.+):([^:]+):\d+$/u.exec(toolCallId);
   if (!nested) return toolCallId;
   pruneProgressWrappers();
-  const wrapper = progressWrappersByParentToolCallId.get(nested[1]);
-  if (!wrapper) return toolCallId;
+  const exactWrapper = progressWrappersByParentToolCallId.get(nested[1]);
+  const resolvedWrapper = exactWrapper
+    ? { parentToolCallId: nested[1], wrapper: exactWrapper }
+    : Array.from(progressWrappersByParentToolCallId.entries())
+        .reverse()
+        .map(([parentToolCallId, wrapper]) => ({ parentToolCallId, wrapper }))
+        .find(({ parentToolCallId }) => parentToolCallId.replaceAll('|', '_') === nested[1]);
+  if (!resolvedWrapper) return toolCallId;
+  const { parentToolCallId, wrapper } = resolvedWrapper;
   const runId = getRunId(event, ctx);
   if (wrapper.runId && runId && wrapper.runId !== runId) return toolCallId;
   const childToolName = String(nested[2] ?? '').trim().toLowerCase();
-  return childToolName === wrapper.targetToolName ? nested[1] : toolCallId;
+  return childToolName === wrapper.targetToolName ? parentToolCallId : toolCallId;
 }
 
 function buildNativeToolProgressId(event, ctx, suffix = '') {

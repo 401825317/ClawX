@@ -51,6 +51,7 @@
     },
     "runtimeProgress": {
         "title": "Collaboration",
+        "processingRequest": "Processing your request…",
         "commandDetails": "View command details",
         "executing": "Running",
         "blocked": "Needs attention",
@@ -69,9 +70,9 @@
         "toolPartial": "Partially completed: {{tool}}",
         "toolWaitingApproval": "Waiting for approval: {{tool}}",
         "toolLabels": {
-            "command": "Command",
-            "exec": "Command",
-            "exec_command": "Command",
+            "command": "Task step",
+            "exec": "Task step",
+            "exec_command": "Task step",
             "web_search": "Web search",
             "web_fetch": "Page access",
             "browser": "Browser action",

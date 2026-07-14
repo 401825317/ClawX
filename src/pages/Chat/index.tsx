@@ -1892,7 +1892,7 @@ export function Chat() {
                   )}
 
                   {/* Typing indicator when sending but no stream content yet */}
-                  {inputRunActive && !pendingFinal && !hasAnyStreamContent && !hasVisibleActiveExecutionGraph && !pendingImageGeneration && !pendingVideoGeneration && (
+                  {inputRunActive && !pendingFinal && !hasAnyStreamContent && !hasVisibleActiveRunSurface && !pendingImageGeneration && !pendingVideoGeneration && (
                     <TypingIndicator />
                   )}
                 </>
@@ -2128,6 +2128,7 @@ function WelcomeScreen() {
 // ── Typing Indicator ────────────────────────────────────────────
 
 function TypingIndicator() {
+  const { t } = useTranslation('chat');
   return (
     <div className="flex gap-3" data-testid="chat-typing-indicator">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full mt-1 bg-black/5 dark:bg-white/5 text-foreground">
@@ -2136,7 +2137,7 @@ function TypingIndicator() {
       <div className="bg-black/5 dark:bg-white/5 text-foreground rounded-2xl px-4 py-3">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-          <span>我先看下这条请求。</span>
+          <span>{t('runtimeProgress.processingRequest')}</span>
         </div>
       </div>
     </div>

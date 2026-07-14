@@ -51,6 +51,7 @@
     },
     "runtimeProgress": {
         "title": "共同作業の進捗",
+        "processingRequest": "リクエストを処理しています…",
         "commandDetails": "コマンドの詳細を表示",
         "executing": "実行中",
         "blocked": "対応が必要です",
@@ -69,9 +70,9 @@
         "toolPartial": "一部完了: {{tool}}",
         "toolWaitingApproval": "承認待ち: {{tool}}",
         "toolLabels": {
-            "command": "コマンド",
-            "exec": "コマンド",
-            "exec_command": "コマンド",
+            "command": "実行ステップ",
+            "exec": "実行ステップ",
+            "exec_command": "実行ステップ",
             "web_search": "ウェブ検索",
             "web_fetch": "ページ閲覧",
             "browser": "ブラウザー操作",
