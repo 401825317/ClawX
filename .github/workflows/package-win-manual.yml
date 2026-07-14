@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/uclaw-agent-runtime-contract
+      - feature/uclaw-general-agent-orchestration
     paths:
       - .github/workflows/package-win-manual.yml
   workflow_dispatch:
