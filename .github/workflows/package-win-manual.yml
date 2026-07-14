@@ -72,8 +72,10 @@ jobs:
         run: pnpm install
 
       - name: Read app version
-        shell: bash
-        run: echo "APP_VERSION=$(node -p \"require('./package.json').version\")" >> "$GITHUB_ENV"
+        shell: pwsh
+        run: |
+          $appVersion = node -p "require('./package.json').version"
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build Windows USB ZIP
         if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' }}
