@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.18.0'
           cache: 'pnpm'
 
       - name: Prefer HTTPS for public GitHub git dependencies
@@ -71,7 +71,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '24.18.0'
           cache: 'pnpm'
 
       - name: Prefer HTTPS for public GitHub git dependencies
