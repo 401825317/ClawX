@@ -51,6 +51,7 @@
     },
     "runtimeProgress": {
         "title": "协作过程",
+        "processingRequest": "正在处理请求…",
         "commandDetails": "查看命令详情",
         "executing": "正在执行",
         "blocked": "需要处理",
@@ -69,9 +70,9 @@
         "toolPartial": "部分完成：{{tool}}",
         "toolWaitingApproval": "等待批准：{{tool}}",
         "toolLabels": {
-            "command": "命令",
-            "exec": "命令",
-            "exec_command": "命令",
+            "command": "执行步骤",
+            "exec": "执行步骤",
+            "exec_command": "执行步骤",
             "web_search": "网页搜索",
             "web_fetch": "页面访问",
             "browser": "浏览器操作",

@@ -32,6 +32,19 @@ __test.emitToolResultProgress(api, {
 assert.equal(progressEntries().length, 0);
 
 __test.emitToolCallProgress(api, {
+  toolCallId: 'update-plan',
+  toolName: 'update_plan',
+  params: { plan: [{ step: 'Build the app', status: 'in_progress' }] },
+}, ctx);
+__test.emitToolResultProgress(api, {
+  toolCallId: 'update-plan',
+  toolName: 'update_plan',
+  result: { message: 'Plan updated' },
+}, ctx);
+
+assert.equal(progressEntries().length, 0);
+
+__test.emitToolCallProgress(api, {
   toolCallId: 'search-official-data',
   toolName: 'tool_call',
   params: {
@@ -122,6 +135,28 @@ for (const toolCallId of [
   }, ctx);
 }
 
+const sanitizedDirectoryImageParentId = 'call-directory-image|fc_4f13f53d';
+const sanitizedDirectoryImageNestedId = `tool_search_code:${sanitizedDirectoryImageParentId.replaceAll('|', '_')}:image_generate:2`;
+for (const toolCallId of [sanitizedDirectoryImageParentId, sanitizedDirectoryImageNestedId]) {
+  __test.emitToolCallProgress(api, {
+    toolCallId,
+    toolName: toolCallId === sanitizedDirectoryImageParentId ? 'tool_call' : 'image_generate',
+    params: {
+      id: 'image_generate',
+      args: { prompt: '生成一张餐饮宣传图', size: '1536x1024' },
+    },
+  }, ctx);
+  __test.emitToolResultProgress(api, {
+    toolCallId,
+    toolName: toolCallId === sanitizedDirectoryImageParentId ? 'tool_call' : 'image_generate',
+    params: { id: 'image_generate' },
+    result: {
+      tool: { name: 'image_generate', label: 'Image Generation' },
+      result: { details: { async: true, status: 'started', taskId: 'image-task-native-sanitized' } },
+    },
+  }, ctx);
+}
+
 const codeModeParentId = 'call-code-mode';
 __test.emitToolCallProgress(api, {
   toolCallId: codeModeParentId,
@@ -179,6 +214,11 @@ const directoryImageEntries = entries.filter((entry) => (
 ));
 assert.equal(new Set(directoryImageEntries.map((entry) => entry.id)).size, 1);
 assert.equal(directoryImageEntries.every((entry) => entry.toolCallId === directoryImageParentId), true);
+const sanitizedDirectoryImageEntries = entries.filter((entry) => (
+  entry.toolName === 'image_generate' && entry.taskId === 'image-task-native-sanitized'
+));
+assert.equal(new Set(sanitizedDirectoryImageEntries.map((entry) => entry.id)).size, 1);
+assert.equal(sanitizedDirectoryImageEntries.every((entry) => entry.toolCallId === sanitizedDirectoryImageParentId), true);
 const codeModeEntries = entries.filter((entry) => entry.taskId?.startsWith('code-image-task-'));
 assert.equal(new Set(codeModeEntries.map((entry) => entry.id)).size, 2);
 assert.deepEqual(codeModeEntries.map((entry) => entry.toolCallId), [

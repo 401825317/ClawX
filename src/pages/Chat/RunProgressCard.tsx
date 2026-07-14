@@ -20,6 +20,7 @@ type RunProgressEntry =
       command?: string;
       status: TaskStep['status'];
       identity?: string;
+      aggregateKey?: string;
     }
   | {
       id: string;
@@ -49,6 +50,7 @@ const MEANINGLESS_ACTION_TEXTS = new Set([
   'выполнено',
   'шаг инструмента завершён',
 ]);
+const AGGREGATED_EXECUTION_TOOL_NAMES = new Set(['command', 'exec', 'exec_command']);
 
 function normalizeText(value: string | undefined | null): string | undefined {
   const trimmed = value?.trim();
@@ -221,6 +223,9 @@ function buildRunProgressEntries(
           ?? entry.stepId
           ?? entry.taskId
           ?? undefined,
+        aggregateKey: AGGREGATED_EXECUTION_TOOL_NAMES.has(canonicalToolName(entry.toolName) ?? '')
+          ? 'execution-step'
+          : undefined,
       };
     });
     const normalizedLiveText = normalizeText(liveText);
@@ -271,6 +276,7 @@ function buildRunProgressEntries(
 function dedupeProgressEntries(entries: RunProgressEntry[]): RunProgressEntry[] {
   const result: RunProgressEntry[] = [];
   const actionIndexes = new Map<string, number>();
+  const aggregateIndexes = new Map<string, number>();
 
   for (const entry of entries) {
     if (!normalizeText(entry.text)) continue;
@@ -279,6 +285,17 @@ function dedupeProgressEntries(entries: RunProgressEntry[]): RunProgressEntry[] 
       if (previous?.kind === entry.kind && normalizeText(previous.text) === normalizeText(entry.text)) continue;
       result.push(entry);
       continue;
+    }
+
+    const aggregateKey = normalizeText(entry.aggregateKey);
+    if (aggregateKey) {
+      const semanticKey = `${aggregateKey}:${entry.status}:${normalizeText(entry.text) ?? ''}`;
+      const aggregateIndex = aggregateIndexes.get(semanticKey);
+      if (aggregateIndex != null) {
+        result[aggregateIndex] = entry;
+        continue;
+      }
+      aggregateIndexes.set(semanticKey, result.length);
     }
 
     const identity = normalizeText(entry.identity);
@@ -341,8 +358,7 @@ function problemTextClass(status: TaskStep['status']): string {
 export function RunProgressCard({ summary, status, steps, progressEntries, liveText }: RunProgressCardProps) {
   const { t } = useTranslation('chat');
   const entries = buildRunProgressEntries(steps, progressEntries, liveText, t);
-  const live = status === 'running';
-  const [expanded, setExpanded] = useState(live);
+  const [expanded, setExpanded] = useState(false);
   if (entries.length === 0) return null;
 
   return (
