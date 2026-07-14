@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import dns from 'node:dns/promises';
 
-const SELF_CHECK_VERSION = '2';
+const SELF_CHECK_VERSION = '3';
 const args = process.argv.slice(2);
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRoot = path.dirname(scriptPath);
@@ -199,6 +199,20 @@ async function checkPlugin(pluginId, requiresTypebox = true) {
     record('PASS', `插件 ${pluginId}`, '@sinclair/typebox 已实际加载，Type.Object 可用');
   } catch (error) {
     record('FAIL', `插件 ${pluginId}`, `@sinclair/typebox 不可解析，USB 包不完整：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function checkOpenClawSharp() {
+  const packageJsonPath = path.join(rootDir, 'resources', 'openclaw', 'package.json');
+  try {
+    const requireFromOpenClaw = createRequire(packageJsonPath);
+    const sharp = requireFromOpenClaw('sharp');
+    if (typeof sharp !== 'function' || !sharp.versions?.sharp || !sharp.versions?.vips) {
+      throw new Error('sharp 或 libvips 版本信息不可用');
+    }
+    record('PASS', 'OpenClaw sharp', `sharp ${sharp.versions.sharp} / libvips ${sharp.versions.vips} 已实际加载`);
+  } catch (error) {
+    record('FAIL', 'OpenClaw sharp', `win32-x64 原生运行时不可用，USB 包不完整：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -533,6 +547,7 @@ async function main() {
   await checkPlugin('uclaw-blender');
   await checkPlugin('uclaw-task-bridge');
   await checkPlugin('uclaw-artifact-guard', false);
+  checkOpenClawSharp();
 
   const nodeExe = path.join(rootDir, 'resources', 'bin', 'node.exe');
   const uvExe = path.join(rootDir, 'resources', 'bin', 'uv.exe');

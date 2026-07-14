@@ -76,6 +76,10 @@ function installWindowsSelfCheck(portableRoot) {
 }
 
 function assertWindowsPortableContents(portableRoot) {
+  if (process.platform !== 'win32') {
+    throw new Error('Windows USB packages must be built on a Windows host. Use the Package Windows (Manual) GitHub Actions workflow.');
+  }
+
   const requiredFiles = [
     'UClaw.exe',
     'portable.flag',
@@ -85,6 +89,9 @@ function assertWindowsPortableContents(portableRoot) {
     'resources/bin/agent-browser.exe',
     'resources/cli/openclaw.cmd',
     'resources/openclaw/openclaw.mjs',
+    'resources/openclaw/package.json',
+    'resources/openclaw/node_modules/sharp/package.json',
+    'resources/openclaw/node_modules/@img/sharp-win32-x64/package.json',
     WINDOWS_SELF_CHECK_FILE,
   ];
   const typeboxPlugins = new Set();
@@ -118,6 +125,13 @@ function assertWindowsPortableContents(portableRoot) {
     if (typeof typebox?.Type?.Object !== 'function') {
       throw new Error(`Windows USB package plugin ${pluginId} cannot load @sinclair/typebox Type.Object.`);
     }
+  }
+
+  const openClawPackageJsonPath = path.join(portableRoot, 'resources', 'openclaw', 'package.json');
+  const requireFromOpenClaw = createRequire(openClawPackageJsonPath);
+  const sharp = requireFromOpenClaw('sharp');
+  if (typeof sharp !== 'function' || !sharp.versions?.sharp || !sharp.versions?.vips) {
+    throw new Error('Windows USB package cannot load the sharp win32-x64 runtime.');
   }
 }
 
