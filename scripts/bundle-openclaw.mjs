@@ -20,6 +20,8 @@ import 'zx/globals';
 import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { patchOpenClawBrowserLifecycleRuntime } from './openclaw-browser-lifecycle-patch.mjs';
+import { patchOpenClawCronRuntimePolicyRuntime } from './openclaw-cron-runtime-policy-patch.mjs';
 import { cleanupOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
@@ -1071,6 +1073,25 @@ function patchBundledRuntime(outputDir) {
     if (browserPatch.patchedFiles > 0) {
       echo`   🩹 Patched ${browserPatch.patchedFiles} browser runtime file(s)`;
     }
+  }
+
+  // Do not relaunch managed Chrome after a short CDP probe misses during
+  // startup. A persistent port conflict is surfaced once and cooled down.
+  const browserLifecyclePatch = patchOpenClawBrowserLifecycleRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (browserLifecyclePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${browserLifecyclePatch.patchedFiles} browser lifecycle runtime file(s)`;
+  }
+
+  // --- Cron runtime policy patch ---
+  // Model-created cron jobs may not silently impose a short task deadline;
+  // explicit UI/API job settings bypass this model-tool-only safeguard.
+  const cronRuntimePolicyPatch = patchOpenClawCronRuntimePolicyRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (cronRuntimePolicyPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${cronRuntimePolicyPatch.patchedFiles} cron runtime policy file(s)`;
   }
 
   // --- Local action finalization cleanup ---

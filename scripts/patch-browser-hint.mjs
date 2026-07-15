@@ -7,6 +7,8 @@
  */
 
 import { patchInstalledOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
+import { patchInstalledOpenClawBrowserLifecycleRuntime } from './openclaw-browser-lifecycle-patch.mjs';
+import { patchInstalledOpenClawCronRuntimePolicy } from './openclaw-cron-runtime-policy-patch.mjs';
 import { cleanupInstalledOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
 import { patchInstalledOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
@@ -36,6 +38,8 @@ try {
   if (ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH) {
     patchInstalledOpenClawBrowserRuntime();
   }
+  patchInstalledOpenClawBrowserLifecycleRuntime();
+  patchInstalledOpenClawCronRuntimePolicy();
   patchInstalledOpenClawFinalizeLocalActionRuntime();
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawCompactionSessionStateRuntime();

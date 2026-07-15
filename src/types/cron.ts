@@ -32,6 +32,9 @@ export interface CronJobLastRun {
   success: boolean;
   error?: string;
   duration?: number;
+  delivered?: boolean;
+  deliveryStatus?: string;
+  deliveryError?: string;
 }
 
 /**
@@ -59,6 +62,8 @@ export interface CronJob {
   lastRun?: CronJobLastRun;
   nextRun?: string;
   agentId: string;
+  /** Explicit wall-clock deadline for one cron run. Omitted means Gateway default. */
+  timeoutSeconds?: number;
 }
 
 /**

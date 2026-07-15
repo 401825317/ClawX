@@ -30,6 +30,24 @@ const cronJobs = [
     updatedAt: '2026-04-30T03:00:00.000Z',
     agentId: 'main',
   },
+  {
+    id: 'job-delivery-failure',
+    name: '交付失败的任务',
+    message: '生成并发送日报',
+    schedule: { kind: 'cron', expr: '0 9 * * *' },
+    enabled: true,
+    createdAt: '2026-04-30T03:00:00.000Z',
+    updatedAt: '2026-04-30T03:00:00.000Z',
+    agentId: 'main',
+    delivery: { mode: 'announce', channel: 'wecom', to: 'customer' },
+    lastRun: {
+      time: '2026-04-30T03:00:00.000Z',
+      success: true,
+      delivered: false,
+      deliveryStatus: 'not-delivered',
+      deliveryError: 'Gateway not connected',
+    },
+  },
 ];
 
 test.describe('Cron job card layout', () => {
@@ -98,5 +116,45 @@ test.describe('Cron job card layout', () => {
     // overlap the switch container.
     const titleRight = titleBox.x + titleBox.width;
     expect(titleRight).toBeLessThanOrEqual(switchBox.x + 0.5);
+  });
+
+  test('makes a completed-but-undelivered cron run and its consumption attribution explicit', async ({ electronApp, page }) => {
+    await installIpcMocks(electronApp, {
+      gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+      gatewayRpc: {},
+      hostApi: {
+        [stableStringify(['/api/gateway/status', 'GET'])]: {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+          },
+        },
+        [stableStringify(['/api/cron/jobs', 'GET'])]: {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: cronJobs,
+          },
+        },
+        [stableStringify(['/api/channels/accounts', 'GET'])]: {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: { success: true, channels: [] },
+          },
+        },
+      },
+    });
+
+    await completeSetup(page);
+    await page.getByTestId('sidebar-nav-cron').click();
+
+    await expect(page.getByTestId('cron-job-delivery-job-delivery-failure')).toHaveText(/未交付/);
+    await expect(page.getByTestId('cron-job-delivery-failure-job-delivery-failure')).toContainText('消耗归属本次 Cron 运行');
+    await expect(page.getByTestId('cron-job-delivery-failure-job-delivery-failure')).toContainText('Gateway not connected');
   });
 });

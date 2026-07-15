@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import i18n from '@/i18n';
-import { useGatewayStore } from './gateway';
+import { isGatewayReadyForChatSend, useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { getManagedAuthStateKey, isManagedAuthLocallyReady, isManagedAuthReady } from '@/lib/managed-auth';
 import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
@@ -19,6 +19,7 @@ import {
   type ChatRuntimeEvent,
 } from '../../shared/chat-runtime-events';
 import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
+import type { GatewayStatus } from '../types/gateway';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -2659,6 +2660,27 @@ function clearPendingOptimisticUserMessages(sessionKey: string): void {
   _pendingOptimisticUserMessages.delete(sessionKey);
 }
 
+function discardPendingOptimisticUserMessage(sessionKey: string, messageId: string | undefined): void {
+  if (!messageId) return;
+
+  const pending = (_pendingOptimisticUserMessages.get(sessionKey) || [])
+    .filter((entry) => entry.message.id !== messageId);
+  if (pending.length > 0) {
+    _pendingOptimisticUserMessages.set(sessionKey, pending);
+  } else {
+    _pendingOptimisticUserMessages.delete(sessionKey);
+  }
+
+  const cached = _sessionHistoryCache.get(sessionKey);
+  if (cached) {
+    cacheSessionHistory(
+      sessionKey,
+      cached.messages.filter((message) => message.id !== messageId),
+      cached.thinkingLevel,
+    );
+  }
+}
+
 function mergePendingOptimisticUserMessages(sessionKey: string, loadedMessages: RawMessage[]): RawMessage[] {
   const pending = _pendingOptimisticUserMessages.get(sessionKey);
   if (!pending || pending.length === 0) return loadedMessages;
@@ -4144,6 +4166,47 @@ async function fetchChatHistory(
   }
 }
 
+class GatewayNotReadyForChatSendError extends Error {
+  constructor(message: string, readonly status: GatewayStatus | null = null) {
+    super(message);
+    this.name = 'GatewayNotReadyForChatSendError';
+  }
+}
+
+function gatewayNotReadySendMessage(): string {
+  return i18n.t('chat:gatewaySend.notConnected', {
+    defaultValue: 'Gateway is not connected. Your message was not sent. Reconnect Gateway and retry.',
+  });
+}
+
+/**
+ * Renderer lifecycle events are advisory. Before the UI accepts a new turn,
+ * read Main-process state so stale "running" data cannot create a fake sent
+ * bubble.
+ */
+async function assertGatewayReadyForChatSend(): Promise<GatewayStatus> {
+  let status: GatewayStatus;
+  try {
+    status = await useGatewayStore.getState().refreshStatus();
+  } catch {
+    throw new GatewayNotReadyForChatSendError(gatewayNotReadySendMessage());
+  }
+
+  if (!isGatewayReadyForChatSend(status)) {
+    throw new GatewayNotReadyForChatSendError(gatewayNotReadySendMessage(), status);
+  }
+  return status;
+}
+
+async function gatewayIsUnavailableForChatSend(): Promise<boolean> {
+  try {
+    return !isGatewayReadyForChatSend(await useGatewayStore.getState().refreshStatus());
+  } catch {
+    // Unknown transport state is not proof that the message was accepted.
+    return true;
+  }
+}
+
 async function sendChatMessageViaHostApi(params: {
   sessionKey: string;
   message: string;
@@ -4152,6 +4215,7 @@ async function sendChatMessageViaHostApi(params: {
   thinking?: string | null;
   clientPreferences?: GatewayTurnPreferences;
 }): Promise<{ runId?: string }> {
+  await assertGatewayReadyForChatSend();
   try {
     const response = await hostApiFetch<{
       success: boolean;
@@ -4166,6 +4230,7 @@ async function sendChatMessageViaHostApi(params: {
     }
     return response.result ?? {};
   } catch {
+    await assertGatewayReadyForChatSend();
     return await useGatewayStore.getState().rpc<{ runId?: string }>('chat.send', params, CHAT_SEND_RPC_TIMEOUT_MS);
   }
 }
@@ -6732,6 +6797,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       enqueuedAt: Date.now(),
     });
 
+    try {
+      // Keep the attempted payload above as a retryable draft, but do not add
+      // an optimistic message until Main confirms Gateway is actually ready.
+      await assertGatewayReadyForChatSend();
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : String(error),
+        runError: null,
+        sending: false,
+      });
+      return;
+    }
+
     const currentSessionKey = targetSessionKey;
     const explicitPendingImages = (attachments ?? [])
       .filter((file) => file.mimeType.startsWith('image/') && file.stagedPath.trim().length > 0)
@@ -6946,7 +7024,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     setTimeout(checkStuck, 30_000);
 
-    const applySendFailure = (errorMsg: string) => {
+    const applySendFailure = (errorMsg: string, discardOptimisticMessage = false) => {
       const latest = get();
       const sendStillCurrent = _activeSendGenerationBySession.get(currentSessionKey) === sendGeneration;
       const canApplyToCurrentSession = latest.currentSessionKey === currentSessionKey
@@ -6955,7 +7033,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (sendStillCurrent && canApplyToCurrentSession) {
         clearSendGenerationIfCurrent();
         clearHistoryPoll();
-        set({ error: errorMsg, sending: false });
+        if (discardOptimisticMessage) {
+          discardPendingOptimisticUserMessage(currentSessionKey, userMsg.id);
+          set((state) => ({
+            messages: state.messages.filter((message) => message.id !== userMsg.id),
+            error: errorMsg,
+            sending: false,
+          }));
+        } else {
+          set({ error: errorMsg, sending: false });
+        }
         markSessionRunIdle(currentSessionKey);
         return;
       }
@@ -6963,6 +7050,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
         const cached = _sessionRunStateCache.get(currentSessionKey);
         if (cached?.lastUserMessageAt === nowMs) {
+          if (discardOptimisticMessage) {
+            discardPendingOptimisticUserMessage(currentSessionKey, userMsg.id);
+          }
           markSessionRunIdle(currentSessionKey);
           return;
         }
@@ -6973,6 +7063,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionKey: currentSessionKey,
       });
     };
+
+    try {
+      // Model/config checks above may outlive a Gateway restart. Re-check just
+      // before the host/RPC path accepts the optimistic turn.
+      await assertGatewayReadyForChatSend();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      applySendFailure(errorMessage, error instanceof GatewayNotReadyForChatSendError);
+      return;
+    }
 
     try {
       const idempotencyKey = crypto.randomUUID();
@@ -7054,9 +7154,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!result.success) {
         const errorMsg = result.error || 'Failed to send message';
         if (isRecoverableChatSendTimeout(errorMsg)) {
-          console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errorMsg}`);
+          if (await gatewayIsUnavailableForChatSend()) {
+            applySendFailure(errorMsg, true);
+          } else {
+            console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errorMsg}`);
+          }
         } else {
-          applySendFailure(errorMsg);
+          applySendFailure(errorMsg, await gatewayIsUnavailableForChatSend());
         }
       } else if (result.result?.runId) {
         const returnedRunId = result.result.runId;
@@ -7108,11 +7212,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearSendGenerationIfCurrent();
       }
     } catch (err) {
-      const errStr = String(err);
+      const errStr = err instanceof Error ? err.message : String(err);
       if (isRecoverableChatSendTimeout(errStr)) {
-        console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errStr}`);
+        if (await gatewayIsUnavailableForChatSend()) {
+          applySendFailure(errStr, true);
+        } else {
+          console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errStr}`);
+        }
       } else {
-        applySendFailure(errStr);
+        applySendFailure(
+          errStr,
+          err instanceof GatewayNotReadyForChatSendError || await gatewayIsUnavailableForChatSend(),
+        );
       }
     }
   },

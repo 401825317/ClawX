@@ -221,6 +221,58 @@ async function getListeningProcessIds(port: number): Promise<string[]> {
   return [...new Set(stdout.trim().split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
 }
 
+const MAX_PROCESS_ANCESTRY_DEPTH = 32;
+
+function normalizeProcessId(value: string | number | undefined): string | undefined {
+  const normalized = String(value ?? '').trim();
+  return /^\d+$/u.test(normalized) && Number(normalized) > 0 ? normalized : undefined;
+}
+
+async function getParentProcessId(pid: string): Promise<string | undefined> {
+  const normalizedPid = normalizeProcessId(pid);
+  if (!normalizedPid) return undefined;
+
+  const command = process.platform === 'win32'
+    ? `powershell -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId = ${normalizedPid}').ParentProcessId"`
+    : `ps -o ppid= -p ${normalizedPid}`;
+  const cp = await import('child_process');
+  const { stdout } = await new Promise<{ stdout: string }>((resolve) => {
+    cp.exec(command, { timeout: 3_000, windowsHide: true }, (err, output) => {
+      resolve({ stdout: err ? '' : output });
+    });
+  });
+
+  return normalizeProcessId(stdout.trim().split(/\s+/u)[0]);
+}
+
+/**
+ * Gateway is forked through Electron UtilityProcess, while the HTTP listener
+ * can live in a child Node process. Treat descendants as owned so a healthy
+ * in-process restart is not mistaken for another UClaw installation.
+ */
+export async function isGatewayListenerOwnedByProcess(
+  listenerPid: string | number,
+  ownedPid: string | number | undefined,
+  resolveParentPid: (pid: string) => Promise<string | undefined> = getParentProcessId,
+): Promise<boolean> {
+  const listener = normalizeProcessId(listenerPid);
+  const owner = normalizeProcessId(ownedPid);
+  if (!listener || !owner) return false;
+  if (listener === owner) return true;
+
+  const visited = new Set<string>();
+  let current = listener;
+  for (let depth = 0; depth < MAX_PROCESS_ANCESTRY_DEPTH; depth += 1) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+    const parent = await resolveParentPid(current);
+    if (!parent) return false;
+    if (parent === owner) return true;
+    current = parent;
+  }
+  return false;
+}
+
 export const GATEWAY_PORT_OWNERSHIP_CONFLICT = 'GATEWAY_PORT_OWNERSHIP_CONFLICT' as const;
 
 export interface GatewayPortOwnershipConflict {
@@ -271,7 +323,21 @@ export async function findExistingGatewayProcess(options: {
     logger.warn('Error checking for existing process on port:', error);
   }
 
-  const externalPids = pids.filter((pid) => !ownedPid || pid !== String(ownedPid));
+  const ownedListenerPids = ownedPid
+    ? await Promise.all(pids.map(async (pid) => ({
+      pid,
+      owned: await isGatewayListenerOwnedByProcess(pid, ownedPid),
+    })))
+    : [];
+  const externalPids = ownedPid
+    ? ownedListenerPids.filter(({ owned }) => !owned).map(({ pid }) => pid)
+    : pids;
+  const adoptedPids = ownedListenerPids.filter(({ owned }) => owned).map(({ pid }) => pid);
+  if (adoptedPids.length > 0) {
+    logger.info(
+      `Gateway port ${port} is owned by this UClaw process tree (listener PIDs: ${adoptedPids.join(', ')}); reusing it`,
+    );
+  }
   if (externalPids.length > 0) {
     const ready = await probeGatewayReady(port, 5000).catch(() => false);
     logger.warn(
