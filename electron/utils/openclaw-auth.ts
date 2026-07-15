@@ -72,6 +72,7 @@ import {
 } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 import { readJsonFileWithRetry, writeJsonFileAtomically } from './json-file-io';
+import { isTransientPluginInstallPath } from './plugin-install-paths';
 
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -3685,7 +3686,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         const validPlugins: unknown[] = [];
         for (const p of plugins) {
           if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-            if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+            if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
               console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
               modified = true;
             } else {
@@ -3702,7 +3703,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
           const validLoad: unknown[] = [];
           for (const p of pluginsObj.load) {
             if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-              if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+              if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                 console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
                 modified = true;
               } else {
@@ -3721,7 +3722,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
             const countBefore = loadObj.paths.length;
             for (const p of loadObj.paths) {
               if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-                if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+                if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                   console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from plugins.load.paths`);
                   modified = true;
                 } else {
