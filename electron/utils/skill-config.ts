@@ -5,9 +5,8 @@
  *
  * All file I/O uses async fs/promises to avoid blocking the main thread.
  */
-import { readFile, writeFile, access, mkdir, readdir, rm } from 'fs/promises';
+import { readFile, mkdir, readdir, rm } from 'fs/promises';
 import { existsSync } from 'fs';
-import { constants } from 'fs';
 import { join } from 'path';
 import { getOpenClawConfigPath, getOpenClawDir, getOpenClawResolvedDir, getOpenClawSkillsDir } from './paths';
 import { logger } from './logger';
@@ -44,10 +43,6 @@ interface PreinstalledMarker {
     slug: string;
     version: string;
     installedAt: string;
-}
-
-async function fileExists(p: string): Promise<boolean> {
-    try { await access(p, constants.F_OK); return true; } catch { return false; }
 }
 
 /**

@@ -80,6 +80,69 @@ export function resolveCompletionWakeOwnerRunId(params: {
   return owners[0]?.[0] ?? null;
 }
 
+/** Resolve a completion wake against its target session, including background sessions. */
+export function resolveCompletionWakeOwnerContext(params: {
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+  activeRunId: string | null;
+  currentSessionKey: string;
+  eventRunId: string;
+  eventSessionKey: string | null;
+}): { ownerRunId: string; taskId: string; sessionKey: string } | null {
+  const taskId = completionWakeTaskIdFromRunId(params.eventRunId);
+  if (!taskId) return null;
+  let sessionKey = params.eventSessionKey?.trim();
+  if (!sessionKey) {
+    const ownerSessionKeys = [...new Set(
+      Object.entries(params.runtimeRuns)
+        .filter(([runId, run]) => runId !== params.eventRunId && runtimeRunOwnsTaskId(run, taskId))
+        .map(([, run]) => run.sessionKey?.trim())
+        .filter((value): value is string => Boolean(value)),
+    )];
+    if (ownerSessionKeys.length === 1) {
+      [sessionKey] = ownerSessionKeys;
+    } else if (
+      ownerSessionKeys.length === 0
+      && params.activeRunId
+      && runtimeRunOwnsTaskId(params.runtimeRuns[params.activeRunId], taskId)
+    ) {
+      sessionKey = params.currentSessionKey;
+    }
+  }
+  if (!sessionKey) return null;
+  const ownerRunId = resolveCompletionWakeOwnerRunId({
+    runtimeRuns: params.runtimeRuns,
+    activeRunId: sessionKey === params.currentSessionKey ? params.activeRunId : null,
+    eventRunId: params.eventRunId,
+    currentSessionKey: sessionKey,
+    eventSessionKey: sessionKey,
+  });
+  return ownerRunId ? { ownerRunId, taskId, sessionKey } : null;
+}
+
+/** Preserve child wake identity while attaching runtime evidence to its owning conversation run. */
+export function correlateCompletionWakeRuntimeEvent(params: {
+  runtimeRuns: Record<string, ChatRuntimeRunState>;
+  activeRunId: string | null;
+  currentSessionKey: string;
+  eventSessionKey: string | null;
+  event: ChatRuntimeEvent;
+}): ChatRuntimeEvent {
+  const owner = resolveCompletionWakeOwnerContext({
+    runtimeRuns: params.runtimeRuns,
+    activeRunId: params.activeRunId,
+    currentSessionKey: params.currentSessionKey,
+    eventRunId: params.event.runId,
+    eventSessionKey: params.eventSessionKey,
+  });
+  if (!owner) return params.event;
+  return {
+    ...params.event,
+    rootRunId: params.event.rootRunId ?? owner.ownerRunId,
+    sessionKey: params.event.sessionKey ?? owner.sessionKey,
+    taskId: params.event.taskId ?? owner.taskId,
+  };
+}
+
 export function buildCompletionWakeTerminalTaskEvent(params: {
   runtimeRuns: Record<string, ChatRuntimeRunState>;
   ownerRunId: string;

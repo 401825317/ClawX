@@ -58,25 +58,33 @@ const CLOUD_ARTIFACT_PATH = '/opt/cursor/artifacts/chat_table_header_light.png';
 
 test.describe('ClawX chat table header styling', () => {
   test('renders markdown table headers with transparent background and bold text in light theme', async ({ launchElectronApp }, testInfo) => {
-    const app = await launchElectronApp({ skipSetup: true });
+    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'timeline' });
 
     try {
+      const sessions = [{
+        key: SESSION_KEY,
+        displayName: 'main',
+        status: 'done',
+        hasActiveRun: false,
+      }];
+      const historyResult = {
+        messages: seededHistory,
+        sessionInfo: { hasActiveRun: false },
+      };
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
-            result: {
-              sessions: [{ key: SESSION_KEY, displayName: 'main' }],
-            },
+            result: { sessions },
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: seededHistory },
+            result: historyResult,
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: seededHistory },
+            result: historyResult,
           },
         },
         hostApi: {
@@ -85,8 +93,16 @@ test.describe('ClawX chat table header styling', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
             },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, result: { sessions } } },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, result: historyResult } },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
             ok: true,
@@ -112,6 +128,7 @@ test.describe('ClawX chat table header styling', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
+      await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
 
       await page.evaluate(() => {
         const root = document.documentElement;
@@ -119,7 +136,13 @@ test.describe('ClawX chat table header styling', () => {
         root.classList.add('light');
       });
 
-      const header = page.locator('.prose table thead th').first();
+      const timeline = page.getByTestId('conversation-timeline');
+      const assistantRow = timeline
+        .locator('[data-timeline-row-kind="item"]')
+        .filter({ hasText: 'All done' })
+        .first();
+      const tableEl = assistantRow.locator('.prose table');
+      const header = tableEl.locator('thead th').first();
       await expect(header).toBeVisible({ timeout: 30_000 });
 
       const headerStyles = await header.evaluate((el) => {
@@ -130,7 +153,6 @@ test.describe('ClawX chat table header styling', () => {
       expect(headerStyles.backgroundColor).toBe('rgba(0, 0, 0, 0)');
       expect(Number(headerStyles.fontWeight)).toBeGreaterThanOrEqual(700);
 
-      const tableEl = page.locator('.prose table').first();
       await tableEl.scrollIntoViewIfNeeded();
 
       const screenshotPath = testInfo.outputPath('chat_table_header_light.png');

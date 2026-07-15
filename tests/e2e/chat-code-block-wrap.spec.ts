@@ -45,29 +45,47 @@ const seededHistory = [
 
 test.describe('ClawX chat code block wrapping', () => {
   test('soft-wraps long lines inside fenced code blocks instead of overflowing', async ({ launchElectronApp }) => {
-    const app = await launchElectronApp({ skipSetup: true });
+    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'timeline' });
 
     try {
+      const sessions = [{
+        key: SESSION_KEY,
+        displayName: 'main',
+        status: 'done',
+        hasActiveRun: false,
+      }];
+      const historyResult = {
+        messages: seededHistory,
+        sessionInfo: { hasActiveRun: false },
+      };
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
         gatewayRpc: {
           [stableStringify(['sessions.list', {}])]: {
             success: true,
-            result: { sessions: [{ key: SESSION_KEY, displayName: 'main' }] },
+            result: { sessions },
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: seededHistory },
+            result: historyResult,
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: seededHistory },
+            result: historyResult,
           },
         },
         hostApi: {
           [stableStringify(['/api/gateway/status', 'GET'])]: {
             ok: true,
-            data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345 } },
+            data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true } },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, result: { sessions } } },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, result: historyResult } },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
             ok: true,
@@ -90,12 +108,18 @@ test.describe('ClawX chat code block wrapping', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
+      await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
 
       // Constrain the viewport so the long line cannot fit on a single visual
       // row; without wrapping, this would force horizontal overflow.
       await page.setViewportSize({ width: 720, height: 800 });
 
-      const assistantProse = page.locator('.prose').filter({ hasText: 'Here is the relevant log entry' }).first();
+      const timeline = page.getByTestId('conversation-timeline');
+      const assistantRow = timeline
+        .locator('[data-timeline-row-kind="item"]')
+        .filter({ hasText: 'Here is the relevant log entry' })
+        .first();
+      const assistantProse = assistantRow.locator('.prose');
       await expect(assistantProse).toBeVisible({ timeout: 30_000 });
 
       const codeBlock = assistantProse.locator('pre').first();

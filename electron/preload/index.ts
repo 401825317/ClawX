@@ -3,6 +3,13 @@
  * Exposes safe APIs to the renderer process via contextBridge
  */
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { normalizeConversationTimelineMode } from '../../shared/conversation-rollout';
+
+const chatTimelineModeOverride = normalizeConversationTimelineMode(
+  process.argv
+    .find((argument) => argument.startsWith('--clawx-chat-timeline-mode='))
+    ?.slice('--clawx-chat-timeline-mode='.length),
+);
 
 /**
  * IPC renderer methods exposed to the renderer process
@@ -25,6 +32,7 @@ const electronAPI = {
         'hostapi:fetch',
         'hostapi:token',
         'desktop:approve',
+        'approval:resolve',
         'gateway:health',
         'gateway:getControlUiUrl',
         // OpenClaw
@@ -286,6 +294,9 @@ const electronAPI = {
    * Check if running in development
    */
   isDev: process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL,
+
+  /** Main-owned emergency override for the chat renderer rollout. */
+  chatTimelineModeOverride,
 };
 
 // Expose the API to the renderer process

@@ -2,6 +2,7 @@
  * Electron API Type Declarations
  * Types for the APIs exposed via contextBridge
  */
+import type { ConversationTimelineMode } from '../../shared/conversation-rollout';
 
 export interface IpcRenderer {
   invoke(channel: string, ...args: unknown[]): Promise<unknown>;
@@ -16,6 +17,7 @@ export interface ElectronAPI {
   getPathForFile: (file: File) => string;
   platform: NodeJS.Platform;
   isDev: boolean;
+  chatTimelineModeOverride: ConversationTimelineMode | null;
 }
 
 declare global {

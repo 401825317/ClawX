@@ -29,26 +29,34 @@ const seededHistory = [
 ];
 
 test.describe('ClawX chat question directory', () => {
-  test('shows a toolbar button that opens a clickable in-conversation question directory', async ({ launchElectronApp }) => {
+  test('opens a clickable directory on desktop and a closing sheet on compact viewports', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
+      const sessions = [{ key: SESSION_KEY, displayName: 'main', status: 'done', hasActiveRun: false }];
+      const historyResult = { messages: seededHistory, sessionInfo: { hasActiveRun: false } };
       await installIpcMocks(app, {
-        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
         gatewayRpc: {
+          [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
+            success: true,
+            result: { sessions },
+          },
           [stableStringify(['sessions.list', {}])]: {
             success: true,
-            result: {
-              sessions: [{ key: SESSION_KEY, displayName: 'main' }],
-            },
+            result: { sessions },
+          },
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
+            success: true,
+            result: historyResult,
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: seededHistory },
+            result: historyResult,
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: seededHistory },
+            result: historyResult,
           },
         },
         hostApi: {
@@ -57,8 +65,20 @@ test.describe('ClawX chat question directory', () => {
             data: {
               status: 200,
               ok: true,
-              json: { state: 'running', port: 18789, pid: 12345 },
+              json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
             },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, result: { sessions } } },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, result: historyResult } },
+          },
+          [stableStringify([`/api/task-bridge/tasks?activeOnly=false&sessionKey=${encodeURIComponent(SESSION_KEY)}`, 'GET'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, tasks: [] } },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
             ok: true,
@@ -70,6 +90,10 @@ test.describe('ClawX chat question directory', () => {
                 agents: [{ id: 'main', name: 'main' }],
               },
             },
+          },
+          [stableStringify(['/api/files/thumbnails', 'POST'])]: {
+            ok: true,
+            data: { status: 200, ok: true, json: {} },
           },
         },
       });
@@ -88,17 +112,32 @@ test.describe('ClawX chat question directory', () => {
 
       const toggle = page.getByTestId('chat-question-directory-toggle');
       await expect(toggle).toBeVisible();
+      await expect(toggle).toBeEnabled({ timeout: 30_000 });
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      await expect(toggle).toHaveAttribute('aria-controls', 'chat-question-directory');
       await toggle.click();
 
       const directory = page.getByTestId('chat-question-directory');
       await expect(directory).toBeVisible({ timeout: 30_000 });
-      await expect(directory).toContainText('Question directory');
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      await expect(directory).toContainText(/Question directory|问题目录/u);
       await expect(directory).toContainText('First question: summarize the market opening.');
       await expect(directory).toContainText('Fourth question: prepare the final action plan.');
       await expect(directory.locator('button')).toHaveCount(4);
 
-      await page.getByTestId('chat-question-directory-item-6').click();
-      await expect(page.getByTestId('chat-message-6')).toBeInViewport();
+      const fourthTurn = page.getByTestId('conversation-turn').filter({ hasText: 'Fourth question: prepare the final action plan.' });
+      await page.getByTestId('chat-question-directory-item-3').click();
+      await expect(fourthTurn).toBeInViewport();
+
+      await toggle.click();
+      await expect(directory).toBeHidden();
+      await page.setViewportSize({ width: 800, height: 900 });
+      await toggle.click();
+      await expect(directory).toBeVisible();
+      await expect(directory).toHaveAttribute('role', 'dialog');
+      await page.getByTestId('chat-question-directory-item-0').click();
+      await expect(directory).toBeHidden();
+      await expect(page.getByTestId('conversation-turn').filter({ hasText: 'First question: summarize the market opening.' })).toBeInViewport();
     } finally {
       await closeElectronApp(app);
     }

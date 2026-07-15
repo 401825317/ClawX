@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { dispatchJsonRpcNotification, dispatchProtocolEvent } from '../electron/gateway/event-dispatch.ts';
+import {
+  dispatchCanonicalApprovalRuntimeEvent,
+  dispatchJsonRpcNotification,
+  dispatchProtocolEvent,
+} from '../electron/gateway/event-dispatch.ts';
+import {
+  GatewayApprovalRecoveryCoordinator,
+  normalizeGatewayApprovalListRuntimeEvents,
+  replayPendingGatewayApprovalRuntimeEvents,
+} from '../electron/gateway/chat-runtime-events.ts';
 import { GatewayManager } from '../electron/gateway/manager.ts';
 import {
   CHAT_SYNTHETIC_TERMINAL_PRODUCER,
@@ -217,6 +226,472 @@ test('JSON-RPC chat delivery also closes a terminal runtime run', () => {
   assert.equal(terminalEvents.length, 1);
   assert.equal(terminalEvents[0]?.runId, 'run-json-rpc-final');
   assert.equal(terminalEvents[0]?.sessionKey, 'agent:main:session-json-rpc-final');
+});
+
+test('native exec and plugin approval wire events emit structured canonical approvals', () => {
+  const now = Date.now();
+  const execSessionKey = 'agent:main:approval-exec';
+  const execRequest = {
+    command: 'pnpm run typecheck',
+    commandPreview: 'pnpm run typecheck',
+    allowedDecisions: ['allow-once', 'deny'],
+    sessionKey: execSessionKey,
+  };
+  const execEvents = runtimeEvents(replayProtocolEvents([
+    {
+      event: 'exec.approval.requested',
+      payload: {
+        id: 'exec-approval-wire',
+        request: execRequest,
+        createdAtMs: now,
+        expiresAtMs: now + 60_000,
+      },
+    },
+    {
+      event: 'exec.approval.resolved',
+      payload: {
+        id: 'exec-approval-wire',
+        decision: 'allow-once',
+        resolvedBy: 'test-device',
+        ts: now + 1,
+        request: execRequest,
+      },
+    },
+  ])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> => (
+    event.type === 'approval.updated'
+  ));
+  assert.equal(execEvents.length, 2);
+  assert.deepEqual({
+    runId: execEvents[0].runId,
+    sessionKey: execEvents[0].sessionKey,
+    approvalId: execEvents[0].approvalId,
+    approvalKind: execEvents[0].approvalKind,
+    allowedDecisions: execEvents[0].allowedDecisions,
+    requestedAt: execEvents[0].requestedAt,
+    expiresAt: execEvents[0].expiresAt,
+    actionable: execEvents[0].actionable,
+    phase: execEvents[0].phase,
+    status: execEvents[0].status,
+    message: execEvents[0].message,
+  }, {
+    runId: 'approval:exec:exec-approval-wire',
+    sessionKey: execSessionKey,
+    approvalId: 'exec-approval-wire',
+    approvalKind: 'exec',
+    allowedDecisions: ['allow-once', 'deny'],
+    requestedAt: now,
+    expiresAt: now + 60_000,
+    actionable: true,
+    phase: 'requested',
+    status: 'pending',
+    message: 'pnpm run typecheck',
+  });
+  assert.deepEqual({
+    decision: execEvents[1].decision,
+    actionable: execEvents[1].actionable,
+    phase: execEvents[1].phase,
+    status: execEvents[1].status,
+  }, {
+    decision: 'allow-once',
+    actionable: false,
+    phase: 'resolved',
+    status: 'allow-once',
+  });
+
+  const pluginSessionKey = 'agent:main:approval-plugin';
+  const pluginRequest = {
+    pluginId: 'plugin.example',
+    title: 'Publish artifact',
+    description: 'Publish the generated artifact to the configured destination.',
+    toolName: 'publish_artifact',
+    toolCallId: 'tool-call-plugin-approval',
+    allowedDecisions: ['allow-once', 'allow-always', 'deny'],
+    sessionKey: pluginSessionKey,
+  };
+  const pluginEmissions: Emission[] = [];
+  const emitter = {
+    emit(event: string, payload: unknown): boolean {
+      pluginEmissions.push({ event, payload });
+      return true;
+    },
+  };
+  dispatchJsonRpcNotification(emitter, {
+    jsonrpc: '2.0',
+    method: 'plugin.approval.requested',
+    params: {
+      id: 'plugin-approval-wire',
+      request: pluginRequest,
+      createdAtMs: now + 2,
+      expiresAtMs: now + 60_002,
+    },
+  });
+  dispatchJsonRpcNotification(emitter, {
+    jsonrpc: '2.0',
+    method: 'plugin.approval.resolved',
+    params: {
+      id: 'plugin-approval-wire',
+      decision: 'deny',
+      resolvedBy: 'test-device',
+      ts: now + 3,
+      request: pluginRequest,
+    },
+  });
+  const pluginEvents = runtimeEvents(pluginEmissions)
+    .filter((event): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> => (
+      event.type === 'approval.updated'
+    ));
+  assert.equal(pluginEvents.length, 2);
+  assert.deepEqual({
+    producer: pluginEvents[0].producer,
+    runId: pluginEvents[0].runId,
+    sessionKey: pluginEvents[0].sessionKey,
+    toolCallId: pluginEvents[0].toolCallId,
+    title: pluginEvents[0].title,
+    message: pluginEvents[0].message,
+    allowedDecisions: pluginEvents[0].allowedDecisions,
+  }, {
+    producer: 'plugin',
+    runId: 'approval:plugin:plugin-approval-wire',
+    sessionKey: pluginSessionKey,
+    toolCallId: 'tool-call-plugin-approval',
+    title: 'Publish artifact',
+    message: 'Publish the generated artifact to the configured destination.',
+    allowedDecisions: ['allow-once', 'allow-always', 'deny'],
+  });
+  assert.equal(pluginEvents[1].decision, 'deny');
+  assert.equal(pluginEvents[1].actionable, false);
+  assert.equal(pluginEvents[1].status, 'deny');
+});
+
+test('requestless native resolutions recover only from the matching pending approval identity', () => {
+  const now = Date.now();
+  const sharedApprovalId = 'shared-native-approval-id';
+  const execSessionKey = 'agent:main:requestless-exec';
+  const pluginSessionKey = 'agent:main:requestless-plugin';
+  const events = runtimeEvents(replayProtocolEvents([{
+    event: 'exec.approval.requested',
+    payload: {
+      id: sharedApprovalId,
+      request: { command: 'pnpm run typecheck', sessionKey: execSessionKey },
+      createdAtMs: now,
+      expiresAtMs: now + 60_000,
+    },
+  }, {
+    event: 'plugin.approval.requested',
+    payload: {
+      id: sharedApprovalId,
+      request: {
+        title: 'Publish artifact',
+        description: 'Publish the generated artifact.',
+        sessionKey: pluginSessionKey,
+      },
+      createdAtMs: now + 1,
+      expiresAtMs: now + 60_001,
+    },
+  }, {
+    event: 'exec.approval.resolved',
+    payload: {
+      id: sharedApprovalId,
+      decision: 'allow-once',
+      sessionKey: 'agent:main:untrusted-top-level',
+      ts: now + 2,
+    },
+  }, {
+    event: 'plugin.approval.resolved',
+    payload: {
+      id: sharedApprovalId,
+      decision: 'deny',
+      sessionKey: 'agent:main:untrusted-top-level',
+      ts: now + 3,
+    },
+  }])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> => (
+    event.type === 'approval.updated'
+  ));
+
+  assert.equal(events.length, 4);
+  assert.deepEqual(events.slice(2).map((event) => ({
+    approvalKind: event.approvalKind,
+    sessionKey: event.sessionKey,
+    decision: event.decision,
+    request: event.request,
+  })), [{
+    approvalKind: 'exec',
+    sessionKey: execSessionKey,
+    decision: 'allow-once',
+    request: undefined,
+  }, {
+    approvalKind: 'plugin',
+    sessionKey: pluginSessionKey,
+    decision: 'deny',
+    request: undefined,
+  }]);
+});
+
+test('requestless resolution rejects untrusted routing after pending identity cleanup', () => {
+  const now = Date.now();
+  const approvalId = 'approval-session-cleanup';
+  const events = runtimeEvents(replayProtocolEvents([{
+    event: 'exec.approval.resolved',
+    payload: {
+      id: 'orphan-resolution',
+      decision: 'allow-once',
+      sessionKey: 'agent:main:untrusted-orphan',
+      ts: now,
+    },
+  }, {
+    event: 'exec.approval.requested',
+    payload: {
+      id: approvalId,
+      request: { command: 'pnpm run typecheck', sessionKey: 'agent:main:cleanup' },
+      createdAtMs: now + 1,
+      expiresAtMs: now + 60_001,
+    },
+  }, {
+    event: 'exec.approval.resolved',
+    payload: { id: approvalId, decision: 'allow-once', ts: now + 2 },
+  }, {
+    event: 'exec.approval.resolved',
+    payload: {
+      id: approvalId,
+      decision: 'allow-once',
+      sessionKey: 'agent:main:untrusted-duplicate',
+      ts: now + 3,
+    },
+  }])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> => (
+    event.type === 'approval.updated'
+  ));
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].phase, 'requested');
+  assert.equal(events[1].phase, 'resolved');
+  assert.equal(events[1].sessionKey, 'agent:main:cleanup');
+});
+
+test('pending approval list replay seeds requestless resolution correlation', () => {
+  const now = Date.now();
+  const approvalId = 'approval-replay-correlation';
+  const sessionKey = 'agent:main:approval-replay-correlation';
+  const [pending] = normalizeGatewayApprovalListRuntimeEvents('exec', [{
+    id: approvalId,
+    request: { command: 'pnpm run typecheck', sessionKey },
+    createdAtMs: now,
+    expiresAtMs: now + 60_000,
+  }], now);
+  assert.ok(pending);
+
+  const emissions: Emission[] = [];
+  const emitter = {
+    emit(event: string, payload: unknown): boolean {
+      emissions.push({ event, payload });
+      return true;
+    },
+  };
+  dispatchCanonicalApprovalRuntimeEvent(emitter, pending);
+  dispatchProtocolEvent(emitter, 'exec.approval.resolved', {
+    id: approvalId,
+    decision: 'allow-once',
+    ts: now + 1,
+  });
+
+  const events = runtimeEvents(emissions)
+    .filter((event): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> => (
+      event.type === 'approval.updated'
+    ));
+  assert.equal(events.length, 2);
+  assert.equal(events[1].phase, 'resolved');
+  assert.equal(events[1].sessionKey, sessionKey);
+  assert.equal(events[1].request, undefined);
+});
+
+test('pending approval lookup replay restores only valid session-owned requests', () => {
+  const now = Date.now();
+  const events = normalizeGatewayApprovalListRuntimeEvents('exec', {
+    approvals: [{
+      id: 'exec-approval-replayed',
+      sessionKey: 'agent:main:wrong-top-level-session',
+      request: {
+        command: 'pnpm run typecheck',
+        sessionKey: 'agent:main:approval-replay',
+        allowedDecisions: ['allow-once', 'deny'],
+      },
+      createdAtMs: now,
+      expiresAtMs: now + 60_000,
+    }, {
+      id: 'approval-without-session',
+      request: { command: 'ignored' },
+      createdAtMs: now,
+      expiresAtMs: now + 60_000,
+    }, {
+      id: 'expired-approval',
+      request: {
+        command: 'ignored after expiry',
+        sessionKey: 'agent:main:approval-replay',
+      },
+      createdAtMs: now - 120_000,
+      expiresAtMs: now - 60_000,
+    }],
+  }, now);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].approvalId, 'exec-approval-replayed');
+  assert.equal(events[0].sessionKey, 'agent:main:approval-replay');
+  assert.equal(events[0].phase, 'requested');
+  assert.equal(events[0].actionable, true);
+  assert.equal(events[0].expiresAt, now + 60_000);
+});
+
+test('pending approval recovery queries exec and plugin stores through the canonical adapter', async () => {
+  const now = Date.now();
+  const calls: Array<{ method: string; params: unknown; timeoutMs: number }> = [];
+  const emitted: Array<Extract<ChatRuntimeEvent, { type: 'approval.updated' }>> = [];
+
+  await replayPendingGatewayApprovalRuntimeEvents({
+    rpc: async (method, params, timeoutMs) => {
+      calls.push({ method, params, timeoutMs });
+      const approvalKind = method.startsWith('exec.') ? 'exec' : 'plugin';
+      return [{
+        id: `${approvalKind}-approval-recovery`,
+        request: {
+          sessionKey: `agent:main:${approvalKind}-approval-recovery`,
+          title: `${approvalKind} approval`,
+        },
+        createdAtMs: now,
+        expiresAtMs: now + 60_000,
+      }];
+    },
+    emit: (event) => emitted.push(event),
+    nowMs: () => now,
+  });
+
+  assert.deepEqual(calls.map((call) => call.method), [
+    'exec.approval.list',
+    'plugin.approval.list',
+  ]);
+  assert.equal(calls.every((call) => call.timeoutMs === 5_000), true);
+  assert.deepEqual(
+    emitted.map((event) => [event.approvalKind, event.sessionKey, event.phase, event.actionable]).sort(),
+    [
+      ['exec', 'agent:main:exec-approval-recovery', 'requested', true],
+      ['plugin', 'agent:main:plugin-approval-recovery', 'requested', true],
+    ],
+  );
+});
+
+test('renderer-ready recovery queues one fresh replay behind an active connection replay', async () => {
+  let connected = true;
+  let replayCount = 0;
+  let releaseFirstReplay!: () => void;
+  const firstReplayGate = new Promise<void>((resolve) => {
+    releaseFirstReplay = resolve;
+  });
+  const coordinator = new GatewayApprovalRecoveryCoordinator({
+    isConnected: () => connected,
+    replayOnce: async () => {
+      replayCount += 1;
+      if (replayCount === 1) await firstReplayGate;
+    },
+  });
+
+  const connectionReplay = coordinator.replay();
+  const rendererReadyReplay = coordinator.replay({ queueAfterActive: true });
+  assert.equal(replayCount, 1);
+  releaseFirstReplay();
+  await Promise.all([connectionReplay, rendererReadyReplay]);
+  assert.equal(replayCount, 2);
+
+  connected = false;
+  await coordinator.replay({ queueAfterActive: true });
+  assert.equal(replayCount, 2);
+});
+
+test('a stale pending approval replay cannot reopen terminal native evidence', () => {
+  const now = Date.now();
+  const request = {
+    command: 'pnpm run typecheck',
+    sessionKey: 'agent:main:approval-terminal-lock',
+  };
+  const approval = {
+    id: 'exec-approval-terminal-lock',
+    request,
+    createdAtMs: now,
+    expiresAtMs: now + 60_000,
+  };
+
+  const events = runtimeEvents(replayProtocolEvents([{
+    event: 'exec.approval.requested',
+    payload: approval,
+  }, {
+    event: 'exec.approval.resolved',
+    payload: {
+      id: approval.id,
+      decision: 'allow-once',
+      resolvedBy: 'test-device',
+      ts: now + 1,
+      request,
+    },
+  }, {
+    event: 'exec.approval.requested',
+    payload: approval,
+  }])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'approval.updated' }> => (
+    event.type === 'approval.updated'
+  ));
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0].phase, 'requested');
+  assert.equal(events[1].phase, 'resolved');
+  assert.equal(events[1].decision, 'allow-once');
+});
+
+test('native approval expiry emits a derived terminal event when OpenClaw sends no resolution', async () => {
+  const now = Date.now();
+  const approvalEvents: Array<Extract<ChatRuntimeEvent, { type: 'approval.updated' }>> = [];
+  let resolveExpired: ((event: Extract<ChatRuntimeEvent, { type: 'approval.updated' }>) => void) | undefined;
+  const expiredEventPromise = new Promise<Extract<ChatRuntimeEvent, { type: 'approval.updated' }>>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('approval expiry event timed out')), 1_000);
+    resolveExpired = (event) => {
+      clearTimeout(timeout);
+      resolve(event);
+    };
+  });
+  const emitter = {
+    emit(event: string, payload: unknown): boolean {
+      if (event === 'chat:runtime-event') {
+        const runtimeEvent = payload as ChatRuntimeEvent;
+        if (runtimeEvent.type === 'approval.updated') {
+          approvalEvents.push(runtimeEvent);
+          if (runtimeEvent.status === 'expired') {
+            resolveExpired?.(runtimeEvent);
+            resolveExpired = undefined;
+          }
+        }
+      }
+      return true;
+    },
+  };
+  dispatchProtocolEvent(emitter, 'exec.approval.requested', {
+    id: 'exec-approval-expiry',
+    request: {
+      command: 'pnpm run build:vite',
+      sessionKey: 'agent:main:approval-expiry',
+    },
+    createdAtMs: now,
+    expiresAtMs: now + 20,
+  });
+  const expiredEvent = await expiredEventPromise;
+
+  assert.equal(expiredEvent.producer, 'gateway-approval-expiry');
+  assert.equal(expiredEvent.approvalId, 'exec-approval-expiry');
+  assert.equal(expiredEvent.decision, undefined);
+  assert.equal(expiredEvent.actionable, false);
+  assert.equal(expiredEvent.phase, 'resolved');
+  assert.equal(expiredEvent.status, 'expired');
+  dispatchProtocolEvent(emitter, 'exec.approval.resolved', {
+    id: 'exec-approval-expiry',
+    decision: 'allow-once',
+    sessionKey: 'agent:main:untrusted-after-expiry',
+    ts: now + 21,
+  });
+  assert.equal(approvalEvents.length, 2);
 });
 
 test('authoritative lifecycle failure corrects an earlier synthesized completion', () => {

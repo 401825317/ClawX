@@ -1,0 +1,1387 @@
+{
+  "schemaVersion": 1,
+  "description": "Deterministic canonical Timeline fixtures covering every event type and the abnormal ordering/recovery cases required by the approved redesign.",
+  "scenarios": [
+    {
+      "id": "core-event-families",
+      "description": "One completed Turn exercises direct narrative, multi-round tools, plan/step, subtask, approval, image/video artifacts, verification, final delivery, and lifecycle evidence.",
+      "tags": [
+        "event-family-coverage",
+        "direct-answer",
+        "multi-round-tools",
+        "approval",
+        "artifact-verification",
+        "subagent",
+        "image",
+        "video"
+      ],
+      "events": [
+        {
+          "version": 1,
+          "eventId": "families:turn-requested",
+          "type": "turn.requested",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "messageId": "message:families:user",
+          "occurredAt": 1700000000000,
+          "receivedAt": 1700000000000,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:families:user",
+              "idempotencyKey": "request:families",
+              "timestamp": 1700000000,
+              "content": "Build and verify the release bundle."
+            },
+            "mode": "chat"
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:run-started",
+          "type": "run.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "seq": 1,
+          "occurredAt": 1700000000010,
+          "receivedAt": 1700000000011,
+          "replayed": false,
+          "data": {
+            "startedAt": 1700000000010,
+            "objective": "Build and verify the release bundle."
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:assistant-content",
+          "type": "assistant.content",
+          "source": "openclaw-runtime",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "messageId": "message:families:stream",
+          "seq": 2,
+          "occurredAt": 1700000000020,
+          "receivedAt": 1700000000021,
+          "replayed": false,
+          "data": {
+            "text": "I will inspect the inputs and build the bundle.",
+            "replace": true,
+            "phase": "commentary"
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:thinking-content",
+          "type": "thinking.content",
+          "source": "openclaw-runtime",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "messageId": "message:families:thinking",
+          "seq": 3,
+          "occurredAt": 1700000000030,
+          "receivedAt": 1700000000031,
+          "replayed": false,
+          "data": {
+            "text": "Displayable reasoning evidence.",
+            "replace": true
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:commentary-append",
+          "type": "commentary.append",
+          "source": "plugin",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "seq": 4,
+          "occurredAt": 1700000000040,
+          "receivedAt": 1700000000041,
+          "replayed": false,
+          "data": {
+            "entry": {
+              "id": "commentary:families:inspect",
+              "kind": "commentary",
+              "text": "Inspecting release inputs.",
+              "status": "running",
+              "source": "native"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:progress-updated",
+          "type": "progress.updated",
+          "source": "openclaw-runtime",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "seq": 5,
+          "occurredAt": 1700000000050,
+          "receivedAt": 1700000000051,
+          "replayed": false,
+          "data": {
+            "entry": {
+              "id": "progress:families:prepare",
+              "kind": "action",
+              "text": "Preparing release evidence.",
+              "status": "completed",
+              "source": "native"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:plan-updated",
+          "type": "plan.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "seq": 6,
+          "occurredAt": 1700000000060,
+          "receivedAt": 1700000000061,
+          "replayed": false,
+          "data": {
+            "objective": "Create verified release evidence.",
+            "summary": "Inspect, build, and verify.",
+            "steps": [
+              {
+                "id": "step:families:inspect",
+                "title": "Inspect inputs",
+                "status": "running",
+                "order": 1
+              },
+              {
+                "id": "step:families:build",
+                "title": "Build bundle",
+                "status": "pending",
+                "order": 2,
+                "requiresArtifact": true
+              }
+            ]
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:step-updated",
+          "type": "step.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "seq": 7,
+          "occurredAt": 1700000000070,
+          "receivedAt": 1700000000071,
+          "replayed": false,
+          "data": {
+            "step": {
+              "id": "step:families:inspect",
+              "title": "Inspect inputs",
+              "status": "completed",
+              "order": 1,
+              "durationMs": 40
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:tool-read-started",
+          "type": "tool.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:read",
+          "seq": 8,
+          "occurredAt": 1700000000080,
+          "receivedAt": 1700000000081,
+          "replayed": false,
+          "data": {
+            "toolCallId": "tool:families:read",
+            "name": "read_file",
+            "args": {
+              "path": "/workspace/release.json"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:tool-read-updated",
+          "type": "tool.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:read",
+          "seq": 9,
+          "occurredAt": 1700000000090,
+          "receivedAt": 1700000000091,
+          "replayed": false,
+          "data": {
+            "toolCallId": "tool:families:read",
+            "name": "read_file",
+            "partialResult": "Reading release metadata."
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:tool-read-completed",
+          "type": "tool.completed",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:read",
+          "seq": 10,
+          "occurredAt": 1700000000100,
+          "receivedAt": 1700000000101,
+          "replayed": false,
+          "data": {
+            "toolCallId": "tool:families:read",
+            "name": "read_file",
+            "result": {
+              "version": "1.0.0"
+            },
+            "durationMs": 20,
+            "isError": false
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:tool-build-started",
+          "type": "tool.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:build",
+          "seq": 11,
+          "occurredAt": 1700000000110,
+          "receivedAt": 1700000000111,
+          "replayed": false,
+          "data": {
+            "toolCallId": "tool:families:build",
+            "name": "exec",
+            "args": {
+              "command": "pnpm build"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:tool-build-completed",
+          "type": "tool.completed",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:build",
+          "seq": 12,
+          "occurredAt": 1700000000120,
+          "receivedAt": 1700000000121,
+          "replayed": false,
+          "data": {
+            "toolCallId": "tool:families:build",
+            "name": "exec",
+            "result": {
+              "exitCode": 0,
+              "output": "Build complete."
+            },
+            "durationMs": 120,
+            "isError": false
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:task-updated",
+          "type": "task.updated",
+          "source": "task-ledger",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "rootRunId": "run:fixture:families",
+          "runId": "run:fixture:families:child",
+          "taskId": "task:families:review",
+          "parentTaskId": "task:families:root",
+          "seq": 1,
+          "occurredAt": 1700000000130,
+          "receivedAt": 1700000000131,
+          "replayed": false,
+          "data": {
+            "task": {
+              "taskId": "task:families:review",
+              "parentTaskId": "task:families:root",
+              "kind": "subagent",
+              "runtime": "openclaw",
+              "title": "Review release evidence",
+              "agentId": "reviewer",
+              "status": "completed",
+              "sourceStatus": "completed",
+              "createdAt": 1700000000100,
+              "updatedAt": 1700000000130,
+              "endedAt": 1700000000130
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:approval-pending",
+          "type": "approval.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:publish",
+          "seq": 13,
+          "occurredAt": 1700000000140,
+          "receivedAt": 1700000000141,
+          "replayed": false,
+          "data": {
+            "approvalId": "approval:families:publish",
+            "approvalKind": "exec",
+            "allowedDecisions": [
+              "allow-once",
+              "deny"
+            ],
+            "requestedAt": 1700000000140,
+            "request": {
+              "command": "publish release"
+            },
+            "actionable": true,
+            "itemId": "approval-item:families:publish",
+            "title": "Publish release",
+            "status": "pending",
+            "message": "Approve release publication."
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:approval-resolved",
+          "type": "approval.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "toolCallId": "tool:families:publish",
+          "seq": 14,
+          "occurredAt": 1700000000150,
+          "receivedAt": 1700000000151,
+          "replayed": false,
+          "data": {
+            "approvalId": "approval:families:publish",
+            "approvalKind": "exec",
+            "allowedDecisions": [
+              "allow-once",
+              "deny"
+            ],
+            "decision": "allow-once",
+            "requestedAt": 1700000000140,
+            "actionable": false,
+            "resolutionSource": "gateway",
+            "itemId": "approval-item:families:publish",
+            "title": "Publish release",
+            "status": "approved",
+            "message": "Release publication approved."
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:image-artifact",
+          "type": "artifact.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "taskId": "task:families:review",
+          "toolCallId": "tool:families:build",
+          "seq": 15,
+          "occurredAt": 1700000000160,
+          "receivedAt": 1700000000161,
+          "replayed": false,
+          "data": {
+            "itemId": "artifact-item:families:media",
+            "artifact": {
+              "id": "artifact:families:image",
+              "kind": "image",
+              "title": "release-preview.png",
+              "filePath": "/workspace/release-preview.png",
+              "mimeType": "image/png",
+              "sizeBytes": 2048,
+              "availability": "available",
+              "width": 1280,
+              "height": 720,
+              "taskId": "task:families:review",
+              "sourceToolCallId": "tool:families:build",
+              "source": "openclaw"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:video-artifact",
+          "type": "artifact.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "taskId": "task:families:review",
+          "toolCallId": "tool:families:build",
+          "seq": 16,
+          "occurredAt": 1700000000170,
+          "receivedAt": 1700000000171,
+          "replayed": false,
+          "data": {
+            "itemId": "artifact-item:families:media",
+            "artifact": {
+              "id": "artifact:families:video",
+              "kind": "video",
+              "title": "release-preview.mp4",
+              "filePath": "/workspace/release-preview.mp4",
+              "mimeType": "video/mp4",
+              "sizeBytes": 4096,
+              "availability": "available",
+              "width": 1280,
+              "height": 720,
+              "durationSeconds": 5,
+              "hasAudio": true,
+              "taskId": "task:families:review",
+              "sourceToolCallId": "tool:families:build",
+              "source": "openclaw"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:image-verification",
+          "type": "verification.updated",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "taskId": "task:families:review",
+          "seq": 17,
+          "occurredAt": 1700000000180,
+          "receivedAt": 1700000000181,
+          "replayed": false,
+          "data": {
+            "itemId": "verification-item:families",
+            "verification": {
+              "id": "verification:families:image",
+              "status": "passed",
+              "kind": "artifact.availability",
+              "required": true,
+              "severity": "blocking",
+              "title": "Image availability",
+              "artifactId": "artifact:families:image",
+              "taskId": "task:families:review",
+              "evidence": "Image exists and is readable.",
+              "source": "host"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:video-verification",
+          "type": "verification.updated",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "taskId": "task:families:review",
+          "seq": 18,
+          "occurredAt": 1700000000190,
+          "receivedAt": 1700000000191,
+          "replayed": false,
+          "data": {
+            "itemId": "verification-item:families",
+            "verification": {
+              "id": "verification:families:video",
+              "status": "passed",
+              "kind": "media.metadata",
+              "required": true,
+              "severity": "blocking",
+              "title": "Video metadata",
+              "artifactId": "artifact:families:video",
+              "taskId": "task:families:review",
+              "evidence": "1280x720, 5 seconds, audio present.",
+              "source": "host"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:final-message",
+          "type": "final.message",
+          "source": "openclaw-chat",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "messageId": "message:families:final",
+          "seq": 19,
+          "occurredAt": 1700000000200,
+          "receivedAt": 1700000000201,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "assistant",
+              "id": "message:families:final",
+              "timestamp": 1700000001,
+              "content": "The verified release bundle is ready."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "families:run-ended",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:families",
+          "turnId": "turn:fixture:families",
+          "runId": "run:fixture:families",
+          "seq": 20,
+          "occurredAt": 1700000000210,
+          "receivedAt": 1700000000211,
+          "replayed": false,
+          "data": {
+            "status": "completed",
+            "endedAt": 1700000000210,
+            "stopReason": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "abnormal-stream-order",
+      "description": "A missing-sequence exact retransmission, a lower late sequence, and final-before-lifecycle converge deterministically.",
+      "tags": [
+        "missing-sequence",
+        "duplicate",
+        "late-sequence",
+        "final-before-lifecycle"
+      ],
+      "events": [
+        {
+          "version": 1,
+          "eventId": "order:turn-requested",
+          "type": "turn.requested",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "messageId": "message:order:user",
+          "occurredAt": 1700000100000,
+          "receivedAt": 1700000100000,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:order:user",
+              "content": "Stream this answer exactly once."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:run-started",
+          "type": "run.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "seq": 1,
+          "occurredAt": 1700000100010,
+          "receivedAt": 1700000100010,
+          "replayed": false,
+          "data": {
+            "startedAt": 1700000100010
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:assistant-newest",
+          "type": "assistant.content",
+          "source": "openclaw-runtime",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "messageId": "message:order:stream",
+          "seq": 4,
+          "occurredAt": 1700000100040,
+          "receivedAt": 1700000100040,
+          "replayed": false,
+          "data": {
+            "text": "Newest streamed replacement.",
+            "replace": true
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:assistant-stale",
+          "type": "assistant.content",
+          "source": "openclaw-runtime",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "messageId": "message:order:stream",
+          "seq": 3,
+          "occurredAt": 1700000100030,
+          "receivedAt": 1700000100050,
+          "replayed": false,
+          "data": {
+            "text": "Stale streamed replacement.",
+            "replace": true
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:no-sequence-commentary",
+          "type": "commentary.append",
+          "source": "plugin",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "occurredAt": 1700000100060,
+          "receivedAt": 1700000100060,
+          "replayed": false,
+          "data": {
+            "entry": {
+              "id": "commentary:order:no-sequence",
+              "kind": "commentary",
+              "text": "No-sequence commentary.",
+              "status": "running",
+              "source": "native"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:no-sequence-commentary",
+          "type": "commentary.append",
+          "source": "plugin",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "occurredAt": 1700000100060,
+          "receivedAt": 1700000100060,
+          "replayed": false,
+          "data": {
+            "entry": {
+              "id": "commentary:order:no-sequence",
+              "kind": "commentary",
+              "text": "No-sequence commentary.",
+              "status": "running",
+              "source": "native"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:final-before-lifecycle",
+          "type": "final.message",
+          "source": "openclaw-chat",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "messageId": "message:order:final",
+          "occurredAt": 1700000100070,
+          "receivedAt": 1700000100070,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "assistant",
+              "id": "message:order:final",
+              "content": "The final arrived before lifecycle completion."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "order:run-ended",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:order",
+          "turnId": "turn:fixture:order",
+          "runId": "run:fixture:order",
+          "seq": 5,
+          "occurredAt": 1700000100080,
+          "receivedAt": 1700000100080,
+          "replayed": false,
+          "data": {
+            "status": "completed",
+            "endedAt": 1700000100080
+          }
+        }
+      ]
+    },
+    {
+      "id": "terminal-precedence-abort",
+      "description": "Authoritative abort closes pending work and rejects lower-authority completion or late pending evidence.",
+      "tags": [
+        "terminal-precedence",
+        "abort",
+        "late-event",
+        "approval-reopen"
+      ],
+      "events": [
+        {
+          "version": 1,
+          "eventId": "abort:turn-requested",
+          "type": "turn.requested",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "messageId": "message:abort:user",
+          "occurredAt": 1700000200000,
+          "receivedAt": 1700000200000,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:abort:user",
+              "content": "Start work, then stop it."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:run-started",
+          "type": "run.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "seq": 1,
+          "occurredAt": 1700000200010,
+          "receivedAt": 1700000200010,
+          "replayed": false,
+          "data": {
+            "startedAt": 1700000200010
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:tool-started",
+          "type": "tool.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "toolCallId": "tool:abort:long",
+          "seq": 2,
+          "occurredAt": 1700000200020,
+          "receivedAt": 1700000200020,
+          "replayed": false,
+          "data": {
+            "toolCallId": "tool:abort:long",
+            "name": "exec",
+            "args": {
+              "command": "long-running-task"
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:task-running",
+          "type": "task.updated",
+          "source": "task-ledger",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "rootRunId": "run:fixture:abort",
+          "runId": "run:fixture:abort:child",
+          "taskId": "task:abort:child",
+          "seq": 1,
+          "occurredAt": 1700000200030,
+          "receivedAt": 1700000200030,
+          "replayed": false,
+          "data": {
+            "task": {
+              "taskId": "task:abort:child",
+              "kind": "subagent",
+              "title": "Long child task",
+              "status": "running",
+              "updatedAt": 1700000200030
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:approval-pending",
+          "type": "approval.updated",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "toolCallId": "tool:abort:long",
+          "seq": 3,
+          "occurredAt": 1700000200040,
+          "receivedAt": 1700000200040,
+          "replayed": false,
+          "data": {
+            "approvalId": "approval:abort:long",
+            "approvalKind": "exec",
+            "allowedDecisions": [
+              "allow-once",
+              "deny"
+            ],
+            "actionable": true,
+            "itemId": "approval-item:abort:long",
+            "status": "pending",
+            "message": "Approve long-running task."
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:run-ended-native",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "seq": 4,
+          "occurredAt": 1700000200050,
+          "receivedAt": 1700000200050,
+          "replayed": false,
+          "data": {
+            "status": "aborted",
+            "endedAt": 1700000200050,
+            "error": "Stopped by user.",
+            "stopReason": "user"
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:run-ended-history-completed",
+          "type": "run.ended",
+          "source": "history",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "seq": 5,
+          "occurredAt": 1700000200060,
+          "receivedAt": 1700000200060,
+          "replayed": true,
+          "data": {
+            "status": "completed",
+            "endedAt": 1700000200060
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:tool-late-running",
+          "type": "tool.updated",
+          "source": "history",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "toolCallId": "tool:abort:long",
+          "seq": 6,
+          "occurredAt": 1700000200070,
+          "receivedAt": 1700000200070,
+          "replayed": true,
+          "data": {
+            "toolCallId": "tool:abort:long",
+            "name": "exec",
+            "partialResult": "Late progress must not reopen the tool."
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:task-late-running",
+          "type": "task.updated",
+          "source": "history",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "rootRunId": "run:fixture:abort",
+          "runId": "run:fixture:abort:child",
+          "taskId": "task:abort:child",
+          "seq": 2,
+          "occurredAt": 1700000200080,
+          "receivedAt": 1700000200080,
+          "replayed": true,
+          "data": {
+            "task": {
+              "taskId": "task:abort:child",
+              "kind": "subagent",
+              "title": "Long child task",
+              "status": "running",
+              "updatedAt": 1700000200080
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "abort:approval-late-pending",
+          "type": "approval.updated",
+          "source": "history",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:abort",
+          "turnId": "turn:fixture:abort",
+          "runId": "run:fixture:abort",
+          "toolCallId": "tool:abort:long",
+          "seq": 7,
+          "occurredAt": 1700000200090,
+          "receivedAt": 1700000200090,
+          "replayed": true,
+          "data": {
+            "approvalId": "approval:abort:long",
+            "approvalKind": "exec",
+            "allowedDecisions": [
+              "allow-once",
+              "deny"
+            ],
+            "actionable": true,
+            "itemId": "approval-item:abort:long",
+            "status": "pending",
+            "message": "Stale approval must remain closed."
+          }
+        }
+      ]
+    },
+    {
+      "id": "history-restart-reconnect",
+      "description": "History checkpoint completion is reopened only by authoritative live activity, then settles through the same Turn.",
+      "tags": [
+        "history-replay",
+        "restart",
+        "disconnect-reconnect"
+      ],
+      "events": [
+        {
+          "version": 1,
+          "eventId": "restart:history-user",
+          "type": "turn.requested",
+          "source": "history",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "turnId": "turn:fixture:restart",
+          "messageId": "message:restart:user",
+          "occurredAt": 1700000300000,
+          "receivedAt": 1700000301000,
+          "replayed": true,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:restart:user",
+              "content": "Resume this restored session."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:history-final",
+          "type": "final.message",
+          "source": "history",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "turnId": "turn:fixture:restart",
+          "messageId": "message:restart:history-final",
+          "occurredAt": 1700000300010,
+          "receivedAt": 1700000301000,
+          "replayed": true,
+          "data": {
+            "message": {
+              "role": "assistant",
+              "id": "message:restart:history-final",
+              "content": "Persisted answer before reconnect."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:history-checkpoint",
+          "type": "history.checkpoint",
+          "source": "history",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "occurredAt": 1700000300020,
+          "receivedAt": 1700000301000,
+          "replayed": true,
+          "data": {
+            "messageCount": 2,
+            "throughMessageId": "message:restart:history-final",
+            "transcriptMtime": 1700000300020,
+            "reason": "initial-load"
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:session-active",
+          "type": "session.activity",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "runId": "run:fixture:restart:live",
+          "occurredAt": 1700000300030,
+          "receivedAt": 1700000300030,
+          "replayed": false,
+          "data": {
+            "active": true
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:assistant-live",
+          "type": "assistant.content",
+          "source": "openclaw-runtime",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:restart",
+          "runId": "run:fixture:restart:live",
+          "messageId": "message:restart:live-stream",
+          "seq": 1,
+          "occurredAt": 1700000300040,
+          "receivedAt": 1700000300040,
+          "replayed": false,
+          "data": {
+            "text": "Live continuation after reconnect.",
+            "replace": true
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:live-final",
+          "type": "final.message",
+          "source": "openclaw-chat",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "runId": "run:fixture:restart:live",
+          "messageId": "message:restart:live-final",
+          "seq": 2,
+          "occurredAt": 1700000300050,
+          "receivedAt": 1700000300050,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "assistant",
+              "id": "message:restart:live-final",
+              "content": "Persisted answer before reconnect."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:run-ended",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "runId": "run:fixture:restart:live",
+          "seq": 3,
+          "occurredAt": 1700000300060,
+          "receivedAt": 1700000300060,
+          "replayed": false,
+          "data": {
+            "status": "completed",
+            "endedAt": 1700000300060
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "restart:session-idle",
+          "type": "session.activity",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:restart",
+          "runId": "run:fixture:restart:live",
+          "occurredAt": 1700000300070,
+          "receivedAt": 1700000300070,
+          "replayed": false,
+          "data": {
+            "active": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "session-isolation",
+      "description": "The same native run identifier in two sessions remains bound to two independent Turns.",
+      "tags": [
+        "session-isolation",
+        "session-switch"
+      ],
+      "events": [
+        {
+          "version": 1,
+          "eventId": "session-a:turn-requested",
+          "type": "turn.requested",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-a",
+          "turnId": "turn:fixture:session-a",
+          "messageId": "message:session-a:user",
+          "occurredAt": 1700000400000,
+          "receivedAt": 1700000400000,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:session-a:user",
+              "content": "Answer session A."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-b:turn-requested",
+          "type": "turn.requested",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-b",
+          "turnId": "turn:fixture:session-b",
+          "messageId": "message:session-b:user",
+          "occurredAt": 1700000400010,
+          "receivedAt": 1700000400010,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:session-b:user",
+              "content": "Answer session B."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-a:run-started",
+          "type": "run.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-a",
+          "turnId": "turn:fixture:session-a",
+          "runId": "run:fixture:reused",
+          "seq": 1,
+          "occurredAt": 1700000400020,
+          "receivedAt": 1700000400020,
+          "replayed": false,
+          "data": {
+            "startedAt": 1700000400020
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-b:run-started",
+          "type": "run.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-b",
+          "turnId": "turn:fixture:session-b",
+          "runId": "run:fixture:reused",
+          "seq": 1,
+          "occurredAt": 1700000400030,
+          "receivedAt": 1700000400030,
+          "replayed": false,
+          "data": {
+            "startedAt": 1700000400030
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-b:final",
+          "type": "final.message",
+          "source": "openclaw-chat",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-b",
+          "turnId": "turn:fixture:session-b",
+          "runId": "run:fixture:reused",
+          "messageId": "message:session-b:final",
+          "seq": 2,
+          "occurredAt": 1700000400040,
+          "receivedAt": 1700000400040,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "assistant",
+              "id": "message:session-b:final",
+              "content": "Session B answer."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-a:final",
+          "type": "final.message",
+          "source": "openclaw-chat",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-a",
+          "turnId": "turn:fixture:session-a",
+          "runId": "run:fixture:reused",
+          "messageId": "message:session-a:final",
+          "seq": 2,
+          "occurredAt": 1700000400050,
+          "receivedAt": 1700000400050,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "assistant",
+              "id": "message:session-a:final",
+              "content": "Session A answer."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-b:run-ended",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-b",
+          "turnId": "turn:fixture:session-b",
+          "runId": "run:fixture:reused",
+          "seq": 3,
+          "occurredAt": 1700000400060,
+          "receivedAt": 1700000400060,
+          "replayed": false,
+          "data": {
+            "status": "completed",
+            "endedAt": 1700000400060
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "session-a:run-ended",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:session-a",
+          "turnId": "turn:fixture:session-a",
+          "runId": "run:fixture:reused",
+          "seq": 3,
+          "occurredAt": 1700000400070,
+          "receivedAt": 1700000400070,
+          "replayed": false,
+          "data": {
+            "status": "completed",
+            "endedAt": 1700000400070
+          }
+        }
+      ]
+    },
+    {
+      "id": "recoverable-error",
+      "description": "A recoverable display error remains distinct from the authoritative error lifecycle.",
+      "tags": [
+        "error",
+        "recoverable-error"
+      ],
+      "events": [
+        {
+          "version": 1,
+          "eventId": "error:turn-requested",
+          "type": "turn.requested",
+          "source": "host",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:error",
+          "turnId": "turn:fixture:error",
+          "messageId": "message:error:user",
+          "occurredAt": 1700000500000,
+          "receivedAt": 1700000500000,
+          "replayed": false,
+          "data": {
+            "message": {
+              "role": "user",
+              "id": "message:error:user",
+              "content": "Run a recoverable operation."
+            }
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "error:run-started",
+          "type": "run.started",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:error",
+          "turnId": "turn:fixture:error",
+          "runId": "run:fixture:error",
+          "seq": 1,
+          "occurredAt": 1700000500010,
+          "receivedAt": 1700000500010,
+          "replayed": false,
+          "data": {
+            "startedAt": 1700000500010
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "error:turn-error",
+          "type": "turn.error",
+          "source": "openclaw-chat",
+          "authority": "corroborating",
+          "sessionKey": "agent:fixture:error",
+          "turnId": "turn:fixture:error",
+          "runId": "run:fixture:error",
+          "occurredAt": 1700000500020,
+          "receivedAt": 1700000500020,
+          "replayed": false,
+          "data": {
+            "error": "The operation can be retried.",
+            "recoverable": true
+          }
+        },
+        {
+          "version": 1,
+          "eventId": "error:run-ended",
+          "type": "run.ended",
+          "source": "openclaw-runtime",
+          "authority": "authoritative",
+          "sessionKey": "agent:fixture:error",
+          "turnId": "turn:fixture:error",
+          "runId": "run:fixture:error",
+          "seq": 2,
+          "occurredAt": 1700000500030,
+          "receivedAt": 1700000500030,
+          "replayed": false,
+          "data": {
+            "status": "error",
+            "endedAt": 1700000500030,
+            "error": "Runtime failed.",
+            "stopReason": "runtime-error"
+          }
+        }
+      ]
+    }
+  ]
+}

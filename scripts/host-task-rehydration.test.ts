@@ -7,6 +7,10 @@ import {
 } from '../src/stores/chat/host-task-rehydration.ts';
 import { applyRuntimeEventToRuns } from '../src/stores/chat/runtime-graph.ts';
 import type { ChatRuntimeRunState } from '../src/stores/chat/types.ts';
+import { historyMessagesToConversationEvents } from '../src/stores/conversation/history-adapter.ts';
+import { hostTasksToConversationEvents } from '../src/stores/conversation/host-task-adapter.ts';
+import { reduceConversationEvents } from '../src/stores/conversation/reducer.ts';
+import { createEmptyConversationState } from '../src/stores/conversation/types.ts';
 
 function payload(status: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -89,6 +93,15 @@ test('rehydrates a succeeded Host task with stable native terminal evidence', ()
   assert.equal(taskEvent?.task.status, 'completed');
   assert.equal(taskEvent?.task.sourceStatus, 'succeeded');
   assert.equal(taskEvent?.task.deliveryStatus, 'delivered');
+  assert.equal(taskEvent?.toolCallId, 'tool-1');
+  assert.equal(
+    events.find((event) => event.type === 'run.step.updated')?.timelineVisibility,
+    'diagnostics',
+  );
+  assert.equal(
+    events.find((event) => event.type === 'progress.update')?.timelineVisibility,
+    'diagnostics',
+  );
   const artifactEvent = events.find((event) => event.type === 'artifact.produced');
   assert.equal(artifactEvent?.toolCallId, 'tool-1');
   assert.equal(artifactEvent?.artifact.taskId, 'task-1');
@@ -96,6 +109,7 @@ test('rehydrates a succeeded Host task with stable native terminal evidence', ()
   const toolEvent = events.find((event) => event.type === 'tool.completed');
   assert.equal(toolEvent?.toolCallId, 'tool-1');
   assert.equal(toolEvent?.isError, false);
+  assert.equal(toolEvent?.timelineVisibility, 'diagnostics');
 
   const once = apply(events);
   const twice = events.reduce((runs, event) => applyRuntimeEventToRuns(runs, event), once);
@@ -104,6 +118,71 @@ test('rehydrates a succeeded Host task with stable native terminal evidence', ()
   assert.equal(once['run-1']?.tasks?.length, 1);
   assert.equal(once['run-1']?.artifacts?.length, 1);
   assert.equal(once['run-1']?.verifications?.length, 1);
+});
+
+test('keeps same-kind event sequences strictly monotonic across Host Task revisions', () => {
+  const revisionFourEvents = buildHostTaskRehydrationEvents(
+    parseHostTaskBridgeTasks(payload('succeeded')),
+  );
+  const revisionFiveEvents = buildHostTaskRehydrationEvents(
+    parseHostTaskBridgeTasks(payload('succeeded', { revision: 5, updatedAt: 500 })),
+  );
+  const revisionFiveSequenceByType = new Map(
+    revisionFiveEvents.map((event) => [event.type, event.seq]),
+  );
+
+  for (const event of revisionFourEvents) {
+    const nextSequence = revisionFiveSequenceByType.get(event.type);
+    assert.equal(Number.isSafeInteger(event.seq), true);
+    assert.equal(Number.isSafeInteger(nextSequence), true);
+    assert.ok(
+      nextSequence !== undefined && event.seq !== undefined && nextSequence > event.seq,
+      `${event.type} seq must increase when revision advances`,
+    );
+  }
+
+  const maximumSupportedRevision = 9_007_199_253;
+  const boundaryEvents = buildHostTaskRehydrationEvents(
+    parseHostTaskBridgeTasks(payload('succeeded', { revision: maximumSupportedRevision })),
+  );
+  assert.ok(boundaryEvents.every((event) => Number.isSafeInteger(event.seq)));
+  assert.equal(
+    parseHostTaskBridgeTasks(payload('succeeded', { revision: maximumSupportedRevision + 1 })).length,
+    0,
+  );
+});
+
+test('rehydrates durable Host Task evidence into the owning canonical turn', () => {
+  const tasks = parseHostTaskBridgeTasks(payload('succeeded'));
+  const history = historyMessagesToConversationEvents('agent:main:session-1', [{
+    role: 'user',
+    id: 'persisted-user-message',
+    idempotencyKey: 'idem-1',
+    content: 'Render the presentation',
+    timestamp: 0.1,
+  }, {
+    role: 'assistant',
+    id: 'persisted-final-message',
+    content: 'The presentation is ready.',
+    timestamp: 0.5,
+  }]);
+  const taskEvents = hostTasksToConversationEvents(tasks);
+  const state = reduceConversationEvents(createEmptyConversationState(), [...history, ...taskEvents]);
+  const turnIds = state.turnOrderBySession['agent:main:session-1'];
+
+  assert.equal(turnIds.length, 1);
+  assert.ok(taskEvents.every((event) => event.source === 'task-ledger' && event.replayed));
+  const turn = state.turnsById[turnIds[0]];
+  assert.equal(turn.taskById['task-1']?.status, 'completed');
+  assert.equal(turn.items.some((item) => item.kind === 'subtask'), true);
+  assert.equal(turn.items.some((item) => item.kind === 'plan'), false);
+  assert.equal(turn.items.some((item) => item.kind === 'tool-group'), false);
+  assert.equal(turn.items.some((item) => item.kind === 'artifact-group'), true);
+  assert.equal(turn.items.some((item) => item.kind === 'verification-summary'), true);
+  assert.equal(
+    state.eventsByTurnId[turn.id].filter((event) => event.timelineVisibility === 'diagnostics').length,
+    3,
+  );
 });
 
 test('failed and blocked Host tasks never rehydrate deliverable artifacts or successful tools', () => {

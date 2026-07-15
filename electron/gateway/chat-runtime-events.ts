@@ -1,4 +1,6 @@
 import type {
+  ChatRuntimeApprovalDecision,
+  ChatRuntimeArtifactAvailability,
   ChatRuntimeEvent,
   ChatRuntimeIssueSeverity,
   ChatRuntimeProgressEntry,
@@ -35,6 +37,16 @@ function readBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
+function readArtifactAvailability(value: unknown): ChatRuntimeArtifactAvailability | undefined {
+  const normalized = readString(value)?.trim().toLowerCase();
+  return normalized === 'registered'
+    || normalized === 'available'
+    || normalized === 'unavailable'
+    || normalized === 'error'
+    ? normalized
+    : undefined;
+}
+
 function readFirstString(records: Array<Record<string, unknown> | null | undefined>, keys: string[]): string | undefined {
   for (const record of records) {
     if (!record) continue;
@@ -56,6 +68,7 @@ type RuntimeTaskContext = {
   taskId?: string;
   parentTaskId?: string;
   runId?: string;
+  rootRunId?: string;
   sessionKey?: string;
 };
 
@@ -95,6 +108,7 @@ function resolveRuntimeTaskContext(payload: Record<string, unknown>): RuntimeTas
     taskId,
     parentTaskId: readFirstString(records, ['parentTaskId', 'parent_task_id']),
     runId: readFirstString(records, ['runId', 'run_id']),
+    rootRunId: readFirstString(records, ['rootRunId', 'root_run_id', 'ownerRunId', 'owner_run_id']),
     sessionKey: readFirstString(records, [
       'sessionKey',
       'session_key',
@@ -109,7 +123,7 @@ function resolveRuntimeTaskContext(payload: Record<string, unknown>): RuntimeTas
 function withBase(
   type: ChatRuntimeEvent['type'],
   payload: Record<string, unknown>,
-): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'type' | 'runId' | 'sessionKey' | 'taskId' | 'parentTaskId' | 'taskStatus' | 'seq' | 'ts'> | null {
+): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'type' | 'runId' | 'rootRunId' | 'sessionKey' | 'taskId' | 'parentTaskId' | 'taskStatus' | 'seq' | 'ts'> | null {
   const taskContext = resolveRuntimeTaskContext(payload);
   const runId = taskContext.runId ?? (taskContext.taskId ? `task:${taskContext.taskId}` : undefined);
   if (!runId) return null;
@@ -118,6 +132,7 @@ function withBase(
     producer: readFirstString([payload, taskContext.data, taskContext.task], ['producer', 'source']) ?? 'gateway',
     type,
     runId,
+    rootRunId: taskContext.rootRunId,
     sessionKey: taskContext.sessionKey,
     taskId: taskContext.taskId,
     parentTaskId: taskContext.parentTaskId,
@@ -144,6 +159,232 @@ function readSeverity(value: unknown): ChatRuntimeIssueSeverity | undefined {
   return normalized === 'info' || normalized === 'warning' || normalized === 'blocking'
     ? normalized
     : undefined;
+}
+
+const APPROVAL_DECISIONS = new Set<ChatRuntimeApprovalDecision>([
+  'allow-once',
+  'allow-always',
+  'deny',
+]);
+
+function normalizeApprovalDecision(value: unknown): ChatRuntimeApprovalDecision | undefined {
+  const decision = readString(value)?.trim().toLowerCase() as ChatRuntimeApprovalDecision | undefined;
+  return decision && APPROVAL_DECISIONS.has(decision) ? decision : undefined;
+}
+
+function normalizeAllowedApprovalDecisions(
+  records: Array<Record<string, unknown> | null | undefined>,
+): ChatRuntimeApprovalDecision[] {
+  for (const record of records) {
+    const raw = record?.allowedDecisions ?? record?.allowed_decisions ?? record?.decisions;
+    if (!Array.isArray(raw)) continue;
+    const decisions = raw
+      .map(normalizeApprovalDecision)
+      .filter((decision): decision is ChatRuntimeApprovalDecision => Boolean(decision));
+    if (decisions.length > 0) return [...new Set(decisions)];
+  }
+  return ['allow-once', 'allow-always', 'deny'];
+}
+
+/** Normalize OpenClaw's native exec/plugin approval notifications. */
+export function normalizeGatewayApprovalRuntimeEvent(
+  eventName: string,
+  payload: unknown,
+  options?: {
+    lookupSessionKey?: (approvalKind: 'exec' | 'plugin', approvalId: string) => string | undefined;
+  },
+): Extract<ChatRuntimeEvent, { type: 'approval.updated' }> | null {
+  const approvalKind = eventName.startsWith('exec.approval.')
+    ? 'exec'
+    : eventName.startsWith('plugin.approval.')
+      ? 'plugin'
+      : null;
+  const requested = eventName.endsWith('.requested');
+  const resolved = eventName.endsWith('.resolved');
+  if (!approvalKind || (!requested && !resolved)) return null;
+
+  const raw = asRecord(payload);
+  if (!raw) return null;
+  const data = asRecord(raw.data) ?? raw;
+  const requestRecord = asRecord(data.request);
+  const context = asRecord(data.context);
+  const records = [raw, data, requestRecord, context];
+  const approvalId = readFirstString(records, ['id', 'approvalId', 'approval_id']);
+  if (!approvalId) return null;
+  // OpenClaw owns approval routing through request.sessionKey. Top-level
+  // fields are transport metadata and must not move an approval across chats.
+  // Resolved events may omit the optional request snapshot, so Main can
+  // correlate them with a previously observed pending identity.
+  const requestSessionKey = readFirstString([requestRecord], [
+    'sessionKey',
+    'session_key',
+    'requesterSessionKey',
+    'requester_session_key',
+  ]);
+  const sessionKey = requestSessionKey
+    ?? (resolved ? readString(options?.lookupSessionKey?.(approvalKind, approvalId)) : undefined);
+  if (!sessionKey) return null;
+
+  const decision = normalizeApprovalDecision(data.decision ?? raw.decision);
+  const rawStatus = readFirstString(records, ['status', 'state', 'resolution'])?.trim().toLowerCase();
+  const nonDecisionResolution = rawStatus === 'expired'
+    || rawStatus === 'cancelled'
+    || rawStatus === 'canceled'
+    || rawStatus === 'error'
+    || rawStatus === 'failed';
+  if (resolved && !decision && !nonDecisionResolution) return null;
+
+  const ts = readTimestamp(raw.ts)
+    ?? readTimestamp(data.ts)
+    ?? readTimestamp(data.timestamp)
+    ?? readTimestamp(raw.createdAtMs)
+    ?? readTimestamp(data.createdAtMs)
+    ?? readTimestamp(data.resolvedAt)
+    ?? readTimestamp(data.resolved_at)
+    ?? readTimestamp(data.requestedAt)
+    ?? readTimestamp(data.requested_at)
+    ?? Date.now();
+  const requestedAt = readTimestamp(raw.createdAtMs)
+    ?? readTimestamp(data.createdAtMs)
+    ?? readTimestamp(data.requestedAt)
+    ?? readTimestamp(data.requested_at)
+    ?? (requested ? ts : undefined);
+  const expiresAt = records
+    .map((record) => readTimestamp(
+      record?.expiresAtMs
+      ?? record?.expiresAt
+      ?? record?.expires_at
+      ?? record?.expiry,
+    ))
+    .find((value) => value != null);
+  const runId = readFirstString(records, ['runId', 'run_id']) ?? `approval:${approvalKind}:${approvalId}`;
+  const toolCallId = readFirstString(records, ['toolCallId', 'tool_call_id']);
+  const taskId = readFirstString(records, ['taskId', 'task_id']);
+  const allowedDecisions = normalizeAllowedApprovalDecisions(records);
+  const status = requested ? 'pending' : decision ?? rawStatus ?? 'resolved';
+
+  return {
+    contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
+    producer: approvalKind === 'plugin' ? 'plugin' : 'openclaw',
+    type: 'approval.updated',
+    runId,
+    sessionKey,
+    taskId,
+    toolCallId,
+    seq: readNumber(raw.seq) ?? readNumber(data.seq),
+    ts,
+    approvalId,
+    approvalKind,
+    allowedDecisions,
+    decision,
+    requestedAt,
+    expiresAt,
+    request: data.request,
+    actionable: requested,
+    resolutionSource: 'gateway',
+    itemId: approvalId,
+    kind: approvalKind,
+    phase: requested ? 'requested' : 'resolved',
+    status,
+    title: readFirstString(records, ['title', 'label', 'toolName', 'tool_name', 'pluginName', 'plugin_name']),
+    message: readFirstString(records, [
+      'description',
+      'warningText',
+      'warning_text',
+      'commandPreview',
+      'command_preview',
+      'command',
+      'message',
+      'reason',
+      'summary',
+    ]),
+  };
+}
+
+/** Normalize pending lookup responses used after reconnect or renderer reload. */
+export function normalizeGatewayApprovalListRuntimeEvents(
+  approvalKind: 'exec' | 'plugin',
+  payload: unknown,
+  nowMs = Date.now(),
+): Array<Extract<ChatRuntimeEvent, { type: 'approval.updated' }>> {
+  const entries = Array.isArray(payload)
+    ? payload
+    : (() => {
+        const record = asRecord(payload);
+        if (!record) return [];
+        for (const key of ['approvals', 'requests', 'items']) {
+          if (Array.isArray(record[key])) return record[key] as unknown[];
+        }
+        return [];
+      })();
+  return entries.flatMap((snapshot) => {
+    const event = normalizeGatewayApprovalRuntimeEvent(
+      `${approvalKind}.approval.requested`,
+      snapshot,
+    );
+    if (!event || (event.expiresAt != null && event.expiresAt <= nowMs)) return [];
+    return [event];
+  });
+}
+
+type PendingGatewayApprovalReplayOptions = {
+  rpc: (method: string, params: unknown, timeoutMs: number) => Promise<unknown>;
+  emit: (event: Extract<ChatRuntimeEvent, { type: 'approval.updated' }>) => void;
+  warn?: (message: string, error: unknown) => void;
+  nowMs?: () => number;
+  timeoutMs?: number;
+};
+
+/** Query both native approval stores and replay their still-pending requests. */
+export async function replayPendingGatewayApprovalRuntimeEvents(
+  options: PendingGatewayApprovalReplayOptions,
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  await Promise.all((['exec', 'plugin'] as const).map(async (approvalKind) => {
+    try {
+      const pending = await options.rpc(`${approvalKind}.approval.list`, {}, timeoutMs);
+      const observedAt = options.nowMs?.() ?? Date.now();
+      for (const event of normalizeGatewayApprovalListRuntimeEvents(approvalKind, pending, observedAt)) {
+        options.emit(event);
+      }
+    } catch (error) {
+      options.warn?.(`Failed to replay pending ${approvalKind} approvals`, error);
+    }
+  }));
+}
+
+type GatewayApprovalRecoveryCoordinatorOptions = {
+  isConnected: () => boolean;
+  replayOnce: () => Promise<void>;
+};
+
+/** Coalesce recovery triggers while preserving one renderer-ready replay. */
+export class GatewayApprovalRecoveryCoordinator {
+  private activeReplay: Promise<void> | null = null;
+  private replayAfterActive = false;
+
+  constructor(private readonly options: GatewayApprovalRecoveryCoordinatorOptions) {}
+
+  async replay(options?: { queueAfterActive?: boolean }): Promise<void> {
+    if (!this.options.isConnected()) return;
+    if (this.activeReplay) {
+      if (options?.queueAfterActive) this.replayAfterActive = true;
+      return await this.activeReplay;
+    }
+
+    const activeReplay = (async () => {
+      do {
+        this.replayAfterActive = false;
+        await this.options.replayOnce();
+      } while (this.replayAfterActive && this.options.isConnected());
+    })();
+    this.activeReplay = activeReplay;
+    try {
+      await activeReplay;
+    } finally {
+      if (this.activeReplay === activeReplay) this.activeReplay = null;
+    }
+  }
 }
 
 function normalizePlanStep(value: unknown, index: number): NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']> | null {
@@ -226,6 +467,20 @@ function normalizeArtifact(value: unknown): Extract<ChatRuntimeEvent, { type: 'a
   const title = readString(record.title) ?? readString(record.name);
   const id = readString(record.id) ?? readString(record.artifactId) ?? filePath ?? url ?? title;
   if (!id) return null;
+  const preview = Object.prototype.hasOwnProperty.call(record, 'preview')
+    ? record.preview === null ? null : readString(record.preview)
+    : undefined;
+  const previewStatus = readString(record.previewStatus) === 'unavailable' ? 'unavailable' : undefined;
+  const explicitAvailability = readArtifactAvailability(
+    record.availability ?? record.availabilityStatus ?? record.deliveryStatus,
+  );
+  const artifactError = readString(record.error) ?? readString(record.errorMessage) ?? readString(record.error_message);
+  const availability = artifactError
+    ? 'error'
+    : explicitAvailability
+    ?? ((readNumber(record.sizeBytes) ?? readNumber(record.fileSize) ?? 0) > 0 || Boolean(url) || Boolean(preview)
+      ? 'available'
+      : 'registered');
   return {
     id,
     kind: readString(record.kind) ?? readString(record.type),
@@ -234,6 +489,14 @@ function normalizeArtifact(value: unknown): Extract<ChatRuntimeEvent, { type: 'a
     url,
     mimeType: readString(record.mimeType) ?? readString(record.mediaType),
     sizeBytes: readNumber(record.sizeBytes) ?? readNumber(record.fileSize),
+    availability,
+    error: artifactError,
+    preview,
+    previewStatus,
+    width: readNumber(record.width),
+    height: readNumber(record.height),
+    durationSeconds: readNumber(record.durationSeconds) ?? readNumber(record.duration_seconds),
+    hasAudio: readBoolean(record.hasAudio) ?? readBoolean(record.has_audio),
     stepId: readString(record.stepId) ?? readString(record.requiredStepId) ?? readString(record.compositeTaskId),
     taskId: readString(record.taskId) ?? readString(record.task_id),
     sourceToolCallId: readString(record.sourceToolCallId) ?? readString(record.toolCallId),
@@ -682,10 +945,12 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
   const events: ChatRuntimeEvent[] = [{
     ...nativeBase,
     type: 'task.updated',
+    toolCallId,
     task: nativeTaskProjection(task, context.data, taskId, lifecycle),
   }, {
     ...nativeBase,
     type: 'run.step.updated',
+    timelineVisibility: 'diagnostics',
     step: {
       id: stepId,
       title,
@@ -702,6 +967,7 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
     events.push({
       ...nativeBase,
       type: 'progress.update',
+      timelineVisibility: 'diagnostics',
       entry: {
         id: `task:${taskId}:progress`,
         kind: lifecycle === 'error' || lifecycle === 'waiting_approval' || lifecycle === 'partial' ? 'status' : 'action',
@@ -757,10 +1023,18 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
 
   if (lifecycle === 'waiting_approval') {
     const approval = nestedRecord(task, 'approval') ?? nestedRecord(context.data, 'approval');
+    const approvalId = readFirstString([approval], ['id', 'approvalId', 'approval_id']) ?? `task:${taskId}:approval`;
     events.push({
       ...nativeBase,
       type: 'approval.updated',
-      itemId: taskId,
+      approvalId,
+      approvalKind: 'task',
+      allowedDecisions: [],
+      requestedAt: nativeBase.ts,
+      expiresAt: readTimestamp(approval?.expiresAt ?? approval?.expires_at),
+      request: approval ?? undefined,
+      actionable: false,
+      itemId: approvalId,
       toolCallId,
       title: readFirstString([approval, task, context.data], ['title', 'label', 'kind']) ?? title,
       kind: readFirstString([approval, task, context.data], ['kind', 'approvalKind', 'approval_kind']),
@@ -1021,6 +1295,18 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
     return base
       ? {
           ...base,
+          approvalId: readString(data.approvalId) ?? readString(data.approval_id) ?? readString(data.itemId),
+          approvalKind: (() => {
+            const kind = readString(data.approvalKind) ?? readString(data.approval_kind);
+            return kind === 'exec' || kind === 'plugin' || kind === 'desktop' || kind === 'task' ? kind : undefined;
+          })(),
+          allowedDecisions: normalizeAllowedApprovalDecisions([data]),
+          decision: normalizeApprovalDecision(data.decision),
+          requestedAt: readTimestamp(data.requestedAt ?? data.requested_at),
+          expiresAt: readTimestamp(data.expiresAt ?? data.expires_at),
+          request: data.request,
+          actionable: readBoolean(data.actionable),
+          resolutionSource: 'gateway',
           itemId: readString(data.itemId),
           toolCallId: readString(data.toolCallId),
           title: readString(data.title),

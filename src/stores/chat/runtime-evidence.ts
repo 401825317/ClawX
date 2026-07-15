@@ -9,7 +9,11 @@ import type { AttachedFileMeta, ChatRuntimeRunState, ChatSendMode } from './type
 
 type RuntimeEventBase = {
   runId: string;
+  rootRunId?: string;
   sessionKey?: string;
+  taskId?: string;
+  parentTaskId?: string;
+  toolCallId?: string;
   ts?: number;
   producer?: ChatRuntimeEventProducer;
 };
@@ -44,14 +48,35 @@ function artifactDedupeKey(file: AttachedFileMeta): string {
     || `${file.fileName}|${file.mimeType}|${file.fileSize}|${file.preview ?? ''}`;
 }
 
+/** Keep path-like prose renderable without promoting it to canonical output evidence. */
+export function hasCanonicalArtifactEvidence(file: AttachedFileMeta): boolean {
+  if (file.disposition === 'input-reference' || file.source === 'user-upload') return false;
+  const hasLocation = Boolean(
+    normalizeText(file.filePath)
+    || normalizeText(file.gatewayUrl)
+    || normalizeText(file.preview),
+  );
+  if (!hasLocation) return false;
+  if (file.source === 'gateway-media') return true;
+  if (file.source === 'message-ref' || file.source === 'tool-result') {
+    return file.fileSize > 0 || Boolean(normalizeText(file.preview));
+  }
+  return file.fileSize > 0
+    || Boolean(normalizeText(file.preview))
+    || Boolean(normalizeText(file.gatewayUrl))
+    || Boolean(normalizeText(file.filePath));
+}
+
 export function hasDeliveredArtifactEvidence(
   run: ChatRuntimeRunState | undefined,
   pendingFiles: AttachedFileMeta[],
 ): boolean {
   const hasPendingAttachment = pendingFiles.some((file) => (
-    file.disposition !== 'input-reference'
+    hasCanonicalArtifactEvidence(file)
+    && !file.error
     && (
-      file.fileSize > 0
+      file.availability === 'available'
+      || file.fileSize > 0
       || Boolean(normalizeText(file.gatewayUrl))
       || Boolean(normalizeText(file.preview))
     )
@@ -81,12 +106,27 @@ function inferArtifactKind(mimeType: string | undefined): string | undefined {
 
 function buildBase(
   base: RuntimeEventBase,
-): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'runId' | 'sessionKey' | 'ts'> {
+): Pick<
+  ChatRuntimeEvent,
+  | 'contractVersion'
+  | 'producer'
+  | 'runId'
+  | 'rootRunId'
+  | 'sessionKey'
+  | 'taskId'
+  | 'parentTaskId'
+  | 'toolCallId'
+  | 'ts'
+> {
   return {
     contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
     producer: base.producer ?? 'renderer',
     runId: base.runId,
+    rootRunId: base.rootRunId,
     sessionKey: base.sessionKey,
+    taskId: base.taskId,
+    parentTaskId: base.parentTaskId,
+    toolCallId: base.toolCallId,
     ts: base.ts ?? Date.now(),
   };
 }
@@ -134,7 +174,7 @@ export function buildRuntimeArtifactEventsFromAttachedFiles(
   const events: ChatRuntimeEvent[] = [];
 
   for (const file of files) {
-    if (file.disposition === 'input-reference') continue;
+    if (!hasCanonicalArtifactEvidence(file)) continue;
     const key = artifactDedupeKey(file);
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -152,7 +192,13 @@ export function buildRuntimeArtifactEventsFromAttachedFiles(
       url: gatewayUrl ?? previewUrl,
       mimeType: normalizeText(file.mimeType),
       sizeBytes: file.fileSize > 0 ? file.fileSize : undefined,
+      availability: file.error
+        ? 'error'
+        : file.availability
+        ?? (file.fileSize > 0 || file.gatewayUrl || file.preview ? 'available' : 'registered'),
+      error: file.error,
       stepId: normalizeText(base.stepId),
+      taskId: normalizeText(base.taskId),
       sourceToolCallId: normalizeText(base.toolCallId),
       source: file.source,
     };
@@ -212,6 +258,7 @@ export function buildRuntimeArtifactVerificationEvent(
       detail: input.detail,
       targetId: input.artifact.id,
       artifactId: input.artifact.id,
+      taskId: input.artifact.taskId ?? runBase.taskId,
       evidence: input.evidence,
       source: input.artifact.source ?? runBase.producer,
     },

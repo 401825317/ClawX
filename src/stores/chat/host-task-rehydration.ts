@@ -95,6 +95,10 @@ const VERIFICATION_STATUSES = new Set<ChatRuntimeVerification['status']>([
   'blocked',
   'skipped',
 ]);
+const EVENT_SEQUENCE_BUCKET_SIZE = 1_000_000;
+const MAX_EVENT_SEQUENCE_REVISION = Math.floor(
+  (Number.MAX_SAFE_INTEGER - (EVENT_SEQUENCE_BUCKET_SIZE - 1)) / EVENT_SEQUENCE_BUCKET_SIZE,
+);
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -192,6 +196,7 @@ function normalizeHostTask(value: unknown): HostTaskBridgeTask | null {
   const title = text(item?.title);
   const status = text(item?.status) as HostTaskBridgeStatus | undefined;
   const revision = number(item?.revision);
+  const normalizedRevision = revision === undefined ? undefined : Math.floor(revision);
   const createdAt = number(item?.createdAt);
   const updatedAt = number(item?.updatedAt);
   const sessionKey = text(correlation?.sessionKey);
@@ -206,8 +211,10 @@ function normalizeHostTask(value: unknown): HostTaskBridgeTask | null {
     || !title
     || !status
     || !HOST_TASK_STATUSES.has(status)
-    || revision === undefined
-    || revision < 1
+    || normalizedRevision === undefined
+    || !Number.isSafeInteger(normalizedRevision)
+    || normalizedRevision < 1
+    || normalizedRevision > MAX_EVENT_SEQUENCE_REVISION
     || createdAt === undefined
     || updatedAt === undefined
     || !sessionKey
@@ -223,7 +230,7 @@ function normalizeHostTask(value: unknown): HostTaskBridgeTask | null {
     kind,
     title,
     status,
-    revision: Math.floor(revision),
+    revision: normalizedRevision,
     createdAt,
     updatedAt,
     ...(text(item.error) ? { error: text(item.error) } : {}),
@@ -283,7 +290,8 @@ function fnv1a32(value: string): number {
 }
 
 function eventSequence(task: HostTaskBridgeTask, key: string): number {
-  return fnv1a32(`${task.taskId}:${task.revision}:${key}`);
+  const eventBucket = fnv1a32(`${task.taskId}:${key}`) % EVENT_SEQUENCE_BUCKET_SIZE;
+  return task.revision * EVENT_SEQUENCE_BUCKET_SIZE + eventBucket;
 }
 
 function latestProgressDetail(task: HostTaskBridgeTask): string | undefined {
@@ -354,6 +362,7 @@ export function buildHostTaskRehydrationEvents(
     events.push({
       ...common,
       type: 'task.updated',
+      toolCallId: task.correlation.toolCallId,
       task: {
         taskId: task.taskId,
         kind: task.kind,
@@ -375,6 +384,7 @@ export function buildHostTaskRehydrationEvents(
     events.push({
       ...eventBase(task, 'step'),
       type: 'run.step.updated',
+      timelineVisibility: 'diagnostics',
       step: {
         id: `host-task:${task.taskId}`,
         title: task.title,
@@ -388,6 +398,7 @@ export function buildHostTaskRehydrationEvents(
     events.push({
       ...eventBase(task, 'progress'),
       type: 'progress.update',
+      timelineVisibility: 'diagnostics',
       entry: {
         id: `host-task:${task.taskId}:state`,
         kind: 'status',
@@ -434,6 +445,7 @@ export function buildHostTaskRehydrationEvents(
       events.push({
         ...eventBase(task, 'tool.completed'),
         type: 'tool.completed',
+        timelineVisibility: 'diagnostics',
         toolCallId: task.correlation.toolCallId,
         name: `host.${task.kind}`,
         result: {

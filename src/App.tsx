@@ -33,6 +33,7 @@ import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { ManagedAuthGate } from './components/auth/ManagedAuthGate';
 import { ClientConfigInitializer } from './components/client/ClientConfigInitializer';
 import { UrgentAnnouncementDialog } from './components/client/UrgentAnnouncementDialog';
+import { useConversationStore } from './stores/conversation/store';
 
 
 /**
@@ -112,6 +113,7 @@ function App() {
   const initGateway = useGatewayStore((state) => state.init);
   const initUpdate = useUpdateStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
+  const chatTimelineMode = useConversationStore((state) => state.mode);
 
   useEffect(() => {
     let cancelled = false;
@@ -228,7 +230,7 @@ function App() {
         <ClientConfigInitializer enabled={setupComplete && !skipSetupForE2E} />
         <UrgentAnnouncementDialog />
         <ManagedAuthGate enabled={setupComplete && !skipSetupForE2E} />
-        <DesktopApprovalOverlay />
+        {chatTimelineMode !== 'timeline' && <DesktopApprovalOverlay />}
 
         {/* Global toast notifications */}
         <Toaster

@@ -1,5 +1,6 @@
 import type {
   ChatRuntimeArtifact,
+  ChatRuntimeArtifactAvailability,
   ChatRuntimeEvent,
   ChatRuntimePlanStep,
   ChatRuntimeProgressEntry,
@@ -14,6 +15,8 @@ export interface AttachedFileMeta {
   fileSize: number;
   preview: string | null;
   previewStatus?: 'unavailable';
+  availability?: ChatRuntimeArtifactAvailability;
+  error?: string;
   width?: number;
   height?: number;
   durationSeconds?: number;
@@ -200,6 +203,30 @@ export interface ChatSendAttachment {
   preview: string | null;
 }
 
+export interface GatewayTurnPreferences {
+  mode: ChatSendMode;
+  image?: {
+    model?: string;
+    size?: string;
+    quality?: 'low' | 'medium' | 'high';
+  };
+  video?: ChatVideoSendOptions;
+  selectedArtifacts?: Array<{
+    filePath: string;
+    mimeType: string;
+    title: string;
+  }>;
+}
+
+/** Internal retry payload; it contains send inputs only, never run/task state. */
+export interface ChatSendReplayIntent {
+  imageOptions?: ChatImageSendOptions;
+  videoOptions?: ChatVideoSendOptions;
+  thinkingLevel?: string | null;
+  referenceImages: ChatSendAttachment[];
+  clientPreferences: GatewayTurnPreferences;
+}
+
 export interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -208,6 +235,7 @@ export interface ChatState {
   hasMoreHistory: boolean;
   error: string | null;
   runError: string | null;
+  historyError: string | null;
 
   // Streaming
   sending: boolean;
@@ -255,6 +283,7 @@ export interface ChatState {
     mode?: ChatSendMode,
     imageOptions?: ChatImageSendOptions,
     videoOptions?: ChatVideoSendOptions,
+    replayIntent?: ChatSendReplayIntent,
   ) => Promise<void>;
   abortRun: () => Promise<void>;
   retryLastRun: () => Promise<void>;
@@ -262,6 +291,7 @@ export interface ChatState {
   handleRuntimeEvent: (event: ChatRuntimeEvent) => void;
   refresh: () => Promise<void>;
   clearError: () => void;
+  clearHistoryError: () => void;
 }
 
 export const DEFAULT_CANONICAL_PREFIX = 'agent:main';

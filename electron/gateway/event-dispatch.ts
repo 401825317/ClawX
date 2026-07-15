@@ -6,6 +6,7 @@ import {
 } from '../../shared/chat-runtime-events';
 import {
   normalizeGatewayChatTerminalRuntimeEvent,
+  normalizeGatewayApprovalRuntimeEvent,
   normalizeGatewayChatRuntimeEvent,
   normalizeGatewayChatRuntimeEvents,
 } from './chat-runtime-events';
@@ -15,6 +16,7 @@ type GatewayEventEmitter = {
 };
 
 type TerminalRuntimeEvent = Extract<ChatRuntimeEvent, { type: 'run.ended' }>;
+type ApprovalRuntimeEvent = Extract<ChatRuntimeEvent, { type: 'approval.updated' }>;
 type TerminalRunRecord = {
   status: TerminalRuntimeEvent['status'];
   authoritative: boolean;
@@ -23,6 +25,131 @@ type TerminalRunRecord = {
 
 const MAX_TERMINAL_RUNS_PER_EMITTER = 2_048;
 const emittedTerminalRuns = new WeakMap<GatewayEventEmitter, Map<string, TerminalRunRecord>>();
+const MAX_APPROVAL_EXPIRY_TIMERS_PER_EMITTER = 2_048;
+const approvalExpiryTimers = new WeakMap<GatewayEventEmitter, Map<string, ReturnType<typeof setTimeout>>>();
+const terminalApprovalKeys = new WeakMap<GatewayEventEmitter, Map<string, true>>();
+const MAX_PENDING_APPROVAL_SESSIONS_PER_EMITTER = 2_048;
+// Retain only trusted routing identity; approval request content stays in the canonical event stream.
+const pendingApprovalSessions = new WeakMap<GatewayEventEmitter, Map<string, string>>();
+
+function nativeApprovalIdentityKey(
+  approvalKind: ApprovalRuntimeEvent['approvalKind'],
+  approvalId: string | undefined,
+): string | null {
+  if ((approvalKind !== 'exec' && approvalKind !== 'plugin') || !approvalId) return null;
+  return `${approvalKind}:${approvalId}`;
+}
+
+function lookupPendingApprovalSession(
+  emitter: GatewayEventEmitter,
+  approvalKind: 'exec' | 'plugin',
+  approvalId: string,
+): string | undefined {
+  const sessions = pendingApprovalSessions.get(emitter);
+  const key = nativeApprovalIdentityKey(approvalKind, approvalId);
+  if (!sessions || !key) return undefined;
+  const sessionKey = sessions.get(key);
+  if (!sessionKey) return undefined;
+  sessions.delete(key);
+  sessions.set(key, sessionKey);
+  return sessionKey;
+}
+
+function rememberPendingApprovalSession(emitter: GatewayEventEmitter, event: ApprovalRuntimeEvent): void {
+  const key = nativeApprovalIdentityKey(event.approvalKind, event.approvalId);
+  if (!key || !event.sessionKey) return;
+  let sessions = pendingApprovalSessions.get(emitter);
+  if (!sessions) {
+    sessions = new Map();
+    pendingApprovalSessions.set(emitter, sessions);
+  }
+  sessions.delete(key);
+  sessions.set(key, event.sessionKey);
+  while (sessions.size > MAX_PENDING_APPROVAL_SESSIONS_PER_EMITTER) {
+    const oldestKey = sessions.keys().next().value;
+    if (!oldestKey) break;
+    sessions.delete(oldestKey);
+  }
+}
+
+function forgetPendingApprovalSession(emitter: GatewayEventEmitter, event: ApprovalRuntimeEvent): void {
+  const key = nativeApprovalIdentityKey(event.approvalKind, event.approvalId);
+  if (key) pendingApprovalSessions.get(emitter)?.delete(key);
+}
+
+function approvalEventKey(event: ApprovalRuntimeEvent): string | null {
+  if (!event.approvalId || !event.approvalKind || !event.sessionKey) return null;
+  return `${event.sessionKey.length}:${event.sessionKey}:${event.approvalKind}:${event.approvalId}`;
+}
+
+function cancelApprovalExpiry(emitter: GatewayEventEmitter, event: ApprovalRuntimeEvent): void {
+  const key = approvalEventKey(event);
+  if (!key) return;
+  const timers = approvalExpiryTimers.get(emitter);
+  const timer = timers?.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  timers?.delete(key);
+}
+
+function hasTerminalApproval(emitter: GatewayEventEmitter, event: ApprovalRuntimeEvent): boolean {
+  const key = approvalEventKey(event);
+  return key ? terminalApprovalKeys.get(emitter)?.has(key) === true : false;
+}
+
+function markTerminalApproval(emitter: GatewayEventEmitter, event: ApprovalRuntimeEvent): void {
+  const key = approvalEventKey(event);
+  if (!key) return;
+  let approvals = terminalApprovalKeys.get(emitter);
+  if (!approvals) {
+    approvals = new Map();
+    terminalApprovalKeys.set(emitter, approvals);
+  }
+  approvals.delete(key);
+  approvals.set(key, true);
+  while (approvals.size > MAX_APPROVAL_EXPIRY_TIMERS_PER_EMITTER) {
+    const oldestKey = approvals.keys().next().value;
+    if (!oldestKey) break;
+    approvals.delete(oldestKey);
+  }
+}
+
+function scheduleApprovalExpiry(emitter: GatewayEventEmitter, event: ApprovalRuntimeEvent): void {
+  const key = approvalEventKey(event);
+  if (!key || event.expiresAt == null) return;
+  cancelApprovalExpiry(emitter, event);
+
+  let timers = approvalExpiryTimers.get(emitter);
+  if (!timers) {
+    timers = new Map();
+    approvalExpiryTimers.set(emitter, timers);
+  }
+
+  const timer = setTimeout(() => {
+    if (timers?.get(key) !== timer) return;
+    timers.delete(key);
+    dispatchCanonicalApprovalRuntimeEvent(emitter, {
+      ...event,
+      producer: 'gateway-approval-expiry',
+      ts: event.expiresAt,
+      decision: undefined,
+      actionable: false,
+      phase: 'resolved',
+      status: 'expired',
+      resolutionSource: 'gateway',
+    });
+  }, Math.max(0, event.expiresAt - Date.now()));
+  timer.unref();
+  timers.set(key, timer);
+
+  while (timers.size > MAX_APPROVAL_EXPIRY_TIMERS_PER_EMITTER) {
+    const oldestKey = timers.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = timers.get(oldestKey);
+    if (oldest) clearTimeout(oldest);
+    timers.delete(oldestKey);
+  }
+}
 
 function terminalRunKey(event: Pick<ChatRuntimeEvent, 'runId' | 'sessionKey'>): string {
   const sessionKey = event.sessionKey ?? '';
@@ -303,6 +430,46 @@ function isChatRuntimeGatewayEventName(event: string): boolean {
     || event === 'runtime.event';
 }
 
+function isApprovalGatewayEventName(event: string): boolean {
+  return event === 'exec.approval.requested'
+    || event === 'exec.approval.resolved'
+    || event === 'plugin.approval.requested'
+    || event === 'plugin.approval.resolved';
+}
+
+function dispatchApprovalRuntimeEvent(
+  emitter: GatewayEventEmitter,
+  eventName: string,
+  payload: unknown,
+): void {
+  const event = normalizeGatewayApprovalRuntimeEvent(eventName, payload, {
+    lookupSessionKey: (approvalKind, approvalId) => (
+      lookupPendingApprovalSession(emitter, approvalKind, approvalId)
+    ),
+  });
+  if (!event) return;
+  dispatchCanonicalApprovalRuntimeEvent(emitter, event);
+}
+
+/** Emit a canonical approval and arm/cancel its expiry timer for replayed snapshots. */
+export function dispatchCanonicalApprovalRuntimeEvent(
+  emitter: GatewayEventEmitter,
+  event: ApprovalRuntimeEvent,
+): void {
+  if (event.phase === 'requested' && hasTerminalApproval(emitter, event)) {
+    cancelApprovalExpiry(emitter, event);
+    return;
+  }
+  if (event.phase === 'requested') rememberPendingApprovalSession(emitter, event);
+  if (event.phase === 'resolved') {
+    markTerminalApproval(emitter, event);
+    forgetPendingApprovalSession(emitter, event);
+  }
+  emitChatRuntimeEvent(emitter, event);
+  if (event.phase === 'requested') scheduleApprovalExpiry(emitter, event);
+  else cancelApprovalExpiry(emitter, event);
+}
+
 function dispatchChatRuntimeEvents(
   emitter: GatewayEventEmitter,
   payload: unknown,
@@ -330,6 +497,11 @@ export function dispatchProtocolEvent(
   event: string,
   payload: unknown,
 ): void {
+  if (isApprovalGatewayEventName(event)) {
+    dispatchApprovalRuntimeEvent(emitter, event, payload);
+    emitter.emit('notification', { method: event, params: payload });
+    return;
+  }
   if (isChatRuntimeGatewayEventName(event)) {
     dispatchChatRuntimeEvents(emitter, payload);
     emitter.emit('notification', { method: event, params: payload });
@@ -368,6 +540,9 @@ export function dispatchJsonRpcNotification(
   notification: JsonRpcNotification,
 ): void {
   emitter.emit('notification', notification);
+  if (isApprovalGatewayEventName(notification.method)) {
+    dispatchApprovalRuntimeEvent(emitter, notification.method, notification.params);
+  }
   if (isChatRuntimeGatewayEventName(notification.method)) {
     dispatchChatRuntimeEvents(emitter, notification.params);
   }
@@ -385,6 +560,11 @@ export function dispatchJsonRpcNotification(
       emitter.emit('error', new Error(errorData.message || 'Gateway error'));
       break;
     }
+    case 'exec.approval.requested':
+    case 'exec.approval.resolved':
+    case 'plugin.approval.requested':
+    case 'plugin.approval.resolved':
+      break;
     default:
       logger.debug(`Unknown Gateway notification: ${notification.method}`);
   }

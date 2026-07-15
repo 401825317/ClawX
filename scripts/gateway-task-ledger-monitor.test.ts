@@ -31,6 +31,23 @@ test('task ledger projection accepts the real OpenClaw gateway DTO', () => {
   assert.equal(event.task.status, 'running');
 });
 
+test('task ledger projection preserves explicit conversation owner run lineage', () => {
+  const event = projectTaskLedgerRecord({
+    id: 'task-owned-child',
+    runtime: 'subagent',
+    sessionKey: 'agent:main:session-1',
+    runId: 'run-child',
+    ownerRunId: 'run-conversation-owner',
+    title: 'Owned child task',
+    status: 'running',
+    createdAt: 10_000,
+    updatedAt: 11_000,
+  });
+
+  assert.equal(event?.runId, 'run-child');
+  assert.equal(event?.rootRunId, 'run-conversation-owner');
+});
+
 test('public completed TaskSummary stays partial when delivery evidence is unavailable', () => {
   const event = projectTaskLedgerRecord({
     id: 'task-completed',
@@ -203,6 +220,41 @@ test('monitor suppresses unchanged active events and preserves terminal lookup a
   const completed = events.at(-1);
   assert.equal(completed?.taskId, 'active');
   assert.equal(completed?.taskStatus, 'completed');
+});
+
+test('monitor emits a corrected owner lineage when task state and timestamps stay unchanged', async () => {
+  let ownerRunId: string | undefined;
+  const events: ChatRuntimeEvent[] = [];
+  const monitor = new GatewayTaskLedgerMonitor({
+    listTasks: async (params) => {
+      if (params.status[0] === 'completed') return { tasks: [] };
+      return {
+        tasks: [{
+          id: 'owner-corrected-task',
+          runtime: 'subagent',
+          sessionKey: 'agent:main:session-1',
+          runId: 'run-owner-corrected-child',
+          ownerRunId,
+          title: 'Owner correction',
+          status: 'running',
+          createdAt: 19_000,
+          updatedAt: 19_500,
+        }],
+      };
+    },
+    getTask: async () => { throw new Error('terminal lookup not expected'); },
+    emit: (event) => events.push(event),
+    now: () => 20_000,
+  });
+
+  await monitor.pollOnce();
+  await monitor.pollOnce();
+  assert.equal(events.length, 1);
+
+  ownerRunId = 'run-conversation-owner';
+  await monitor.pollOnce();
+  assert.equal(events.length, 2);
+  assert.equal(events.at(-1)?.rootRunId, 'run-conversation-owner');
 });
 
 test('monitor discovers tasks that start and finish between active polls', async () => {

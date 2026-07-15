@@ -31,7 +31,7 @@ const seededHistory = [{
 
 test.describe('OpenClaw reasoning projection', () => {
   test('renders persistent reasoning separately from the final answer', async ({ launchElectronApp }, testInfo) => {
-    const app = await launchElectronApp({ skipSetup: true });
+    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'timeline' });
 
     try {
       await installIpcMocks(app, {
@@ -100,20 +100,20 @@ test.describe('OpenClaw reasoning projection', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      const panel = page.getByTestId('reasoning-panel');
+      await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
+      const panel = page.getByTestId('timeline-thinking');
       await expect(panel).toBeVisible({ timeout: 30_000 });
-      await expect(panel).toHaveAttribute('data-live', 'false');
       await expect(panel).toContainText(/Reasoning|思考过程/u);
       await expect(panel.locator('button')).toHaveAttribute('aria-expanded', 'false');
       await expect(panel).not.toContainText('先确认用户目标');
       await panel.locator('button').click();
       await expect(panel).toContainText('先确认用户目标');
       await expect(panel).toContainText('再选择可验证的执行路径');
-      await expect(page.locator('body')).toContainText('已完成分析，这是最终回复。');
+      await expect(page.getByText('已完成分析，这是最终回复。', { exact: true })).toBeVisible();
 
-      const screenshotPath = testInfo.outputPath('reasoning-panel.png');
+      const screenshotPath = testInfo.outputPath('timeline-thinking.png');
       await panel.screenshot({ path: screenshotPath });
-      await testInfo.attach('reasoning-panel', { path: screenshotPath, contentType: 'image/png' });
+      await testInfo.attach('timeline-thinking', { path: screenshotPath, contentType: 'image/png' });
     } finally {
       await closeElectronApp(app);
     }

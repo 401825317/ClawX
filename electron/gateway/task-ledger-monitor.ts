@@ -31,6 +31,7 @@ type TaskProjectionContext = {
   parentTaskId?: string;
   rootSessionKey?: string;
   runId?: string;
+  rootRunId?: string;
 };
 
 const DEFAULT_POLL_INTERVAL_MS = 2_500;
@@ -110,6 +111,21 @@ function taskChildSessionKey(task: TaskLedgerRecord): string | undefined {
   return text(task.childSessionKey ?? task.child_session_key, 300);
 }
 
+/** Explicit owner lineage only; a task's own runId is not a conversation owner. */
+function taskRootRunId(task: TaskLedgerRecord): string | undefined {
+  return text(
+    task.rootRunId
+      ?? task.root_run_id
+      ?? task.ownerRunId
+      ?? task.owner_run_id
+      ?? task.requesterRunId
+      ?? task.requester_run_id
+      ?? task.parentRunId
+      ?? task.parent_run_id,
+    300,
+  );
+}
+
 function explicitParentTaskId(task: TaskLedgerRecord): string | undefined {
   return text(task.parentTaskId ?? task.parent_task_id, 300);
 }
@@ -151,6 +167,7 @@ function taskFingerprint(task: TaskLedgerRecord, context: TaskProjectionContext)
     context.parentTaskId,
     context.rootSessionKey,
     context.runId,
+    context.rootRunId,
     task.flowId ?? task.flow_id ?? task.parentFlowId ?? task.parent_flow_id,
     task.kind ?? task.taskKind ?? task.task_kind,
   ]);
@@ -221,7 +238,8 @@ function buildProjectionContexts(tasks: TaskLedgerRecord[]): Map<string, TaskPro
     const runId = parentContext?.runId
       ?? text(rootTask?.runId ?? rootTask?.run_id, 300)
       ?? (flowId ? `task-flow:${flowId}` : `task:${id}`);
-    const context = { parentTaskId, rootSessionKey, runId };
+    const rootRunId = parentContext?.rootRunId ?? taskRootRunId(task);
+    const context = { parentTaskId, rootSessionKey, runId, rootRunId };
     contexts.set(id, context);
     visiting.delete(id);
     return context;
@@ -269,6 +287,7 @@ export function projectTaskLedgerRecord(
     producer: 'openclaw-task-ledger',
     type: 'task.updated',
     runId,
+    rootRunId: context.rootRunId ?? taskRootRunId(task),
     sessionKey,
     taskId: id,
     parentTaskId: projection.parentTaskId,

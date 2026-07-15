@@ -116,6 +116,9 @@ export interface JunFeiAIClientAnnouncement {
 }
 
 export interface JunFeiAIClientConfigPayload {
+  rollouts?: {
+    chatTimelineMode?: 'legacy' | 'shadow' | 'timeline';
+  };
   announcements?: {
     enabled?: boolean;
     items?: JunFeiAIClientAnnouncement[];

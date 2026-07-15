@@ -53,6 +53,8 @@ import type { AttachedFileMeta } from '@/stores/chat/types';
 import { mergeRuntimeRunStates, runtimeRunsShareTaskIdentity } from './runtime-run-merge';
 import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 import { toast } from 'sonner';
+import { useConversationStore } from '@/stores/conversation/store';
+import { TimelineChatPage } from './TimelineChatPage';
 
 const ArtifactPanelLazy = lazy(() =>
   import('@/components/file-preview/ArtifactPanel').then((m) => ({ default: m.ArtifactPanel })),
@@ -681,6 +683,11 @@ function setBoundedSessionEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntri
 }
 
 export function Chat() {
+  const mode = useConversationStore((state) => state.mode);
+  return mode === 'timeline' ? <TimelineChatPage /> : <LegacyChat timelineMode={mode} />;
+}
+
+function LegacyChat(props: { timelineMode: 'legacy' | 'shadow' }) {
   const { t } = useTranslation('chat');
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -1649,6 +1656,7 @@ export function Chat() {
     <div
       ref={splitContainerRef}
       data-testid="chat-page"
+      data-timeline-mode={props.timelineMode}
       className={cn(
         'relative flex min-h-0 -m-6 overflow-hidden transition-colors duration-500',
         'bg-background',
@@ -1667,6 +1675,7 @@ export function Chat() {
         <div data-testid="chat-toolbar-drag-region" className="drag-region absolute inset-0 z-0" aria-hidden="true" />
         <div data-testid="chat-toolbar-actions" className="no-drag relative z-10">
           <ChatToolbar
+            runActive={sending}
             questionDirectoryOpen={questionDirectoryVisible}
             questionDirectoryCount={questionDirectoryItems.length}
             onToggleQuestionDirectory={() =>

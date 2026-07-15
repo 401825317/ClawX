@@ -301,10 +301,14 @@ test.describe('Native OpenClaw media routing', () => {
         if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
       }
       await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-mode-image').click();
       await page.getByTestId('chat-composer-input').fill('把这张图片改成白天晴天');
       await page.getByTestId('chat-composer-send').click();
 
       await expect(page.getByText(/你想编辑哪张图片|Which image would you like to edit/)).toBeVisible();
+      await expect(page.getByTestId('conversation-turn')).toHaveAttribute('data-turn-status', 'completed');
+      await expect(page.getByTestId('timeline-turn-status')).toHaveCount(0);
+      await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/);
       const requests = await app.evaluate(() => (
         (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests as Array<{ path?: string }> ?? []
       ));

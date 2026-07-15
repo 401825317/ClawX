@@ -12,6 +12,9 @@ import crypto from 'node:crypto';
 import { syncMacTrafficLightPosition } from './traffic-light-layout';
 import { GatewayManager } from '../gateway/manager';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
+import type {
+  ChatRuntimeApprovalDecision,
+} from '../../shared/chat-runtime-events';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
 import {
   type ProviderConfig,
@@ -104,6 +107,12 @@ import {
 } from './ipc/request-helpers';
 
 const gatewayRpcBackpressure = new GatewayRpcBackpressure();
+const APPROVAL_DECISIONS = new Set<ChatRuntimeApprovalDecision>(['allow-once', 'allow-always', 'deny']);
+const gatewayApprovalResolutions = new Map<string, {
+  decision: ChatRuntimeApprovalDecision;
+  promise: Promise<{ success: boolean; result?: unknown; error?: string }>;
+}>();
+const MAX_GATEWAY_APPROVAL_RESOLUTIONS = 1_024;
 const OFFICE_ARTIFACT_TOOL_NAMES = [
   'create_designed_pptx_file',
   'create_pptx_file',
@@ -293,16 +302,53 @@ export function registerIpcHandlers(
 
   // The renderer is the only approval surface allowed to execute a pending
   // desktop action. OpenClaw tools can create/read requests but cannot resolve them.
-  registerDesktopApprovalHandlers();
+  registerDesktopApprovalHandlers(gatewayManager);
 }
 
-function registerDesktopApprovalHandlers(): void {
+function registerDesktopApprovalHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('desktop:approve', async (_, approvalId: unknown) => {
     if (typeof approvalId !== 'string' || !/^[a-zA-Z0-9-]{16,128}$/u.test(approvalId)) {
       return { success: false, error: 'Invalid desktop approval id' };
     }
     const result = await desktopRunCoordinator.approveAndExecuteFromUserInterface(approvalId);
     return { success: result.status === 'completed', result };
+  });
+
+  ipcMain.handle('approval:resolve', async (_, input: unknown) => {
+    const request = input && typeof input === 'object' ? input as Record<string, unknown> : null;
+    const approvalId = typeof request?.approvalId === 'string' ? request.approvalId.trim() : '';
+    const approvalKind = request?.approvalKind;
+    const decision = request?.decision as ChatRuntimeApprovalDecision | undefined;
+    if (!approvalId || approvalId.length > 300) return { success: false, error: 'Invalid approval id' };
+    if (approvalKind !== 'exec' && approvalKind !== 'plugin') {
+      return { success: false, error: 'Unsupported approval kind' };
+    }
+    if (!decision || !APPROVAL_DECISIONS.has(decision)) {
+      return { success: false, error: 'Unsupported approval decision' };
+    }
+
+    const key = `${approvalKind}:${approvalId}`;
+    const existing = gatewayApprovalResolutions.get(key);
+    if (existing) {
+      if (existing.decision !== decision) {
+        return { success: false, error: 'Approval decision was already submitted' };
+      }
+      return await existing.promise;
+    }
+
+    const method: 'exec.approval.resolve' | 'plugin.approval.resolve' = `${approvalKind}.approval.resolve`;
+    const promise = gatewayManager.rpc(method, { id: approvalId, decision }, 15_000)
+      .then((result) => ({ success: true, result }))
+      .catch((error) => {
+        gatewayApprovalResolutions.delete(key);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      });
+    gatewayApprovalResolutions.set(key, { decision, promise });
+    while (gatewayApprovalResolutions.size > MAX_GATEWAY_APPROVAL_RESOLUTIONS) {
+      const oldest = gatewayApprovalResolutions.keys().next().value;
+      if (oldest) gatewayApprovalResolutions.delete(oldest);
+    }
+    return await promise;
   });
 }
 

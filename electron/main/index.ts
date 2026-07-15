@@ -64,6 +64,17 @@ import { ensureJunFeiAIProviderSeeded, getJunFeiAILocalStatus, isJunFeiAISeedRea
 import { autoMigrateManagedChatToOpenAiOnStartup } from '../services/providers/openai-chat-migration';
 import { ensureJunFeiAIManagedRuntimeBootstrap } from '../services/junfeiai/managed-runtime-bootstrap';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
+import {
+  CHAT_RUNTIME_CONTRACT_VERSION,
+  type ChatRuntimeEvent,
+} from '../../shared/chat-runtime-events';
+import { normalizeConversationTimelineMode } from '../../shared/conversation-rollout';
+import { desktopRunCoordinator, type DesktopApprovalView } from '../services/computer';
+import {
+  GatewayApprovalRecoveryCoordinator,
+  replayPendingGatewayApprovalRuntimeEvents,
+} from '../gateway/chat-runtime-events';
+import { dispatchCanonicalApprovalRuntimeEvent } from '../gateway/event-dispatch';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const DISPLAY_APP_NAME = 'UClaw';
@@ -71,6 +82,7 @@ const isE2EMode = process.env.CLAWX_E2E === '1';
 const portableModeInfo = applyPortableEnvironment();
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
+const chatTimelineModeOverride = normalizeConversationTimelineMode(process.env.CLAWX_CHAT_TIMELINE_MODE);
 let extensionsLoadPromise: Promise<void> | null = null;
 
 type JunFeiAILocalStatus = Awaited<ReturnType<typeof getJunFeiAILocalStatus>>;
@@ -236,8 +248,62 @@ let gatewayManager!: GatewayManager;
 let clawHubService!: ClawHubService;
 let hostEventBus!: HostEventBus;
 let hostApiServer: Server | null = null;
+let unsubscribeDesktopApprovals: (() => void) | null = null;
+let gatewayApprovalRecovery!: GatewayApprovalRecoveryCoordinator;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+
+function desktopApprovalRuntimeEvent(
+  approval: DesktopApprovalView,
+): Extract<ChatRuntimeEvent, { type: 'approval.updated' }> {
+  const observedAt = Date.now();
+  const requestedAt = Date.parse(approval.createdAt);
+  const expiresAt = Date.parse(approval.expiresAt);
+  const decision = approval.status === 'approved' || approval.status === 'consumed'
+    ? 'allow-once'
+    : approval.status === 'denied'
+      ? 'deny'
+      : undefined;
+  const pending = approval.status === 'pending';
+
+  return {
+    contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
+    producer: 'uclaw-desktop-approval',
+    type: 'approval.updated',
+    runId: approval.runId,
+    sessionKey: approval.sessionKey,
+    ts: pending && Number.isFinite(requestedAt) ? requestedAt : observedAt,
+    approvalId: approval.id,
+    approvalKind: 'desktop',
+    allowedDecisions: ['allow-once', 'deny'],
+    decision,
+    requestedAt: Number.isFinite(requestedAt) ? requestedAt : undefined,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : undefined,
+    request: {
+      actionKind: approval.action.kind,
+      appId: approval.action.appId,
+    },
+    actionable: pending,
+    resolutionSource: 'desktop-broker',
+    itemId: approval.id,
+    kind: 'desktop',
+    phase: pending ? 'requested' : 'resolved',
+    status: approval.status,
+    title: approval.action.appId,
+    message: approval.reason,
+  };
+}
+
+function sendPendingDesktopApprovals(win: BrowserWindow): void {
+  for (const approval of desktopRunCoordinator.approvals.listPending()) {
+    win.webContents.send('chat:runtime-event', desktopApprovalRuntimeEvent(approval));
+  }
+}
+
+/** Replay pending native approvals after reconnect or renderer reload. */
+async function replayPendingGatewayApprovals(options?: { queueAfterActive?: boolean }): Promise<void> {
+  await gatewayApprovalRecovery.replay(options);
+}
 
 /**
  * Resolve the icons directory path (works in both dev and packaged mode)
@@ -283,6 +349,9 @@ function createWindow(): BrowserWindow {
     icon: getAppIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
+      additionalArguments: chatTimelineModeOverride
+        ? [`--clawx-chat-timeline-mode=${chatTimelineModeOverride}`]
+        : [],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
@@ -359,6 +428,15 @@ function focusMainWindow(): void {
 
 function createMainWindow(): BrowserWindow {
   const win = createWindow();
+
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed()) {
+      sendPendingDesktopApprovals(win);
+      // If connection recovery is already listing approvals, run once more
+      // after it finishes so this newly loaded renderer cannot miss delivery.
+      void replayPendingGatewayApprovals({ queueAfterActive: true });
+    }
+  });
 
   win.once('ready-to-show', () => {
     if (mainWindow !== win) {
@@ -462,6 +540,15 @@ async function initialize(): Promise<void> {
 
   // Register IPC handlers
   registerIpcHandlers(gatewayManager, clawHubService, window);
+
+  unsubscribeDesktopApprovals?.();
+  unsubscribeDesktopApprovals = desktopRunCoordinator.approvals.subscribe((approval) => {
+    const event = desktopApprovalRuntimeEvent(approval);
+    hostEventBus.emit('chat:runtime-event', event);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('chat:runtime-event', event);
+    }
+  });
 
   hostApiServer = startHostApiServer({
     gatewayManager,
@@ -604,8 +691,13 @@ async function initialize(): Promise<void> {
 
   // Bridge gateway and host-side events before any auto-start logic runs, so
   // renderer subscribers observe the full startup lifecycle.
-  gatewayManager.on('status', (status: { state: string }) => {
+  gatewayManager.on('status', (status: { state: string; gatewayReady?: boolean }) => {
     hostEventBus.emit('gateway:status', status);
+    if (status.state === 'running') {
+      // The handshake makes RPC available. A later ready=true transition is
+      // allowed to queue one retry if the first lookup is still in flight.
+      void replayPendingGatewayApprovals({ queueAfterActive: status.gatewayReady === true });
+    }
     if (status.state === 'running' && !isE2EMode) {
       void ensureClawXContext().catch((error) => {
         logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
@@ -806,6 +898,16 @@ if (gotTheLock) {
   }
 
   gatewayManager = new GatewayManager();
+  gatewayApprovalRecovery = new GatewayApprovalRecoveryCoordinator({
+    isConnected: () => gatewayManager.getStatus().state === 'running',
+    replayOnce: async () => {
+      await replayPendingGatewayApprovalRuntimeEvents({
+        rpc: async (method, params, timeoutMs) => await gatewayManager.rpc(method, params, timeoutMs),
+        emit: (event) => dispatchCanonicalApprovalRuntimeEvent(gatewayManager, event),
+        warn: (message, error) => logger.warn(`${message}:`, error),
+      });
+    },
+  });
   clawHubService = new ClawHubService();
   hostEventBus = new HostEventBus();
 
@@ -871,6 +973,8 @@ if (gotTheLock) {
       return;
     }
 
+    unsubscribeDesktopApprovals?.();
+    unsubscribeDesktopApprovals = null;
     hostEventBus.closeAll();
     hostApiServer?.close();
     void extensionRegistry.teardownAll();

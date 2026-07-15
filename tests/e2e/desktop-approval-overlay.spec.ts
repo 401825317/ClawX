@@ -2,7 +2,7 @@ import { closeElectronApp, expect, getStableWindow, test } from './fixtures/elec
 
 test.describe('UClaw desktop approval overlay', () => {
   test('shows a Main-owned pending approval and can deny it without exposing action payload', async ({ launchElectronApp }) => {
-    const app = await launchElectronApp({ skipSetup: true });
+    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'legacy' });
     try {
       await app.evaluate(({ ipcMain }) => {
         let pending = true;

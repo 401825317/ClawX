@@ -405,6 +405,18 @@ test('same-seq gateway fan-out retains every entity and remains idempotent on re
   assert.equal(replayed?.progressEntries?.length, 2);
 });
 
+test('gateway runtime normalization preserves explicit owner run lineage', () => {
+  const events = normalizeGatewayChatRuntimeEvents({
+    stream: 'artifact',
+    runId: 'image_generate:lineage-task:ok',
+    rootRunId: 'run-lineage-owner',
+    sessionKey: SESSION_KEY,
+    artifact: { id: 'lineage-artifact', kind: 'image', filePath: '/tmp/lineage.png' },
+  });
+  assert.ok(events.length > 0);
+  assert.equal(events[0]?.rootRunId, 'run-lineage-owner');
+});
+
 test('a task-ledger-only run follows the detached task terminal state', () => {
   const completed = applyRuntimeEventToRuns({}, {
     type: 'task.updated',

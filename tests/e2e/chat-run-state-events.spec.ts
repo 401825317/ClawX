@@ -278,12 +278,26 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
-      await expect(page.getByTestId('chat-run-progress')).toBeVisible();
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'true');
-      await expect(page.getByTestId('chat-run-progress')).toContainText(/completed|完成/i);
-      await expect(page.getByTestId('chat-run-progress')).not.toContainText(/failed|失败/i);
+      const turn = page.getByTestId('conversation-turn').filter({ hasText: 'run long task' });
+      const turnId = await turn.getAttribute('data-turn-id');
+      expect(turnId).toBeTruthy();
+      await expect(turn).toHaveAttribute('data-turn-status', 'running');
+      await expect(page.getByTestId('timeline-turn-status')).toBeVisible();
+      const toolGroups = page.getByTestId('timeline-tool-group');
+      await expect(toolGroups).toHaveCount(2);
+      await expect(toolGroups.nth(0)).toHaveAttribute('data-status', 'completed');
+      await expect(toolGroups.nth(1)).toHaveAttribute('data-status', 'error');
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
       await expect(page.getByText(/No such file or directory/i)).toHaveCount(0);
       await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      await page.getByTestId('timeline-execution-details').click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+      await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'read' })).toBeVisible();
+      await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'exec' })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(page.getByRole('dialog')).toHaveCount(0);
 
       await app.evaluate(({ BrowserWindow }) => {
         for (const win of BrowserWindow.getAllWindows()) {
@@ -297,9 +311,7 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'false');
-      await page.getByTestId('chat-run-progress-toggle').click();
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'true');
+      await expect(page.locator(`[data-turn-id="${turnId}"][data-timeline-row-kind="status"]`)).toHaveCount(0);
 
       await installIpcMocks(app, {
         gatewayRpc: {
@@ -446,6 +458,7 @@ test.describe('ClawX chat run state events', () => {
         let mainActive = false;
         let mainIdleObserved = false;
         let mainHistory: unknown[] = [];
+        let mainRequestIdempotencyKey: string | undefined;
         const otherHistory = [
           {
             id: 'user-offscreen-control',
@@ -480,7 +493,11 @@ test.describe('ClawX chat run state events', () => {
         });
 
         ipcMain.removeHandler('gateway:rpc');
-        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: { sessionKey?: string } = {}) => {
+        ipcMain.handle('gateway:rpc', async (
+          _event: unknown,
+          method: string,
+          params: { sessionKey?: string; idempotencyKey?: string } = {},
+        ) => {
           if (method === 'sessions.list') {
             if (!mainActive) mainIdleObserved = true;
             return { success: true, result: sessionResult() };
@@ -499,6 +516,7 @@ test.describe('ClawX chat run state events', () => {
           }
           if (method === 'chat.send') {
             mainActive = true;
+            mainRequestIdempotencyKey = params.idempotencyKey;
             return { success: true, result: { runId: 'run-offscreen-idle' } };
           }
           return { success: true, result: {} };
@@ -528,6 +546,10 @@ test.describe('ClawX chat run state events', () => {
           }
           if (request.path === '/api/chat/send') {
             mainActive = true;
+            const body = request.body
+              ? JSON.parse(request.body) as { idempotencyKey?: string }
+              : {};
+            mainRequestIdempotencyKey = body.idempotencyKey;
             return response({ success: true, result: { runId: 'run-offscreen-idle' } });
           }
           if (request.path?.startsWith('/api/task-bridge/tasks')) {
@@ -547,6 +569,7 @@ test.describe('ClawX chat run state events', () => {
           mainIdleObserved = false;
         };
         (globalThis as Record<string, unknown>).__mainOffscreenIdleObserved = () => mainIdleObserved;
+        (globalThis as Record<string, unknown>).__mainRequestIdempotencyKey = () => mainRequestIdempotencyKey;
       });
 
       const page = await getStableWindow(app);
@@ -563,9 +586,17 @@ test.describe('ClawX chat run state events', () => {
       await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
 
       const finalTimestamp = Date.now() / 1000;
+      const idempotencyKey = await app.evaluate(() => {
+        const getIdempotencyKey = (globalThis as Record<string, unknown>).__mainRequestIdempotencyKey as
+          | (() => string | undefined)
+          | undefined;
+        return getIdempotencyKey?.();
+      });
+      expect(idempotencyKey).toBeTruthy();
       const settledHistory = [
         {
           id: 'user-offscreen-idle',
+          idempotencyKey,
           role: 'user',
           content: '后台完成后不要恢复旧运行态',
           timestamp: finalTimestamp - 1,
@@ -625,7 +656,7 @@ test.describe('ClawX chat run state events', () => {
       });
 
       await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
-      await expect(page.getByText('任务已经完成。')).toBeVisible();
+      await expect(page.getByText('任务已经完成。')).toHaveCount(1);
       await expect(sendButton).toHaveAttribute('title', /Send|发送/);
       expect(await page.evaluate(() => (
         (globalThis as unknown as Record<string, unknown>).__staleOffscreenRunObserved
@@ -834,11 +865,18 @@ test.describe('ClawX chat run state events', () => {
         }
       }
 
-      await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toBeVisible({ timeout: 30_000 });
+      await expect(toolGroup).toHaveAttribute('data-status', 'completed');
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
-      await expect(page.getByText('我先查看相关内容。')).toBeVisible();
-      await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
+      await page.getByTestId('timeline-tool-group-toggle').click();
+      await expect(page.getByTestId('timeline-tool-details')).toContainText('/tmp/capabilities.md');
       await expect(page.getByText('我现在可以生成文档、表格和演示文稿。')).toBeVisible();
+      await expect(page.getByTestId('conversation-turn').filter({ hasText: '你现在能做哪些文件类产物？' }))
+        .toHaveAttribute('data-turn-status', 'completed');
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'read' })).toBeVisible();
     } finally {
       await closeElectronApp(app);
     }
@@ -1183,8 +1221,14 @@ test.describe('ClawX chat run state events', () => {
         }
       }
 
-      await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByText('我先查看相关内容。')).toBeVisible();
+      const openTurn = page.getByTestId('conversation-turn').filter({ hasText: '你现在能做哪些文件类产物？' });
+      await expect(openTurn).toHaveAttribute('data-turn-status', 'running', { timeout: 30_000 });
+      await expect(page.getByTestId('timeline-turn-status')).toBeVisible();
+      await expect(page.getByTestId('timeline-tool-group')).toHaveAttribute('data-status', 'completed');
+      await page.getByTestId('timeline-tool-group-toggle').click();
+      await expect(page.getByTestId('timeline-tool-details')).toContainText('/tmp/capabilities.md');
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/);
     } finally {
       await closeElectronApp(app);
@@ -1230,6 +1274,22 @@ test.describe('ClawX chat run state events', () => {
               status: 200,
               ok: true,
               json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] } },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { messages: history } },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
@@ -1303,6 +1363,22 @@ MEDIA:C:\Users\Administrator\.openclaw\workspace\japan-kansai-4d3n-plan.svg`,
               status: 200,
               ok: true,
               json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] } },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { messages: history } },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {

@@ -11,6 +11,13 @@ import {
   CHAT_SYNTHETIC_TERMINAL_PRODUCER,
   type ChatRuntimeEvent,
 } from '../../shared/chat-runtime-events';
+import { createChatEventContext, normalizeGatewayChatEnvelope } from './conversation/chat-adapter';
+import {
+  completionWakeTaskIdFromRunId,
+  resolveCanonicalEventSession,
+  resolveCompletionWakeCorrelation,
+} from './conversation/control-selectors';
+import { useConversationStore } from './conversation/store';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
@@ -187,16 +194,82 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
 }
 
 function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
-  const resolvedSessionKey = event.sessionKey ?? null;
-  if (resolvedSessionKey) {
-    touchSessionActivity(resolvedSessionKey, typeof event.ts === 'number' ? event.ts : Date.now());
-  }
-
   import('./chat')
-    .then(({ useChatStore }) => {
+    .then(({ inferSessionKeyForRun, useChatStore }) => {
       const state = useChatStore.getState();
+      const inferredSessionKey = inferSessionKeyForRun(
+        state,
+        event.runId,
+        event.sessionKey ?? null,
+      );
+      const legacyEventForSession = inferredSessionKey && event.sessionKey !== inferredSessionKey
+        ? { ...event, sessionKey: inferredSessionKey }
+        : event;
+      const completionTaskId = completionWakeTaskIdFromRunId(event.runId);
+      const completionWake = completionTaskId
+        ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
+            runId: event.runId,
+            rootRunId: event.rootRunId,
+            sessionKey: event.sessionKey,
+            taskId: event.taskId,
+          })
+        : null;
+      const canonicalRouting = completionTaskId
+        ? null
+        : resolveCanonicalEventSession(useConversationStore.getState(), {
+            sessionKey: event.sessionKey,
+            rootRunId: event.rootRunId,
+            runId: event.runId,
+            taskId: event.taskId,
+          }, { allowPendingLocal: event.type === 'run.started' });
+      const canonicalEvent = completionWake
+        ? {
+            ...event,
+            rootRunId: event.rootRunId ?? completionWake.rootRunId,
+            sessionKey: event.sessionKey ?? completionWake.sessionKey,
+            taskId: event.taskId ?? completionWake.taskId,
+          }
+        : canonicalRouting && event.sessionKey !== canonicalRouting.sessionKey
+          ? {
+              ...event,
+              sessionKey: canonicalRouting.sessionKey,
+              rootRunId: event.rootRunId ?? canonicalRouting.rootRunId,
+            }
+          : event;
+      const resolvedSessionKey = completionTaskId
+        ? completionWake?.sessionKey ?? null
+        : canonicalRouting?.sessionKey ?? inferredSessionKey;
+
+      if (resolvedSessionKey) {
+        touchSessionActivity(resolvedSessionKey, typeof event.ts === 'number' ? event.ts : Date.now());
+      }
+
+      // Correlate session-less completion wakes from the canonical task owner
+      // before ingestion; ambiguous ownership remains intentionally unscoped.
+      if (completionWake || canonicalRouting) {
+        try {
+          useConversationStore.getState().ingestRuntimeEvent(canonicalEvent);
+        } catch (error) {
+          console.warn('[conversation-timeline] Failed to ingest runtime event:', error);
+        }
+      }
+
       state.handleRuntimeEvent(event);
       const nextState = useChatStore.getState();
+
+      if (legacyEventForSession.type === 'run.ended' && resolvedSessionKey) {
+        try {
+          const legacyRunStatus = nextState.runtimeRuns[legacyEventForSession.runId]?.status;
+          useConversationStore.getState().compareAuthoritativeTerminal({
+            sessionKey: resolvedSessionKey,
+            runId: legacyEventForSession.runId,
+            status: legacyEventForSession.status,
+            legacyRunStatus: legacyRunStatus === 'running' ? undefined : legacyRunStatus,
+          });
+        } catch (error) {
+          console.warn('[conversation-timeline] Failed to compare terminal projections:', error);
+        }
+      }
 
       const shouldRefreshSessions = resolvedSessionKey != null && (
         resolvedSessionKey !== nextState.currentSessionKey
@@ -233,33 +306,48 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
 
 function handleGatewayChatMessage(data: unknown): void {
   import('./chat').then(({ useChatStore }) => {
-    const chatData = data as Record<string, unknown>;
-    const payload = ('message' in chatData && typeof chatData.message === 'object')
-      ? chatData.message as Record<string, unknown>
-      : chatData;
-    const normalizedPayload: Record<string, unknown> = {
-      ...payload,
-      ...(payload.sessionKey == null && chatData.sessionKey != null
-        ? { sessionKey: chatData.sessionKey }
-        : {}),
-      ...(payload.runId == null && chatData.runId != null
-        ? { runId: chatData.runId }
-        : {}),
-    };
-
-    if (normalizedPayload.state) {
-      if (!shouldProcessGatewayEvent(normalizedPayload)) return;
-      useChatStore.getState().handleChatEvent(normalizedPayload);
-      return;
-    }
-
-    const normalized = {
-      state: 'final',
-      message: normalizedPayload,
-      runId: normalizedPayload.runId,
-      sessionKey: normalizedPayload.sessionKey,
-    };
+    const normalized = normalizeGatewayChatEnvelope(data);
+    if (!normalized) return;
     if (!shouldProcessGatewayEvent(normalized)) return;
+    const chatState = useChatStore.getState();
+    const explicitSessionKey = typeof normalized.sessionKey === 'string'
+      ? normalized.sessionKey
+      : null;
+    const eventRunId = typeof normalized.runId === 'string' ? normalized.runId : null;
+    // Completion wakes use a short-lived media run ID. Preserve that event ID,
+    // but attach its canonical root owner before the reducer assigns a Turn.
+    const completionTaskId = eventRunId ? completionWakeTaskIdFromRunId(eventRunId) : null;
+    const owner = eventRunId && completionTaskId
+      ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
+          runId: eventRunId,
+          rootRunId: typeof normalized.rootRunId === 'string' ? normalized.rootRunId : undefined,
+          sessionKey: explicitSessionKey,
+          taskId: typeof normalized.taskId === 'string' ? normalized.taskId : undefined,
+        })
+      : null;
+    const canonicalRouting = completionTaskId
+      ? null
+      : resolveCanonicalEventSession(useConversationStore.getState(), {
+          sessionKey: explicitSessionKey,
+          rootRunId: typeof normalized.rootRunId === 'string' ? normalized.rootRunId : undefined,
+          runId: eventRunId,
+          taskId: typeof normalized.taskId === 'string' ? normalized.taskId : undefined,
+        }, { allowPendingLocal: true });
+    const sessionKey = completionTaskId
+      ? owner?.sessionKey ?? null
+      : canonicalRouting?.sessionKey ?? null;
+    if (sessionKey) {
+      try {
+        useConversationStore.getState().ingestChatEvent(normalized, createChatEventContext({
+          sessionKey,
+          currentSessionKey: chatState.currentSessionKey,
+          activeRunId: chatState.activeRunId,
+          ownerRunId: owner?.rootRunId,
+        }));
+      } catch (error) {
+        console.warn('[conversation-timeline] Failed to ingest chat event:', error);
+      }
+    }
     useChatStore.getState().handleChatEvent(normalized);
   }).catch(() => {});
 }

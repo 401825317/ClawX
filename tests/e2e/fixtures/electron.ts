@@ -4,15 +4,18 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import type { ConversationTimelineMode } from '../../../shared/conversation-rollout';
 
 type LaunchElectronOptions = {
   skipSetup?: boolean;
+  chatTimelineMode?: ConversationTimelineMode;
 };
 
 type IpcMockConfig = {
   gatewayStatus?: Record<string, unknown>;
   gatewayRpc?: Record<string, unknown>;
   hostApi?: Record<string, unknown>;
+  captureHostApiRequests?: boolean;
 };
 
 type ElectronFixtures = {
@@ -140,6 +143,7 @@ async function launchClawXElectron(
       CLAWX_E2E: '1',
       CLAWX_USER_DATA_DIR: userDataDir,
       ...(options.skipSetup ? { CLAWX_E2E_SKIP_SETUP: '1' } : {}),
+      ...(options.chatTimelineMode ? { CLAWX_CHAT_TIMELINE_MODE: options.chatTimelineMode } : {}),
       CLAWX_PORT_CLAWX_HOST_API: String(hostApiPort),
     },
     timeout: 90_000,
@@ -211,6 +215,10 @@ export async function installIpcMocks(
   await app.evaluate(
     async ({ app: _app }, mockConfig) => {
       const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+      const capturedHostApiRequests: Array<{ path?: string; method?: string; body?: string }> = [];
+      if (mockConfig.captureHostApiRequests) {
+        (globalThis as Record<string, unknown>).__clawxE2EHostApiRequests = capturedHostApiRequests;
+      }
       const stableStringify = (value: unknown): string => {
         if (value == null || typeof value !== 'object') return JSON.stringify(value);
         if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
@@ -237,7 +245,8 @@ export async function installIpcMocks(
 
       if (mockConfig.hostApi) {
         ipcMain.removeHandler('hostapi:fetch');
-        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string }) => {
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string; body?: string }) => {
+          if (mockConfig.captureHostApiRequests) capturedHostApiRequests.push({ ...request });
           const key = stableStringify([request?.path ?? '', request?.method ?? 'GET']);
           if (key in mockConfig.hostApi!) {
             return mockConfig.hostApi![key];
