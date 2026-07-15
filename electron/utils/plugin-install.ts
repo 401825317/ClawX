@@ -13,6 +13,11 @@ import { readdir, stat, copyFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { logger } from './logger';
 import { getOpenClawExtensionsDir } from './paths';
+import {
+  isTransientPluginInstallPath,
+  resolvePluginInstallWorkPaths,
+  resolvePluginInstallWorkRoot,
+} from './plugin-install-paths';
 
 function normalizeFsPathForWindows(filePath: string): string {
   if (process.platform !== 'win32') return filePath;
@@ -138,6 +143,49 @@ function runWithTransientFsRetry(operation: () => void): void {
     }
   }
   throw lastError;
+}
+
+export function cleanupStalePluginInstallArtifacts(): boolean {
+  const extensionsRoot = getOpenClawExtensionsDir();
+  let succeeded = true;
+
+  try {
+    for (const entry of readdirSync(fsPath(extensionsRoot), { withFileTypes: true })) {
+      if (!isTransientPluginInstallPath(entry.name)) continue;
+      const stalePath = join(extensionsRoot, entry.name);
+      try {
+        runWithTransientFsRetry(() => rmSync(fsPath(stalePath), { recursive: true, force: true }));
+        logger.info(`[plugin] Removed stale plugin install artifact: ${stalePath}`);
+      } catch (error) {
+        succeeded = false;
+        logger.warn('[plugin] Failed to remove stale plugin install artifact', {
+          stalePath,
+          ...toErrorDiagnostic(error),
+        });
+      }
+    }
+  } catch (error) {
+    if (asErrnoException(error)?.code !== 'ENOENT') {
+      succeeded = false;
+      logger.warn('[plugin] Failed to scan extensions for stale install artifacts', {
+        extensionsRoot,
+        ...toErrorDiagnostic(error),
+      });
+    }
+  }
+
+  const workRoot = resolvePluginInstallWorkRoot(extensionsRoot);
+  try {
+    runWithTransientFsRetry(() => rmSync(fsPath(workRoot), { recursive: true, force: true }));
+  } catch (error) {
+    succeeded = false;
+    logger.warn('[plugin] Failed to clean plugin install work directory', {
+      workRoot,
+      ...toErrorDiagnostic(error),
+    });
+  }
+
+  return succeeded;
 }
 
 // ── Known plugin-ID corrections ─────────────────────────────────────────────
@@ -699,15 +747,15 @@ function prepareAndActivatePlugin(
   pluginLabel: string,
   prepareStaging: (stagingDir: string) => void,
 ): void {
-  const parentDir = path.dirname(targetDir);
-  const targetName = path.basename(targetDir);
   const nonce = `${process.pid}-${randomUUID()}`;
-  const stagingDir = join(parentDir, `.${targetName}.uclaw-staging-${nonce}`);
-  const backupDir = join(parentDir, `.${targetName}.uclaw-backup-${nonce}`);
+  const { workRoot, stagingDir, backupDir } = resolvePluginInstallWorkPaths(targetDir, nonce);
   let oldVersionMoved = false;
   let newVersionActivated = false;
 
-  mkdirSync(fsPath(parentDir), { recursive: true });
+  // Keep partial plugin trees outside extensions/. OpenClaw scans that directory
+  // and may persist a staging path before the atomic rename completes.
+  mkdirSync(fsPath(path.dirname(targetDir)), { recursive: true });
+  mkdirSync(fsPath(workRoot), { recursive: true });
   rmSync(fsPath(stagingDir), { recursive: true, force: true });
   rmSync(fsPath(backupDir), { recursive: true, force: true });
 
