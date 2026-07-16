@@ -6,6 +6,11 @@ import { getUvMirrorEnv } from '../utils/uv-env';
 import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
+import {
+  getListeningProcessIds,
+  isProcessDescendantByParentResolver,
+  isProcessDescendantOf,
+} from '../utils/process-inspection';
 import { probeGatewayReady } from './ws-client';
 
 const PYTHON_STARTUP_READINESS_DELAY_MS = 45_000;
@@ -187,64 +192,6 @@ export async function waitForPortFree(port: number, timeoutMs = 30000): Promise<
   throw new Error(`Port ${port} still occupied after ${timeoutMs}ms`);
 }
 
-async function getListeningProcessIds(port: number): Promise<string[]> {
-  const cmd = process.platform === 'win32'
-    ? `netstat -ano | findstr :${port}`
-    : `lsof -i :${port} -sTCP:LISTEN -t`;
-
-  const cp = await import('child_process');
-  const { stdout } = await new Promise<{ stdout: string }>((resolve) => {
-    cp.exec(cmd, { timeout: 5000, windowsHide: true }, (err, stdout) => {
-      if (err) {
-        resolve({ stdout: '' });
-      } else {
-        resolve({ stdout });
-      }
-    });
-  });
-
-  if (!stdout.trim()) {
-    return [];
-  }
-
-  if (process.platform === 'win32') {
-    const pids: string[] = [];
-    for (const line of stdout.trim().split(/\r?\n/)) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length >= 5 && parts[3] === 'LISTENING') {
-        pids.push(parts[4]);
-      }
-    }
-    return [...new Set(pids)];
-  }
-
-  return [...new Set(stdout.trim().split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
-}
-
-const MAX_PROCESS_ANCESTRY_DEPTH = 32;
-
-function normalizeProcessId(value: string | number | undefined): string | undefined {
-  const normalized = String(value ?? '').trim();
-  return /^\d+$/u.test(normalized) && Number(normalized) > 0 ? normalized : undefined;
-}
-
-async function getParentProcessId(pid: string): Promise<string | undefined> {
-  const normalizedPid = normalizeProcessId(pid);
-  if (!normalizedPid) return undefined;
-
-  const command = process.platform === 'win32'
-    ? `powershell -NoProfile -NonInteractive -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId = ${normalizedPid}').ParentProcessId"`
-    : `ps -o ppid= -p ${normalizedPid}`;
-  const cp = await import('child_process');
-  const { stdout } = await new Promise<{ stdout: string }>((resolve) => {
-    cp.exec(command, { timeout: 3_000, windowsHide: true }, (err, output) => {
-      resolve({ stdout: err ? '' : output });
-    });
-  });
-
-  return normalizeProcessId(stdout.trim().split(/\s+/u)[0]);
-}
-
 /**
  * Gateway is forked through Electron UtilityProcess, while the HTTP listener
  * can live in a child Node process. Treat descendants as owned so a healthy
@@ -253,24 +200,17 @@ async function getParentProcessId(pid: string): Promise<string | undefined> {
 export async function isGatewayListenerOwnedByProcess(
   listenerPid: string | number,
   ownedPid: string | number | undefined,
-  resolveParentPid: (pid: string) => Promise<string | undefined> = getParentProcessId,
+  resolveParentPid?: (pid: string) => Promise<string | undefined>,
 ): Promise<boolean> {
-  const listener = normalizeProcessId(listenerPid);
-  const owner = normalizeProcessId(ownedPid);
-  if (!listener || !owner) return false;
-  if (listener === owner) return true;
-
-  const visited = new Set<string>();
-  let current = listener;
-  for (let depth = 0; depth < MAX_PROCESS_ANCESTRY_DEPTH; depth += 1) {
-    if (visited.has(current)) return false;
-    visited.add(current);
-    const parent = await resolveParentPid(current);
-    if (!parent) return false;
-    if (parent === owner) return true;
-    current = parent;
+  if (!resolveParentPid) {
+    return await isProcessDescendantOf(listenerPid, ownedPid);
   }
-  return false;
+
+  return await isProcessDescendantByParentResolver(
+    listenerPid,
+    ownedPid,
+    async (pid) => await resolveParentPid(String(pid)),
+  );
 }
 
 export const GATEWAY_PORT_OWNERSHIP_CONFLICT = 'GATEWAY_PORT_OWNERSHIP_CONFLICT' as const;
@@ -318,7 +258,7 @@ export async function findExistingGatewayProcess(options: {
 
   let pids: string[] = [];
   try {
-    pids = await getListeningProcessIds(port);
+    pids = (await getListeningProcessIds(port)).map(String);
   } catch (error) {
     logger.warn('Error checking for existing process on port:', error);
   }

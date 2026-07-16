@@ -26,7 +26,8 @@ export const EXTRACT_APP_PACKAGE_NSH = join(
   'extractAppPackage.nsh',
 );
 
-const PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail closed';
+const PATCH_MARKER = 'ClawX-patched-v3: extract directly to $INSTDIR and fail closed';
+const LEGACY_V2_PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail closed';
 const LEGACY_PATCH_MARKER = 'ClawX-patched: extract directly to $INSTDIR';
 const LEGACY_CONTINUE_ON_EXTRACT_FAILURE = 'continuing overwrite install anyway';
 const FATAL_EXTRACT_FAILURE_DETAIL = 'Failed to extract UClaw files after multiple attempts.';
@@ -45,6 +46,9 @@ const PATCHED_EXTRACT_MACRO = [
   '    ${if} $R9 < 5',
   '      DetailPrint "Releasing file locks before retry..."',
   '      nsExec::ExecToStack \'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"\'',
+  '      Pop $0',
+  '      Pop $1',
+  '      nsExec::ExecToStack \'taskkill /F /T /IM ClawX.exe\'',
   '      Pop $0',
   '      Pop $1',
   '      nsExec::ExecToStack \'taskkill /F /IM openclaw-gateway.exe\'',
@@ -89,6 +93,7 @@ function isTemplateHealthy(content) {
     && content.includes('$(decompressionFailed)')
     && content.includes('SetErrorLevel 2')
     && content.includes('Quit')
+    && content.includes('taskkill /F /T /IM ClawX.exe')
     && !content.includes('$clawxRollbackDir')
     && !content.includes('clawx_extract_show_error')
     && !content.includes('$(appCannotBeClosed)')
@@ -98,6 +103,7 @@ function isTemplateHealthy(content) {
 function hasStaleExtractPatch(content) {
   return content.includes(PATCH_MARKER)
     || content.includes(LEGACY_PATCH_MARKER)
+    || content.includes(LEGACY_V2_PATCH_MARKER)
     || content.includes(LEGACY_CONTINUE_ON_EXTRACT_FAILURE)
     || content.includes('$(appCannotBeClosed)');
 }

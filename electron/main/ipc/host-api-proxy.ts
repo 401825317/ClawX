@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { proxyAwareFetch } from '../../utils/proxy-fetch';
 import { getPort } from '../../utils/config';
 import { getHostApiToken } from '../../api/host-api-token';
+import { logger } from '../../utils/logger';
 
 type HostApiFetchRequest = {
   path: string;
@@ -18,13 +19,13 @@ export function registerHostApiProxyHandlers(): void {
   ipcMain.handle('hostapi:token', () => getHostApiToken());
 
   ipcMain.handle('hostapi:fetch', async (_, request: HostApiFetchRequest) => {
+    const path = typeof request?.path === 'string' ? request.path : '';
+    const method = (request?.method || 'GET').toUpperCase();
     try {
-      const path = typeof request?.path === 'string' ? request.path : '';
       if (!path || !path.startsWith('/')) {
         throw new Error(`Invalid host API path: ${String(request?.path)}`);
       }
 
-      const method = (request.method || 'GET').toUpperCase();
       const headers: Record<string, string> = { ...(request.headers || {}) };
       // Inject the per-session auth token so the Host API server accepts this request.
       headers['Authorization'] = `Bearer ${getHostApiToken()}`;
@@ -53,6 +54,13 @@ export function registerHostApiProxyHandlers(): void {
         status: response.status,
         ok: response.ok,
       };
+      if (!response.ok) {
+        logger.warn('[hostapi:fetch] Non-success response', {
+          method,
+          path: path.split('?')[0],
+          status: response.status,
+        });
+      }
 
       if (response.status !== 204) {
         const contentType = response.headers.get('content-type') || '';
@@ -65,6 +73,11 @@ export function registerHostApiProxyHandlers(): void {
 
       return { ok: true, data };
     } catch (error) {
+      logger.warn('[hostapi:fetch] Request failed', {
+        method,
+        path: path.split('?')[0] || 'invalid',
+        error: error instanceof Error ? error.message : String(error),
+      });
       return {
         ok: false,
         error: {

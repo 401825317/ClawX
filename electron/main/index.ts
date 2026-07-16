@@ -47,14 +47,15 @@ import {
 } from './quit-lifecycle';
 import { createSignalQuitHandler } from './signal-quit';
 import {
-  acquireProcessInstanceFileLock,
   resolveGlobalProcessInstanceLockDir,
 } from './process-instance-lock';
+import { ensureRuntimeOwnership, showRuntimeStartupFailure } from './runtime-port-guard';
 import { shouldDisableHardwareAcceleration } from './hardware-acceleration';
 import { ensureBuiltinSkillsInstalled, removeClawXPreinstalledSkillsAndConfigs, trimBundledOpenClawSkillsAndConfigs } from '../utils/skill-config';
 import { ensureWeChatPluginInstalled } from '../utils/plugin-install';
 
 import { startHostApiServer } from '../api/server';
+import type { HostApiContext } from '../api/context';
 import { HostEventBus } from '../api/event-bus';
 import { deviceOAuthManager } from '../utils/device-oauth';
 import { browserOAuthManager } from '../utils/browser-oauth';
@@ -64,6 +65,7 @@ import { ensureJunFeiAIProviderSeeded, getJunFeiAILocalStatus, isJunFeiAISeedRea
 import { autoMigrateManagedChatToOpenAiOnStartup } from '../services/providers/openai-chat-migration';
 import { ensureJunFeiAIManagedRuntimeBootstrap } from '../services/junfeiai/managed-runtime-bootstrap';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
+import { getPort } from '../utils/config';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const DISPLAY_APP_NAME = 'UClaw';
@@ -193,46 +195,18 @@ if (process.platform === 'linux') {
 }
 
 // Prevent multiple instances of the app from running simultaneously.
-// Electron's lock is scoped by userData, so portable copies also take a
-// per-OS-user file lock below that is independent of their extraction folder.
+// Electron's lock is scoped by userData. Portable copies take a second,
+// per-OS-user lock after app.whenReady() so conflicts can be handled visibly.
 // Without this, two instances each spawn their own gateway process on the
 // same port, then each treats the other's gateway as "orphaned" and kills
 // it — creating an infinite kill/restart loop on Windows.
-// The losing process must exit immediately so it never reaches Gateway startup.
 const gotElectronLock = isE2EMode ? true : app.requestSingleInstanceLock();
 if (!gotElectronLock) {
   console.info('[UClaw] Another instance already holds the single-instance lock; exiting duplicate process');
   app.exit(0);
 }
 let releaseProcessInstanceFileLock: () => void = () => {};
-let gotFileLock = true;
-if (gotElectronLock && !isE2EMode) {
-  try {
-    const globalLockDir = resolveGlobalProcessInstanceLockDir(app.getPath('appData'));
-    const fileLock = acquireProcessInstanceFileLock({
-      lockDir: globalLockDir,
-      lockName: WINDOWS_APP_USER_MODEL_ID,
-    });
-    gotFileLock = fileLock.acquired;
-    releaseProcessInstanceFileLock = fileLock.release;
-    if (!fileLock.acquired) {
-      const ownerDescriptor = fileLock.ownerPid
-        ? `${fileLock.ownerFormat ?? 'legacy'} pid=${fileLock.ownerPid}`
-        : fileLock.ownerFormat === 'unknown'
-          ? 'unknown lock format/content'
-          : 'unknown owner';
-      console.info(
-        `[UClaw] Another instance already holds process lock (${fileLock.lockPath}, ${ownerDescriptor}); exiting duplicate process`,
-      );
-      app.exit(0);
-    }
-  } catch (error) {
-    gotFileLock = false;
-    console.error('[UClaw] Failed to acquire global process instance lock; exiting to avoid a Gateway ownership conflict', error);
-    app.exit(1);
-  }
-}
-const gotTheLock = gotElectronLock && gotFileLock;
+const gotTheLock = gotElectronLock;
 
 // Global references
 let mainWindow: BrowserWindow | null = null;
@@ -413,6 +387,29 @@ async function initialize(): Promise<void> {
   );
 
   if (!isE2EMode) {
+    try {
+      const ownership = await ensureRuntimeOwnership({
+        lockDir: resolveGlobalProcessInstanceLockDir(app.getPath('appData')),
+        lockName: WINDOWS_APP_USER_MODEL_ID,
+        ports: [
+          { label: 'Host API', port: getPort('CLAWX_HOST_API') },
+          { label: 'OpenClaw Gateway', port: gatewayManager.getStatus().port },
+        ],
+      });
+      if (!ownership.acquired) {
+        app.quit();
+        return;
+      }
+      releaseProcessInstanceFileLock = ownership.release;
+    } catch (error) {
+      logger.error('Runtime ownership preflight failed:', error);
+      await showRuntimeStartupFailure(error);
+      app.quit();
+      return;
+    }
+  }
+
+  if (!isE2EMode) {
     // Warm up network optimization (non-blocking)
     void warmupNetworkOptimization();
 
@@ -430,11 +427,25 @@ async function initialize(): Promise<void> {
     logger.info('Running in E2E mode: startup side effects minimized');
   }
 
-  // Set application menu
-  createMenu();
+  const hostApiContext: HostApiContext = {
+    gatewayManager,
+    clawHubService,
+    eventBus: hostEventBus,
+    mainWindow: null,
+  };
+  try {
+    hostApiServer = await startHostApiServer(hostApiContext);
+  } catch (error) {
+    logger.error('Host API startup failed:', error);
+    await showRuntimeStartupFailure(error);
+    app.quit();
+    return;
+  }
 
-  // Create the main window
+  // The Host API must be listening before the desktop window or Gateway starts.
+  createMenu();
   const window = createMainWindow();
+  hostApiContext.mainWindow = window;
 
   // Create system tray
   if (!isE2EMode) {
@@ -466,13 +477,6 @@ async function initialize(): Promise<void> {
 
   // Register IPC handlers
   registerIpcHandlers(gatewayManager, clawHubService, window);
-
-  hostApiServer = startHostApiServer({
-    gatewayManager,
-    clawHubService,
-    eventBus: hostEventBus,
-    mainWindow: window,
-  });
 
   if (extensionsLoadPromise) {
     await extensionsLoadPromise;

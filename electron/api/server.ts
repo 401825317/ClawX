@@ -23,6 +23,7 @@ import { handleComputerRoutes } from './routes/computer';
 import { handleBlenderRoutes } from './routes/blender';
 import { handleRuntimeRoutes } from './routes/runtime';
 import { sendJson, setCorsHeaders, requireJsonContentType } from './route-utils';
+import { listenHttpServer } from './server-listener';
 
 type RouteHandler = (
   req: IncomingMessage,
@@ -64,7 +65,10 @@ function buildRouteHandlers(): RouteHandler[] {
  * if they can reach 127.0.0.1:13210 (the CORS wildcard alone is not
  * sufficient because browsers attach the Origin header but not a secret).
  */
-export function startHostApiServer(ctx: HostApiContext, port = getPort('CLAWX_HOST_API')): Server {
+export async function startHostApiServer(
+  ctx: HostApiContext,
+  port = getPort('CLAWX_HOST_API'),
+): Promise<Server> {
   // Generate a cryptographically random token for this session.
   const hostApiToken = rotateHostApiToken();
 
@@ -118,7 +122,7 @@ export function startHostApiServer(ctx: HostApiContext, port = getPort('CLAWX_HO
     }
   });
 
-  server.on('error', (error: NodeJS.ErrnoException) => {
+  const logServerError = (error: NodeJS.ErrnoException): void => {
     if (error.code === 'EACCES' || error.code === 'EADDRINUSE') {
       logger.error(
         `Host API server failed to bind port ${port}: ${error.message}. ` +
@@ -128,11 +132,16 @@ export function startHostApiServer(ctx: HostApiContext, port = getPort('CLAWX_HO
     } else {
       logger.error('Host API server error:', error);
     }
-  });
+  };
 
-  server.listen(port, '127.0.0.1', () => {
-    logger.info(`Host API server listening on http://127.0.0.1:${port}`);
-  });
+  try {
+    await listenHttpServer(server, port);
+  } catch (error) {
+    logServerError(error as NodeJS.ErrnoException);
+    throw error;
+  }
+  server.on('error', logServerError);
+  logger.info(`Host API server listening on http://127.0.0.1:${port}`);
 
   return server;
 }

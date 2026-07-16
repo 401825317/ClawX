@@ -228,6 +228,115 @@ test.describe('Native OpenClaw media routing', () => {
     }
   });
 
+  const hostFailureCases = [
+    {
+      name: 'transport failure',
+      message: 'Host API transport unavailable for regression',
+      response: { ok: false, error: { message: 'Host API transport unavailable for regression' } },
+    },
+    {
+      name: 'HTTP 500',
+      message: 'Host API 500 regression',
+      response: {
+        ok: true,
+        data: {
+          status: 500,
+          ok: false,
+          json: { success: false, error: 'Host API 500 regression' },
+        },
+      },
+    },
+  ] as const;
+
+  for (const failureCase of hostFailureCases) test(`preserves Host API chat.send ${failureCase.name} without retrying through raw Gateway RPC`, async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    try {
+      await installChatBootstrapMocks(app);
+      await app.evaluate(({ app: _app }, { sessionKey, failureResponse }) => {
+        const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+        const hostRequests: Array<{ path?: string; method?: string; body?: string }> = [];
+        const gatewayMethods: string[] = [];
+        (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests = hostRequests;
+        (globalThis as Record<string, unknown>).__nativeMediaGatewayMethods = gatewayMethods;
+
+        ipcMain.removeHandler('gateway:rpc');
+        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string) => {
+          gatewayMethods.push(method);
+          if (method === 'sessions.list') {
+            return {
+              success: true,
+              result: { sessions: [{ key: sessionKey, displayName: 'main', model: 'openai/smart-latest', hasActiveRun: false }] },
+            };
+          }
+          if (method === 'chat.history') {
+            return { success: true, result: { messages: [] } };
+          }
+          return { success: true, result: {} };
+        });
+
+        ipcMain.removeHandler('hostapi:fetch');
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string; body?: string }) => {
+          hostRequests.push(request);
+          if (request.path === '/api/chat/send') {
+            return failureResponse;
+          }
+          if (request.path === '/api/provider-accounts'
+            || request.path === '/api/provider-accounts/key-info'
+            || request.path === '/api/provider-vendors'
+            || request.path === '/api/providers') {
+            return { ok: true, data: { status: 200, ok: true, json: [] } };
+          }
+          if (request.path === '/api/provider-accounts/default') {
+            return { ok: true, data: { status: 200, ok: true, json: { accountId: null } } };
+          }
+          if (request.path?.startsWith('/api/sessions/transcript?')) {
+            return { ok: true, data: { status: 200, ok: true, json: { messages: [] } } };
+          }
+          if (request.path === '/api/junfeiai/status' || request.path === '/api/junfeiai/status/local') {
+            return { ok: true, data: { status: 200, ok: true, json: { managed: false } } };
+          }
+          if (request.path === '/api/gateway/status') {
+            return { ok: true, data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true } } };
+          }
+          if (request.path === '/api/chat/sessions') {
+            return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { sessions: [{ key: sessionKey, displayName: 'main', model: 'openai/smart-latest', hasActiveRun: false }] } } } };
+          }
+          if (request.path === '/api/chat/history') {
+            return { ok: true, data: { status: 200, ok: true, json: { success: true, result: { messages: [] } } } };
+          }
+          if (request.path === '/api/agents') {
+            return { ok: true, data: { status: 200, ok: true, json: { success: true, agents: [{ id: 'main', name: 'Main' }] } } };
+          }
+          return { ok: true, data: { status: 200, ok: true, json: {} } };
+        });
+      }, { sessionKey: SESSION_KEY, failureResponse: failureCase.response });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-mode-image').click();
+      await page.getByTestId('chat-composer-input').fill('做个婴儿尿不湿的电商主图成品图 不要白底图');
+      await page.getByTestId('chat-composer-send').click();
+
+      await expect(page.getByText(failureCase.message, { exact: true })).toBeVisible();
+      const captured = await app.evaluate(() => ({
+        hostRequests: (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests as Array<{ path?: string; body?: string }> ?? [],
+        gatewayMethods: (globalThis as Record<string, unknown>).__nativeMediaGatewayMethods as string[] ?? [],
+      }));
+      const sendRequests = captured.hostRequests.filter((request) => request.path === '/api/chat/send');
+      expect(sendRequests).toHaveLength(1);
+      const payload = JSON.parse(sendRequests[0]?.body ?? '{}') as { clientPreferences?: { mode?: string } };
+      expect(payload.clientPreferences?.mode).toBe('image');
+      expect(captured.gatewayMethods).not.toContain('chat.send');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('uses the latest session image for an explicit edit request without requiring a manual selection', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     try {
