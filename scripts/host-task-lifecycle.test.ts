@@ -37,6 +37,25 @@ function createRequest(idempotencyKey: string, input: unknown = {}) {
   };
 }
 
+test('Host task persistence preserves an internal composition-step completion mode', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-internal-step-'));
+  const serviceOptions = { rootDir: path.join(root, 'host-tasks') };
+  try {
+    const service = new HostTaskService(serviceOptions);
+    const created = await service.create({
+      ...createRequest('internal-compose-step'),
+      completion: { mode: 'internal' },
+    });
+    assert.equal(created.task.completion.mode, 'internal');
+
+    const restarted = new HostTaskService(serviceOptions);
+    const restored = await restarted.get(created.task.taskId);
+    assert.equal(restored?.completion.mode, 'internal');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Host task lifecycle persists bounded input/checkpoint and delegates start, cancel, and safe resume once', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-'));
   const serviceOptions = { rootDir: path.join(root, 'host-tasks') };

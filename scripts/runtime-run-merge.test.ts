@@ -274,7 +274,67 @@ test('a terminal task error makes the merged user turn terminal error', () => {
     endedAt: 30,
   }];
 
-  const merged = mergeRuntimeRunStates('segment:failed', sessionKey, [mainRun, taskRun]);
+  const merged = mergeRuntimeRunStates('segment:failed', sessionKey, [mainRun, taskRun], mainRun.runId);
   assert.equal(merged?.status, 'error');
   assert.equal(merged?.tasks?.[0]?.detail, 'provider unavailable');
+});
+
+test('a later successful main run completion recovers an earlier auxiliary failure', () => {
+  const failedToolRun = run('tool:local-video-compose:failed', 'error', 20);
+  failedToolRun.tasks = [{
+    taskId: 'local-video-compose-attempt',
+    runtime: 'uclaw-host-task',
+    title: 'Compose video locally',
+    status: 'error',
+    detail: 'ffmpeg was unavailable',
+    updatedAt: 20,
+    endedAt: 20,
+  }];
+  const mainRun = run('run-main-recovered', 'completed', 30);
+
+  const merged = mergeRuntimeRunStates(
+    'segment:recovered',
+    sessionKey,
+    [failedToolRun, mainRun],
+    mainRun.runId,
+  );
+
+  assert.equal(merged?.status, 'completed');
+  assert.equal(merged?.tasks?.[0]?.status, 'error');
+  assert.equal(merged?.tasks?.[0]?.detail, 'ffmpeg was unavailable');
+});
+
+test('a successful retry clears a later logical video-segment failure without hiding its detail', () => {
+  const title = 'video-segment:{"parentTaskId":"promo-60s","segmentId":"scene-004"}';
+  const mainRun = run('run-main-awaiting-video', 'completed', 10);
+  const failedAttempt = run('tool:video_generate:failed', 'error', 20);
+  failedAttempt.tasks = [{
+    taskId: 'scene-004-attempt-1',
+    runtime: 'video_generate',
+    title,
+    status: 'error',
+    detail: 'temporary provider timeout',
+    updatedAt: 20,
+    endedAt: 20,
+  }];
+  const successfulAttempt = run('tool:video_generate:recovered', 'completed', 30);
+  successfulAttempt.tasks = [{
+    taskId: 'scene-004-attempt-2',
+    runtime: 'video_generate',
+    title,
+    status: 'completed',
+    updatedAt: 30,
+    endedAt: 30,
+  }];
+
+  const merged = mergeRuntimeRunStates(
+    'segment:video-recovered',
+    sessionKey,
+    [mainRun, failedAttempt, successfulAttempt],
+    mainRun.runId,
+  );
+
+  assert.equal(merged?.status, 'completed');
+  assert.equal(merged?.tasks?.length, 2);
+  assert.match(merged?.tasks?.[0]?.detail ?? '', /provider timeout/u);
 });

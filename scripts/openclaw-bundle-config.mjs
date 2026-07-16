@@ -55,4 +55,5 @@ export const LOCAL_OPENCLAW_PLUGIN_IDS = [
   'uclaw-desktop-control',
   'uclaw-blender',
   'uclaw-task-bridge',
+  'uclaw-video-project',
 ];

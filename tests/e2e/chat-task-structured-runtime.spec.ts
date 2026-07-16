@@ -640,6 +640,21 @@ test.describe('structured OpenClaw task projection', () => {
       await expect(page.locator('[data-testid="chat-execution-step"][data-task-id="video-task-1"]'))
         .toHaveAttribute('data-step-status', 'error');
       await expect(page.getByTestId('chat-generated-file')).toHaveCount(0);
+
+      await emitRuntimeEvents(app, [{
+        type: 'run.ended',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        status: 'completed',
+        endedAt: now + 40,
+        ts: now + 40,
+      }]);
+
+      await expect(progress).not.toContainText('任务执行失败');
+      await expect(graph).toHaveAttribute('data-compact-status', 'completed');
+      await expect(page.locator('[data-testid="chat-execution-step"][data-task-id="video-task-1"]'))
+        .toHaveAttribute('data-step-status', 'error');
+      await expect(progress).toContainText('HTTP 503');
     } finally {
       await closeElectronApp(app);
     }

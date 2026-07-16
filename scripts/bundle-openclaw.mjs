@@ -27,6 +27,7 @@ import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-loc
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
+import { patchOpenClawNativeMediaCompletionQueueRuntime } from './openclaw-native-media-completion-queue-patch.mjs';
 import { patchOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
 import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
@@ -34,6 +35,7 @@ import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-ca
 import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
+import { patchOpenClawProcessControlSemanticsRuntime } from './openclaw-process-control-semantics-patch.mjs';
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
@@ -1229,6 +1231,17 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${pluginToolRunContextPatch.patchedFiles} plugin tool run context file(s)`;
   }
 
+  // --- Process control outcome semantics patch ---
+  // A successful process kill/remove is a completed control operation. Its
+  // expected manual cancellation must not surface as a failed tool or wake a
+  // separate heartbeat merely because the process had emitted prior output.
+  const processControlSemanticsPatch = patchOpenClawProcessControlSemanticsRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (processControlSemanticsPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${processControlSemanticsPatch.patchedFiles} process control runtime file(s)`;
+  }
+
   // --- Native detached media task cancellation patch ---
   // Tie tasks.cancel to the exact image/video provider request and suppress
   // completion wake/delivery after cancellation instead of only changing the ledger.
@@ -1237,6 +1250,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (nativeMediaCancellationPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${nativeMediaCancellationPatch.patchedFiles} native media cancellation runtime file(s)`;
+  }
+
+  // Completion callbacks for one parent session must enter OpenClaw one at a
+  // time. Parallel video segments otherwise compete for the same embedded
+  // session and can fail with takeover or gateway timeout errors.
+  const nativeMediaCompletionQueuePatch = patchOpenClawNativeMediaCompletionQueueRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (nativeMediaCompletionQueuePatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${nativeMediaCompletionQueuePatch.patchedFiles} native media completion queue file(s)`;
   }
 
   const managedMediaTimeoutPatch = patchOpenClawManagedMediaTimeoutRuntime(distDir, {

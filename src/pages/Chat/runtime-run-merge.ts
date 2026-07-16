@@ -4,6 +4,7 @@ import {
 } from '../../stores/chat/helpers';
 import type { AsyncTaskLedgerEntry, ChatRuntimeRunState } from '../../stores/chat/types';
 import { sanitizeRuntimeDisplayText } from '../../lib/runtime-display-sanitizer';
+import { unresolvedRuntimeTasks } from '../../stores/chat/runtime-task-recovery';
 
 function toTimestampMs(value: number | undefined | null): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
@@ -38,6 +39,55 @@ function getRunLastEventMs(run: ChatRuntimeRunState): number | null {
   const latest = [lastEventAt, endedAt, ...eventTimes]
     .filter((value): value is number => value != null);
   return latest.length > 0 ? Math.max(...latest) : null;
+}
+
+function getRunTerminalMs(run: ChatRuntimeRunState): number | null {
+  const matchingTerminalTimes = run.events
+    .filter((event) => event.type === 'run.ended' && event.status === run.status)
+    .map(getRuntimeEventMs)
+    .filter((value): value is number => value != null);
+  if (matchingTerminalTimes.length > 0) return Math.max(...matchingTerminalTimes);
+  return toTimestampMs(run.endedAt) ?? toTimestampMs(run.lastEventAt);
+}
+
+function taskSignalsAbort(task: NonNullable<ChatRuntimeRunState['tasks']>[number]): boolean {
+  return [task.sourceStatus, task.terminalOutcome]
+    .some((value) => /^(?:aborted|cancelled|canceled)$/iu.test(value?.trim() ?? ''));
+}
+
+function resolveMergedRunStatus(
+  runs: ChatRuntimeRunState[],
+  authoritativeRunId: string | undefined,
+): ChatRuntimeRunState['status'] {
+  if (runs.some((run) => run.status === 'running')) return 'running';
+
+  const authoritativeRun = runs.find((run) => run.runId === authoritativeRunId) ?? runs[0]!;
+  if (authoritativeRun.status !== 'completed') return authoritativeRun.status;
+
+  const completedAt = getRunTerminalMs(authoritativeRun);
+  if (completedAt == null) return authoritativeRun.status;
+
+  const unresolvedTaskIds = new Set(
+    unresolvedRuntimeTasks(runs.flatMap((run) => run.tasks ?? []))
+      .filter((task) => task.status === 'error' || task.status === 'partial' || taskSignalsAbort(task))
+      .map((task) => task.taskId),
+  );
+  const laterProblems = runs
+    .filter((run) => run.runId !== authoritativeRun.runId)
+    .filter((run) => run.status === 'error' || run.status === 'aborted')
+    .filter((run) => (getRunTerminalMs(run) ?? Number.NEGATIVE_INFINITY) > completedAt)
+    .filter((run) => {
+      const problemTasks = (run.tasks ?? []).filter((task) => (
+        task.status === 'error' || task.status === 'partial' || taskSignalsAbort(task)
+      ));
+      return problemTasks.length === 0
+        || problemTasks.some((task) => unresolvedTaskIds.has(task.taskId));
+    })
+    .sort((left, right) => (
+      (getRunTerminalMs(right) ?? Number.NEGATIVE_INFINITY)
+      - (getRunTerminalMs(left) ?? Number.NEGATIVE_INFINITY)
+    ));
+  return laterProblems[0]?.status ?? 'completed';
 }
 
 function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
@@ -214,6 +264,7 @@ export function mergeRuntimeRunStates(
   runId: string,
   sessionKey: string,
   runs: ChatRuntimeRunState[],
+  authoritativeRunId?: string,
 ): ChatRuntimeRunState | null {
   if (runs.length === 0) return null;
   if (runs.length === 1) return runs[0];
@@ -240,13 +291,7 @@ export function mergeRuntimeRunStates(
     .map(getRunLastEventMs)
     .filter((value): value is number => value != null)
     .sort((left, right) => right - left)[0];
-  const status = sortedRuns.some((run) => run.status === 'running')
-    ? 'running'
-    : sortedRuns.some((run) => run.status === 'error')
-      ? 'error'
-      : sortedRuns.some((run) => run.status === 'aborted')
-        ? 'aborted'
-        : 'completed';
+  const status = resolveMergedRunStatus(sortedRuns, authoritativeRunId);
 
   return {
     runId,

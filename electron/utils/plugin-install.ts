@@ -1084,6 +1084,14 @@ export function ensureUClawTaskBridgePluginInstalled(): { installed: boolean; wa
   );
 }
 
+export function ensureUClawVideoProjectPluginInstalled(): { installed: boolean; warning?: string } {
+  return ensurePluginInstalled(
+    'uclaw-video-project',
+    buildCandidateSources('uclaw-video-project'),
+    'UClaw Video Project',
+  );
+}
+
 export function ensureParallelPluginInstalled(): { installed: boolean; warning?: string } {
   return ensurePluginInstalled(
     'parallel',
@@ -1111,6 +1119,7 @@ const ALL_BUNDLED_PLUGINS = [
   { fn: ensureUClawDesktopControlPluginInstalled, label: 'UClaw Desktop Control' },
   { fn: ensureUClawBlenderPluginInstalled, label: 'UClaw Blender' },
   { fn: ensureUClawTaskBridgePluginInstalled, label: 'UClaw Task Bridge' },
+  { fn: ensureUClawVideoProjectPluginInstalled, label: 'UClaw Video Project' },
 ] as const;
 
 /**

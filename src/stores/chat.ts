@@ -24,6 +24,7 @@ import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
+  isInternalHeartbeatSession,
   persistCurrentSessionKey,
   pickStartupSessionFallback,
   readPersistedCurrentSessionKey,
@@ -5378,6 +5379,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               sessionId,
               sessionFile,
               fileName,
+              heartbeatIsolatedBaseSessionKey: typeof s.heartbeatIsolatedBaseSessionKey === 'string'
+                && s.heartbeatIsolatedBaseSessionKey.trim()
+                ? s.heartbeatIsolatedBaseSessionKey.trim()
+                : undefined,
               label: s.label ? String(s.label) : undefined,
               displayName: s.displayName ? String(s.displayName) : undefined,
               derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
@@ -5408,7 +5413,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
             };
             return mergeSessionRowWithLocalState(nextSession, localSessionByKey.get(nextSession.key));
-          }).filter((s: ChatSession) => s.key && !isInternalTemporarySessionKey(s.key));
+          }).filter((s: ChatSession) => (
+            s.key
+            && !isInternalTemporarySessionKey(s.key)
+            && !isInternalHeartbeatSession(s)
+          ));
 
           const canonicalBySuffix = new Map<string, string>();
           for (const session of sessions) {
@@ -5443,7 +5452,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!dedupedSessions.find((s) => s.key === nextSessionKey)) {
             // Preserve only locally-created pending sessions. On initial boot the
             // default ghost key (`agent:main:main`) should yield to real history.
-            const hasLocalPendingSession = localSessions.some((session) => session.key === nextSessionKey);
+            const hasLocalPendingSession = _pendingLocalSessionKeys.has(nextSessionKey)
+              && !isInternalHeartbeatSession(nextSessionKey);
             if (!hasLocalPendingSession) {
               nextSessionKey = pickStartupSessionFallback(nextSessionKey, dedupedSessions) ?? DEFAULT_SESSION_KEY;
             }
@@ -5578,6 +5588,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Switch session ──
 
   switchSession: (key: string) => {
+    if (isInternalHeartbeatSession(key)) return;
     if (key === get().currentSessionKey) return;
     // Stop any background polling for the old session before switching.
     // This prevents the poll timer from firing after the switch and loading
@@ -8181,6 +8192,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         nextPatch.pendingFinal = shouldKeepLifecycle;
         nextPatch.lastUserMessageAt = shouldKeepLifecycle ? latestState.lastUserMessageAt : null;
         nextPatch.streamingTools = shouldKeepLifecycle ? latestState.streamingTools : [];
+        if (eventForSession.status === 'completed') {
+          nextPatch.error = null;
+          nextPatch.runError = null;
+        }
         if (eventForSession.status === 'error' && eventForSession.error) {
           nextPatch.error = null;
           nextPatch.runError = shouldSuppressToolTerminalError(

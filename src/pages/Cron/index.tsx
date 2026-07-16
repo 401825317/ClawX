@@ -919,7 +919,15 @@ function CronJobCard({ job, deliveryAccountName, onToggle, onEdit, onDelete, onT
         {job.lastRun && !job.lastRun.success && job.lastRun.error && (
           <div className="flex items-start gap-2 p-2.5 mb-3 rounded-xl bg-destructive/10 border border-destructive/20 text-meta text-destructive">
             <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            <span className="line-clamp-2">{job.lastRun.error}</span>
+            <div className="min-w-0">
+              <span className="line-clamp-2 block">{job.lastRun.error}</span>
+              {job.lastRun.deliveryStatus && job.lastRun.deliveryStatus !== 'delivered' && (
+                <span className="mt-1 block text-xs">
+                  {t('card.deliveryNotDelivered', '结果未交付')}
+                  {job.lastRun.deliveryError ? `: ${job.lastRun.deliveryError}` : ''}
+                </span>
+              )}
+            </div>
           </div>
         )}
 

@@ -14,6 +14,7 @@ import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-fin
 import { patchInstalledOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchInstalledOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
+import { patchInstalledOpenClawNativeMediaCompletionQueueRuntime } from './openclaw-native-media-completion-queue-patch.mjs';
 import { patchInstalledOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
 import { cleanupInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchInstalledOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
@@ -21,6 +22,7 @@ import { patchInstalledOpenClawVideoCapabilityContractRuntime } from './openclaw
 import { patchInstalledOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchInstalledOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchInstalledOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
+import { patchInstalledOpenClawProcessControlSemanticsRuntime } from './openclaw-process-control-semantics-patch.mjs';
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
@@ -53,7 +55,9 @@ try {
   patchInstalledOpenClawModelRequestContractRuntime();
   patchInstalledOpenClawRawToolSignalRuntime();
   patchInstalledOpenClawPluginToolRunContextRuntime();
+  patchInstalledOpenClawProcessControlSemanticsRuntime();
   patchInstalledOpenClawNativeMediaCancellationRuntime();
+  patchInstalledOpenClawNativeMediaCompletionQueueRuntime();
   patchInstalledOpenClawManagedMediaTimeoutRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
   cleanupInstalledOpenClawNativeMediaAcceptanceRuntime();
