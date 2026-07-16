@@ -20,7 +20,6 @@ import {
 } from '../../shared/chat-runtime-events';
 import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
 import type { GatewayStatus } from '../types/gateway';
-import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
@@ -4223,23 +4222,18 @@ async function sendChatMessageViaHostApi(params: {
   clientPreferences?: GatewayTurnPreferences;
 }): Promise<{ runId?: string }> {
   await assertGatewayReadyForChatSend();
-  try {
-    const response = await hostApiFetch<{
-      success: boolean;
-      result?: { runId?: string };
-      error?: string;
-    }>('/api/chat/send', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    });
-    if (!response.success) {
-      throw new Error(response.error || 'Failed to send chat message');
-    }
-    return response.result ?? {};
-  } catch {
-    await assertGatewayReadyForChatSend();
-    return await useGatewayStore.getState().rpc<{ runId?: string }>('chat.send', params, CHAT_SEND_RPC_TIMEOUT_MS);
+  const response = await hostApiFetch<{
+    success: boolean;
+    result?: { runId?: string };
+    error?: string;
+  }>('/api/chat/send', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+  if (!response.success) {
+    throw new Error(response.error || 'Failed to send chat message');
   }
+  return response.result ?? {};
 }
 
 async function abortChatRunViaHostApi(sessionKey: string, runId?: string | null, taskIds: string[] = []): Promise<void> {

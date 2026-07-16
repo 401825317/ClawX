@@ -297,12 +297,13 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 
 - ClawX 基于 Electron，**单个应用实例出现多个系统进程是正常现象**（main/renderer/zygote/utility）。
 - 单实例保护同时使用 Electron 自带锁与本地进程文件锁回退机制，可在桌面会话总线异常时避免重复启动。
-- 滚动升级期间若新旧版本混跑，单实例保护仍可能出现不对称行为。为保证稳定性，建议桌面客户端尽量统一升级到同一版本。
-- 但 OpenClaw Gateway 监听应始终保持**单实例**：`127.0.0.1:18789` 只能有一个监听者。
+- 核心运行时监听必须保持**单一所有者**：Host API `127.0.0.1:13210` 与 OpenClaw Gateway `127.0.0.1:18789` 必须归属于同一个 UClaw 桌面实例。
+- 安装版与便携版升级混跑时，UClaw 会在创建桌面窗口前检查共享实例锁和两个端口的进程树。只有确认属于旧版 UClaw/ClawX 时才会提供退出旧版的选项；无法确认身份的进程绝不会被自动结束。
+- 临时 OAuth 回调、系统动态分配的回环端口、开发服务器和外部供应商端口不由该启动守卫接管。
 - Gateway readiness 以 OpenClaw 的 `system-presence`、`health`、`status` 等核心信号为准；memory、Dreams 或频道失败会显示为能力降级，而不是全局 Gateway 故障。
 - 可用以下命令确认监听进程：
-  - macOS/Linux：`lsof -nP -iTCP:18789 -sTCP:LISTEN`
-  - Windows（PowerShell）：`Get-NetTCPConnection -LocalPort 18789 -State Listen`
+  - macOS/Linux：`lsof -nP -iTCP:13210 -sTCP:LISTEN` 和 `lsof -nP -iTCP:18789 -sTCP:LISTEN`
+  - Windows（PowerShell）：`Get-NetTCPConnection -LocalPort 13210,18789 -State Listen`
 - 点击窗口关闭按钮（`X`）默认只是最小化到托盘，并不会完全退出应用。请在托盘菜单中选择 **Quit ClawX** 执行完整退出。
 
 ---

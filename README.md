@@ -294,12 +294,13 @@ ClawX employs a **dual-process architecture** with a unified host API layer. The
 
 - ClawX is an Electron app, so **one app instance normally appears as multiple OS processes** (main/renderer/zygote/utility). This is expected.
 - Single-instance protection uses Electron's lock plus a local process-file lock fallback, preventing duplicate app launch in environments where desktop IPC/session bus is unstable.
-- During rolling upgrades, mixed old/new app versions can still have asymmetric protection behavior. For best reliability, upgrade all desktop clients to the same version.
-- The OpenClaw Gateway listener should still be **single-owner**: only one process should listen on `127.0.0.1:18789`.
+- Core runtime listeners are **single-owner**: Host API `127.0.0.1:13210` and OpenClaw Gateway `127.0.0.1:18789` must belong to the same UClaw desktop instance.
+- During installed/portable upgrades, UClaw checks the shared instance lock and both listener process trees before opening the desktop window. It can offer to close a verified older UClaw/ClawX process; an unknown process is never terminated automatically.
+- Temporary OAuth callbacks, dynamically allocated loopback listeners, development servers, and external provider ports are not taken over by this startup guard.
 - Gateway readiness is based on OpenClaw core signals such as `system-presence`, `health`, and `status`; memory, Dreams, or channel failures are shown as capability degradation instead of global Gateway failure.
-- To verify the active listener:
-  - macOS/Linux: `lsof -nP -iTCP:18789 -sTCP:LISTEN`
-  - Windows (PowerShell): `Get-NetTCPConnection -LocalPort 18789 -State Listen`
+- To verify the active listeners:
+  - macOS/Linux: `lsof -nP -iTCP:13210 -sTCP:LISTEN` and `lsof -nP -iTCP:18789 -sTCP:LISTEN`
+  - Windows (PowerShell): `Get-NetTCPConnection -LocalPort 13210,18789 -State Listen`
 - Clicking the window close button (`X`) hides ClawX to tray; it does **not** fully quit the app. Use tray menu **Quit ClawX** for complete shutdown.
 
 ---

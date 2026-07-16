@@ -5,6 +5,8 @@
 
 !include "LogicLib.nsh"
 
+!define LEGACY_APP_EXECUTABLE_FILENAME "ClawX.exe"
+
 !ifndef nsProcess::FindProcess
   !include "nsProcess.nsh"
 !endif
@@ -82,6 +84,9 @@ FunctionEnd
   DetailPrint "Extracting UClaw runtime files. This can take a few minutes on slower disks or while antivirus scanning is active."
 
   ${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}" $R0
+  ${if} $R0 != 0
+    ${nsProcess::FindProcess} "${LEGACY_APP_EXECUTABLE_FILENAME}" $R0
+  ${endIf}
 
   ${if} $R0 == 0
     ${if} ${isUpdated}
@@ -92,6 +97,9 @@ FunctionEnd
       DetailPrint `Waiting for "${PRODUCT_NAME}" to finish shutting down...`
       Sleep 8000
       ${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}" $R0
+      ${if} $R0 != 0
+        ${nsProcess::FindProcess} "${LEGACY_APP_EXECUTABLE_FILENAME}" $R0
+      ${endIf}
       ${if} $R0 != 0
         # App exited cleanly. Still kill long-lived child processes (gateway,
         # uv, python) which may not have followed the app's graceful exit.
@@ -121,6 +129,9 @@ FunctionEnd
     ${if} $0 != 0
       # PowerShell failed (policy restriction, etc.) — fall back to name-based kill
       nsExec::ExecToStack 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
+      Pop $0
+      Pop $1
+      nsExec::ExecToStack 'taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"'
       Pop $0
       Pop $1
     ${endIf}
@@ -155,6 +166,9 @@ FunctionEnd
   nsExec::ExecToStack 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
   Pop $0
   Pop $1
+  nsExec::ExecToStack 'taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"'
+  Pop $0
+  Pop $1
   nsExec::ExecToStack 'taskkill /F /IM openclaw-gateway.exe'
   Pop $0
   Pop $1
@@ -173,11 +187,11 @@ FunctionEnd
   ; fail closed even when taskkill or the nsProcess plugin misses/elevates poorly.
   StrCpy $R7 0
   _clawx_verify_closed:
-    nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if (Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.Name -ieq '${APP_EXECUTABLE_FILENAME}' }) { exit 0 } else { exit 1 }"`
+    nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if (Get-CimInstance -ClassName Win32_Process | Where-Object { $$_.Name -ieq '${APP_EXECUTABLE_FILENAME}' -or $$_.Name -ieq '${LEGACY_APP_EXECUTABLE_FILENAME}' }) { exit 0 } else { exit 1 }"`
     Pop $R0
     Pop $R1
     ${if} $R0 != 0
-      nsExec::ExecToStack 'cmd.exe /c tasklist /FI "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}" | find /I "${APP_EXECUTABLE_FILENAME}" >nul'
+      nsExec::ExecToStack 'cmd.exe /c tasklist /FI "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}" | find /I "${APP_EXECUTABLE_FILENAME}" >nul || tasklist /FI "IMAGENAME eq ${LEGACY_APP_EXECUTABLE_FILENAME}" | find /I "${LEGACY_APP_EXECUTABLE_FILENAME}" >nul'
       Pop $R0
       Pop $R1
     ${endIf}
@@ -187,7 +201,13 @@ FunctionEnd
       nsExec::ExecToStack 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
       Pop $0
       Pop $1
+      nsExec::ExecToStack 'taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"'
+      Pop $0
+      Pop $1
       nsExec::ExecToStack `cmd.exe /c wmic process where "name='${APP_EXECUTABLE_FILENAME}'" call terminate`
+      Pop $0
+      Pop $1
+      nsExec::ExecToStack `cmd.exe /c wmic process where "name='${LEGACY_APP_EXECUTABLE_FILENAME}'" call terminate`
       Pop $0
       Pop $1
       Sleep 2000
@@ -247,6 +267,9 @@ FunctionEnd
       ; Large openclaw bundles (#1026+) can make rd /s /q take several minutes.
       DetailPrint "Waiting for file locks to clear, then removing old files..."
       nsExec::ExecToStack 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
+      Pop $0
+      Pop $1
+      nsExec::ExecToStack 'taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"'
       Pop $0
       Pop $1
       nsExec::ExecToStack 'taskkill /F /IM openclaw-gateway.exe'
@@ -423,8 +446,14 @@ FunctionEnd
     ; Kill any lingering UClaw processes (and their child process trees) to
     ; release file locks on electron-store JSON files, Gateway sockets, etc.
     ${nsProcess::FindProcess} "${APP_EXECUTABLE_FILENAME}" $R0
+    ${if} $R0 != 0
+      ${nsProcess::FindProcess} "${LEGACY_APP_EXECUTABLE_FILENAME}" $R0
+    ${endIf}
     ${if} $R0 == 0
       nsExec::ExecToStack 'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
+      Pop $0
+      Pop $1
+      nsExec::ExecToStack 'taskkill /F /T /IM "${LEGACY_APP_EXECUTABLE_FILENAME}"'
       Pop $0
       Pop $1
     ${endIf}
