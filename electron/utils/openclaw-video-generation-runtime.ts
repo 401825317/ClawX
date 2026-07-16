@@ -9,6 +9,8 @@ import { proxyAwareFetch } from './proxy-fetch';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 import {
   CLAWX_OPENAI_VIDEO_15_MODEL,
+  CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
+  isClawXOpenAiVideoModelId,
 } from './openclaw-video-relay-constants';
 
 export interface VideoGenerationInputImageAsset {
@@ -55,6 +57,7 @@ type VideoGenerationRuntimeModule = {
   }>;
   listRuntimeVideoGenerationProviders: (params?: { config?: unknown }) => Array<{
     id: string;
+    aliases?: string[];
     label?: string;
     defaultModel?: string;
     models?: string[];
@@ -220,6 +223,39 @@ function parseModelRef(modelRef: string): { provider: string; model: string } | 
     provider: trimmed.slice(0, slash).trim().toLowerCase(),
     model: trimmed.slice(slash + 1).trim(),
   };
+}
+
+function listAdvertisedVideoModels(provider: {
+  defaultModel?: string;
+  models?: string[];
+}): Set<string> {
+  const models = new Set((provider.models ?? []).map((model) => model.trim()).filter(Boolean));
+  if (models.size === 0 && provider.defaultModel?.trim()) {
+    models.add(provider.defaultModel.trim());
+  }
+  return models;
+}
+
+function validateVideoModelRef(
+  modelRef: string,
+  providers: ReturnType<VideoGenerationRuntimeModule['listRuntimeVideoGenerationProviders']>,
+): { provider: string; model: string } {
+  const parsed = parseModelRef(modelRef);
+  if (!parsed) {
+    throw new Error(`invalid_video_model: "${modelRef}" must use provider/model format.`);
+  }
+  const provider = providers.find((candidate) => {
+    const ids = [candidate.id, ...(candidate.aliases ?? [])]
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    return ids.includes(parsed.provider);
+  });
+  if (!provider || !listAdvertisedVideoModels(provider).has(parsed.model)) {
+    throw new Error(
+      `invalid_video_model: "${modelRef}" is not advertised by a registered video-generation provider.`,
+    );
+  }
+  return { provider: provider.id, model: parsed.model };
 }
 
 function isOfficialOpenAiBaseUrl(baseUrl: string): boolean {
@@ -491,6 +527,7 @@ export async function listVideoGenerationProvidersInProcess(params: {
   isProviderConfigured: (providerId: string) => Promise<boolean>;
 }): Promise<Array<{
   id: string;
+  aliases: string[];
   label: string;
   defaultModel: string;
   configured: boolean;
@@ -512,6 +549,7 @@ export async function listVideoGenerationProvidersInProcess(params: {
     configured: selectedProvider === provider.id || await params.isProviderConfigured(provider.id),
     selected: selectedProvider === provider.id,
     id: provider.id,
+    aliases: provider.aliases ?? [],
     label: provider.label ?? provider.id,
     defaultModel: provider.defaultModel ?? '',
     models: provider.models ?? [],
@@ -548,19 +586,34 @@ export async function generateVideoInProcess(params: {
   metadata?: Record<string, unknown>;
   ignoredOverrides: unknown[];
 }> {
+  const runtime = await getVideoGenerationRuntime();
+  const parsedModel = validateVideoModelRef(
+    params.model,
+    runtime.listRuntimeVideoGenerationProviders({ config: params.config }),
+  );
   const inputImages = await loadInputImages(params.inputImages);
-  const parsedModel = parseModelRef(params.model);
   const imageCount = inputImages?.filter((image) => image.buffer && image.buffer.length > 0).length ?? 0;
   const requestedSize = params.size?.trim() || '1280x720';
   const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds);
   const requestedDimensions = parseVideoSize(requestedSize);
 
-  if (parsedModel?.provider === 'openai' && parsedModel.model === CLAWX_OPENAI_VIDEO_15_MODEL && imageCount !== 1) {
+  if (parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+    && params.directOpenAiCompatible
+    && !isOfficialOpenAiBaseUrl(params.directOpenAiCompatible.baseUrl)
+    && !isClawXOpenAiVideoModelId(parsedModel.model)) {
+    throw new Error(
+      `invalid_video_model: "${parsedModel.model}" is not supported by the managed OpenAI-compatible video relay.`,
+    );
+  }
+
+  if (parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+    && parsedModel.model === CLAWX_OPENAI_VIDEO_15_MODEL
+    && imageCount !== 1) {
     throw new Error('grok-video-1.5 requires exactly one reference image.');
   }
 
   if (
-    parsedModel?.provider === 'openai'
+    parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     && params.directOpenAiCompatible?.baseUrl
     && params.directOpenAiCompatible.apiKey
     && !isOfficialOpenAiBaseUrl(params.directOpenAiCompatible.baseUrl)
@@ -603,7 +656,7 @@ export async function generateVideoInProcess(params: {
     };
   }
 
-  const { generateVideo } = await getVideoGenerationRuntime();
+  const { generateVideo } = runtime;
   const { saveMediaBuffer } = await getMediaStore();
 
   const result = await generateVideo({

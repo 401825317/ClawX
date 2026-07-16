@@ -17,7 +17,10 @@ Every returned shot includes a `generationInput` object. Its `parentTaskId` is
 the durable project ID and its `segmentId` is the durable shot ID. Pass those
 unchanged to `video_generate`; when a reference exists, it is exposed as
 `image` plus `imageRoles: ['reference_image']`. Do not ask this plugin to
-generate the clip.
+generate the clip. An explicit shot model must exist in the live
+`video_generate` capability catalog. The project preserves a valid Agent
+choice and rejects a stale or chat-only model instead of substituting another
+model.
 
 Projects are session-scoped and persisted atomically under
 `$OPENCLAW_HOME/state/uclaw-video-projects` (or `~/.openclaw/...`). A project

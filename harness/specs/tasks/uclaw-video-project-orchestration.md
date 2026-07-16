@@ -6,11 +6,13 @@ taskType: runtime-bridge
 intent: Keep GPT/OpenClaw responsible for creative video planning and semantic acceptance while UClaw persists a VideoProject, schedules native video_generate shots through their existing task identity, verifies deterministic media facts locally, and delivers one verified project result without a second media planner or a user-visible provider-routing explanation.
 touchedAreas:
   - harness/specs/tasks/uclaw-video-project-orchestration.md
+  - harness/specs/tasks/video-generation-model-routing.md
   - harness/specs/tasks/openclaw-native-media-host-bridge.md
   - harness/specs/tasks/uclaw-agent-runtime-contract.md
   - harness/specs/rules/bundled-plugin-cross-platform-runtime.md
   - electron/services/agent-runtime/host-capability-defaults.ts
   - electron/services/agent-runtime/**
+  - electron/services/junfeiai/junfeiai-service.ts
   - electron/api/routes/runtime.ts
   - electron/gateway/config-sync.ts
   - electron/utils/openclaw-auth.ts

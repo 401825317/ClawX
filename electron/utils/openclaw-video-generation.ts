@@ -22,10 +22,9 @@ import {
   CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
   CLAWX_OPENAI_VIDEO_MODEL_OPTIONS,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
-  isClawXOpenAiVideoModelRef,
+  isClawXOpenAiVideoModelId,
   normalizeClawXOpenAiVideoModelId,
   orderedClawXOpenAiVideoModelIds,
-  selectClawXOpenAiVideoModelIdForInput,
   type ClawXOpenAiVideoModelOption,
 } from './openclaw-video-relay-constants';
 import { getJunFeiAIDefaultBaseUrl, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
@@ -39,6 +38,7 @@ export interface VideoGenerationModelConfig {
 
 export interface VideoGenerationProviderRow {
   id: string;
+  aliases: string[];
   label: string;
   defaultModel: string;
   configured: boolean;
@@ -99,6 +99,11 @@ type AgentModelConfigShape = {
   primary?: string;
   fallbacks?: string[];
   timeoutMs?: number;
+};
+
+type ParsedVideoModelRef = {
+  provider: string;
+  model: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -198,16 +203,79 @@ function buildVideoGenerationModelConfigWrite(
 }
 
 export function parseProviderFromVideoModelRef(modelRef: string): string | null {
+  return parseVideoModelRef(modelRef)?.provider ?? null;
+}
+
+function parseVideoModelRef(modelRef: string): ParsedVideoModelRef | null {
   const trimmed = modelRef.trim();
   const slash = trimmed.indexOf('/');
   if (slash <= 0 || slash >= trimmed.length - 1) {
     return null;
   }
-  return trimmed.slice(0, slash).trim().toLowerCase();
+  const provider = trimmed.slice(0, slash).trim().toLowerCase();
+  const model = trimmed.slice(slash + 1).trim();
+  if (!provider || !model) {
+    return null;
+  }
+  return { provider, model };
 }
 
 export function isValidVideoModelRef(modelRef: string): boolean {
-  return parseProviderFromVideoModelRef(modelRef) !== null;
+  return parseVideoModelRef(modelRef) !== null;
+}
+
+async function listRegisteredVideoProviders(config: unknown): Promise<VideoGenerationProviderRow[]> {
+  return listVideoGenerationProvidersInProcess({
+    config,
+    isProviderConfigured: async () => false,
+  });
+}
+
+export function normalizeRegisteredVideoModelRef(
+  modelRef: string,
+  registeredProviders: readonly VideoGenerationProviderRow[],
+): string | null {
+  const parsed = parseVideoModelRef(modelRef);
+  if (!parsed) {
+    return null;
+  }
+  const provider = registeredProviders.find((candidate) => [candidate.id, ...candidate.aliases]
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(parsed.provider));
+  if (!provider) {
+    return null;
+  }
+  const normalizedModel = provider.id === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+    && isClawXOpenAiVideoModelId(parsed.model)
+    ? normalizeClawXOpenAiVideoModelId(parsed.model)
+    : parsed.model;
+  const advertisedModels = new Set(provider.models.map((model) => model.trim()).filter(Boolean));
+  if (advertisedModels.size === 0 && provider.defaultModel.trim()) {
+    advertisedModels.add(provider.defaultModel.trim());
+  }
+  if (!advertisedModels.has(normalizedModel)) {
+    return null;
+  }
+  return `${provider.id}/${normalizedModel}`;
+}
+
+function assertRegisteredVideoModelRef(
+  modelRef: string,
+  registeredProviders: readonly VideoGenerationProviderRow[],
+  field: 'primary' | 'fallback',
+): string {
+  const parsed = parseVideoModelRef(modelRef);
+  if (!parsed) {
+    throw new Error(field === 'primary'
+      ? 'primary must be in "provider/model" format'
+      : `Invalid fallback model ref "${modelRef}"`);
+  }
+  const normalized = normalizeRegisteredVideoModelRef(modelRef, registeredProviders);
+  if (normalized) {
+    return normalized;
+  }
+  throw new Error(`Video model "${modelRef}" is not advertised by a registered video-generation provider`);
 }
 
 function authProviderCandidates(providerKey: string): string[] {
@@ -260,6 +328,7 @@ export async function setVideoGenerationConfig(
 
   return withConfigLock(async () => {
     const config = await readOpenClawConfig();
+    const registeredProviders = await listRegisteredVideoProviders(config);
     const agents = (config.agents && typeof config.agents === 'object'
       ? { ...(config.agents as Record<string, unknown>) }
       : {}) as Record<string, unknown>;
@@ -268,8 +337,11 @@ export async function setVideoGenerationConfig(
       : {}) as Record<string, unknown>;
 
     const writeValue = buildVideoGenerationModelConfigWrite({
-      primary: next.primary,
-      fallbacks: [...new Set(next.fallbacks.map((ref) => ref.trim()).filter(Boolean))],
+      primary: next.primary
+        ? assertRegisteredVideoModelRef(next.primary, registeredProviders, 'primary')
+        : null,
+      fallbacks: [...new Set(next.fallbacks
+        .map((ref) => assertRegisteredVideoModelRef(ref, registeredProviders, 'fallback')))],
       timeoutMs: CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
     });
 
@@ -519,8 +591,40 @@ export async function ensureManagedOpenAiVideoRelay(
 ): Promise<void> {
   const config = await readOpenClawConfig();
   const currentConfig = parseVideoGenerationModelConfig(config.agents?.defaults?.videoGenerationModel);
-  if (options.preserveExisting && currentConfig.primary && !isClawXOpenAiVideoModelRef(currentConfig.primary)) {
-    return;
+  if (options.preserveExisting && currentConfig.primary) {
+    const registeredProviders = await listRegisteredVideoProviders(config);
+    const parsedPrimary = parseVideoModelRef(currentConfig.primary);
+    const normalizedPrimary = normalizeRegisteredVideoModelRef(currentConfig.primary, registeredProviders);
+    const openAiProvider = isRecord(config.models)
+      && isRecord(config.models.providers)
+      && isRecord(config.models.providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY])
+      ? config.models.providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY]
+      : undefined;
+    const configuredOpenAiBaseUrl = typeof openAiProvider?.baseUrl === 'string'
+      ? openAiProvider.baseUrl.trim().replace(/\/+$/u, '')
+      : '';
+    const managedOpenAiBaseUrl = getJunFeiAIDefaultBaseUrl().trim().replace(/\/+$/u, '');
+    const isManagedOpenAiRelay = parsedPrimary?.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+      && configuredOpenAiBaseUrl === managedOpenAiBaseUrl;
+    const canPreservePrimary = Boolean(normalizedPrimary)
+      && (!isManagedOpenAiRelay || isClawXOpenAiVideoModelId(parsedPrimary?.model));
+    if (canPreservePrimary && normalizedPrimary) {
+      const normalizedFallbacks = currentConfig.fallbacks
+        .map((fallback) => normalizeRegisteredVideoModelRef(fallback, registeredProviders))
+        .filter((fallback): fallback is string => Boolean(fallback));
+      if (
+        normalizedPrimary !== currentConfig.primary
+        || normalizedFallbacks.length !== currentConfig.fallbacks.length
+        || normalizedFallbacks.some((fallback, index) => fallback !== currentConfig.fallbacks[index])
+      ) {
+        await setVideoGenerationConfig({
+          primary: normalizedPrimary,
+          fallbacks: normalizedFallbacks,
+          timeoutMs: currentConfig.timeoutMs,
+        });
+      }
+      return;
+    }
   }
   const current = await getVideoGenerationSettingsSnapshot();
   const model = current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
@@ -576,7 +680,11 @@ export async function generateVideoForChatSession(params: {
   const config = await readOpenClawConfig();
   const current = await getVideoGenerationSettingsSnapshot();
   const inputImages = normalizeInputImageRefs(params.inputImages);
-  const configuredModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${selectClawXOpenAiVideoModelIdForInput(inputImages.length)}`;
+  const requestedModel = params.model?.trim();
+  const configuredModel = requestedModel
+    ? (requestedModel.includes('/') ? requestedModel : `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${requestedModel}`)
+    : current.config.primary
+      || `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
   const providerKey = parseProviderFromVideoModelRef(configuredModel);
   const directApiKey = providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     ? await resolveVideoRelayApiKey(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, agentId)
