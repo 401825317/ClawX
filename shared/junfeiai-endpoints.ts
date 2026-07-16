@@ -53,6 +53,12 @@ export const JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS = readPositiveTimeoutMs(
   'videoGenerationTimeoutMs',
 );
 
+/** Canonical maximum local download size for managed generated video outputs. */
+export const JUNFEIAI_VIDEO_GENERATION_MAX_DOWNLOAD_BYTES = readPositiveTimeoutMs(
+  endpoints.videoGenerationMaxDownloadBytes,
+  'videoGenerationMaxDownloadBytes',
+);
+
 /** Canonical interval for managed video-generation status checks. */
 export const JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS = readPositiveTimeoutMs(
   endpoints.videoGenerationPollIntervalMs,

@@ -285,6 +285,26 @@ try {
     assert.equal(statSync(staged.params.image).size, statSync(stagedSourcePath).size);
     assert.match(staged.params.image.replace(/\\/g, '/'), /openclaw-state\/media\/outbound\/uclaw-runs/u);
 
+    const concurrentSourcePath = join(artifactDir, 'concurrent-source.png');
+    writeFileSync(concurrentSourcePath, 'shared reference image');
+    const [firstConcurrent, secondConcurrent] = await Promise.all([
+      __test.stageMediaToolInputs({
+        runId: 'media:stage:concurrent',
+        toolName: 'video_generate',
+        args: { image: concurrentSourcePath, prompt: 'shot one' },
+      }, { runId: 'media:stage:concurrent' }),
+      __test.stageMediaToolInputs({
+        runId: 'media:stage:concurrent',
+        toolName: 'video_generate',
+        args: { image: concurrentSourcePath, prompt: 'shot two' },
+      }, { runId: 'media:stage:concurrent' }),
+    ]);
+    assert.equal(firstConcurrent.blockReason, undefined);
+    assert.equal(secondConcurrent.blockReason, undefined);
+    assert.equal(firstConcurrent.params.image, secondConcurrent.params.image);
+    assert.notEqual(firstConcurrent.params.image, concurrentSourcePath);
+    assert.equal(statSync(firstConcurrent.params.image).size, statSync(concurrentSourcePath).size);
+
     const screenshotRewrite = __test.rewriteTmpScreenshotMediaPaths(
       'screencapture -x /tmp/uclaw-screen.png',
     );

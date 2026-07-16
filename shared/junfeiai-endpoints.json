@@ -12,6 +12,7 @@
   },
   "imageGenerationTimeoutMs": 1800000,
   "videoGenerationTimeoutMs": 1800000,
+  "videoGenerationMaxDownloadBytes": 1073741824,
   "videoGenerationPollIntervalMs": 5000,
   "mediaGenerationTestTimeoutMs": 1800000,
   "mediaGenerationClientTimeoutBufferMs": 10000

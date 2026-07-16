@@ -15,9 +15,50 @@ const ELECTRON_BUILDER_BIN = process.platform === 'win32'
 const passthroughArgs = process.argv.slice(2);
 const skipNsisPatch = passthroughArgs.includes('--skip-nsis-patch');
 const args = passthroughArgs.filter((arg) => arg !== '--skip-nsis-patch');
+const REQUIRED_WINDOWS_RUNTIME_BINARIES = [
+  'node.exe',
+  'uv.exe',
+  'agent-browser.exe',
+  'ffmpeg.exe',
+  'ffprobe.exe',
+  'ffmpeg-runtime.json',
+];
 
 function isWindowsBuild() {
-  return process.platform === 'win32' && args.some((arg) => arg === '--win' || arg === 'portable');
+  if (process.platform !== 'win32') return false;
+  if (args.some((arg) => arg === '--help' || arg === '-h' || arg === '--version')) return false;
+  return !args.some((arg) => arg === '--mac' || arg === '-m' || arg === '--linux' || arg === '-l');
+}
+
+function resolveWindowsTargetArch() {
+  if (args.includes('--arm64')) return 'arm64';
+  if (args.includes('--ia32')) return 'ia32';
+  return 'x64';
+}
+
+function validateWindowsRuntimeBinaries() {
+  if (!isWindowsBuild()) return;
+  const arch = resolveWindowsTargetArch();
+  const binDir = path.join(ROOT, 'resources', 'bin', `win32-${arch}`);
+  const missing = REQUIRED_WINDOWS_RUNTIME_BINARIES.filter((name) => {
+    const filePath = path.join(binDir, name);
+    try {
+      const stat = fs.statSync(filePath);
+      return !stat.isFile() || stat.size <= 0;
+    } catch {
+      return true;
+    }
+  });
+  if (missing.length > 0) {
+    const prepCommand = arch === 'x64' ? 'pnpm run prep:win-binaries:x64' : 'pnpm run prep:win-binaries:all';
+    throw new Error(
+      [
+        `[run-electron-builder] Missing required Windows runtime binaries for win32-${arch}: ${missing.join(', ')}`,
+        `Expected directory: ${binDir}`,
+        `Run: ${prepCommand}`,
+      ].join('\n'),
+    );
+  }
 }
 
 function cleanWindowsBuildOutput() {
@@ -78,6 +119,7 @@ function spawnElectronBuilder() {
   });
 }
 
+validateWindowsRuntimeBinaries();
 cleanWindowsBuildOutput();
 
 const child = spawnElectronBuilder();

@@ -1,5 +1,5 @@
 import { accessSync, constants as fsConstants, existsSync, realpathSync, statSync } from 'node:fs';
-import { copyFile, mkdir, realpath as realpathAsync, stat as statAsync } from 'node:fs/promises';
+import { copyFile, mkdir, realpath as realpathAsync, rename, rm, stat as statAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
@@ -13,6 +13,7 @@ const TURN_PREFERENCES_TIMEOUT_MS = 1_200;
 const TURN_PREFERENCES_CACHE_TTL_MS = 5 * 60 * 1000;
 const TURN_PREFERENCES_CACHE_MAX_ENTRIES = 256;
 const turnPreferencesByRunId = new Map();
+const mediaInputStagePromises = new Map();
 const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate', 'create_blender_scene', 'repair_blender_scene']);
 const NATIVE_MEDIA_GENERATION_TOOLS = new Set(['image_generate', 'video_generate']);
 const NATIVE_MEDIA_PROMPT_MAX_CHARACTERS = 4_096;
@@ -428,6 +429,21 @@ async function stageMediaInputFile({ sourceValue, paramKey, runDir }) {
   const extension = extname(sourcePath).toLowerCase();
   const fingerprint = hashString(`${sourcePath}:${sourceStat.size}:${sourceStat.mtimeMs}`);
   const stagedPath = join(runDir, `${fingerprint}${extension}`);
+  const stageKey = `${stagedPath}:${sourceStat.size}:${sourceStat.mtimeMs}`;
+  const existingStage = mediaInputStagePromises.get(stageKey);
+  if (existingStage) return await existingStage;
+  const stagePromise = stageMediaInputFileOnce({ sourcePath, sourceStat, stagedPath });
+  mediaInputStagePromises.set(stageKey, stagePromise);
+  try {
+    return await stagePromise;
+  } finally {
+    if (mediaInputStagePromises.get(stageKey) === stagePromise) {
+      mediaInputStagePromises.delete(stageKey);
+    }
+  }
+}
+
+async function stageMediaInputFileOnce({ sourcePath, sourceStat, stagedPath }) {
   let stagedStat;
   try {
     stagedStat = await statAsync(stagedPath);
@@ -435,7 +451,26 @@ async function stageMediaInputFile({ sourceValue, paramKey, runDir }) {
     stagedStat = undefined;
   }
   if (!stagedStat?.isFile() || stagedStat.size !== sourceStat.size) {
-    await copyFile(sourcePath, stagedPath);
+    const tempPath = `${stagedPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    try {
+      await copyFile(sourcePath, tempPath);
+      const tempStat = await statAsync(tempPath);
+      if (!tempStat.isFile() || tempStat.size !== sourceStat.size) {
+        throw new Error('staged media temporary copy verification failed');
+      }
+      await rename(tempPath, stagedPath);
+    } catch (error) {
+      try {
+        stagedStat = await statAsync(stagedPath);
+      } catch {
+        stagedStat = undefined;
+      }
+      if (!stagedStat?.isFile() || stagedStat.size !== sourceStat.size) {
+        throw error;
+      }
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+    }
     stagedStat = await statAsync(stagedPath);
   }
   if (!stagedStat.isFile() || stagedStat.size !== sourceStat.size) {
@@ -2493,7 +2528,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.2.7',
+  version: '0.2.8',
   register(api) {
     registerArtifactGuard(api);
   },

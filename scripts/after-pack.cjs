@@ -56,6 +56,37 @@ function resolveArch(archEnum) {
   return ARCH_MAP[archEnum] || 'x64';
 }
 
+function runtimeExecutableName(platform, name) {
+  return platform === 'win32' ? `${name}.exe` : name;
+}
+
+function assertPackagedRuntimeBinaries(resourcesDir, platform, arch) {
+  const required = [
+    runtimeExecutableName(platform, 'uv'),
+    runtimeExecutableName(platform, 'agent-browser'),
+    runtimeExecutableName(platform, 'ffmpeg'),
+    runtimeExecutableName(platform, 'ffprobe'),
+    'ffmpeg-runtime.json',
+  ];
+  if (platform === 'win32') required.unshift('node.exe');
+
+  const binDir = join(resourcesDir, 'bin');
+  const missing = required.filter((name) => {
+    const filePath = join(binDir, name);
+    try {
+      const stat = statSync(normWin(filePath));
+      return !stat.isFile() || stat.size <= 0;
+    } catch {
+      return true;
+    }
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `[after-pack] Missing packaged runtime binaries for ${platform}-${arch}: ${missing.join(', ')} in ${binDir}`,
+    );
+  }
+}
+
 function readJsonSafe(filePath) {
   try {
     return JSON.parse(readFileSync(normWin(filePath), 'utf8'));
@@ -801,6 +832,8 @@ exports.default = async function afterPack(context) {
   } else {
     resourcesDir = join(appOutDir, 'resources');
   }
+
+  assertPackagedRuntimeBinaries(resourcesDir, platform, arch);
 
   const openclawRoot = join(resourcesDir, 'openclaw');
   const dest = join(openclawRoot, 'node_modules');

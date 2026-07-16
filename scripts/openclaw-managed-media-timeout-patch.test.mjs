@@ -11,12 +11,14 @@ import {
 const timeouts = {
   imageTimeoutMs: 1_800_000,
   videoTimeoutMs: 1_800_000,
+  videoMaxDownloadBytes: 1_073_741_824,
   videoPollIntervalMs: 5_000,
   videoPollMaxAttempts: 361,
 };
 const toolFixture = 'const timeoutMs = readGenerationTimeoutMs(args) ?? videoGenerationModelConfig.timeoutMs;';
 const providerFixture = `// extensions/openai/video-generation-provider.ts
 const DEFAULT_TIMEOUT_MS = 12e4;
+const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
 const POLL_INTERVAL_MS = 2500;
 const MAX_POLL_ATTEMPTS = 120;
 const options = {
@@ -47,6 +49,7 @@ assert.doesNotMatch(patchedTool.content, /readGenerationTimeoutMs/);
 const patchedProvider = patchOpenClawManagedMediaTimeoutContent(providerFixture, 'provider.js', timeouts);
 assert.equal(patchedProvider.category, 'openai-video-provider');
 assert.match(patchedProvider.content, /const DEFAULT_TIMEOUT_MS = 1800000/);
+assert.match(patchedProvider.content, /const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 1073741824/);
 assert.match(patchedProvider.content, /const POLL_INTERVAL_MS = 5000/);
 assert.match(patchedProvider.content, /const MAX_POLL_ATTEMPTS = 361/);
 assert.match(patchedProvider.content, /\["completed", "done", "succeeded"\]\.includes\(payload\.status\)/);
