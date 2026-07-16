@@ -22,7 +22,10 @@ export type HostTaskAcceptance = {
 };
 
 export type HostTaskCompletion = {
-  mode: 'direct' | 'replan';
+  // Internal tasks are durable Host steps that must finish before a later
+  // task can produce a user-visible artifact. They are acknowledged by the
+  // bridge without injecting a completion turn.
+  mode: 'direct' | 'replan' | 'internal';
   reason?: string;
 };
 
@@ -203,7 +206,11 @@ function normalizeAcceptance(value: HostTaskAcceptance): HostTaskAcceptance {
 }
 
 function normalizeCompletion(value: HostTaskCompletion | undefined): HostTaskCompletion {
-  const mode = value?.mode === 'replan' ? 'replan' : 'direct';
+  const mode = value?.mode === 'replan'
+    ? 'replan'
+    : value?.mode === 'internal'
+      ? 'internal'
+      : 'direct';
   const reason = shortText(value?.reason, 1_000);
   if (mode === 'replan' && !reason) throw new Error('Host task replan completion requires a reason');
   return { mode, ...(reason ? { reason } : {}) };

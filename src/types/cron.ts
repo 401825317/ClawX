@@ -32,6 +32,9 @@ export interface CronJobLastRun {
   success: boolean;
   error?: string;
   duration?: number;
+  delivered?: boolean;
+  deliveryStatus?: string;
+  deliveryError?: string;
 }
 
 /**

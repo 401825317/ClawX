@@ -35,7 +35,7 @@ import { buildProxyEnv, resolveProxySettings } from '../utils/proxy';
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
-import { buildCandidateSources, ensurePluginInstalled, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureUClawDesktopControlPluginInstalled, ensureUClawBlenderPluginInstalled, ensureUClawTaskBridgePluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
+import { buildCandidateSources, cleanupStalePluginInstallArtifacts, ensurePluginInstalled, ensureUClawArtifactGuardPluginInstalled, ensureUClawLocalArtifactsPluginInstalled, ensureUClawDesktopControlPluginInstalled, ensureUClawBlenderPluginInstalled, ensureUClawTaskBridgePluginInstalled, ensureUClawVideoProjectPluginInstalled, ensureParallelPluginInstalled, findBestBundledPluginSource } from '../utils/plugin-install';
 import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-constants';
 import { getHostApiToken } from '../api/host-api-token';
 import { getPort } from '../utils/config';
@@ -111,6 +111,7 @@ function ensureCoreUClawPluginsInstalled(): boolean {
   recordResult('UClaw Desktop Control', ensureUClawDesktopControlPluginInstalled());
   recordResult('UClaw Blender', ensureUClawBlenderPluginInstalled());
   recordResult('UClaw Task Bridge', ensureUClawTaskBridgePluginInstalled());
+  recordResult('UClaw Video Project', ensureUClawVideoProjectPluginInstalled());
 
   return succeeded;
 }
@@ -419,6 +420,12 @@ export async function syncGatewayConfigBeforeLaunch(
   await measureAsync(timingsMs, 'proxySyncMs', async () => {
     await syncProxyConfigToOpenClaw(appSettings, { preserveExistingWhenDisabled: true });
   });
+
+  try {
+    measureSync(timingsMs, 'pluginInstallArtifactCleanupMs', cleanupStalePluginInstallArtifacts);
+  } catch (err) {
+    logger.warn('Failed to clean stale plugin install artifacts:', err);
+  }
 
   try {
     await measureAsync(timingsMs, 'sanitizeMs', sanitizeOpenClawConfig);

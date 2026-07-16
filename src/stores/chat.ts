@@ -6,7 +6,7 @@
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
 import i18n from '@/i18n';
-import { useGatewayStore } from './gateway';
+import { isGatewayReadyForChatSend, useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { getManagedAuthStateKey, isManagedAuthLocallyReady, isManagedAuthReady } from '@/lib/managed-auth';
 import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
@@ -19,10 +19,12 @@ import {
   type ChatRuntimeEvent,
 } from '../../shared/chat-runtime-events';
 import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
+import type { GatewayStatus } from '../types/gateway';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
 import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
+  isInternalHeartbeatSession,
   persistCurrentSessionKey,
   pickStartupSessionFallback,
   readPersistedCurrentSessionKey,
@@ -2659,6 +2661,27 @@ function clearPendingOptimisticUserMessages(sessionKey: string): void {
   _pendingOptimisticUserMessages.delete(sessionKey);
 }
 
+function discardPendingOptimisticUserMessage(sessionKey: string, messageId: string | undefined): void {
+  if (!messageId) return;
+
+  const remaining = (_pendingOptimisticUserMessages.get(sessionKey) || [])
+    .filter((entry) => entry.message.id !== messageId);
+  if (remaining.length > 0) {
+    _pendingOptimisticUserMessages.set(sessionKey, remaining);
+  } else {
+    _pendingOptimisticUserMessages.delete(sessionKey);
+  }
+
+  const cached = _sessionHistoryCache.get(sessionKey);
+  if (cached) {
+    cacheSessionHistory(
+      sessionKey,
+      cached.messages.filter((message) => message.id !== messageId),
+      cached.thinkingLevel,
+    );
+  }
+}
+
 function mergePendingOptimisticUserMessages(sessionKey: string, loadedMessages: RawMessage[]): RawMessage[] {
   const pending = _pendingOptimisticUserMessages.get(sessionKey);
   if (!pending || pending.length === 0) return loadedMessages;
@@ -4144,6 +4167,53 @@ async function fetchChatHistory(
   }
 }
 
+class GatewayNotReadyForChatSendError extends Error {
+  readonly status: GatewayStatus | null;
+
+  constructor(message: string, status: GatewayStatus | null = null) {
+    super(message);
+    this.name = 'GatewayNotReadyForChatSendError';
+    this.status = status;
+  }
+}
+
+function gatewayNotReadySendMessage(detail?: string): string {
+  return i18n.t('chat:gatewaySend.notConnected', {
+    defaultValue: 'Gateway is not connected. Your message was not sent. Reconnect Gateway and retry.',
+    ...(detail ? { detail } : {}),
+  });
+}
+
+/**
+ * Renderer lifecycle events are advisory. Before accepting a user turn, read
+ * the Main-process lifecycle state so a stale "running" event cannot create
+ * a message bubble for a request that cannot be delivered.
+ */
+async function assertGatewayReadyForChatSend(): Promise<GatewayStatus> {
+  let status: GatewayStatus;
+  try {
+    status = await useGatewayStore.getState().refreshStatus();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GatewayNotReadyForChatSendError(gatewayNotReadySendMessage(detail));
+  }
+
+  if (!isGatewayReadyForChatSend(status)) {
+    throw new GatewayNotReadyForChatSendError(gatewayNotReadySendMessage(), status);
+  }
+  return status;
+}
+
+async function gatewayIsUnavailableForChatSend(): Promise<boolean> {
+  try {
+    const status = await useGatewayStore.getState().refreshStatus();
+    return !isGatewayReadyForChatSend(status);
+  } catch {
+    // Status cannot be verified, so do not present a successful send state.
+    return true;
+  }
+}
+
 async function sendChatMessageViaHostApi(params: {
   sessionKey: string;
   message: string;
@@ -4152,6 +4222,7 @@ async function sendChatMessageViaHostApi(params: {
   thinking?: string | null;
   clientPreferences?: GatewayTurnPreferences;
 }): Promise<{ runId?: string }> {
+  await assertGatewayReadyForChatSend();
   try {
     const response = await hostApiFetch<{
       success: boolean;
@@ -4166,6 +4237,7 @@ async function sendChatMessageViaHostApi(params: {
     }
     return response.result ?? {};
   } catch {
+    await assertGatewayReadyForChatSend();
     return await useGatewayStore.getState().rpc<{ runId?: string }>('chat.send', params, CHAT_SEND_RPC_TIMEOUT_MS);
   }
 }
@@ -5313,6 +5385,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               sessionId,
               sessionFile,
               fileName,
+              heartbeatIsolatedBaseSessionKey: typeof s.heartbeatIsolatedBaseSessionKey === 'string'
+                && s.heartbeatIsolatedBaseSessionKey.trim()
+                ? s.heartbeatIsolatedBaseSessionKey.trim()
+                : undefined,
               label: s.label ? String(s.label) : undefined,
               displayName: s.displayName ? String(s.displayName) : undefined,
               derivedTitle: s.derivedTitle ? String(s.derivedTitle) : undefined,
@@ -5343,7 +5419,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
             };
             return mergeSessionRowWithLocalState(nextSession, localSessionByKey.get(nextSession.key));
-          }).filter((s: ChatSession) => s.key && !isInternalTemporarySessionKey(s.key));
+          }).filter((s: ChatSession) => (
+            s.key
+            && !isInternalTemporarySessionKey(s.key)
+            && !isInternalHeartbeatSession(s)
+          ));
 
           const canonicalBySuffix = new Map<string, string>();
           for (const session of sessions) {
@@ -5378,7 +5458,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           if (!dedupedSessions.find((s) => s.key === nextSessionKey)) {
             // Preserve only locally-created pending sessions. On initial boot the
             // default ghost key (`agent:main:main`) should yield to real history.
-            const hasLocalPendingSession = localSessions.some((session) => session.key === nextSessionKey);
+            const hasLocalPendingSession = _pendingLocalSessionKeys.has(nextSessionKey)
+              && !isInternalHeartbeatSession(nextSessionKey);
             if (!hasLocalPendingSession) {
               nextSessionKey = pickStartupSessionFallback(nextSessionKey, dedupedSessions) ?? DEFAULT_SESSION_KEY;
             }
@@ -5513,6 +5594,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── Switch session ──
 
   switchSession: (key: string) => {
+    if (isInternalHeartbeatSession(key)) return;
     if (key === get().currentSessionKey) return;
     // Stop any background polling for the old session before switching.
     // This prevents the poll timer from firing after the switch and loading
@@ -6732,6 +6814,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       enqueuedAt: Date.now(),
     });
 
+    try {
+      await assertGatewayReadyForChatSend();
+    } catch (error) {
+      set({
+        error: error instanceof Error ? error.message : String(error),
+        runError: null,
+        sending: false,
+      });
+      return;
+    }
+
     const currentSessionKey = targetSessionKey;
     const explicitPendingImages = (attachments ?? [])
       .filter((file) => file.mimeType.startsWith('image/') && file.stagedPath.trim().length > 0)
@@ -6946,7 +7039,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     setTimeout(checkStuck, 30_000);
 
-    const applySendFailure = (errorMsg: string) => {
+    const applySendFailure = (errorMsg: string, discardOptimisticMessage = false) => {
       const latest = get();
       const sendStillCurrent = _activeSendGenerationBySession.get(currentSessionKey) === sendGeneration;
       const canApplyToCurrentSession = latest.currentSessionKey === currentSessionKey
@@ -6955,7 +7048,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (sendStillCurrent && canApplyToCurrentSession) {
         clearSendGenerationIfCurrent();
         clearHistoryPoll();
-        set({ error: errorMsg, sending: false });
+        if (discardOptimisticMessage) {
+          discardPendingOptimisticUserMessage(currentSessionKey, userMsg.id);
+          set((state) => ({
+            messages: state.messages.filter((message) => message.id !== userMsg.id),
+            error: errorMsg,
+            sending: false,
+          }));
+        } else {
+          set({ error: errorMsg, sending: false });
+        }
         markSessionRunIdle(currentSessionKey);
         return;
       }
@@ -6963,6 +7065,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
         const cached = _sessionRunStateCache.get(currentSessionKey);
         if (cached?.lastUserMessageAt === nowMs) {
+          if (discardOptimisticMessage) {
+            discardPendingOptimisticUserMessage(currentSessionKey, userMsg.id);
+          }
           markSessionRunIdle(currentSessionKey);
           return;
         }
@@ -6973,6 +7078,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionKey: currentSessionKey,
       });
     };
+
+    try {
+      // Provider/model persistence above can take long enough for a just-
+      // restarted Gateway to disconnect. Check Main-process truth again right
+      // before the host/RPC send path accepts the turn.
+      await assertGatewayReadyForChatSend();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      applySendFailure(errorMessage, error instanceof GatewayNotReadyForChatSendError);
+      return;
+    }
 
     try {
       const idempotencyKey = crypto.randomUUID();
@@ -7054,9 +7170,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!result.success) {
         const errorMsg = result.error || 'Failed to send message';
         if (isRecoverableChatSendTimeout(errorMsg)) {
-          console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errorMsg}`);
+          if (await gatewayIsUnavailableForChatSend()) {
+            applySendFailure(errorMsg, true);
+          } else {
+            console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errorMsg}`);
+          }
         } else {
-          applySendFailure(errorMsg);
+          applySendFailure(errorMsg, await gatewayIsUnavailableForChatSend());
         }
       } else if (result.result?.runId) {
         const returnedRunId = result.result.runId;
@@ -7108,11 +7228,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearSendGenerationIfCurrent();
       }
     } catch (err) {
-      const errStr = String(err);
+      const errStr = err instanceof Error ? err.message : String(err);
       if (isRecoverableChatSendTimeout(errStr)) {
-        console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errStr}`);
+        if (await gatewayIsUnavailableForChatSend()) {
+          applySendFailure(errStr, true);
+        } else {
+          console.warn(`[sendMessage] Recoverable chat.send timeout, keeping poll alive: ${errStr}`);
+        }
       } else {
-        applySendFailure(errStr);
+        applySendFailure(
+          errStr,
+          err instanceof GatewayNotReadyForChatSendError || await gatewayIsUnavailableForChatSend(),
+        );
       }
     }
   },
@@ -8070,6 +8197,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         nextPatch.pendingFinal = shouldKeepLifecycle;
         nextPatch.lastUserMessageAt = shouldKeepLifecycle ? latestState.lastUserMessageAt : null;
         nextPatch.streamingTools = shouldKeepLifecycle ? latestState.streamingTools : [];
+        if (eventForSession.status === 'completed') {
+          nextPatch.error = null;
+          nextPatch.runError = null;
+        }
         if (eventForSession.status === 'error' && eventForSession.error) {
           nextPatch.error = null;
           nextPatch.runError = shouldSuppressToolTerminalError(

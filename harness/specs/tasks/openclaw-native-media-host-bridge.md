@@ -19,6 +19,7 @@ touchedAreas:
   - harness/specs/tasks/uclaw-feedback-runtime-regressions.md
   - harness/specs/tasks/uclaw-desktop-and-blender-runtime.md
   - harness/specs/rules/backend-communication-boundary.md
+  - harness/specs/rules/bundled-plugin-cross-platform-runtime.md
   - harness/src/profiles.mjs
   - electron/api/routes/gateway.ts
   - electron/api/routes/media.ts
@@ -90,7 +91,7 @@ touchedAreas:
   - README.ja-JP.md
 expectedUserBehavior:
   - A normal chat can invoke native image_generate or video_generate based on the full OpenClaw session context; UClaw does not require a keyword matcher or second semantic planning pass.
-  - Image and video modes remain visible product affordances. They supply current-turn defaults such as model, size, quality, duration, and selected input artifact, but do not bypass the OpenClaw agent loop.
+  - Image and video modes remain visible product affordances. They supply current-turn media constraints and selected input artifacts, but do not bypass the OpenClaw agent loop. For video, the Agent explicitly selects a compatible model from the request, reference inputs, and advertised provider capabilities; UI defaults never become a silent model override.
   - Native OpenClaw media task start, progress, completion, failure, and produced attachments project into the existing UClaw runtime graph and artifact UI.
   - A native async media completion resumes the same session through OpenClaw's completion path. UClaw does not synthesize an assistant reply to pretend that an Agent tool returned.
   - OpenClaw remains the only semantic decision maker for when to invoke a capability. UClaw guard code may validate ownership, cost, parameter bounds, media staging, and result evidence, but may not authorize a tool from natural-language regexes.
@@ -99,6 +100,8 @@ expectedUserBehavior:
   - Generated images that exceed the OpenClaw attachment cap are transcoded and progressively compressed before persistence; a provider-successful image is not discarded solely because its original encoding is too large.
   - Native image task terminal state from the task ledger closes the pending image UI and freezes elapsed time even when internal completion messages are intentionally absent from the visible transcript.
   - When remote video providers cannot produce clips, the Agent can select the advertised `local.video.timeline.render` Host capability to render managed image/video scenes with deterministic duration, basic motion, transitions, captions, narration, and optional background music.
+  - Generated video scene audio is preserved by default. TTS is an optional overlay only for explicit narration intent or when source speech is missing or unusable; it does not replace model audio in every video workflow.
+  - Local video composition and timeline rendering use a packaged FFmpeg/ffprobe runtime on macOS, Windows, and Linux; the Agent never offers a platform-only implementation to a supported UClaw client.
   - `video_generate action=list` exposes the models configured in `agents.defaults.videoGenerationModel` and `models.providers.<id>.models`; the local timeline renderer is a fallback after those real configured candidates are unavailable, not a replacement for provider discovery.
   - Long-form video plans may submit multiple native `video_generate` tasks with one shared `parentTaskId` and a unique `segmentId` per shot. The duplicate guard suppresses only the same logical segment, while calls without segment identity retain session-level single-flight behavior.
   - A still-image-only timeline is disclosed as a fallback after provider generation is unavailable or fails; it is never described as equivalent to provider-generated motion.
@@ -111,11 +114,13 @@ requiredRules:
   - api-client-transport-policy
   - host-events-fallback-policy
   - comms-regression
+  - bundled-plugin-cross-platform-runtime
 requiredTests:
   - pnpm harness validate --spec harness/specs/tasks/openclaw-native-media-host-bridge.md --since HEAD
   - pnpm run comms:replay
   - pnpm run comms:compare
   - pnpm exec tsc --noEmit --pretty false
+  - node scripts/download-bundled-ffmpeg.mjs --verify --target=current
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - node scripts/uclaw-artifact-guard-runtime.test.mjs
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
@@ -149,8 +154,10 @@ acceptance:
   - An oversized PNG response for a requested JPEG is saved as a valid JPEG below the configured image byte cap, with authoritative MIME type and filename metadata.
   - Managed UClaw installs default `agents.defaults.mediaMaxMb` to 16 when unset, while preserving an explicit user value.
   - Failed, partial, cancelled, and completed native image tasks are terminal for the renderer pending-state detector even when the artifact guard filters their internal completion envelopes from transcript history.
-  - `local.video.timeline.render` is available only when the macOS Swift, AVFoundation, and speech runtime are present; unsupported platforms report unavailable and never fabricate a video artifact.
+  - `local.video.compose` and `local.video.timeline.render` resolve packaged FFmpeg/ffprobe binaries for the current macOS, Windows, or Linux target and do not contain a permanent OS-family rejection.
+  - Packaging fails when the target FFmpeg/ffprobe binaries are absent, have the wrong architecture, or cannot execute their version probes.
   - Timeline rendering accepts only managed image/video and background-music paths, verifies the final MP4 duration, dimensions, video track, and requested audio track, and returns blocked rather than success when any required fact is missing.
+  - Local composition and timeline rendering retain source video audio unless `keepOriginalAudio=false`; explicit narration mixes over source audio at background level instead of silently deleting it.
 docs:
   required: true
 ---

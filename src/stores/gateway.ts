@@ -29,6 +29,8 @@ interface GatewayState {
   isInitialized: boolean;
   lastError: string | null;
   init: () => Promise<void>;
+  /** Read Main-process status immediately instead of relying on renderer events. */
+  refreshStatus: () => Promise<GatewayStatus>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   restart: () => Promise<void>;
@@ -36,6 +38,32 @@ interface GatewayState {
   rpc: <T>(method: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   setStatus: (status: GatewayStatus) => void;
   clearError: () => void;
+}
+
+/**
+ * `running` alone is not enough: the process can be alive while its RPC
+ * transport is still reconnecting. `gatewayReady` is intentionally backward
+ * compatible with older Main processes that did not report the field.
+ */
+export function isGatewayReadyForChatSend(status: GatewayStatus): boolean {
+  return status.state === 'running' && status.gatewayReady !== false;
+}
+
+function gatewayStatusesMatch(left: GatewayStatus, right: GatewayStatus): boolean {
+  return left.state === right.state
+    && left.port === right.port
+    && left.pid === right.pid
+    && left.connectedAt === right.connectedAt
+    && left.gatewayReady === right.gatewayReady
+    && left.error === right.error
+    && left.reconnectAttempts === right.reconnectAttempts
+    && left.version === right.version;
+}
+
+function gatewayStatusRefreshError(hostError: unknown, ipcError: unknown): Error {
+  const hostMessage = hostError instanceof Error ? hostError.message : String(hostError);
+  const ipcMessage = ipcError instanceof Error ? ipcError.message : String(ipcError);
+  return new Error(`Unable to read Gateway status: ${hostMessage || ipcMessage || 'unknown error'}`);
 }
 
 function pruneGatewayEventDedupe(now: number): void {
@@ -289,6 +317,46 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   isInitialized: false,
   lastError: null,
 
+  refreshStatus: async () => {
+    let hostError: unknown;
+    try {
+      const status = await hostApiFetch<GatewayStatus>('/api/gateway/status');
+      if (!status || typeof status !== 'object' || typeof status.state !== 'string') {
+        throw new Error('Gateway status response was invalid');
+      }
+      if (!gatewayStatusesMatch(get().status, status)) {
+        set({ status });
+      }
+      return status;
+    } catch (error) {
+      hostError = error;
+    }
+
+    try {
+      const status = await invokeIpc<GatewayStatus>('gateway:status');
+      if (!status || typeof status !== 'object' || typeof status.state !== 'string') {
+        throw new Error('Gateway status response was invalid');
+      }
+      if (!gatewayStatusesMatch(get().status, status)) {
+        set({ status });
+      }
+      return status;
+    } catch (ipcError) {
+      const refreshError = gatewayStatusRefreshError(hostError, ipcError);
+      const current = get().status;
+      set({
+        status: {
+          ...current,
+          state: 'error',
+          gatewayReady: false,
+          error: refreshError.message,
+        },
+        lastError: refreshError.message,
+      });
+      throw refreshError;
+    }
+  },
+
   init: async () => {
     if (get().isInitialized) return;
     if (gatewayInitPromise) {
@@ -298,7 +366,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
 
     gatewayInitPromise = (async () => {
       try {
-        const status = await hostApiFetch<GatewayStatus>('/api/gateway/status');
+        const status = await get().refreshStatus();
         set({ status, isInitialized: true });
 
         if (!gatewayEventUnsubscribers) {
@@ -379,9 +447,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               .then((result: unknown) => {
                 const latest = result as GatewayStatus;
                 const current = get().status;
-                if (latest.state !== current.state) {
-                  console.info(
-                    `[gateway-store] reconciled stale state: ${current.state} → ${latest.state}`,
+              if (!gatewayStatusesMatch(latest, current)) {
+                console.info(
+                    `[gateway-store] reconciled stale status: ${current.state}/${String(current.gatewayReady)} → ${latest.state}/${String(latest.gatewayReady)}`,
                   );
                   set({ status: latest });
                 }
@@ -395,11 +463,7 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         // the initial fetch and the IPC listener setup, that event was lost.
         // A second fetch guarantees we pick up the latest state.
         try {
-          const refreshed = await hostApiFetch<GatewayStatus>('/api/gateway/status');
-          const current = get().status;
-          if (refreshed.state !== current.state) {
-            set({ status: refreshed });
-          }
+          await get().refreshStatus();
         } catch {
           // Best-effort; the IPC listener will eventually reconcile.
         }

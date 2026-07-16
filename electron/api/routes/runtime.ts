@@ -5,6 +5,7 @@ import { ensureDefaultHostCapabilities } from '../../services/agent-runtime/host
 import { hostCapabilityRegistry } from '../../services/agent-runtime/host-capability-registry';
 import { buildRuntimeCapabilityCatalog } from '../../services/agent-runtime/runtime-capability-catalog';
 import { agentTurnPreferenceStore } from '../../services/agent-runtime/turn-preference-store';
+import { scheduleTaskBridgeSessionWake } from '../../services/agent-runtime/host-task-session-wake';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
 
@@ -17,6 +18,13 @@ function publishHostTaskEvent(ctx: HostApiContext, event: ChatRuntimeEvent): voi
 
 function bridgeStatus(status: HostTaskSnapshot['status']): string {
   return status;
+}
+
+function bridgeDeliveryStatus(task: HostTaskSnapshot): 'pending' | 'delivered' | 'expired' | 'not_applicable' {
+  if (task.completion.mode === 'internal') return 'not_applicable';
+  if (!['succeeded', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost'].includes(task.status)) return 'pending';
+  if (isBridgeTerminalExpired(task)) return 'expired';
+  return isBridgeTerminalDelivered(task) ? 'delivered' : 'pending';
 }
 
 function requiredCorrelationValue(value: unknown, label: string): string {
@@ -97,6 +105,9 @@ async function bridgeTask(task: HostTaskSnapshot) {
     },
     acceptance: task.acceptance,
     completion: task.completion,
+    delivery: {
+      status: bridgeDeliveryStatus(task),
+    },
     progress,
     artifacts: task.artifacts.map((artifact) => ({ ...artifact, role: artifact.kind ?? 'output' })),
     verifications: task.verifications,
@@ -115,6 +126,14 @@ async function bridgeTask(task: HostTaskSnapshot) {
 
 function isBridgeTerminalDelivered(task: HostTaskSnapshot): boolean {
   return task.completionAcks.some((key) => key.startsWith(`uclaw-task-bridge:completion:${task.taskId}:${task.revision}`));
+}
+
+function isBridgeTerminalExpired(task: HostTaskSnapshot): boolean {
+  return task.completionAcks.some((key) => key.startsWith(`uclaw-task-bridge:completion-expired:${task.taskId}:${task.revision}`));
+}
+
+function isBridgeTerminalSettled(task: HostTaskSnapshot): boolean {
+  return isBridgeTerminalDelivered(task) || isBridgeTerminalExpired(task);
 }
 
 export async function handleRuntimeRoutes(
@@ -150,13 +169,31 @@ export async function handleRuntimeRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/task-bridge/session-wakes' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ sessionKey?: unknown; taskIds?: unknown }>(req);
+      const sessionKey = requiredCorrelationValue(body.sessionKey, 'sessionKey');
+      const taskIds = Array.isArray(body.taskIds)
+        ? [...new Set(body.taskIds.map((taskId) => requiredCorrelationValue(taskId, 'taskId')))].slice(0, 64)
+        : [];
+      if (taskIds.length === 0) throw new Error('taskIds is required');
+      const wake = await scheduleTaskBridgeSessionWake(ctx.gatewayManager, sessionKey, taskIds, {
+        getTask: (taskId) => hostTaskService.get(taskId),
+      });
+      sendJson(res, 202, { success: true, scheduled: true, wake });
+    } catch (error) {
+      sendJson(res, 409, { success: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/task-bridge/tasks' && req.method === 'POST') {
     try {
       const body = await parseJsonBody<{
         kind?: string;
         title?: string;
         input?: unknown;
-        completion?: { mode?: 'direct' | 'replan'; reason?: string };
+        completion?: { mode?: 'direct' | 'replan' | 'internal'; reason?: string };
         correlation?: Partial<HostTaskCreateRequest>;
       }>(req);
       const kind = requiredTaskKind(body.kind);
@@ -187,7 +224,9 @@ export async function handleRuntimeRoutes(
         acceptance: registration.capability.acceptance,
         completion: body.completion?.mode === 'replan'
           ? { mode: 'replan', reason: requiredReplanReason(body.completion.reason) }
-          : { mode: 'direct' },
+          : body.completion?.mode === 'internal'
+            ? { mode: 'internal' }
+            : { mode: 'direct' },
       });
       let task = result.task;
       // Always attempt dispatch after an exact idempotent replay. If the Host
@@ -209,7 +248,7 @@ export async function handleRuntimeRoutes(
     const tasks = (await hostTaskService.list(sessionKey)).filter((task) => (
       !activeOnly
       || !['succeeded', 'failed', 'blocked', 'cancelled', 'timed_out', 'lost'].includes(task.status)
-      || (includeTerminalUndelivered && !isBridgeTerminalDelivered(task))
+      || (includeTerminalUndelivered && !isBridgeTerminalSettled(task))
     ));
     sendJson(res, 200, { success: true, tasks: await Promise.all(tasks.map(bridgeTask)) });
     return true;

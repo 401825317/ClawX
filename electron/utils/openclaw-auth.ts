@@ -72,6 +72,7 @@ import {
 } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 import { readJsonFileWithRetry, writeJsonFileAtomically } from './json-file-io';
+import { isTransientPluginInstallPath } from './plugin-install-paths';
 
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -954,6 +955,7 @@ const UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID = 'uclaw-local-artifacts';
 const UCLAW_DESKTOP_CONTROL_PLUGIN_ID = 'uclaw-desktop-control';
 const UCLAW_BLENDER_PLUGIN_ID = 'uclaw-blender';
 const UCLAW_TASK_BRIDGE_PLUGIN_ID = 'uclaw-task-bridge';
+const UCLAW_VIDEO_PROJECT_PLUGIN_ID = 'uclaw-video-project';
 const ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
@@ -3367,6 +3369,7 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     ensurePluginEntryEnabled(config, UCLAW_DESKTOP_CONTROL_PLUGIN_ID);
     ensurePluginEntryEnabled(config, UCLAW_BLENDER_PLUGIN_ID);
     ensurePluginEntryEnabled(config, UCLAW_TASK_BRIDGE_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_VIDEO_PROJECT_PLUGIN_ID);
     ensureParallelWebSearchPluginRegistration(config);
 
     const pinnedProviderRuntimes = applyOpenClawProviderAgentRuntimePinsToConfig(config);
@@ -3685,7 +3688,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         const validPlugins: unknown[] = [];
         for (const p of plugins) {
           if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-            if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+            if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
               console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
               modified = true;
             } else {
@@ -3702,7 +3705,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
           const validLoad: unknown[] = [];
           for (const p of pluginsObj.load) {
             if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-              if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+              if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                 console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
                 modified = true;
               } else {
@@ -3721,7 +3724,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
             const countBefore = loadObj.paths.length;
             for (const p of loadObj.paths) {
               if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-                if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+                if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                   console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from plugins.load.paths`);
                   modified = true;
                 } else {

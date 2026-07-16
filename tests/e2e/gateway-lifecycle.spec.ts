@@ -177,4 +177,103 @@ test.describe('ClawX gateway lifecycle resilience', () => {
     await expect(page.getByText('history after ready')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText(/gateway connected \| port: 18789/i)).toBeVisible();
   });
+
+  test('does not show a sent chat bubble when fresh Gateway status is disconnected', async ({ electronApp, page }) => {
+    await electronApp.evaluate(async () => {
+      const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+      let freshGatewayDisconnected = false;
+      let chatSendCalls = 0;
+      const response = (json: unknown) => ({
+        ok: true,
+        data: { status: 200, ok: true, json },
+      });
+
+      ipcMain.removeHandler('gateway:status');
+      ipcMain.handle('gateway:status', async () => ({
+        state: 'running',
+        port: 18789,
+        pid: 12345,
+        connectedAt: 1,
+        gatewayReady: true,
+      }));
+
+      ipcMain.removeHandler('gateway:rpc');
+      ipcMain.handle('gateway:rpc', async (_event: unknown, method: string) => {
+        if (method === 'sessions.list') {
+          return {
+            success: true,
+            result: { sessions: [{ key: 'agent:main:main', displayName: 'main' }] },
+          };
+        }
+        if (method === 'chat.history') {
+          return { success: true, result: { messages: [] } };
+        }
+        if (method === 'chat.send') {
+          chatSendCalls += 1;
+          return { success: true, result: { runId: 'must-not-send' } };
+        }
+        return { success: true, result: {} };
+      });
+
+      ipcMain.removeHandler('hostapi:fetch');
+      ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string }) => {
+        const path = request?.path ?? '';
+        if (path === '/api/gateway/status') {
+          return response(freshGatewayDisconnected
+            ? {
+              state: 'running',
+              port: 18789,
+              pid: 12345,
+              connectedAt: 2,
+              gatewayReady: false,
+            }
+            : {
+              state: 'running',
+              port: 18789,
+              pid: 12345,
+              connectedAt: 1,
+              gatewayReady: true,
+            });
+        }
+        if (path === '/api/agents') {
+          return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
+        }
+        if (path === '/api/chat/send') {
+          chatSendCalls += 1;
+          return response({ success: true, result: { runId: 'must-not-send' } });
+        }
+        return response({});
+      });
+
+      (globalThis as Record<string, unknown>).__setFreshGatewayDisconnected = () => {
+        freshGatewayDisconnected = true;
+      };
+      (globalThis as Record<string, unknown>).__getChatSendCalls = () => chatSendCalls;
+    });
+
+    await completeSetup(page);
+    await page.getByTestId('sidebar-new-chat').click();
+    await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 10_000 });
+
+    await electronApp.evaluate(() => {
+      const setDisconnected = (globalThis as Record<string, unknown>).__setFreshGatewayDisconnected as
+        | (() => void)
+        | undefined;
+      setDisconnected?.();
+    });
+
+    await page.getByTestId('chat-composer-input').fill('this message must stay local');
+    await page.getByTestId('chat-composer-send').click();
+
+    await expect(page.getByText(/message was not sent/i)).toBeVisible();
+    await expect(page.getByText('this message must stay local')).toHaveCount(0);
+
+    const chatSendCalls = await electronApp.evaluate(() => {
+      const getChatSendCalls = (globalThis as Record<string, unknown>).__getChatSendCalls as
+        | (() => number)
+        | undefined;
+      return getChatSendCalls?.() ?? -1;
+    });
+    expect(chatSendCalls).toBe(0);
+  });
 });

@@ -66,7 +66,7 @@ expectedUserBehavior:
   - Native task failure, cancellation, partial completion, and success remain authoritative across live events and history reload.
   - A final assistant reply never ends a session by itself; ClawX keeps the session active until OpenClaw emits a terminal run event or reports `hasActiveRun: false` through `sessions.list`.
   - Host work is accepted only when the registered capability's required artifacts and verifications are satisfied by real structured results.
-  - Async Host completion reaches the same run and session directly; another model turn occurs only when the capability explicitly requests replanning and supplies a reason.
+  - Async Host completion reaches the same run and session directly. When a yielded session needs to consume a durable completion injection, the bridge may schedule at most one tagged same-session announcement turn; `replan` additionally supplies the concrete replanning reason.
   - Internal execution instructions, provider diagnostics, and runtime plumbing are never persisted as user-authored transcript text.
   - Capability questions, explanation requests, and explicit no-tool turns do not receive side-effect authorization from UI mode hints or keyword rules.
 requiredProfiles:
@@ -104,8 +104,8 @@ acceptance:
   - Host capability descriptors declare required artifact kinds, minimum counts, and required verification kinds.
   - Host task completion persists the capability-derived acceptance snapshot and rejects a reported success when required evidence is absent.
   - Required local file artifacts reference readable, non-empty regular files before the task can become succeeded.
-  - Direct Host completion emits artifact, verification, step, progress, tool, and terminal run events to the owning run without an unconditional model wake.
-  - Explicit replan completion schedules at most one same-session Agent continuation and records why replanning is required.
+  - Direct Host completion emits artifact, verification, step, progress, tool, and terminal run events to the owning run before its single tagged completion announcement is acknowledged.
+  - Direct and replan completion schedule at most one tagged same-session announcement after injection and runtime events are ready; replan records why further planning is required, while direct does not fabricate a replanning reason.
   - Native OpenClaw task and tool terminal states are authoritative; the renderer does not perform a second semantic completion decision.
   - When `sessions.list` reports `hasActiveRun: true`, ClawX keeps or restores the active session controls even if history already contains a final reply.
   - A fresh run begins with `run.started` only. Plan and step rows appear only when real runtime events provide them.

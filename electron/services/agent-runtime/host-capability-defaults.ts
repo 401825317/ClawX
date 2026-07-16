@@ -1,14 +1,22 @@
-import { promises as fs } from 'node:fs';
 import type { DesktopObservationRequest } from '../computer';
 import { desktopRunCoordinator } from '../computer';
 import type { HostCapabilityTaskContext } from './host-capability-registry';
 import { hostCapabilityRegistry } from './host-capability-registry';
-import { cancelLocalVideoCompose, runLocalVideoCompose } from './local-video-compose';
+import {
+  assessLocalVideoComposeAvailability,
+  cancelLocalVideoCompose,
+  runLocalVideoCompose,
+} from './local-video-compose';
 import {
   assessLocalVideoTimelineAvailability,
   cancelLocalVideoTimelineRender,
   runLocalVideoTimelineRender,
 } from './local-video-timeline';
+import {
+  assessLocalVideoShotQaAvailability,
+  cancelLocalVideoShotQa,
+  runLocalVideoShotQa,
+} from './local-video-shot-qa';
 
 function text(value: unknown, maximum: number): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -138,7 +146,7 @@ export function ensureDefaultHostCapabilities(): void {
     descriptor: {
       kind: 'local.video.compose',
       label: 'Compose video segments with narration',
-      description: 'Concatenate 2-120 existing managed video segments in order, optionally synthesize Chinese narration, export one MP4, and verify actual duration, dimensions, and audio. Use after remote video generation has produced all required segments.',
+      description: 'Concatenate 2-120 existing managed video segments in order, preserve generated source audio by default, optionally add Chinese narration, export one MP4, and verify actual duration, dimensions, and audio. Use after remote video generation has produced all required segments.',
       sideEffect: 'local_artifact',
       requiresApproval: false,
       inputSchema: {
@@ -151,8 +159,8 @@ export function ensureDefaultHostCapabilities(): void {
           width: { type: 'integer', minimum: 1, maximum: 7680 },
           height: { type: 'integer', minimum: 1, maximum: 4320 },
           narrationText: { type: 'string', maxLength: 16000 },
-          voice: { type: 'string', default: 'Tingting' },
-          keepOriginalAudio: { type: 'boolean', default: false },
+          voice: { type: 'string', default: 'zh-CN-XiaoxiaoNeural', description: 'Narration voice. Defaults to a natural Chinese neural voice with system TTS fallback.' },
+          keepOriginalAudio: { type: 'boolean', default: true, description: 'Preserve the video model source audio. Disable only when the source sound is intentionally being replaced.' },
         },
       },
       outputDescription: 'A verified MP4 artifact with measured duration, width, height, and audio-track evidence.',
@@ -162,17 +170,7 @@ export function ensureDefaultHostCapabilities(): void {
         requiredVerificationKinds: ['media.metadata'],
       },
     },
-    async assess() {
-      if (process.platform !== 'darwin') {
-        return { availability: 'not_implemented', reason: 'local.video.compose currently requires the macOS AVFoundation executor.' };
-      }
-      try {
-        await Promise.all([fs.access('/usr/bin/swift'), fs.access('/usr/bin/say')]);
-        return { availability: 'available' };
-      } catch {
-        return { availability: 'unavailable', reason: 'The macOS Swift or speech runtime is unavailable.' };
-      }
-    },
+    assess: assessLocalVideoComposeAvailability,
     start: runLocalVideoCompose,
     resume: runLocalVideoCompose,
     cancel: cancelLocalVideoCompose,
@@ -181,7 +179,7 @@ export function ensureDefaultHostCapabilities(): void {
     descriptor: {
       kind: 'local.video.timeline.render',
       label: 'Render an image/video timeline with narration',
-      description: 'Render 1-120 managed image or video scenes into one MP4 with per-scene duration, basic pan/zoom motion, cut/crossfade/fade transitions, captions, optional Chinese narration, and optional background music. Use this local fallback when remote video generation cannot supply motion clips.',
+      description: 'Render 1-120 managed image or video scenes into one MP4 with per-scene duration, source audio preserved by default, basic pan/zoom motion, cut/crossfade/fade transitions, captions, optional Chinese narration, and optional background music. Use this local fallback when remote video generation cannot supply motion clips.',
       sideEffect: 'local_artifact',
       requiresApproval: false,
       inputSchema: {
@@ -213,8 +211,9 @@ export function ensureDefaultHostCapabilities(): void {
           height: { type: 'integer', minimum: 240, maximum: 4320, multipleOf: 2, default: 1080 },
           fps: { type: 'integer', minimum: 12, maximum: 60, default: 30 },
           narrationText: { type: 'string', maxLength: 16000 },
-          voice: { type: 'string', default: 'Tingting' },
+          voice: { type: 'string', default: 'zh-CN-XiaoxiaoNeural', description: 'Narration voice. Defaults to a natural Chinese neural voice with system TTS fallback.' },
           narrationVolume: { type: 'number', minimum: 0, maximum: 1, default: 1 },
+          keepOriginalAudio: { type: 'boolean', default: true, description: 'Preserve generated video scene audio. Explicit narration is mixed over it at background level.' },
           backgroundMusicPath: { type: 'string', description: 'Optional absolute managed audio or video path with an audio track.' },
           backgroundMusicVolume: { type: 'number', minimum: 0, maximum: 1, default: 0.18 },
         },
@@ -230,5 +229,40 @@ export function ensureDefaultHostCapabilities(): void {
     start: runLocalVideoTimelineRender,
     resume: runLocalVideoTimelineRender,
     cancel: cancelLocalVideoTimelineRender,
+  });
+  if (!hostCapabilityRegistry.has('local.video.shot.qa')) hostCapabilityRegistry.register({
+    descriptor: {
+      kind: 'local.video.shot.qa',
+      label: 'Verify a generated video shot',
+      description: 'Inspect one managed generated video shot with FFmpeg/ffprobe, sample frames, and produce a contact sheet. It verifies deterministic media facts and exposes black-frame or freeze risk for the Agent to review; it does not claim semantic visual or speech quality judgement.',
+      sideEffect: 'local_artifact',
+      requiresApproval: false,
+      inputSchema: {
+        type: 'object',
+        required: ['sourcePath'],
+        properties: {
+          sourcePath: { type: 'string', description: 'Absolute managed video artifact path for one generated shot.' },
+          expectedDurationSeconds: { type: 'number', minimum: 0.05, maximum: 7200 },
+          durationToleranceSeconds: { type: 'number', minimum: 0.05, maximum: 30, default: 0.35 },
+          expectedWidth: { type: 'integer', minimum: 2, maximum: 7680, multipleOf: 2 },
+          expectedHeight: { type: 'integer', minimum: 2, maximum: 4320, multipleOf: 2 },
+          requireAudio: { type: 'boolean', default: false },
+          includeSourceArtifact: { type: 'boolean', default: false, description: 'Attach the verified source video as the deliverable artifact. Use only for final-project QA after internal composition.' },
+          sampleFrameCount: { type: 'integer', minimum: 3, maximum: 12, default: 6 },
+          blackFrameLumaThreshold: { type: 'number', minimum: 0, maximum: 80, default: 16 },
+          freezeFrameDifferenceThreshold: { type: 'number', minimum: 0, maximum: 32, default: 2 },
+        },
+      },
+      outputDescription: 'Verified media metadata, sampled frame artifacts, a contact sheet, and factual black-frame/freeze-risk signals for semantic review.',
+      acceptance: {
+        requiresArtifact: true,
+        requiresVerification: true,
+        requiredVerificationKinds: ['media.shot.qa'],
+      },
+    },
+    assess: assessLocalVideoShotQaAvailability,
+    start: runLocalVideoShotQa,
+    resume: runLocalVideoShotQa,
+    cancel: cancelLocalVideoShotQa,
   });
 }

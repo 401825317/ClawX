@@ -15,6 +15,7 @@ import {
   settledRuntimeRunError,
   settledRuntimeRunStatus,
 } from '../src/stores/chat/runtime-graph.ts';
+import { runtimeRunTaskProblemStatus } from '../src/stores/chat/runtime-task-recovery.ts';
 
 const RUN_ID = 'run-task-graph';
 const SESSION_KEY = 'agent:main:task-graph';
@@ -229,6 +230,9 @@ test('a successful retry settles only the matching logical video segment failure
   assert.equal(settledRuntimeRunStatus(recoveredRun), 'completed');
   assert.equal(settledRuntimeRunError(recoveredRun), undefined);
 
+  const projectedRun = applyEvents(recoveredRun.tasks.map((task) => taskEvent(task)));
+  assert.equal(projectedRun[RUN_ID]?.status, 'completed');
+
   const unresolvedRun = {
     ...recoveredRun,
     tasks: [
@@ -246,6 +250,42 @@ test('a successful retry settles only the matching logical video segment failure
   };
   assert.equal(settledRuntimeRunStatus(unresolvedRun), 'error');
   assert.match(settledRuntimeRunError(unresolvedRun) ?? '', /second segment failed/u);
+});
+
+test('a successful run completion supersedes earlier task failures but not failures that arrive later', () => {
+  const failedTask = {
+    taskId: 'local-compose-attempt',
+    runtime: 'uclaw-host-task',
+    title: 'Compose locally',
+    status: 'error' as const,
+    detail: 'local encoder failed',
+    updatedAt: 200,
+    endedAt: 200,
+  };
+  const completedAfterFailure = {
+    runId: 'run-completed-after-fallback',
+    sessionKey: SESSION_KEY,
+    status: 'completed' as const,
+    endedAt: 300,
+    assistantText: 'Recovered with a verified fallback output.',
+    thinkingText: '',
+    tasks: [failedTask],
+    events: [{
+      type: 'run.ended' as const,
+      runId: 'run-completed-after-fallback',
+      sessionKey: SESSION_KEY,
+      status: 'completed' as const,
+      ts: 300,
+      endedAt: 300,
+    }],
+  };
+  assert.equal(runtimeRunTaskProblemStatus(completedAfterFailure), null);
+
+  const failedAfterCompletion = {
+    ...completedAfterFailure,
+    tasks: [{ ...failedTask, updatedAt: 400, endedAt: 400 }],
+  };
+  assert.equal(runtimeRunTaskProblemStatus(failedAfterCompletion), 'error');
 });
 
 test('successful image completion wake closes the owner task and projects artifact evidence to the owner run', () => {

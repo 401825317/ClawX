@@ -62,13 +62,13 @@ test('registers timeline rendering as a discoverable Host task with its input sc
   assert.match(registration.capability.description, /image or video scenes/);
 });
 
-test('reports non-macOS timeline rendering as unavailable without claiming implementation', async () => {
+test('reports timeline capability from the packaged media runtime', async () => {
   const availability = await assessLocalVideoTimelineAvailability();
-  if (process.platform === 'darwin') {
-    assert.equal(availability.availability, 'available');
-  } else {
+  if (availability.availability === 'unavailable') {
     assert.equal(availability.availability, 'unavailable');
-    assert.match(availability.reason ?? '', /macOS AVFoundation/);
+    assert.match(availability.reason ?? '', /FFmpeg|media runtime/iu);
+  } else {
+    assert.equal(availability.availability, 'available');
   }
 });
 

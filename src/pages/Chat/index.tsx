@@ -51,6 +51,7 @@ import type { FilePreviewTarget } from '@/components/file-preview/types';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
 import type { AttachedFileMeta } from '@/stores/chat/types';
 import { mergeRuntimeRunStates, runtimeRunsShareTaskIdentity } from './runtime-run-merge';
+import { runtimeRunTaskProblemStatus } from '@/stores/chat/runtime-task-recovery';
 import { DEFAULT_AGENT_AVATAR_SRC, getAgentAvatar } from '@/lib/agent-avatars';
 import { toast } from 'sonner';
 
@@ -198,20 +199,18 @@ function runCardHasUserFacingProblem(card: UserRunCard, generatedFiles: Generate
 }
 
 function getRuntimeTaskProblemStatus(run: ChatRuntimeRunState | null): TaskStep['status'] | null {
-  const tasks = run?.tasks ?? [];
-  if (tasks.some((task) => task.status === 'error')) return 'error';
-  if (tasks.some((task) => task.status === 'partial' || task.status === 'waiting_approval')) return 'blocked';
-  return null;
+  return runtimeRunTaskProblemStatus(run);
 }
 
 function getRunCompactStatus(card: UserRunCard): TaskStep['status'] {
   const runtimeStatus = card.runtimeRun?.status;
   const taskFlowProgress = getTaskFlowCompactProgress(card.steps);
+  const runtimeTaskProblemStatus = getRuntimeTaskProblemStatus(card.runtimeRun);
   const taskFlowProblemStatus = getTaskFlowProblemStatus(taskFlowProgress)
-    ?? getRuntimeTaskProblemStatus(card.runtimeRun);
+    ?? runtimeTaskProblemStatus;
   if (runtimeStatus === 'completed') {
-    if (taskFlowProblemStatus) return taskFlowProblemStatus;
-    if ((taskFlowProgress?.running ?? 0) > 0 || runtimeRunHasPendingAsyncTasks(card.runtimeRun ?? undefined)) {
+    if (runtimeTaskProblemStatus) return runtimeTaskProblemStatus;
+    if (runtimeRunHasPendingAsyncTasks(card.runtimeRun ?? undefined)) {
       return 'running';
     }
     return 'completed';
@@ -592,11 +591,13 @@ export function mergeRuntimeRunsForSegment(
   triggerMessage: RawMessage,
   triggerIndex: number,
   runs: ChatRuntimeRunState[],
+  authoritativeRunId?: string,
 ): ChatRuntimeRunState | null {
   return mergeRuntimeRunStates(
     `segment:${buildHistoricalRunIdForMessage(sessionKey, triggerMessage, triggerIndex)}`,
     sessionKey,
     runs,
+    authoritativeRunId,
   );
 }
 
@@ -632,7 +633,13 @@ export function getRuntimeRunForSegment(
       if (firstEventMs == null) return false;
       return firstEventMs >= startBoundaryMs - 5_000;
     });
-    const mergedRun = mergeRuntimeRunsForSegment(sessionKey, triggerMessage, triggerIndex, sameTurnRuns);
+    const mergedRun = mergeRuntimeRunsForSegment(
+      sessionKey,
+      triggerMessage,
+      triggerIndex,
+      sameTurnRuns,
+      activeRunId,
+    );
     if (mergedRun) return mergedRun;
   }
 
@@ -652,6 +659,7 @@ export function getRuntimeRunForSegment(
           triggerMessage,
           triggerIndex,
           [historicalRun, ...relatedTaskRuns],
+          historicalRun.runId,
         )
       : historicalRun;
   }
@@ -898,6 +906,7 @@ export function Chat() {
         const firstEventMs = getRunFirstEventMs(run);
         return activeStartMs != null && firstEventMs != null && firstEventMs >= activeStartMs - 5_000;
       }),
+      activeRunId,
     )
     : null;
   const effectiveStreamMsg = useMemo(() => (
