@@ -36,14 +36,44 @@ try {
     if (route.startsWith('/api/task-bridge/tasks/host-final-qa-1')) return finalQaTask;
     throw new Error(`Unexpected Host route ${route}`);
   };
+  const videoProviders = [{
+    id: 'openai',
+    defaultModel: 'grok-image-video',
+    models: ['grok-image-video', 'grok-video-1.5'],
+  }, {
+    id: 'custom-video',
+    defaultModel: 'movie-v2',
+    models: ['movie-v2'],
+  }, {
+    id: 'fal',
+    defaultModel: 'fal-ai/minimax/video-01-live',
+    models: ['fal-ai/minimax/video-01-live'],
+  }];
   const tools = __test.createTools({
     sessionKey: 'agent:main:video-project-harness',
     runId: 'run-video-project-harness',
-  }, { hostApiFetch });
+  }, { hostApiFetch, videoProviders });
   const projectTool = tools.find((tool) => tool.name === 'uclaw_video_project');
   const shotTool = tools.find((tool) => tool.name === 'uclaw_video_shot');
   assert.ok(projectTool);
   assert.ok(shotTool);
+  for (const supportedModel of [
+    'grok-image-video',
+    'openai/grok-image-video',
+    'grok-video-1.5',
+    'openai/grok-video-1.5',
+  ]) {
+    assert.equal(__test.normalizeVideoModel(supportedModel, videoProviders), supportedModel);
+  }
+  assert.equal(__test.normalizeVideoModel('custom-video/movie-v2', videoProviders), 'custom-video/movie-v2');
+  assert.equal(
+    __test.normalizeVideoModel('fal-ai/minimax/video-01-live', videoProviders),
+    'fal-ai/minimax/video-01-live',
+  );
+  assert.equal(
+    __test.normalizeVideoModel('fal/fal-ai/minimax/video-01-live', videoProviders),
+    'fal/fal-ai/minimax/video-01-live',
+  );
 
   const created = await projectTool.execute('tool-create', {
     action: 'create',
@@ -60,6 +90,65 @@ try {
   assert.equal(shot.generationInput.image, '/managed/reference.png');
   assert.deepEqual(shot.generationInput.imageRoles, ['reference_image']);
   assert.equal(shot.generationInput.size, '1280x720');
+  assert.equal(shot.generationInput.model, 'openai/grok-video-1.5');
+
+  const selectableModel = await projectTool.execute('tool-select-model', {
+    action: 'create',
+    title: 'Selectable text-to-video model',
+    goal: 'Keep the agent-selected supported video model.',
+    constraints: { model: 'grok-image-video' },
+    shots: [{ shotId: 'shot-1', prompt: 'A text-only product scene' }],
+  });
+  assert.equal(selectableModel.details.ok, true);
+  assert.equal(selectableModel.details.project.constraints.model, 'grok-image-video');
+  assert.equal(selectableModel.details.project.shots[0].model, 'grok-image-video');
+  assert.equal(selectableModel.details.project.shots[0].generationInput.model, 'grok-image-video');
+
+  for (const invalidModel of [
+    'smart-latest',
+    'openai/smart-latest',
+    'qwen-latest',
+    'openai/qwen-latest',
+    'openai/not-a-video-model',
+    'unknown-provider/grok-image-video',
+  ]) {
+    const invalidConstraints = await projectTool.execute(`tool-invalid-constraints-${invalidModel}`, {
+      action: 'create',
+      title: 'Invalid constraints model',
+      goal: 'Reject a non-video model before project persistence.',
+      constraints: { model: invalidModel },
+      shots: [{ shotId: 'shot-1', prompt: 'This generation must not be planned' }],
+    });
+    assert.equal(invalidConstraints.details.ok, false);
+    assert.equal(invalidConstraints.details.code, 'video_model_invalid');
+
+    const invalidShot = await projectTool.execute(`tool-invalid-shot-${invalidModel}`, {
+      action: 'create',
+      title: 'Invalid shot model',
+      goal: 'Reject a non-video per-shot model override.',
+      constraints: { model: 'openai/grok-image-video' },
+      shots: [{ shotId: 'shot-1', prompt: 'This generation must not be planned', model: invalidModel }],
+    });
+    assert.equal(invalidShot.details.ok, false);
+    assert.equal(invalidShot.details.code, 'video_model_invalid');
+  }
+
+  assert.throws(
+    () => __test.shotGenerationInput(
+      { projectId: 'video-project-legacy-state', constraints: { model: 'smart-latest' } },
+      { shotId: 'shot-1', prompt: 'Legacy poisoned state', attempts: [] },
+      videoProviders,
+    ),
+    (error) => error?.code === 'video_model_invalid',
+  );
+  assert.throws(
+    () => __test.shotGenerationInput(
+      { projectId: 'video-project-legacy-state', constraints: { model: 'grok-image-video' } },
+      { shotId: 'shot-1', prompt: 'Legacy poisoned shot', model: 'openai/qwen-latest', attempts: [] },
+      videoProviders,
+    ),
+    (error) => error?.code === 'video_model_invalid',
+  );
 
   const attempt = await shotTool.execute('tool-attempt', {
     action: 'record_attempt',

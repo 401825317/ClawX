@@ -1,4 +1,5 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/core';
+import { listRuntimeVideoGenerationProviders } from 'openclaw/plugin-sdk/video-generation-runtime';
 import { Type } from '@sinclair/typebox';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -18,6 +19,7 @@ const COMPOSITION_MONITOR_INTERVAL_MS = 2_500;
 const COMPOSITION_SCHEMA = 'uclaw.video-project.composition/v1';
 const PROJECT_ID_RE = /^video-project-[a-z0-9-]{8,96}$/u;
 const SHOT_ID_RE = /^[a-z][a-z0-9_-]{0,95}$/u;
+const VIDEO_MODEL_REF_RE = /^[a-z0-9][a-z0-9._:-]*(?:\/[a-z0-9][a-z0-9._:-]*)*$/iu;
 
 class VideoProjectError extends Error {
   constructor(message, code = 'video_project_error') {
@@ -122,6 +124,59 @@ function normalizeNumber(value, { min, max, fallback }) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
+function listAdvertisedVideoModels(provider) {
+  const models = new Set(
+    (Array.isArray(provider?.models) ? provider.models : [])
+      .map((model) => cleanText(model, 240))
+      .filter(Boolean),
+  );
+  if (models.size === 0) {
+    const defaultModel = cleanText(provider?.defaultModel, 240);
+    if (defaultModel) models.add(defaultModel);
+  }
+  return models;
+}
+
+function validateVideoModelAgainstProviders(model, providers) {
+  const exactMatches = (Array.isArray(providers) ? providers : [])
+    .filter((provider) => listAdvertisedVideoModels(provider).has(model));
+  if (exactMatches.length === 1) return model;
+  if (exactMatches.length > 1) {
+    throw new VideoProjectError(
+      `Video model "${model}" is advertised by multiple active video-generation providers. Use an explicit provider/model reference.`,
+      'video_model_invalid',
+    );
+  }
+  const separator = model.indexOf('/');
+  const providerId = separator > 0 ? model.slice(0, separator).toLowerCase() : undefined;
+  const modelId = separator > 0 ? model.slice(separator + 1) : model;
+  const matches = (Array.isArray(providers) ? providers : []).filter((provider) => {
+    const providerIds = [provider?.id, ...(Array.isArray(provider?.aliases) ? provider.aliases : [])]
+      .map((value) => cleanText(value, 240).toLowerCase())
+      .filter(Boolean);
+    return (!providerId || providerIds.includes(providerId)) && listAdvertisedVideoModels(provider).has(modelId);
+  });
+  if (matches.length !== 1) {
+    throw new VideoProjectError(
+      `Video model "${model}" is not advertised by exactly one active video-generation provider. Call video_generate action:list and choose a listed model.`,
+      'video_model_invalid',
+    );
+  }
+  return model;
+}
+
+function normalizeVideoModel(value, providers) {
+  const model = cleanText(value, 240);
+  if (!model) return undefined;
+  if (!VIDEO_MODEL_REF_RE.test(model)) {
+    throw new VideoProjectError(
+      `Video model "${model}" must be a model ID or provider/model reference.`,
+      'video_model_invalid',
+    );
+  }
+  return providers ? validateVideoModelAgainstProviders(model, providers) : model;
+}
+
 function normalizeReference(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const filePath = cleanText(value.filePath || value.path, 2_000);
@@ -151,7 +206,7 @@ function normalizeArtifact(value, role = 'video') {
   };
 }
 
-function normalizeConstraints(value) {
+function normalizeConstraints(value, providers) {
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   return {
     targetDurationSeconds: normalizeNumber(input.targetDurationSeconds, { min: 1, max: 3_600, fallback: undefined }),
@@ -159,7 +214,7 @@ function normalizeConstraints(value) {
     aspectRatio: cleanText(input.aspectRatio, 40) || undefined,
     resolution: cleanText(input.resolution, 80) || undefined,
     qualityProfile: cleanText(input.qualityProfile, 120) || undefined,
-    model: cleanText(input.model, 240) || undefined,
+    model: normalizeVideoModel(input.model, providers),
     keepOriginalAudio: input.keepOriginalAudio !== false,
     maxAttemptsPerShot: normalizeNumber(input.maxAttemptsPerShot, { min: 1, max: MAX_ATTEMPTS_PER_SHOT, fallback: 3 }),
   };
@@ -182,7 +237,7 @@ function normalizeQa(value) {
   };
 }
 
-function normalizeShot(value, index, constraints, projectReference) {
+function normalizeShot(value, index, constraints, projectReference, providers) {
   const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const shotId = cleanText(source.shotId || source.id, 96) || `shot-${index + 1}`;
   if (!SHOT_ID_RE.test(shotId)) {
@@ -191,7 +246,7 @@ function normalizeShot(value, index, constraints, projectReference) {
   const prompt = cleanText(source.prompt, 8_000);
   if (!prompt) throw new VideoProjectError(`Shot ${shotId} requires a prompt.`, 'shot_prompt_missing');
   const reference = normalizeReference(source.reference) || (source.useProjectReference === false ? undefined : projectReference);
-  const model = cleanText(source.model, 240) || constraints.model;
+  const model = normalizeVideoModel(source.model, providers) || constraints.model;
   if (modelRequiresExactlyOneReference(model) && !reference) {
     throw new VideoProjectError(
       'grok-video-1.5 requires exactly one reference image. Add a managed reference image or choose a text-to-video model.',
@@ -222,9 +277,9 @@ function modelRequiresExactlyOneReference(model) {
   return /(?:^|\/)grok-video-1\.5$/iu.test(cleanText(model, 240));
 }
 
-function shotGenerationInput(project, shot) {
+function shotGenerationInput(project, shot, providers) {
   const reference = effectiveReference(shot, project);
-  const model = shot.model || project.constraints.model;
+  const model = normalizeVideoModel(shot.model || project.constraints.model, providers);
   if (modelRequiresExactlyOneReference(model) && !reference) {
     throw new VideoProjectError(
       'grok-video-1.5 requires exactly one reference image. Add a managed reference image or choose a text-to-video model.',
@@ -248,12 +303,19 @@ function shotGenerationInput(project, shot) {
   };
 }
 
-function publicShot(project, shot) {
+function validateProjectVideoModels(project, providers) {
+  normalizeVideoModel(project.constraints?.model, providers);
+  for (const shot of project.shots ?? []) {
+    shotGenerationInput(project, shot, providers);
+  }
+}
+
+function publicShot(project, shot, providers) {
   const currentAttempt = shot.attempts.at(-1);
   return {
     ...shot,
     effectiveReference: effectiveReference(shot, project),
-    generationInput: shotGenerationInput(project, shot),
+    generationInput: shotGenerationInput(project, shot, providers),
     currentAttemptId: currentAttempt?.attemptId,
   };
 }
@@ -296,14 +358,14 @@ function projectSummary(project) {
   };
 }
 
-function projectResult(project, operation) {
+function projectResult(project, operation, providers) {
   const result = {
     schema: PROJECT_SCHEMA,
     ok: true,
     operation,
     project: {
       ...project,
-      shots: project.shots.map((shot) => publicShot(project, shot)),
+      shots: project.shots.map((shot) => publicShot(project, shot, providers)),
       summary: projectSummary(project),
     },
   };
@@ -888,6 +950,9 @@ const COMPOSITION_REQUEST_SCHEMA = Type.Object({
 
 function createTools(toolContext, options = {}) {
   const request = options.hostApiFetch || hostApiFetch;
+  const videoProviders = () => typeof options.listVideoProviders === 'function'
+    ? options.listVideoProviders()
+    : options.videoProviders;
   return [
     {
       name: 'uclaw_video_project',
@@ -926,9 +991,10 @@ function createTools(toolContext, options = {}) {
               if (existing.length >= MAX_PROJECTS_PER_SESSION) {
                 throw new VideoProjectError('This session already reached its VideoProject limit.', 'project_limit_reached');
               }
-              const constraints = normalizeConstraints(params.constraints);
+              const providers = videoProviders();
+              const constraints = normalizeConstraints(params.constraints, providers);
               const reference = normalizeReference(params.reference);
-              const shots = (params.shots || []).map((shot, index) => normalizeShot(shot, index, constraints, reference));
+              const shots = (params.shots || []).map((shot, index) => normalizeShot(shot, index, constraints, reference, providers));
               if (new Set(shots.map((shot) => shot.shotId)).size !== shots.length) {
                 throw new VideoProjectError('Shot IDs must be unique inside one VideoProject.', 'shot_id_duplicate');
               }
@@ -950,7 +1016,7 @@ function createTools(toolContext, options = {}) {
               };
               updateDerivedState(project);
               await writeProject(project);
-              return projectResult(project, 'create');
+              return projectResult(project, 'create', providers);
             }
             if (operation === 'list') {
               const projects = await listProjects(sessionKey);
@@ -973,9 +1039,10 @@ function createTools(toolContext, options = {}) {
             const projectId = cleanText(params.projectId, 120);
             if (!projectId) throw new VideoProjectError(`${operation} requires projectId.`, 'project_id_missing');
             const project = await ownProject(sessionKey, projectId);
+            validateProjectVideoModels(project, videoProviders());
             if (operation === 'get') {
               await synchronizeProjectComposition(project, request);
-              return projectResult(project, 'get');
+              return projectResult(project, 'get', videoProviders());
             }
             if (operation === 'compose') {
               const correlation = compositionCorrelation(
@@ -985,7 +1052,7 @@ function createTools(toolContext, options = {}) {
                 (Number(project.composition?.attempt) || 0) + 1,
               );
               await startProjectComposition(project, params, correlation, request);
-              return projectResult(project, 'compose');
+              return projectResult(project, 'compose', videoProviders());
             }
             const finalizationStatus = params.finalizationStatus;
             if (!finalizationStatus) throw new VideoProjectError('Finalizing a VideoProject requires finalizationStatus.', 'finalization_status_missing');
@@ -1005,7 +1072,7 @@ function createTools(toolContext, options = {}) {
             };
             updateDerivedState(project);
             await writeProject(project);
-            return projectResult(project, 'finalize');
+            return projectResult(project, 'finalize', videoProviders());
           });
           return { content: [{ type: 'text', text: safeJson(result) }], details: result };
         } catch (error) {
@@ -1036,12 +1103,14 @@ function createTools(toolContext, options = {}) {
           const sessionKey = sessionKeyFromContext(toolContext);
           const result = await enqueueOperation(async () => {
             const project = await ownProject(sessionKey, cleanText(params.projectId, 120));
+            validateProjectVideoModels(project, videoProviders());
             if (project.status === 'completed' || project.status === 'assembled' || project.status === 'cancelled') {
               throw new VideoProjectError('Completed or cancelled VideoProjects cannot change shots.', 'project_terminal');
             }
             if (operation === 'upsert') {
               if (!params.shot) throw new VideoProjectError('upsert requires shot.', 'shot_input_missing');
-              const normalized = normalizeShot(params.shot, project.shots.length, project.constraints, project.reference);
+              const providers = videoProviders();
+              const normalized = normalizeShot(params.shot, project.shots.length, project.constraints, project.reference, providers);
               const existing = project.shots.find((candidate) => candidate.shotId === normalized.shotId);
               if (existing) {
                 if (existing.attempts.length > 0) {
@@ -1118,7 +1187,7 @@ function createTools(toolContext, options = {}) {
             }
             updateDerivedState(project);
             await writeProject(project);
-            return projectResult(project, operation);
+            return projectResult(project, operation, videoProviders());
           });
           return { content: [{ type: 'text', text: safeJson(result) }], details: result };
         } catch (error) {
@@ -1218,7 +1287,9 @@ export const pluginEntry = definePluginEntry({
   name: 'UClaw Video Project',
   description: 'Stores durable video project and shot state while leaving planning, generation, QA, and composition to their owning layers.',
   register(api) {
-    api.registerTool((toolContext) => createTools(toolContext), { names: TOOL_NAMES });
+    api.registerTool((toolContext) => createTools(toolContext, {
+      listVideoProviders: () => listRuntimeVideoGenerationProviders({ config: api.config }),
+    }), { names: TOOL_NAMES });
     const monitor = createCompositionMonitor();
     api.registerService({
       id: 'uclaw-video-project-composition-monitor',
@@ -1242,10 +1313,13 @@ export default pluginEntry;
 
 export const __test = {
   VideoProjectError,
+  validateVideoModelAgainstProviders,
+  normalizeVideoModel,
   normalizeConstraints,
   normalizeShot,
   modelRequiresExactlyOneReference,
   shotGenerationInput,
+  validateProjectVideoModels,
   projectStatus,
   createTools,
   buildCompositionPlan,

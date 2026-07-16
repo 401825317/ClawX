@@ -32,6 +32,7 @@ import { patchOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-medi
 import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
 import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
+import { patchOpenClawVideoModelValidationRuntime } from './openclaw-video-model-validation-patch.mjs';
 import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 import { patchOpenClawVideoSegmentDedupeRuntime } from './openclaw-video-segment-dedupe-patch.mjs';
 import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool-run-context-patch.mjs';
@@ -1308,6 +1309,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (videoCapabilityContractPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${videoCapabilityContractPatch.patchedFiles} video capability contract runtime file(s)`;
+  }
+
+  // --- Fail-closed native video model validation ---
+  // Keep semantic model choice with the Agent while rejecting any model that
+  // the selected video provider does not advertise before network execution.
+  const videoModelValidationPatch = patchOpenClawVideoModelValidationRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (videoModelValidationPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${videoModelValidationPatch.patchedFiles} video model validation runtime file(s)`;
   }
 
   // --- Requested/applied/actual native video specification ---

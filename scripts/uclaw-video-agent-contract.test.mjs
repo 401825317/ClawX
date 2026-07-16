@@ -52,7 +52,13 @@ try {
     appliedKeys: ['size', 'durationSeconds'],
   });
 
-  const tools = videoProject.__test.createTools({ sessionKey: 'agent:main:video-contract' });
+  const tools = videoProject.__test.createTools({ sessionKey: 'agent:main:video-contract' }, {
+    videoProviders: [{
+      id: 'openai',
+      defaultModel: 'grok-image-video',
+      models: ['grok-image-video', 'grok-video-1.5'],
+    }],
+  });
   const projectTool = tools.find((tool) => tool.name === 'uclaw_video_project');
   const shotTool = tools.find((tool) => tool.name === 'uclaw_video_shot');
   assert.ok(projectTool);
