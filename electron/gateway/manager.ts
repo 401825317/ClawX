@@ -234,6 +234,7 @@ export class GatewayManager extends EventEmitter {
   private static readonly HEARTBEAT_MAX_MISSES = 4;
   private static readonly ACCEPTED_CHAT_RUN_EVENT_GRACE_MS = 30_000;
   public static readonly RESTART_COOLDOWN_MS = 5_000;
+  private static readonly RPC_TRANSPORT_WAIT_MAX_MS = 30_000;
   private static readonly GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS = [1_500, 3_000, 5_000, 8_000, 12_000, 30_000] as const;
   private static readonly INITIAL_READY_HEARTBEAT_RECOVERY_GRACE_MS = 5 * 60_000;
   private lastRestartAt = 0;
@@ -593,6 +594,63 @@ export class GatewayManager extends EventEmitter {
    */
   isConnected(): boolean {
     return this.stateController.isConnected(this.ws?.readyState === WebSocket.OPEN);
+  }
+
+  private isRpcTransportOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  private shouldWaitForRpcTransport(): boolean {
+    if (this.isRpcTransportOpen()) return false;
+    if (!this.shouldReconnect) return false;
+    if (this.startLock || this.reconnectTimer !== null) return true;
+    return this.status.state === 'starting' || this.status.state === 'reconnecting';
+  }
+
+  private getRpcTransportWaitMs(timeoutMs: number): number {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
+    return Math.min(timeoutMs, GatewayManager.RPC_TRANSPORT_WAIT_MAX_MS);
+  }
+
+  private async waitForRpcTransport(method: string, waitMs: number): Promise<boolean> {
+    if (this.isRpcTransportOpen()) return true;
+    if (waitMs <= 0 || !this.shouldWaitForRpcTransport()) return false;
+
+    const startedAt = Date.now();
+    logger.debug(
+      `[gateway:rpc] waiting for Gateway transport before ${method} ` +
+      `(state=${this.status.state}, waitMs=${waitMs})`,
+    );
+
+    return await new Promise<boolean>((resolve) => {
+      let finished = false;
+      const timer = setTimeout(() => finish(false), waitMs);
+      const finish = (connected: boolean) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        this.off('status', onStatus);
+        if (connected) {
+          logger.debug(
+            `[gateway:rpc] Gateway transport became ready before ${method} ` +
+            `(elapsedMs=${Date.now() - startedAt})`,
+          );
+        }
+        resolve(connected);
+      };
+      const onStatus = (status: GatewayStatus) => {
+        if (this.isRpcTransportOpen()) {
+          finish(true);
+          return;
+        }
+        if (status.state === 'error' || (!this.shouldReconnect && status.state === 'stopped')) {
+          finish(false);
+        }
+      };
+
+      this.on('status', onStatus);
+      onStatus(this.status);
+    });
   }
 
   /**
@@ -1333,42 +1391,46 @@ export class GatewayManager extends EventEmitter {
     const startedAt = Date.now();
     const id = crypto.randomUUID();
     const trackBlockingRequest = this.shouldTrackBlockingRpcMethod(method);
-    return await new Promise<T>((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('Gateway not connected'));
-        return;
+    try {
+      if (!this.isRpcTransportOpen()) {
+        await this.waitForRpcTransport(method, this.getRpcTransportWaitMs(timeoutMs));
       }
+      const result = await new Promise<T>((resolve, reject) => {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+          reject(new Error('Gateway not connected'));
+          return;
+        }
 
-      if (trackBlockingRequest) {
-        this.blockingRpcRequestIds.add(id);
-      }
+        if (trackBlockingRequest) {
+          this.blockingRpcRequestIds.add(id);
+        }
 
-      // Set timeout for request
-      const timeout = setTimeout(() => {
-        rejectPendingGatewayRequest(this.pendingRequests, id, new Error(`RPC timeout: ${method}`));
-      }, timeoutMs);
+        // Set timeout for request
+        const timeout = setTimeout(() => {
+          rejectPendingGatewayRequest(this.pendingRequests, id, new Error(`RPC timeout: ${method}`));
+        }, timeoutMs);
 
-      // Store pending request
-      this.pendingRequests.set(id, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timeout,
+        // Store pending request
+        this.pendingRequests.set(id, {
+          resolve: resolve as (value: unknown) => void,
+          reject,
+          timeout,
+        });
+
+        // Send request using OpenClaw protocol format
+        const request = {
+          type: 'req',
+          id,
+          method,
+          params,
+        };
+
+        try {
+          this.ws.send(JSON.stringify(request));
+        } catch (error) {
+          rejectPendingGatewayRequest(this.pendingRequests, id, new Error(`Failed to send RPC request: ${error}`));
+        }
       });
-
-      // Send request using OpenClaw protocol format
-      const request = {
-        type: 'req',
-        id,
-        method,
-        params,
-      };
-
-      try {
-        this.ws.send(JSON.stringify(request));
-      } catch (error) {
-        rejectPendingGatewayRequest(this.pendingRequests, id, new Error(`Failed to send RPC request: ${error}`));
-      }
-    }).then((result) => {
       this.recordRpcSuccess();
       if (isCoreRpcMethod(method)) {
         this.capabilityMonitor.recordCoreProbe({
@@ -1385,7 +1447,7 @@ export class GatewayManager extends EventEmitter {
         this.trackAcceptedChatRun(result, params);
       }
       return result;
-    }).catch((error) => {
+    } catch (error) {
       const capability = classifyCapabilityMethod(method);
       if (capability) {
         this.capabilityMonitor.recordCapabilityFailure(capability, error, Date.now() - startedAt);
@@ -1400,10 +1462,10 @@ export class GatewayManager extends EventEmitter {
         this.recordRpcFailure(method);
       }
       throw error;
-    }).finally(() => {
+    } finally {
       this.blockingRpcRequestIds.delete(id);
       this.flushDeferredRestartIfIdle(`rpc:${method}:settled`);
-    });
+    }
   }
 
   /**
