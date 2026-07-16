@@ -113,6 +113,28 @@ function mergeTranscriptMetadata(
     next.provenance = { ...transcriptMessage.provenance };
     changed = true;
   }
+  if (!next.toolCallId && transcriptMessage.toolCallId) {
+    next.toolCallId = transcriptMessage.toolCallId;
+    changed = true;
+  }
+  if (!next.toolName && transcriptMessage.toolName) {
+    next.toolName = transcriptMessage.toolName;
+    changed = true;
+  }
+  const gatewayDetailsAreEmpty = next.details == null
+    || (
+      typeof next.details === 'object'
+      && !Array.isArray(next.details)
+      && Object.keys(next.details as Record<string, unknown>).length === 0
+    );
+  if (gatewayDetailsAreEmpty && transcriptMessage.details != null) {
+    next.details = transcriptMessage.details;
+    changed = true;
+  }
+  if (next.isError == null && transcriptMessage.isError != null) {
+    next.isError = transcriptMessage.isError;
+    changed = true;
+  }
   if ((next._attachedFiles?.length ?? 0) === 0 && (transcriptMessage._attachedFiles?.length ?? 0) > 0) {
     next._attachedFiles = cloneAttachedFilesFromTranscript(transcriptMessage);
     changed = true;

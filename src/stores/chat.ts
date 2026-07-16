@@ -7576,6 +7576,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
               }
             }
+            toolFiles.push(...extractStructuredToolResultFiles(normalizedFinalMessage.details)
+              .filter((file) => !file.mimeType.startsWith('image/')));
             const text = getMessageText(normalizedFinalMessage.content);
             if (text) {
               const mediaRefs = extractMediaRefs(text);

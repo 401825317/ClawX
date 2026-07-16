@@ -93,7 +93,7 @@ const structuredToolResultHistory = [
     id: 'tool-result-direct-1',
     toolCallId: 'create-docx-1',
     toolName: 'create_docx_file',
-    content: [{ type: 'text', text: '{"ok":true,"filePath":"C:\\\\workspace\\\\direct-output.docx"}' }],
+    content: [{ type: 'text', text: '{"ok":true}' }],
     details: {
       ok: true,
       filePath: 'C:\\workspace\\direct-output.docx',
@@ -107,7 +107,7 @@ const structuredToolResultHistory = [
     id: 'tool-result-nested-1',
     toolCallId: 'create-xlsx-1',
     toolName: 'tool_call',
-    content: [{ type: 'text', text: '{"ok":true,"filePath":"C:\\\\workspace\\\\nested-output.xlsx"}' }],
+    content: [{ type: 'text', text: '{"ok":true}' }],
     details: {
       tool: { name: 'create_xlsx_file' },
       result: {
@@ -128,8 +128,14 @@ const structuredToolResultHistory = [
     timestamp: Date.now(),
   },
 ];
+
+const gatewayHistoryWithoutToolDetails = structuredToolResultHistory.map((message) => {
+  if (message.role !== 'toolResult') return message;
+  const { details: _details, toolCallId: _toolCallId, toolName: _toolName, ...gatewayMessage } = message;
+  return gatewayMessage;
+});
 test.describe('ClawX chat file changes', () => {
-  test('renders direct and nested structured tool result files as attachment cards', async ({ launchElectronApp }) => {
+  test('restores direct and nested structured tool result files from transcript metadata', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -144,11 +150,11 @@ test.describe('ClawX chat file changes', () => {
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: structuredToolResultHistory },
+            result: { messages: gatewayHistoryWithoutToolDetails },
           },
           [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
             success: true,
-            result: { messages: structuredToolResultHistory },
+            result: { messages: gatewayHistoryWithoutToolDetails },
           },
         },
         hostApi: {
@@ -171,6 +177,14 @@ test.describe('ClawX chat file changes', () => {
               },
             },
           },
+          [stableStringify([`/api/sessions/transcript?sessionKey=${encodeURIComponent(SESSION_KEY)}&limit=100&includeFamily=true`, 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { messages: structuredToolResultHistory },
+            },
+          },
         },
       });
 
@@ -188,6 +202,93 @@ test.describe('ClawX chat file changes', () => {
       await expect(fileCards.filter({ hasText: 'direct-output.docx' })).toContainText('4.0 KB');
       await expect(fileCards.filter({ hasText: 'nested-output.xlsx' })).toContainText('8.0 KB');
       await expect(fileCards).toHaveCount(2);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('attaches direct and nested structured files from live tool result finals', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+      });
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) {
+          throw error;
+        }
+      }
+
+      await expect(page.getByTestId('main-layout')).toBeVisible();
+      await app.evaluate(({ BrowserWindow }) => {
+        const events = [
+          {
+            state: 'final',
+            runId: 'run-structured-files-live',
+            sessionKey: 'agent:main:main',
+            message: {
+              id: 'live-tool-result-direct',
+              role: 'toolResult',
+              toolCallId: 'live-create-docx',
+              toolName: 'create_docx_file',
+              content: [{ type: 'text', text: '{"ok":true}' }],
+              details: {
+                filePath: 'C:\\workspace\\live-direct-output.docx',
+                mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                sizeBytes: 4096,
+              },
+              timestamp: Date.now() / 1000,
+            },
+          },
+          {
+            state: 'final',
+            runId: 'run-structured-files-live',
+            sessionKey: 'agent:main:main',
+            message: {
+              id: 'live-tool-result-nested',
+              role: 'toolResult',
+              toolCallId: 'live-create-xlsx',
+              toolName: 'tool_call',
+              content: [{ type: 'text', text: '{"ok":true}' }],
+              details: {
+                result: {
+                  details: {
+                    filePath: 'C:\\workspace\\live-nested-output.xlsx',
+                    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    fileSize: 8192,
+                  },
+                },
+              },
+              timestamp: Date.now() / 1000,
+            },
+          },
+          {
+            state: 'final',
+            runId: 'run-structured-files-live',
+            sessionKey: 'agent:main:main',
+            message: {
+              id: 'live-structured-files-final',
+              role: 'assistant',
+              content: [{ type: 'text', text: 'UCLAW_REGRESSION_STRUCTURED_FILES_OK' }],
+              timestamp: Date.now() / 1000,
+            },
+          },
+        ];
+        for (const win of BrowserWindow.getAllWindows()) {
+          for (const event of events) {
+            win.webContents.send('gateway:chat-message', { message: event });
+          }
+        }
+      });
+
+      await expect(page.getByText('UCLAW_REGRESSION_STRUCTURED_FILES_OK')).toBeVisible();
+      const fileCards = page.getByTestId('chat-attached-file');
+      await expect(fileCards.filter({ hasText: 'live-direct-output.docx' })).toContainText('4.0 KB');
+      await expect(fileCards.filter({ hasText: 'live-nested-output.xlsx' })).toContainText('8.0 KB');
     } finally {
       await closeElectronApp(app);
     }
