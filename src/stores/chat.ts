@@ -6064,19 +6064,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const openRunSegment = isSendingNow && lastUserMessageAt != null
         ? getOpenRunSegmentFromHistory(filteredMessages, lastUserMessageAt)
         : postUserSegmentMessages(filteredMessages);
-      const postBoundaryMessages = isSendingNow && lastUserMessageAt != null
-        ? openRunSegment
+      const terminalStateMessages = isSendingNow && lastUserMessageAt != null
+        ? getOpenRunSegmentFromHistory(messagesWithToolAttachments, lastUserMessageAt)
         : (lastUserMessageAt != null
-          ? filteredMessages.filter((msg) => isAfterUserMsg(msg))
+          ? messagesWithToolAttachments.filter((msg) => isAfterUserMsg(msg))
           : (() => {
-              for (let i = filteredMessages.length - 1; i >= 0; i -= 1) {
-                if (isRealUserBoundary(filteredMessages[i])) {
-                  return filteredMessages.slice(i + 1);
+              for (let i = messagesWithToolAttachments.length - 1; i >= 0; i -= 1) {
+                if (isRealUserBoundary(messagesWithToolAttachments[i])) {
+                  return messagesWithToolAttachments.slice(i + 1);
                 }
               }
-              return filteredMessages;
+              return messagesWithToolAttachments;
             })());
-        const lastAssistantAfterBoundary = [...postBoundaryMessages].reverse().find((msg) => msg.role === 'assistant');
+        const lastAssistantAfterBoundary = [...terminalStateMessages].reverse().find((msg) => msg.role === 'assistant');
         const latestTerminalAssistantErrorMessage = lastAssistantAfterBoundary
           && (getMessageStopReason(lastAssistantAfterBoundary) === 'error'
             || isFailedAssistantTurnMessage(lastAssistantAfterBoundary))

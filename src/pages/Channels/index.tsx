@@ -777,6 +777,7 @@ export function Channels() {
 
                       <div className="flex items-center gap-2">
                         <Button
+                          data-testid={`channels-add-account-${group.channelType}`}
                           size="sm"
                           variant="outline"
                           className="h-8 text-xs rounded-full"

@@ -59,6 +59,20 @@ function resolveMergedRunStatus(
   runs: ChatRuntimeRunState[],
   authoritativeRunId: string | undefined,
 ): ChatRuntimeRunState['status'] {
+  const unresolvedTasks = unresolvedRuntimeTasks(runs.flatMap((run) => run.tasks ?? []));
+  const detachedTaskIds = new Set(
+    runs
+      .flatMap((run) => Object.values(run.asyncTaskLedger ?? {}))
+      .map((entry) => entry.taskId)
+      .filter((taskId): taskId is string => Boolean(taskId)),
+  );
+  const detachedProblems = unresolvedTasks.filter((task) => (
+    detachedTaskIds.has(task.taskId)
+    && (task.status === 'error' || task.status === 'partial' || taskSignalsAbort(task))
+  ));
+  if (detachedProblems.some((task) => task.status === 'error')) return 'error';
+  if (detachedProblems.some((task) => task.status === 'partial')) return 'error';
+  if (detachedProblems.some(taskSignalsAbort)) return 'aborted';
   if (runs.some((run) => run.status === 'running')) return 'running';
 
   const authoritativeRun = runs.find((run) => run.runId === authoritativeRunId) ?? runs[0]!;
@@ -68,7 +82,7 @@ function resolveMergedRunStatus(
   if (completedAt == null) return authoritativeRun.status;
 
   const unresolvedTaskIds = new Set(
-    unresolvedRuntimeTasks(runs.flatMap((run) => run.tasks ?? []))
+    unresolvedTasks
       .filter((task) => task.status === 'error' || task.status === 'partial' || taskSignalsAbort(task))
       .map((task) => task.taskId),
   );

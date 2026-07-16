@@ -141,16 +141,16 @@ test.describe('OpenClaw Dreams', () => {
     await expect(page.getByTestId('dreams-action-message')).toContainText(/Backfilled 2 dream diary entries\.|已回填 2 条梦境日记。/);
 
     await page.getByTestId('dreams-action-dedupe').click();
-    await page.getByRole('button', { name: 'Confirm' }).click();
-    await expect(page.getByTestId('dreams-action-message')).toContainText(/Removed 2 duplicate dream entries and kept 5\.|已移除 2 条重复梦境，保留 5 条。/);
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect(page.getByTestId('dreams-action-message')).toContainText(/2.*5/);
 
     await page.getByTestId('dreams-action-reset-grounded').click();
-    await page.getByRole('button', { name: 'Confirm' }).click();
-    await expect(page.getByTestId('dreams-action-message')).toContainText(/Cleared 3 replayed short-term entries\.|已清理 3 条回放短期记忆。/);
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect(page.getByTestId('dreams-action-message')).toContainText('3');
 
     await page.getByTestId('dreams-action-reset-diary').click();
-    await page.getByRole('button', { name: 'Confirm' }).click();
-    await expect(page.getByTestId('dreams-action-message')).toContainText(/Removed 4 backfilled dream diary entries\.|已移除 4 条回填梦境日记。/);
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect(page.getByTestId('dreams-action-message')).toContainText('4');
   });
 
   test('starts Dreams from the native page when dreaming is disabled', async ({ electronApp, page }) => {

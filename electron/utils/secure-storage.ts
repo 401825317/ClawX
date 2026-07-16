@@ -206,6 +206,15 @@ export async function deleteProvider(providerId: string): Promise<boolean> {
     const s = await getClawXProviderStore();
     const providers = s.get('providers') as Record<string, ProviderConfig>;
     delete providers[providerId];
+    for (const [id, provider] of Object.entries(providers)) {
+      const fallbackProviderIds = (provider.fallbackProviderIds ?? []).filter((candidate) => candidate !== providerId);
+      if (fallbackProviderIds.length === (provider.fallbackProviderIds ?? []).length) continue;
+      providers[id] = {
+        ...provider,
+        fallbackProviderIds,
+        updatedAt: new Date().toISOString(),
+      };
+    }
     s.set('providers', providers);
     await deleteProviderAccount(providerId);
 

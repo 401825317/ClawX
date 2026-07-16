@@ -1040,7 +1040,9 @@ test.describe('ClawX chat run state events', () => {
 
       await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await page.getByTestId('chat-run-progress-toggle').click();
       await expect(page.getByText('我先查看相关内容。')).toBeVisible();
+      await page.getByTestId('chat-run-progress-action').locator('summary').click();
       await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
       await expect(page.getByText('我现在可以生成文档、表格和演示文稿。')).toBeVisible();
     } finally {
@@ -1124,7 +1126,7 @@ test.describe('ClawX chat run state events', () => {
       }
 
       await expect(page.getByText('已经做好，共 8 页并通过版式与内容质检。')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByText('深海探索.pptx')).toBeVisible();
+      await expect(page.getByTestId('chat-generated-file').filter({ hasText: '深海探索.pptx' })).toBeVisible();
       await expect(page.getByText(/任务需要补充处理/)).toHaveCount(0);
       await expect(page.getByText(/任务执行失败/)).toHaveCount(0);
     } finally {
@@ -1388,6 +1390,7 @@ test.describe('ClawX chat run state events', () => {
       }
 
       await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
+      await page.getByTestId('chat-run-progress-toggle').click();
       await expect(page.getByText('我先查看相关内容。')).toBeVisible();
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/);
     } finally {

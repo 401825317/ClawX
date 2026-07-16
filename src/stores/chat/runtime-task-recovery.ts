@@ -61,7 +61,13 @@ export function runtimeRunTaskProblemStatus(
 ): 'error' | 'blocked' | null {
   if (!run) return null;
   const completionAt = successfulRunCompletionAt(run);
+  const detachedTaskIds = new Set(
+    Object.values(run.asyncTaskLedger ?? {})
+      .map((entry) => entry.taskId)
+      .filter((taskId): taskId is string => Boolean(taskId)),
+  );
   const tasks = unresolvedRuntimeTasks(run.tasks ?? []).filter((task) => {
+    if (detachedTaskIds.has(task.taskId)) return true;
     if (completionAt == null) return true;
     const updatedAt = toTimestampMs(task.endedAt)
       ?? toTimestampMs(task.updatedAt)

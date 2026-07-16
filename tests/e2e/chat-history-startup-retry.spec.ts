@@ -43,17 +43,7 @@ test.describe('ClawX startup chat history recovery', () => {
 
         ipcMain.removeHandler('gateway:rpc');
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, payload: unknown) => {
-          const stableStringify = (value: unknown): string => {
-            if (value == null || typeof value !== 'object') return JSON.stringify(value);
-            if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
-            const entries = Object.entries(value as Record<string, unknown>)
-              .sort(([left], [right]) => left.localeCompare(right))
-              .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`);
-            return `{${entries.join(',')}}`;
-          };
-
-          const key = stableStringify([method, payload ?? null]);
-          if (key === stableStringify(['sessions.list', {}])) {
+          if (method === 'sessions.list') {
             return {
               success: true,
               result: {
@@ -61,7 +51,8 @@ test.describe('ClawX startup chat history recovery', () => {
               },
             };
           }
-          if (key === stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 200, maxChars: 500000 }])) {
+          if (method === 'chat.history'
+            && (payload as { sessionKey?: string } | null)?.sessionKey === 'agent:main:main') {
             chatHistoryCallCount += 1;
             if (chatHistoryCallCount === 1) {
               return {
@@ -124,7 +115,7 @@ test.describe('ClawX startup chat history recovery', () => {
               json: { success: true, agents: [{ id: 'main', name: 'main' }] },
             },
           },
-          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=200&includeFamily=true', 'GET'])]: {
+          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=100', 'GET'])]: {
             ok: true,
             data: {
               status: 200,
@@ -144,17 +135,7 @@ test.describe('ClawX startup chat history recovery', () => {
 
         ipcMain.removeHandler('gateway:rpc');
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, payload: unknown) => {
-          const stableStringify = (value: unknown): string => {
-            if (value == null || typeof value !== 'object') return JSON.stringify(value);
-            if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
-            const entries = Object.entries(value as Record<string, unknown>)
-              .sort(([left], [right]) => left.localeCompare(right))
-              .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`);
-            return `{${entries.join(',')}}`;
-          };
-
-          const key = stableStringify([method, payload ?? null]);
-          if (key === stableStringify(['sessions.list', {}])) {
+          if (method === 'sessions.list') {
             return {
               success: true,
               result: {
@@ -162,7 +143,8 @@ test.describe('ClawX startup chat history recovery', () => {
               },
             };
           }
-          if (key === stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 200, maxChars: 500000 }])) {
+          if (method === 'chat.history'
+            && (payload as { sessionKey?: string } | null)?.sessionKey === 'agent:main:main') {
             await new Promise((resolve) => setTimeout(resolve, 5_000));
             return {
               success: true,

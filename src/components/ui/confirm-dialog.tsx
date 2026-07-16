@@ -73,6 +73,7 @@ export function ConfirmDialog({
 
   return (
     <div
+      data-testid="confirm-dialog"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       role="dialog"
       aria-modal="true"
@@ -92,6 +93,7 @@ export function ConfirmDialog({
         <p className="mt-2 text-sm text-muted-foreground">{message}</p>
         <div className="mt-6 flex justify-end gap-2">
           <Button
+            data-testid="confirm-dialog-cancel"
             ref={cancelRef}
             variant="outline"
             onClick={onCancel}
@@ -100,6 +102,7 @@ export function ConfirmDialog({
             {cancelLabel}
           </Button>
           <Button
+            data-testid="confirm-dialog-confirm"
             variant={variant === 'destructive' ? 'destructive' : 'default'}
             onClick={handleConfirm}
             disabled={confirming}

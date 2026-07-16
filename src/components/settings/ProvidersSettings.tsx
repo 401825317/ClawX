@@ -1469,6 +1469,7 @@ function AddProviderDialog({
                 {isOAuth && supportsApiKey && !oauthUiHidden && (
                   <div className="flex rounded-xl border border-black/10 dark:border-white/10 overflow-hidden text-meta font-medium shadow-sm bg-transparent p-1 gap-1">
                     <button
+                      data-testid="add-provider-auth-mode-oauth"
                       onClick={() => setAuthMode('oauth')}
                       className={cn(
                         'flex-1 py-2 px-3 rounded-lg transition-colors',
@@ -1478,6 +1479,7 @@ function AddProviderDialog({
                       {t('aiProviders.oauth.loginMode')}
                     </button>
                     <button
+                      data-testid="add-provider-auth-mode-apikey"
                       onClick={() => setAuthMode('apikey')}
                       className={cn(
                         'flex-1 py-2 px-3 rounded-lg transition-colors',
@@ -1678,6 +1680,7 @@ function AddProviderDialog({
                         {t('aiProviders.oauth.loginPrompt')}
                       </p>
                       <Button
+                        data-testid="add-provider-oauth-login-button"
                         onClick={handleStartOAuth}
                         disabled={oauthFlowing}
                         className="w-full rounded-full h-[42px] font-semibold bg-brand hover:bg-brand-hover text-white shadow-sm"

@@ -9,6 +9,7 @@
  */
 import { diffLines } from 'diff';
 import type { ContentBlock, RawMessage } from '@/stores/chat';
+import type { ChatRuntimeArtifact } from '../../shared/chat-runtime-events';
 
 export type FileContentType =
   | 'snapshot'
@@ -352,6 +353,20 @@ function buildGeneratedFile(
     edits: parts?.edits,
     baseline: parts?.baseline,
     lastSeenIndex: index,
+  };
+}
+
+export function generatedFileFromRuntimeArtifact(
+  artifact: ChatRuntimeArtifact,
+  index: number,
+): GeneratedFile | null {
+  const filePath = artifact.filePath?.trim();
+  if (!filePath) return null;
+  const file = buildGeneratedFile(filePath, 'created', undefined, index);
+  return {
+    ...file,
+    mimeType: artifact.mimeType?.trim() || file.mimeType,
+    size: artifact.sizeBytes,
   };
 }
 

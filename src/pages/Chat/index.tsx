@@ -45,7 +45,13 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { useStickToBottomInstant } from '@/hooks/use-stick-to-bottom-instant';
 import { useMinLoading } from '@/hooks/use-min-loading';
-import { extractGeneratedFiles, generatedFileHasDiffPayload, isHtmlPreviewExt, type GeneratedFile } from '@/lib/generated-files';
+import {
+  extractGeneratedFiles,
+  generatedFileFromRuntimeArtifact,
+  generatedFileHasDiffPayload,
+  isHtmlPreviewExt,
+  type GeneratedFile,
+} from '@/lib/generated-files';
 import { GeneratedFilesPanel } from '@/components/file-preview/GeneratedFilesPanel';
 import type { FilePreviewTarget } from '@/components/file-preview/types';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
@@ -1090,14 +1096,8 @@ export function Chat() {
         || (runStillExecutingTools && !!activeRunId)
       );
 
-    const buildSteps = (omitLastStreamingMessageSegment: boolean): TaskStep[] => {
-      let builtSteps = deriveTaskSteps({
-        messages: segmentMessages,
-        streamingMessage: isLatestOpenRun ? streamingMessage : null,
-        streamingTools: isLatestOpenRun ? streamingTools : [],
-        omitLastStreamingMessageSegment: isLatestOpenRun ? omitLastStreamingMessageSegment : false,
-      });
-
+    const appendSubagentBranches = (initialSteps: TaskStep[]): TaskStep[] => {
+      let builtSteps = initialSteps;
       for (const completion of completionInfos) {
         const childMessages = childTranscripts[completion.sessionId];
         if (!childMessages || childMessages.length === 0) continue;
@@ -1130,6 +1130,14 @@ export function Chat() {
 
       return builtSteps;
     };
+    const buildSteps = (omitLastStreamingMessageSegment: boolean): TaskStep[] => appendSubagentBranches(
+      deriveTaskSteps({
+        messages: segmentMessages,
+        streamingMessage: isLatestOpenRun ? streamingMessage : null,
+        streamingTools: isLatestOpenRun ? streamingTools : [],
+        omitLastStreamingMessageSegment: isLatestOpenRun ? omitLastStreamingMessageSegment : false,
+      }),
+    );
 
     // Show the streaming response as a separate bubble (not inside the
     // execution graph) once tool activity has happened and the CURRENT stream
@@ -1152,7 +1160,7 @@ export function Chat() {
       && !runtimeHasRunningTool;
 
     let steps = segmentRuntimeRun && runtimeHasToolActivity
-      ? sanitizeGraphSteps(deriveRuntimeTaskSteps(segmentRuntimeRun))
+      ? sanitizeGraphSteps(appendSubagentBranches(deriveRuntimeTaskSteps(segmentRuntimeRun)))
       : sanitizeGraphSteps(buildSteps(rawStreamingReplyCandidate));
     let streamingReplyText: string | null = null;
     if (rawStreamingReplyCandidate) {
@@ -1163,7 +1171,7 @@ export function Chat() {
         streamingReplyText = hasReplyText ? trimmedReplyText : '';
       } else {
         steps = segmentRuntimeRun && runtimeHasToolActivity
-          ? sanitizeGraphSteps(deriveRuntimeTaskSteps(segmentRuntimeRun))
+          ? sanitizeGraphSteps(appendSubagentBranches(deriveRuntimeTaskSteps(segmentRuntimeRun)))
           : sanitizeGraphSteps(buildSteps(false));
       }
     }
@@ -1431,13 +1439,20 @@ export function Chat() {
         .filter((msg) => msg.role === 'user' && (!Array.isArray(msg.content) || !(msg.content as Array<{ type?: string }>).every((b) => b.type === 'tool_result' || b.type === 'toolResult')))
         .length;
       const runKey = buildBaselineRunKey(currentSessionKey, userTurnOrdinal);
-      const raw = extractGeneratedFiles(
+      const extracted = extractGeneratedFiles(
         messages,
         card.triggerIndex,
         card.segmentEnd,
         runKey ? (filePath) => getBaseline(runKey, filePath) : undefined,
-      );
-      map.set(card.triggerIndex, raw.filter(generatedFileHasDiffPayload));
+      ).filter(generatedFileHasDiffPayload);
+      const byPath = new Map(extracted.map((file) => [file.filePath, file] as const));
+      for (const [index, artifact] of (card.runtimeRun?.artifacts ?? []).entries()) {
+        const runtimeFile = generatedFileFromRuntimeArtifact(artifact, card.segmentEnd + index + 1);
+        if (!runtimeFile) continue;
+        const existing = byPath.get(runtimeFile.filePath);
+        byPath.set(runtimeFile.filePath, existing ? { ...runtimeFile, ...existing } : runtimeFile);
+      }
+      map.set(card.triggerIndex, [...byPath.values()].sort((left, right) => left.lastSeenIndex - right.lastSeenIndex));
     }
     return map;
   }, [currentSessionKey, userRunCards, messages]);
@@ -1461,6 +1476,9 @@ export function Chat() {
       const hasRuntimeProgressEntries = (card.runtimeRun?.progressEntries?.length ?? 0) > 0;
       const hasNativeTaskFlow = getTaskFlowCompactProgress(card.steps) != null
         || (card.runtimeRun?.tasks?.length ?? 0) > 0;
+      const hasSubagentBranch = card.steps.some((step) => (
+        step.id.startsWith('subagent:') || step.parentId?.startsWith('subagent:')
+      ));
       const shouldShowTranscript = shouldUseRunProgressTranscript(
         card.steps,
         generatedFiles.length,
@@ -1478,6 +1496,7 @@ export function Chat() {
       const shouldHideExecutionGraphBehindTranscript = shouldShowTranscript
         && hasCanonicalProgressTranscript
         && !hasNativeTaskFlow
+        && !hasSubagentBranch
         && !devModeUnlocked
         && !hasProblem;
       const shouldRenderExecutionGraph = hasExecutionGraphDetails

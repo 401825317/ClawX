@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
-import { completeSetup, expect, test } from './fixtures/electron';
+import { completeSetup, emitIpcEvent, expect, test } from './fixtures/electron';
 
 const TEST_AGENT_ID = 'agent';
 const ZERO_TOKEN_SESSION_ID = 'agent-session-zero-token';
@@ -141,14 +141,17 @@ test.describe('ClawX token usage history', () => {
     expect(nonzeroEntry?.provider).toBe('kimi');
   });
 
-  // TODO: This test needs a reliable way to inject mocked gateway status into
-  // the renderer's Zustand store in CI (where no real OpenClaw runtime exists).
-  // The hostapi:fetch mock + page.reload approach fails because the reload
-  // re-triggers setup flow. Skipping until we add an E2E-aware store hook.
-  test.skip('hides gateway internal usage rows from the usage list overview', async ({ page, homeDir }) => {
+  test('hides gateway internal usage rows from the usage list overview', async ({ electronApp, page, homeDir }) => {
     await seedTokenUsageTranscripts(homeDir);
     await completeSetup(page);
     await validateUsageHistory(page);
+    await emitIpcEvent(electronApp, 'gateway:status-changed', {
+      state: 'running',
+      port: 18789,
+      pid: 12345,
+      gatewayReady: true,
+      connectedAt: Date.now(),
+    });
 
     await page.getByTestId('sidebar-nav-models').click();
     await expect(page.getByTestId('models-page')).toBeVisible();

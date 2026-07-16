@@ -388,6 +388,7 @@ export function ExecutionGraphCard({
               data-testid="chat-execution-step"
               data-task-id={step.taskId}
               data-parent-id={step.parentId}
+              data-step-kind={step.kind}
               data-step-status={step.status}
               style={{ marginLeft: `${rowMarginLeft}px` }}
             >

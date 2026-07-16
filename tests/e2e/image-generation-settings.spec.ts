@@ -34,10 +34,11 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('image-generation-fallbacks')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-timeout')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-save')).toBeVisible();
-    await expect(page.getByTestId('image-generation-clear')).toBeDisabled();
+    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('https://zz-cn.lingzhiwuxian.com/v1');
+    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveAttribute('readonly', '');
   });
 
-  test('configures an independent OpenAI-compatible image endpoint', async ({ page }) => {
+  test('configures the managed image model while keeping its endpoint fixed', async ({ page }) => {
     await expect(page.getByTestId('setup-page')).toBeVisible();
     await page.getByTestId('setup-skip-button').click();
 
@@ -46,12 +47,12 @@ test.describe('Image generation settings page', () => {
     await page.getByTestId('sidebar-nav-image-generation').click();
 
     await expect(page.getByTestId('image-generation-settings')).toBeVisible();
-    await expect(page.getByTestId('image-generation-relay-base-url')).toBeVisible();
-    await page.getByTestId('image-generation-relay-base-url').fill('https://api.example.com/v1');
-    await page.getByTestId('image-generation-relay-model').fill('gpt-image-2');
-    await page.getByTestId('image-generation-relay-api-key').fill('sk-test-image');
+    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('https://zz-cn.lingzhiwuxian.com/v1');
+    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveAttribute('readonly', '');
+    await page.getByTestId('image-generation-relay-model').fill('gpt-image-2-e2e');
+    await expect(page.getByTestId('image-generation-relay-api-key')).toHaveAttribute('readonly', '');
 
-    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-2');
+    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-2-e2e');
     await expect(page.getByTestId('image-generation-save')).toBeEnabled();
   });
 
@@ -173,9 +174,9 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('image-generation-clear')).toBeEnabled();
 
     await page.getByTestId('image-generation-clear').click();
-    const confirmDialog = page.getByRole('dialog');
+    const confirmDialog = page.getByTestId('confirm-dialog');
     await expect(confirmDialog).toBeVisible();
-    await confirmDialog.getByRole('button', { name: 'Clear', exact: true }).click();
+    await page.getByTestId('confirm-dialog-confirm').click();
 
     await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('');
     await expect(page.getByTestId('image-generation-clear')).toBeDisabled();

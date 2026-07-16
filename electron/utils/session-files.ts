@@ -27,7 +27,7 @@
  * cooperate with OpenClaw's documented `OPENCLAW_TRAJECTORY_DIR` override.
  */
 
-import { promises as fsP } from 'node:fs';
+import { promises as fsP, realpathSync } from 'node:fs';
 import path from 'node:path';
 
 export type SessionResolutionFailure =
@@ -47,6 +47,14 @@ export type SessionResolutionResult =
  */
 function isAnyAbsolute(candidate: string): boolean {
   return path.isAbsolute(candidate) || path.win32.isAbsolute(candidate);
+}
+
+function canonicalDirectory(candidate: string): string {
+  try {
+    return realpathSync.native(candidate);
+  } catch {
+    return path.resolve(candidate);
+  }
 }
 
 /**
@@ -108,13 +116,13 @@ export function resolveSessionTranscriptPath(
     resolvedSrcPath = path.join(sessionsDir, uuidFileName!);
   }
 
-  const sessionsDirAbs = path.dirname(resolvedSrcPath);
+  const sessionsDirAbs = canonicalDirectory(path.dirname(resolvedSrcPath));
   // sessionsDir is always built from `getOpenClawConfigDir()` + the validated
   // agentId, so anything that doesn't resolve underneath it is suspect. We
   // refuse rather than try to "normalise" the entry — the worst case for the
   // user is that the sidebar entry stops listing it; the worst case if we
   // proceeded is `unlink`s in someone else's directory.
-  const rel = path.relative(sessionsDir, sessionsDirAbs);
+  const rel = path.relative(canonicalDirectory(sessionsDir), sessionsDirAbs);
   if (rel.startsWith('..') || path.isAbsolute(rel)) {
     return { ok: false, failure: { kind: 'path-outside-scope', resolvedPath: resolvedSrcPath } };
   }

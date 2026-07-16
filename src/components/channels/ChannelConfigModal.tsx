@@ -479,6 +479,7 @@ export function ChannelConfigModal({
 
   return (
     <div
+      data-testid="channel-config-modal"
       className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
@@ -661,7 +662,7 @@ export function ChannelConfigModal({
                     className={cn(inputClasses, accountIdError && 'border-destructive/50 focus-visible:ring-destructive/30')}
                   />
                   {accountIdError ? (
-                    <p className="text-xs text-destructive">{accountIdError}</p>
+                    <p data-testid="channel-account-id-error" className="text-xs text-destructive">{accountIdError}</p>
                   ) : (
                     <p className="text-xs text-muted-foreground">{t('account.customIdHint')}</p>
                   )}
@@ -754,6 +755,7 @@ export function ChannelConfigModal({
                     </Button>
                   )}
                   <Button
+                    data-testid="channel-config-submit"
                     onClick={() => {
                       void handleConnect();
                     }}

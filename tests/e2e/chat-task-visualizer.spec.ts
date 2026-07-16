@@ -302,11 +302,26 @@ test.describe('ClawX chat execution graph', () => {
       await expect(
         page.locator('[data-testid="chat-execution-graph"] [data-testid="chat-execution-step"]').getByText('exec', { exact: true }),
       ).toBeVisible();
-      const execRow = page.locator('[data-testid="chat-execution-step"]').filter({ hasText: 'exec' }).first();
+      const execRow = page
+        .locator('[data-testid="chat-execution-step"][data-step-kind="tool"]')
+        .filter({ has: page.getByText('exec', { exact: true }) });
+      await expect(execRow).toHaveCount(1);
       await execRow.click();
       await expect(execRow.locator('pre')).toBeVisible();
-      await expect(page.locator('[data-testid="chat-execution-graph"]').getByText('I asked coder to break down the core blocks of ~/Velaria uncommitted changes; will give you the conclusion when it returns.')).toBeVisible();
-      await expect(page.getByText('CHECKLIST.md')).toHaveCount(0);
+      const yieldRow = page
+        .locator('[data-testid="chat-execution-step"][data-step-kind="tool"]')
+        .filter({ has: page.getByText('sessions_yield', { exact: true }) });
+      await expect(yieldRow).toHaveCount(1);
+      await yieldRow.click();
+      await expect(yieldRow.locator('pre')).toContainText('I asked coder to break down the core blocks of ~/Velaria uncommitted changes; will give you the conclusion when it returns.');
+      await expect(page.getByText('[Internal task completion event]')).toHaveCount(0);
+      const finalReply = page.locator('[data-testid^="chat-message-"]').filter({
+        has: page.getByText('Coder has finished the analysis, here are the conclusions.', { exact: true }),
+      });
+      await expect(finalReply).toHaveCount(1);
+      await expect(
+        finalReply.getByText('CHECKLIST.md', { exact: true }),
+      ).toBeVisible();
     } finally {
       await closeElectronApp(app);
     }
@@ -399,8 +414,9 @@ test.describe('ClawX chat execution graph', () => {
       await expect(page.getByTestId('main-layout')).toBeVisible();
       await expect(page.getByTestId('chat-execution-graph')).toBeVisible({ timeout: 30_000 });
       await expect(page.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
-      await expect(page.getByTestId('chat-execution-graph')).toContainText(/0\s+(tool calls|个工具调用)/);
-      await expect(page.getByTestId('chat-execution-graph')).toContainText(/9\s+(process messages|条过程消息)/);
+      await page.getByTestId('chat-execution-graph').click();
+      await expect(page.locator('[data-testid="chat-execution-step"][data-step-kind="tool"]')).toHaveCount(0);
+      await expect(page.locator('[data-testid="chat-execution-step"][data-step-kind="message"]')).toHaveCount(9);
       await expect(page.getByText(longRunSummary, { exact: true })).toBeVisible();
       await expect(page.getByText(longRunReplyText, { exact: true })).toHaveCount(0);
     } finally {

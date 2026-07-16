@@ -198,7 +198,15 @@ export const test = base.extend<ElectronFixtures>({
 
 export async function completeSetup(page: Page): Promise<void> {
   await expect(page.getByTestId('setup-page')).toBeVisible();
+  await page.evaluate(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('e2eSkipSetup', '1');
+    window.history.replaceState({}, '', url.toString());
+  });
   await page.getByTestId('setup-skip-button').click();
+  await page.evaluate(() => {
+    window.location.hash = '#/';
+  });
   await expect(page.getByTestId('main-layout')).toBeVisible();
 }
 
@@ -221,6 +229,19 @@ export async function installIpcMocks(
           .map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`);
         return `{${entries.join(',')}}`;
       };
+      const isSubset = (expected: unknown, actual: unknown): boolean => {
+        if (Object.is(expected, actual)) return true;
+        if (Array.isArray(expected)) {
+          return Array.isArray(actual)
+            && expected.length === actual.length
+            && expected.every((item, index) => isSubset(item, actual[index]));
+        }
+        if (!expected || typeof expected !== 'object' || !actual || typeof actual !== 'object' || Array.isArray(actual)) {
+          return false;
+        }
+        return Object.entries(expected as Record<string, unknown>)
+          .every(([key, value]) => isSubset(value, (actual as Record<string, unknown>)[key]));
+      };
 
       if (mockConfig.gatewayRpc) {
         ipcMain.removeHandler('gateway:rpc');
@@ -232,6 +253,28 @@ export async function installIpcMocks(
           const fallbackKey = stableStringify([method, null]);
           if (fallbackKey in mockConfig.gatewayRpc!) {
             return mockConfig.gatewayRpc![fallbackKey];
+          }
+          const methodEntries = Object.entries(mockConfig.gatewayRpc!)
+            .map(([candidateKey, value]) => {
+              try {
+                const parsed = JSON.parse(candidateKey) as unknown;
+                return Array.isArray(parsed) && parsed.length === 2
+                  ? { method: parsed[0], params: parsed[1], value, specificity: candidateKey.length }
+                  : null;
+              } catch {
+                return null;
+              }
+            })
+            .filter((candidate) => candidate?.method === method);
+          const compatibleEntry = methodEntries
+            .filter((candidate) => isSubset(candidate!.params, payload ?? null))
+            .sort((left, right) => (right?.specificity ?? 0) - (left?.specificity ?? 0))[0];
+          if (compatibleEntry) {
+            return compatibleEntry.value;
+          }
+          const distinctMethodResponses = new Set(methodEntries.map((candidate) => stableStringify(candidate!.value)));
+          if (methodEntries.length > 0 && distinctMethodResponses.size === 1) {
+            return methodEntries[0]!.value;
           }
           return { success: true, result: {} };
         });

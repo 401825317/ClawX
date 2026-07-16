@@ -3,6 +3,13 @@ import type { AddressInfo } from 'node:net';
 
 export const REGRESSION_API_KEY = 'sk-uclaw-regression';
 export const REGRESSION_MODEL = 'uclaw-regression-model';
+export const REGRESSION_FALLBACK_MODEL = 'uclaw-regression-fallback-model';
+
+type DeterministicOpenAiServerOptions = {
+  name?: string;
+  model?: string;
+  alwaysFailScenarios?: string[];
+};
 
 type OpenAiTool = {
   type?: string;
@@ -18,6 +25,11 @@ type OpenAiTool = {
 type OpenAiMessage = {
   role?: string;
   content?: unknown;
+  tool_calls?: Array<{
+    function?: {
+      name?: string;
+    };
+  }>;
 };
 
 type OpenAiRequest = {
@@ -28,6 +40,7 @@ type OpenAiRequest = {
 };
 
 export type RecordedProviderRequest = {
+  provider: string;
   at: string;
   method: string;
   path: string;
@@ -61,6 +74,12 @@ function latestUserMessage(messages: OpenAiMessage[]): { index: number; text: st
 function scenarioFromPrompt(prompt: string): string {
   const match = prompt.match(/\[REGRESSION:([A-Z0-9_]+)\]/u);
   return match?.[1] ?? 'DEFAULT';
+}
+
+function calledToolNames(messages: OpenAiMessage[]): string[] {
+  return messages.flatMap((message) => (
+    message.tool_calls ?? []
+  )).map((call) => call.function?.name?.trim() ?? '').filter(Boolean);
 }
 
 function functionTool(tool: OpenAiTool): { name: string; properties: Record<string, unknown>; required: string[] } | null {
@@ -116,16 +135,16 @@ function streamChunk(res: ServerResponse, payload: unknown): void {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
-function completionBase(id: string) {
+function completionBase(id: string, model: string) {
   return {
     id,
     object: 'chat.completion.chunk',
     created: Math.floor(Date.now() / 1000),
-    model: REGRESSION_MODEL,
+    model,
   };
 }
 
-function sendAssistant(res: ServerResponse, text: string, stream: boolean): void {
+function sendAssistant(res: ServerResponse, text: string, stream: boolean, model: string): void {
   const id = `chatcmpl-uclaw-${Date.now()}`;
   const usage = { prompt_tokens: 32, completion_tokens: 16, total_tokens: 48 };
   if (!stream) {
@@ -133,7 +152,7 @@ function sendAssistant(res: ServerResponse, text: string, stream: boolean): void
       id,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
-      model: REGRESSION_MODEL,
+      model,
       choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
       usage,
     });
@@ -145,14 +164,14 @@ function sendAssistant(res: ServerResponse, text: string, stream: boolean): void
     connection: 'keep-alive',
   });
   streamChunk(res, {
-    ...completionBase(id),
+    ...completionBase(id, model),
     choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }],
   });
   streamChunk(res, {
-    ...completionBase(id),
+    ...completionBase(id, model),
     choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
   });
-  streamChunk(res, { ...completionBase(id), choices: [], usage });
+  streamChunk(res, { ...completionBase(id, model), choices: [], usage });
   res.end('data: [DONE]\n\n');
 }
 
@@ -161,6 +180,7 @@ function sendToolCall(
   name: string,
   args: Record<string, unknown>,
   stream: boolean,
+  model: string,
 ): void {
   const id = `chatcmpl-uclaw-tool-${Date.now()}`;
   const callId = `call_uclaw_${Date.now()}`;
@@ -170,7 +190,7 @@ function sendToolCall(
       id,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
-      model: REGRESSION_MODEL,
+      model,
       choices: [{
         index: 0,
         message: {
@@ -190,7 +210,7 @@ function sendToolCall(
     connection: 'keep-alive',
   });
   streamChunk(res, {
-    ...completionBase(id),
+    ...completionBase(id, model),
     choices: [{
       index: 0,
       delta: {
@@ -206,7 +226,7 @@ function sendToolCall(
     }],
   });
   streamChunk(res, {
-    ...completionBase(id),
+    ...completionBase(id, model),
     choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
   });
   res.end('data: [DONE]\n\n');
@@ -227,13 +247,19 @@ async function readJson(req: IncomingMessage): Promise<OpenAiRequest> {
 export class DeterministicOpenAiServer {
   readonly requests: RecordedProviderRequest[] = [];
   readonly toolTargetPath: string;
+  readonly name: string;
+  readonly model: string;
+  private alwaysFailScenarios: Set<string>;
   private server: Server | null = null;
   private pendingTimers = new Set<NodeJS.Timeout>();
   private scenarioAttempts = new Map<string, number>();
   private originValue = '';
 
-  constructor(toolTargetPath: string) {
+  constructor(toolTargetPath: string, options: DeterministicOpenAiServerOptions = {}) {
     this.toolTargetPath = toolTargetPath;
+    this.name = options.name?.trim() || 'primary';
+    this.model = options.model?.trim() || REGRESSION_MODEL;
+    this.alwaysFailScenarios = new Set(options.alwaysFailScenarios ?? []);
   }
 
   get origin(): string {
@@ -301,7 +327,7 @@ export class DeterministicOpenAiServer {
       }
       json(res, 200, {
         object: 'list',
-        data: [{ id: REGRESSION_MODEL, object: 'model', owned_by: 'uclaw-regression' }],
+        data: [{ id: this.model, object: 'model', owned_by: 'uclaw-regression' }],
       });
       return;
     }
@@ -323,6 +349,7 @@ export class DeterministicOpenAiServer {
     const attempt = (this.scenarioAttempts.get(scenario) ?? 0) + 1;
     this.scenarioAttempts.set(scenario, attempt);
     this.requests.push({
+      provider: this.name,
       at: new Date().toISOString(),
       method: req.method || 'POST',
       path: requestUrl.pathname,
@@ -334,18 +361,24 @@ export class DeterministicOpenAiServer {
       toolNames,
     });
 
+    const responseModel = body.model || this.model;
+    if (this.alwaysFailScenarios.has(scenario)) {
+      errorResponse(res, 503, `UCLAW_REGRESSION_${scenario}_PRIMARY_FAILED`);
+      return;
+    }
+
     if (scenario === 'HTTP_401') {
       errorResponse(res, 401, 'UCLAW_REGRESSION_HTTP_401');
       return;
     }
     if (scenario === 'HTTP_429') {
       if (attempt === 1) errorResponse(res, 429, 'UCLAW_REGRESSION_HTTP_429');
-      else sendAssistant(res, 'UCLAW_REGRESSION_HTTP_429_RECOVERED', body.stream === true);
+      else sendAssistant(res, 'UCLAW_REGRESSION_HTTP_429_RECOVERED', body.stream === true, responseModel);
       return;
     }
     if (scenario === 'HTTP_500') {
       if (attempt === 1) errorResponse(res, 500, 'UCLAW_REGRESSION_HTTP_500');
-      else sendAssistant(res, 'UCLAW_REGRESSION_HTTP_500_RECOVERED', body.stream === true);
+      else sendAssistant(res, 'UCLAW_REGRESSION_HTTP_500_RECOVERED', body.stream === true, responseModel);
       return;
     }
     if (scenario === 'MALFORMED_STREAM') {
@@ -357,7 +390,7 @@ export class DeterministicOpenAiServer {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           this.pendingTimers.delete(timer);
-          if (!res.destroyed) sendAssistant(res, 'UCLAW_REGRESSION_SLOW_FINISHED', body.stream === true);
+          if (!res.destroyed) sendAssistant(res, 'UCLAW_REGRESSION_SLOW_FINISHED', body.stream === true, responseModel);
           resolve();
         }, 60_000);
         this.pendingTimers.add(timer);
@@ -370,15 +403,17 @@ export class DeterministicOpenAiServer {
       return;
     }
 
-    const toolResults = messages.slice(latestUser.index + 1).filter((message) => message.role === 'tool').length;
+    const scenarioMessages = messages.slice(latestUser.index + 1);
+    const toolResults = scenarioMessages.filter((message) => message.role === 'tool').length;
+    const scenarioToolCalls = calledToolNames(scenarioMessages);
     if (scenario === 'TOOL_WRITE') {
       if (toolResults > 0) {
-        sendAssistant(res, 'UCLAW_REGRESSION_TOOL_WRITE_OK', body.stream === true);
+        sendAssistant(res, 'UCLAW_REGRESSION_TOOL_WRITE_OK', body.stream === true, responseModel);
         return;
       }
       const tool = findTool(tools, ['write', 'write_file', 'writeFile']);
       if (!tool) {
-        sendAssistant(res, `UCLAW_REGRESSION_TOOL_WRITE_UNAVAILABLE ${toolNames.join(',')}`, body.stream === true);
+        sendAssistant(res, `UCLAW_REGRESSION_TOOL_WRITE_UNAVAILABLE ${toolNames.join(',')}`, body.stream === true, responseModel);
         return;
       }
       const pathKey = firstProperty(tool.properties, ['path', 'file_path', 'filePath']) ?? 'path';
@@ -386,13 +421,83 @@ export class DeterministicOpenAiServer {
       sendToolCall(res, tool.name, {
         [pathKey]: this.toolTargetPath,
         [contentKey]: 'UCLAW_REGRESSION_TOOL_FILE_OK\n',
-      }, body.stream === true);
+      }, body.stream === true, responseModel);
+      return;
+    }
+    const artifactScenarios: Record<string, { tool: string; args: Record<string, unknown> }> = {
+      ARTIFACT_DOCX: {
+        tool: 'create_docx_file',
+        args: {
+          filename: 'uclaw-regression.docx',
+          outputDir: 'uclaw-regression/office',
+          title: 'UClaw Regression Document',
+          paragraphs: ['UCLAW_DOCX_CONTENT_OK', 'Packaged DOCX generation evidence.'],
+          sections: [{ title: 'Verification', bullets: ['real tool call', 'real ZIP package'] }],
+        },
+      },
+      ARTIFACT_XLSX: {
+        tool: 'create_xlsx_file',
+        args: {
+          filename: 'uclaw-regression.xlsx',
+          outputDir: 'uclaw-regression/office',
+          title: 'UClaw Regression Workbook',
+          sheetName: 'Evidence',
+          headers: ['Item', 'Status'],
+          rows: [['UCLAW_XLSX_CONTENT_OK', 'passed'], ['packaged', 1]],
+        },
+      },
+      ARTIFACT_PPTX: {
+        tool: 'create_pptx_file',
+        args: {
+          filename: 'uclaw-regression.pptx',
+          outputDir: 'uclaw-regression/office',
+          title: 'UClaw Regression Presentation',
+          subtitle: 'Packaged artifact evidence',
+          presentationDesign: { themeFamily: 'executive-report', audience: 'QA', purpose: 'Regression evidence' },
+          slides: [
+            { title: 'UClaw Regression Presentation', subtitle: 'UCLAW_PPTX_CONTENT_OK' },
+            { title: 'Verification', bullets: ['Real packaged plugin', 'Real PPTX ZIP output'] },
+          ],
+        },
+      },
+    };
+    const artifactScenario = artifactScenarios[scenario];
+    if (artifactScenario) {
+      if (
+        scenarioToolCalls.includes(artifactScenario.tool)
+        || scenarioToolCalls.includes('tool_call')
+      ) {
+        sendAssistant(res, `UCLAW_REGRESSION_${scenario}_OK`, body.stream === true, responseModel);
+        return;
+      }
+      const tool = findTool(tools, [artifactScenario.tool]);
+      if (tool) {
+        sendToolCall(res, tool.name, artifactScenario.args, body.stream === true, responseModel);
+        return;
+      }
+      const toolSearch = findTool(tools, ['tool_search']);
+      const toolCall = findTool(tools, ['tool_call']);
+      if (!scenarioToolCalls.includes('tool_search') && toolSearch) {
+        sendToolCall(res, toolSearch.name, {
+          query: artifactScenario.tool,
+          limit: 5,
+        }, body.stream === true, responseModel);
+        return;
+      }
+      if (scenarioToolCalls.includes('tool_search') && toolCall) {
+        sendToolCall(res, toolCall.name, {
+          id: artifactScenario.tool,
+          args: artifactScenario.args,
+        }, body.stream === true, responseModel);
+        return;
+      }
+      sendAssistant(res, `UCLAW_REGRESSION_${scenario}_UNAVAILABLE ${toolNames.join(',')}`, body.stream === true, responseModel);
       return;
     }
     if (scenario === 'BROWSER') {
       const browser = findTool(tools, ['browser']);
       if (!browser) {
-        sendAssistant(res, `UCLAW_REGRESSION_BROWSER_UNAVAILABLE ${toolNames.join(',')}`, body.stream === true);
+        sendAssistant(res, `UCLAW_REGRESSION_BROWSER_UNAVAILABLE ${toolNames.join(',')}`, body.stream === true, responseModel);
         return;
       }
       if (toolResults === 0) {
@@ -400,7 +505,7 @@ export class DeterministicOpenAiServer {
           action: 'open',
           profile: 'openclaw',
           targetUrl: this.browserFixtureUrl,
-        }, body.stream === true);
+        }, body.stream === true, responseModel);
         return;
       }
       if (toolResults === 1) {
@@ -408,10 +513,10 @@ export class DeterministicOpenAiServer {
           action: 'snapshot',
           profile: 'openclaw',
           refs: 'aria',
-        }, body.stream === true);
+        }, body.stream === true, responseModel);
         return;
       }
-      sendAssistant(res, 'UCLAW_REGRESSION_BROWSER_OK', body.stream === true);
+      sendAssistant(res, 'UCLAW_REGRESSION_BROWSER_OK', body.stream === true, responseModel);
       return;
     }
 
@@ -422,6 +527,6 @@ export class DeterministicOpenAiServer {
       MARKDOWN: '# UCLAW_REGRESSION_MARKDOWN_OK\n\n| Item | Status |\n| --- | --- |\n| packaged | pass |\n\n```text\nUCLAW_CODE_BLOCK_OK\n```\n\nUnicode: 中文 / 日本語 / Русский',
       DEFAULT: 'UCLAW_REGRESSION_DEFAULT_OK',
     };
-    sendAssistant(res, responseByScenario[scenario] ?? `UCLAW_REGRESSION_${scenario}_OK`, body.stream === true);
+    sendAssistant(res, responseByScenario[scenario] ?? `UCLAW_REGRESSION_${scenario}_OK`, body.stream === true, responseModel);
   }
 }

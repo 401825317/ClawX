@@ -15,6 +15,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { generateRegressionReport } from './generate-regression-report.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, '..', '..');
@@ -30,6 +31,7 @@ function parseArgs(argv) {
     keep: false,
     latest: false,
     liveProfile: '',
+    liveLoginStdin: false,
     allowDesktopCapture: false,
     allowExternalDelivery: false,
   };
@@ -46,6 +48,9 @@ function parseArgs(argv) {
         break;
       case '--live-profile':
         options.liveProfile = readValue();
+        break;
+      case '--live-login-stdin':
+        options.liveLoginStdin = true;
         break;
       case '--latest':
         options.latest = true;
@@ -71,8 +76,14 @@ function parseArgs(argv) {
   if (!PROFILE_NAMES.has(options.profile)) {
     throw new Error(`Unsupported profile "${options.profile}". Use core, full, or live.`);
   }
-  if (options.profile === 'live' && !options.liveProfile) {
-    throw new Error('The live profile requires --live-profile <isolated UClawData directory>.');
+  if (options.profile === 'live' && !options.liveProfile && !options.liveLoginStdin) {
+    throw new Error('The live profile requires --live-profile <isolated UClawData directory> or --live-login-stdin.');
+  }
+  if (options.liveLoginStdin && options.profile !== 'live') {
+    throw new Error('--live-login-stdin is only valid with --profile live.');
+  }
+  if (options.liveLoginStdin && options.liveProfile) {
+    throw new Error('Use either --live-profile or --live-login-stdin, not both.');
   }
   if (options.allowExternalDelivery) {
     if (options.profile !== 'live') {
@@ -106,6 +117,8 @@ Profiles:
 Options:
   --keep                       Keep the extracted sandbox after a successful run.
   --live-profile <dir>         Prepared test-only UClawData directory. Never read implicitly.
+  --live-login-stdin           Read one {"username","password"} JSON line without echo and
+                               authenticate only inside the isolated package sandbox.
   --allow-desktop-capture      Allow the desktop.observe scenario.
   --allow-external-delivery    Send to the dedicated live destination supplied through
                                UCLAW_REGRESSION_DELIVERY_CHANNEL,
@@ -329,7 +342,7 @@ async function main() {
     verifyCriticalRuntimeFiles(appRoot);
     await verifyEmptyPortableData(appRoot);
     staticSummary = await runStaticSelfCheck(appRoot, reportDir);
-    if (options.profile === 'live') await installLiveProfile(options.liveProfile, appRoot);
+    if (options.profile === 'live' && options.liveProfile) await installLiveProfile(options.liveProfile, appRoot);
 
     const playwrightCli = path.join(ROOT, 'node_modules', '@playwright', 'test', 'cli.js');
     if (!existsSync(playwrightCli)) {
@@ -352,6 +365,7 @@ async function main() {
         UCLAW_REGRESSION_RUN_ID: runId,
         UCLAW_REGRESSION_ALLOW_DESKTOP_CAPTURE: options.allowDesktopCapture ? '1' : '0',
         UCLAW_REGRESSION_ALLOW_EXTERNAL_DELIVERY: options.allowExternalDelivery ? '1' : '0',
+        UCLAW_REGRESSION_LIVE_LOGIN_STDIN: options.liveLoginStdin ? '1' : '0',
       },
     });
     playwrightExitCode = testResult.status ?? 1;
@@ -392,10 +406,28 @@ async function main() {
       scenarios: scenarioResults,
       diagnosticFiles,
       liveProfileSupplied: Boolean(options.liveProfile),
+      liveLoginViaStdin: options.liveLoginStdin,
       failure: failure ? redact(failure.stack || failure.message) : null,
       sandboxKept: Boolean(options.keep || failure),
     };
-    await writeFile(path.join(reportDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+    const summaryPath = path.join(reportDir, 'summary.json');
+    await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+    try {
+      await generateRegressionReport({
+        matrix: path.join(ROOT, 'tests', 'packaged-e2e', 'capability-matrix.json'),
+        source: path.join(ROOT, 'test-results', 'results.json'),
+        packaged: options.profile === 'live' ? '' : summaryPath,
+        live: options.profile === 'live' ? summaryPath : '',
+        output: path.join(reportDir, 'UClaw-complete-regression-report.zh-CN.md'),
+        resultsOutput: path.join(reportDir, 'capability-results.json'),
+      });
+    } catch (error) {
+      const reportFailure = error instanceof Error ? error : new Error(String(error));
+      if (!failure) failure = reportFailure;
+      summary.status = 'failed';
+      summary.failure = redact(reportFailure.stack || reportFailure.message);
+      await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+    }
     if (!options.keep && !failure) await rm(sandboxRoot, { recursive: true, force: true });
     else console.log(`[packaged-regression] Sandbox kept: ${sandboxRoot}`);
   }

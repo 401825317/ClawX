@@ -388,7 +388,7 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
           label: event.name,
           status: 'running',
           kind: 'tool',
-          detail: undefined,
+          detail: runtimeDetail(event.args),
           depth: 1,
           url,
         });

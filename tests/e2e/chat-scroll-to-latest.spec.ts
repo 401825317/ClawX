@@ -73,10 +73,12 @@ test.describe('ClawX chat scroll-to-latest affordance', () => {
       await expect(page.getByText('Chat history message 36')).toBeVisible({ timeout: 30_000 });
 
       const scrollContainer = page.getByTestId('chat-scroll-container');
-      await scrollContainer.evaluate((element) => {
-        element.scrollTop = 0;
-        element.dispatchEvent(new Event('scroll', { bubbles: true }));
-      });
+      await expect.poll(async () => scrollContainer.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      )).toBeGreaterThan(0);
+      await scrollContainer.hover();
+      await page.mouse.wheel(0, -10_000);
+      await expect.poll(async () => scrollContainer.evaluate((element) => element.scrollTop)).toBeLessThan(8);
 
       const jumpButton = page.getByTestId('chat-scroll-to-latest');
       await expect(jumpButton).toBeVisible();

@@ -51,6 +51,11 @@ Required scenarios:
 - persistent 401 failure, successful credential revalidation through the Provider UI, persisted auth-failure reset, Gateway restart, and a healthy recovery turn;
 - a real file-writing tool side effect;
 - real managed-browser open and snapshot actions;
+- real DOCX, XLSX, and PPTX tool calls with UI, file, ZIP structure, and content evidence;
+- session create, transcript, rename, reload, and hard delete;
+- two-Provider fallback followed by fallback deletion and stale-reference cleanup;
+- local Skill discovery, enablement persistence, quick access, and marketplace capability probe;
+- OpenClaw Doctor, runtime logs, and Control UI reachability with token-safe reporting;
 - Agent create/update/delete;
 - Cron create/disable/invalid/delete;
 - packaged FFmpeg timeline render, segment composition, ffprobe/shot QA, and missing-input failure;
@@ -62,10 +67,12 @@ Required scenarios:
 Managed Responses, cloud image generation, cloud video generation, desktop capture, and external channel delivery have cost, privacy, or external-side-effect requirements. They must be explicit gates, never inferred from the developer's existing profile.
 
 - `live` requires a caller-supplied, test-only `UClawData` directory.
+- Alternatively, `live` may read one login JSON line from no-echo stdin and authenticate only inside the extracted package sandbox.
 - The harness copies that directory into the temporary package sandbox and never mutates the source.
 - Desktop capture requires `--allow-desktop-capture`.
 - External delivery requires `--allow-external-delivery` plus `UCLAW_REGRESSION_DELIVERY_CHANNEL`, `UCLAW_REGRESSION_DELIVERY_ACCOUNT_ID`, and `UCLAW_REGRESSION_DELIVERY_TARGET`. It must use a dedicated test destination, verify the final delivery state, and remove its temporary Cron job.
 - Tokens, API keys, passwords, signed URLs, Authorization headers, and Provider secret values must never enter reports.
+- Recharge automation is read-only. Creating an order or attempting real payment is forbidden.
 - Deterministic Provider reports may include scenario names, attempt numbers, model IDs, message roles, and tool names, but never request headers or secret values.
 
 ## Release gate

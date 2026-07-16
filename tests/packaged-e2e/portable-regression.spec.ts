@@ -10,8 +10,14 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
+import JSZip from 'jszip';
 import sharp from 'sharp';
-import { DeterministicOpenAiServer, REGRESSION_API_KEY, REGRESSION_MODEL } from './fixtures/deterministic-openai-server';
+import {
+  DeterministicOpenAiServer,
+  REGRESSION_API_KEY,
+  REGRESSION_FALLBACK_MODEL,
+  REGRESSION_MODEL,
+} from './fixtures/deterministic-openai-server';
 import {
   allocatePort,
   closePackagedApp,
@@ -53,6 +59,7 @@ const profile = process.env.UCLAW_REGRESSION_PROFILE || 'full';
 const runId = process.env.UCLAW_REGRESSION_RUN_ID || `manual-${Date.now()}`;
 const allowDesktopCapture = process.env.UCLAW_REGRESSION_ALLOW_DESKTOP_CAPTURE === '1';
 const allowExternalDelivery = process.env.UCLAW_REGRESSION_ALLOW_EXTERNAL_DELIVERY === '1';
+const liveLoginStdin = process.env.UCLAW_REGRESSION_LIVE_LOGIN_STDIN === '1';
 const externalDelivery = {
   channel: process.env.UCLAW_REGRESSION_DELIVERY_CHANNEL?.trim() || '',
   accountId: process.env.UCLAW_REGRESSION_DELIVERY_ACCOUNT_ID?.trim() || '',
@@ -60,6 +67,12 @@ const externalDelivery = {
 };
 let regressionModelRef = '';
 let regressionAccountId = '';
+let fallbackAccountId = '';
+
+type LiveLoginCredentials = {
+  username: string;
+  password: string;
+};
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -74,7 +87,134 @@ function safeName(value: string): string {
 function redactedError(error: unknown): string {
   return String(error instanceof Error ? error.stack || error.message : error)
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/gu, 'sk-[REDACTED]')
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"']+/giu, '$1[REDACTED]');
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"']+/giu, '$1[REDACTED]')
+    .replace(/("?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|relay[_-]?token|password|secret)"?\s*[:=]\s*")([^"]+)(")/giu, '$1[REDACTED]$3')
+    .replace(/([?&#](?:token|signature|sig|key)=)[^&#\s]+/giu, '$1[REDACTED]');
+}
+
+async function readLiveLoginCredentials(): Promise<LiveLoginCredentials> {
+  if (!liveLoginStdin) throw new Error('Live login stdin was not enabled.');
+  const stdin = process.stdin;
+  const previousRawMode = stdin.isTTY ? stdin.isRaw : false;
+  const line = await new Promise<string>((resolve, reject) => {
+    let buffer = '';
+    const cleanup = (): void => {
+      stdin.off('data', onData);
+      stdin.off('error', onError);
+      if (stdin.isTTY && typeof stdin.setRawMode === 'function') stdin.setRawMode(previousRawMode);
+      stdin.pause();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      buffer += String(chunk);
+      const lineEnd = buffer.search(/[\r\n]/u);
+      if (lineEnd < 0) return;
+      const value = buffer.slice(0, lineEnd);
+      cleanup();
+      resolve(value);
+    };
+    if (stdin.isTTY && typeof stdin.setRawMode === 'function') stdin.setRawMode(true);
+    stdin.setEncoding('utf8');
+    stdin.on('data', onData);
+    stdin.once('error', onError);
+    stdin.resume();
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    throw new Error('Live login stdin must be one JSON line.');
+  }
+  const record = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : {};
+  const username = typeof record.username === 'string' ? record.username.trim() : '';
+  const password = typeof record.password === 'string' ? record.password : '';
+  if (!username || !password) throw new Error('Live login stdin requires username and password.');
+  return { username, password };
+}
+
+async function loginManagedAccount(hostApiPort: number, credentials: LiveLoginCredentials): Promise<Record<string, unknown>> {
+  const response = await fetch(`http://127.0.0.1:${hostApiPort}/api/junfeiai/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(credentials),
+  });
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  if (!response.ok || payload.success === false) {
+    const code = typeof payload.code === 'string' ? payload.code : `http_${response.status}`;
+    const message = typeof payload.message === 'string' ? payload.message : 'Managed login failed.';
+    throw new Error(`Managed login failed (${code}): ${message}`);
+  }
+  return {
+    managed: payload.managed === true,
+    authValid: payload.authValid === true,
+    hasRelayToken: payload.hasRelayToken === true,
+    deviceActivated: payload.deviceActivated === true,
+    activationRequired: payload.activationRequired === true,
+  };
+}
+
+async function sanitizedControlUiInfo(page: Page): Promise<{
+  success: boolean;
+  port: number | null;
+  tokenInFragment: boolean;
+  sanitizedUrl: string;
+}> {
+  return await page.evaluate(async () => {
+    const electronApi = (window as unknown as {
+      electron: { ipcRenderer: { invoke(channel: string, payload: unknown): Promise<unknown> } };
+    }).electron;
+    const raw = await electronApi.ipcRenderer.invoke('hostapi:fetch', {
+      path: '/api/gateway/control-ui',
+      method: 'GET',
+      headers: {},
+      body: null,
+    });
+    const response = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    const data = response.data && typeof response.data === 'object' && !Array.isArray(response.data)
+      ? response.data as Record<string, unknown>
+      : response;
+    const json = data.json && typeof data.json === 'object' && !Array.isArray(data.json)
+      ? data.json as Record<string, unknown>
+      : {};
+    const rawUrl = typeof json.url === 'string' ? json.url : '';
+    const url = rawUrl ? new URL(rawUrl) : null;
+    const tokenInFragment = Boolean(url?.hash && new URLSearchParams(url.hash.slice(1)).has('token'));
+    if (url) {
+      url.hash = '';
+      for (const name of ['token', 'key', 'signature', 'sig']) url.searchParams.delete(name);
+    }
+    return {
+      success: json.success === true,
+      port: typeof json.port === 'number' ? json.port : null,
+      tokenInFragment,
+      sanitizedUrl: url?.toString() || '',
+    };
+  });
+}
+
+async function verifyOfficePackage(
+  filePath: string,
+  requiredEntry: RegExp,
+  requiredText: string,
+): Promise<{ bytes: number; entries: number }> {
+  const file = await readFile(filePath);
+  const zip = await JSZip.loadAsync(file);
+  const entryNames = Object.keys(zip.files);
+  expect(entryNames.some((entry) => requiredEntry.test(entry))).toBe(true);
+  const xmlEntries = entryNames.filter((entry) => /\.xml$/iu.test(entry));
+  const xml = (await Promise.all(xmlEntries.map(async (entry) => await zip.file(entry)?.async('string') ?? ''))).join('\n');
+  expect(xml).toContain(requiredText);
+  return { bytes: file.length, entries: entryNames.length };
+}
+
+async function listGatewaySessions(page: Page): Promise<Array<Record<string, unknown>>> {
+  const payload = await hostApiJson<{ result?: { sessions?: Array<Record<string, unknown>> } }>(page, '/api/chat/sessions');
+  return Array.isArray(payload.result?.sessions) ? payload.result.sessions : [];
 }
 
 class ScenarioRunner {
@@ -157,25 +297,66 @@ async function selectRegressionModel(page: Page): Promise<void> {
   await expect(picker).toContainText(REGRESSION_MODEL);
 }
 
+async function addCustomProvider(
+  page: Page,
+  label: string,
+  baseUrl: string,
+  model: string,
+): Promise<string> {
+  await page.getByTestId('sidebar-nav-models').click();
+  await page.getByTestId('providers-add-button').click();
+  await page.getByTestId('add-provider-type-custom').click();
+  await page.getByTestId('add-provider-name-input').fill(label);
+  await page.getByTestId('add-provider-base-url-input').fill(baseUrl);
+  await page.getByTestId('add-provider-model-id-input').fill(model);
+  await page.getByTestId('add-provider-api-key-input').fill(REGRESSION_API_KEY);
+  await page.getByTestId('add-provider-submit-button').click();
+  await expect(page.getByTestId('add-provider-dialog')).toHaveCount(0, { timeout: 60_000 });
+  const card = page.locator('[data-testid^="provider-card-"]').filter({ hasText: label });
+  await expect(card).toBeVisible();
+  const accounts = await hostApiJson<Array<{ id: string; label: string }>>(page, '/api/provider-accounts');
+  const account = accounts.find((entry) => entry.label === label);
+  if (!account?.id) throw new Error(`Provider account was not persisted for ${label}.`);
+  return account.id;
+}
+
 async function sendChat(page: Page, prompt: string, expectedText: string, timeoutMs = 120_000): Promise<number> {
   const startedAt = Date.now();
+  const chatMessages = page.locator('[data-testid^="chat-message-"]');
+  const messageCountBeforeSend = await chatMessages.count();
+  const sendButton = page.getByTestId('chat-composer-send');
   await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 120_000 });
   await page.getByTestId('chat-composer-input').fill(prompt);
-  await page.getByTestId('chat-composer-send').click();
+  await sendButton.click();
   const expected = page.getByText(expectedText, { exact: false }).last();
   const error = page.getByTestId('chat-run-error');
   const transcriptFailure = page.getByText(/Agent failed before reply:/iu).last();
   const deadline = Date.now() + timeoutMs;
+  let observedBusy = false;
   while (Date.now() < deadline) {
     if (await expected.isVisible()) break;
     if (await error.isVisible()) throw new Error(`Chat failed before expected output: ${await error.innerText()}`);
     if (await transcriptFailure.isVisible()) {
       throw new Error(`Chat failed before expected output: ${await transcriptFailure.innerText()}`);
     }
+    const sendTitle = await sendButton.getAttribute('title') ?? '';
+    const isIdle = /Send|发送/iu.test(sendTitle);
+    if (!isIdle) observedBusy = true;
+    const messageCount = await chatMessages.count();
+    if (isIdle && (observedBusy || messageCount >= messageCountBeforeSend + 2)) {
+      await page.waitForTimeout(500);
+      if (await expected.isVisible()) break;
+      const finalMessage = messageCount > 0
+        ? (await chatMessages.nth(messageCount - 1).innerText()).trim().slice(0, 500)
+        : '';
+      throw new Error(
+        `Chat run completed without expected output "${expectedText}".${finalMessage ? ` Final message: ${finalMessage}` : ''}`,
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   await expect(expected).toBeVisible({ timeout: Math.max(1, deadline - Date.now()) });
-  await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 60_000 });
+  await expect(sendButton).toHaveAttribute('title', /Send|发送/iu, { timeout: 60_000 });
   return Date.now() - startedAt;
 }
 
@@ -327,10 +508,93 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
 
   await runner.run('live.startup', 'start managed package with the supplied isolated profile', async () => {
     context = await launchPackagedApp({ appRoot, portableRoot: appRoot, osHome, gatewayPort, hostApiPort, managed: true });
-    await expect(context.page.getByTestId('main-layout')).toBeVisible({ timeout: 120_000 });
-    await expect(context.page.getByTestId('setup-page')).toHaveCount(0);
-    const status = await waitForGatewayReady(context.page, 180_000);
-    return { startupMs: context.startupMs, gateway: status.state };
+    const setupVisible = await context.page.getByTestId('setup-page').isVisible().catch(() => false);
+    if (!setupVisible) await expect(context.page.getByTestId('main-layout')).toBeVisible({ timeout: 120_000 });
+    return { startupMs: context.startupMs, setupVisible, loginViaStdin: liveLoginStdin };
+  });
+
+  await runner.run('live.auth.login', 'authenticate the isolated managed test profile without persisting credentials in reports', async () => {
+    const current = contextOrThrow(context);
+    let login: Record<string, unknown> | null = null;
+    if (liveLoginStdin) {
+      const credentials = await readLiveLoginCredentials();
+      try {
+        login = await loginManagedAccount(current.hostApiPort, credentials);
+      } finally {
+        credentials.username = '';
+        credentials.password = '';
+      }
+      await current.page.reload({ waitUntil: 'domcontentloaded' });
+    }
+    await expect(current.page.getByTestId('main-layout')).toBeVisible({ timeout: 180_000 });
+    await expect(current.page.getByTestId('setup-page')).toHaveCount(0);
+    const gateway = await waitForGatewayReady(current.page, 240_000);
+    return { login, gateway: gateway.state };
+  });
+
+  await runner.run('live.managed.contract', 'verify managed Responses and media runtime configuration without reading secret values', async () => {
+    const configPath = path.join(appRoot, 'UClawData', 'openclaw-home', '.openclaw', 'openclaw.json');
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    const agents = config.agents && typeof config.agents === 'object' ? config.agents as Record<string, unknown> : {};
+    const defaults = agents.defaults && typeof agents.defaults === 'object' ? agents.defaults as Record<string, unknown> : {};
+    const model = defaults.model && typeof defaults.model === 'object' ? defaults.model as Record<string, unknown> : {};
+    const image = defaults.imageGenerationModel && typeof defaults.imageGenerationModel === 'object'
+      ? defaults.imageGenerationModel as Record<string, unknown>
+      : {};
+    const video = defaults.videoGenerationModel && typeof defaults.videoGenerationModel === 'object'
+      ? defaults.videoGenerationModel as Record<string, unknown>
+      : {};
+    const plugins = config.plugins && typeof config.plugins === 'object' ? config.plugins as Record<string, unknown> : {};
+    const allow = Array.isArray(plugins.allow) ? plugins.allow.filter((value): value is string => typeof value === 'string') : [];
+    expect(model.primary).toBe('openai/smart-latest');
+    expect(image.primary).toBeTruthy();
+    expect(video.primary).toBeTruthy();
+    expect(allow).toEqual(expect.arrayContaining(['clawx-openai-image', 'openai', 'uclaw-task-bridge']));
+    return {
+      defaultModel: model.primary,
+      thinking: defaults.thinkingDefault,
+      reasoning: defaults.reasoningDefault,
+      imageModel: image.primary,
+      videoModel: video.primary,
+      plugins: allow,
+    };
+  });
+
+  await runner.run('live.account.status', 'read managed account, activation, and relay readiness using sanitized fields', async () => {
+    const page = contextOrThrow(context).page;
+    const local = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status/local');
+    const remote = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status');
+    expect(local.authValid === true || remote.authValid === true).toBe(true);
+    expect(local.hasRelayToken === true || remote.hasRelayToken === true).toBe(true);
+    expect(remote.activationRequired).not.toBe(true);
+    return {
+      authValid: local.authValid === true || remote.authValid === true,
+      hasRelayToken: local.hasRelayToken === true || remote.hasRelayToken === true,
+      deviceActivated: local.deviceActivated === true || remote.deviceActivated === true,
+      activationRequired: remote.activationRequired === true,
+    };
+  });
+
+  await runner.run('live.billing.read-only', 'read recharge overview and order history without creating or paying an order', async () => {
+    const page = contextOrThrow(context).page;
+    const overview = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/topup/overview');
+    const orders = await hostApiJson<unknown>(page, '/api/junfeiai/topup/orders?page=1&pageSize=20');
+    const orderRecord = orders && typeof orders === 'object' && !Array.isArray(orders) ? orders as Record<string, unknown> : {};
+    const rows = Array.isArray(orders)
+      ? orders
+      : Array.isArray(orderRecord.items)
+        ? orderRecord.items
+        : Array.isArray(orderRecord.orders)
+          ? orderRecord.orders
+          : Array.isArray(orderRecord.data)
+            ? orderRecord.data
+            : [];
+    return {
+      overviewAvailable: Object.keys(overview).length > 0,
+      orderHistoryAvailable: Array.isArray(rows),
+      orderCount: rows.length,
+      paymentAttempted: false,
+    };
   });
 
   await runner.run('live.responses.text', 'send one real managed Responses turn', async () => {
@@ -425,6 +689,7 @@ test('runs the packaged UClaw regression matrix', async () => {
   const runner = new ScenarioRunner();
   let context: PackagedAppContext | null = null;
   let provider: DeterministicOpenAiServer | null = null;
+  let fallbackProvider: DeterministicOpenAiServer | null = null;
   const processOutputs: string[][] = [];
   runner.setPageProvider(() => context?.page ?? null);
 
@@ -480,8 +745,16 @@ test('runs the packaged UClaw regression matrix', async () => {
     await mkdir(path.dirname(toolTargetPath), { recursive: true });
     await seedGatewaySettings(appRoot, gatewayPort);
     if (profile === 'full') {
-      provider = new DeterministicOpenAiServer(toolTargetPath);
+      provider = new DeterministicOpenAiServer(toolTargetPath, {
+        name: 'primary',
+        alwaysFailScenarios: ['FALLBACK'],
+      });
+      fallbackProvider = new DeterministicOpenAiServer(toolTargetPath, {
+        name: 'fallback',
+        model: REGRESSION_FALLBACK_MODEL,
+      });
       await provider.start();
+      await fallbackProvider.start();
     }
 
     await runner.run('startup.fresh', 'launch the real packaged executable with a fresh portable profile', async () => {
@@ -621,6 +894,73 @@ test('runs the packaged UClaw regression matrix', async () => {
     );
 
     await runner.run(
+      'provider.fallback-runtime',
+      'route a real model turn to a secondary Provider after the primary returns persistent errors',
+      async () => {
+        const page = contextOrThrow(context).page;
+        const localPrimary = provider;
+        const localFallback = fallbackProvider;
+        if (!localPrimary || !localFallback || !regressionAccountId) {
+          throw new Error('Regression Provider prerequisites are unavailable.');
+        }
+        fallbackAccountId = await addCustomProvider(
+          page,
+          'UClaw Regression Fallback',
+          localFallback.baseUrl,
+          REGRESSION_FALLBACK_MODEL,
+        );
+        await hostApiJson(page, `/api/provider-accounts/${encodeURIComponent(regressionAccountId)}`, 'PUT', {
+          updates: { fallbackAccountIds: [fallbackAccountId] },
+        });
+        await waitForGatewayReady(page, 180_000);
+        const primaryAccount = await hostApiJson<{ fallbackAccountIds?: string[] }>(
+          page,
+          `/api/provider-accounts/${encodeURIComponent(regressionAccountId)}`,
+        );
+        expect(primaryAccount.fallbackAccountIds).toContain(fallbackAccountId);
+        const primaryBefore = providerRequestCount(localPrimary, 'FALLBACK');
+        const fallbackBefore = providerRequestCount(localFallback, 'FALLBACK');
+        await startNewChat(page);
+        const latencyMs = await sendChat(
+          page,
+          '[REGRESSION:FALLBACK] force the primary model to fail and use its configured fallback',
+          'UCLAW_REGRESSION_FALLBACK_OK',
+          240_000,
+        );
+        const primaryAttempts = providerRequestCount(localPrimary, 'FALLBACK') - primaryBefore;
+        const fallbackAttempts = providerRequestCount(localFallback, 'FALLBACK') - fallbackBefore;
+        expect(primaryAttempts).toBeGreaterThanOrEqual(1);
+        expect(fallbackAttempts).toBeGreaterThanOrEqual(1);
+        return { primaryAttempts, fallbackAttempts, latencyMs, fallbackAccountId };
+      },
+      { skip: profile !== 'full' ? 'Requires two deterministic local Providers.' : undefined },
+    );
+
+    await runner.run(
+      'provider.delete-fallback',
+      'delete the fallback Provider and remove stale runtime fallback references',
+      async () => {
+        if (!fallbackAccountId || !regressionAccountId) throw new Error('Fallback Provider account is unavailable.');
+        const page = contextOrThrow(context).page;
+        await page.getByTestId('sidebar-nav-models').click();
+        const card = page.getByTestId(`provider-card-${fallbackAccountId}`);
+        await expect(card).toBeVisible();
+        await card.hover();
+        await page.getByTestId(`provider-delete-${fallbackAccountId}`).click();
+        await expect(card).toHaveCount(0, { timeout: 60_000 });
+        const accounts = await hostApiJson<Array<{ id: string; fallbackAccountIds?: string[] }>>(page, '/api/provider-accounts');
+        expect(accounts.some((account) => account.id === fallbackAccountId)).toBe(false);
+        const primaryAccount = accounts.find((account) => account.id === regressionAccountId);
+        expect(primaryAccount?.fallbackAccountIds ?? []).not.toContain(fallbackAccountId);
+        await waitForGatewayReady(page, 180_000);
+        await startNewChat(page);
+        await sendChat(page, '[REGRESSION:RECOVERY] verify the primary after fallback deletion', 'UCLAW_REGRESSION_RECOVERY_OK');
+        return { deletedAccountId: fallbackAccountId, primaryAccountId: regressionAccountId };
+      },
+      { skip: profile !== 'full' ? 'Requires the deterministic fallback Provider.' : undefined },
+    );
+
+    await runner.run(
       'chat.simple',
       'complete a simple real Gateway/OpenClaw/model turn',
       async () => {
@@ -655,6 +995,50 @@ test('runs the packaged UClaw regression matrix', async () => {
         await sendChat(page, '[REGRESSION:MULTI_TURN] second turn', 'user_messages=2');
       },
       { skip: profile !== 'full' ? 'Requires the deterministic local Provider.' : undefined },
+    );
+
+    await runner.run(
+      'sessions.lifecycle',
+      'create, persist, rename, reload, and hard-delete a real chat session and transcript',
+      async () => {
+        const page = contextOrThrow(context).page;
+        const beforeKeys = new Set((await listGatewaySessions(page))
+          .map((session) => String(session.key ?? session.sessionKey ?? ''))
+          .filter(Boolean));
+        await startNewChat(page);
+        await sendChat(
+          page,
+          '[REGRESSION:SESSION_LIFECYCLE] create a uniquely persisted session',
+          'UCLAW_REGRESSION_SESSION_LIFECYCLE_OK',
+        );
+        let createdKey = '';
+        const deadline = Date.now() + 60_000;
+        while (Date.now() < deadline && !createdKey) {
+          const sessions = await listGatewaySessions(page);
+          createdKey = sessions
+            .map((session) => String(session.key ?? session.sessionKey ?? ''))
+            .find((key) => key.startsWith('agent:') && !beforeKeys.has(key)) ?? '';
+          if (!createdKey) await page.waitForTimeout(250);
+        }
+        expect(createdKey).toBeTruthy();
+        const transcriptPath = `/api/sessions/transcript?sessionKey=${encodeURIComponent(createdKey)}&limit=20`;
+        const transcript = await hostApiJson<{ messages?: unknown[] }>(page, transcriptPath);
+        expect(transcript.messages?.length ?? 0).toBeGreaterThan(0);
+        const label = `QA ${runId.slice(-10)}`;
+        await hostApiJson(page, '/api/sessions/rename', 'POST', { sessionKey: createdKey, label });
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await expect(page.getByTestId(`sidebar-session-${createdKey}`)).toContainText(label, { timeout: 60_000 });
+        await hostApiJson(page, '/api/sessions/delete', 'POST', { sessionKey: createdKey });
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await expect(page.getByTestId(`sidebar-session-${createdKey}`)).toHaveCount(0, { timeout: 60_000 });
+        expect((await listGatewaySessions(page)).some((session) => (
+          String(session.key ?? session.sessionKey ?? '') === createdKey
+        ))).toBe(false);
+        const missingTranscript = await rawHostApi(page, transcriptPath);
+        expect(missingTranscript.status).toBe(404);
+        return { sessionKey: createdKey, transcriptMessages: transcript.messages?.length ?? 0, deleted: true };
+      },
+      { skip: profile !== 'full' ? 'Requires a real model turn to persist the session.' : undefined },
     );
 
     for (const status of [429, 500]) {
@@ -751,6 +1135,73 @@ test('runs the packaged UClaw regression matrix', async () => {
       },
       { skip: profile !== 'full' ? 'Requires the deterministic local Provider and an available managed browser.' : undefined },
     );
+
+    const officeArtifacts = [
+      {
+        id: 'artifacts.docx',
+        title: 'generate a real DOCX through the packaged local-artifacts tool',
+        scenario: 'ARTIFACT_DOCX',
+        fileName: 'uclaw-regression.docx',
+        entry: /^word\/document\.xml$/u,
+        content: 'UCLAW_DOCX_CONTENT_OK',
+      },
+      {
+        id: 'artifacts.xlsx',
+        title: 'generate a real XLSX through the packaged local-artifacts tool',
+        scenario: 'ARTIFACT_XLSX',
+        fileName: 'uclaw-regression.xlsx',
+        entry: /^xl\/worksheets\/sheet1\.xml$/u,
+        content: 'UCLAW_XLSX_CONTENT_OK',
+      },
+      {
+        id: 'artifacts.pptx',
+        title: 'generate a real PPTX through the packaged local-artifacts tool',
+        scenario: 'ARTIFACT_PPTX',
+        fileName: 'uclaw-regression.pptx',
+        entry: /^ppt\/slides\/slide1\.xml$/u,
+        content: 'UCLAW_PPTX_CONTENT_OK',
+      },
+    ] as const;
+    for (const artifact of officeArtifacts) {
+      await runner.run(
+        artifact.id,
+        artifact.title,
+        async () => {
+          const page = contextOrThrow(context).page;
+          const filePath = path.join(
+            appRoot,
+            'UClawData',
+            'openclaw-home',
+            'workspace',
+            'uclaw-regression',
+            'office',
+            artifact.fileName,
+          );
+          await rm(filePath, { force: true });
+          await startNewChat(page);
+          await sendChat(
+            page,
+            `[REGRESSION:${artifact.scenario}] create the requested Office artifact`,
+            `UCLAW_REGRESSION_${artifact.scenario}_OK`,
+            240_000,
+          );
+          await expect(page.getByTestId('chat-generated-file').filter({ hasText: artifact.fileName })).toBeVisible({ timeout: 60_000 });
+          const packageEvidence = await verifyOfficePackage(filePath, artifact.entry, artifact.content);
+          const evidenceDir = path.join(reportDir, 'evidence', 'office');
+          await mkdir(evidenceDir, { recursive: true });
+          const evidenceFile = path.join(evidenceDir, artifact.fileName);
+          await writeFile(evidenceFile, await readFile(filePath));
+          const screenshot = path.join(evidenceDir, `${artifact.id.replace('artifacts.', '')}-ui.png`);
+          await page.screenshot({ path: screenshot, fullPage: true });
+          return {
+            file: path.relative(reportDir, evidenceFile),
+            screenshot: path.relative(reportDir, screenshot),
+            ...packageEvidence,
+          };
+        },
+        { skip: profile !== 'full' ? 'Requires the deterministic local Provider and packaged artifact plugin.' : undefined },
+      );
+    }
 
     await runner.run(
       'chat.http-401',
@@ -869,6 +1320,66 @@ test('runs the packaged UClaw regression matrix', async () => {
       const afterDelete = await hostApiJson<Array<{ id: string }>>(page, '/api/cron/jobs');
       expect(afterDelete.some((job) => job.id === jobId)).toBe(false);
       return { jobId };
+    });
+
+    await runner.run('skills.local-config', 'discover packaged Skills, persist enablement, and expose enabled quick access', async () => {
+      const page = contextOrThrow(context).page;
+      const initial = await hostApiJson<{ skills?: Array<{
+        id?: string;
+        name?: string;
+        enabled?: boolean;
+        isCore?: boolean;
+        source?: string;
+      }> }>(page, '/api/skills/local');
+      const skills = initial.skills ?? [];
+      expect(skills.length).toBeGreaterThan(0);
+      const target = skills.find((skill) => skill.id && !skill.isCore) ?? skills.find((skill) => skill.id);
+      if (!target?.id) throw new Error('No configurable packaged Skill was discovered.');
+      const disabled = await hostApiJson<{ success?: boolean }>(page, '/api/skills/config', 'PUT', {
+        skillKey: target.id,
+        enabled: false,
+      });
+      expect(disabled.success).toBe(true);
+      const disabledConfigs = await hostApiJson<Record<string, { enabled?: boolean }>>(page, '/api/skills/configs');
+      expect(disabledConfigs[target.id]?.enabled).toBe(false);
+      const afterDisable = await hostApiJson<{ skills?: Array<{ id?: string; enabled?: boolean }> }>(page, '/api/skills/local');
+      expect(afterDisable.skills?.find((skill) => skill.id === target.id)?.enabled).toBe(false);
+      const restored = await hostApiJson<{ success?: boolean }>(page, '/api/skills/config', 'PUT', {
+        skillKey: target.id,
+        enabled: true,
+      });
+      expect(restored.success).toBe(true);
+      const quickAccess = await hostApiJson<{ skills?: Array<{ id?: string; name?: string; slug?: string }> }>(
+        page,
+        '/api/skills/quick-access',
+        'POST',
+        {},
+      );
+      expect(quickAccess.skills?.some((skill) => (
+        skill.id === target.id || skill.slug === target.id || skill.name === target.name
+      ))).toBe(true);
+      await page.getByTestId('sidebar-nav-skills').click();
+      await expect(page.getByTestId('skills-page')).toBeVisible();
+      return {
+        discovered: skills.length,
+        configuredSkill: target.id,
+        source: target.source,
+        quickAccessCount: quickAccess.skills?.length ?? 0,
+        restored: true,
+      };
+    });
+
+    await runner.run('skills.marketplace-capability', 'probe packaged Skill marketplace capability without installing from the network', async () => {
+      const page = contextOrThrow(context).page;
+      const response = await hostApiJson<{ success?: boolean; capability?: Record<string, unknown> }>(
+        page,
+        '/api/skills/marketplace/capability',
+      );
+      expect(response.success).toBe(true);
+      return {
+        capabilityAvailable: Boolean(response.capability),
+        networkInstallAttempted: false,
+      };
     });
 
     let renderedVideoPath = '';
@@ -992,6 +1503,69 @@ test('runs the packaged UClaw regression matrix', async () => {
       await expect(page.getByTestId('chat-video-duration')).toBeVisible();
     });
 
+    await runner.run('diagnostics.logs', 'read packaged runtime logs and verify credential redaction', async () => {
+      const page = contextOrThrow(context).page;
+      const logDir = await hostApiJson<{ dir?: string | null }>(page, '/api/logs/dir');
+      const logFiles = await hostApiJson<{ files?: unknown[] }>(page, '/api/logs/files');
+      const logs = await hostApiJson<{ content?: string }>(page, '/api/logs?tailLines=500');
+      const content = logs.content ?? '';
+      expect(logDir.dir).toBeTruthy();
+      expect(path.resolve(logDir.dir!)).toBe(path.resolve(osHome, 'AppData', 'Local', 'UClawRuntime', 'logs'));
+      expect(content).not.toContain(REGRESSION_API_KEY);
+      expect(content).not.toMatch(/authorization\s*[:=]\s*bearer\s+(?!\[REDACTED\])\S+/iu);
+      return {
+        logDirectory: logDir.dir,
+        listedFiles: logFiles.files?.length ?? 0,
+        inspectedChars: content.length,
+      };
+    });
+
+    await runner.run('diagnostics.doctor', 'run the bundled OpenClaw Doctor through the real Host API', async () => {
+      const page = contextOrThrow(context).page;
+      const result = await hostApiJson<{
+        success?: boolean;
+        exitCode?: number | null;
+        stdout?: string;
+        stderr?: string;
+        command?: string;
+        cwd?: string;
+        durationMs?: number;
+        timedOut?: boolean;
+        error?: string;
+      }>(page, '/api/app/openclaw-doctor', 'POST', { mode: 'diagnose' });
+      expect(result.command).toBe('openclaw doctor');
+      expect(result.timedOut).not.toBe(true);
+      expect(typeof result.exitCode).toBe('number');
+      expect(result.success, result.error || result.stderr).toBe(true);
+      const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+      expect(output).not.toContain(REGRESSION_API_KEY);
+      return {
+        success: result.success,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        workingDirectory: result.cwd,
+        outputChars: output.length,
+      };
+    });
+
+    await runner.run('diagnostics.control-ui', 'verify Control UI reachability while stripping its one-time token before reporting', async () => {
+      const page = contextOrThrow(context).page;
+      const info = await sanitizedControlUiInfo(page);
+      expect(info.success).toBe(true);
+      expect(info.tokenInFragment).toBe(true);
+      expect(info.sanitizedUrl).not.toMatch(/[?&#](?:token|key|signature|sig)=/iu);
+      const response = await fetch(info.sanitizedUrl, { redirect: 'follow' });
+      expect(response.ok).toBe(true);
+      const html = await response.text();
+      expect(html.length).toBeGreaterThan(100);
+      return {
+        port: info.port,
+        tokenTransport: 'fragment-stripped-before-report',
+        sanitizedUrl: info.sanitizedUrl,
+        htmlBytes: Buffer.byteLength(html),
+      };
+    });
+
     await runner.run(
       'desktop.observe',
       'capture and verify one managed desktop screenshot',
@@ -1080,16 +1654,20 @@ test('runs the packaged UClaw regression matrix', async () => {
       return { inspectedChars: output.length };
     });
 
-    if (provider) {
+    if (provider || fallbackProvider) {
       await writeFile(
         path.join(reportDir, 'deterministic-provider-requests.json'),
-        `${JSON.stringify(provider.requests, null, 2)}\n`,
+        `${JSON.stringify([
+          ...(provider?.requests ?? []),
+          ...(fallbackProvider?.requests ?? []),
+        ], null, 2)}\n`,
         'utf8',
       );
     }
   } finally {
     await closePackagedApp(context);
     await provider?.close();
+    await fallbackProvider?.close();
     await runner.finish();
   }
 });

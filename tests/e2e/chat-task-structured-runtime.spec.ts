@@ -393,13 +393,13 @@ test.describe('structured OpenClaw task projection', () => {
     });
     const events = [...partialEvents, ...completedEvents];
     const steps = deriveTaskSteps(events, 'completed');
-    const partialIssue = steps.find((step) => step.id === 'gate-issue:issue:task:task-recovered:partial');
+    const recoveredTask = steps.find((step) => step.id === 'plan-step:task:task-recovered');
     const partialArtifact = steps.find((step) => step.id === 'artifact:partial-evidence');
 
+    expect(recoveredTask?.status).toBe('completed');
     expect(partialArtifact?.status).toBe('completed');
     expect(partialArtifact?.parentId).toBe('plan-step:task:task-recovered');
-    expect(partialIssue?.taskId).toBe('task-recovered');
-    expect(partialIssue?.status).toBe('completed');
+    expect(steps.filter((step) => step.taskId === 'task-recovered' && step.status === 'blocked')).toHaveLength(0);
   });
 
   test('only projects explicit output artifacts and never fabricates availability verification', () => {
@@ -576,6 +576,7 @@ test.describe('structured OpenClaw task projection', () => {
 
       const progress = page.getByTestId('chat-run-progress');
       await expect(progress).toBeVisible({ timeout: 30_000 });
+      await progress.getByTestId('chat-run-progress-toggle').click();
       await expect(progress.getByTestId('chat-run-progress-action')).toHaveCount(2);
       await expect(progress).toContainText(/已完成：网页搜索|Completed: Web search/u);
       await expect(progress).toContainText(/已提交：视频生成|Submitted: Video generation/u);
@@ -632,6 +633,9 @@ test.describe('structured OpenClaw task projection', () => {
       }]);
 
       await expect(progress).toContainText('任务执行失败');
+      if ((await progress.getAttribute('data-expanded')) === 'false') {
+        await progress.getByTestId('chat-run-progress-toggle').click();
+      }
       await expect(progress).toContainText(/执行失败：视频生成|Failed: Video generation/u);
       await expect(progress).toContainText('HTTP 503');
       await expect(progress).not.toContainText('处理完成');
@@ -650,10 +654,13 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 40,
       }]);
 
-      await expect(progress).not.toContainText('任务执行失败');
-      await expect(graph).toHaveAttribute('data-compact-status', 'completed');
+      await expect(progress).toContainText('任务执行失败');
+      await expect(graph).toHaveAttribute('data-compact-status', 'error');
       await expect(page.locator('[data-testid="chat-execution-step"][data-task-id="video-task-1"]'))
         .toHaveAttribute('data-step-status', 'error');
+      if ((await progress.getAttribute('data-expanded')) === 'false') {
+        await progress.getByTestId('chat-run-progress-toggle').click();
+      }
       await expect(progress).toContainText('HTTP 503');
     } finally {
       await closeElectronApp(app);
@@ -814,6 +821,7 @@ test.describe('structured OpenClaw task projection', () => {
       const taskRow = page.locator('[data-testid="chat-execution-step"][data-task-id="cold-video-task"]');
       await expect(taskRow).toHaveAttribute('data-step-status', 'error');
       await expect(taskRow).toContainText('生成产品视频');
+      await page.getByTestId('chat-run-progress-toggle').click();
       await expect(page.getByTestId('chat-run-progress')).toContainText('后台任务恢复后确认生成失败');
     } finally {
       await closeElectronApp(app);

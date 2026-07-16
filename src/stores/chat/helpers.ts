@@ -1621,6 +1621,10 @@ function messageHasRenderableMedia(msg: { content?: unknown; _attachedFiles?: un
   return (msg.content as ContentBlock[]).some((block) => isUserVisibleMediaBlockType(block.type));
 }
 
+function isInternalTaskCompletionMessage(msg: { content?: unknown; text?: unknown }): boolean {
+  return /^\[Internal task completion event\]/iu.test(getMessageTextForFilter(msg).trim());
+}
+
 /** True for internal plumbing messages that should never be shown in the UI. */
 function isInternalMessage(msg: {
   role?: unknown;
@@ -1635,6 +1639,7 @@ function isInternalMessage(msg: {
 }): boolean {
   if (msg.role === 'system') return true;
   if (hasInternalProvenance(msg)) return true;
+  if (isInternalTaskCompletionMessage(msg)) return true;
   const text = getMessageTextForFilter(msg);
   if (msg.role === 'assistant') {
     if (isInternalAssistantReplyText(text)) return true;
@@ -1674,6 +1679,7 @@ function shouldDropMessageFromHistory(msg: { role?: unknown; content?: unknown; 
   if (hasInternalProvenance(msg)) return true;
   if (isToolResultRole(msg.role)) return true;
   if (messageHasToolUse(msg)) return false;
+  if (isInternalTaskCompletionMessage(msg)) return false;
   return isInternalMessage(msg);
 }
 

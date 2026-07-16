@@ -92,7 +92,7 @@ test.describe('ClawX chat question directory', () => {
 
       const directory = page.getByTestId('chat-question-directory');
       await expect(directory).toBeVisible({ timeout: 30_000 });
-      await expect(directory).toContainText('Question directory');
+      await expect(directory.getByRole('heading')).toBeVisible();
       await expect(directory).toContainText('First question: summarize the market opening.');
       await expect(directory).toContainText('Fourth question: prepare the final action plan.');
       await expect(directory.locator('button')).toHaveCount(4);

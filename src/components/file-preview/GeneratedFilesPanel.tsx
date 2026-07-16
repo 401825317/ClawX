@@ -58,6 +58,7 @@ export function GeneratedFilesPanel({
               <button
                 key={`${file.filePath}-${file.lastSeenIndex}`}
                 type="button"
+                data-testid="chat-generated-file"
                 onClick={() => revealInFileManager(file)}
                 className={cn(
                   'group inline-flex min-w-0 max-w-full items-center gap-2 rounded-full border border-black/8 bg-black/[0.035] px-3.5 py-2 text-left transition-colors',
@@ -84,6 +85,7 @@ export function GeneratedFilesPanel({
             <button
               key={`${file.filePath}-${file.lastSeenIndex}`}
               type="button"
+              data-testid="chat-generated-file"
               disabled={!clickable}
               onClick={() => {
                 if (clickable) onOpen(file);

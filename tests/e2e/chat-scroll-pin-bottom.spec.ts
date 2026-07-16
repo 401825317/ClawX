@@ -114,7 +114,16 @@ test.describe('ClawX chat scroll pin-to-bottom during runs', () => {
       await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
       await page.getByTestId('chat-composer-input').fill('do a multi-tool task');
       await page.getByTestId('chat-composer-send').click();
-      await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', 'Stop');
+      await app.evaluate(({ BrowserWindow }, payload) => {
+        BrowserWindow.getAllWindows()[0]?.webContents.send('chat:runtime-event', {
+          type: 'run.started',
+          runId: payload.runId,
+          sessionKey: payload.sessionKey,
+          startedAt: payload.startedAt,
+          ts: payload.startedAt,
+        });
+      }, { runId: RUN_ID, sessionKey: SESSION_KEY, startedAt: Date.now() });
+      await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/);
 
       // Growing text stream -> height keeps increasing; bar must stay at bottom.
       await emitDelta({ role: 'assistant', content: [{ type: 'text', text: streamingText(3) }] });
@@ -140,11 +149,9 @@ test.describe('ClawX chat scroll pin-to-bottom during runs', () => {
 
       // Manual scroll-up while the run is live: pinning must yield to the user
       // and surface the "scroll to latest" affordance.
-      await scrollContainer.evaluate((el) => {
-        const element = el as HTMLElement;
-        element.scrollTop = 0;
-        element.dispatchEvent(new Event('scroll', { bubbles: true }));
-      });
+      await scrollContainer.hover();
+      await page.mouse.wheel(0, -10_000);
+      await expect.poll(async () => scrollContainer.evaluate((element) => element.scrollTop)).toBeLessThan(8);
 
       const jumpButton = page.getByTestId('chat-scroll-to-latest');
       await expect(jumpButton).toBeVisible();

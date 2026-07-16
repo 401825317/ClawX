@@ -5,6 +5,7 @@ scenario: gateway-backend-communication
 taskType: runtime-bridge
 intent: Exercise every distributable Windows USB package through the real Electron, Host API, Gateway, OpenClaw, Provider, tool, Agent, Cron, and media runtime paths before release.
 touchedAreas:
+  - .env.e2e
   - package.json
   - electron-builder.yml
   - electron/gateway/**
@@ -12,7 +13,17 @@ touchedAreas:
   - electron/utils/openclaw-auth.ts
   - scripts/build-usb-release.mjs
   - scripts/windows-support/**
+  - src/App.tsx
+  - src/components/channels/**
+  - src/components/file-preview/**
+  - src/components/settings/**
+  - src/components/ui/**
+  - src/lib/generated-files.ts
+  - src/pages/Channels/**
+  - src/pages/Chat/**
+  - tests/e2e/**
   - tests/packaged-e2e/**
+  - playwright.config.ts
   - playwright.packaged.config.ts
   - PACKAGED_REGRESSION.md
   - harness/specs/scenarios/packaged-windows-regression.md
@@ -39,10 +50,11 @@ requiredTests:
 acceptance:
   - `package:win:usb` requires a clean source tree, creates ZIP and companion metadata, then runs the `full` packaged regression as a release gate.
   - Core coverage validates package identity, SHA-512, static self-check, empty portable state, first launch, navigation, Gateway stop/start, port conflict, single instance, relaunch persistence, and managed startup without auth.
-  - Full coverage uses a deterministic local Provider through the real UI and runtime synchronization for chat, transient retries, malformed streaming, cancellation, 401 credential recovery, file and browser tools, Agent, Cron, and FFmpeg media workflows.
+  - Full coverage uses two deterministic local Providers through the real UI and runtime synchronization for fallback/deletion, session lifecycle, chat, transient retries, malformed streaming, cancellation, 401 credential recovery, file/browser/DOCX/XLSX/PPTX tools, Skills configuration, Doctor/log/Control UI diagnostics, Agent, Cron, and FFmpeg media workflows.
   - Chat and error scenarios require both Renderer state and a matching recorded Provider request so cooldowns cannot create false passes.
   - Child processes use isolated HOME, APPDATA, LOCALAPPDATA, TEMP, ports, and portable data; inherited UCLAW, CLAWX, OPENCLAW, token, key, password, and secret environment variables are removed.
-  - Live managed Responses, image, video, desktop capture, and external delivery remain explicit opt-in gates with dedicated test data and destinations.
+  - Live login is accepted only from no-echo stdin or an explicitly supplied isolated profile; managed status, recharge overview/order history, Responses, image, video, desktop capture, and external delivery remain explicit opt-in gates with dedicated test data and destinations, and automated payment is forbidden.
+  - Every report classifies evidence as SOURCE_E2E, PACKAGED_REAL, LIVE_REQUIRED, STATIC_ONLY, or NOT_COVERED; mocks and unexecuted conditional capabilities are never counted as packaged passes.
 docs:
   required: true
 ---

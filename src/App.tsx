@@ -102,12 +102,14 @@ class ErrorBoundary extends Component<
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
-  const skipSetupForE2E = typeof window !== 'undefined'
+  const setupBypassRequestedForE2E = typeof window !== 'undefined'
     && new URLSearchParams(window.location.search).get('e2eSkipSetup') === '1';
   const initSettings = useSettingsStore((state) => state.init);
   const theme = useSettingsStore((state) => state.theme);
   const language = useSettingsStore((state) => state.language);
   const setupComplete = useSettingsStore((state) => state.setupComplete);
+  const skipSetupForE2E = setupBypassRequestedForE2E
+    || (setupComplete && import.meta.env.VITE_ALLOW_SETUP_SKIP === '1');
   const settingsInitialized = useSettingsStore((state) => state.initialized);
   const devModeUnlocked = useSettingsStore((state) => state.devModeUnlocked);
   const initGateway = useGatewayStore((state) => state.init);

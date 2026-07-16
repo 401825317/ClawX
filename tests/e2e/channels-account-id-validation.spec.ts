@@ -74,15 +74,15 @@ test.describe('Channels account ID validation', () => {
     await expect(page.getByTestId('channels-page')).toBeVisible();
     await expect(page.getByText('Feishu / Lark')).toBeVisible();
 
-    await page.getByRole('button', { name: /Add Account|account\.add/i }).click();
-    await expect(page.getByText(/Configure Feishu \/ Lark|dialog\.configureTitle/)).toBeVisible();
+    await page.getByTestId('channels-add-account-feishu').click();
+    await expect(page.getByTestId('channel-config-modal')).toBeVisible();
 
     await page.locator('#account-id').fill('测试账号');
     await page.locator('#appId').fill('cli_test');
     await page.locator('#appSecret').fill('secret_test');
 
-    await page.getByRole('button', { name: /Save & Connect|dialog\.saveAndConnect/ }).click();
-    await expect(page.getByText(/account\.invalidCanonicalId|must use lowercase letters/i).first()).toBeVisible();
+    await page.getByTestId('channel-config-submit').click();
+    await expect(page.getByTestId('channel-account-id-error')).toBeVisible();
 
     const saveCalls = await electronApp.evaluate(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

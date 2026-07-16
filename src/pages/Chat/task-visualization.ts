@@ -9,6 +9,7 @@ import {
 import type { TaskStep } from './runtime-task-visualization';
 import { isInternalMessage, messageHasDeliverableContent } from '@/stores/chat/helpers';
 import type { RawMessage, ToolStatus } from '@/stores/chat';
+import { stringifyRuntimeDisplayValue } from '@/lib/runtime-display-sanitizer';
 
 export { deriveRuntimeTaskSteps, isVisibleRuntimePlanStep } from './runtime-task-visualization';
 export type { RuntimePlanStep, TaskStep, TaskStepStatus } from './runtime-task-visualization';
@@ -187,6 +188,12 @@ function normalizeText(text: string | null | undefined): string | undefined {
   const normalized = text.replace(/[ \t]+/g, ' ').trim();
   if (!normalized) return undefined;
   return normalized;
+}
+
+function toolInputDetail(input: unknown): string | undefined {
+  const rendered = stringifyRuntimeDisplayValue(input)?.trim();
+  if (!rendered) return undefined;
+  return rendered.length > 4000 ? `${rendered.slice(0, 4000)}...` : rendered;
 }
 
 function makeToolId(prefix: string, name: string, index: number): string {
@@ -399,7 +406,7 @@ export function deriveTaskSteps({
         label: tool.name,
         status: 'completed',
         kind: 'tool',
-        detail: undefined,
+        detail: toolInputDetail(tool.input),
         depth: 1,
         url,
       });
@@ -459,7 +466,7 @@ export function deriveTaskSteps({
         label: tool.name,
         status: 'running',
         kind: 'tool',
-        detail: undefined,
+        detail: toolInputDetail(tool.input),
         depth: 1,
         url,
       });

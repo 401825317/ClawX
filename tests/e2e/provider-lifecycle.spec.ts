@@ -6,16 +6,28 @@ const TEST_PROVIDER_LABEL = 'Moonshot E2E';
 async function seedTestProvider(page: Parameters<typeof completeSetup>[0]): Promise<void> {
   await page.evaluate(async ({ providerId, providerLabel }) => {
     const now = new Date().toISOString();
-    await window.electron.ipcRenderer.invoke('provider:save', {
-      id: providerId,
-      name: providerLabel,
-      type: 'moonshot',
-      baseUrl: 'https://api.moonshot.cn/v1',
-      model: 'kimi-k2.6',
-      enabled: true,
-      createdAt: now,
-      updatedAt: now,
+    const response = await window.electron.ipcRenderer.invoke('hostapi:fetch', {
+      path: '/api/provider-accounts',
+      method: 'POST',
+      body: JSON.stringify({
+        account: {
+          id: providerId,
+          vendorId: 'moonshot',
+          label: providerLabel,
+          authMode: 'api_key',
+          baseUrl: 'https://api.moonshot.cn/v1',
+          model: 'kimi-k2.6',
+          enabled: true,
+          isDefault: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+        apiKey: 'sk-e2e-provider-lifecycle',
+      }),
     });
+    if (!response?.data?.ok || response?.data?.json?.success === false) {
+      throw new Error(`Failed to seed provider account: ${String(response?.data?.json?.error || response?.data?.status)}`);
+    }
   }, { providerId: TEST_PROVIDER_ID, providerLabel: TEST_PROVIDER_LABEL });
 }
 
@@ -23,6 +35,8 @@ test.describe('ClawX provider lifecycle', () => {
   test('shows a saved provider and removes it cleanly after deletion', async ({ page }) => {
     await completeSetup(page);
     await seedTestProvider(page);
+    await page.reload();
+    await expect(page.getByTestId('main-layout')).toBeVisible();
 
     await page.getByTestId('sidebar-nav-models').click();
     await expect(page.getByTestId('providers-settings')).toBeVisible();
@@ -38,6 +52,8 @@ test.describe('ClawX provider lifecycle', () => {
   test('does not redisplay a deleted provider after relaunch', async ({ electronApp, launchElectronApp, page }) => {
     await completeSetup(page);
     await seedTestProvider(page);
+    await page.reload();
+    await expect(page.getByTestId('main-layout')).toBeVisible();
 
     await page.getByTestId('sidebar-nav-models').click();
     await expect(page.getByTestId(`provider-card-${TEST_PROVIDER_ID}`)).toContainText(TEST_PROVIDER_LABEL);
@@ -73,17 +89,15 @@ test.describe('ClawX provider lifecycle', () => {
     await expect(page.getByTestId('add-provider-dialog')).toBeVisible();
 
     await page.getByTestId('add-provider-type-openai').click();
-    await expect(page.getByRole('button', { name: 'OAuth Login' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'API Key' })).toBeVisible();
+    await expect(page.getByTestId('add-provider-auth-mode-oauth')).toBeVisible();
+    await expect(page.getByTestId('add-provider-auth-mode-apikey')).toBeVisible();
 
-    await page.getByRole('button', { name: 'OAuth Login' }).click();
-    await expect(page.getByRole('button', { name: 'Login with Browser' })).toBeVisible();
+    await page.getByTestId('add-provider-auth-mode-oauth').click();
+    await expect(page.getByTestId('add-provider-oauth-login-button')).toBeVisible();
     await expect(page.getByTestId('add-provider-api-key-input')).toHaveCount(0);
   });
 
   test('trims whitespace before validating and saving a custom provider key', async ({ electronApp, page }) => {
-    await completeSetup(page);
-
     await electronApp.evaluate(async ({ app: _app }) => {
       const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
@@ -165,6 +179,8 @@ test.describe('ClawX provider lifecycle', () => {
       });
     });
 
+    await completeSetup(page);
+
     await page.getByTestId('sidebar-nav-models').click();
     await expect(page.getByTestId('providers-settings')).toBeVisible();
 
@@ -178,12 +194,10 @@ test.describe('ClawX provider lifecycle', () => {
     await page.getByTestId('add-provider-model-id-input').fill('local-model');
     await page.getByTestId('add-provider-submit-button').click();
 
-    await expect(page.getByTestId('provider-card-custom')).toContainText('LM Studio Local');
+    await expect(page.locator('[data-testid^="provider-card-custom"]', { hasText: 'LM Studio Local' })).toBeVisible();
   });
 
   test('edit form validates the new API key inline before saving (single button)', async ({ electronApp, page }) => {
-    await completeSetup(page);
-
     await electronApp.evaluate(async ({ app: _app }) => {
       const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
@@ -240,6 +254,8 @@ test.describe('ClawX provider lifecycle', () => {
         return respond({});
       });
     });
+
+    await completeSetup(page);
 
     await page.getByTestId('sidebar-nav-models').click();
     await expect(page.getByTestId('providers-settings')).toBeVisible();

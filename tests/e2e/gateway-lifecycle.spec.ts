@@ -160,7 +160,7 @@ test.describe('ClawX gateway lifecycle resilience', () => {
 
     await completeSetup(page);
     await page.getByTestId('sidebar-new-chat').click();
-    await expect(page.getByText(/gateway starting \| port: 18789/i)).toBeVisible();
+    await expect(page.getByTestId('chat-composer-input')).toBeDisabled();
     await expect(page.getByText('history after ready')).toHaveCount(0);
 
     await electronApp.evaluate(({ BrowserWindow }) => {
@@ -175,7 +175,7 @@ test.describe('ClawX gateway lifecycle resilience', () => {
     });
 
     await expect(page.getByText('history after ready')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/gateway connected \| port: 18789/i)).toBeVisible();
+    await expect(page.getByTestId('chat-composer-input')).toBeEnabled();
   });
 
   test('does not show a sent chat bubble when fresh Gateway status is disconnected', async ({ electronApp, page }) => {
