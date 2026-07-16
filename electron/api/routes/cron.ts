@@ -20,7 +20,13 @@ interface GatewayCronJob {
   createdAtMs: number;
   updatedAtMs: number;
   schedule: { kind: string; expr?: string; everyMs?: number; at?: string; tz?: string };
-  payload: { kind: string; message?: string; text?: string };
+  payload: {
+    kind: string;
+    message?: string;
+    text?: string;
+    timeoutSeconds?: number;
+    [key: string]: unknown;
+  };
   delivery?: { mode: string; channel?: string; to?: string; accountId?: string };
   sessionTarget?: string;
   state: {
@@ -445,6 +451,10 @@ function buildCronUpdatePatch(input: Record<string, unknown>): Record<string, un
 
 function transformCronJob(job: GatewayCronJob) {
   const message = job.payload?.message || job.payload?.text || '';
+  const timeoutSeconds = typeof job.payload?.timeoutSeconds === 'number'
+    && Number.isFinite(job.payload.timeoutSeconds)
+    ? job.payload.timeoutSeconds
+    : undefined;
   const gatewayDelivery = normalizeCronDelivery(job.delivery);
   const channelType = gatewayDelivery.channel ? toUiChannelType(gatewayDelivery.channel) : undefined;
   const delivery = channelType
@@ -489,6 +499,7 @@ function transformCronJob(job: GatewayCronJob) {
     lastRun,
     nextRun,
     agentId,
+    ...(timeoutSeconds !== undefined ? { timeoutSeconds } : {}),
   };
 }
 
@@ -748,6 +759,38 @@ export async function handleCronRoutes(
       });
       invalidateCronJobsRouteCache();
       sendJson(res, 200, result && typeof result === 'object' ? transformCronJob(result as GatewayCronJob) : result);
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname.startsWith('/api/cron/jobs/') && url.pathname.endsWith('/clear-timeout') && req.method === 'POST') {
+    try {
+      const routePrefix = '/api/cron/jobs/';
+      const routeSuffix = '/clear-timeout';
+      const encodedId = url.pathname.slice(routePrefix.length, -routeSuffix.length);
+      const id = decodeURIComponent(encodedId);
+      if (!id) {
+        sendJson(res, 400, { success: false, error: 'cron job id is required' });
+        return true;
+      }
+
+      const currentResult = await ctx.gatewayManager.rpc('cron.get', { id }, 8_000) as GatewayCronJob | { job?: GatewayCronJob };
+      const current = 'job' in currentResult && currentResult.job ? currentResult.job : currentResult;
+      const currentPayload = current?.payload && typeof current.payload === 'object'
+        ? current.payload as Record<string, unknown>
+        : undefined;
+      if (!currentPayload) {
+        sendJson(res, 404, { success: false, error: 'cron job payload was not found' });
+        return true;
+      }
+
+      const payload = { ...currentPayload };
+      delete payload.timeoutSeconds;
+      await ctx.gatewayManager.rpc('cron.update', { id, patch: { payload } }, 8_000);
+      invalidateCronJobsRouteCache();
+      sendJson(res, 200, { success: true });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,9 @@ import {
   patchOpenClawBrowserLifecycleContent,
   patchOpenClawBrowserLifecycleRuntime,
 } from './openclaw-browser-lifecycle-patch.mjs';
+
+const installedOpenClawDistDir = join(process.cwd(), 'node_modules', 'openclaw', 'dist');
+const hasInstalledOpenClawRuntime = existsSync(installedOpenClawDistDir);
 
 const lifecycleFixture = `
 function createProfileAvailability({ opts, profile, state, getProfileState, setProfileRunning }) {
@@ -150,24 +153,26 @@ test('runtime patch fails closed when the availability runtime is missing', () =
   );
 });
 
-test('current installed OpenClaw runtime still matches the lifecycle patch anchors', () => {
+test('current installed OpenClaw runtime still matches the lifecycle patch anchors', { skip: !hasInstalledOpenClawRuntime }, () => {
   const result = patchOpenClawBrowserLifecycleRuntime(
-    join(process.cwd(), 'node_modules', 'openclaw', 'dist'),
+    installedOpenClawDistDir,
     { dryRun: true, logger: { log() {} } },
   );
   assert.equal(result.patchedFiles + result.alreadyPatchedFiles, 1);
 });
 
-test('the transformed installed OpenClaw runtime remains syntactically valid', () => {
-  const sourceDistDir = join(process.cwd(), 'node_modules', 'openclaw', 'dist');
+test('the transformed installed OpenClaw runtime remains syntactically valid', { skip: !hasInstalledOpenClawRuntime }, () => {
   const source = patchOpenClawBrowserLifecycleRuntime(
-    sourceDistDir,
+    installedOpenClawDistDir,
     { dryRun: true, logger: { log() {} } },
   ).browserLifecycleFile;
   const distDir = mkdtempSync(join(tmpdir(), 'uclaw-browser-lifecycle-parse-'));
   const target = join(distDir, 'server-context.js');
   writeFileSync(target, readFileSync(source, 'utf8'), 'utf8');
   const result = patchOpenClawBrowserLifecycleRuntime(distDir, { logger: { log() {} } });
-  assert.equal(result.patchedFiles, 1);
+  // The installed bundle may already have been patched by postinstall/predev.
+  // Copying it into the fixture must still prove that the transformed runtime
+  // is valid JavaScript without making this test order-dependent.
+  assert.equal(result.patchedFiles + result.alreadyPatchedFiles, 1);
   execFileSync(process.execPath, ['--check', target], { stdio: 'pipe' });
 });

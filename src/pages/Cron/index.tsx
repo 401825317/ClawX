@@ -21,6 +21,7 @@ import {
   Pause,
   ChevronDown,
   Bot,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -176,6 +177,20 @@ function estimateNextRun(scheduleExpr: string): string | null {
   }
 
   return null;
+}
+
+function formatExecutionTimeout(timeoutSeconds: number): string {
+  if (timeoutSeconds < 60) return `${timeoutSeconds} 秒`;
+
+  const minutes = Math.floor(timeoutSeconds / 60);
+  const seconds = timeoutSeconds % 60;
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`;
 }
 
 interface DeliveryChannelAccount {
@@ -707,11 +722,13 @@ interface CronJobCardProps {
   onEdit: () => void;
   onDelete: () => void;
   onTrigger: () => Promise<void>;
+  onClearTimeout: () => Promise<void>;
 }
 
-function CronJobCard({ job, deliveryAccountName, onToggle, onEdit, onDelete, onTrigger }: CronJobCardProps) {
+function CronJobCard({ job, deliveryAccountName, onToggle, onEdit, onDelete, onTrigger, onClearTimeout }: CronJobCardProps) {
   const { t } = useTranslation('cron');
   const [triggering, setTriggering] = useState(false);
+  const [clearingTimeout, setClearingTimeout] = useState(false);
   const agents = useAgentsStore((s) => s.agents);
   const agentName = agents.find((a) => a.id === job.agentId)?.name ?? job.agentId;
 
@@ -734,11 +751,45 @@ function CronJobCard({ job, deliveryAccountName, onToggle, onEdit, onDelete, onT
     onDelete();
   };
 
+  const handleClearTimeout = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setClearingTimeout(true);
+    try {
+      await onClearTimeout();
+      toast.success(t('toast.timeoutCleared', '已恢复自动时限'));
+    } catch (error) {
+      console.error('Failed to clear cron execution timeout:', error);
+      toast.error(t('toast.failedClearTimeout', '恢复自动时限失败'));
+    } finally {
+      setClearingTimeout(false);
+    }
+  };
+
   const deliveryChannel = typeof job.delivery?.channel === 'string' ? job.delivery.channel : '';
   const deliveryLabel = deliveryChannel ? getChannelDisplayName(deliveryChannel) : '';
   const deliveryIcon = deliveryChannel && isKnownChannelType(deliveryChannel)
     ? CHANNEL_ICONS[deliveryChannel]
     : null;
+  const timeoutSeconds = typeof job.timeoutSeconds === 'number' && Number.isFinite(job.timeoutSeconds) && job.timeoutSeconds > 0
+    ? job.timeoutSeconds
+    : undefined;
+  const lastDeliveryStatus = typeof job.lastRun?.deliveryStatus === 'string'
+    ? job.lastRun.deliveryStatus.trim().toLowerCase()
+    : '';
+  const lastDeliveryFailed = Boolean(job.lastRun) && (
+    job.lastRun?.delivered === false
+    || lastDeliveryStatus === 'not-delivered'
+    || lastDeliveryStatus === 'unknown'
+  );
+  const lastDeliveryLabel = lastDeliveryStatus === 'delivered' || job.lastRun?.delivered === true
+    ? t('card.deliveryDelivered', '已交付')
+    : lastDeliveryStatus === 'not-requested' || lastDeliveryStatus === 'not_requested'
+      ? t('card.deliveryNotRequested', '未请求交付')
+      : lastDeliveryStatus === 'not-delivered'
+        ? t('card.deliveryNotDelivered', '未交付')
+        : lastDeliveryStatus === 'unknown'
+          ? t('card.deliveryUnknown', '交付状态未知')
+          : null;
 
   return (
     <div
@@ -811,10 +862,50 @@ function CronJobCard({ job, deliveryAccountName, onToggle, onEdit, onDelete, onT
             </span>
           )}
 
+          {job.lastRun && lastDeliveryLabel && (
+            <span
+              data-testid={`cron-job-delivery-${job.id}`}
+              className={cn(
+                'flex items-center gap-1.5',
+                lastDeliveryFailed ? 'text-destructive' : undefined,
+              )}
+              title={job.lastRun.deliveryError}
+            >
+              {lastDeliveryFailed ? (
+                <XCircle className="h-3.5 w-3.5" />
+              ) : (
+                <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+              )}
+              <span>{lastDeliveryLabel}</span>
+            </span>
+          )}
+
           {job.nextRun && job.enabled && (
             <span className="flex items-center gap-1.5">
               <Calendar className="h-3.5 w-3.5" />
               {t('card.next')}: {new Date(job.nextRun).toLocaleString()}
+            </span>
+          )}
+
+          {timeoutSeconds !== undefined && (
+            <span className="flex items-center gap-1.5">
+              <Timer className="h-3.5 w-3.5" />
+              <span>{t('card.executionTimeout', '执行时限 {{duration}}', { duration: formatExecutionTimeout(timeoutSeconds) })}</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleClearTimeout}
+                disabled={clearingTimeout}
+                className="h-6 px-2 text-tiny rounded-md whitespace-nowrap"
+              >
+                {clearingTimeout ? (
+                  <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                ) : (
+                  <RotateCcw className="h-3 w-3 mr-1" />
+                )}
+                {t('card.restoreAutomaticTimeout', '恢复自动时限')}
+              </Button>
             </span>
           )}
 
@@ -830,13 +921,29 @@ function CronJobCard({ job, deliveryAccountName, onToggle, onEdit, onDelete, onT
             <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
             <div className="min-w-0">
               <span className="line-clamp-2 block">{job.lastRun.error}</span>
-              {job.lastRun.deliveryStatus && job.lastRun.deliveryStatus !== 'delivered' && (
+              {lastDeliveryFailed && (
                 <span className="mt-1 block text-xs">
                   {t('card.deliveryNotDelivered', '结果未交付')}
                   {job.lastRun.deliveryError ? `: ${job.lastRun.deliveryError}` : ''}
                 </span>
               )}
             </div>
+          </div>
+        )}
+
+        {lastDeliveryFailed && (
+          <div
+            data-testid={`cron-job-delivery-failure-${job.id}`}
+            className="flex items-start gap-2 p-2.5 mb-3 rounded-xl bg-destructive/10 border border-destructive/20 text-meta text-destructive"
+          >
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            <span className="line-clamp-2">
+              {t(
+                'card.deliveryFailureAttribution',
+                '本次任务最终未交付；如产生模型调用，消耗归属本次 Cron 运行。',
+              )}
+              {job.lastRun?.deliveryError ? ` ${job.lastRun.deliveryError}` : ''}
+            </span>
           </div>
         )}
 
@@ -937,6 +1044,16 @@ export function Cron() {
       toast.error(t('toast.failedUpdate'));
     }
   }, [toggleJob, t]);
+
+  const handleClearTimeout = useCallback(async (id: string) => {
+    const result = await hostApiFetch<{ success: boolean; error?: string }>(`/api/cron/jobs/${encodeURIComponent(id)}/clear-timeout`, {
+      method: 'POST',
+    });
+    if (!result.success) {
+      throw new Error(result.error || 'Failed to restore the automatic cron timeout');
+    }
+    await fetchJobs({ force: true });
+  }, [fetchJobs]);
 
 
 
@@ -1099,6 +1216,7 @@ export function Cron() {
                   }}
                   onDelete={() => setJobToDelete({ id: job.id })}
                   onTrigger={() => triggerJob(job.id)}
+                  onClearTimeout={() => handleClearTimeout(job.id)}
                 />
                 );
               })}

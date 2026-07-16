@@ -53,6 +53,7 @@ function gatewayStatusesMatch(left: GatewayStatus, right: GatewayStatus): boolea
   return left.state === right.state
     && left.port === right.port
     && left.pid === right.pid
+    && left.uptime === right.uptime
     && left.connectedAt === right.connectedAt
     && left.gatewayReady === right.gatewayReady
     && left.error === right.error

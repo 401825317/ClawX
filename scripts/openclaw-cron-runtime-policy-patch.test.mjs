@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -184,10 +184,10 @@ test('runtime patch rejects partial and missing cron targets', () => {
   );
 });
 
-test('current installed OpenClaw runtime matches all fail-closed cron policy anchors', () => {
-  const result = patchOpenClawCronRuntimePolicyRuntime(
-    join(process.cwd(), 'node_modules', 'openclaw', 'dist'),
-    { dryRun: true, logger: { log() {} } },
-  );
+const installedDistDir = join(process.cwd(), 'node_modules', 'openclaw', 'dist');
+test('current installed OpenClaw runtime matches all fail-closed cron policy anchors', {
+  skip: !existsSync(installedDistDir),
+}, () => {
+  const result = patchOpenClawCronRuntimePolicyRuntime(installedDistDir, { dryRun: true, logger: { log() {} } });
   assert.equal(result.patchedFiles + result.alreadyPatchedFiles, 2);
 });
