@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -42,4 +44,26 @@ test('places plugin staging and backup directories outside extensions', () => {
   assert.match(path.basename(work.stagingDir), /^uclaw-blender\.staging-/u);
   assert.match(path.basename(work.backupDir), /^uclaw-blender\.backup-/u);
   assert.equal(resolvePluginInstallWorkRoot(extensionsRoot), work.workRoot);
+});
+
+test('copies root node_modules packages on Windows without realpath long-path failures', async (t) => {
+  const sourcePackage = path.join(process.cwd(), 'node_modules', '@sinclair', 'typebox');
+  if (!existsSync(path.join(sourcePackage, 'package.json'))) {
+    t.skip('fixture package @sinclair/typebox is not installed');
+    return;
+  }
+
+  const mod = await import('../electron/utils/plugin-install.ts');
+  const installUtils = (mod.default ?? mod['module.exports'] ?? mod) as {
+    copyPluginFromNodeModules: (npmPkgPath: string, targetDir: string, npmName: string) => void;
+  };
+  const tempRoot = mkdtempSync(path.join(os.tmpdir(), 'uclaw-plugin-copy-'));
+  const targetDir = path.join(tempRoot, 'typebox-copy');
+
+  try {
+    installUtils.copyPluginFromNodeModules(sourcePackage, targetDir, '@sinclair/typebox');
+    assert.equal(existsSync(path.join(targetDir, 'package.json')), true);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });

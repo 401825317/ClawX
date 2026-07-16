@@ -6,6 +6,7 @@ const execFileAsync = promisify(execFile);
 const MAX_PROCESS_ANCESTRY_DEPTH = 32;
 const KNOWN_PRODUCT_NAMES = new Set(['uclaw', 'clawx']);
 const KNOWN_EXECUTABLE_NAMES = new Set(['uclaw', 'uclaw.exe', 'clawx', 'clawx.exe']);
+const DEV_ELECTRON_EXECUTABLE_NAMES = new Set(['electron', 'electron.exe']);
 
 export interface ProcessDescriptor {
   pid: number;
@@ -185,6 +186,34 @@ export function isVerifiedUClawProcess(
   }
 
   return KNOWN_EXECUTABLE_NAMES.has(executableName);
+}
+
+export function isLikelyUClawRuntimeProcess(
+  processInfo: ProcessDescriptor,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (isVerifiedUClawProcess(processInfo, platform)) return true;
+
+  const executablePath = (processInfo.executablePath ?? '').replace(/\\/gu, '/');
+  const executableName = basename(executablePath || processInfo.name || '').toLowerCase();
+  const productName = (processInfo.productName ?? '').trim().toLowerCase();
+
+  if (KNOWN_EXECUTABLE_NAMES.has(executableName)) return true;
+  if (KNOWN_PRODUCT_NAMES.has(productName)) return true;
+  if (DEV_ELECTRON_EXECUTABLE_NAMES.has(executableName) || productName === 'electron') return true;
+
+  if (platform === 'darwin') {
+    return /\/(uclaw|clawx)\.app\//iu.test(executablePath);
+  }
+
+  return false;
+}
+
+export function isClearlyForeignUClawLockOwner(
+  processInfo: ProcessDescriptor,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !isLikelyUClawRuntimeProcess(processInfo, platform);
 }
 
 export async function findVerifiedUClawOwner(

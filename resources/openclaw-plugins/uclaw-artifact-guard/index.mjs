@@ -776,6 +776,17 @@ function compactPresentationInvocationArgs(toolName, rawArgs) {
   return { value: wasString ? serialized : compactArgs, omittedChars };
 }
 
+function tryAssignCompactToolArg(target, key, value) {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(target, key);
+    if (descriptor && descriptor.set == null && descriptor.writable === false) return false;
+    target[key] = value;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function compactHistoricalPresentationToolCalls(event) {
   const result = { compacted: 0, omittedChars: 0 };
   const visited = new Set();
@@ -808,7 +819,7 @@ function compactHistoricalPresentationToolCalls(event) {
           if (!(key in fn)) continue;
           const compacted = compactPresentationInvocationArgs(toolName, fn[key]);
           if (compacted.omittedChars <= 0) continue;
-          fn[key] = compacted.value;
+          if (!tryAssignCompactToolArg(fn, key, compacted.value)) continue;
           result.compacted += 1;
           result.omittedChars += compacted.omittedChars;
         }

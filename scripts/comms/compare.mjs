@@ -1,8 +1,10 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const __filename = fileURLToPath(import.meta.url);
+const ROOT = path.resolve(path.dirname(__filename), '..', '..');
 const CURRENT_FILE = path.join(ROOT, 'artifacts/comms/current-metrics.json');
 const BASELINE_FILE = path.join(ROOT, 'scripts/comms/baseline/metrics.baseline.json');
 const OUTPUT_DIR = path.join(ROOT, 'artifacts/comms');
@@ -113,7 +115,7 @@ export async function main() {
   }
 }
 
-const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname);
+const isEntrypoint = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename);
 if (isEntrypoint) {
   main().catch((error) => {
     console.error('[comms:compare] failed:', error);

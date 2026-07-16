@@ -29,6 +29,7 @@ import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchInstalledOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchInstalledOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
+import { patchInstalledOpenClawPluginSkillsSymlinkRuntime } from './openclaw-plugin-skills-symlink-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchInstalledOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -46,6 +47,7 @@ try {
   patchInstalledOpenClawFinalizeLocalActionRuntime();
   patchInstalledOpenClawReplySessionInitConflictRuntime();
   patchInstalledOpenClawCompactionSessionStateRuntime();
+  patchInstalledOpenClawPluginSkillsSymlinkRuntime();
   patchInstalledOpenClawSessionCwdRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
   patchInstalledOpenClawResponsesCompatibleFallbackRuntime();

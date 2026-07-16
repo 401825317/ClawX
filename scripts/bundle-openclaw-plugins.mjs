@@ -39,6 +39,17 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
+function realpathSyncSafe(p) {
+  if (process.platform === 'win32') {
+    try {
+      return fs.realpathSync.native(normWin(p));
+    } catch {
+      return fs.realpathSync(p);
+    }
+  }
+  return fs.realpathSync(p);
+}
+
 const LOCAL_PLUGINS = LOCAL_OPENCLAW_PLUGIN_IDS.map((pluginId) => ({
   sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', pluginId),
   pluginId,
@@ -177,7 +188,7 @@ function bundleOnePlugin(plugin) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
   }
 
-  const realPluginPath = fs.realpathSync(pkgPath);
+  const realPluginPath = realpathSyncSafe(pkgPath);
   const outputDir = path.join(OUTPUT_ROOT, pluginId);
 
   echo`📦 Bundling plugin ${npmName} -> ${outputDir}`;
@@ -217,7 +228,7 @@ function bundleOnePlugin(plugin) {
 
       let realPath;
       try {
-        realPath = fs.realpathSync(fullPath);
+        realPath = realpathSyncSafe(fullPath);
       } catch {
         continue;
       }
@@ -304,7 +315,7 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
     if (!fs.existsSync(depPath)) {
       throw new Error(`Missing dependency "${depName}" for local plugin "${pluginId}". Run pnpm install first.`);
     }
-    const realDepPath = fs.realpathSync(depPath);
+    const realDepPath = realpathSyncSafe(depPath);
     collected.set(realDepPath, depName);
     const rootVirtualNM = getVirtualStoreNodeModules(realDepPath);
     if (rootVirtualNM) {
@@ -320,7 +331,7 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
 
       let realPath;
       try {
-        realPath = fs.realpathSync(fullPath);
+        realPath = realpathSyncSafe(fullPath);
       } catch {
         continue;
       }

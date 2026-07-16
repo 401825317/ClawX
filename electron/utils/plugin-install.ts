@@ -36,6 +36,17 @@ function fsPath(filePath: string): string {
   return normalizeFsPathForWindows(filePath);
 }
 
+function realpathSyncSafe(filePath: string): string {
+  if (process.platform === 'win32') {
+    try {
+      return realpathSync.native(fsPath(filePath));
+    } catch {
+      return realpathSync(filePath);
+    }
+  }
+  return realpathSync(filePath);
+}
+
 /**
  * Unicode-safe recursive directory copy.
  *
@@ -584,7 +595,7 @@ function listPackagesInDir(nodeModulesDir: string): Array<{ name: string; fullPa
 export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string, npmName: string): void {
   let realPath: string;
   try {
-    realPath = realpathSync(fsPath(npmPkgPath));
+    realPath = realpathSyncSafe(npmPkgPath);
   } catch {
     throw new Error(`Cannot resolve real path for ${npmPkgPath}`);
   }
@@ -622,7 +633,7 @@ export function copyPluginFromNodeModules(npmPkgPath: string, targetDir: string,
       if (SKIP_PACKAGES.has(name) || name.startsWith('@types/')) continue;
       let depRealPath: string;
       try {
-        depRealPath = realpathSync(fsPath(fullPath));
+        depRealPath = realpathSyncSafe(fullPath);
       } catch { continue; }
       if (collected.has(depRealPath)) continue;
       collected.set(depRealPath, name);
@@ -671,7 +682,7 @@ function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pl
       throw new Error(`Missing dependency "${depName}" for ${pluginLabel}. Run pnpm install first.`);
     }
 
-    const realDepPath = realpathSync(fsPath(depPath));
+    const realDepPath = realpathSyncSafe(depPath);
     collected.set(realDepPath, depName);
 
     const rootVirtualNM = findParentNodeModules(realDepPath);
@@ -688,7 +699,7 @@ function copyLocalPluginRuntimeDependenciesFromNodeModules(targetDir: string, pl
 
       let depRealPath: string;
       try {
-        depRealPath = realpathSync(fsPath(fullPath));
+        depRealPath = realpathSyncSafe(fullPath);
       } catch {
         continue;
       }

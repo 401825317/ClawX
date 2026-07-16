@@ -37,6 +37,17 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
+function realpathSyncSafe(p) {
+  if (process.platform === 'win32') {
+    try {
+      return realpathSync.native(normWin(p));
+    } catch {
+      return realpathSync(p);
+    }
+  }
+  return realpathSync(p);
+}
+
 // ── Arch helpers ─────────────────────────────────────────────────────────────
 // electron-builder Arch enum: 0=ia32, 1=x64, 2=armv7l, 3=arm64, 4=universal
 const ARCH_MAP = { 0: 'ia32', 1: 'x64', 2: 'armv7l', 3: 'arm64', 4: 'universal' };
@@ -704,7 +715,7 @@ function bundlePlugin(nodeModulesRoot, npmName, destDir) {
   }
 
   let realPluginPath;
-  try { realPluginPath = realpathSync(pkgPath); } catch { realPluginPath = pkgPath; }
+  try { realPluginPath = realpathSyncSafe(pkgPath); } catch { realPluginPath = pkgPath; }
 
   // Copy plugin package itself
   if (existsSync(normWin(destDir))) rmSync(normWin(destDir), { recursive: true, force: true });
@@ -741,7 +752,7 @@ function bundlePlugin(nodeModulesRoot, npmName, destDir) {
       if (name === skipPkg) continue;
       if (SKIP_PACKAGES.has(name) || SKIP_SCOPES.some(s => name.startsWith(s))) continue;
       let rp;
-      try { rp = realpathSync(fullPath); } catch { continue; }
+      try { rp = realpathSyncSafe(fullPath); } catch { continue; }
       if (collected.has(rp)) continue;
       collected.set(rp, name);
       const depVirtualNM = getVirtualStoreNodeModules(rp);

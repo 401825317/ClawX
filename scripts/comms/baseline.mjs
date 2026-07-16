@@ -1,8 +1,10 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const __filename = fileURLToPath(import.meta.url);
+const ROOT = path.resolve(path.dirname(__filename), '..', '..');
 const CURRENT_FILE = path.join(ROOT, 'artifacts/comms/current-metrics.json');
 const BASELINE_DIR = path.join(ROOT, 'scripts/comms/baseline');
 const BASELINE_FILE = path.join(BASELINE_DIR, 'metrics.baseline.json');

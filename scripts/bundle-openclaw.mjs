@@ -42,6 +42,7 @@ import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-pa
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
 import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
+import { patchOpenClawPluginSkillsSymlinkRuntime } from './openclaw-plugin-skills-symlink-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -54,6 +55,17 @@ const OUTPUT = path.join(ROOT, 'build', 'openclaw');
 const NODE_MODULES = path.join(ROOT, 'node_modules');
 const OPENCLAW_SKILL_SHIMS = path.join(ROOT, 'resources', 'openclaw-skill-shims');
 const ENABLE_OPENCLAW_BROWSER_RUNTIME_PATCH = process.env.CLAWX_ENABLE_OPENCLAW_BROWSER_PATCH === '1';
+
+function realpathSyncSafe(p) {
+  if (process.platform === 'win32') {
+    try {
+      return fs.realpathSync.native(normWin(p));
+    } catch {
+      return fs.realpathSync(p);
+    }
+  }
+  return fs.realpathSync(p);
+}
 
 function isJunFeiAIManagedDistribution() {
   return process.env.CLAWX_MANAGED_PROVIDER !== '0';
@@ -75,7 +87,7 @@ if (!fs.existsSync(openclawLink)) {
   process.exit(1);
 }
 
-const openclawReal = fs.realpathSync(openclawLink);
+const openclawReal = realpathSyncSafe(openclawLink);
 echo`   openclaw resolved: ${openclawReal}`;
 
 function shouldCopyOpenClawPackageEntry(src) {
@@ -288,7 +300,7 @@ while (queue.length > 0) {
 
     let realPath;
     try {
-      realPath = fs.realpathSync(fullPath);
+      realPath = realpathSyncSafe(fullPath);
     } catch {
       continue; // broken symlink, skip
     }
@@ -325,7 +337,7 @@ for (const pkgName of EXTRA_BUNDLED_PACKAGES) {
   }
 
   let pkgReal;
-  try { pkgReal = fs.realpathSync(pkgLink); } catch { continue; }
+  try { pkgReal = realpathSyncSafe(pkgLink); } catch { continue; }
 
   if (!collected.has(pkgReal)) {
     collected.set(pkgReal, pkgName);
@@ -342,7 +354,7 @@ for (const pkgName of EXTRA_BUNDLED_PACKAGES) {
           if (name === skipPkg) continue;
           if (SKIP_PACKAGES.has(name) || SKIP_SCOPES.some(s => name.startsWith(s))) continue;
           let realPath;
-          try { realPath = fs.realpathSync(fullPath); } catch { continue; }
+          try { realPath = realpathSyncSafe(fullPath); } catch { continue; }
           if (collected.has(realPath)) continue;
           collected.set(realPath, name);
           extraCount++;
@@ -380,7 +392,7 @@ for (const pkgName of EXTRA_BUNDLED_PACKAGES) {
   const pkgLink = path.join(NODE_MODULES, ...pkgName.split('/'));
   if (!fs.existsSync(pkgLink)) continue;
   try {
-    preferredBundledPackageRealPaths.add(fs.realpathSync(pkgLink));
+    preferredBundledPackageRealPaths.add(realpathSyncSafe(pkgLink));
   } catch {
     // ignore
   }
@@ -1129,6 +1141,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (compactionSessionStatePatch.patchedFiles > 0) {
     echo`   🩹 Patched ${compactionSessionStatePatch.patchedFiles} compaction session-state runtime file(s)`;
+  }
+
+  // --- Plugin skills symlink retry patch ---
+  // On Windows, stale generated junctions can survive cleanup and make the
+  // following symlink creation fail with EISDIR. Retry after one forced cleanup.
+  const pluginSkillsSymlinkPatch = patchOpenClawPluginSkillsSymlinkRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (pluginSkillsSymlinkPatch.patchedFiles > 0) {
+    echo`   馃┕ Patched ${pluginSkillsSymlinkPatch.patchedFiles} plugin skill symlink runtime file(s)`;
   }
 
   // --- Ordinary session cwd patch ---

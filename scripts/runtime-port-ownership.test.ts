@@ -9,6 +9,8 @@ import { listenHttpServer } from '../electron/api/server-listener.ts';
 import { acquireProcessInstanceFileLock } from '../electron/main/process-instance-lock.ts';
 import {
   buildWindowsProcessInspectionScript,
+  isClearlyForeignUClawLockOwner,
+  isLikelyUClawRuntimeProcess,
   isProcessDescendantByParentResolver,
   isVerifiedUClawProcess,
 } from '../electron/utils/process-inspection.ts';
@@ -68,6 +70,42 @@ test('Windows process termination requires exact executable and product identity
     executablePath: 'C:\\Temp\\uclaw-helper\\python.exe',
     productName: 'Python',
   }, 'win32'), false);
+});
+
+test('shared lock stale-owner detection distinguishes PID reuse from UClaw runtime processes', () => {
+  assert.equal(isClearlyForeignUClawLockOwner({
+    pid: 20868,
+    name: 'WmiApSrv.exe',
+    executablePath: 'C:\\Windows\\system32\\wbem\\WmiApSrv.exe',
+  }, 'win32'), true);
+  assert.equal(isLikelyUClawRuntimeProcess({
+    pid: 20868,
+    name: 'electron.exe',
+    executablePath: 'C:\\Users\\me\\project\\node_modules\\.pnpm\\electron@40.8.4\\node_modules\\electron\\dist\\electron.exe',
+    productName: 'Electron',
+  }, 'win32'), true);
+  assert.equal(isClearlyForeignUClawLockOwner({
+    pid: 20868,
+    name: 'UClaw.exe',
+    executablePath: 'C:\\Temp\\UClaw.exe',
+  }, 'win32'), false);
+});
+
+test('macOS shared lock stale-owner detection preserves app and Electron dev owners', () => {
+  assert.equal(isLikelyUClawRuntimeProcess({
+    pid: 301,
+    executablePath: '/Applications/UClaw.app/Contents/Frameworks/UClaw Helper.app/Contents/MacOS/UClaw Helper',
+  }, 'darwin'), true);
+  assert.equal(isLikelyUClawRuntimeProcess({
+    pid: 302,
+    executablePath: '/Users/me/project/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
+    name: 'Electron',
+  }, 'darwin'), true);
+  assert.equal(isClearlyForeignUClawLockOwner({
+    pid: 303,
+    executablePath: '/usr/sbin/cfprefsd',
+    name: 'cfprefsd',
+  }, 'darwin'), true);
 });
 
 test('Windows process inspection emits valid block and hashtable separators', () => {

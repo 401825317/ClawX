@@ -1,4 +1,5 @@
 import { app, dialog } from 'electron';
+import { rmSync } from 'node:fs';
 import { resolveSupportedLanguage, type LanguageCode } from '../../shared/language';
 import { getSetting } from '../utils/store';
 import { logger } from '../utils/logger';
@@ -7,6 +8,7 @@ import {
   findVerifiedUClawOwner,
   getListeningProcessIds,
   inspectProcess,
+  isClearlyForeignUClawLockOwner,
   isProcessAlive,
   isProcessDescendantOf,
   isVerifiedUClawProcess,
@@ -165,6 +167,31 @@ async function describeLockConflict(
     processInfo,
     owner,
   };
+}
+
+function tryReclaimClearlyStaleInstanceLock(conflict: RuntimeConflict): boolean {
+  if (conflict.resource !== 'instance-lock') return false;
+  if (!conflict.lockPath || !conflict.listenerPid || !conflict.processInfo) return false;
+  if (conflict.owner) return false;
+  if (!isClearlyForeignUClawLockOwner(conflict.processInfo)) return false;
+
+  try {
+    rmSync(conflict.lockPath, { force: true });
+    logger.warn('[runtime-port-guard] Reclaimed stale shared instance lock after PID reuse', {
+      lockPath: conflict.lockPath,
+      staleOwnerPid: conflict.listenerPid,
+      executablePath: conflict.processInfo.executablePath,
+      processName: conflict.processInfo.name,
+    });
+    return true;
+  } catch (error) {
+    logger.warn('[runtime-port-guard] Failed to reclaim stale shared instance lock', {
+      lockPath: conflict.lockPath,
+      staleOwnerPid: conflict.listenerPid,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
 }
 
 async function scanPortConflicts(
@@ -336,7 +363,9 @@ export async function ensureRuntimeOwnership(
       if (fileLock.acquired) {
         heldLock = fileLock;
       } else {
-        conflicts.push(await describeLockConflict(fileLock, copy));
+        const conflict = await describeLockConflict(fileLock, copy);
+        if (tryReclaimClearlyStaleInstanceLock(conflict)) continue;
+        conflicts.push(conflict);
       }
     }
 

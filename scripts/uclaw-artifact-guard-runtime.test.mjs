@@ -104,6 +104,47 @@ assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /grok-video-1\.5 
 assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /create a uclaw_video_project before generation/iu);
 assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /uclaw_video_project action:compose exactly once/iu);
 
+const compactablePresentationArgs = JSON.stringify({
+  id: 'create_designed_pptx_file',
+  args: {
+    title: 'Deck',
+    slides: [
+      { elements: [{ type: 'text', text: 'A'.repeat(500) }, { type: 'shape' }] },
+      { elements: [{ type: 'text', text: 'B'.repeat(500) }] },
+    ],
+    patches: [{ path: '/slides/0', value: 'C'.repeat(500) }],
+  },
+});
+const readOnlyHistoricalTool = { name: 'create_designed_pptx_file' };
+Object.defineProperty(readOnlyHistoricalTool, 'arguments', {
+  value: compactablePresentationArgs,
+  writable: false,
+  enumerable: true,
+  configurable: true,
+});
+const readOnlyCompaction = __test.compactHistoricalPresentationToolCalls({
+  messages: [
+    { role: 'assistant', tool_calls: [{ function: readOnlyHistoricalTool }] },
+    { role: 'user', content: '继续' },
+  ],
+});
+assert.deepEqual(readOnlyCompaction, { compacted: 0, omittedChars: 0 });
+assert.equal(readOnlyHistoricalTool.arguments, compactablePresentationArgs);
+
+const writableHistoricalTool = {
+  name: 'create_designed_pptx_file',
+  arguments: compactablePresentationArgs,
+};
+const writableCompaction = __test.compactHistoricalPresentationToolCalls({
+  messages: [
+    { role: 'assistant', tool_calls: [{ function: writableHistoricalTool }] },
+    { role: 'user', content: '继续' },
+  ],
+});
+assert.equal(writableCompaction.compacted, 1);
+assert.ok(writableCompaction.omittedChars > 0);
+assert.match(writableHistoricalTool.arguments, /summarizedForModel/u);
+
 const mediaDefaultsEvent = {
   runId: 'prompt:media',
   toolName: 'image_generate',
@@ -242,13 +283,16 @@ try {
     assert.equal(staged.stagedCount, 1);
     assert.notEqual(staged.params.image, stagedSourcePath);
     assert.equal(statSync(staged.params.image).size, statSync(stagedSourcePath).size);
-    assert.match(staged.params.image, /openclaw-state\/media\/outbound\/uclaw-runs/u);
+    assert.match(staged.params.image.replace(/\\/g, '/'), /openclaw-state\/media\/outbound\/uclaw-runs/u);
 
     const screenshotRewrite = __test.rewriteTmpScreenshotMediaPaths(
       'screencapture -x /tmp/uclaw-screen.png',
     );
     assert.equal(screenshotRewrite?.rewrittenPaths.length, 1);
-    assert.match(screenshotRewrite?.command ?? '', /openclaw-state\/media\/outbound\/uclaw-screen\.png/u);
+    assert.match(
+      (screenshotRewrite?.command ?? '').replace(/\\/g, '/'),
+      /openclaw-state\/media\/outbound\/uclaw-screen\.png/u,
+    );
   } finally {
     if (previousStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
     else process.env.OPENCLAW_STATE_DIR = previousStateDir;

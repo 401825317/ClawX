@@ -98,6 +98,17 @@ function defaultPluginRuntimeDepsDir(): string {
   return path.join(getOpenClawConfigDir(), 'plugin-runtime-deps');
 }
 
+function realpathSyncSafe(filePath: string): string {
+  if (process.platform === 'win32') {
+    try {
+      return realpathSync.native(path.toNamespacedPath(filePath));
+    } catch {
+      return realpathSync(filePath);
+    }
+  }
+  return realpathSync(filePath);
+}
+
 /**
  * Resolve the agents skills directory to its real path.  When the directory
  * itself does not exist yet (fresh install), fall back to realpath'ing its
@@ -108,7 +119,7 @@ function defaultPluginRuntimeDepsDir(): string {
 function resolveAgentsRealRoot(agentsDir: string): string {
   if (existsSync(agentsDir)) {
     try {
-      return realpathSync(agentsDir);
+      return realpathSyncSafe(agentsDir);
     } catch {
       // fall through
     }
@@ -117,7 +128,7 @@ function resolveAgentsRealRoot(agentsDir: string): string {
   const tail = path.basename(agentsDir);
   if (parent && parent !== agentsDir && existsSync(parent)) {
     try {
-      return path.join(realpathSync(parent), tail);
+      return path.join(realpathSyncSafe(parent), tail);
     } catch {
       // fall through
     }
@@ -156,7 +167,7 @@ function looksLikeOpenClawPackagePath(candidate: string): boolean {
 function resolveCurrentOpenClawRoots(currentOpenClawDir: string): string[] {
   const roots = new Set<string>([path.resolve(currentOpenClawDir)]);
   try {
-    roots.add(realpathSync(currentOpenClawDir));
+    roots.add(realpathSyncSafe(currentOpenClawDir));
   } catch {
     // fall through
   }
@@ -351,7 +362,7 @@ function cleanupSkillsDir(skillsDir: string, agentsDir: string): CleanupResult {
 
     let realTarget: string;
     try {
-      realTarget = realpathSync(entryPath);
+      realTarget = realpathSyncSafe(entryPath);
     } catch {
       continue;
     }
