@@ -1387,6 +1387,32 @@ export async function saveProviderKeyToOpenClaw(
   console.log(`Saved API key for provider "${provider}" to OpenClaw auth store (agents: ${agentIds.join(', ')})`);
 }
 
+export async function clearProviderAuthFailureState(
+  provider: string,
+  agentId?: string,
+): Promise<void> {
+  const agentIds = agentId ? [agentId] : await discoverAgentIds();
+  if (agentIds.length === 0) agentIds.push('main');
+  const profileId = `${provider}:default`;
+  const runtime = await getOpenClawProviderAuthRuntime().catch(() => null);
+  if (!runtime?.updateAuthProfileStoreWithLock) {
+    console.warn(`OpenClaw auth runtime unavailable while clearing failure state for provider "${provider}"`);
+    return;
+  }
+
+  for (const id of agentIds) {
+    await runtime.updateAuthProfileStoreWithLock({
+      agentDir: getOpenClawAgentDir(id),
+      updater: (store) => {
+        if (!store.usageStats?.[profileId]) return false;
+        delete store.usageStats[profileId];
+        if (Object.keys(store.usageStats).length === 0) delete store.usageStats;
+        return true;
+      },
+    });
+  }
+}
+
 /**
  * Remove a provider API key from OpenClaw auth store.
  */

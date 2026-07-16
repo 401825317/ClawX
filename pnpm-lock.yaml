@@ -32,6 +32,9 @@ importers:
       pptxgenjs:
         specifier: 4.0.1
         version: 4.0.1
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       tar:
         specifier: ^6.2.1
         version: 6.2.1
@@ -270,9 +273,6 @@ importers:
       remark-math:
         specifier: ^6.0.0
         version: 6.0.0
-      sharp:
-        specifier: ^0.34.5
-        version: 0.34.5
       silk-wasm:
         specifier: ^3.7.1
         version: 3.7.1

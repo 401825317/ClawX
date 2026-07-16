@@ -141,6 +141,7 @@ In developer mode, the dedicated Image Generation page supports an independent O
 Requested image format, background, and compatible compression options are forwarded to the image provider. Managed installs default generated-media delivery to 16 MiB when the user has not set a custom limit. If an image is still too large, UClaw automatically transcodes and progressively compresses it before saving instead of discarding a provider-successful result; terminal task-ledger state also closes the pending UI even when internal completion envelopes stay hidden.
 For **Custom** providers used with OpenAI-compatible gateways, you can set a custom `User-Agent` in **Settings → AI Providers → Edit Provider** for compatibility-sensitive endpoints.
 When a compatible gateway rejects `/models` for non-auth reasons, ClawX automatically falls back to a lightweight `/chat/completions` or `/responses` probe during API key validation.
+After a replacement API key validates successfully, UClaw clears that account's persisted authentication-failure state before refreshing the Gateway, so a corrected Provider can be selected immediately without weakening normal 401 protection.
 
 ### 🌙 Adaptive Theming
 Light mode, dark mode, or system-synchronized themes. ClawX adapts to your preferences automatically.
@@ -374,6 +375,8 @@ pnpm typecheck            # TypeScript validation
 # Testing
 pnpm run test:e2e         # Run Electron E2E smoke tests with Playwright
 pnpm run test:e2e:headed  # Run Electron E2E tests with a visible window
+pnpm run test:packaged:win       # Run core regression against the latest Windows USB ZIP
+pnpm run test:packaged:win:full  # Run real packaged chat, tools, browser, Cron, Agent, and media regression
 pnpm run comms:replay     # Compute communication replay metrics
 pnpm run comms:baseline   # Refresh communication baseline snapshot
 pnpm run comms:compare    # Compare replay metrics against baseline thresholds
@@ -388,7 +391,7 @@ pnpm package              # Package for current platform (includes bundled prein
 pnpm package:mac          # Package for macOS
 pnpm package:mac:usb      # Package an install-free high-performance portable macOS folder
 pnpm package:win          # Package for Windows
-pnpm package:win:usb      # Package an install-free high-performance portable Windows folder
+pnpm package:win:usb      # Package Windows USB ZIP and gate it with the full packaged regression
 pnpm package:linux        # Package for Linux
 ```
 

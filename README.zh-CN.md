@@ -144,6 +144,7 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 在开发者模式下，独立的“图像生成”页面支持配置 OpenAI 兼容生图端点（Base URL、API Key 和模型名，例如 `gpt-image-2`），生图请求会走专用的 `/v1/images/generations` 服务，聊天仍继续使用正常的 OpenAI Provider。
 如果你通过 **自定义（Custom）Provider** 对接 OpenAI-compatible 网关，可以在 **设置 → AI Providers → 编辑 Provider** 中配置自定义 `User-Agent`，以提高兼容性。
 如果兼容网关的 `/models` 因非鉴权原因不可用，ClawX 会在校验 API Key 时自动降级为轻量的 `/chat/completions` 或 `/responses` 探测。
+替换 API Key 并成功通过校验后，UClaw 会在刷新 Gateway 前清除该账号持久化的认证失败状态，让已经修正的 Provider 立即恢复可选，同时保留正常的 401 防护。
 
 ### 🌙 自适应主题
 支持浅色模式、深色模式或跟随系统主题。ClawX 自动适应你的偏好设置。
@@ -377,6 +378,8 @@ pnpm typecheck            # TypeScript 类型检查
 # 测试
 pnpm run test:e2e         # 运行 Electron E2E 冒烟测试
 pnpm run test:e2e:headed  # 以可见窗口运行 Electron E2E 测试
+pnpm run test:packaged:win       # 对最新 Windows USB ZIP 执行核心真实回归
+pnpm run test:packaged:win:full  # 执行打包版聊天、工具、浏览器、Cron、Agent 和媒体完整回归
 pnpm run comms:replay     # 计算通信回放指标
 pnpm run comms:baseline   # 刷新通信基线快照
 pnpm run comms:compare    # 将回放指标与基线阈值对比
@@ -391,7 +394,7 @@ pnpm package              # 为当前平台打包（包含预装技能资源）
 pnpm package:mac          # 为 macOS 打包
 pnpm package:mac:usb      # 为 macOS 生成免安装高性能便携包
 pnpm package:win          # 为 Windows 打包
-pnpm package:win:usb      # 为 Windows 生成免安装高性能便携包
+pnpm package:win:usb      # 生成 Windows USB ZIP，并自动通过打包版完整回归门禁
 pnpm package:linux        # 为 Linux 打包
 ```
 

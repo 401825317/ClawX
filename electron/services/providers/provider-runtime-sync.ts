@@ -5,6 +5,7 @@ import type { ProviderConfig } from '../../utils/secure-storage';
 import { getAllProviders, getApiKey, getDefaultProvider, getProvider } from '../../utils/secure-storage';
 import { getProviderConfig, getProviderDefaultModel } from '../../utils/provider-registry';
 import {
+  clearProviderAuthFailureState,
   ensureAnthropicMessagesModelMaxTokens,
   ensureOpenClawProviderAgentRuntimePins,
   pruneInvalidApiProviderEntries,
@@ -333,16 +334,19 @@ function scheduleGatewayRefresh(
   }
 
   logger.info(message);
+  const details = { configUpdatedAt: Date.now() };
   if (options?.mode === 'restart') {
     gatewayManager.debouncedRestart(options?.delayMs, {
       reason: message,
       source: 'provider-runtime-sync',
+      details,
     });
     return;
   }
   gatewayManager.debouncedReload(options?.delayMs, {
     reason: message,
     source: 'provider-runtime-sync',
+    details,
   });
 }
 
@@ -818,6 +822,10 @@ export async function syncUpdatedProviderToRuntime(
   const context = await syncProviderToRuntime(config, apiKey);
   if (!context) {
     return;
+  }
+
+  if (apiKey !== undefined && apiKey.trim()) {
+    await clearProviderAuthFailureState(context.runtimeProviderKey);
   }
 
   const ock = context.runtimeProviderKey;

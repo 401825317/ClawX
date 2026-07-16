@@ -23,6 +23,7 @@ import { buildPreviewTarget } from '@/components/file-preview/build-preview-targ
 import { useProviderStore } from '@/stores/providers';
 import { DEFAULT_CLIENT_MODEL_OPTIONS, useClientConfigStore } from '@/stores/client-config';
 import {
+  buildConfiguredModelOptions,
   formatModelDisplayLabel,
   formatProviderModelIdLabel,
   toModelOptionTestId,
@@ -394,6 +395,8 @@ export function ChatInput({
   const agents = useAgentsStore((s) => s.agents);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
   const providerAccounts = useProviderStore((s) => s.accounts);
+  const providerStatuses = useProviderStore((s) => s.statuses);
+  const providerDefaultAccountId = useProviderStore((s) => s.defaultAccountId);
   const refreshProviderSnapshot = useProviderStore((s) => s.refreshProviderSnapshot);
   const clientModelOptions = useClientConfigStore((s) => s.modelOptions);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
@@ -536,19 +539,28 @@ export function ChatInput({
       accountId: MANAGED_TEXT_PROVIDER_KEY,
     }));
   }, [clientModelOptions.text.models]);
+  const configuredProviderModelOptions = useMemo<RemoteModelOption[]>(
+    () => buildConfiguredModelOptions(
+      providerAccounts,
+      providerStatuses,
+      providerDefaultAccountId,
+    ),
+    [providerAccounts, providerDefaultAccountId, providerStatuses],
+  );
   const modelOptions = useMemo(() => {
-    const preferredRemoteOptions = configuredTextModelOptions.length > 0
-      ? configuredTextModelOptions
-      : remoteModelOptions;
     const deduped = new Map<string, RemoteModelOption>();
-    for (const option of preferredRemoteOptions) {
+    for (const option of [
+      ...configuredProviderModelOptions,
+      ...configuredTextModelOptions,
+      ...remoteModelOptions,
+    ]) {
       deduped.set(option.modelRef, option);
     }
     if (deduped.size === 0) {
       deduped.set(DEFAULT_TEXT_MODEL_OPTION.modelRef, DEFAULT_TEXT_MODEL_OPTION);
     }
     return [...deduped.values()];
-  }, [configuredTextModelOptions, remoteModelOptions]);
+  }, [configuredProviderModelOptions, configuredTextModelOptions, remoteModelOptions]);
   const requestedModelRef = optimisticModelRef || currentSession?.model || currentAgent?.modelRef || defaultModelRef || null;
   const effectiveModelRef = requestedModelRef && modelOptions.some((option) => option.modelRef === requestedModelRef)
     ? requestedModelRef

@@ -733,6 +733,10 @@ async function main() {
     'resources/cli/openclaw.cmd',
     'resources/openclaw/openclaw.mjs',
     'resources/openclaw/package.json',
+    'resources/app.asar.unpacked/node_modules/sharp/package.json',
+    'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/package.json',
+    'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/sharp-win32-x64.node',
+    'resources/app.asar.unpacked/node_modules/@img/sharp-win32-x64/lib/libvips-42.dll',
     PACKAGED_BUILD_IDENTITY_FILE,
     BUILD_IDENTITY_FILE,
   ];

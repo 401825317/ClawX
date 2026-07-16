@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import { PORTS } from '../utils/config';
+import { getPort } from '../utils/config';
 import { JsonRpcNotification, isNotification, isResponse } from './protocol';
 import { logger } from '../utils/logger';
 import { captureTelemetryEvent, trackMetric } from '../utils/telemetry';
@@ -191,7 +191,7 @@ export class GatewayManager extends EventEmitter {
   private processExitCode: number | null = null; // set by exit event, replaces exitCode/signalCode
   private ownsProcess = false;
   private ws: WebSocket | null = null;
-  private status: GatewayStatus = { state: 'stopped', port: PORTS.OPENCLAW_GATEWAY };
+  private status: GatewayStatus = { state: 'stopped', port: getPort('OPENCLAW_GATEWAY') };
   private readonly stateController: GatewayStateController;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
@@ -1040,6 +1040,7 @@ export class GatewayManager extends EventEmitter {
       reason: context?.reason ?? 'debounced-restart',
       source: context?.source ?? 'gateway-manager',
       details: {
+        ...context?.details,
         delayMs,
       },
     });
@@ -1047,6 +1048,7 @@ export class GatewayManager extends EventEmitter {
       void this.restart({
         reason: context?.reason ?? 'debounced-restart',
         source: context?.source ?? 'gateway-manager',
+        details: context?.details,
       }).catch((err) => {
         logger.warn('Debounced Gateway restart failed:', err);
       });
@@ -1067,6 +1069,7 @@ export class GatewayManager extends EventEmitter {
       await this.restart({
         reason: context?.reason ?? `reload-policy-${this.reloadPolicy.mode}`,
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1096,6 +1099,7 @@ export class GatewayManager extends EventEmitter {
       await this.restart({
         reason: 'reload-fallback-not-running',
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1103,11 +1107,20 @@ export class GatewayManager extends EventEmitter {
     const connectedForMs = this.status.connectedAt
       ? Date.now() - this.status.connectedAt
       : Number.POSITIVE_INFINITY;
+    const configUpdatedAt = typeof context?.details?.configUpdatedAt === 'number'
+      ? context.details.configUpdatedAt
+      : undefined;
+    const connectedAfterConfigUpdate = Boolean(
+      configUpdatedAt
+      && this.status.connectedAt
+      && this.status.connectedAt >= configUpdatedAt,
+    );
 
-    // Avoid signaling a process that just came up; it will already read latest config.
-    if (connectedForMs < 8000) {
+    // A process connected after the write already loaded the latest config. A
+    // provider changed after connection must still refresh, even during startup.
+    if (connectedForMs < 8000 && (!configUpdatedAt || connectedAfterConfigUpdate)) {
       logger.info(
-        `[gateway-refresh] mode=reload result=skipped_recent_connect connectedForMs=${connectedForMs} pid=${this.process.pid}`,
+        `[gateway-refresh] mode=reload result=skipped_recent_connect connectedForMs=${connectedForMs} connectedAfterConfigUpdate=${connectedAfterConfigUpdate} pid=${this.process.pid}`,
       );
       logger.info(`Gateway connected ${connectedForMs}ms ago, skipping reload signal`);
       return;
@@ -1121,6 +1134,7 @@ export class GatewayManager extends EventEmitter {
       await this.restart({
         reason: 'reload-fallback-windows',
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1137,6 +1151,7 @@ export class GatewayManager extends EventEmitter {
         await this.restart({
           reason: 'reload-fallback-post-signal-unhealthy',
           source: context?.source ?? 'gateway-reload',
+          details: context?.details,
         });
       } else {
         const pidAfter = this.process.pid;
@@ -1151,6 +1166,7 @@ export class GatewayManager extends EventEmitter {
         reason: 'reload-fallback-signal-error',
         source: context?.source ?? 'gateway-reload',
         details: {
+          ...context?.details,
           error: error instanceof Error ? error.message : String(error),
         },
       });
@@ -1171,6 +1187,7 @@ export class GatewayManager extends EventEmitter {
       this.debouncedRestart(effectiveDelay, {
         reason: context?.reason ?? `debounced-reload-policy-${this.reloadPolicy.mode}`,
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1182,6 +1199,7 @@ export class GatewayManager extends EventEmitter {
       reason: context?.reason ?? 'debounced-reload',
       source: context?.source ?? 'gateway-manager',
       details: {
+        ...context?.details,
         delayMs: effectiveDelay,
         policy: this.reloadPolicy.mode,
       },
@@ -1192,6 +1210,7 @@ export class GatewayManager extends EventEmitter {
       void this.reload({
         reason: context?.reason ?? 'debounced-reload',
         source: context?.source ?? 'gateway-manager',
+        details: context?.details,
       }).catch((err) => {
         logger.warn('Debounced Gateway reload failed:', err);
       });

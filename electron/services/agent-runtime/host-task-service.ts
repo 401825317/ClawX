@@ -164,6 +164,9 @@ function normalizeTaskData(value: unknown, label: string, allowUndefined = false
     const result: Record<string, HostTaskData> = {};
     for (const [key, item] of entries) {
       if (!key || key.length > 256 || FORBIDDEN_KEYS.has(key)) throw new Error(`${label} contains an invalid object field`);
+      // Optional fields in internal checkpoints follow JSON object semantics:
+      // an undefined value is absent rather than an invalid persisted value.
+      if (item === undefined) continue;
       result[key] = visit(item, depth + 1);
     }
     seen.delete(current);
