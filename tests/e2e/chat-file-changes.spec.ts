@@ -80,7 +80,119 @@ const htmlFileHistory = [
     timestamp: Date.now(),
   },
 ];
+
+const structuredToolResultHistory = [
+  {
+    role: 'user',
+    id: 'user-structured-output-1',
+    content: [{ type: 'text', text: '生成两个 Office 文件' }],
+    timestamp: Date.now(),
+  },
+  {
+    role: 'toolResult',
+    id: 'tool-result-direct-1',
+    toolCallId: 'create-docx-1',
+    toolName: 'create_docx_file',
+    content: [{ type: 'text', text: '{"ok":true,"filePath":"C:\\\\workspace\\\\direct-output.docx"}' }],
+    details: {
+      ok: true,
+      filePath: 'C:\\workspace\\direct-output.docx',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      sizeBytes: 4096,
+    },
+    timestamp: Date.now(),
+  },
+  {
+    role: 'toolResult',
+    id: 'tool-result-nested-1',
+    toolCallId: 'create-xlsx-1',
+    toolName: 'tool_call',
+    content: [{ type: 'text', text: '{"ok":true,"filePath":"C:\\\\workspace\\\\nested-output.xlsx"}' }],
+    details: {
+      tool: { name: 'create_xlsx_file' },
+      result: {
+        details: {
+          ok: true,
+          filePath: 'C:\\workspace\\nested-output.xlsx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          fileSize: 8192,
+        },
+      },
+    },
+    timestamp: Date.now(),
+  },
+  {
+    role: 'assistant',
+    id: 'assistant-structured-output-1',
+    content: [{ type: 'text', text: '文件已生成。' }],
+    timestamp: Date.now(),
+  },
+];
 test.describe('ClawX chat file changes', () => {
+  test('renders direct and nested structured tool result files as attachment cards', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345 },
+        gatewayRpc: {
+          [stableStringify(['sessions.list', {}])]: {
+            success: true,
+            result: {
+              sessions: [{ key: SESSION_KEY, displayName: 'main' }],
+            },
+          },
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+            success: true,
+            result: { messages: structuredToolResultHistory },
+          },
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 1000, maxChars: 500000 }])]: {
+            success: true,
+            result: { messages: structuredToolResultHistory },
+          },
+        },
+        hostApi: {
+          [stableStringify(['/api/gateway/status', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { state: 'running', port: 18789, pid: 12345 },
+            },
+          },
+          [stableStringify(['/api/agents', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                agents: [{ id: 'main', name: 'main', workspace: 'C:\\workspace' }],
+              },
+            },
+          },
+        },
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) {
+          throw error;
+        }
+      }
+
+      await expect(page.getByTestId('main-layout')).toBeVisible();
+      const fileCards = page.getByTestId('chat-attached-file');
+      await expect(fileCards.filter({ hasText: 'direct-output.docx' })).toContainText('4.0 KB');
+      await expect(fileCards.filter({ hasText: 'nested-output.xlsx' })).toContainText('8.0 KB');
+      await expect(fileCards).toHaveCount(2);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   test('shows line stats on generated file cards', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 

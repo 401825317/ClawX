@@ -362,7 +362,9 @@ async function sendChat(page: Page, prompt: string, expectedText: string, timeou
 
 async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs = 120_000): Promise<string> {
   const runError = page.getByTestId('chat-run-error');
-  const transcriptFailure = page.getByText(/Agent failed before reply:/iu).last();
+  const transcriptFailure = page.getByText(
+    /Agent failed before reply:|The agent run failed before producing a reply\.?|LLM request failed\.?/iu,
+  ).last();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const candidate = await runError.isVisible()
@@ -1185,7 +1187,7 @@ test('runs the packaged UClaw regression matrix', async () => {
             `UCLAW_REGRESSION_${artifact.scenario}_OK`,
             240_000,
           );
-          await expect(page.getByTestId('chat-generated-file').filter({ hasText: artifact.fileName })).toBeVisible({ timeout: 60_000 });
+          await expect(page.getByTestId('chat-attached-file').filter({ hasText: artifact.fileName })).toBeVisible({ timeout: 60_000 });
           const packageEvidence = await verifyOfficePackage(filePath, artifact.entry, artifact.content);
           const evidenceDir = path.join(reportDir, 'evidence', 'office');
           await mkdir(evidenceDir, { recursive: true });

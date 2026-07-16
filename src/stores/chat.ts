@@ -96,6 +96,7 @@ import {
   collectRunHostTaskIdsForAbort,
   enrichWithToolCallAttachments,
   extractAsyncTaskEvidence,
+  extractStructuredToolResultFiles,
   isInternalMessage as isHistoryInternalMessage,
   messageHasDeliverableContent,
   runtimeRunHasPendingAsyncTasks,
@@ -3295,6 +3296,12 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
       // in segments that already have an ExecutionGraphCard.
       for (const f of imageFiles) f.source = 'tool-result';
       pending.push(...imageFiles);
+
+      // Structured details preserve Windows paths without JSON escaping.
+      // Image outputs continue through assistant-media to avoid surfacing
+      // intermediate image reads as produced artifacts.
+      pending.push(...extractStructuredToolResultFiles(msg.details)
+        .filter((file) => !file.mimeType.startsWith('image/')));
 
       // 2. [media attached: ...] patterns in tool result text output
       const text = getMessageText(msg.content);

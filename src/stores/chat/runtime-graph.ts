@@ -3,6 +3,7 @@ import {
   extractImagesAsAttachedFiles,
   extractMediaRefs,
   extractRawFilePaths,
+  extractStructuredToolResultFiles,
   getMessageText,
   makeAttachedFile,
 } from './helpers';
@@ -690,6 +691,11 @@ export function extractToolCompletedFiles(event: ChatRuntimeEvent): AttachedFile
     .filter((file) => !file.mimeType.startsWith('image/'))
     .map((file) => (file.source ? file : { ...file, source: 'tool-result' as const }));
 
+  for (const file of extractStructuredToolResultFiles(event.result)) {
+    if (file.mimeType.startsWith('image/')) continue;
+    if (file.filePath && files.some((candidate) => candidate.filePath === file.filePath)) continue;
+    files.push(file);
+  }
   const seenPaths = new Set(files.map((file) => file.filePath).filter(Boolean));
   const resultTexts = collectRuntimeResultTexts(event.result);
   const allowRawPaths = RAW_PATH_PRODUCER_TOOLS.test(event.name)

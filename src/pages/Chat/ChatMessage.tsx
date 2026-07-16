@@ -954,7 +954,8 @@ function FileCard({ file, onOpen }: { file: AttachedFileMeta; onOpen?: (file: At
   }, [file, onOpen]);
 
   return (
-    <div 
+    <div
+      data-testid="chat-attached-file"
       className={cn(
         "flex items-center gap-3 rounded-xl border border-black/10 dark:border-white/10 px-3 py-2.5 bg-black/5 dark:bg-white/5 max-w-[220px]",
         attachmentOpenTarget(file) && "cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition-colors"

@@ -51,7 +51,7 @@ Required scenarios:
 - persistent 401 failure, successful credential revalidation through the Provider UI, persisted auth-failure reset, Gateway restart, and a healthy recovery turn;
 - a real file-writing tool side effect;
 - real managed-browser open and snapshot actions;
-- real DOCX, XLSX, and PPTX tool calls with UI, file, ZIP structure, and content evidence;
+- real DOCX, XLSX, and PPTX tool calls with visible attachment cards recovered from direct or nested structured tool results, plus file, ZIP structure, and content evidence;
 - session create, transcript, rename, reload, and hard delete;
 - two-Provider fallback followed by fallback deletion and stale-reference cleanup;
 - local Skill discovery, enablement persistence, quick access, and marketplace capability probe;

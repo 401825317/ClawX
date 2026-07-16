@@ -36,7 +36,7 @@ node scripts/windows-support/run-packaged-regression.mjs --zip C:\path\UClaw-x.y
 | Provider | 本地兼容 Provider 校验、保存、设为默认、真实 fallback、删除、重启后保留 | 无效 API Key 必须被拒绝；401 后重新校验并替换凭证会清除该账号的持久化认证失败状态；删除 fallback 不得残留引用 | `full` |
 | 文本聊天 | 简单、中文、多语言、Markdown、表格、代码、多轮上下文 | 瞬时 429/500 自动重试、畸形流失败、慢请求在到达 Provider 后取消、401 凭证修复后恢复 | `full` |
 | 会话 | 新会话落盘、转录读取、重命名、重启保留、硬删除 | 删除后会话、转录和侧车产物不得残留 | `full` |
-| 工具 | OpenClaw 写文件、浏览器打开与 snapshot、DOCX/XLSX/PPTX 真实生成与 Office ZIP 内容检查 | 工具缺失、文件缺失、内容证据缺失或没有真实副作用均失败 | `full` |
+| 工具 | OpenClaw 写文件、浏览器打开与 snapshot、DOCX/XLSX/PPTX 真实生成；直接或嵌套结构化 toolResult 均恢复为可见附件卡，并检查 Office ZIP 内容 | 工具缺失、文件缺失、附件卡缺失、内容证据缺失或没有真实副作用均失败 | `full` |
 | Skills | 本地发现、启停配置持久化、Quick Access、市场能力探测 | 公网安装默认不执行，必须在报告中标为条件项 | `full` |
 | Agent | 创建、展示、重命名、删除 | 删除后残留配置失败 | `core` |
 | Cron | 创建、禁用、查询、删除 | 非法 Cron 表达式必须被拒绝 | `core` |

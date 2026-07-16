@@ -1015,6 +1015,54 @@ function makeAttachedFile(
   return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source, disposition };
 }
 
+function structuredFileSize(record: Record<string, unknown>): number | undefined {
+  for (const candidate of [record.sizeBytes, record.fileSize]) {
+    const value = typeof candidate === 'number'
+      ? candidate
+      : typeof candidate === 'string' && candidate.trim()
+        ? Number(candidate)
+        : Number.NaN;
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return undefined;
+}
+
+/** Extract concrete output files from structured tool result envelopes. */
+function extractStructuredToolResultFiles(details: unknown): AttachedFileMeta[] {
+  const files: AttachedFileMeta[] = [];
+  const visited = new Set<object>();
+
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 5 || !value || typeof value !== 'object') return;
+    if (visited.has(value as object)) return;
+    visited.add(value as object);
+
+    if (Array.isArray(value)) {
+      value.forEach((entry) => visit(entry, depth + 1));
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
+    if (filePath) {
+      const mimeType = typeof record.mimeType === 'string' && record.mimeType.trim()
+        ? record.mimeType.trim()
+        : mimeFromExtension(filePath);
+      const file = makeAttachedFile({ filePath, mimeType }, 'tool-result', 'output-delivery');
+      files.push({
+        ...file,
+        mimeType,
+        fileSize: structuredFileSize(record) ?? file.fileSize,
+      });
+    }
+
+    Object.values(record).forEach((entry) => visit(entry, depth + 1));
+  };
+
+  visit(details, 0);
+  return dedupeAttachedFiles(files);
+}
+
 /**
  * Extract file path from a tool call's arguments by toolCallId.
  * Searches common argument names: file_path, filePath, path, file.
@@ -1146,6 +1194,12 @@ function enrichWithToolResultFiles(messages: RawMessage[]): RawMessage[] {
         }
       }
       pending.push(...imageFiles.map((file) => withAttachedFileSource(file, 'tool-result')));
+
+      // Structured tool results preserve Windows paths without JSON escaping.
+      // Keep image delivery on the existing assistant-media path so an input
+      // image read by a tool is not promoted into a produced artifact.
+      pending.push(...extractStructuredToolResultFiles(msg.details)
+        .filter((file) => !file.mimeType.startsWith('image/')));
 
       // 2. [media attached: ...] patterns in tool result text output
       const text = getMessageText(msg.content);
@@ -2394,6 +2448,7 @@ export {
   extractMediaRefs,
   extractRawFilePaths,
   makeAttachedFile,
+  extractStructuredToolResultFiles,
   enrichWithToolResultFiles,
   enrichWithToolCallAttachments,
   isInternalMessage,
