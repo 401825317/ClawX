@@ -16,6 +16,7 @@ export type ChatRuntimeApprovalKind = 'exec' | 'plugin' | 'desktop' | 'task';
 export type ChatRuntimeApprovalResolutionSource =
   | 'gateway'
   | 'desktop-broker'
+  | 'history-checkpoint'
   | 'task-state-transition'
   | 'run-terminal'
   | 'ui-rpc-confirmed';
@@ -53,6 +54,7 @@ export type ChatRuntimeTaskStatus =
   | 'pending'
   | 'running'
   | 'completed'
+  | 'aborted'
   | 'error'
   | 'waiting_approval'
   | 'partial';
@@ -78,7 +80,7 @@ export type ChatRuntimeTaskProjection = {
   endedAt?: number;
 };
 
-export type ChatRuntimeStepStatus = 'pending' | 'running' | 'completed' | 'error' | 'blocked' | 'skipped';
+export type ChatRuntimeStepStatus = 'pending' | 'running' | 'completed' | 'aborted' | 'error' | 'blocked' | 'skipped';
 
 export type ChatRuntimePlanStep = {
   id: string;

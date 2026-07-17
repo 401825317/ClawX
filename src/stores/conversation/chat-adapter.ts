@@ -4,7 +4,7 @@ import {
   type ConversationMessageSnapshot,
 } from '../../../shared/conversation-events';
 import type { RawMessage } from '../chat/types';
-import { extractText } from '../../pages/Chat/message-utils';
+import { extractText, extractToolUse } from '../../pages/Chat/message-utils';
 import { asyncTaskPayloadToConversationEvents } from './async-task-adapter';
 import { createEventId, stableHash } from './identity';
 
@@ -175,19 +175,31 @@ export function chatEventToConversationEvents(
     const recoverable = typeof raw.recoverable === 'boolean'
       ? raw.recoverable
       : isRecoverableConversationError(error);
-    return [{
-      ...base,
-      eventId: createEventId({ source: base.source, type: 'turn.error', runId, seq, messageId: message?.id, phase: state, occurredAt, data: error }),
-      type: 'turn.error',
-      authority: 'authoritative',
-      data: { error, recoverable },
-    }, ...taskEvents];
+    return [
+      {
+        ...base,
+        eventId: createEventId({ source: base.source, type: 'run.ended', runId, seq, messageId: message?.id, phase: state, occurredAt, data: error }),
+        type: 'run.ended',
+        authority: 'authoritative',
+        data: { status: 'error', endedAt: occurredAt, error },
+      },
+      {
+        ...base,
+        eventId: createEventId({ source: base.source, type: 'turn.error', runId, seq, messageId: message?.id, phase: state, occurredAt, data: error }),
+        type: 'turn.error',
+        authority: 'authoritative',
+        data: { error, recoverable },
+      },
+      ...taskEvents,
+    ];
   }
 
   if (!message || message.role !== 'assistant') return taskEvents;
   const text = extractText(message);
   if (!text && !(message._attachedFiles?.length)) return taskEvents;
-  const final = state === 'final';
+  // OpenClaw completes each assistant model message, including mixed
+  // preamble + tool-call messages. Only a tool-free envelope is deliverable.
+  const final = state === 'final' && extractToolUse(message).length === 0;
   return [{
     ...base,
     eventId: createEventId({

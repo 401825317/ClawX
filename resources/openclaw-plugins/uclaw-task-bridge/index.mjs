@@ -18,6 +18,8 @@ const MONITOR_INTERVAL_MS = 2_500;
 const COMPLETION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const COMPLETION_RETRY_BASE_MS = 15_000;
 const COMPLETION_RETRY_MAX_MS = 5 * 60 * 1_000;
+const COMPLETION_RETRY_MAX_ATTEMPTS = 5;
+const COMPLETION_RETRY_MAX_AGE_MS = 10 * 60 * 1_000;
 const MAX_COMPLETION_RETRY_ENTRIES = 2_000;
 const MAX_EVENT_ITEMS = 24;
 const MAX_TEXT_CHARS = 4_000;
@@ -155,6 +157,7 @@ function normalizeTask(value) {
   const lifecycle = task.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : {};
   const acceptance = task.acceptance && typeof task.acceptance === 'object' ? task.acceptance : {};
   const completion = task.completion && typeof task.completion === 'object' ? task.completion : {};
+  const delivery = task.delivery && typeof task.delivery === 'object' ? task.delivery : undefined;
   const operations = Array.isArray(lifecycle.operations)
     ? lifecycle.operations.slice(-MAX_EVENT_ITEMS).map((operation) => ({
         kind: cleanText(operation?.kind, 80),
@@ -198,6 +201,7 @@ function normalizeTask(value) {
       mode: completion.mode === 'replan' ? 'replan' : 'direct',
       reason: cleanText(completion.reason, 1_000) || undefined,
     },
+    delivery,
     progress,
     artifacts,
     verifications,
@@ -468,6 +472,12 @@ function createBridge(api, options = {}) {
   const completionRetryMaxMs = Number.isFinite(options.completionRetryMaxMs)
     ? Math.max(completionRetryBaseMs, Math.floor(options.completionRetryMaxMs))
     : COMPLETION_RETRY_MAX_MS;
+  const completionRetryMaxAttempts = Number.isFinite(options.completionRetryMaxAttempts)
+    ? Math.max(1, Math.floor(options.completionRetryMaxAttempts))
+    : COMPLETION_RETRY_MAX_ATTEMPTS;
+  const completionRetryMaxAgeMs = Number.isFinite(options.completionRetryMaxAgeMs)
+    ? Math.max(completionRetryBaseMs, Math.floor(options.completionRetryMaxAgeMs))
+    : COMPLETION_RETRY_MAX_AGE_MS;
   let timer;
   let polling = false;
   let loggedUnavailable = false;
@@ -488,6 +498,10 @@ function createBridge(api, options = {}) {
     return !retry || retry.nextAttemptAt <= now();
   }
 
+  function completionRetryState(task) {
+    return completionRetries.get(completionRetryKey(task));
+  }
+
   function clearCompletionRetry(task) {
     completionRetries.delete(completionRetryKey(task));
   }
@@ -495,26 +509,39 @@ function createBridge(api, options = {}) {
   function scheduleCompletionRetry(task, reason, details = {}) {
     const key = completionRetryKey(task);
     const previous = completionRetries.get(key);
+    const attemptedAt = now();
+    const firstAttemptAt = previous?.firstAttemptAt ?? attemptedAt;
     const attempts = (previous?.attempts || 0) + 1;
+    const exhausted = attempts >= completionRetryMaxAttempts
+      || attemptedAt - firstAttemptAt >= completionRetryMaxAgeMs;
     const delayMs = Math.min(
       completionRetryMaxMs,
       completionRetryBaseMs * (2 ** Math.min(attempts - 1, 20)),
     );
-    completionRetries.set(key, {
+    const retry = {
       attempts,
-      nextAttemptAt: now() + delayMs,
-    });
+      firstAttemptAt,
+      lastAttemptAt: attemptedAt,
+      nextAttemptAt: exhausted ? attemptedAt : attemptedAt + delayMs,
+      exhausted,
+      reason,
+      details,
+    };
+    completionRetries.set(key, retry);
     while (completionRetries.size > MAX_COMPLETION_RETRY_ENTRIES) {
       completionRetries.delete(completionRetries.keys().next().value);
     }
-    api.logger?.warn?.(`[${PLUGIN_ID}] Completion delivery deferred with bounded retry`, {
+    api.logger?.warn?.(`[${PLUGIN_ID}] ${exhausted
+      ? 'Completion delivery retry budget exhausted'
+      : 'Completion delivery deferred with bounded retry'}`, {
       taskId: task.taskId,
       sessionKey: task.correlation.sessionKey,
       reason,
       attempt: attempts,
-      retryInMs: delayMs,
+      retryInMs: exhausted ? 0 : delayMs,
       ...details,
     });
+    return retry;
   }
 
   async function acknowledge(task, key, result) {
@@ -526,12 +553,18 @@ function createBridge(api, options = {}) {
           deliveryKey: key,
           sessionKey: task.correlation.sessionKey,
           delivery: {
+            outcome: result?.outcome === 'abandoned' ? 'abandoned' : 'delivered',
             kind: task.completion.mode === 'replan'
               ? 'openclaw_session_replan'
               : 'openclaw_runtime_events',
             injectionEnqueued: result?.injectionReady === true,
             runtimeEventsEmitted: result?.runtimeEventsEmitted === true,
             sessionTurnScheduled: result?.scheduled === true,
+            attempts: result?.attempts,
+            firstAttemptAt: result?.firstAttemptAt,
+            lastAttemptAt: result?.lastAttemptAt,
+            reason: result?.reason,
+            details: result?.details,
             at: now(),
           },
         }),
@@ -543,6 +576,48 @@ function createBridge(api, options = {}) {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async function settleExhaustedCompletion(task, retry) {
+    const deliveredBeforeAckFailure = retry.reason === 'host_acknowledgement_failed'
+      && retry.details?.runtimeEventsEmitted === true;
+    const acknowledged = await acknowledge(task, completionKey(task), {
+      outcome: deliveredBeforeAckFailure ? 'delivered' : 'abandoned',
+      injectionReady: retry.details?.injectionEnqueued === true,
+      runtimeEventsEmitted: retry.details?.runtimeEventsEmitted === true,
+      scheduled: retry.details?.sessionTurnScheduled === true,
+      attempts: retry.attempts,
+      firstAttemptAt: retry.firstAttemptAt,
+      lastAttemptAt: retry.lastAttemptAt,
+      reason: retry.reason,
+      details: retry.details,
+    });
+    if (acknowledged.ok) {
+      clearCompletionRetry(task);
+      api.logger?.warn?.(`[${PLUGIN_ID}] Completion delivery settled after retry exhaustion`, {
+        taskId: task.taskId,
+        sessionKey: task.correlation.sessionKey,
+        outcome: deliveredBeforeAckFailure ? 'delivered' : 'abandoned',
+        reason: retry.reason,
+        attempts: retry.attempts,
+      });
+      return;
+    }
+    retry.nextAttemptAt = now() + completionRetryMaxMs;
+    completionRetries.set(completionRetryKey(task), retry);
+    api.logger?.warn?.(`[${PLUGIN_ID}] Completion delivery settlement acknowledgement failed`, {
+      taskId: task.taskId,
+      sessionKey: task.correlation.sessionKey,
+      reason: retry.reason,
+      attempts: retry.attempts,
+      error: acknowledged.error,
+      retryInMs: completionRetryMaxMs,
+    });
+  }
+
+  async function deferCompletion(task, reason, details = {}) {
+    const retry = scheduleCompletionRetry(task, reason, details);
+    if (retry.exhausted) await settleExhaustedCompletion(task, retry);
   }
 
   async function unscheduleReplan(task) {
@@ -563,6 +638,11 @@ function createBridge(api, options = {}) {
 
   async function deliverTerminalTask(task) {
     if (!terminalTask(task) || !task.taskId || !task.correlation.sessionKey) return;
+    const retry = completionRetryState(task);
+    if (retry?.exhausted) {
+      if (completionRetryDue(task)) await settleExhaustedCompletion(task, retry);
+      return;
+    }
     if (!completionRetryDue(task)) return;
     const key = completionKey(task);
     let injection;
@@ -581,20 +661,20 @@ function createBridge(api, options = {}) {
         },
       });
     } catch (error) {
-      scheduleCompletionRetry(task, 'injection_failed', {
+      await deferCompletion(task, 'injection_failed', {
         error: error instanceof Error ? error.message : String(error),
       });
       return;
     }
     const injectionReady = injection?.enqueued === true || Boolean(cleanText(injection?.id, 300));
     if (!injectionReady) {
-      scheduleCompletionRetry(task, 'injection_not_ready');
+      await deferCompletion(task, 'injection_not_ready');
       return;
     }
 
     const runtimeEvents = emitTerminalRuntimeEvents(api, task);
     if (!runtimeEvents.emitted) {
-      scheduleCompletionRetry(task, 'runtime_event_delivery_failed', { reason: runtimeEvents.reason });
+      await deferCompletion(task, 'runtime_event_delivery_failed', { reason: runtimeEvents.reason });
       return;
     }
 
@@ -634,14 +714,19 @@ function createBridge(api, options = {}) {
         const cleanup = task.completion.mode === 'replan' && scheduled
           ? await unscheduleReplan(task)
           : { ok: true };
-        scheduleCompletionRetry(task, 'host_acknowledgement_failed', {
+        await deferCompletion(task, 'host_acknowledgement_failed', {
           error: acknowledged.error,
+          injectionEnqueued: injectionReady,
+          runtimeEventsEmitted: runtimeEvents.emitted,
+          sessionTurnScheduled: scheduled,
           replanCleanup: cleanup.ok === true ? 'completed' : cleanup.error,
         });
       }
     } else {
-      scheduleCompletionRetry(task, 'session_wake_failed', {
+      await deferCompletion(task, 'session_wake_failed', {
         injectionEnqueued: injection?.enqueued === true,
+        runtimeEventsEmitted: runtimeEvents.emitted,
+        sessionTurnScheduled: scheduled,
         scheduleError,
       });
     }

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import type { ChatRuntimeEvent } from '../shared/chat-runtime-events.ts';
 import {
   HostTaskService,
   type HostTaskLifecycleExecutor,
 } from '../electron/services/agent-runtime/host-task-service.ts';
+import { applyRuntimeEventToRuns } from '../src/stores/chat/runtime-graph.ts';
 
 async function waitUntil(check: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -243,6 +245,53 @@ test('Host task success is blocked until capability-derived artifact and verific
   }
 });
 
+test('Host task completion settlement persists abandonment and explicit redelivery opens a new revision', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-delivery-'));
+  const hostRoot = path.join(root, 'host-tasks');
+  try {
+    const service = new HostTaskService({ rootDir: hostRoot });
+    const created = await service.create(createRequest('completion-delivery'));
+    const artifactPath = path.join(root, 'delivery.txt');
+    await writeFile(artifactPath, 'delivery evidence');
+    const completed = await service.update(created.task.taskId, {
+      status: 'succeeded',
+      artifacts: [{ id: 'delivery-artifact', kind: 'file', filePath: artifactPath }],
+    });
+    assert.equal(completed?.status, 'succeeded');
+    const deliveryKey = `uclaw-task-bridge:completion:${created.task.taskId}:${completed?.revision}`;
+    const acknowledged = await service.acknowledgeCompletion(created.task.taskId, deliveryKey, {
+      outcome: 'abandoned',
+      kind: 'openclaw_runtime_events',
+      attempts: 5,
+      firstAttemptAt: 1_000,
+      lastAttemptAt: 2_000,
+      reason: 'runtime_event_delivery_failed',
+      details: { reason: 'session unavailable' },
+    });
+    assert.deepEqual(acknowledged?.completionAcks, [deliveryKey]);
+    assert.equal(acknowledged?.completionDeliveries[0]?.outcome, 'abandoned');
+    assert.equal(acknowledged?.completionDeliveries[0]?.attempts, 5);
+
+    const restarted = new HostTaskService({ rootDir: hostRoot });
+    const persisted = await restarted.get(created.task.taskId);
+    assert.equal(persisted?.completionDeliveries[0]?.reason, 'runtime_event_delivery_failed');
+    assert.deepEqual(persisted?.completionDeliveries[0]?.details, { reason: 'session unavailable' });
+    const journal = await readFile(
+      path.join(hostRoot, 'jobs', created.task.taskId, 'journal.jsonl'),
+      'utf8',
+    );
+    assert.match(journal, /task\.completion_abandoned/);
+    assert.match(journal, /runtime_event_delivery_failed/);
+
+    const redelivery = await restarted.recover(created.task.taskId, 'redeliver_existing_artifacts');
+    assert.equal(redelivery.task?.revision, (completed?.revision ?? 0) + 1);
+    assert.deepEqual(redelivery.task?.completionAcks, []);
+    assert.deepEqual(redelivery.task?.completionDeliveries, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Host task v3 store does not load legacy v2 snapshots', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-v3-only-'));
   const hostRoot = path.join(root, 'host-tasks');
@@ -367,9 +416,56 @@ test('a public update cannot bypass an in-flight cancellation claim', async () =
     const cancelled = await service.waitForTerminal(created.task.taskId, 2_000);
     assert.equal(cancelled?.status, 'cancelled');
     assert.equal(cancelled?.artifacts.some((artifact) => artifact.id === 'bypass-artifact'), false);
+    await waitUntil(async () => (
+      (await service.get(created.task.taskId))?.lifecycle.operations
+        .some((operation) => operation.kind === 'cancel' && operation.status === 'completed') === true
+    ));
   } finally {
     if (previousStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
     else process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('live Host task cancellation publishes aborted runtime semantics', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-live-cancel-'));
+  const service = new HostTaskService({ rootDir: path.join(root, 'host-tasks') });
+  const events: ChatRuntimeEvent[] = [];
+  service.setPublisher((event) => events.push(event));
+  const executor: HostTaskLifecycleExecutor = {
+    async start(context) {
+      await context.update({ status: 'running', progress: { detail: 'working' } });
+    },
+    async cancel() {},
+  };
+
+  try {
+    const created = await service.create(createRequest('live-cancel'));
+    await service.dispatchStart(created.task.taskId, executor);
+    await waitUntil(async () => (
+      (await service.get(created.task.taskId))?.lifecycle.operations.at(-1)?.status === 'completed'
+    ));
+
+    const cancelStartIndex = events.length;
+    assert.equal((await service.requestCancel(created.task.taskId, executor, 'stop live work')).dispatched, true);
+    assert.equal((await service.waitForTerminal(created.task.taskId, 2_000))?.status, 'cancelled');
+    await waitUntil(async () => (
+      (await service.get(created.task.taskId))?.lifecycle.operations.at(-1)?.status === 'completed'
+    ));
+
+    const cancellationEvents = events.slice(cancelStartIndex);
+    const taskEvent = cancellationEvents.findLast((event) => event.type === 'task.updated');
+    const stepEvent = cancellationEvents.findLast((event) => event.type === 'run.step.updated');
+    const progressEvent = cancellationEvents.findLast((event) => event.type === 'progress.update');
+
+    assert.equal(taskEvent?.task.status, 'aborted');
+    assert.equal(taskEvent?.task.sourceStatus, 'cancelled');
+    assert.equal(taskEvent?.task.terminalOutcome, 'cancelled');
+    assert.equal(stepEvent?.step.status, 'aborted');
+    assert.equal(progressEvent?.entry.status, 'aborted');
+    assert.equal(cancellationEvents.some((event) => event.type === 'tool.completed'), false);
+    assert.equal(events.reduce((runs, event) => applyRuntimeEventToRuns(runs, event), {})['run-test']?.status, 'aborted');
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

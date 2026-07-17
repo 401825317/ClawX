@@ -64,6 +64,26 @@ export function sessionAliasKeyBelongsTo(key: string, sessionKey: string): boole
   }
 }
 
+export type ToolSearchNestedCallIdentity = {
+  encodedParentToolCallId: string;
+  toolName: string;
+};
+
+/** Match OpenClaw's Tool Search child identity without assuming parent IDs survive sanitization. */
+export function parseToolSearchNestedCallId(toolCallId: string): ToolSearchNestedCallIdentity | null {
+  const match = /^tool_search_code:(.+):([^:]+):\d+$/u.exec(toolCallId.trim());
+  if (!match) return null;
+  return {
+    encodedParentToolCallId: match[1],
+    toolName: match[2],
+  };
+}
+
+/** Mirror OpenClaw's parent-ID encoding used inside Tool Search child call IDs. */
+export function encodeToolSearchParentCallId(toolCallId: string): string {
+  return toolCallId.trim().replace(/[^A-Za-z0-9_.:-]+/gu, '_').slice(0, 120) || 'call';
+}
+
 export function createEventId(input: {
   source: string;
   type: string;
@@ -112,7 +132,7 @@ function pendingLocalTurnId(state: ConversationState, sessionKey: string): strin
   const turnId = scopedTurnId(state, sessionKey, state.aliases.pendingLocalBySession[sessionKey]);
   if (!turnId) return undefined;
   const status = state.turnsById[turnId].status;
-  return status === 'completed' || status === 'partial' || status === 'error' || status === 'aborted'
+  return status === 'completed' || status === 'error' || status === 'aborted'
     ? undefined
     : turnId;
 }
@@ -128,7 +148,7 @@ function assignment(
 /** Accept an ownerless ledger fallback only when its lifecycle overlaps the candidate Turn. */
 function taskLedgerCanFallbackToTurn(turn: ConversationTurn, event: ConversationEvent): boolean {
   if (event.type !== 'task.updated' || event.source !== 'task-ledger' || event.rootRunId) return false;
-  if (['completed', 'partial', 'error', 'aborted'].includes(turn.status)) return false;
+  if (['completed', 'error', 'aborted'].includes(turn.status)) return false;
   const task = (event.data as {
     task?: { createdAt?: number; startedAt?: number };
   }).task;

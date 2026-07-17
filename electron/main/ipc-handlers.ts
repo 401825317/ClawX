@@ -1574,7 +1574,12 @@ function registerGatewayHandlers(
         const fsP = await import('fs/promises');
         for (const m of params.media) {
           const exists = await fsP.access(m.filePath).then(() => true, () => false);
-          logger.info(`[chat:sendWithMedia] Processing file: ${m.fileName} (${m.mimeType}), path: ${m.filePath}, exists: ${exists}, isVision: ${OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)}`);
+          logger.info('[chat:sendWithMedia] Processing staged attachment', {
+            sessionKey: params.sessionKey,
+            mimeType: m.mimeType,
+            exists,
+            isVision: OPENCLAW_VISION_MIME_TYPES.has(m.mimeType),
+          });
 
           // Always add file path reference so the model can access it via tools
           fileReferences.push(
@@ -1589,7 +1594,6 @@ function registerGatewayHandlers(
             if (!inlineImage.attachment) {
               logger.warn('[chat:sendWithMedia] Skipping inline image attachment above OpenClaw safe inline cap', {
                 sessionKey: params.sessionKey,
-                fileName: m.fileName,
                 bytes: inlineImage.inputBytes,
                 limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
                 reason: inlineImage.skippedReason,
@@ -1599,7 +1603,6 @@ function registerGatewayHandlers(
             if (inlineImage.resized) {
               logger.info('[chat:sendWithMedia] Resized inline image attachment for OpenClaw parser safety', {
                 sessionKey: params.sessionKey,
-                fileName: m.fileName,
                 inputBytes: inlineImage.inputBytes,
                 outputBytes: inlineImage.outputBytes,
                 outputMimeType: inlineImage.outputMimeType,
@@ -1611,7 +1614,6 @@ function registerGatewayHandlers(
           } else if (!shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
             logger.info('[chat:sendWithMedia] Using media path reference without inline attachment', {
               sessionKey: params.sessionKey,
-              fileName: m.fileName,
               mimeType: m.mimeType,
             });
           }

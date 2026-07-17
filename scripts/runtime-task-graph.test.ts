@@ -417,6 +417,34 @@ test('gateway runtime normalization preserves explicit owner run lineage', () =>
   assert.equal(events[0]?.rootRunId, 'run-lineage-owner');
 });
 
+test('gateway runtime normalization preserves cancelled tasks as aborted', () => {
+  const events = normalizeGatewayChatRuntimeEvents({
+    stream: 'tool',
+    runId: 'run-native-cancelled',
+    sessionKey: SESSION_KEY,
+    ts: 4300,
+    data: {
+      task: {
+        taskId: 'task-native-cancelled',
+        title: 'Cancelled native task',
+        status: 'cancelled',
+        terminalOutcome: 'cancelled',
+        terminalSummary: 'Cancelled by user',
+        updatedAt: 4300,
+        endedAt: 4300,
+      },
+    },
+  });
+
+  const taskEvent = events.find((event) => event.type === 'task.updated');
+  const stepEvent = events.find((event) => event.type === 'run.step.updated');
+  const progressEvent = events.find((event) => event.type === 'progress.update');
+  assert.equal(taskEvent?.taskStatus, 'aborted');
+  assert.equal(taskEvent?.type === 'task.updated' ? taskEvent.task.status : undefined, 'aborted');
+  assert.equal(stepEvent?.type === 'run.step.updated' ? stepEvent.step?.status : undefined, 'aborted');
+  assert.equal(progressEvent?.type === 'progress.update' ? progressEvent.entry.status : undefined, 'aborted');
+});
+
 test('a task-ledger-only run follows the detached task terminal state', () => {
   const completed = applyRuntimeEventToRuns({}, {
     type: 'task.updated',
@@ -505,7 +533,7 @@ test('cancelled task and approval projections use aborted semantics', () => {
       taskId: 'task-cancelled',
       flowId: 'flow-cancelled',
       title: 'Cancelled task',
-      status: 'error',
+      status: 'aborted',
       sourceStatus: 'cancelled',
       terminalOutcome: 'aborted',
       updatedAt: 500,
@@ -516,13 +544,13 @@ test('cancelled task and approval projections use aborted semantics', () => {
       runId: RUN_ID,
       sessionKey: SESSION_KEY,
       taskId: 'task-cancelled',
-      taskStatus: 'error',
+      taskStatus: 'aborted',
       ts: 500,
       step: {
         id: 'task:task-cancelled',
         taskId: 'task-cancelled',
         title: 'Cancelled task',
-        status: 'error',
+        status: 'aborted',
       },
     },
     {

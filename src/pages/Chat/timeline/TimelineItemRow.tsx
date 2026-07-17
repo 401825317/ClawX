@@ -6,6 +6,7 @@ import {
   ChevronDown,
   CircleDashed,
   ClipboardCheck,
+  CircleStop,
   FileCheck2,
   GitBranch,
   Loader2,
@@ -18,7 +19,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import type { GeneratedFile } from '@/lib/generated-files';
-import { stringifyRuntimeDisplayValue } from '@/lib/runtime-display-sanitizer';
+import { sanitizeRuntimeDisplayText, stringifyRuntimeDisplayValue } from '@/lib/runtime-display-sanitizer';
 import { cn } from '@/lib/utils';
 import { GeneratedFilesPanel } from '@/components/file-preview/GeneratedFilesPanel';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -147,11 +148,14 @@ function SubtaskBlock({ item }: { item: SubtaskItem }) {
           <span className={cn(
             'flex h-5 w-5 shrink-0 items-center justify-center',
             item.status === 'error' && 'text-red-700 dark:text-red-400',
+            item.status === 'aborted' && 'text-muted-foreground',
           )}>
             {running
               ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
               : item.status === 'error'
                 ? <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                : item.status === 'aborted'
+                  ? <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
                 : <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />}
           </span>
           <span className="min-w-0 truncate font-medium">{t(item.summaryKey, item.summaryParams)}</span>
@@ -169,6 +173,7 @@ function SubtaskBlock({ item }: { item: SubtaskItem }) {
                   <span className={cn(
                     'shrink-0 text-2xs text-muted-foreground',
                     (task.status === 'error' || task.status === 'partial') && 'text-red-700 dark:text-red-400',
+                    task.status === 'aborted' && 'text-muted-foreground',
                   )}>
                     {t(`timeline.subtaskStatus.${task.status}`)}
                   </span>
@@ -189,6 +194,7 @@ function ApprovalBlock({ item }: { item: ApprovalItem }) {
   const [error, setError] = useState<string | null>(null);
   const pending = item.status === 'blocked';
   const failed = item.status === 'error';
+  const stopped = item.status === 'aborted';
   const normalizedStatus = (item.decision ?? item.approvalStatus)?.trim().toLowerCase().replace(/[^a-z0-9]+/gu, '_');
   const statusLabel = normalizedStatus
     ? t(`timeline.approvalStatus.${normalizedStatus}`, { defaultValue: item.decision ?? item.approvalStatus })
@@ -226,7 +232,8 @@ function ApprovalBlock({ item }: { item: ApprovalItem }) {
         'rounded-md border px-3 py-2',
         pending && 'border-yellow-500/20 bg-yellow-500/10',
         failed && 'border-red-500/20 bg-red-500/10',
-        !pending && !failed && 'border-green-500/20 bg-green-500/10',
+        stopped && 'border-border bg-surface-input',
+        !pending && !failed && !stopped && 'border-green-500/20 bg-green-500/10',
       )}
       data-testid="timeline-approval"
       data-status={item.status}
@@ -236,11 +243,14 @@ function ApprovalBlock({ item }: { item: ApprovalItem }) {
         'flex items-center gap-2 text-sm font-medium',
         pending && 'text-yellow-700 dark:text-yellow-400',
         failed && 'text-red-700 dark:text-red-400',
-        !pending && !failed && 'text-green-700 dark:text-green-400',
+        stopped && 'text-muted-foreground',
+        !pending && !failed && !stopped && 'text-green-700 dark:text-green-400',
       )}>
-        {pending || failed
-          ? <AlertCircle className="h-4 w-4" aria-hidden="true" />
-          : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
+        {stopped
+          ? <CircleStop className="h-4 w-4" aria-hidden="true" />
+          : pending || failed
+            ? <AlertCircle className="h-4 w-4" aria-hidden="true" />
+            : <CheckCircle2 className="h-4 w-4" aria-hidden="true" />}
         <span className="min-w-0 flex-1">{item.title || t('timeline.approval')}</span>
         <span className="shrink-0 text-2xs font-normal opacity-80">{statusLabel}</span>
       </div>
@@ -499,7 +509,11 @@ function ItemContent(props: TimelineItemRowProps & { item: TimelineItem }) {
             <span className="font-medium">{item.status === 'running' ? t('reasoning.live') : t('reasoning.title')}</span>
             <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', expanded && 'rotate-180')} aria-hidden="true" />
           </button>
-          {expanded && <div className="pb-1 pt-1.5 text-xs leading-5 text-muted-foreground whitespace-pre-wrap break-words">{item.text}</div>}
+          {expanded && (
+            <div className="pb-1 pt-1.5 text-xs leading-5 text-muted-foreground whitespace-pre-wrap break-words">
+              {sanitizeRuntimeDisplayText(item.text)}
+            </div>
+          )}
         </section>
       );
     case 'tool-group':
@@ -552,8 +566,6 @@ function ItemContent(props: TimelineItemRowProps & { item: TimelineItem }) {
     }
     case 'error':
       return <ErrorBlock item={item} retryable={props.retryable} onRetryTurn={props.onRetryTurn} />;
-    case 'system-notice':
-      return <p className="text-xs text-muted-foreground">{item.message}</p>;
   }
 }
 

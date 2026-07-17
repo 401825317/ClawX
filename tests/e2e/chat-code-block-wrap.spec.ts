@@ -45,7 +45,7 @@ const seededHistory = [
 
 test.describe('ClawX chat code block wrapping', () => {
   test('soft-wraps long lines inside fenced code blocks instead of overflowing', async ({ launchElectronApp }) => {
-    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'timeline' });
+    const app = await launchElectronApp({ skipSetup: true });
 
     try {
       const sessions = [{
@@ -108,7 +108,7 @@ test.describe('ClawX chat code block wrapping', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
+      await expect(page.getByTestId('chat-page')).toBeVisible();
 
       // Constrain the viewport so the long line cannot fit on a single visual
       // row; without wrapping, this would force horizontal overflow.

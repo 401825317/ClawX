@@ -223,7 +223,9 @@ export function applyRuntimeContractEvents(
     if (event.type === 'task.updated') {
       const ledgerStatus = event.task.status === 'completed'
         ? 'completed'
-        : event.task.status === 'error' || event.task.status === 'partial'
+        : event.task.status === 'aborted'
+          ? 'aborted'
+          : event.task.status === 'error' || event.task.status === 'partial'
           ? 'error'
           : 'pending';
       nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, event.runId, [{

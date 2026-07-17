@@ -25,7 +25,6 @@
             "watermarks": "Границы последовательностей",
             "mergeEvidence": "Основания слияния",
             "assignments": "Назначение хода",
-            "shadow": "Теневое сравнение",
             "performance": "Производительность",
             "none": "Нет записей",
             "retained": "Сохранено",
@@ -37,9 +36,6 @@
             "staleSequences": "Устаревшие последовательности",
             "lastEventId": "ID последнего события",
             "records": "Записи",
-            "matched": "Совпадает",
-            "different": "Есть различия",
-            "differences": "Различия",
             "ingress": "Входящие события",
             "commits": "Фиксации",
             "renders": "Отрисовки",
@@ -123,12 +119,14 @@
     "tools": {
       "running": "Выполняется действий «{{category}}»: {{count}}",
       "completed": "Завершено действий «{{category}}»: {{count}}",
+      "aborted": "Остановлено действий «{{category}}»: {{aborted}} из {{count}}",
       "failed": "Ошибок в действиях «{{category}}»: {{failed}} из {{count}}"
     },
     "subtasks": {
       "running": "Выполняется подзадач: {{running}} из {{count}}",
       "waiting": "Ожидают одобрения подзадачи: {{waiting}} из {{count}}",
       "completed": "Завершено подзадач: {{count}}",
+      "aborted": "Остановлено подзадач: {{aborted}} из {{count}}",
       "failed": "Подзадач с ошибкой: {{failed}} из {{count}}"
     },
     "subtaskStatus": {
@@ -136,17 +134,16 @@
       "running": "Выполняется",
       "waiting_approval": "Ожидает одобрения",
       "completed": "Завершено",
+      "aborted": "Остановлено",
       "partial": "Частично завершено",
       "error": "Ошибка"
     },
         "toolCategory": { "read": "чтение", "search": "поиск", "command": "команда", "edit": "изменение", "browser": "браузер", "media": "медиа", "subagent": "подзадача", "generic": "инструмент" },
-        "toolStatus": { "running": "Выполняется", "completed": "Завершено", "error": "Ошибка" },
+        "toolStatus": { "running": "Выполняется", "completed": "Завершено", "aborted": "Остановлено", "error": "Ошибка" },
         "turnStatus": {
             "queued": "В очереди",
             "running": "Выполняется",
-            "waiting_approval": "Ожидает одобрения",
-            "waiting_background": "Ожидает фоновой задачи",
-            "settling": "Завершение"
+            "waiting_approval": "Ожидает одобрения"
         }
     },
     "toolbar": {

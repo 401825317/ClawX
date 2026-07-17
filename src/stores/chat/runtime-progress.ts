@@ -4,6 +4,10 @@ import type {
 } from '../../../shared/chat-runtime-events';
 import type { ChatRuntimeRunState } from './types';
 import { sanitizeRuntimeDisplayText } from '../../lib/runtime-display-sanitizer';
+import {
+  encodeToolSearchParentCallId,
+  parseToolSearchNestedCallId,
+} from '../conversation/identity';
 
 const PROBLEM_PROGRESS_STATUSES = new Set(['blocked', 'error']);
 
@@ -314,14 +318,17 @@ function canonicalProgressToolCallId(
   run: ChatRuntimeRunState | undefined,
   event: RuntimeToolEvent,
 ): string {
-  const nested = /^tool_search_code:(.+):([^:]+):\d+$/u.exec(event.toolCallId);
+  const nested = parseToolSearchNestedCallId(event.toolCallId);
   if (!nested) return event.toolCallId;
-  const parentStart = matchingToolStart(run, nested[1]);
+  const parentStart = [...(run?.events ?? [])].reverse().find((candidate): candidate is RuntimeToolEvent => (
+    candidate?.type === 'tool.started'
+    && encodeToolSearchParentCallId(candidate.toolCallId) === nested.encodedParentToolCallId
+  ));
   if (!parentStart) return event.toolCallId;
   const parentContext = resolveRuntimeToolProgressContext(run, parentStart);
-  const childToolName = canonicalToolName(nested[2]);
+  const childToolName = canonicalToolName(nested.toolName);
   return parentContext.outerName === 'tool_call' && parentContext.name === childToolName
-    ? nested[1]
+    ? parentStart.toolCallId
     : event.toolCallId;
 }
 
@@ -378,6 +385,7 @@ function toolSemanticState(
 function semanticStateForTask(
   task: NonNullable<ChatRuntimeRunState['tasks']>[number],
 ): ToolProgressSemanticState | undefined {
+  if (task.status === 'aborted') return 'aborted';
   const sourceStatus = normalizeText(task.sourceStatus)?.toLowerCase();
   const terminalOutcome = normalizeText(task.terminalOutcome)?.toLowerCase();
   if (sourceStatus && /^(?:aborted|cancelled|canceled|stopped|terminated)$/u.test(sourceStatus)) return 'aborted';
@@ -531,7 +539,7 @@ function buildTaskProgressEvents(
     // detached task reaches a terminal state, those values are not evidence
     // of what the provider actually produced. Keep the action readable and
     // show authoritative facts in the task-status detail below instead.
-    ...(semanticState === 'completed' || semanticState === 'partial' || semanticState === 'error'
+    ...(semanticState === 'completed' || semanticState === 'aborted' || semanticState === 'partial' || semanticState === 'error'
       ? { command: '' }
       : {}),
     text: fallbackTextForSemanticState(semanticState, context),

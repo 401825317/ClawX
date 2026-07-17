@@ -202,9 +202,6 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
         event.runId,
         event.sessionKey ?? null,
       );
-      const legacyEventForSession = inferredSessionKey && event.sessionKey !== inferredSessionKey
-        ? { ...event, sessionKey: inferredSessionKey }
-        : event;
       const completionTaskId = completionWakeTaskIdFromRunId(event.runId);
       const completionWake = completionTaskId
         ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
@@ -256,20 +253,6 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
 
       state.handleRuntimeEvent(event);
       const nextState = useChatStore.getState();
-
-      if (legacyEventForSession.type === 'run.ended' && resolvedSessionKey) {
-        try {
-          const legacyRunStatus = nextState.runtimeRuns[legacyEventForSession.runId]?.status;
-          useConversationStore.getState().compareAuthoritativeTerminal({
-            sessionKey: resolvedSessionKey,
-            runId: legacyEventForSession.runId,
-            status: legacyEventForSession.status,
-            legacyRunStatus: legacyRunStatus === 'running' ? undefined : legacyRunStatus,
-          });
-        } catch (error) {
-          console.warn('[conversation-timeline] Failed to compare terminal projections:', error);
-        }
-      }
 
       const shouldRefreshSessions = resolvedSessionKey != null && (
         resolvedSessionKey !== nextState.currentSessionKey
@@ -368,6 +351,47 @@ function mapChannelStatus(status: string): 'connected' | 'connecting' | 'disconn
   }
 }
 
+/** Detect status changes that affect the renderer's connection generation. */
+function gatewayRuntimeStatusChanged(previous: GatewayStatus, next: GatewayStatus): boolean {
+  return previous.state !== next.state
+    || previous.pid !== next.pid
+    || previous.connectedAt !== next.connectedAt
+    || previous.gatewayReady !== next.gatewayReady;
+}
+
+/** Reconcile the selected chat from OpenClaw after transport becomes ready again. */
+function reconcileChatAfterGatewayRecovery(previous: GatewayStatus, next: GatewayStatus): void {
+  const runtimeGenerationChanged = previous.state === 'running'
+    && next.state === 'running'
+    && (
+      (previous.pid != null && next.pid != null && previous.pid !== next.pid)
+      || (
+        previous.connectedAt != null
+        && next.connectedAt != null
+        && previous.connectedAt !== next.connectedAt
+      )
+    );
+  const becameReady = next.state === 'running'
+    && next.gatewayReady !== false
+    && (
+      previous.state !== 'running'
+      || previous.gatewayReady === false
+      || runtimeGenerationChanged
+    );
+  if (!becameReady) return;
+
+  void import('./chat')
+    .then(async ({ useChatStore }) => {
+      const before = useChatStore.getState();
+      // Session liveness is authoritative; connection recovery alone does not
+      // determine whether the interrupted Turn completed, failed, or went idle.
+      await before.reconcileGatewayRecovery();
+    })
+    .catch((error) => {
+      console.warn('[gateway-store] chat recovery reconciliation failed', error);
+    });
+}
+
 export const useGatewayStore = create<GatewayState>((set, get) => ({
   status: {
     state: 'stopped',
@@ -392,7 +416,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
           unsubscribers.push(subscribeHostEvent<GatewayStatus>('gateway:status', (payload) => {
+            const previous = get().status;
             set({ status: payload });
+            reconcileChatAfterGatewayRecovery(previous, payload);
 
             // Trigger cron repair when gateway becomes ready
             if (!cronRepairTriggeredThisSession && payload.state === 'running') {
@@ -467,11 +493,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
               .then((result: unknown) => {
                 const latest = result as GatewayStatus;
                 const current = get().status;
-                if (latest.state !== current.state) {
+                if (gatewayRuntimeStatusChanged(current, latest)) {
                   console.info(
-                    `[gateway-store] reconciled stale state: ${current.state} → ${latest.state}`,
+                    `[gateway-store] reconciled stale runtime: ${current.state}/${current.pid ?? 'none'} → ${latest.state}/${latest.pid ?? 'none'}`,
                   );
                   set({ status: latest });
+                  reconcileChatAfterGatewayRecovery(current, latest);
                 }
               })
               .catch(() => { /* ignore */ });
@@ -485,8 +512,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         try {
           const refreshed = await hostApiFetch<GatewayStatus>('/api/gateway/status');
           const current = get().status;
-          if (refreshed.state !== current.state) {
+          if (gatewayRuntimeStatusChanged(current, refreshed)) {
             set({ status: refreshed });
+            reconcileChatAfterGatewayRecovery(current, refreshed);
           }
         } catch {
           // Best-effort; the IPC listener will eventually reconcile.

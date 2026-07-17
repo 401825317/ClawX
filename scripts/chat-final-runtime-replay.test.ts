@@ -945,6 +945,175 @@ test('an unscoped terminal never clears session-scoped runs that share a run ID'
   assert.equal(runtimeState.activeRuntimeRunKeysByRunId.size, 0);
 });
 
+test('Gateway process exit clears process-local runtime work before reconnect', () => {
+  const manager = new GatewayManager();
+  const runtimeState = manager as unknown as {
+    activeRuntimeRuns: Map<string, unknown>;
+    activeRuntimeRunKeysByRunId: Map<string, Set<string>>;
+    activeRuntimeTasks: Map<string, unknown>;
+    clearRuntimeWorkAfterProcessExit: (code: number | null, childPid?: number) => number;
+  };
+
+  for (const [runId, sessionKey] of [
+    ['run-before-crash-a', 'agent:main:session-a'],
+    ['run-before-crash-b', 'agent:main:session-b'],
+  ]) {
+    manager.emit('chat:runtime-event', {
+      type: 'run.started',
+      runId,
+      sessionKey,
+      producer: 'gateway',
+    });
+  }
+  manager.emit('chat:runtime-event', {
+    type: 'task.updated',
+    runId: 'tool:image_generate:before-crash',
+    sessionKey: 'agent:main:session-a',
+    producer: 'openclaw-task-ledger',
+    task: {
+      taskId: 'image-before-crash',
+      title: 'Generate image',
+      status: 'running',
+    },
+  });
+
+  assert.equal(runtimeState.activeRuntimeRuns.size, 2);
+  assert.equal(runtimeState.activeRuntimeTasks.size, 1);
+  assert.equal(runtimeState.clearRuntimeWorkAfterProcessExit(137, 4242), 3);
+  assert.equal(runtimeState.activeRuntimeRuns.size, 0);
+  assert.equal(runtimeState.activeRuntimeRunKeysByRunId.size, 0);
+  assert.equal(runtimeState.activeRuntimeTasks.size, 0);
+  assert.equal(manager.getDiagnostics().recentLifecycleEvents?.at(-1)?.event, 'runtime_work_reset');
+  assert.deepEqual(manager.getDiagnostics().recentLifecycleEvents?.at(-1)?.details, {
+    code: 137,
+    childPid: 4242,
+    interruptedRunCount: 2,
+    interruptedTaskCount: 1,
+  });
+});
+
+test('active detached task keeps a deferred Gateway restart pending after the parent run ends', async () => {
+  const manager = new GatewayManager();
+  const runtimeState = manager as unknown as {
+    activeRuntimeRuns: Map<string, unknown>;
+    activeRuntimeTasks: Map<string, unknown>;
+  };
+  const sessionKey = 'agent:main:session-image-task';
+
+  manager.emit('chat:runtime-event', {
+    type: 'run.started',
+    runId: 'run-image-request',
+    sessionKey,
+    producer: 'gateway',
+  });
+  manager.emit('chat:runtime-event', {
+    type: 'task.updated',
+    runId: 'tool:image_generate:image-task',
+    sessionKey,
+    producer: 'openclaw-task-ledger',
+    task: {
+      taskId: 'image-task',
+      title: 'Generate image',
+      status: 'running',
+    },
+  });
+
+  await manager.restart({ reason: 'provider-switch', source: 'gateway-reload' });
+  let restartCount = 0;
+  manager.restart = async () => {
+    restartCount += 1;
+  };
+
+  manager.emit('chat:runtime-event', {
+    type: 'run.ended',
+    runId: 'run-image-request',
+    sessionKey,
+    producer: 'gateway',
+    status: 'completed',
+  });
+
+  assert.equal(runtimeState.activeRuntimeRuns.size, 0);
+  assert.equal(runtimeState.activeRuntimeTasks.size, 1);
+  assert.equal(restartCount, 0);
+
+  manager.emit('chat:runtime-event', {
+    type: 'task.updated',
+    runId: 'tool:image_generate:image-task',
+    sessionKey,
+    producer: 'openclaw-task-ledger',
+    task: {
+      taskId: 'image-task',
+      title: 'Generate image',
+      status: 'completed',
+    },
+  });
+
+  assert.equal(runtimeState.activeRuntimeTasks.size, 0);
+  assert.equal(restartCount, 1);
+});
+
+test('history task replay does not fabricate active Gateway work', () => {
+  const manager = new GatewayManager();
+  const runtimeState = manager as unknown as {
+    activeRuntimeTasks: Map<string, unknown>;
+  };
+
+  manager.emit('chat:runtime-event', {
+    type: 'task.updated',
+    runId: 'tool:image_generate:history-task',
+    sessionKey: 'agent:main:history-task',
+    producer: 'history',
+    task: {
+      taskId: 'history-task',
+      title: 'Generate image',
+      status: 'running',
+    },
+  });
+
+  assert.equal(runtimeState.activeRuntimeTasks.size, 0);
+});
+
+test('non-lifecycle runtime replay cannot fabricate active Gateway work', () => {
+  const manager = new GatewayManager();
+  const runtimeState = manager as unknown as {
+    activeRuntimeRuns: Map<string, unknown>;
+  };
+
+  manager.emit('chat:runtime-event', {
+    type: 'approval.updated',
+    runId: 'approval:exec:replayed-pending',
+    sessionKey: 'agent:main:approval-replay',
+    producer: 'openclaw',
+    approval: {
+      id: 'replayed-pending',
+      kind: 'exec',
+      phase: 'requested',
+      status: 'pending',
+    },
+  });
+  assert.equal(runtimeState.activeRuntimeRuns.size, 0);
+
+  manager.emit('chat:runtime-event', {
+    type: 'run.started',
+    runId: 'run-with-approval',
+    sessionKey: 'agent:main:approval-replay',
+    producer: 'gateway',
+  });
+  manager.emit('chat:runtime-event', {
+    type: 'approval.updated',
+    runId: 'run-with-approval',
+    sessionKey: 'agent:main:approval-replay',
+    producer: 'openclaw',
+    approval: {
+      id: 'owned-pending',
+      kind: 'exec',
+      phase: 'requested',
+      status: 'pending',
+    },
+  });
+  assert.equal(runtimeState.activeRuntimeRuns.size, 1);
+});
+
 test('history terminal replay does not suppress a later live final', () => {
   const runId = 'run-history-then-live';
   const sessionKey = 'agent:main:session-history-then-live';

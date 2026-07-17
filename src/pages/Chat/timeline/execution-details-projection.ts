@@ -42,12 +42,14 @@ function taskFlowStepId(flowId: string): string {
 
 function itemStatus(status: TimelineItemStatus): TaskStepStatus {
   if (status === 'completed') return 'completed';
+  if (status === 'aborted') return 'aborted';
   if (status === 'error') return 'error';
   if (status === 'blocked') return 'blocked';
   return 'running';
 }
 
 function taskStatus(task: ChatRuntimeTaskProjection): TaskStepStatus {
+  if (task.status === 'aborted') return 'aborted';
   const lifecycle = [task.sourceStatus, task.deliveryStatus, task.terminalOutcome]
     .map((value) => value?.trim().toLowerCase())
     .filter((value): value is string => Boolean(value));
@@ -98,6 +100,7 @@ function toolInputOutputDetail(
 
 function runtimeStepStatus(status: ChatRuntimePlanStep['status']): TaskStepStatus {
   if (status === 'completed' || status === 'skipped') return 'completed';
+  if (status === 'aborted') return 'aborted';
   if (status === 'error') return 'error';
   if (status === 'blocked') return 'blocked';
   return 'running';
@@ -153,6 +156,25 @@ function verificationDetail(verification: ChatRuntimeVerification): string | und
   const lines = [verification.detail, verification.evidence]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
   return lines.length > 0 ? sanitizeRuntimeDisplayText(lines.join('\n')) : undefined;
+}
+
+/** Read one displayable process message without exposing diagnostic-only events. */
+function commentaryEventText(event: ConversationEvent): string | undefined {
+  if (event.timelineVisibility === 'diagnostics' || event.type !== 'commentary.append') return undefined;
+  const data = event.data as { entry?: { text?: string }; text?: string; delta?: string };
+  const text = data.entry?.text ?? data.text ?? data.delta;
+  if (typeof text !== 'string') return undefined;
+  const normalized = text.replace(/[ \t]+/g, ' ').trim();
+  return normalized || undefined;
+}
+
+/** Match persisted commentary to its canonical owner without using display text. */
+function commentaryItemOwnsEvent(
+  item: { id: string; sourceEventIds: readonly string[] },
+  event: ConversationEvent,
+): boolean {
+  if (item.sourceEventIds.includes(event.eventId)) return true;
+  return item.id === `commentary:${event.messageId ?? event.eventId}`;
 }
 
 function flowStatus(tasks: ChatRuntimeTaskProjection[], flowId: string): TaskStepStatus {
@@ -245,6 +267,11 @@ export function deriveConversationExecutionSteps(
   }
   const tasks = [...tasksById.values()];
   const knownTaskIds = new Set(tasksById.keys());
+  const historyCommentaryEvents = events.filter((event) => (
+    event.source === 'history' && Boolean(commentaryEventText(event))
+  ));
+  const historyCommentaryEventIds = new Set(historyCommentaryEvents.map((event) => event.eventId));
+  const historyCommentaryOwnedByCanonical = new Set<string>();
 
   const upsertCanonical = (step: TaskStep, rank: number): void => {
     const sanitizedStep = sanitizeExecutionStep(step);
@@ -335,6 +362,28 @@ export function deriveConversationExecutionSteps(
         }
         break;
       }
+      case 'commentary': {
+        // History replay keeps the default row compact, while lazy details
+        // retain each persisted assistant process message below.
+        const ownedHistoryEvents = historyCommentaryEvents.filter((event) => (
+          commentaryItemOwnsEvent(item, event)
+        ));
+        const hasNonHistorySource = item.sourceEventIds.some((eventId) => (
+          !historyCommentaryEventIds.has(eventId)
+        ));
+        if (ownedHistoryEvents.length > 0 && !hasNonHistorySource) break;
+        ownedHistoryEvents.forEach((event) => historyCommentaryOwnedByCanonical.add(event.eventId));
+        upsertCanonical({
+          id: item.id,
+          label: item.text,
+          detail: item.text,
+          status: itemStatus(item.status),
+          kind: 'message',
+          depth: 1,
+          parentId: 'agent-run',
+        }, 1);
+        break;
+      }
       case 'subtask':
         for (const task of item.tasks) projectTask(tasksById.get(task.taskId) ?? task);
         break;
@@ -420,6 +469,23 @@ export function deriveConversationExecutionSteps(
 
   // A task can be retained in canonical task state even when its compact timeline item is absent.
   for (const task of tasks) projectTask(task);
+
+  // Persisted assistant messages remain individually inspectable even though
+  // their default Timeline row is reduced to one calm commentary item.
+  for (const event of historyCommentaryEvents) {
+    if (historyCommentaryOwnedByCanonical.has(event.eventId)) continue;
+    const text = commentaryEventText(event);
+    if (!text) continue;
+    upsertCanonical({
+      id: `history-commentary:${event.eventId}`,
+      label: text,
+      detail: text,
+      status: 'completed',
+      kind: 'message',
+      depth: 1,
+      parentId: 'agent-run',
+    }, 1);
+  }
 
   for (const event of events) {
     const ownedStep = ownedAuthoritativeDiagnosticStep(event, knownTaskIds);

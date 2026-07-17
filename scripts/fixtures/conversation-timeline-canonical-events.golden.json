@@ -235,7 +235,8 @@
                     "category": "read",
                     "count": 1,
                     "running": 0,
-                    "failed": 0
+                    "failed": 0,
+                    "aborted": 0
                   },
                   "toolCallIds": [
                     "tool:families:read"
@@ -277,7 +278,8 @@
                     "category": "command",
                     "count": 1,
                     "running": 0,
-                    "failed": 0
+                    "failed": 0,
+                    "aborted": 0
                   },
                   "toolCallIds": [
                     "tool:families:build"
@@ -318,7 +320,8 @@
                     "count": 1,
                     "failed": 0,
                     "waiting": 0,
-                    "running": 0
+                    "running": 0,
+                    "aborted": 0
                   },
                   "taskIds": [
                     "task:families:review"
@@ -1044,12 +1047,13 @@
                   "turnId": "turn:fixture:abort",
                   "kind": "tool-group",
                   "category": "command",
-                  "summaryKey": "timeline.tools.failed",
+                  "summaryKey": "timeline.tools.aborted",
                   "summaryParams": {
                     "category": "command",
                     "count": 1,
                     "running": 0,
-                    "failed": 1
+                    "failed": 0,
+                    "aborted": 1
                   },
                   "toolCallIds": [
                     "tool:abort:long"
@@ -1058,7 +1062,7 @@
                     {
                       "toolCallId": "tool:abort:long",
                       "name": "exec",
-                      "status": "error",
+                      "status": "aborted",
                       "args": {
                         "command": "long-running-task"
                       },
@@ -1067,7 +1071,7 @@
                       "updatedAt": 1700000200070
                     }
                   ],
-                  "status": "error",
+                  "status": "aborted",
                   "firstSeenAt": 1700000200020,
                   "updatedAt": 1700000200070,
                   "sourceEventIds": [
@@ -1081,12 +1085,13 @@
                   "id": "subtask:turn:fixture:abort:task:abort:child",
                   "turnId": "turn:fixture:abort",
                   "kind": "subtask",
-                  "summaryKey": "timeline.subtasks.failed",
+                  "summaryKey": "timeline.subtasks.aborted",
                   "summaryParams": {
                     "count": 1,
-                    "failed": 1,
+                    "failed": 0,
                     "waiting": 0,
-                    "running": 0
+                    "running": 0,
+                    "aborted": 1
                   },
                   "taskIds": [
                     "task:abort:child"
@@ -1096,13 +1101,13 @@
                       "taskId": "task:abort:child",
                       "kind": "subagent",
                       "title": "Long child task",
-                      "status": "error",
+                      "status": "aborted",
                       "updatedAt": 1700000200050,
                       "terminalOutcome": "aborted",
                       "endedAt": 1700000200050
                     }
                   ],
-                  "status": "error",
+                  "status": "aborted",
                   "firstSeenAt": 1700000200030,
                   "updatedAt": 1700000200050,
                   "sourceEventIds": [
@@ -1128,7 +1133,7 @@
                   "message": "Approve long-running task.",
                   "authority": "corroborating",
                   "source": "derived",
-                  "status": "error",
+                  "status": "aborted",
                   "firstSeenAt": 1700000200040,
                   "updatedAt": 1700000200050,
                   "sourceEventIds": [
@@ -1350,6 +1355,21 @@
                   }
                 },
                 {
+                  "id": "commentary:message:restart:live-stream",
+                  "turnId": "turn:fixture:restart",
+                  "kind": "commentary",
+                  "text": "Live continuation after reconnect.",
+                  "sealed": true,
+                  "status": "completed",
+                  "firstSeenAt": 1700000300040,
+                  "updatedAt": 1700000300040,
+                  "sourceEventIds": [
+                    "restart:assistant-live"
+                  ],
+                  "revision": 2,
+                  "origin": "assistant"
+                },
+                {
                   "id": "final:turn:fixture:restart",
                   "turnId": "turn:fixture:restart",
                   "kind": "final-answer",
@@ -1367,21 +1387,6 @@
                     "restart:live-final"
                   ],
                   "revision": 2
-                },
-                {
-                  "id": "commentary:message:restart:live-stream",
-                  "turnId": "turn:fixture:restart",
-                  "kind": "commentary",
-                  "text": "Live continuation after reconnect.",
-                  "sealed": true,
-                  "status": "completed",
-                  "firstSeenAt": 1700000300040,
-                  "updatedAt": 1700000300040,
-                  "sourceEventIds": [
-                    "restart:assistant-live"
-                  ],
-                  "revision": 2,
-                  "origin": "assistant"
                 }
               ],
               "evidence": {

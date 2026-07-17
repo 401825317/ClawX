@@ -28,7 +28,7 @@ function streamingText(paragraphs: number): string {
 
 test.describe('ClawX chat scroll pin-to-bottom during runs', () => {
   test('keeps the scrollbar pinned to the bottom through oscillating tool-heavy streaming, and yields to manual scroll-up', async ({ launchElectronApp }) => {
-    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'timeline' });
+    const app = await launchElectronApp({ skipSetup: true });
 
     try {
       await installIpcMocks(app, {
@@ -86,7 +86,7 @@ test.describe('ClawX chat scroll pin-to-bottom during runs', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
+      await expect(page.getByTestId('chat-page')).toBeVisible();
       await expect(page.getByText('Chat history message 40')).toBeVisible({ timeout: 30_000 });
 
       const scrollContainer = page.getByTestId('chat-scroll-container');

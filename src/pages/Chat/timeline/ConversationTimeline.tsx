@@ -29,6 +29,7 @@ import { TimelineItemRow } from './TimelineItemRow';
 
 interface ConversationTimelineProps {
   sessionKey: string;
+  reasoningLevel?: string | null;
   assistantAvatarSrc?: string | null;
   hasMoreHistory: boolean;
   loadingMoreHistory: boolean;
@@ -114,7 +115,14 @@ interface VisibleTimelineAnchor {
   offsetTop: number;
 }
 
+interface DynamicLayoutSnapshot {
+  scrollTop: number;
+  scrollHeight: number;
+  anchor: VisibleTimelineAnchor;
+}
+
 const EXECUTION_DETAILS_ITEM_KINDS = new Set<TimelineItemKind>([
+  'commentary',
   'plan',
   'tool-group',
   'subtask',
@@ -123,6 +131,14 @@ const EXECUTION_DETAILS_ITEM_KINDS = new Set<TimelineItemKind>([
   'verification-summary',
   'error',
 ]);
+
+type ReasoningVisibilityLevel = 'off' | 'on' | 'stream';
+
+function normalizeReasoningVisibilityLevel(value: string | null | undefined): ReasoningVisibilityLevel {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'on' || normalized === 'stream') return normalized;
+  return 'off';
+}
 
 function timelineItemRowKey(turnId: string, itemId: string, executionDetailsEntry: boolean): string {
   return JSON.stringify(executionDetailsEntry
@@ -134,12 +150,16 @@ function timelineStatusRowKey(turnId: string): string {
   return JSON.stringify(['status', turnId]);
 }
 
-function createTimelineRowKeySelector(sessionKey: string): (state: ConversationStore) => string[] {
+function createTimelineRowKeySelector(
+  sessionKey: string,
+  reasoningLevel: ReasoningVisibilityLevel,
+): (state: ConversationStore) => string[] {
   let previousTurnIds: string[] = [];
   let previousSegments: string[][] = [];
   let previousRowKeys: string[] = [];
   const segmentCache = new Map<string, {
     active: boolean;
+    includeThinking: boolean;
     itemIndex: Record<string, number>;
     rowKeys: string[];
   }>();
@@ -152,17 +172,33 @@ function createTimelineRowKeySelector(sessionKey: string): (state: ConversationS
       const turn = state.turnsById[turnId];
       if (!turn) return [];
       const active = isActiveTurnStatus(turn.status);
+      const includeThinking = reasoningLevel === 'on'
+        || (reasoningLevel === 'stream' && active && !turn.evidence.finalMessagePresent);
       const cached = segmentCache.get(turnId);
-      const executionDetailsItemId = turn.items.find((item) => EXECUTION_DETAILS_ITEM_KINDS.has(item.kind))?.id;
-      const segment = cached?.itemIndex === turn.itemIndex && cached.active === active
+      const segment = cached?.itemIndex === turn.itemIndex
+        && cached.active === active
+        && cached.includeThinking === includeThinking
         ? cached.rowKeys
-        : [
-            ...turn.items.map((item) => timelineItemRowKey(turnId, item.id, item.id === executionDetailsItemId)),
-            ...(active ? [timelineStatusRowKey(turnId)] : []),
-          ];
+        : (() => {
+            const visibleItems = includeThinking
+              ? turn.items
+              : turn.items.filter((item) => item.kind !== 'thinking');
+            const executionDetailsItemId = visibleItems.find(
+              (item) => EXECUTION_DETAILS_ITEM_KINDS.has(item.kind),
+            )?.id;
+            return [
+              ...visibleItems.map((item) => timelineItemRowKey(turnId, item.id, item.id === executionDetailsItemId)),
+              ...(active ? [timelineStatusRowKey(turnId)] : []),
+            ];
+          })();
       if (segment !== previousSegments[index]) changed = true;
       if (segment !== cached?.rowKeys) {
-        segmentCache.set(turnId, { active, itemIndex: turn.itemIndex, rowKeys: segment });
+        segmentCache.set(turnId, {
+          active,
+          includeThinking,
+          itemIndex: turn.itemIndex,
+          rowKeys: segment,
+        });
       }
       return segment;
     });
@@ -310,6 +346,7 @@ const ConversationStatusRow = memo(function ConversationStatusRow({ row }: {
 
 export const ConversationTimeline = forwardRef<ConversationTimelineHandle, ConversationTimelineProps>(function ConversationTimeline({
   sessionKey,
+  reasoningLevel: rawReasoningLevel,
   assistantAvatarSrc,
   hasMoreHistory,
   loadingMoreHistory,
@@ -323,7 +360,11 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
 }, forwardedRef) {
   const { t } = useTranslation('chat');
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
-  const selectStoreRowKeys = useMemo(() => createTimelineRowKeySelector(sessionKey), [sessionKey]);
+  const reasoningLevel = normalizeReasoningVisibilityLevel(rawReasoningLevel);
+  const selectStoreRowKeys = useMemo(
+    () => createTimelineRowKeySelector(sessionKey, reasoningLevel),
+    [reasoningLevel, sessionKey],
+  );
   const storeTurnIds = useConversationStore(useShallow((state) => state.turnOrderBySession[sessionKey] ?? []));
   const storeRowKeys = useConversationStore(selectStoreRowKeys);
   const latestTurnRevision = useConversationStore((state) => {
@@ -350,6 +391,11 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
   const followScrollFrameRef = useRef<number | null>(null);
   const anchorRestoreFrameRef = useRef<number | null>(null);
   const detachedVisibleAnchorRef = useRef<VisibleTimelineAnchor | null>(null);
+  const dynamicLayoutSnapshotRef = useRef<DynamicLayoutSnapshot | null>(null);
+  const dynamicLayoutClickHandlerRef = useRef<(event: Event) => void>(() => undefined);
+  const handleDynamicLayoutNativeClick = useCallback((event: Event) => {
+    dynamicLayoutClickHandlerRef.current(event);
+  }, []);
   let resolvedTimelineWindow = timelineWindow;
   if (timelineWindow.sessionKey !== sessionKey || timelineWindow.rowKeys !== storeRowKeys) {
     // Keep data and its inverse-list origin in one render. Passing a larger
@@ -456,19 +502,22 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
     previousElement?.removeEventListener('scroll', handleScrollerScroll);
     previousElement?.removeEventListener('wheel', handleScrollerWheel);
     previousElement?.removeEventListener('pointerdown', handleScrollerPointerDown);
+    previousElement?.removeEventListener('click', handleDynamicLayoutNativeClick, true);
     const nextElement = element instanceof HTMLElement ? element : null;
     scrollerElementRef.current = nextElement;
     lastScrollTopRef.current = nextElement?.scrollTop ?? 0;
     nextElement?.addEventListener('scroll', handleScrollerScroll, { passive: true });
     nextElement?.addEventListener('wheel', handleScrollerWheel, { passive: true });
     nextElement?.addEventListener('pointerdown', handleScrollerPointerDown, { passive: true });
-  }, [handleScrollerPointerDown, handleScrollerScroll, handleScrollerWheel]);
+    nextElement?.addEventListener('click', handleDynamicLayoutNativeClick, true);
+  }, [handleDynamicLayoutNativeClick, handleScrollerPointerDown, handleScrollerScroll, handleScrollerWheel]);
 
   useEffect(() => () => {
     scrollerElementRef.current?.removeEventListener('scroll', handleScrollerScroll);
     scrollerElementRef.current?.removeEventListener('wheel', handleScrollerWheel);
     scrollerElementRef.current?.removeEventListener('pointerdown', handleScrollerPointerDown);
-  }, [handleScrollerPointerDown, handleScrollerScroll, handleScrollerWheel]);
+    scrollerElementRef.current?.removeEventListener('click', handleDynamicLayoutNativeClick, true);
+  }, [handleDynamicLayoutNativeClick, handleScrollerPointerDown, handleScrollerScroll, handleScrollerWheel]);
 
   useEffect(() => {
     window.addEventListener('pointerup', finishPointerScroll, { passive: true });
@@ -562,8 +611,36 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
       if (attemptsRemaining > 1) scheduleVisibleRowRestore(anchor, attemptsRemaining - 1);
     });
   }, [markProgrammaticScroll, sessionKey]);
+  const restoreScrollHeightDelta = useCallback(function scheduleScrollHeightRestore(
+    snapshot: DynamicLayoutSnapshot,
+    attemptsRemaining: number,
+  ) {
+    anchorRestoreFrameRef.current = window.requestAnimationFrame(() => {
+      anchorRestoreFrameRef.current = null;
+      const scroller = scrollerElementRef.current;
+      if (!scroller || useConversationStore.getState().followModeBySession[sessionKey] !== 'detached') {
+        dynamicLayoutSnapshotRef.current = null;
+        return;
+      }
+      const targetScrollTop = snapshot.scrollTop + (scroller.scrollHeight - snapshot.scrollHeight);
+      const correction = targetScrollTop - scroller.scrollTop;
+      if (Math.abs(correction) > 0.5) {
+        recordTimelineScrollCorrection(correction);
+        markProgrammaticScroll();
+        scroller.scrollTop = targetScrollTop;
+        lastScrollTopRef.current = scroller.scrollTop;
+      }
+      if (attemptsRemaining > 1) {
+        scheduleScrollHeightRestore(snapshot, attemptsRemaining - 1);
+      } else {
+        dynamicLayoutSnapshotRef.current = null;
+        detachedVisibleAnchorRef.current = snapshot.anchor;
+        restoreVisibleRow(snapshot.anchor, 4);
+      }
+    });
+  }, [markProgrammaticScroll, restoreVisibleRow, sessionKey]);
 
-  const handleTimelineClickCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+  const handleTimelineClickCapture = useCallback((event: Event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target?.closest('button[aria-expanded]')) return;
 
@@ -581,8 +658,28 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
     if (followModeAtChange !== 'detached') setFollowMode(sessionKey, 'detached');
     detachedVisibleAnchorRef.current = anchor;
     cancelAnchorRestore();
+    const toggledRow = target.closest<HTMLElement>('[data-timeline-row-id]');
+    if (toggledRow && toggledRow.getBoundingClientRect().bottom <= scroller.getBoundingClientRect().top) {
+      const snapshot = {
+        scrollTop: scroller.scrollTop,
+        scrollHeight: scroller.scrollHeight,
+        anchor,
+      };
+      dynamicLayoutSnapshotRef.current = snapshot;
+      restoreScrollHeightDelta(snapshot, DYNAMIC_LAYOUT_ANCHOR_RESTORE_FRAMES);
+      return;
+    }
+    dynamicLayoutSnapshotRef.current = null;
     restoreVisibleRow(anchor, DYNAMIC_LAYOUT_ANCHOR_RESTORE_FRAMES);
-  }, [cancelAnchorRestore, captureVisibleRow, restoreVisibleRow, sessionKey, setFollowMode]);
+  }, [
+    cancelAnchorRestore,
+    captureVisibleRow,
+    restoreScrollHeightDelta,
+    restoreVisibleRow,
+    sessionKey,
+    setFollowMode,
+  ]);
+  dynamicLayoutClickHandlerRef.current = handleTimelineClickCapture;
 
   useEffect(() => {
     const scroller = scrollerElementRef.current;
@@ -607,6 +704,7 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
         scheduleScrollToBottomIfFollowing();
         return;
       }
+      if (dynamicLayoutSnapshotRef.current) return;
       const intent = userScrollIntentRef.current;
       const pointerGraceActive = Boolean(intent?.persistent && performance.now() <= intent.expiresAt);
       if (!pointerScrollActiveRef.current && !pointerGraceActive) {
@@ -798,12 +896,12 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
   return (
     <div
       className="relative h-full min-h-0"
-      onClickCapture={handleTimelineClickCapture}
       data-testid="conversation-timeline"
       data-total-row-count={rows.length}
       data-turn-count={storeTurnIds.length}
       data-follow-mode={followMode}
       data-latest-turn-revision={latestTurnRevision}
+      data-reasoning-level={reasoningLevel}
     >
       <Virtuoso
         key={sessionKey}

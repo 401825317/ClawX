@@ -273,13 +273,29 @@ export async function handleRuntimeRoutes(
       return true;
     }
     if (action === 'ack' && req.method === 'POST') {
-      const body = await parseJsonBody<{ deliveryKey?: string; sessionKey?: unknown }>(req).catch(() => ({}));
+      const body = await parseJsonBody<{
+        deliveryKey?: string;
+        sessionKey?: unknown;
+        delivery?: {
+          outcome?: 'delivered' | 'abandoned';
+          kind?: string;
+          injectionEnqueued?: boolean;
+          runtimeEventsEmitted?: boolean;
+          sessionTurnScheduled?: boolean;
+          attempts?: number;
+          firstAttemptAt?: number;
+          lastAttemptAt?: number;
+          reason?: string;
+          details?: unknown;
+          at?: number;
+        };
+      }>(req).catch(() => ({}));
       const current = await hostTaskService.get(taskId);
       if (!current || !taskBelongsToSession(current, body.sessionKey)) {
         sendJson(res, 404, { success: false, error: 'Host task not found' });
         return true;
       }
-      const task = await hostTaskService.acknowledgeCompletion(taskId, body.deliveryKey ?? '');
+      const task = await hostTaskService.acknowledgeCompletion(taskId, body.deliveryKey ?? '', body.delivery);
       sendJson(res, task ? 200 : 404, task ? { success: true, task: await bridgeTask(task) } : { success: false, error: 'Host task not found' });
       return true;
     }

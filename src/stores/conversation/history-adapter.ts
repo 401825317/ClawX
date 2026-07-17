@@ -8,6 +8,7 @@ import {
   extractThinking,
   extractToolUse,
   normalizeMessageRole,
+  stripProcessMessagePrefix,
 } from '../../pages/Chat/message-utils';
 import { parseSubagentCompletionInfo } from '../../pages/Chat/task-visualization';
 import { isInternalMessage } from '../chat/helpers';
@@ -15,7 +16,13 @@ import { hasCanonicalArtifactEvidence } from '../chat/runtime-evidence';
 import type { RawMessage } from '../chat/types';
 import { extractGeneratedFiles } from '../../lib/generated-files';
 import { asyncTaskPayloadToConversationEvents } from './async-task-adapter';
-import { createEventId, createTurnId, stableHash } from './identity';
+import {
+  createEventId,
+  createTurnId,
+  encodeToolSearchParentCallId,
+  parseToolSearchNestedCallId,
+  stableHash,
+} from './identity';
 import { conversationMessageSnapshot } from './chat-adapter';
 
 function timestampMs(value: unknown): number | undefined {
@@ -218,6 +225,61 @@ function toolResultContent(message: RawMessage): unknown {
   return result?.content ?? message.content;
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function delegatedToolName(name: string, input: unknown): string | undefined {
+  if (name.trim().toLowerCase() !== 'tool_call') return undefined;
+  const wrapper = record(input);
+  if (!wrapper) return undefined;
+  for (const key of ['id', 'toolName', 'tool_name', 'name']) {
+    const value = wrapper[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function canonicalHistoryToolCallId(
+  toolCallId: string,
+  toolName: string,
+  delegatedParents: Map<string, { toolCallId: string; toolName: string }>,
+): string {
+  const nested = parseToolSearchNestedCallId(toolCallId);
+  if (!nested) return toolCallId;
+  const parent = delegatedParents.get(nested.encodedParentToolCallId);
+  return parent?.toolName === nested.toolName && nested.toolName === toolName
+    ? parent.toolCallId
+    : toolCallId;
+}
+
+/** Replace only assistant text blocks while preserving attachment and media evidence. */
+function withAssistantText(message: RawMessage, text: string): RawMessage {
+  if (typeof message.content === 'string') return { ...message, content: text };
+  if (!Array.isArray(message.content)) return message;
+
+  let replaced = false;
+  const content = message.content.flatMap((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return [block];
+    const record = block as Record<string, unknown>;
+    if (record.type !== 'text') return [block];
+    if (replaced) return [];
+    replaced = true;
+    return [{ ...record, text }];
+  });
+  if (!replaced) content.unshift({ type: 'text', text });
+  return { ...message, content };
+}
+
+/** Strip persisted process narration only when it is an exact ordered final prefix. */
+function finalHistoryMessage(message: RawMessage, processSegments: string[]): RawMessage {
+  const fullText = extractText(message).trim();
+  const finalText = stripProcessMessagePrefix(fullText, processSegments);
+  return finalText === fullText ? message : withAssistantText(message, finalText);
+}
+
 function toolInputPath(value: unknown): string | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
@@ -309,7 +371,14 @@ function projectSegment(
   const segmentMessages = segment.map((entry) => entry.message);
   const terminal = terminalAssistant(segmentMessages);
   const finalIndex = finalAssistantIndex(segmentMessages, terminal);
+  const processSegments = finalIndex < 0
+    ? []
+    : segmentMessages.slice(0, finalIndex)
+      .filter((message) => message.role === 'assistant')
+      .map((message) => extractText(message).trim())
+      .filter(Boolean);
   const toolNames = new Map<string, string>();
+  const delegatedParents = new Map<string, { toolCallId: string; toolName: string }>();
 
   segment.forEach(({ message, occurredAt, locationId }, index) => {
     let taskToolCallId = message.toolCallId;
@@ -327,10 +396,18 @@ function projectSegment(
     }
 
     for (const tool of extractToolUse(message)) {
-      const toolCallId = tool.id || `history-tool:${stableHash({ turnId, index, name: tool.name })}`;
+      const rawToolCallId = tool.id || `history-tool:${stableHash({ turnId, index, name: tool.name })}`;
+      const delegatedName = delegatedToolName(tool.name, tool.input);
+      if (delegatedName) {
+        delegatedParents.set(encodeToolSearchParentCallId(rawToolCallId), {
+          toolCallId: rawToolCallId,
+          toolName: delegatedName,
+        });
+      }
+      const toolCallId = canonicalHistoryToolCallId(rawToolCallId, tool.name, delegatedParents);
       toolNames.set(toolCallId, tool.name);
       events.push(baseEvent({
-        eventId: createEventId({ source: 'history', type: 'tool.started', toolCallId, phase: 'start', occurredAt, data: tool.input }),
+        eventId: createEventId({ source: 'history', type: 'tool.started', toolCallId: rawToolCallId, phase: 'start', occurredAt, data: tool.input }),
         type: 'tool.started',
         sessionKey,
         turnId,
@@ -342,14 +419,20 @@ function projectSegment(
     }
 
     if (isToolResultUserMessage(message)) {
-      const toolCallId = (message.toolCallId
+      const rawToolCallId = (message.toolCallId
         ?? (Array.isArray(message.content)
           ? String((message.content as Array<{ id?: string; tool_use_id?: string }>)[0]?.tool_use_id ?? '')
           : '')) || `history-result:${stableHash({ turnId, index })}`;
+      const resultName = message.toolName ?? toolNames.get(rawToolCallId) ?? 'tool';
+      const toolCallId = canonicalHistoryToolCallId(
+        rawToolCallId,
+        resultName,
+        delegatedParents,
+      );
       taskToolCallId = toolCallId;
       const name = message.toolName ?? toolNames.get(toolCallId) ?? 'tool';
       events.push(baseEvent({
-        eventId: createEventId({ source: 'history', type: 'tool.completed', toolCallId, phase: 'completed', occurredAt, data: message.content }),
+        eventId: createEventId({ source: 'history', type: 'tool.completed', toolCallId: rawToolCallId, phase: 'completed', occurredAt, data: message.content }),
         type: 'tool.completed',
         sessionKey,
         turnId,
@@ -362,6 +445,7 @@ function projectSegment(
 
     if (message.role === 'assistant') {
       const text = extractText(message).trim();
+      const messageArtifacts = artifactEvents(sessionKey, turnId, message, occurredAt, locationId);
       if (terminal?.index === index) {
         events.push(baseEvent({
           eventId: createEventId({ source: 'history', type: 'turn.error', messageId: message.id ?? locationId, phase: `turn-${terminal.status}`, occurredAt, data: terminal.error }),
@@ -390,8 +474,11 @@ function projectSegment(
         const isFinal = index === finalIndex;
         const type = isFinal ? 'final.message' : 'commentary.append';
         const data = isFinal
-          ? { message: conversationMessageSnapshot(message) }
+          ? { message: conversationMessageSnapshot(finalHistoryMessage(message, processSegments)) }
           : { text, replace: true };
+        // A delivered artifact is part of the result evidence, so it must own
+        // its timeline position before the final answer from the same message.
+        if (isFinal) events.push(...messageArtifacts);
         events.push(baseEvent({
           eventId: createEventId({ source: 'history', type, messageId: message.id ?? locationId, phase: isFinal ? 'final' : 'commentary', occurredAt, data: message.content }),
           type,
@@ -401,8 +488,10 @@ function projectSegment(
           messageId: message.id,
           data,
         }));
+        if (!isFinal) events.push(...messageArtifacts);
+      } else {
+        events.push(...messageArtifacts);
       }
-      events.push(...artifactEvents(sessionKey, turnId, message, occurredAt, locationId));
     }
 
     events.push(...asyncTaskPayloadToConversationEvents(message, {

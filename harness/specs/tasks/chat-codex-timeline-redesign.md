@@ -9,26 +9,35 @@ touchedAreas:
   - pnpm-lock.yaml
   - harness/specs/tasks/chat-codex-timeline-redesign.md
   - shared/chat-runtime-events.ts
+  - shared/chat-send-outbox.ts
   - shared/conversation-events.ts
   - shared/conversation-rollout.ts
   - shared/chat-timeline/**
   - electron/preload/index.ts
   - electron/main/index.ts
   - electron/main/ipc-handlers.ts
+  - electron/api/routes/gateway.ts
+  - electron/services/chat-send-outbox.ts
   - electron/services/junfeiai/junfeiai-service.ts
+  - electron/services/agent-runtime/host-task-service.ts
   - electron/services/computer/approval-broker.ts
+  - electron/services/computer/desktop-run-coordinator.ts
+  - electron/services/computer/types.ts
   - electron/gateway/chat-runtime-events.ts
   - electron/gateway/event-dispatch.ts
+  - electron/gateway/manager.ts
   - electron/gateway/task-ledger-monitor.ts
   - src/lib/host-events.ts
   - src/lib/approval-actions.ts
   - src/lib/runtime-display-sanitizer.ts
   - src/App.tsx
   - src/components/client/ClientConfigInitializer.tsx
+  - src/components/desktop/DesktopApprovalOverlay.tsx
   - src/stores/client-config.ts
   - src/stores/chat.ts
   - src/stores/chat/**
   - src/stores/conversation/**
+  - src/stores/gateway.ts
   - src/types/electron.d.ts
   - src/pages/Chat/index.tsx
   - src/pages/Chat/TimelineChatPage.tsx
@@ -38,7 +47,9 @@ touchedAreas:
   - src/pages/Chat/ExecutionGraphCard.tsx
   - src/pages/Chat/RunProgressCard.tsx
   - src/pages/Chat/ReasoningPanel.tsx
+  - src/pages/Chat/image-generation-status.ts
   - src/pages/Chat/runtime-run-merge.ts
+  - src/pages/Chat/runtime-task-visualization.ts
   - src/pages/Chat/task-visualization.ts
   - src/pages/Chat/timeline/**
   - src/pages/Agents/index.tsx
@@ -52,8 +63,11 @@ touchedAreas:
   - scripts/fixtures/conversation-timeline-canonical-events.json
   - scripts/fixtures/conversation-timeline-canonical-events.golden.json
   - scripts/chat-send-intent.test.ts
+  - scripts/chat-send-outbox.test.ts
+  - scripts/chat-runtime-control.test.ts
   - scripts/chat-abort-detached-tasks.test.ts
   - scripts/chat-final-runtime-replay.test.ts
+  - scripts/junfeiai-provider-seed-stability.test.ts
   - scripts/gateway-task-ledger-monitor.test.ts
   - scripts/runtime-display-sanitizer.test.ts
   - scripts/runtime-task-graph.test.ts
@@ -61,10 +75,14 @@ touchedAreas:
   - scripts/conversation-timeline-*.test.ts
   - scripts/conversation-control-selectors.test.ts
   - scripts/conversation-shadow-compare.test.ts
+  - scripts/desktop-approval-replay.test.ts
+  - scripts/host-task-lifecycle.test.ts
   - scripts/host-task-rehydration.test.ts
   - scripts/comms/**
   - harness/evidence/chat-codex-timeline-performance.json
   - harness/evidence/chat-codex-timeline-performance.md
+  - resources/openclaw-plugins/uclaw-desktop-control/index.mjs
+  - resources/openclaw-plugins/uclaw-task-bridge/**
   - tests/e2e/chat-host-task-rehydration.spec.ts
   - tests/e2e/chat-approval-actions.spec.ts
   - tests/e2e/desktop-approval-overlay.spec.ts
@@ -72,6 +90,7 @@ touchedAreas:
   - tests/e2e/chat-timeline.spec.ts
   - tests/e2e/chat-timeline-product-matrix.spec.ts
   - tests/e2e/chat-task-structured-runtime.spec.ts
+  - tests/e2e/chat-task-visualizer.spec.ts
   - tests/e2e/fixtures/electron.ts
   - tests/e2e/chat-assistant-markdown-plain.spec.ts
   - tests/e2e/chat-code-block-wrap.spec.ts
@@ -85,6 +104,8 @@ touchedAreas:
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
+  - README.ru-RU.md
+  - harness/specs/tasks/uclaw-desktop-and-blender-runtime.md
 expectedUserBehavior:
   - Each user request owns one stable turn whose commentary, tool activity, artifacts, verification, approvals, final answer, and terminal status remain correctly attributed during streaming, session switches, refresh, and restart.
   - The default information flow is a calm linear timeline: user message, concise commentary and grouped tool summaries, independently visible artifacts or approvals, and one final answer.
@@ -113,19 +134,27 @@ requiredTests:
   - pnpm harness validate --spec harness/specs/tasks/chat-codex-timeline-redesign.md --since origin/feature/uclaw-general-agent-orchestration
   - pnpm harness run --spec harness/specs/tasks/chat-codex-timeline-redesign.md --since origin/feature/uclaw-general-agent-orchestration --dry-run
   - pnpm exec tsx --test scripts/conversation-timeline-replay.test.ts
+  - pnpm exec tsx --test scripts/desktop-approval-replay.test.ts
   - pnpm exec tsx --test scripts/conversation-timeline-golden.test.ts
   - pnpm exec tsx --test scripts/conversation-control-selectors.test.ts
   - pnpm exec tsx --test scripts/chat-send-intent.test.ts
+  - pnpm exec tsx --test scripts/chat-send-outbox.test.ts
+  - pnpm exec tsx --test scripts/chat-runtime-control.test.ts
   - pnpm exec tsx --test scripts/chat-abort-detached-tasks.test.ts
   - pnpm exec tsx --test scripts/chat-final-runtime-replay.test.ts
-  - pnpm exec tsx --test scripts/conversation-shadow-compare.test.ts
+  - pnpm exec tsx --test scripts/junfeiai-provider-seed-stability.test.ts
   - pnpm exec tsx --test scripts/chat-timeline-performance.test.ts
+  - pnpm exec tsx --test scripts/gateway-task-ledger-monitor.test.ts
+  - pnpm exec tsx --test scripts/host-task-lifecycle.test.ts
   - pnpm exec tsx --test scripts/host-task-rehydration.test.ts
+  - pnpm exec tsx --test scripts/runtime-display-sanitizer.test.ts
+  - pnpm exec tsx --test scripts/runtime-task-graph.test.ts
+  - pnpm exec tsx --test scripts/timeline-media-ownership.test.ts
   - node scripts/collect-chat-timeline-performance-evidence.mjs --verify
   - pnpm run typecheck
   - pnpm run lint:check
   - pnpm run build:vite
-  - pnpm exec playwright test tests/e2e/chat-host-task-rehydration.spec.ts tests/e2e/chat-approval-actions.spec.ts tests/e2e/desktop-approval-overlay.spec.ts tests/e2e/chat-timeline-rollout.spec.ts tests/e2e/chat-timeline.spec.ts tests/e2e/chat-timeline-product-matrix.spec.ts tests/e2e/chat-task-structured-runtime.spec.ts tests/e2e/chat-scroll-to-latest.spec.ts tests/e2e/chat-scroll-pin-bottom.spec.ts tests/e2e/chat-question-directory.spec.ts tests/e2e/chat-assistant-markdown-plain.spec.ts tests/e2e/chat-code-block-wrap.spec.ts tests/e2e/chat-reasoning-panel.spec.ts tests/e2e/chat-table-header-light.spec.ts tests/e2e/chat-run-state-events.spec.ts tests/e2e/native-agent-media-routing.spec.ts --workers=1
+  - pnpm exec playwright test tests/e2e/chat-host-task-rehydration.spec.ts tests/e2e/chat-approval-actions.spec.ts tests/e2e/chat-timeline.spec.ts tests/e2e/chat-timeline-product-matrix.spec.ts tests/e2e/chat-task-structured-runtime.spec.ts tests/e2e/chat-task-visualizer.spec.ts tests/e2e/chat-scroll-to-latest.spec.ts tests/e2e/chat-scroll-pin-bottom.spec.ts tests/e2e/chat-question-directory.spec.ts tests/e2e/chat-assistant-markdown-plain.spec.ts tests/e2e/chat-code-block-wrap.spec.ts tests/e2e/chat-reasoning-panel.spec.ts tests/e2e/chat-table-header-light.spec.ts tests/e2e/chat-run-state-events.spec.ts tests/e2e/native-agent-media-routing.spec.ts --workers=1
   - pnpm run comms:replay
   - pnpm run comms:compare
   - Electron UI verification for long-history streaming, user-scrolled anchoring, expanded tool details, execution details, media, subagents, approvals, abort, error, and restart recovery
@@ -147,7 +176,7 @@ acceptance:
   - The legacy projection is removed only after replay parity, E2E coverage, performance thresholds, and product compatibility gates pass; no indefinite second source of truth remains afterward.
   - Image/video modes still provide current-turn defaults only, media artifacts remain playable and durable, and media task terminal evidence closes pending UI after live delivery and history replay.
   - Planner steps, execution-queue work, native tasks, and subagents preserve parent/child ownership without interleaving separate user turns or sessions.
-  - Approval requests remain visible and actionable until authoritative approval, rejection, cancellation, or run termination; replay never reopens a terminal approval.
+  - Approval requests remain visible and actionable until authoritative approval, rejection, cancellation, expiry, or an error/abort that invalidates the request. Successful model Run completion does not cancel a Main-owned pending approval, and replay never reopens a terminal approval.
   - Artifact and verification items come from structured evidence, retain availability/error state, may appear before the final answer, and do not treat path-like prose as produced output.
   - Abort, error, disconnect, stale history, late tool results, duplicate finals, missing sequence numbers, and backend-idle recovery converge to one deterministic visible state.
   - Renderer pages and components add no direct Gateway HTTP, direct IPC, transport switching, polling ownership, semantic planner, or completion inference.
@@ -205,27 +234,41 @@ OpenClaw remains the semantic and orchestration owner. ClawX Main normalizes run
 Every adapter emits a versioned, serializable event envelope. Payload types remain discriminated and must not be reconstructed from display strings.
 
 ```ts
-type CanonicalEventSource = 'native' | 'derived' | 'history' | 'synthetic'
+type CanonicalEventSource =
+  | 'openclaw-chat'
+  | 'openclaw-runtime'
+  | 'task-ledger'
+  | 'history'
+  | 'plugin'
+  | 'host'
+  | 'derived'
+  | 'synthetic'
+
+type CanonicalAuthority = 'authoritative' | 'corroborating' | 'inferred'
 
 type CanonicalEventEnvelope<TKind, TPayload> = {
-  schemaVersion: 1
+  version: 1
   eventId: string
-  kind: TKind
+  type: TKind
   source: CanonicalEventSource
+  authority: CanonicalAuthority
   sessionKey: string
-  turnId: string
+  turnId?: string
   runId?: string
   rootRunId?: string
+  messageId?: string
   taskId?: string
   parentTaskId?: string
   toolCallId?: string
-  itemId: string
   seq?: number
   occurredAt: number
-  observedAt: number
-  payload: TPayload
+  receivedAt: number
+  replayed: boolean
+  data: TPayload
 }
 ```
+
+`turnId` is optional only at pre-correlation ingress. The reducer must resolve it through explicit identity, bounded aliases, or deterministic local ownership before projection; unresolved events are quarantined rather than assigned a fabricated Turn. Event families with an upstream item identity retain it in their structured `data`, while lifecycle and liveness events do not invent a visual item. This is the single canonical object checked by the fixture/golden tests.
 
 Supported discriminants cover the evidence already available to ClawX:
 
@@ -294,18 +337,21 @@ React components consume turn/item selectors. They must not rescan all messages,
 
 ## Timeline Projection
 
-The default renderer accepts only ordered `TimelineItem` values:
+The default renderer accepts only ordered `TimelineItem` values. Design names use snake case below; the implementation uses the equivalent kebab-case discriminants shown in parentheses:
 
-- `user_message`: original user text and attachments.
+- `user_message` (`user-message`): original user text and attachments.
 - `commentary`: concise displayable progress narrative; contiguous deltas update one item.
 - `thinking`: optional, collapsed displayable reasoning only.
-- `tool_group`: summary of adjacent compatible tool calls with lazy details.
+- `tool_group` (`tool-group`): summary of adjacent compatible tool calls with lazy details.
+- `plan`: compact native planner objective/steps; it is never synthesized from prose and preserves the existing Planner / Task Flow capability.
 - `approval`: actionable request and terminal decision state.
 - `subtask`: compact child-agent/task status with stable parent ownership.
-- `artifact`: file, image, video, URL, or other durable output with availability state.
-- `verification`: concise result bound to the evidence it verifies.
-- `final_answer`: one visible final response block for the turn.
+- `artifact` (`artifact-group`): one stable grouped owner for file, image, video, URL, or other durable output with availability state.
+- `verification` (`verification-summary`): one concise grouped result bound to the evidence it verifies.
+- `final_answer` (`final-answer`): one visible final response block for the turn.
 - `error`: friendly terminal or actionable failure when no later authoritative success supersedes it.
+
+No additional default item kind may be introduced without updating this design. Aggregated implementation kinds do not create additional visual ownership for the same fact.
 
 Projection rules:
 
@@ -386,7 +432,7 @@ Performance fixtures must prove:
 - Remove obsolete page-level run-card/message rescans, duplicate runtime projections, and temporary comparison code.
 - Keep only the approved execution-details view and developer event inspector.
 - Exit gate: full static, comms, replay, E2E, product compatibility, and performance validation passes with the legacy renderer disabled.
-- Rollback before merge/release: revert the Phase 5 deletion and re-enable the already-tested renderer flag. No Gateway or transcript migration may make rollback destructive.
+- Rollback before merge/release: revert the Phase 5 deletion as a code/version rollback. No Gateway or transcript migration makes rollback destructive, and no runtime dual-renderer flag remains in the release.
 
 ## Completion Evidence
 
@@ -398,16 +444,35 @@ Implementation review must include:
 - E2E screenshots/traces of the default linear timeline, expanded tool details, normal execution details, developer diagnostics, scroll lock/new-content behavior, and restored sessions.
 - Performance output for high-frequency streaming and a 500-message session, including commit counts, completed-turn render counts, mounted DOM counts, long tasks, frame rate, replay duration, and scroll corrections. The retained reports are `harness/evidence/chat-codex-timeline-performance.json` and `harness/evidence/chat-codex-timeline-performance.md`, verified by `scripts/collect-chat-timeline-performance-evidence.mjs --verify`.
 - Communication replay/compare output proving no renderer-owned transport or Gateway contract regression.
-- A file-level migration checklist identifying legacy code retained temporarily, its flag/rollback owner, its removal gate, and confirmation that no permanent duplicate state source remains.
+- A file-level migration checklist confirming legacy code and rollout flags are removed, the version-level rollback path remains non-destructive, and no permanent duplicate state source remains.
 
 ## File-level Migration Checklist
 
-Current status: Phases 1-4 are implemented and Timeline is the default renderer. Phase 5 bounded retention is implemented, while legacy removal remains intentionally open until the real-OpenClaw manual product-compatibility matrix and release rollback sign-off are complete; automated parity, performance, communication, and Electron E2E gates alone do not authorize deleting the rollback renderer.
+Current status: Phases 1-5 are implemented. Timeline is the sole conversation renderer; the legacy page projection, shadow comparison state, renderer rollout flags, and legacy-only approval overlay have been removed after explicit product and rollback sign-off. Rollback is now a code/version revert and requires no Gateway, transcript, or persisted-conversation migration.
 
-- [x] `src/pages/Chat/index.tsx`: temporarily retain `LegacyChat` and its page-level `messages/runtimeRuns -> UserRunCard/ExecutionGraphCard/ReasoningPanel` projection. `useConversationStore.mode` is the only renderer/rollback owner; `timeline` is the default, while `legacy` and `shadow` exist only for rollback or non-dual-render comparison. Delete the old projection only after replay parity, Timeline E2E, product compatibility, and performance gates all pass.
-- [x] `src/stores/chat.ts`: retain existing `messages` and `runtimeRuns` during migration so session behavior and legacy rollback remain intact. The canonical path may consume only hydrated raw history, local-send identity, and authoritative runtime/chat evidence. Phase 5 removes projection-only rescans and completion inference only after they have no consumers; it does not remove send, session, artifact, or media behavior.
-- [x] `src/stores/gateway.ts`: keep one Gateway subscription that feeds both migration projections. Do not add a second listener. After the removal gate passes, delete only legacy projection delivery/comparison code; Gateway contracts, transcripts, and persisted user data remain unchanged, so rollback requires no data migration.
+Latest automated evidence: the required script/static/build/comms/Harness gates pass. Script suites pass `334/334` with their native runners (`288/288` TypeScript through `tsx`, `46/46` ESM through Node), including the encrypted durable-outbox security cases. The conversation reducer replay suite passes `108/108`, including real async image/video transcript shapes and sealed live-commentary reconciliation. The complete required Electron suite passes `72/72`. Public UI/IPC coverage proves same-session queue serialization, stable queued Turn identity, media-intent preservation, durable restart restoration, transcript reconciliation without duplicate commentary, authoritative abort ownership, normal reconnect convergence, and recovery when Renderer misses the intermediate stopped/reconnecting status and observes only a new running Gateway generation. Retained performance evidence verifies approximately 60 FPS, zero long tasks, one store commit per frame, zero completed-Turn rerenders, and 22 mounted rows for both 500- and 1000-message fixtures. Communication replay/compare reports zero duplicates, loss, ordering violations, or RPC timeout regression. The Harness spec validates and dry-runs against `feature/uclaw-general-agent-orchestration`.
+
+The final continuation audit after the media-order fix also passes the current required boundaries: the combined TypeScript script run passes `236/236`, `uclaw-task-bridge` harness passes, TypeScript and production Vite/Electron builds pass, ESLint reports zero errors with the same six pre-existing warnings, performance evidence verifies, comms replay/compare remains zero-loss/zero-duplicate/zero-ordering-violation, and the task Harness validates and dry-runs from `origin/feature/uclaw-general-agent-orchestration`. After the last canonical-boundary repair, the focused reducer replay passes `110/110`, the canonical golden passes `4/4`, and the required Electron matrix passes `72/72` in one serial invocation against the final build. The live-frame gate records zero long tasks, at most one store commit per frame, zero completed-Turn rerenders, and bounded mounted rows for the 500-, 1000-, and single-long-Turn fixtures.
+
+`src/stores/chat.ts` no longer remains at the previously questioned 8,000-line scale. This continuation reduced it from `7,602` to `6,658` lines without changing the Zustand Store API or canonical Timeline ownership. Media model/default/prompt resolution now lives in `src/stores/chat/media-send-preferences.ts`; session title cleanup, summary hydration, and rename deduplication live in `src/stores/chat/session-label-controller.ts`; transport-shaped tool call/result compatibility lives in `src/stores/chat/tool-status.ts`; and optimistic user-message/history-echo reconciliation plus streaming snapshots live in `src/stores/chat/optimistic-message-reconciliation.ts`. `chat.ts` remains the orchestration facade for send, session lifecycle, artifact/history hydration, and compatibility state used outside rendering, while visible conversation projection continues to come only from canonical Turns.
+
+Latest real-OpenClaw manual evidence: image history renders one artifact block; video history renders one player and one file block with durable metadata. Real image and video transcripts persist the same semantic order: assistant process commentary, async media task evidence, delivered `MEDIA:` artifact, then one completion answer. The user's follow-up screenshots proved that history replay parity alone was insufficient: the live reducer could still show `completion text -> media -> process text` until a later history refresh. The OpenClaw transcript itself was correctly ordered, so the remaining defect was in canonical projection rather than the provider, media API, Gateway, or service restart state. Mixed assistant messages containing both a preamble and a tool call are now classified as `assistant.content`, never `final.message`; Turn items are ordered by canonical occurrence time with user input pinned first and final/error evidence pinned after execution, artifacts, and verification. Tool groups are also split again when late commentary reveals a canonical narrative boundary, and history enrichment uses the same terminal rank as live projection, preventing execution-detail ownership from oscillating during refresh. The running renderer accepted this through Vite HMR, automatically replayed `chat.history`, and immediately showed both real Turns as `process commentary -> tool/task evidence -> media artifact -> completion answer`. Electron PID `27806` and Gateway PID `27896` remained unchanged from their `2026-07-17 08:44` starts, proving the correction did not depend on a restart. The full conversation replay now passes `110/110`; TypeScript, ESLint, `git diff --check`, production Vite/Electron build, artifact-ownership E2E, completion-wake E2E, the live Y-position regression, the history/live execution-details owner regression, and the hundreds-of-items single-Turn regression all pass. History refresh, media-to-report-to-media session switching, and renderer reload preserve the same ownership without duplicate final/artifact/commentary media. A real subagent request in main session `4c8a1c1d-0dd9-445a-b6af-a5bdfa2ad1c0` and child session `35ea50d1-81c9-4f9a-9483-a2193a6c4c33` rendered one owning Turn, one completed subtask summary, two completed tool operations, and exactly one `SUBAGENT_OK MAIN_OK` final across session switching and refresh. A real authoritative abort in session `c8ae509d-80f1-4bfa-903a-29e4947f069d`, run `d979971d-6c40-40b3-8c67-12eee463f00c`, persisted `stopReason=aborted` and `Request was aborted.`, produced no assistant final, and never rendered `MUST_NOT_RENDER`.
+
+Gateway restart evidence remains separate from renderer ordering. A background JunFeiAI provider-status refresh no longer interprets provider/default metadata drift as an authentication change, so it does not schedule a Gateway runtime reload. The final full development restart at `2026-07-17 08:44` started Electron PID `27806` and Gateway PID `27896`, upgraded the bundled `uclaw-task-bridge` plugin from `0.1.8` to `0.1.9`, and contains one `start_requested` plus one Gateway process start with no later restart. Relay-token changes and explicit runtime synchronization still retain their required restart behavior.
+
+The old task-delivery warning loop is now closed rather than merely identified. Four cancelled `agent:main:route-test` Host tasks had no completion acknowledgement and targeted a non-existent session, so completion injection remained not ready forever. The task bridge now enforces both attempt and elapsed-time budgets, persists a `delivered` or `abandoned` completion settlement in the Host task and journal, and reserves explicit redelivery for a new revision. On the real restarted runtime all four old tasks exhausted at five attempts, persisted `task.completion_abandoned` with `reason=injection_not_ready`, retained their task evidence without deleting local data, and produced zero further retry warnings after `2026-07-17 08:48:35`; Gateway PID `27896` remained unchanged.
+
+The actionable desktop-approval matrix now has real product evidence. OpenClaw Tool Search emits an outer `tool_call` plus an inner `desktop_*` call whose encoded ID replaces the outer `|` separator with `_`; live and history projections fold those facts into exactly two visible tool operations while retaining the inner call as a Turn alias. A request sent without model-supplied `sessionKey/runId` produced approval `runId=dad777a5-03d2-490c-9af5-1eea3932e85a` and an inner `toolCallId`, remained visibly actionable after the model Run completed, exposed `Allow once / Deny`, and moved to `denied` when rejected. The composer recovered immediately, and renderer reload preserved one two-tool Turn without reopening the rejected approval. After a later Main restart, historical approval Turns still rendered exactly two tool operations and no actionable approval reopened. One later approval was manually accepted by the user; it is not evidence of automatic approval or auto-consent. The coordinating regression coverage includes Tool Search deduplication, coordinator ownership preservation, completed-Run approval persistence, late-pending rejection, denial closure, manual resolution replay, and replay safety.
+
+The real Gateway crash/reconnect matrix is now authoritative. Session `agent:main:session-1784200865033` started a 120-second command under Gateway PID `37175`; `SIGKILL` produced `runtime_work_reset` with `interruptedRunCount=1`, and Main started Gateway PID `40849`. OpenClaw then reported `hasActiveRun=false` with a terminal failed session row. Renderer recognized the new Gateway generation even though it had missed the intermediate stopped/reconnecting status, settled the same Turn from backend idle, restored the composer, and did not fabricate `MUST_NOT_RENDER_AFTER_CRASH`. A same-session follow-up produced exactly one `RECOVERY_OK` final. The transcript contains only the original user request, the real pre-tool `toolUse` commentary, the follow-up user request, and the one follow-up final. Non-lifecycle approval/tool replay is also covered against fabricating process-local active Gateway work.
+
+The real-OpenClaw product-compatibility matrix is complete for ordinary chat, media, subagents, approvals, authoritative abort, session/history restoration, and Gateway crash recovery. The user explicitly approved the large-version Phase 5 removal and accepted version-level rollback instead of retaining runtime dual-renderer compatibility.
+
+- [x] `src/pages/Chat/index.tsx`: expose only `TimelineChatPage`; `LegacyChat` and page-level `messages/runtimeRuns -> UserRunCard/ExecutionGraphCard/ReasoningPanel` rescans are deleted.
+- [x] `src/stores/chat.ts`: retain send, session, artifact, media, and compatibility runtime state still used outside rendering, while removing legacy-only history comparison inputs. Visible conversation state comes only from canonical Turn/Timeline projection.
+- [x] `src/stores/gateway.ts`: keep one Gateway subscription and remove legacy terminal projection comparison. Gateway contracts, transcripts, and persisted user data remain unchanged, so version rollback requires no data migration.
 - [x] `shared/conversation-events.ts`, `src/stores/conversation/*`, `src/pages/Chat/TimelineChatPage.tsx`, and `src/pages/Chat/timeline/*`: retain these as the target event contract, Turn source of truth, and only default renderer. Execution graphs mount only through execution details, and raw canonical events remain developer-only.
 - [x] `scripts/conversation-timeline-replay.test.ts`, `scripts/chat-timeline-performance.test.ts`, Timeline/scroll E2E, and manual Electron evidence: keep replay parity, abnormal ordering, 500-message DOM bounds, scroll locking, dynamic-height anchoring, media, approval, subtask, and restart coverage as deletion gates. Any failed gate blocks legacy removal.
 - [x] Phase 5 retention foundation: raw canonical evidence is bounded by active/terminal event tails and monotonic retention checkpoints; sequence watermarks are scoped per concrete run/entity stream; no-sequence IDs, quarantine records, assignment diagnostics, session caches, and item provenance all have explicit bounds with replay/performance coverage.
-- [ ] Phase 5 legacy removal: after the real-OpenClaw product matrix and release rollback sign-off pass, delete old page-level run-card/message rescans, history-only `runtimeRuns` reconstruction, rollback busy-state inference, renderer feature branches, and temporary shadow comparison state. Confirm that visible state has one canonical Turn/Timeline source of truth while execution details and developer diagnostics remain available.
+- [x] Main-owned durable send outbox: queued intents use stable Turn/idempotency ownership, encrypted atomic persistence, schema and capacity limits, corrupt-file isolation, memory-only fallback when `safeStorage` is unavailable, transcript reconciliation before retry, and staged-attachment TTL leases. Prompt previews, base64 payloads, signed URLs, credentials, and generated reference artifacts are not persisted as owned staging files.
+- [x] Phase 5 legacy removal: old page-level run-card/message rescans, renderer feature branches, rollout overrides, legacy-only approval overlay, and temporary shadow comparison state are deleted. Visible state has one canonical Turn/Timeline source of truth while execution details and developer diagnostics remain available.

@@ -133,7 +133,8 @@ function normalizeTaskStatus(
   fallback: ChatRuntimeTaskStatus,
 ): ChatRuntimeTaskStatus {
   const status = normalizeMarker(value);
-  if (['error', 'failed', 'failure', 'aborted', 'cancelled', 'canceled'].includes(status)) return 'error';
+  if (['error', 'failed', 'failure'].includes(status)) return 'error';
+  if (['aborted', 'cancelled', 'canceled', 'stopped', 'terminated'].includes(status)) return 'aborted';
   if (['partial', 'partial_failure'].includes(status)) return 'partial';
   if (['completed', 'complete', 'done', 'success', 'succeeded', 'finished'].includes(status)) return 'completed';
   if (['waiting_approval', 'approval_required'].includes(status)) return 'waiting_approval';
@@ -144,6 +145,7 @@ function normalizeTaskStatus(
 
 function legacyTaskStatus(status: ChatRuntimeTaskStatus): AsyncTaskEvidence['status'] {
   if (status === 'completed') return 'completed';
+  if (status === 'aborted') return 'aborted';
   if (status === 'error' || status === 'partial') return 'error';
   return 'pending';
 }

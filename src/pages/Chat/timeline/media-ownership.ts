@@ -301,6 +301,9 @@ export function projectArtifactOwnedFinalMessage(
   message: ConversationMessageSnapshot,
   artifactGroups: readonly ArtifactOwner[],
 ): ConversationMessageSnapshot {
+  const visibleMessage = message.attachments?.some((file) => file.disposition === 'intermediate')
+    ? { ...message, attachments: message.attachments.filter((file) => file.disposition !== 'intermediate') }
+    : message;
   const ownedStrongKeys = new Set<string>();
   const ownedPreviews: PreviewIdentity[] = [];
   for (const group of artifactGroups) {
@@ -311,10 +314,10 @@ export function projectArtifactOwnedFinalMessage(
     }
     for (const change of group.changes) addPathKey(ownedStrongKeys, change.filePath);
   }
-  if (ownedStrongKeys.size === 0 && ownedPreviews.length === 0) return message;
+  if (ownedStrongKeys.size === 0 && ownedPreviews.length === 0) return visibleMessage;
 
   let attachmentsChanged = false;
-  const attachments = message.attachments?.filter((file) => {
+  const attachments = visibleMessage.attachments?.filter((file) => {
     if (file.disposition === 'input-reference' || file.source === 'user-upload') return true;
     const owned = artifactOwnsMedia(
       attachmentMediaIdentity(file),
@@ -326,12 +329,12 @@ export function projectArtifactOwnedFinalMessage(
   });
 
   let contentChanged = false;
-  let content = message.content;
-  if (typeof message.content === 'string') {
-    content = stripArtifactOwnedMediaDirectives(message.content, ownedStrongKeys);
-    contentChanged = content !== message.content;
-  } else if (Array.isArray(message.content)) {
-    content = message.content.flatMap((block) => {
+  let content = visibleMessage.content;
+  if (typeof visibleMessage.content === 'string') {
+    content = stripArtifactOwnedMediaDirectives(visibleMessage.content, ownedStrongKeys);
+    contentChanged = content !== visibleMessage.content;
+  } else if (Array.isArray(visibleMessage.content)) {
+    content = visibleMessage.content.flatMap((block) => {
       const owned = artifactOwnsMedia(
         contentBlockMediaIdentity(block),
         ownedStrongKeys,
@@ -351,10 +354,10 @@ export function projectArtifactOwnedFinalMessage(
     });
   }
 
-  if (!attachmentsChanged && !contentChanged) return message;
+  if (!attachmentsChanged && !contentChanged) return visibleMessage;
   return {
-    ...message,
+    ...visibleMessage,
     content,
-    ...(message.attachments ? { attachments } : {}),
+    ...(visibleMessage.attachments ? { attachments } : {}),
   };
 }

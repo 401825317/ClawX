@@ -134,7 +134,12 @@ function taskStatus(task: TaskLedgerRecord): ChatRuntimeTaskStatus {
   const status = marker(task.status ?? task.state);
   const deliveryStatus = marker(task.deliveryStatus ?? task.delivery_status);
   const terminalOutcome = marker(task.terminalOutcome ?? task.terminal_outcome);
-  if (['failed', 'error', 'cancelled', 'canceled', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
+  if (['failed', 'error', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
+  if (
+    ['aborted', 'cancelled', 'canceled', 'stopped', 'terminated'].includes(status)
+    || ['aborted', 'cancelled', 'canceled'].includes(terminalOutcome)
+    || ['aborted', 'cancelled', 'canceled'].includes(deliveryStatus)
+  ) return 'aborted';
   if (['waiting_approval', 'approval_required', 'pending_approval'].includes(status)) return 'waiting_approval';
   if (
     ['partial', 'partially_completed', 'partial_failure'].includes(status)
@@ -266,7 +271,7 @@ export function projectTaskLedgerRecord(
     kind: text(task.kind ?? task.taskKind ?? task.task_kind, 160),
     runtime: text(task.runtime, 120),
     title: taskTitle(task),
-    detail: text(status === 'partial' || status === 'error' || status === 'completed'
+    detail: text(status === 'partial' || status === 'aborted' || status === 'error' || status === 'completed'
       ? task.terminalSummary ?? task.terminal_summary ?? task.error ?? task.progressSummary ?? task.progress_summary
       : task.progressSummary ?? task.progress_summary ?? task.terminalSummary ?? task.terminal_summary ?? task.error),
     agentId: text(task.agentId ?? task.agent_id, 160),

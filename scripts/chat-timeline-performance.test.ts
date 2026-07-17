@@ -242,7 +242,6 @@ test('long-running session navigation keeps canonical store indexes bounded and 
   const store = useConversationStore.getState();
   const sessionCount = CONVERSATION_SESSION_CACHE_LIMIT * 4;
   store.reset();
-  store.setMode('timeline');
   try {
     const startedAt = performance.now();
     for (let index = 0; index < sessionCount; index += 1) {

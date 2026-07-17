@@ -23,11 +23,19 @@ export function toolGroupSummary(category: ToolCategory, entries: ToolEntry[]): 
 } {
   const running = entries.filter((entry) => entry.status === 'running').length;
   const failed = entries.filter((entry) => entry.status === 'error').length;
-  const status = failed > 0 ? 'failed' : running > 0 ? 'running' : 'completed';
+  const aborted = entries.filter((entry) => entry.status === 'aborted').length;
+  const status = failed > 0 ? 'failed' : running > 0 ? 'running' : aborted > 0 ? 'aborted' : 'completed';
   return {
     key: `timeline.tools.${status}`,
-    params: { category, count: entries.length, running, failed },
+    params: { category, count: entries.length, running, failed, aborted },
   };
+}
+
+export function toolGroupStatus(entries: ToolEntry[]): ToolGroupItem['status'] {
+  if (entries.some((entry) => entry.status === 'error')) return 'error';
+  if (entries.some((entry) => entry.status === 'running')) return 'running';
+  if (entries.some((entry) => entry.status === 'aborted')) return 'aborted';
+  return 'completed';
 }
 
 export function canAppendToolToGroup(
@@ -42,5 +50,6 @@ export function canAppendToolToGroup(
   if ((lastEntry.parentTaskId ?? '') !== (entry.parentTaskId ?? '')) return false;
   if (entry.startedAt - lastEntry.updatedAt > TOOL_GROUP_WINDOW_MS) return false;
   if (lastEntry.status === 'error' || entry.status === 'error') return false;
+  if (lastEntry.status === 'aborted' || entry.status === 'aborted') return false;
   return true;
 }

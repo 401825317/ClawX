@@ -209,6 +209,12 @@ export class GatewayManager extends EventEmitter {
     acceptsUnscopedTerminal: boolean;
   }>();
   private readonly activeRuntimeRunKeysByRunId = new Map<string, Set<string>>();
+  private readonly activeRuntimeTasks = new Map<string, {
+    taskId: string;
+    runId: string;
+    sessionKey?: string;
+    lastEventAt: number;
+  }>();
   private deviceIdentity: DeviceIdentity | null = null;
   private restartInFlight: Promise<void> | null = null;
   private readonly connectionMonitor = new GatewayConnectionMonitor();
@@ -408,7 +414,9 @@ export class GatewayManager extends EventEmitter {
   }
 
   private hasInFlightGatewayWork(): boolean {
-    return this.blockingRpcRequestIds.size > 0 || this.activeRuntimeRuns.size > 0;
+    return this.blockingRpcRequestIds.size > 0
+      || this.activeRuntimeRuns.size > 0
+      || this.activeRuntimeTasks.size > 0;
   }
 
   private getRestartDeferralState(context?: GatewayLifecycleContext): {
@@ -416,6 +424,7 @@ export class GatewayManager extends EventEmitter {
     startLock: boolean;
     hasInFlightWork: boolean;
     activeRunCount: number;
+    activeTaskCount: number;
     blockingRpcCount: number;
   } {
     const hasInFlightWork = this.hasInFlightGatewayWork() && !this.shouldBypassActiveWorkDeferral(context);
@@ -424,6 +433,7 @@ export class GatewayManager extends EventEmitter {
       startLock: this.startLock,
       hasInFlightWork,
       activeRunCount: this.activeRuntimeRuns.size,
+      activeTaskCount: this.activeRuntimeTasks.size,
       blockingRpcCount: this.blockingRpcRequestIds.size,
     };
   }
@@ -456,6 +466,49 @@ export class GatewayManager extends EventEmitter {
       return;
     }
     if (event.producer === 'history') {
+      return;
+    }
+
+    if (event.type === 'task.updated') {
+      const taskEvent = event as Partial<Extract<ChatRuntimeEvent, { type: 'task.updated' }>>;
+      const task = taskEvent.task;
+      const taskId = typeof task?.taskId === 'string' && task.taskId.length > 0
+        ? task.taskId
+        : undefined;
+      if (!taskId || typeof task?.status !== 'string') {
+        return;
+      }
+
+      const sessionKey = typeof event.sessionKey === 'string' && event.sessionKey.length > 0
+        ? event.sessionKey
+        : typeof task.sessionKey === 'string'
+          ? task.sessionKey
+          : '';
+      const taskWorkKey = `${sessionKey.length}:${sessionKey}${taskId}`;
+      const isActive = task.status === 'pending'
+        || task.status === 'running'
+        || task.status === 'waiting_approval';
+
+      if (isActive) {
+        this.activeRuntimeTasks.set(taskWorkKey, {
+          taskId,
+          runId: event.runId,
+          sessionKey: sessionKey || undefined,
+          lastEventAt: Date.now(),
+        });
+        return;
+      }
+
+      let deleted = this.activeRuntimeTasks.delete(taskWorkKey);
+      if (!deleted && !sessionKey) {
+        for (const [key, activeTask] of this.activeRuntimeTasks) {
+          if (activeTask.taskId !== taskId) continue;
+          deleted = this.activeRuntimeTasks.delete(key) || deleted;
+        }
+      }
+      if (deleted) {
+        this.flushDeferredRestartIfIdle(`runtime:${event.type}`);
+      }
       return;
     }
 
@@ -501,6 +554,11 @@ export class GatewayManager extends EventEmitter {
         this.activeRuntimeRunKeysByRunId.get(event.runId)?.delete(unscopedKey);
       }
     }
+    // Only lifecycle start creates process-local active ownership. Approval,
+    // task-ledger, and history-recovery events may arrive without an active Run.
+    if (!existing && event.type !== 'run.started') {
+      return;
+    }
     this.activeRuntimeRuns.set(runtimeWorkKey, {
       startedAt: existing?.startedAt ?? now,
       lastEventAt: now,
@@ -510,6 +568,29 @@ export class GatewayManager extends EventEmitter {
     const runKeys = this.activeRuntimeRunKeysByRunId.get(event.runId) ?? new Set<string>();
     runKeys.add(runtimeWorkKey);
     this.activeRuntimeRunKeysByRunId.set(event.runId, runKeys);
+  }
+
+  /** Drop process-local runtime ownership after the Gateway process exits. */
+  private clearRuntimeWorkAfterProcessExit(code: number | null, childPid?: number): number {
+    const interruptedRunCount = this.activeRuntimeRuns.size;
+    const interruptedTaskCount = this.activeRuntimeTasks.size;
+    this.activeRuntimeRuns.clear();
+    this.activeRuntimeRunKeysByRunId.clear();
+    this.activeRuntimeTasks.clear();
+
+    if (interruptedRunCount > 0 || interruptedTaskCount > 0) {
+      this.recordLifecycleEvent('runtime_work_reset', {
+        reason: 'gateway-process-exit',
+        source: 'utility-process',
+        details: {
+          code,
+          childPid,
+          interruptedRunCount,
+          interruptedTaskCount,
+        },
+      });
+    }
+    return interruptedRunCount + interruptedTaskCount;
   }
 
   /**
@@ -803,6 +884,7 @@ export class GatewayManager extends EventEmitter {
     this.blockingRpcRequestIds.clear();
     this.activeRuntimeRuns.clear();
     this.activeRuntimeRunKeysByRunId.clear();
+    this.activeRuntimeTasks.clear();
 
     this.restartController.resetDeferredRestart();
     this.isAutoReconnectStart = false;
@@ -842,6 +924,7 @@ export class GatewayManager extends EventEmitter {
           state: restartDeferralState.state,
           startLock: restartDeferralState.startLock,
           activeRunCount: restartDeferralState.activeRunCount,
+          activeTaskCount: restartDeferralState.activeTaskCount,
           blockingRpcCount: restartDeferralState.blockingRpcCount,
         },
       });
@@ -1030,6 +1113,7 @@ export class GatewayManager extends EventEmitter {
           state: restartDeferralState.state,
           startLock: restartDeferralState.startLock,
           activeRunCount: restartDeferralState.activeRunCount,
+          activeTaskCount: restartDeferralState.activeTaskCount,
           blockingRpcCount: restartDeferralState.blockingRpcCount,
         },
       });
@@ -1502,6 +1586,9 @@ export class GatewayManager extends EventEmitter {
         if (this.process === exitedChild) {
           this.process = null;
         }
+        // Runtime activity belongs to this Gateway process generation. The
+        // renderer reconciles surviving session truth after reconnect.
+        this.clearRuntimeWorkAfterProcessExit(code, exitedChild.pid);
         this.emit('exit', code);
 
         if (this.status.state === 'running') {

@@ -1,8 +1,11 @@
-import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
+import { closeElectronApp, emitIpcEvent, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
 
 const PROJECT_MANAGER_SESSION_KEY = 'agent:main:main';
 const CODER_SESSION_KEY = 'agent:coder:subagent:child-123';
 const CODER_SESSION_ID = 'child-session-id';
+const DELEGATION_TASK_ID = 'velaria-delegation-task';
+const CODER_TASK_ID = 'velaria-coder-task';
+const CODER_EXEC_TOOL_CALL_ID = 'coder-exec-call';
 
 function stableStringify(value: unknown): string {
   if (value == null || typeof value !== 'object') return JSON.stringify(value);
@@ -44,6 +47,10 @@ const seededHistory = [
     }],
     details: {
       status: 'accepted',
+      async: true,
+      taskId: DELEGATION_TASK_ID,
+      taskTitle: 'Delegate Velaria analysis',
+      runtime: 'subagent',
       childSessionKey: CODER_SESSION_KEY,
       runId: 'child-run-id',
       mode: 'run',
@@ -81,15 +88,40 @@ const seededHistory = [
   },
   {
     role: 'user',
-    content: [{
-      type: 'text',
-      text: `[Internal task completion event]
+    content: [
+      {
+        type: 'text',
+        text: `[Internal task completion event]
 source: subagent
 session_key: ${CODER_SESSION_KEY}
 session_id: ${CODER_SESSION_ID}
 type: subagent task
 status: completed successfully`,
-    }],
+      },
+      {
+        type: 'task_completion',
+        taskId: DELEGATION_TASK_ID,
+        runId: 'child-run-id',
+        runtime: 'subagent',
+        title: 'Delegate Velaria analysis',
+        taskStatus: 'completed',
+        status: 'completed',
+        childSessionKey: CODER_SESSION_KEY,
+        childSessionId: CODER_SESSION_ID,
+      },
+      {
+        type: 'task_completion',
+        taskId: CODER_TASK_ID,
+        parentTaskId: DELEGATION_TASK_ID,
+        runId: 'child-run-id',
+        runtime: 'subagent',
+        title: 'coder subagent',
+        taskStatus: 'completed',
+        status: 'completed',
+        childSessionKey: CODER_SESSION_KEY,
+        childSessionId: CODER_SESSION_ID,
+      },
+    ],
     timestamp: Date.now(),
   },
   {
@@ -103,6 +135,7 @@ status: completed successfully`,
         preview: null,
         filePath: '/Users/bytedance/.openclaw/workspace/CHECKLIST.md',
         source: 'tool-result',
+        disposition: 'intermediate',
       },
     ],
     timestamp: Date.now(),
@@ -288,24 +321,79 @@ test.describe('ClawX chat execution graph', () => {
         }
       }
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await expect(page.getByTestId('chat-execution-graph')).toBeVisible({ timeout: 30_000 });
-      // Completed runs auto-collapse into a single-line summary button. Expand
-      // it first so the underlying step details are rendered.
-      const graph = page.getByTestId('chat-execution-graph');
-      if ((await graph.getAttribute('data-collapsed')) === 'true') {
-        await graph.click();
-      }
-      await expect(
-        page.locator('[data-testid="chat-execution-graph"] [data-testid="chat-execution-step"]').getByText('sessions_yield', { exact: true }),
-      ).toBeVisible();
-      await expect(page.getByText('coder subagent')).toBeVisible();
-      await expect(
-        page.locator('[data-testid="chat-execution-graph"] [data-testid="chat-execution-step"]').getByText('exec', { exact: true }),
-      ).toBeVisible();
-      const execRow = page.locator('[data-testid="chat-execution-step"]').filter({ hasText: 'exec' }).first();
+
+      // Late child-tool evidence must reattach to the already replayed owning Turn.
+      const now = Date.now();
+      await emitIpcEvent(app, 'chat:runtime-event', {
+        type: 'tool.started',
+        producer: 'openclaw',
+        runId: 'child-run-id',
+        sessionKey: PROJECT_MANAGER_SESSION_KEY,
+        taskId: CODER_TASK_ID,
+        parentTaskId: DELEGATION_TASK_ID,
+        toolCallId: CODER_EXEC_TOOL_CALL_ID,
+        name: 'exec',
+        args: childTranscriptMessages[1].content[0].arguments,
+        ts: now,
+      });
+      await emitIpcEvent(app, 'chat:runtime-event', {
+        type: 'tool.completed',
+        producer: 'openclaw',
+        runId: 'child-run-id',
+        sessionKey: PROJECT_MANAGER_SESSION_KEY,
+        taskId: CODER_TASK_ID,
+        parentTaskId: DELEGATION_TASK_ID,
+        toolCallId: CODER_EXEC_TOOL_CALL_ID,
+        name: 'exec',
+        result: childTranscriptMessages[2].details,
+        isError: false,
+        ts: now + 1,
+      });
+      await emitIpcEvent(app, 'chat:runtime-event', {
+        type: 'run.ended',
+        producer: 'openclaw',
+        runId: 'child-run-id',
+        sessionKey: PROJECT_MANAGER_SESSION_KEY,
+        status: 'completed',
+        endedAt: now + 2,
+        ts: now + 2,
+      });
+
+      const turn = page.getByTestId('conversation-turn').filter({ hasText: 'Analyze Velaria uncommitted changes' });
+      await expect(turn).toHaveCount(1);
+      await expect(turn).toHaveAttribute('data-turn-status', 'completed');
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-subtasks')).toHaveCount(2);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const graph = dialog.getByTestId('chat-execution-graph');
+      await expect(graph).toBeVisible({ timeout: 30_000 });
+      const parentTask = dialog.locator(`[data-testid="chat-execution-step"][data-task-id="${DELEGATION_TASK_ID}"]`)
+        .filter({ hasText: 'Delegate Velaria analysis' });
+      const childTask = dialog.locator(`[data-testid="chat-execution-step"][data-task-id="${CODER_TASK_ID}"]`)
+        .filter({ hasText: 'coder subagent' });
+      await expect(parentTask).toHaveAttribute('data-parent-id', 'agent-run');
+      await expect(parentTask).toHaveAttribute('data-step-status', 'completed');
+      await expect(childTask).toHaveAttribute('data-parent-id', `plan-step:task:${DELEGATION_TASK_ID}`);
+      await expect(childTask).toHaveAttribute('data-step-status', 'completed');
+
+      const yieldRow = dialog.getByTestId('chat-execution-step').filter({ hasText: 'sessions_yield' });
+      await expect(yieldRow).toHaveAttribute('data-parent-id', 'agent-run');
+      await expect(yieldRow).toHaveAttribute('data-step-status', 'completed');
+      await yieldRow.click();
+      await expect(yieldRow.locator('pre')).toBeVisible();
+      await expect(yieldRow).toContainText('I asked coder to break down the core blocks of ~/Velaria uncommitted changes; will give you the conclusion when it returns.');
+
+      const execRow = dialog.locator(`[data-testid="chat-execution-step"][data-task-id="${CODER_TASK_ID}"]`)
+        .filter({ hasText: 'exec' });
+      await expect(execRow).toHaveAttribute('data-parent-id', `plan-step:task:${CODER_TASK_ID}`);
+      await expect(execRow).toHaveAttribute('data-step-status', 'completed');
       await execRow.click();
       await expect(execRow.locator('pre')).toBeVisible();
-      await expect(page.locator('[data-testid="chat-execution-graph"]').getByText('I asked coder to break down the core blocks of ~/Velaria uncommitted changes; will give you the conclusion when it returns.')).toBeVisible();
+      await expect(execRow).toContainText('execution_optimizer.cc');
       await expect(page.getByText('CHECKLIST.md')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
@@ -397,10 +485,21 @@ test.describe('ClawX chat execution graph', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await expect(page.getByTestId('chat-execution-graph')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('chat-execution-graph')).toHaveAttribute('data-collapsed', 'true');
-      await expect(page.getByTestId('chat-execution-graph')).toContainText(/0\s+(tool calls|个工具调用)/);
-      await expect(page.getByTestId('chat-execution-graph')).toContainText(/9\s+(process messages|条过程消息)/);
+      const turn = page.getByTestId('conversation-turn').filter({ hasText: longRunPrompt });
+      await expect(turn).toHaveCount(1);
+      await expect(turn).toHaveAttribute('data-turn-status', 'completed');
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-tool-group')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const processRows = dialog.getByTestId('chat-execution-step');
+      await expect(processRows).toHaveCount(longRunProcessSegments.length);
+      for (const segment of longRunProcessSegments) {
+        await expect(processRows.filter({ hasText: segment })).toHaveCount(1);
+      }
       await expect(page.getByText(longRunSummary, { exact: true })).toBeVisible();
       await expect(page.getByText(longRunReplyText, { exact: true })).toHaveCount(0);
     } finally {
@@ -493,13 +592,29 @@ test.describe('ClawX chat execution graph', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await expect(page.getByText('404 Resource not found')).toBeVisible({ timeout: 30_000 });
-      const runErrorCallout = page.getByTestId('chat-run-error');
-      await expect(runErrorCallout).toBeVisible({ timeout: 30_000 });
-      await expect(runErrorCallout).toContainText('404 Resource not found');
-      await expect(page.getByTestId('chat-run-retry')).toBeVisible();
+      const turn = page.getByTestId('conversation-turn').filter({ hasText: errorRunPrompt });
+      await expect(turn).toHaveCount(1);
+      await expect(turn).toHaveAttribute('data-turn-status', 'error');
+      const timelineError = page.getByTestId('timeline-error');
+      await expect(timelineError).toBeVisible({ timeout: 30_000 });
+      await expect(timelineError).toHaveAttribute('data-recoverable', 'false');
+      await expect(timelineError).toContainText('404 Resource not found');
+      await expect(page.getByTestId('timeline-error-retry')).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-step-thinking-trailing')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-turn-status')).toHaveCount(0);
+      await expect(page.getByText('404 Resource not found')).toHaveCount(1);
+
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const errorRow = dialog.getByTestId('chat-execution-step').filter({ hasText: '404 Resource not found' });
+      await expect(errorRow).toHaveCount(1);
+      await expect(errorRow).toHaveAttribute('data-step-status', 'error');
+      await expect(errorRow).toHaveAttribute('data-parent-id', 'agent-run');
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
       await expect(page.getByText('404 Resource not found')).toHaveCount(1);
       await page.getByTestId('chat-composer-input').fill('retry');
       await expect(page.getByTestId('chat-composer-send')).toBeEnabled();

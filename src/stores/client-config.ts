@@ -2,11 +2,6 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { toast } from 'sonner';
 import { hostApiFetch } from '@/lib/host-api';
-import {
-  normalizeConversationTimelineMode,
-  resolveConversationTimelineMode,
-  type ConversationTimelineMode,
-} from '../../shared/conversation-rollout';
 
 export type ClientAnnouncementLevel = 'normal' | 'important' | 'urgent';
 
@@ -95,9 +90,6 @@ export interface ClientModelOptionsConfig {
 }
 
 interface ClientConfigResponse {
-  rollouts?: {
-    chatTimelineMode?: ConversationTimelineMode;
-  };
   announcements?: {
     enabled?: boolean;
     items?: ClientAnnouncement[];
@@ -107,7 +99,6 @@ interface ClientConfigResponse {
 }
 
 interface ClientConfigState {
-  chatTimelineMode: ConversationTimelineMode;
   announcementsEnabled: boolean;
   announcements: ClientAnnouncement[];
   support: SupportContactConfig | null;
@@ -198,18 +189,6 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
 
 function cloneDefaultModelOptions(): ClientModelOptionsConfig {
   return JSON.parse(JSON.stringify(DEFAULT_CLIENT_MODEL_OPTIONS)) as ClientModelOptionsConfig;
-}
-
-function hostTimelineModeOverride(): ConversationTimelineMode | null {
-  if (typeof window === 'undefined') return null;
-  return normalizeConversationTimelineMode(window.electron?.chatTimelineModeOverride);
-}
-
-function resolveTimelineMode(payload?: ClientConfigResponse): ConversationTimelineMode {
-  return resolveConversationTimelineMode(
-    hostTimelineModeOverride(),
-    payload?.rollouts?.chatTimelineMode,
-  );
 }
 
 function normalizeLevel(value: unknown): ClientAnnouncementLevel {
@@ -526,7 +505,6 @@ function scheduleManagedTextModelSelfHeal(): void {
 export const useClientConfigStore = create<ClientConfigState>()(
   persist(
     (set, get) => ({
-      chatTimelineMode: resolveTimelineMode(),
       announcementsEnabled: false,
       announcements: [],
       support: null,
@@ -578,7 +556,6 @@ export const useClientConfigStore = create<ClientConfigState>()(
           }
 
           set({
-            chatTimelineMode: resolveTimelineMode(payload),
             announcementsEnabled: Boolean(payload.announcements?.enabled),
             announcements: payload.announcements?.enabled === false ? [] : announcements,
             support,
@@ -624,7 +601,6 @@ export const useClientConfigStore = create<ClientConfigState>()(
     {
       name: 'clawx-client-config',
       partialize: (state) => ({
-        chatTimelineMode: state.chatTimelineMode,
         readKeys: state.readKeys,
         toastKeys: state.toastKeys,
         urgentDismissedKeys: state.urgentDismissedKeys,

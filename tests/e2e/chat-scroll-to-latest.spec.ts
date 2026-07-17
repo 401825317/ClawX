@@ -279,7 +279,7 @@ async function openTimeline(
   }
   page = await getStableWindow(app);
   await expect(page.getByTestId('main-layout')).toBeVisible();
-  await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
+  await expect(page.getByTestId('chat-page')).toBeVisible();
   return page;
 }
 

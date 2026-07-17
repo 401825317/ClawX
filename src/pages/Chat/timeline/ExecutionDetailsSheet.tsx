@@ -17,8 +17,8 @@ import type {
   ConversationMergeEvidence,
   ConversationTurn,
 } from '@/stores/conversation/types';
+import { isActiveTurnStatus } from '@/stores/conversation/types';
 import { getConversationPerformanceSnapshot } from '@/stores/conversation/metrics';
-import type { ShadowComparisonRecord } from '@/stores/conversation/shadow-compare';
 
 interface ExecutionDetailsSheetProps {
   turnId: string;
@@ -27,7 +27,6 @@ interface ExecutionDetailsSheetProps {
 }
 
 const EMPTY_EVENTS: never[] = [];
-const EMPTY_SHADOW_COMPARISONS: ShadowComparisonRecord[] = [];
 const EMPTY_INGRESS_DIAGNOSTICS: ConversationIngressDiagnostics = {
   duplicateCount: 0,
   staleSequenceCount: 0,
@@ -86,7 +85,7 @@ function historyCorrectionDiagnostics(turn: ConversationTurn | undefined) {
 
 function settlementBlockers(turn: ConversationTurn | undefined) {
   if (!turn) return [];
-  if (['completed', 'partial', 'error', 'aborted'].includes(turn.status)) {
+  if (!isActiveTurnStatus(turn.status)) {
     return [{ key: 'settled', count: 0 }];
   }
   const blockers: Array<{ key: string; count: number }> = [];
@@ -99,7 +98,15 @@ function settlementBlockers(turn: ConversationTurn | undefined) {
   }
   if (!turn.evidence.requiredArtifactsSatisfied) blockers.push({ key: 'requiredArtifacts', count: 0 });
   if (turn.evidence.blockingVerificationFailed) blockers.push({ key: 'blockingVerification', count: 0 });
-  if (turn.status === 'settling' && !turn.evidence.historyCheckpointed) blockers.push({ key: 'historyCheckpoint', count: 0 });
+  if (
+    turn.evidence.runTerminal
+    && turn.evidence.finalMessagePresent
+    && turn.evidence.runTerminalAuthority !== 'authoritative'
+    && !turn.evidence.backendIdle
+    && !turn.evidence.historyCheckpointed
+  ) {
+    blockers.push({ key: 'historyCheckpoint', count: 0 });
+  }
   return blockers.length > 0 ? blockers : [{ key: 'activeWork', count: 0 }];
 }
 
@@ -128,11 +135,6 @@ export function ExecutionDetailsSheet({ turnId, open, onOpenChange }: ExecutionD
   const retentionCheckpoint = useConversationStore((state) => (
     open ? state.eventRetentionByTurnId[turnId] : undefined
   ));
-  const shadowComparisons = useConversationStore((state) => (
-    open && turn
-      ? state.shadowComparisonsBySession[turn.sessionKey] ?? EMPTY_SHADOW_COMPARISONS
-      : EMPTY_SHADOW_COMPARISONS
-  ));
   const quarantine = useConversationStore((state) => (
     open && turn ? state.quarantineBySession[turn.sessionKey] : undefined
   ));
@@ -153,17 +155,12 @@ export function ExecutionDetailsSheet({ turnId, open, onOpenChange }: ExecutionD
     }, events),
     [events, t, turn],
   );
-  const active = turn?.status === 'queued'
-    || turn?.status === 'running'
-    || turn?.status === 'waiting_approval'
-    || turn?.status === 'waiting_background'
-    || turn?.status === 'settling';
+  const active = isActiveTurnStatus(turn?.status);
   const mergeEvidence = useMemo(() => mergeDiagnostics(turn), [turn]);
   const itemMutations = useMemo(() => itemMutationDiagnostics(turn), [turn]);
   const historyCorrections = useMemo(() => historyCorrectionDiagnostics(turn), [turn]);
   const blockers = useMemo(() => settlementBlockers(turn), [turn]);
   const unavailableArtifacts = useMemo(() => unavailableArtifactDiagnostics(turn), [turn]);
-  const latestShadowComparison = shadowComparisons.at(-1);
   const performanceMetrics = open ? getConversationPerformanceSnapshot() : null;
 
   return (
@@ -281,18 +278,6 @@ export function ExecutionDetailsSheet({ turnId, open, onOpenChange }: ExecutionD
                         </div>
                       ))
                     : <div>{diagnostic('none')}</div>}
-                </div>
-                <div className="rounded-md bg-surface-input px-3 py-2 text-2xs leading-5 text-muted-foreground">
-                  <div className="font-semibold text-foreground/70">{t('timeline.diagnostics.shadow')}</div>
-                  {latestShadowComparison ? (
-                    <>
-                      <div>{latestShadowComparison.reason} · {latestShadowComparison.matched ? diagnostic('matched') : diagnostic('different')}</div>
-                      <div>{diagnostic('differences')}: {latestShadowComparison.differences.length}</div>
-                      {latestShadowComparison.differences.slice(0, 6).map((difference, index) => (
-                        <div key={`${difference.field}:${index}`} className="truncate">{difference.field}</div>
-                      ))}
-                    </>
-                  ) : <div>{t('timeline.diagnostics.none')}</div>}
                 </div>
                 {performanceMetrics && (
                   <div className="rounded-md bg-surface-input px-3 py-2 text-2xs leading-5 text-muted-foreground sm:col-span-2">

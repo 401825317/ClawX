@@ -50,7 +50,11 @@ function artifactDedupeKey(file: AttachedFileMeta): string {
 
 /** Keep path-like prose renderable without promoting it to canonical output evidence. */
 export function hasCanonicalArtifactEvidence(file: AttachedFileMeta): boolean {
-  if (file.disposition === 'input-reference' || file.source === 'user-upload') return false;
+  if (
+    file.disposition === 'input-reference'
+    || file.disposition === 'intermediate'
+    || file.source === 'user-upload'
+  ) return false;
   const hasLocation = Boolean(
     normalizeText(file.filePath)
     || normalizeText(file.gatewayUrl)

@@ -116,9 +116,6 @@ export interface JunFeiAIClientAnnouncement {
 }
 
 export interface JunFeiAIClientConfigPayload {
-  rollouts?: {
-    chatTimelineMode?: 'legacy' | 'shadow' | 'timeline';
-  };
   announcements?: {
     enabled?: boolean;
     items?: JunFeiAIClientAnnouncement[];
@@ -830,7 +827,10 @@ function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string
   return JUNFEIAI_DEFAULT_MODEL;
 }
 
-function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAccount | null): ProviderAccount {
+export function buildJunFeiAIProviderAccount(
+  bootstrap: JunFeiAIBootstrapPayload,
+  existing?: ProviderAccount | null,
+): ProviderAccount {
   const runtime = bootstrap.runtime ?? {};
   const now = new Date().toISOString();
   const providerName = normalizeJunFeiAIProviderDisplayName(runtime.providerName)
@@ -848,7 +848,9 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
     model: resolveRuntimeDefaultModel(bootstrap),
     fallbackModels: normalizeFallbackModels(runtime.fallbackModels),
     enabled: true,
-    isDefault: true,
+    // Default ownership is maintained by setDefaultProvider(). Preserve that
+    // state so a migrated OpenAI account does not make status checks oscillate.
+    isDefault: existing?.isDefault ?? true,
     metadata: {
       resourceUrl: bootstrap.service?.apiOrigin || getJunFeiAIOrigin(),
       ...modelMetadata,
@@ -859,7 +861,10 @@ function buildAccount(bootstrap: JunFeiAIBootstrapPayload, existing?: ProviderAc
   };
 }
 
-function accountChanged(left: ProviderAccount | null, right: ProviderAccount): boolean {
+export function hasJunFeiAIProviderAccountChanged(
+  left: ProviderAccount | null,
+  right: ProviderAccount,
+): boolean {
   if (!left) return true;
   const fields: Array<keyof ProviderAccount> = [
     'vendorId',
@@ -878,6 +883,29 @@ function accountChanged(left: ProviderAccount | null, right: ProviderAccount): b
     return true;
   }
   return JSON.stringify(left.metadata ?? {}) !== JSON.stringify(right.metadata ?? {});
+}
+
+/** Decide whether a managed status refresh may rewrite the live runtime. */
+export function shouldSyncJunFeiAIRuntime(
+  options: {
+    syncRuntime?: boolean;
+    syncRuntimeOnAuthChange?: boolean;
+  },
+  changes: {
+    providerChanged: boolean;
+    defaultProviderChanged: boolean;
+    relaySecretChanged: boolean;
+    shouldClearRuntimeKey: boolean;
+  },
+): boolean {
+  const runtimeChanged = changes.providerChanged
+    || changes.defaultProviderChanged
+    || changes.relaySecretChanged
+    || changes.shouldClearRuntimeKey;
+  const authRuntimeChanged = changes.relaySecretChanged || changes.shouldClearRuntimeKey;
+  return options.syncRuntime === true
+    || (options.syncRuntime !== false && runtimeChanged)
+    || (options.syncRuntimeOnAuthChange === true && authRuntimeChanged);
 }
 
 async function requestJunFeiAI<T>(
@@ -1462,13 +1490,13 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   bootstrap = activation.bootstrap;
 
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
-  const account = buildAccount(bootstrap, existing);
+  const account = buildJunFeiAIProviderAccount(bootstrap, existing);
   try {
     await selfHealManagedTextModelsFromClientConfig(bootstrap.client?.modelOptions);
   } catch (error) {
     logger.warn('[junfeiai] Failed to self-heal managed text model refs:', error);
   }
-  const providerChanged = accountChanged(existing, account);
+  const providerChanged = hasJunFeiAIProviderAccountChanged(existing, account);
   if (providerChanged) {
     await saveProviderAccount(account);
   }
@@ -1546,16 +1574,12 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     relaySecretChanged = relaySecretChanged || hadRelaySecret;
   }
 
-  const runtimeChanged = providerChanged || defaultProviderChanged || relaySecretChanged || shouldClearRuntimeKey;
-  const shouldSyncRuntime = options.syncRuntime === true
-    || (
-      options.syncRuntime !== false
-      && runtimeChanged
-    )
-    || (
-      options.syncRuntimeOnAuthChange === true
-      && runtimeChanged
-    );
+  const shouldSyncRuntime = shouldSyncJunFeiAIRuntime(options, {
+    providerChanged,
+    defaultProviderChanged,
+    relaySecretChanged,
+    shouldClearRuntimeKey,
+  });
   const shouldApplyRuntimeAuthImmediately = Boolean(
     options.gatewayManager
     && (relaySecretChanged || shouldClearRuntimeKey),

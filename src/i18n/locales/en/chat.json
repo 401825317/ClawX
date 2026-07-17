@@ -25,7 +25,6 @@
             "watermarks": "Sequence watermarks",
             "mergeEvidence": "Merge evidence",
             "assignments": "Turn assignment",
-            "shadow": "Shadow comparison",
             "performance": "Performance",
             "none": "No records",
             "retained": "Retained",
@@ -37,9 +36,6 @@
             "staleSequences": "Stale sequences",
             "lastEventId": "Last event ID",
             "records": "Records",
-            "matched": "Matched",
-            "different": "Different",
-            "differences": "Differences",
             "ingress": "Ingress",
             "commits": "Commits",
             "renders": "Renders",
@@ -123,12 +119,14 @@
     "tools": {
       "running": "Running {{count}} {{category}} actions",
       "completed": "Completed {{count}} {{category}} actions",
+      "aborted": "Stopped {{aborted}} of {{count}} {{category}} actions",
       "failed": "{{failed}} of {{count}} {{category}} actions failed"
     },
     "subtasks": {
       "running": "Running {{running}} of {{count}} subtasks",
       "waiting": "Waiting for approval on {{waiting}} of {{count}} subtasks",
       "completed": "Completed {{count}} subtasks",
+      "aborted": "Stopped {{aborted}} of {{count}} subtasks",
       "failed": "{{failed}} of {{count}} subtasks failed"
     },
     "subtaskStatus": {
@@ -136,17 +134,16 @@
       "running": "Running",
       "waiting_approval": "Waiting for approval",
       "completed": "Completed",
+      "aborted": "Stopped",
       "partial": "Partially completed",
       "error": "Failed"
     },
         "toolCategory": { "read": "read", "search": "search", "command": "command", "edit": "edit", "browser": "browser", "media": "media", "subagent": "subtask", "generic": "tool" },
-        "toolStatus": { "running": "Running", "completed": "Completed", "error": "Failed" },
+        "toolStatus": { "running": "Running", "completed": "Completed", "aborted": "Stopped", "error": "Failed" },
         "turnStatus": {
             "queued": "Queued",
             "running": "Working",
-            "waiting_approval": "Waiting for approval",
-            "waiting_background": "Waiting for background work",
-            "settling": "Finishing"
+            "waiting_approval": "Waiting for approval"
         }
     },
     "toolbar": {

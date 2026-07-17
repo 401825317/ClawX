@@ -12,6 +12,84 @@ import { asyncTaskPayloadToConversationEvents } from './async-task-adapter';
 import { isRecoverableConversationError } from './chat-adapter';
 import { createEventId, stableHash } from './identity';
 
+const COMPLETION_WAKE_MEDIA_RUN_RE = /^(?:image_generate|image_edit|video_generate|music_generate):([^:]+):[^:]+$/iu;
+
+function mediaMimeType(value: string): string {
+  const cleanPath = value.split(/[?#]/u, 1)[0]?.toLowerCase() ?? '';
+  const extension = cleanPath.match(/\.([a-z0-9]+)$/u)?.[1];
+  const mimeByExtension: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    bmp: 'image/bmp',
+    avif: 'image/avif',
+    svg: 'image/svg+xml',
+    mp4: 'video/mp4',
+    mov: 'video/quicktime',
+    webm: 'video/webm',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    pdf: 'application/pdf',
+  };
+  return extension ? mimeByExtension[extension] ?? 'application/octet-stream' : 'application/octet-stream';
+}
+
+function mediaTitle(value: string, index: number): string {
+  if (/^data:/iu.test(value)) return `Generated media ${index + 1}`;
+  try {
+    const path = /^https?:\/\//iu.test(value) ? new URL(value).pathname : value;
+    const title = path.split(/[\\/]/u).filter(Boolean).at(-1)?.trim();
+    return title || `Generated media ${index + 1}`;
+  } catch {
+    return `Generated media ${index + 1}`;
+  }
+}
+
+/** Promote OpenClaw's live media delivery evidence before its final chat payload arrives. */
+function runtimeMediaArtifactEvents(
+  event: ChatRuntimeEvent,
+  canonical: ConversationEvent,
+): ConversationEvent[] {
+  if (event.type !== 'assistant.delta' || !event.mediaUrls?.length) return [];
+  const completionTaskId = COMPLETION_WAKE_MEDIA_RUN_RE.exec(event.runId)?.[1];
+  const taskId = canonical.taskId ?? completionTaskId;
+  return [...new Set(event.mediaUrls.map((value) => value.trim()).filter(Boolean))]
+    .map((mediaUrl, index) => {
+      const mimeType = mediaMimeType(mediaUrl);
+      const isGatewayUrl = /^(?:https?:\/\/|data:|blob:|\/(?:api\/chat\/media|__openclaw__|media)\/)/iu.test(mediaUrl);
+      const artifact: ChatRuntimeArtifact = {
+        id: `runtime-media:${stableHash(mediaUrl)}`,
+        kind: mimeType.split('/', 1)[0] || 'file',
+        title: mediaTitle(mediaUrl, index),
+        ...(isGatewayUrl ? { url: mediaUrl } : { filePath: mediaUrl }),
+        mimeType,
+        availability: 'available',
+        taskId,
+        source: 'gateway-media',
+      };
+      return {
+        ...canonical,
+        eventId: createEventId({
+          source: canonical.source,
+          type: 'artifact.updated',
+          runId: event.runId,
+          seq: event.seq,
+          entityId: `artifact:${artifact.id}`,
+          taskId,
+          phase: artifact.id,
+          occurredAt: canonical.occurredAt,
+          data: artifact,
+        }),
+        type: 'artifact.updated' as const,
+        authority: 'authoritative' as const,
+        taskId,
+        data: { artifact },
+      };
+    });
+}
+
 function eventTime(event: ChatRuntimeEvent): number {
   const value = event.ts
     ?? (event.type === 'run.started' ? event.startedAt : undefined)
@@ -313,17 +391,25 @@ export function runtimeEventToConversationEvents(event: ChatRuntimeEvent): Conve
   const canonical = runtimeEventToConversationEvent(event);
   if (!canonical) return [];
   if (event.type === 'task.updated') return [canonical];
+  const mediaArtifacts = runtimeMediaArtifactEvents(event, canonical);
+  const completionWakeOwnsMedia = event.type === 'assistant.delta'
+    && mediaArtifacts.length > 0
+    && COMPLETION_WAKE_MEDIA_RUN_RE.test(event.runId);
   const errorEvent = runtimeErrorConversationEvent(event, canonical);
-  return [canonical, ...(errorEvent ? [errorEvent] : []), ...asyncTaskPayloadToConversationEvents(event, {
-    sessionKey: canonical.sessionKey,
-    turnId: canonical.turnId,
-    rootRunId: canonical.rootRunId,
-    runId: event.runId,
-    parentTaskId: event.parentTaskId,
-    toolCallId: event.toolCallId,
-    seq: event.seq,
-    occurredAt: canonical.occurredAt,
-    receivedAt: canonical.receivedAt,
-    replayed: canonical.replayed,
-  })];
+  return [
+    ...(completionWakeOwnsMedia ? mediaArtifacts : [canonical, ...mediaArtifacts]),
+    ...(errorEvent ? [errorEvent] : []),
+    ...asyncTaskPayloadToConversationEvents(event, {
+      sessionKey: canonical.sessionKey,
+      turnId: canonical.turnId,
+      rootRunId: canonical.rootRunId,
+      runId: event.runId,
+      parentTaskId: event.parentTaskId,
+      toolCallId: event.toolCallId,
+      seq: event.seq,
+      occurredAt: canonical.occurredAt,
+      receivedAt: canonical.receivedAt,
+      replayed: canonical.replayed,
+    }),
+  ];
 }

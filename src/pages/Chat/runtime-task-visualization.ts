@@ -36,7 +36,7 @@ const RUNTIME_SCAFFOLD_PLAN_STEP_KINDS = new Set([
   'delivery',
 ]);
 
-const TERMINAL_TASK_STATUSES = new Set<RuntimeTaskProjection['status']>(['completed', 'error']);
+const TERMINAL_TASK_STATUSES = new Set<RuntimeTaskProjection['status']>(['completed', 'aborted', 'error']);
 const TERMINAL_STEP_STATUSES = new Set<TaskStepStatus>(['completed', 'error', 'failed', 'aborted']);
 const CANCELLATION_MARKERS = new Set(['aborted', 'cancelled', 'canceled']);
 
@@ -196,6 +196,7 @@ function runtimeStepStatus(status: string | undefined): TaskStepStatus {
 }
 
 function taskWasCancelled(task: RuntimeTaskProjection): boolean {
+  if (task.status === 'aborted') return true;
   return [task.sourceStatus, task.deliveryStatus, task.terminalOutcome]
     .some((value) => typeof value === 'string' && CANCELLATION_MARKERS.has(value.trim().toLowerCase()));
 }

@@ -262,6 +262,7 @@ function taskStatus(status: HostTaskBridgeStatus): ChatRuntimeTaskStatus {
   if (status === 'running') return 'running';
   if (status === 'waiting') return 'waiting_approval';
   if (status === 'succeeded') return 'completed';
+  if (status === 'cancelled') return 'aborted';
   return 'error';
 }
 
@@ -270,13 +271,15 @@ function stepStatus(status: HostTaskBridgeStatus): ChatRuntimeStepStatus {
   if (status === 'running') return 'running';
   if (status === 'waiting' || status === 'blocked') return 'blocked';
   if (status === 'succeeded') return 'completed';
+  if (status === 'cancelled') return 'aborted';
   return 'error';
 }
 
 function progressStatus(status: HostTaskBridgeStatus): ChatRuntimeProgressEntryStatus {
   if (status === 'succeeded') return 'completed';
   if (status === 'waiting' || status === 'blocked') return 'blocked';
-  if (status === 'failed' || status === 'cancelled' || status === 'timed_out' || status === 'lost') return 'error';
+  if (status === 'cancelled') return 'aborted';
+  if (status === 'failed' || status === 'timed_out' || status === 'lost') return 'error';
   return 'running';
 }
 
@@ -441,7 +444,7 @@ export function buildHostTaskRehydrationEvents(
       });
     }
 
-    if (terminal) {
+    if (terminal && task.status !== 'cancelled') {
       events.push({
         ...eventBase(task, 'tool.completed'),
         type: 'tool.completed',

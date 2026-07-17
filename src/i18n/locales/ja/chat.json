@@ -25,7 +25,6 @@
             "watermarks": "シーケンス水位",
             "mergeEvidence": "マージ根拠",
             "assignments": "ターン割り当て",
-            "shadow": "シャドー比較",
             "performance": "パフォーマンス",
             "none": "記録なし",
             "retained": "保持済み",
@@ -37,9 +36,6 @@
             "staleSequences": "古いシーケンス",
             "lastEventId": "最終イベント ID",
             "records": "レコード",
-            "matched": "一致",
-            "different": "差異あり",
-            "differences": "差異",
             "ingress": "入力",
             "commits": "コミット",
             "renders": "レンダー",
@@ -123,12 +119,14 @@
     "tools": {
       "running": "{{category}}操作を {{count}} 件実行中",
       "completed": "{{category}}操作を {{count}} 件完了",
+      "aborted": "{{category}}操作 {{count}} 件中 {{aborted}} 件を停止",
       "failed": "{{category}}操作 {{count}} 件中 {{failed}} 件が失敗"
     },
     "subtasks": {
       "running": "{{count}} 件中 {{running}} 件のサブタスクを実行中",
       "waiting": "{{count}} 件中 {{waiting}} 件のサブタスクが承認待ち",
       "completed": "{{count}} 件のサブタスクを完了",
+      "aborted": "{{count}} 件中 {{aborted}} 件のサブタスクを停止",
       "failed": "{{count}} 件中 {{failed}} 件のサブタスクが失敗"
     },
     "subtaskStatus": {
@@ -136,17 +134,16 @@
       "running": "実行中",
       "waiting_approval": "承認待ち",
       "completed": "完了",
+      "aborted": "停止済み",
       "partial": "一部完了",
       "error": "失敗"
     },
         "toolCategory": { "read": "読み取り", "search": "検索", "command": "コマンド", "edit": "編集", "browser": "ブラウザー", "media": "メディア", "subagent": "サブタスク", "generic": "ツール" },
-        "toolStatus": { "running": "実行中", "completed": "完了", "error": "失敗" },
+        "toolStatus": { "running": "実行中", "completed": "完了", "aborted": "停止済み", "error": "失敗" },
         "turnStatus": {
             "queued": "待機中",
             "running": "処理中",
-            "waiting_approval": "承認待ち",
-            "waiting_background": "バックグラウンド処理待ち",
-            "settling": "完了処理中"
+            "waiting_approval": "承認待ち"
         }
     },
     "toolbar": {

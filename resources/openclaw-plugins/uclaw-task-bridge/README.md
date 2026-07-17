@@ -70,7 +70,12 @@ prevents duplicate terminal replay after restart; runtime events are idempotent
 by stable task/artifact/verification ids, while the injected completion context
 is exactly-once. Failed event emission, injection, explicit replan wake, or
 acknowledgement attempts use bounded exponential backoff instead of polling the
-same terminal task every monitor tick.
+same terminal task every monitor tick. The retry policy has both attempt and
+elapsed-time budgets. After exhaustion it persists either the already-delivered
+acknowledgement or an `abandoned` delivery result with concrete failure evidence,
+so the Host no longer returns that terminal revision forever. The task and its
+artifacts remain durable; an explicit redelivery request creates a new revision
+and clears the prior delivery settlement.
 
 When the Renderer loads a conversation, it also reads the session's persisted
 Host tasks and projects their stable task, artifact, verification, and progress

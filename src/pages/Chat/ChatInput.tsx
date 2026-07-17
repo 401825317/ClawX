@@ -905,7 +905,7 @@ export function ChatInput({
     }
 
     try {
-      console.log('[stagePathFiles] Staging files:', filePaths);
+      console.info('[stagePathFiles] Staging selected files', { count: filePaths.length });
       const staged = await hostApiFetch<Array<{
         id: string;
         fileName: string;
@@ -917,7 +917,10 @@ export function ChatInput({
         method: 'POST',
         body: JSON.stringify({ filePaths }),
       });
-      console.log('[stagePathFiles] Stage result:', staged?.map(s => ({ id: s?.id, fileName: s?.fileName, mimeType: s?.mimeType, fileSize: s?.fileSize, stagedPath: s?.stagedPath, hasPreview: !!s?.preview })));
+      console.info('[stagePathFiles] Files staged', {
+        count: staged?.length ?? 0,
+        totalBytes: staged?.reduce((sum, entry) => sum + (entry?.fileSize ?? 0), 0) ?? 0,
+      });
       showUnsupportedImageEditReferenceToast(staged, t);
 
       setAttachments(prev => {
@@ -999,7 +1002,7 @@ export function ChatInput({
             mimeType: file.type || 'application/octet-stream',
           }),
         });
-        console.log(`[stageBuffer] Staged: id=${staged?.id}, path=${staged?.stagedPath}, size=${staged?.fileSize}`);
+        console.info('[stageBuffer] Clipboard file staged', { bytes: staged?.fileSize ?? 0 });
         setAttachments(prev => prev.map(a =>
           a.id === tempId ? { ...staged, status: 'ready' as const } : a,
         ));
@@ -1079,13 +1082,12 @@ export function ChatInput({
 
     // Capture values before clearing — clear input immediately for snappy UX,
     // but keep attachments available for the async send
-    console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
-    if (attachmentsToSend) {
-      console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
-        id: a.id, fileName: a.fileName, mimeType: a.mimeType, fileSize: a.fileSize,
-        stagedPath: a.stagedPath, status: a.status, hasPreview: !!a.preview,
-      })));
-    }
+    console.info('[handleSend] Dispatching composer intent', {
+      textChars: Array.from(textToSend).length,
+      attachmentCount: attachmentsToSend?.length ?? 0,
+      attachmentBytes: attachmentsToSend?.reduce((sum, attachment) => sum + attachment.fileSize, 0) ?? 0,
+      mode: sendMode,
+    });
     setInput('');
     setAttachments([]);
     setSelectedSkill(null);

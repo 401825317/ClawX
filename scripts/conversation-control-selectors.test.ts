@@ -113,7 +113,7 @@ test('background completion wake resolves a unique task owner without borrowing 
     id: 'turn-background-owner',
     sessionKey: backgroundSession,
     rootRunId: 'run-background-owner',
-    status: 'waiting_background',
+    status: 'running',
     tasks: [task(taskId, 'running', { runtime: 'image_generate' })],
   });
   const state = conversationState([
@@ -504,7 +504,7 @@ test('running agent ids combine backend sessions with active canonical Turns', (
   const beta = turn({
     id: 'turn-beta-running',
     sessionKey: 'agent:beta:main',
-    status: 'settling',
+    status: 'running',
   });
   const gamma = turn({
     id: 'turn-gamma-completed',

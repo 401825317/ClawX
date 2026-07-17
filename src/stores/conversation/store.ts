@@ -5,8 +5,6 @@ import {
   type ConversationMessageSnapshot,
 } from '../../../shared/conversation-events';
 import type { ChatRuntimeEvent } from '../../../shared/chat-runtime-events';
-import { resolveConversationTimelineMode } from '../../../shared/conversation-rollout';
-import { trackUiEvent } from '../../lib/telemetry';
 import type { RawMessage } from '../chat/types';
 import { chatEventToConversationEvents } from './chat-adapter';
 import { enqueueConversationEvents, flushConversationEvents, resetConversationDeltaBuffer } from './delta-buffer';
@@ -25,28 +23,16 @@ import {
 } from './reducer';
 import { runtimeEventToConversationEvents } from './runtime-adapter';
 import {
-  appendShadowComparison,
-  createHistoryShadowComparison,
-  createTerminalShadowComparison,
-  shadowComparisonTelemetry,
-  type ShadowComparisonRecord,
-} from './shadow-compare';
-import {
   createEmptyConversationState,
   type ConversationState,
-  type ConversationTimelineMode,
   type ConversationTurn,
 } from './types';
 
 type ConversationActions = {
-  mode: ConversationTimelineMode;
   expandedItemIds: Record<string, true>;
   followModeBySession: Record<string, 'following' | 'detached'>;
-  shadowComparisonsBySession: Record<string, ShadowComparisonRecord[]>;
-  shadowComparisonSessionOrder: string[];
   currentSessionKey: string | null;
   sessionAccessOrder: string[];
-  setMode: (mode: ConversationTimelineMode) => void;
   setCurrentSession: (sessionKey: string) => void;
   setItemExpanded: (itemId: string, expanded: boolean) => void;
   setFollowMode: (sessionKey: string, mode: 'following' | 'detached') => void;
@@ -63,22 +49,16 @@ type ConversationActions = {
       reason?: 'initial-load' | 'terminal-refresh' | 'manual-refresh';
       transcriptMtime?: number;
       additionalEvents?: ConversationEvent[];
-      legacyMessages?: RawMessage[];
     },
   ) => void;
   beginLocalTurn: (input: {
     sessionKey: string;
     message: ConversationMessageSnapshot;
     mode?: 'chat' | 'image' | 'video';
+    activate?: boolean;
   }) => string;
   bindRun: (turnId: string, sessionKey: string, runId: string, objective?: string) => void;
   markSessionActivity: (sessionKey: string, active: boolean, runId?: string) => void;
-  compareAuthoritativeTerminal: (input: {
-    sessionKey: string;
-    runId: string;
-    status: 'completed' | 'error' | 'aborted';
-    legacyRunStatus?: 'completed' | 'error' | 'aborted';
-  }) => void;
   removeSession: (sessionKey: string) => void;
   reset: () => void;
 };
@@ -89,7 +69,6 @@ export const CONVERSATION_SESSION_CACHE_LIMIT = 16;
 
 const TERMINAL_TURN_STATUSES = new Set<ConversationTurn['status']>([
   'completed',
-  'partial',
   'error',
   'aborted',
 ]);
@@ -122,7 +101,6 @@ function sessionHasCachedState(state: ConversationStore, sessionKey: string): bo
     || Object.hasOwn(state.aliases.activeBySession, sessionKey)
     || Object.hasOwn(state.aliases.pendingLocalBySession, sessionKey)
     || Object.hasOwn(state.followModeBySession, sessionKey)
-    || Object.hasOwn(state.shadowComparisonsBySession, sessionKey)
     || Object.keys(state.noSequenceDedupeByScope).some((scopeKey) => (
       sessionAliasKeyBelongsTo(scopeKey, sessionKey)
     ));
@@ -152,10 +130,6 @@ function removeSessionFromStore(state: ConversationStore, sessionKey: string): C
     followModeBySession: Object.fromEntries(
       Object.entries(state.followModeBySession).filter(([key]) => key !== sessionKey),
     ),
-    shadowComparisonsBySession: Object.fromEntries(
-      Object.entries(state.shadowComparisonsBySession).filter(([key]) => key !== sessionKey),
-    ),
-    shadowComparisonSessionOrder: state.shadowComparisonSessionOrder.filter((key) => key !== sessionKey),
     currentSessionKey: state.currentSessionKey === sessionKey ? null : state.currentSessionKey,
     sessionAccessOrder: state.sessionAccessOrder.filter((key) => key !== sessionKey),
   };
@@ -190,7 +164,7 @@ function retainBoundedSessions(
   return next;
 }
 
-export const useConversationStore = create<ConversationStore>((set, get) => {
+export const useConversationStore = create<ConversationStore>((set) => {
   const apply = (events: ConversationEvent[]) => {
     if (events.length === 0) return;
     set((state) => {
@@ -215,34 +189,12 @@ export const useConversationStore = create<ConversationStore>((set, get) => {
     flushConversationEvents(apply);
     apply(events);
   };
-  const recordShadowComparison = (sessionKey: string, comparison: ShadowComparisonRecord) => {
-    set((state) => {
-      const next = appendShadowComparison({
-        bySession: state.shadowComparisonsBySession,
-        sessionOrder: state.shadowComparisonSessionOrder,
-      }, sessionKey, comparison);
-      return retainBoundedSessions({
-        ...state,
-        shadowComparisonsBySession: next.bySession,
-        shadowComparisonSessionOrder: next.sessionOrder,
-      }, [sessionKey]);
-    });
-    trackUiEvent('conversation.shadow_compare', shadowComparisonTelemetry(comparison));
-  };
-
   return {
     ...createEmptyConversationState(),
-    mode: resolveConversationTimelineMode(
-      typeof window !== 'undefined' ? window.electron?.chatTimelineModeOverride : null,
-      null,
-    ),
     expandedItemIds: {},
     followModeBySession: {},
-    shadowComparisonsBySession: {},
-    shadowComparisonSessionOrder: [],
     currentSessionKey: null,
     sessionAccessOrder: [],
-    setMode: (mode) => set({ mode }),
     setCurrentSession: (sessionKey) => set((state) => {
       const selected = state.currentSessionKey === sessionKey
         ? state
@@ -302,17 +254,8 @@ export const useConversationStore = create<ConversationStore>((set, get) => {
         return retained;
       });
       recordConversationDuration('historyReplay', conversationPerformanceNow() - replayStartedAt);
-      const state = get();
-      if (state.mode === 'shadow') {
-        recordShadowComparison(sessionKey, createHistoryShadowComparison({
-          state: stateSlice(state),
-          sessionKey,
-          visibleMessages: options?.legacyMessages ?? messages,
-          checkpointReason: options?.reason,
-        }));
-      }
     },
-    beginLocalTurn: ({ sessionKey, message, mode }) => {
+    beginLocalTurn: ({ sessionKey, message, mode, activate = true }) => {
       const turnId = createTurnId({
         sessionKey,
         messageId: message.id,
@@ -325,7 +268,14 @@ export const useConversationStore = create<ConversationStore>((set, get) => {
         : Date.now();
       const event: ConversationEvent = {
         version: CONVERSATION_EVENT_CONTRACT_VERSION,
-        eventId: createEventId({ source: 'host', type: 'turn.requested', messageId: message.id ?? turnId, occurredAt, data: message.content }),
+        eventId: createEventId({
+          source: 'host',
+          type: 'turn.requested',
+          messageId: message.id ?? turnId,
+          phase: activate ? 'active' : 'queued',
+          occurredAt,
+          data: message.content,
+        }),
         type: 'turn.requested',
         source: 'host',
         authority: 'authoritative',
@@ -335,7 +285,7 @@ export const useConversationStore = create<ConversationStore>((set, get) => {
         occurredAt,
         receivedAt: Date.now(),
         replayed: false,
-        data: { message, mode },
+        data: { message, mode, activate },
       };
       ingestEvents([event], { buffered: false });
       return turnId;
@@ -375,18 +325,6 @@ export const useConversationStore = create<ConversationStore>((set, get) => {
         data: { active },
       }], { buffered: false });
     },
-    compareAuthoritativeTerminal: ({ sessionKey, runId, status, legacyRunStatus }) => {
-      const state = get();
-      if (state.mode !== 'shadow') return;
-      const comparison = createTerminalShadowComparison({
-        state: stateSlice(state),
-        sessionKey,
-        runId,
-        expectedStatus: status,
-        legacyRunStatus,
-      });
-      if (comparison) recordShadowComparison(sessionKey, comparison);
-    },
     removeSession: (sessionKey) => {
       set((state) => removeSessionFromStore(state, sessionKey));
     },
@@ -396,8 +334,6 @@ export const useConversationStore = create<ConversationStore>((set, get) => {
         ...createEmptyConversationState(),
         expandedItemIds: {},
         followModeBySession: {},
-        shadowComparisonsBySession: {},
-        shadowComparisonSessionOrder: [],
         currentSessionKey: null,
         sessionAccessOrder: [],
       });

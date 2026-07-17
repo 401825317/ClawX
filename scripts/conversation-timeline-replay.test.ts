@@ -140,6 +140,64 @@ test('gateway chat envelope normalization supports modern nested and legacy fina
   assert.equal(modernEvents[0].messageId, 'modern-final-message');
 });
 
+test('gateway mixed assistant preamble and tool call stays commentary instead of becoming a final answer', () => {
+  const events = chatEventToConversationEvents({
+    state: 'final',
+    runId: RUN_ID,
+    sessionKey: SESSION_KEY,
+    message: {
+      role: 'assistant',
+      id: 'media-preamble-with-tool-call',
+      timestamp: 1_700_000_000,
+      content: [{
+        type: 'text',
+        text: 'I will generate a natural summer lifestyle scene.',
+      }, {
+        type: 'toolCall',
+        id: 'media-preamble-tool-call',
+        name: 'image_generate',
+        arguments: { prompt: 'Generate the image.' },
+      }],
+    },
+  }, { sessionKey: SESSION_KEY, activeRunId: RUN_ID });
+
+  assert.equal(events[0]?.type, 'assistant.content');
+  assert.deepEqual(events[0]?.data, {
+    text: 'I will generate a natural summer lifestyle scene.',
+    replace: true,
+    phase: 'final',
+  });
+});
+
+test('Gateway agent thinking preview normalizes into canonical reasoning evidence', () => {
+  const events = normalizeGatewayChatRuntimeEvents({
+    stream: 'thinking',
+    runId: RUN_ID,
+    sessionKey: SESSION_KEY,
+    seq: 4,
+    ts: 1_700_000_000_004,
+    data: {
+      delta: 'Inspect the current state.',
+    },
+  });
+
+  assert.deepEqual(events, [{
+    contractVersion: 1,
+    producer: 'gateway',
+    type: 'thinking.delta',
+    runId: RUN_ID,
+    rootRunId: undefined,
+    sessionKey: SESSION_KEY,
+    taskId: undefined,
+    parentTaskId: undefined,
+    taskStatus: undefined,
+    seq: 4,
+    ts: 1_700_000_000_004,
+    text: undefined,
+    delta: 'Inspect the current state.',
+  }]);
+});
+
 test('idempotency key owns turn identity across local and history message ids', () => {
   const idempotencyKey = 'request-idempotency-key';
   const localTurnId = createTurnId({
@@ -293,6 +351,87 @@ test('history store replay preserves transcript order when persisted times tie o
       'First answer.',
       'Second answer.',
     ]);
+  } finally {
+    useConversationStore.getState().reset();
+  }
+});
+
+test('deferred local send stays queued without owning the run slot and activates the same Turn', () => {
+  const sessionKey = 'agent:main:deferred-local-send';
+  const message = {
+    role: 'user' as const,
+    id: 'deferred-local-user',
+    idempotencyKey: 'deferred-local-intent',
+    timestamp: 1_700_000_100,
+    content: 'Run this after the current same-session work.',
+  };
+  const store = useConversationStore.getState();
+  store.reset();
+  try {
+    const queuedTurnId = store.beginLocalTurn({
+      sessionKey,
+      message,
+      mode: 'video',
+      activate: false,
+    });
+    let state = useConversationStore.getState();
+    assert.equal(state.turnsById[queuedTurnId].status, 'queued');
+    assert.equal(state.aliases.pendingLocalBySession[sessionKey], undefined);
+    assert.equal(state.aliases.activeBySession[sessionKey], undefined);
+
+    const activatedTurnId = state.beginLocalTurn({
+      sessionKey,
+      message,
+      mode: 'video',
+      activate: true,
+    });
+    state = useConversationStore.getState();
+    assert.equal(activatedTurnId, queuedTurnId);
+    assert.deepEqual(state.turnOrderBySession[sessionKey], [queuedTurnId]);
+    assert.equal(state.aliases.pendingLocalBySession[sessionKey], queuedTurnId);
+    assert.equal(state.aliases.activeBySession[sessionKey], queuedTurnId);
+    assert.equal(state.turnsById[queuedTurnId].status, 'queued');
+    assert.equal(state.turnsById[queuedTurnId].items.filter((item) => item.kind === 'user-message').length, 1);
+  } finally {
+    useConversationStore.getState().reset();
+  }
+});
+
+test('session idle from the preceding run cannot settle a deferred local Turn', () => {
+  const sessionKey = 'agent:main:deferred-local-idle-isolation';
+  const queuedMessage = {
+    role: 'user' as const,
+    id: 'deferred-idle-user',
+    idempotencyKey: 'deferred-idle-intent',
+    timestamp: 1_700_000_200,
+    content: 'Run only after the preceding work releases the session.',
+  };
+  const store = useConversationStore.getState();
+  store.reset();
+  try {
+    const queuedTurnId = store.beginLocalTurn({
+      sessionKey,
+      message: queuedMessage,
+      mode: 'chat',
+      activate: false,
+    });
+
+    store.markSessionActivity(sessionKey, false);
+    let state = useConversationStore.getState();
+    assert.equal(state.turnsById[queuedTurnId].status, 'queued');
+    assert.equal(state.turnsById[queuedTurnId].evidence.backendIdle, false);
+
+    store.beginLocalTurn({
+      sessionKey,
+      message: queuedMessage,
+      mode: 'chat',
+      activate: true,
+    });
+    store.bindRun(queuedTurnId, sessionKey, 'run:deferred-idle-owner');
+    store.markSessionActivity(sessionKey, false, 'run:deferred-idle-owner');
+    state = useConversationStore.getState();
+    assert.equal(state.turnsById[queuedTurnId].status, 'completed');
+    assert.equal(state.turnsById[queuedTurnId].evidence.backendIdle, true);
   } finally {
     useConversationStore.getState().reset();
   }
@@ -1165,6 +1304,262 @@ test('history replay creates one stable turn with commentary, grouped tools, and
   assert.deepEqual(timelineKinds(messages), ['user-message', 'commentary', 'tool-group', 'final-answer']);
 });
 
+test('late commentary splits a compatible tool group at its canonical boundary', () => {
+  const sessionKey = `${SESSION_KEY}:late-tool-boundary`;
+  const turnId = 'turn:late-tool-boundary';
+  const event = (
+    eventId: string,
+    type: ConversationEvent['type'],
+    occurredAt: number,
+    data: ConversationEvent['data'],
+    extra: Partial<ConversationEvent> = {},
+  ): ConversationEvent => ({
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId,
+    type,
+    source: type === 'turn.requested' ? 'host' : 'openclaw-runtime',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    runId: 'run:late-tool-boundary',
+    occurredAt,
+    receivedAt: occurredAt,
+    replayed: false,
+    data,
+    ...extra,
+  });
+  const state = reduceConversationEvents(createEmptyConversationState(), [
+    event('late-tool-boundary:user', 'turn.requested', 1_000, {
+      message: { role: 'user', id: 'late-tool-boundary:user', content: 'Read two files.' },
+    }),
+    event('late-tool-boundary:first-start', 'tool.started', 1_010, {
+      toolCallId: 'late-tool-boundary:first', name: 'read_file', args: { path: '/tmp/first' },
+    }, { toolCallId: 'late-tool-boundary:first' }),
+    event('late-tool-boundary:first-end', 'tool.completed', 1_020, {
+      toolCallId: 'late-tool-boundary:first', name: 'read_file', result: 'first',
+    }, { toolCallId: 'late-tool-boundary:first' }),
+    event('late-tool-boundary:second-start', 'tool.started', 1_040, {
+      toolCallId: 'late-tool-boundary:second', name: 'read_file', args: { path: '/tmp/second' },
+    }, { toolCallId: 'late-tool-boundary:second' }),
+    event('late-tool-boundary:second-end', 'tool.completed', 1_050, {
+      toolCallId: 'late-tool-boundary:second', name: 'read_file', result: 'second',
+    }, { toolCallId: 'late-tool-boundary:second' }),
+    // Transport delivered this preamble after both tool facts.
+    event('late-tool-boundary:commentary', 'assistant.content', 1_040, {
+      text: 'Now I will read the second file.', replace: true,
+    }, { messageId: 'late-tool-boundary:commentary' }),
+  ]);
+
+  assertConversationState(state);
+  const turn = state.turnsById[turnId];
+  assert.deepEqual(turn.items.map((item) => item.kind), [
+    'user-message',
+    'tool-group',
+    'commentary',
+    'tool-group',
+  ]);
+  assert.deepEqual(
+    turn.items.filter((item) => item.kind === 'tool-group').map((group) => group.entries.map((entry) => entry.toolCallId)),
+    [['late-tool-boundary:first'], ['late-tool-boundary:second']],
+  );
+});
+
+test('history replay folds Tool Search target projections into their outer tool calls', () => {
+  const firstParent = 'call_state|fc_history_state';
+  const secondParent = 'call_action|fc_history_action';
+  const firstChild = 'tool_search_code:call_state_fc_history_state:desktop_get_app_state:1';
+  const secondChild = 'tool_search_code:call_action_fc_history_action:desktop_request_action:2';
+  const messages: RawMessage[] = [
+    { role: 'user', id: 'tool-search-history-user', timestamp: 2_000, content: 'Request approval.' },
+    {
+      role: 'assistant',
+      id: 'tool-search-history-state-outer',
+      timestamp: 2_001,
+      content: [{ type: 'toolCall', id: firstParent, name: 'tool_call', arguments: { id: 'desktop_get_app_state', args: {} } }],
+    },
+    { role: 'toolresult', id: 'tool-search-history-state-outer-result', timestamp: 2_002, toolCallId: firstParent, toolName: 'tool_call', content: '{}' },
+    {
+      role: 'assistant',
+      id: 'tool-search-history-state-child',
+      timestamp: 2_003,
+      content: [{ type: 'toolCall', id: firstChild, name: 'desktop_get_app_state', arguments: {} }],
+    },
+    { role: 'toolresult', id: 'tool-search-history-state-child-result', timestamp: 2_004, toolCallId: firstChild, toolName: 'desktop_get_app_state', content: '{}' },
+    {
+      role: 'assistant',
+      id: 'tool-search-history-action-outer',
+      timestamp: 2_005,
+      content: [{ type: 'toolCall', id: secondParent, name: 'tool_call', arguments: { id: 'desktop_request_action', args: {} } }],
+    },
+    { role: 'toolresult', id: 'tool-search-history-action-outer-result', timestamp: 2_006, toolCallId: secondParent, toolName: 'tool_call', content: '{}' },
+    {
+      role: 'assistant',
+      id: 'tool-search-history-action-child',
+      timestamp: 2_007,
+      content: [{ type: 'toolCall', id: secondChild, name: 'desktop_request_action', arguments: {} }],
+    },
+    { role: 'toolresult', id: 'tool-search-history-action-child-result', timestamp: 2_008, toolCallId: secondChild, toolName: 'desktop_request_action', content: '{}' },
+    { role: 'assistant', id: 'tool-search-history-final', timestamp: 2_009, content: 'Waiting for approval.' },
+  ];
+  const state = reduceConversationEvents(
+    createEmptyConversationState(),
+    historyMessagesToConversationEvents(SESSION_KEY, messages),
+  );
+  assertConversationState(state);
+  const turn = state.turnsById[state.turnOrderBySession[SESSION_KEY][0]];
+  const entries = turn.items.flatMap((item) => item.kind === 'tool-group' ? item.entries : []);
+  assert.deepEqual(entries.map((entry) => entry.toolCallId), [firstParent, secondParent]);
+  assert.deepEqual(entries.map((entry) => entry.name), ['desktop_get_app_state', 'desktop_request_action']);
+});
+
+test('live Tool Search targets dedupe and desktop approval resolves by child tool ownership', () => {
+  const sessionKey = `${SESSION_KEY}:tool-search-approval-owner`;
+  const runId = `${RUN_ID}:tool-search-approval-owner`;
+  const wrongLegacyRunId = 'legacy-session-uuid-used-as-run';
+  const stateParent = 'call_state|fc_live_state';
+  const actionParent = 'call_action|fc_live_action';
+  const stateChild = 'tool_search_code:call_state_fc_live_state:desktop_get_app_state:1';
+  const actionChild = 'tool_search_code:call_action_fc_live_action:desktop_request_action:2';
+  const state = reduceConversationEvents(createEmptyConversationState(), runtime([
+    { type: 'run.started', runId, sessionKey, seq: 1, ts: 3_000, producer: 'openclaw' },
+    { type: 'tool.started', runId, sessionKey, seq: 2, ts: 3_001, producer: 'openclaw', toolCallId: stateParent, name: 'tool_call', args: { id: 'desktop_get_app_state', args: {} } },
+    { type: 'tool.started', runId, sessionKey, seq: 3, ts: 3_002, producer: 'openclaw', toolCallId: stateChild, name: 'desktop_get_app_state', args: {} },
+    { type: 'tool.completed', runId, sessionKey, seq: 4, ts: 3_003, producer: 'openclaw', toolCallId: stateChild, name: 'desktop_get_app_state', result: {} },
+    { type: 'tool.started', runId, sessionKey, seq: 5, ts: 3_004, producer: 'openclaw', toolCallId: actionParent, name: 'tool_call', args: { id: 'desktop_request_action', args: {} } },
+    { type: 'tool.started', runId, sessionKey, seq: 6, ts: 3_005, producer: 'openclaw', toolCallId: actionChild, name: 'desktop_request_action', args: {} },
+    { type: 'tool.completed', runId, sessionKey, seq: 7, ts: 3_006, producer: 'openclaw', toolCallId: actionChild, name: 'desktop_request_action', result: { status: 'approval_required' } },
+    {
+      type: 'approval.updated',
+      runId: wrongLegacyRunId,
+      sessionKey,
+      ts: 3_007,
+      producer: 'uclaw-desktop-approval',
+      toolCallId: actionChild,
+      approvalId: 'tool-search-desktop-approval',
+      approvalKind: 'desktop',
+      allowedDecisions: ['allow-once', 'deny'],
+      actionable: true,
+      resolutionSource: 'desktop-broker',
+      itemId: 'tool-search-desktop-approval',
+      phase: 'requested',
+      status: 'pending',
+    },
+  ]));
+
+  assertConversationState(state);
+  assert.equal(state.turnOrderBySession[sessionKey].length, 1);
+  const turn = state.turnsById[state.turnOrderBySession[sessionKey][0]];
+  const entries = turn.items.flatMap((item) => item.kind === 'tool-group' ? item.entries : []);
+  const approval = turn.items.find((item) => item.kind === 'approval');
+  assert.deepEqual(entries.map((entry) => entry.toolCallId), [stateParent, actionParent]);
+  assert.deepEqual(entries.map((entry) => entry.name), ['desktop_get_app_state', 'desktop_request_action']);
+  assert.ok(approval && approval.kind === 'approval');
+  assert.equal(approval.actionable, true);
+  assert.equal(turn.status, 'waiting_approval');
+  assert.equal(state.quarantineBySession[sessionKey], undefined);
+});
+
+test('live and history replay remove the same ordered process prefix from the final answer', () => {
+  const sessionKey = `${SESSION_KEY}:live-history-final-prefix`;
+  const turnId = createTurnId({ sessionKey, idempotencyKey: 'live-history-final-prefix' });
+  const firstProcess = 'Inspecting the current implementation.';
+  const secondProcess = 'Verifying the relevant regression tests.';
+  const finalAnswer = 'The implementation and regression tests are consistent.';
+  const foldedFinal = `${firstProcess}\n\n${secondProcess}\n\n${finalAnswer}`;
+  const occurredAt = 1_700_000_050_000;
+  const event = (
+    type: ConversationEvent['type'],
+    offset: number,
+    data: ConversationEvent['data'],
+    extra: Partial<ConversationEvent> = {},
+  ): ConversationEvent => ({
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: `live-history-final-prefix:${offset}:${type}`,
+    type,
+    source: type === 'turn.requested' ? 'host' : type === 'final.message' ? 'openclaw-chat' : 'openclaw-runtime',
+    authority: type === 'turn.requested' || type === 'run.ended' ? 'authoritative' : 'corroborating',
+    sessionKey,
+    turnId,
+    runId: 'run-live-history-final-prefix',
+    occurredAt: occurredAt + offset,
+    receivedAt: occurredAt + offset,
+    replayed: false,
+    data,
+    ...extra,
+  });
+  const liveState = reduceConversationEvents(createEmptyConversationState(), [
+    event('turn.requested', 0, {
+      message: {
+        role: 'user',
+        id: 'live-history-final-prefix-user',
+        idempotencyKey: 'live-history-final-prefix',
+        content: 'Inspect and verify the implementation.',
+      },
+    }, { messageId: 'live-history-final-prefix-user' }),
+    event('run.started', 1, { startedAt: occurredAt + 1 }),
+    event('assistant.content', 2, { text: firstProcess, replace: true }, { messageId: 'live-process-1' }),
+    event('tool.started', 3, { toolCallId: 'live-prefix-tool', name: 'read_file' }, { toolCallId: 'live-prefix-tool' }),
+    event('tool.completed', 4, { toolCallId: 'live-prefix-tool', name: 'read_file', result: 'done' }, { toolCallId: 'live-prefix-tool' }),
+    event('assistant.content', 5, { text: secondProcess, replace: true }, { messageId: 'live-process-2' }),
+    event('final.message', 6, {
+      message: { role: 'assistant', id: 'live-prefix-final', content: foldedFinal },
+    }, { messageId: 'live-prefix-final' }),
+    event('run.ended', 7, { status: 'completed', endedAt: occurredAt + 7 }),
+  ]);
+  const historyState = reduceConversationEvents(
+    createEmptyConversationState(),
+    historyMessagesToConversationEvents(sessionKey, [{
+      role: 'user',
+      id: 'history-prefix-user',
+      idempotencyKey: 'live-history-final-prefix',
+      content: 'Inspect and verify the implementation.',
+      timestamp: occurredAt / 1_000,
+    }, {
+      role: 'assistant',
+      id: 'history-process-1',
+      content: firstProcess,
+      timestamp: (occurredAt + 2) / 1_000,
+    }, {
+      role: 'assistant',
+      id: 'history-prefix-tool',
+      content: [{ type: 'toolCall', id: 'history-prefix-tool-call', name: 'read_file', arguments: {} }],
+      timestamp: (occurredAt + 3) / 1_000,
+    }, {
+      role: 'toolresult',
+      id: 'history-prefix-result',
+      toolCallId: 'history-prefix-tool-call',
+      toolName: 'read_file',
+      content: 'done',
+      timestamp: (occurredAt + 4) / 1_000,
+    }, {
+      role: 'assistant',
+      id: 'history-process-2',
+      content: secondProcess,
+      timestamp: (occurredAt + 5) / 1_000,
+    }, {
+      role: 'assistant',
+      id: 'history-prefix-final',
+      content: foldedFinal,
+      timestamp: (occurredAt + 6) / 1_000,
+    }]),
+  );
+  const visibleProjection = (state: ReturnType<typeof createEmptyConversationState>) => {
+    const projectedTurn = state.turnsById[state.turnOrderBySession[sessionKey][0]];
+    const final = projectedTurn.items.find((item) => item.kind === 'final-answer');
+    assert.ok(final && final.kind === 'final-answer');
+    return {
+      commentary: projectedTurn.items.flatMap((item) => item.kind === 'commentary' ? [item.text] : []),
+      final: final.message.content,
+    };
+  };
+
+  assert.deepEqual(visibleProjection(liveState), {
+    commentary: [firstProcess, secondProcess],
+    final: finalAnswer,
+  });
+  assert.deepEqual(visibleProjection(historyState), visibleProjection(liveState));
+});
+
 test('history replay preserves each user boundary as a distinct turn', () => {
   const messages: RawMessage[] = [
     { role: 'user', id: 'user-turn-1', timestamp: 2_000, content: 'First question.' },
@@ -1612,6 +2007,114 @@ test('artifact verification and final entities keep stronger fields without dupl
   assert.equal(verificationItem.verifications[0].detail, 'History can fill this missing detail.');
   assert.ok(finalItem && finalItem.kind === 'final-answer');
   assert.equal(finalItem.message.content, 'Persisted transcript final.');
+});
+
+test('artifact bridge aliases union existing path and URL entities in either arrival order', () => {
+  const replay = (reverse: boolean) => {
+    const sessionKey = `agent:main:artifact-bridge-${reverse ? 'url-first' : 'path-first'}`;
+    const turnId = `turn:artifact-bridge-${reverse ? 'url-first' : 'path-first'}`;
+    const path = '/tmp/artifact-bridge-output.png';
+    const url = '/api/chat/media/outgoing/artifact-bridge-output';
+    const occurredAt = 9_100_000;
+    const event = (
+      eventId: string,
+      offset: number,
+      taskId: string,
+      artifact: Record<string, unknown>,
+      source: ConversationEvent['source'] = 'history',
+      authority: ConversationEvent['authority'] = 'authoritative',
+    ): ConversationEvent => ({
+      version: CONVERSATION_EVENT_CONTRACT_VERSION,
+      eventId,
+      type: 'artifact.updated',
+      source,
+      authority,
+      sessionKey,
+      turnId,
+      runId: `run:${turnId}`,
+      taskId,
+      occurredAt: occurredAt + offset,
+      receivedAt: occurredAt + offset,
+      replayed: source === 'history',
+      data: { artifact },
+    });
+    const pathOnly = event('artifact-bridge:path', 1, 'task-path', {
+      id: 'path-only-id',
+      title: 'Strong path title',
+      filePath: path,
+      mimeType: 'image/png',
+      availability: 'available',
+    }, 'host');
+    const urlOnly = event('artifact-bridge:url', 2, 'task-url', {
+      id: 'url-only-id',
+      title: 'History URL title',
+      url,
+      preview: 'data:image/png;base64,c2FtZQ==',
+    });
+    const bridge = event('artifact-bridge:both', 3, 'task-path', {
+      id: 'bridge-id',
+      filePath: path,
+      url,
+    }, 'openclaw-runtime');
+    const lateDonor = event('artifact-bridge:late-donor', 4, 'task-url', {
+      id: 'url-only-id',
+      url,
+      title: 'Late weaker history title',
+    });
+    const requested: ConversationEvent = {
+      version: CONVERSATION_EVENT_CONTRACT_VERSION,
+      eventId: 'artifact-bridge:requested',
+      type: 'turn.requested',
+      source: 'host',
+      authority: 'authoritative',
+      sessionKey,
+      turnId,
+      messageId: 'artifact-bridge:user',
+      occurredAt,
+      receivedAt: occurredAt,
+      replayed: false,
+      data: {
+        message: {
+          role: 'user',
+          id: 'artifact-bridge:user',
+          content: 'Create one durable image artifact.',
+        },
+      },
+    };
+    const ordered = reverse ? [urlOnly, pathOnly] : [pathOnly, urlOnly];
+    const state = reduceConversationEvents(
+      createEmptyConversationState(),
+      [requested, ...ordered, bridge, lateDonor],
+    );
+    assertConversationState(state);
+    return { state, turn: state.turnsById[turnId], path, url };
+  };
+
+  for (const reverse of [false, true]) {
+    const { state, turn, path, url } = replay(reverse);
+    const artifactGroups = turn.items.filter((item) => item.kind === 'artifact-group');
+    const artifacts = artifactGroups.flatMap((item) => item.artifacts);
+    assert.equal(artifactGroups.length, 1);
+    assert.equal(artifacts.length, 1);
+    assert.equal(artifacts[0].filePath, path);
+    assert.equal(artifacts[0].url, url);
+    assert.equal(artifacts[0].preview, 'data:image/png;base64,c2FtZQ==');
+    assert.equal(artifacts[0].title, 'Strong path title');
+    assert.equal(artifacts[0].mimeType, 'image/png');
+    assert.equal(artifacts[0].availability, 'available');
+
+    const entities = new Set([
+      turn.artifactEntityByAlias['id:path-only-id'],
+      turn.artifactEntityByAlias['id:url-only-id'],
+      turn.artifactEntityByAlias['id:bridge-id'],
+      turn.artifactEntityByAlias[`path:${path}`],
+      turn.artifactEntityByAlias[`url:${url}`],
+    ]);
+    assert.equal(entities.size, 1);
+    assert.equal(Object.keys(turn.artifactItemByEntity).length, 1);
+    assert.equal(Object.keys(turn.artifactMergeByEntity).length, 1);
+    assert.equal(state.turnOrderBySession[turn.sessionKey].length, 1);
+  }
 });
 
 test('an older history snapshot cannot replace newer final message content', () => {
@@ -2540,7 +3043,9 @@ test('run terminal waits for background tasks and only settles after final deliv
   ]);
   let state = reduceConversationEvents(createEmptyConversationState(), events);
   const turnId = state.turnOrderBySession[SESSION_KEY][0];
-  assert.equal(state.turnsById[turnId].status, 'waiting_background');
+  assert.equal(state.turnsById[turnId].status, 'running');
+  assert.equal(state.turnsById[turnId].evidence.runTerminal, 'completed');
+  assert.deepEqual(state.turnsById[turnId].evidence.terminalPendingTaskIds, ['video-task']);
   state = reduceConversationEvents(state, runtime([{
     type: 'task.updated',
     runId: RUN_ID,
@@ -2578,6 +3083,493 @@ test('run terminal waits for background tasks and only settles after final deliv
   assert.ok(checkpoint);
   state = reduceConversationEvents(state, [...artifactEvents, ...finalEvents, checkpoint]);
   assert.equal(state.turnsById[turnId].status, 'completed');
+});
+
+test('media completion keeps process text as commentary and reveals final only after the artifact', () => {
+  const sessionKey = `${SESSION_KEY}:media-final-order`;
+  const ownerRunId = `${RUN_ID}:media-final-order`;
+  const taskId = 'media-final-order-task';
+  let state = reduceConversationEvents(createEmptyConversationState(), runtime([{
+    type: 'run.started',
+    runId: ownerRunId,
+    sessionKey,
+    seq: 1,
+    ts: 6_000,
+    producer: 'openclaw',
+  }, {
+    type: 'task.updated',
+    runId: ownerRunId,
+    sessionKey,
+    taskId,
+    seq: 2,
+    ts: 6_001,
+    producer: 'openclaw',
+    task: {
+      taskId,
+      title: 'Generate product image',
+      runtime: 'image_generate',
+      status: 'running',
+      updatedAt: 6_001,
+    },
+  }]));
+  const turnId = state.turnOrderBySession[sessionKey][0];
+
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'final',
+    sessionKey,
+    runId: ownerRunId,
+    message: {
+      role: 'assistant',
+      id: 'media-process-text',
+      timestamp: 6_002,
+      content: 'I will generate the image with clean product lighting.',
+    },
+  }, { sessionKey, activeRunId: ownerRunId, rootRunId: ownerRunId, turnId }));
+  state = reduceConversationEvents(state, runtime([{
+    type: 'run.ended',
+    runId: ownerRunId,
+    sessionKey,
+    seq: 3,
+    ts: 6_003,
+    producer: 'openclaw',
+    status: 'completed',
+  }]));
+  let turn = state.turnsById[turnId];
+  assert.deepEqual(turn.items.filter((item) => item.kind === 'commentary').map((item) => item.text), [
+    'I will generate the image with clean product lighting.',
+  ]);
+  assert.equal(turn.items.some((item) => item.kind === 'final-answer'), false);
+
+  const completionRunId = `image_generate:${taskId}:ok`;
+  const completionMediaEvents = runtimeEventToConversationEvents({
+    type: 'assistant.delta',
+    runId: completionRunId,
+    rootRunId: ownerRunId,
+    sessionKey,
+    taskId,
+    seq: 1,
+    ts: 6_004,
+    producer: 'openclaw',
+    text: 'The blue coffee cup product photo is ready.',
+    replace: true,
+    phase: 'final',
+    mediaUrls: ['/tmp/blue-coffee-cup.png'],
+  });
+  assert.deepEqual(completionMediaEvents.map((event) => event.type), ['artifact.updated']);
+  assert.deepEqual(completionMediaEvents[0]?.data, {
+    artifact: {
+      id: completionMediaEvents[0]?.type === 'artifact.updated'
+        ? completionMediaEvents[0].data.artifact.id
+        : undefined,
+      kind: 'image',
+      title: 'blue-coffee-cup.png',
+      filePath: '/tmp/blue-coffee-cup.png',
+      mimeType: 'image/png',
+      availability: 'available',
+      taskId,
+      source: 'gateway-media',
+    },
+  });
+  state = reduceConversationEvents(state, completionMediaEvents);
+  turn = state.turnsById[turnId];
+  assert.deepEqual(turn.items.filter((item) => item.kind === 'commentary').map((item) => item.text), [
+    'I will generate the image with clean product lighting.',
+  ]);
+  assert.equal(turn.items.some((item) => item.kind === 'final-answer'), false);
+
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'final',
+    sessionKey,
+    runId: completionRunId,
+    message: {
+      role: 'assistant',
+      id: 'media-completion-final',
+      timestamp: 6_005,
+      content: 'The blue coffee cup product photo is ready.',
+    },
+  }, { sessionKey, activeRunId: ownerRunId, rootRunId: ownerRunId, turnId }));
+  turn = state.turnsById[turnId];
+  assert.equal(turn.items.some((item) => item.kind === 'final-answer'), false);
+  assert.equal(turn.deferredFinal?.runId, completionRunId);
+
+  state = reduceConversationEvents(state, runtime([{
+    type: 'task.updated',
+    runId: ownerRunId,
+    sessionKey,
+    taskId,
+    seq: 4,
+    ts: 6_006,
+    producer: 'openclaw-task-ledger',
+    task: {
+      taskId,
+      title: 'Generate product image',
+      runtime: 'image_generate',
+      status: 'completed',
+      deliveryStatus: 'delivered',
+      updatedAt: 6_006,
+    },
+  }]));
+  assertConversationState(state);
+  turn = state.turnsById[turnId];
+  const artifactIndex = turn.items.findIndex((item) => item.kind === 'artifact-group');
+  const finalIndex = turn.items.findIndex((item) => item.kind === 'final-answer');
+  assert.ok(artifactIndex >= 0);
+  assert.ok(finalIndex > artifactIndex);
+  assert.equal(turn.deferredFinal, undefined);
+  assert.equal(turn.items[finalIndex].kind === 'final-answer'
+    ? turn.items[finalIndex].message.content
+    : undefined, 'The blue coffee cup product photo is ready.');
+});
+
+test('history projects a final message artifact before its final answer', () => {
+  const sessionKey = `${SESSION_KEY}:history-media-final-order`;
+  const events = historyMessagesToConversationEvents(sessionKey, [{
+    role: 'user',
+    id: 'history-media-user',
+    timestamp: 7_000,
+    content: 'Generate an image.',
+  }, {
+    role: 'assistant',
+    id: 'history-media-final',
+    timestamp: 7_001,
+    content: 'The image is ready.',
+    _attachedFiles: [{
+      fileName: 'history-image.png',
+      mimeType: 'image/png',
+      fileSize: 128,
+      filePath: '/tmp/history-image.png',
+      availability: 'available',
+      source: 'gateway-media',
+      disposition: 'output-delivery',
+    }],
+  }]);
+  const artifactIndex = events.findIndex((event) => event.type === 'artifact.updated');
+  const finalIndex = events.findIndex((event) => event.type === 'final.message');
+
+  assert.ok(artifactIndex >= 0);
+  assert.ok(finalIndex > artifactIndex);
+});
+
+test('real async image and video transcripts keep process, media, then final order', () => {
+  const sessionKey = `${SESSION_KEY}:real-media-transcript-order`;
+  const mediaCases = [{
+    prompt: 'Generate a person eating watermelon image.',
+    processText: 'I will generate a natural summer lifestyle scene.',
+    taskId: 'real-image-task',
+    toolName: 'image_generate',
+    fileName: 'watermelon.png',
+    filePath: '/tmp/watermelon.png',
+    mimeType: 'image/png',
+    finalText: 'The image is ready.',
+  }, {
+    prompt: 'Turn the image into a four-second video.',
+    processText: 'I will add natural motion and a gentle camera push.',
+    taskId: 'real-video-task',
+    toolName: 'video_generate',
+    fileName: 'watermelon.mp4',
+    filePath: '/tmp/watermelon.mp4',
+    mimeType: 'video/mp4',
+    finalText: 'The four-second video is ready.',
+  }];
+
+  const messages: RawMessage[] = mediaCases.flatMap((media, index) => {
+    const timestamp = 9_000 + (index * 100);
+    const toolCallId = `real-media-tool-${index}`;
+    return [{
+      role: 'user' as const,
+      id: `real-media-user-${index}`,
+      timestamp,
+      content: media.prompt,
+    }, {
+      role: 'assistant' as const,
+      id: `real-media-process-${index}`,
+      timestamp: timestamp + 1,
+      content: [{ type: 'text', text: media.processText }, {
+        type: 'toolCall',
+        id: toolCallId,
+        name: media.toolName,
+        arguments: { prompt: media.prompt },
+      }],
+    }, {
+      role: 'toolresult' as const,
+      id: `real-media-result-${index}`,
+      timestamp: timestamp + 2,
+      toolCallId,
+      toolName: media.toolName,
+      content: [{
+        type: 'text',
+        text: `Background task started for ${media.toolName} (${media.taskId}).`,
+      }],
+      details: {
+        async: true,
+        status: 'started',
+        taskId: media.taskId,
+        runId: `tool:${media.toolName}:${media.taskId}`,
+      },
+    }, {
+      role: 'assistant' as const,
+      id: `real-media-final-${index}`,
+      timestamp: timestamp + 3,
+      content: `${media.finalText}\n\nMEDIA:${media.filePath}`,
+      _attachedFiles: [{
+        fileName: media.fileName,
+        mimeType: media.mimeType,
+        fileSize: 128,
+        filePath: media.filePath,
+        availability: 'available' as const,
+        source: 'message-ref' as const,
+        disposition: 'output-delivery' as const,
+      }],
+    }];
+  });
+
+  const events = historyMessagesToConversationEvents(sessionKey, messages);
+  const state = replaceSessionTurns(createEmptyConversationState(), sessionKey, events);
+  const turns = (state.turnOrderBySession[sessionKey] ?? []).map((turnId) => state.turnsById[turnId]);
+
+  assert.equal(turns.length, 2);
+  turns.forEach((turn, index) => {
+    assert.deepEqual(turn.items.map((item) => item.kind).filter((kind) => kind !== 'user-message' && kind !== 'thinking'), [
+      'commentary',
+      'subtask',
+      'artifact-group',
+      'final-answer',
+    ]);
+    const commentary = turn.items.find((item) => item.kind === 'commentary');
+    const artifactIndex = turn.items.findIndex((item) => item.kind === 'artifact-group');
+    const finalIndex = turn.items.findIndex((item) => item.kind === 'final-answer');
+    assert.equal(commentary?.kind === 'commentary' ? commentary.text : undefined, mediaCases[index].processText);
+    assert.ok(artifactIndex >= 0);
+    assert.ok(finalIndex > artifactIndex);
+  });
+});
+
+test('live reducer and history replacement preserve media timeline order when transport delivery is late', () => {
+  const sessionKey = `${SESSION_KEY}:history-repairs-live-media-order`;
+  const turnId = 'turn:history-repairs-live-media-order';
+  const occurredAt = 8_000_000;
+  const event = (
+    source: ConversationEvent['source'],
+    type: ConversationEvent['type'],
+    offset: number,
+    data: ConversationEvent['data'],
+  ): ConversationEvent => ({
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: `${source}:${type}:${offset}`,
+    type,
+    source,
+    authority: source === 'history' ? 'authoritative' : 'corroborating',
+    sessionKey,
+    turnId,
+    runId: 'run:history-repairs-live-media-order',
+    messageId: type === 'commentary.append'
+      ? 'history-repairs-live-media-order:commentary'
+      : type === 'final.message'
+        ? 'history-repairs-live-media-order:final'
+        : undefined,
+    occurredAt: occurredAt + offset,
+    receivedAt: occurredAt + offset,
+    replayed: source === 'history',
+    data,
+  });
+  const requestedData = {
+    message: {
+      role: 'user' as const,
+      id: 'history-repairs-live-media-order:user',
+      content: 'Generate media.',
+    },
+  };
+  const commentaryData = { text: 'I will generate a natural scene.', replace: true };
+  const artifactData = {
+    artifact: {
+      id: 'history-repairs-live-media-order:artifact',
+      title: 'generated.mp4',
+      filePath: '/tmp/generated.mp4',
+      mimeType: 'video/mp4',
+      availability: 'available' as const,
+    },
+  };
+  const finalData = {
+    message: {
+      role: 'assistant' as const,
+      id: 'history-repairs-live-media-order:final',
+      content: 'The media is ready.',
+    },
+  };
+  const liveEvents = [
+    event('host', 'turn.requested', 0, requestedData),
+    event('openclaw-chat', 'final.message', 3, finalData),
+    event('openclaw-runtime', 'artifact.updated', 3, artifactData),
+    // The preamble occurred first but its transport envelope arrived last.
+    event('openclaw-runtime', 'commentary.append', 1, commentaryData),
+  ];
+  let state = reduceConversationEvents(createEmptyConversationState(), liveEvents);
+  assert.deepEqual(state.turnsById[turnId].items.map((item) => item.kind), [
+    'user-message',
+    'commentary',
+    'artifact-group',
+    'final-answer',
+  ]);
+
+  const historyEvents = [
+    event('history', 'turn.requested', 0, requestedData),
+    event('history', 'commentary.append', 1, commentaryData),
+    event('history', 'artifact.updated', 3, artifactData),
+    event('history', 'final.message', 3, finalData),
+  ];
+  state = replaceSessionTurns(state, sessionKey, historyEvents);
+  assertConversationState(state);
+  assert.deepEqual(state.turnsById[turnId].items.map((item) => item.kind), [
+    'user-message',
+    'commentary',
+    'artifact-group',
+    'final-answer',
+  ]);
+
+  const repairedTurn = state.turnsById[turnId];
+  const staleItems = [
+    repairedTurn.items.find((item) => item.kind === 'user-message'),
+    repairedTurn.items.find((item) => item.kind === 'final-answer'),
+    repairedTurn.items.find((item) => item.kind === 'artifact-group'),
+    repairedTurn.items.find((item) => item.kind === 'commentary'),
+  ]
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .map((item) => ({
+      ...item,
+      sourceEventIds: item.sourceEventIds.filter((eventId) => !eventId.startsWith('history:')),
+    }));
+  state = {
+    ...state,
+    turnsById: {
+      ...state.turnsById,
+      [turnId]: {
+        ...repairedTurn,
+        items: staleItems,
+        itemIndex: Object.fromEntries(staleItems.map((item, index) => [item.id, index])),
+      },
+    },
+  };
+  state = replaceSessionTurns(state, sessionKey, historyEvents);
+  assert.deepEqual(state.turnsById[turnId].items.map((item) => item.kind), [
+    'user-message',
+    'commentary',
+    'artifact-group',
+    'final-answer',
+  ]);
+});
+
+test('history replacement reuses an identical sealed live commentary', () => {
+  const sessionKey = `${SESSION_KEY}:history-reuses-sealed-commentary`;
+  const turnId = 'turn:history-reuses-sealed-commentary';
+  const liveEvents: ConversationEvent[] = [{
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'host:sealed-commentary:requested',
+    type: 'turn.requested',
+    source: 'host',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    occurredAt: 8_100_000,
+    receivedAt: 8_100_000,
+    data: {
+      message: {
+        role: 'user',
+        id: 'sealed-commentary-user',
+        content: 'Generate an image.',
+      },
+    },
+  }, {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'openclaw-chat:sealed-commentary:live',
+    type: 'assistant.content',
+    source: 'openclaw-chat',
+    authority: 'corroborating',
+    sessionKey,
+    turnId,
+    occurredAt: 8_100_001,
+    receivedAt: 8_100_001,
+    data: { text: 'The image task was queued.', replace: true },
+  }, {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'openclaw-runtime:sealed-commentary:artifact',
+    type: 'artifact.updated',
+    source: 'openclaw-runtime',
+    authority: 'corroborating',
+    sessionKey,
+    turnId,
+    occurredAt: 8_100_002,
+    receivedAt: 8_100_002,
+    data: {
+      artifact: {
+        id: 'sealed-commentary-artifact',
+        title: 'sealed-commentary.png',
+        filePath: '/tmp/sealed-commentary.png',
+        mimeType: 'image/png',
+        availability: 'available',
+      },
+    },
+  }, {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'openclaw-chat:sealed-commentary:final',
+    type: 'final.message',
+    source: 'openclaw-chat',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    occurredAt: 8_100_003,
+    receivedAt: 8_100_003,
+    data: {
+      message: {
+        role: 'assistant',
+        id: 'sealed-commentary-final',
+        content: 'The image is ready.',
+      },
+    },
+  }];
+  let state = reduceConversationEvents(createEmptyConversationState(), liveEvents);
+  const liveCommentary = state.turnsById[turnId].items.find((item) => item.kind === 'commentary');
+  assert.ok(liveCommentary && liveCommentary.kind === 'commentary');
+  assert.equal(liveCommentary.sealed, true);
+
+  const historyEvents = historyMessagesToConversationEvents(sessionKey, [{
+    role: 'user',
+    id: 'sealed-commentary-user',
+    timestamp: 8_100,
+    content: 'Generate an image.',
+  }, {
+    role: 'assistant',
+    id: 'sealed-commentary-history-process',
+    timestamp: 8_100.001,
+    content: [{
+      type: 'text',
+      text: 'The image task was queued.',
+    }, {
+      type: 'toolCall',
+      id: 'sealed-commentary-tool',
+      name: 'image_generate',
+      arguments: { prompt: 'Generate an image.' },
+    }],
+  }, {
+    role: 'assistant',
+    id: 'sealed-commentary-history-final',
+    timestamp: 8_100.003,
+    content: 'The image is ready.\n\nMEDIA:/tmp/sealed-commentary.png',
+    _attachedFiles: [{
+      fileName: 'sealed-commentary.png',
+      mimeType: 'image/png',
+      fileSize: 128,
+      filePath: '/tmp/sealed-commentary.png',
+      availability: 'available',
+      source: 'message-ref',
+      disposition: 'output-delivery',
+    }],
+  }]);
+  state = replaceSessionTurns(state, sessionKey, historyEvents);
+  assertConversationState(state);
+  const commentaries = state.turnsById[turnId].items.filter((item) => item.kind === 'commentary');
+  assert.equal(commentaries.length, 1);
+  assert.equal(commentaries[0].id, liveCommentary.id);
+  assert.ok(commentaries[0].sourceEventIds.some((eventId) => eventId.startsWith('history:')));
 });
 
 test('chat tool payload promotes the first structured image task with owner lineage', () => {
@@ -2674,6 +3666,37 @@ test('runtime tool payload promotes structured video completion after the tool f
   assert.equal(task.runtime, 'video_generate');
   assert.equal(task.status, 'completed');
   assert.equal(task.sourceStatus, 'completed');
+});
+
+test('runtime tool payload preserves structured task cancellation as aborted', () => {
+  const sessionKey = `${SESSION_KEY}:derived-cancelled-task`;
+  const ownerRunId = `${RUN_ID}:derived-cancelled-owner`;
+  const events = runtimeEventToConversationEvents({
+    type: 'tool.completed',
+    runId: ownerRunId,
+    sessionKey,
+    seq: 13,
+    ts: 1_021,
+    producer: 'openclaw',
+    toolCallId: 'derived-cancelled-tool-call',
+    name: 'tool_call',
+    result: {
+      tool: { name: 'video_generate', label: 'Video Generation' },
+      result: {
+        details: {
+          async: true,
+          status: 'cancelled',
+          taskId: 'derived-cancelled-task',
+          runId: 'tool:video_generate:derived-cancelled-task',
+        },
+      },
+    },
+  });
+
+  const taskEvent = events.find((event) => event.type === 'task.updated');
+  const task = (taskEvent?.data as { task?: { status?: string; sourceStatus?: string } })?.task;
+  assert.equal(task?.status, 'aborted');
+  assert.equal(task?.sourceStatus, 'cancelled');
 });
 
 test('diagnostic and evidence runtime facts do not synthesize async task lifecycle updates', () => {
@@ -3436,7 +4459,151 @@ test('structured approval requests resolve through the closed decision set or ex
   }
 });
 
-test('native approval resolution can correct a run-terminal fallback', () => {
+test('terminal desktop broker denial closes a turn after the waiting reply', () => {
+  const sessionKey = `${SESSION_KEY}:desktop-denied`;
+  const runId = `${RUN_ID}:desktop-denied`;
+  const approvalId = 'approval-desktop-denied';
+  let state = reduceConversationEvents(createEmptyConversationState(), runtime([
+    { type: 'run.started', runId, sessionKey, seq: 1, ts: 11_000, producer: 'openclaw' },
+    {
+      type: 'approval.updated',
+      runId,
+      sessionKey,
+      seq: 2,
+      ts: 11_001,
+      producer: 'uclaw-desktop-approval',
+      approvalId,
+      approvalKind: 'desktop',
+      allowedDecisions: ['allow-once', 'deny'],
+      actionable: true,
+      resolutionSource: 'desktop-broker',
+      itemId: approvalId,
+      phase: 'requested',
+      status: 'pending',
+    },
+  ]));
+  const turnId = state.turnOrderBySession[sessionKey][0];
+  const context = createChatEventContext({
+    sessionKey,
+    currentSessionKey: sessionKey,
+    activeRunId: runId,
+  });
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'final',
+    sessionKey,
+    runId,
+    seq: 3,
+    message: {
+      role: 'assistant',
+      id: 'desktop-denied-waiting-final',
+      timestamp: 11.002,
+      content: 'Waiting for approval.',
+    } satisfies RawMessage,
+  }, context));
+  assert.equal(state.turnsById[turnId].status, 'waiting_approval');
+
+  state = reduceConversationEvents(state, runtime([{
+    type: 'run.ended',
+    runId,
+    sessionKey,
+    seq: 4,
+    ts: 11_002.5,
+    producer: 'openclaw',
+    status: 'completed',
+  }]));
+  let pendingApproval = state.turnsById[turnId].items.find((item) => item.kind === 'approval');
+  assert.ok(pendingApproval && pendingApproval.kind === 'approval');
+  assert.equal(state.turnsById[turnId].status, 'waiting_approval');
+  assert.equal(pendingApproval.status, 'blocked');
+  assert.equal(pendingApproval.actionable, true);
+
+  state = reduceConversationEvents(state, runtime([{
+    type: 'approval.updated',
+    runId,
+    sessionKey,
+    seq: 5,
+    ts: 11_003,
+    producer: 'uclaw-desktop-approval',
+    approvalId,
+    approvalKind: 'desktop',
+    decision: 'deny',
+    actionable: false,
+    resolutionSource: 'desktop-broker',
+    itemId: approvalId,
+    phase: 'resolved',
+    status: 'denied',
+  }]));
+
+  const turn = state.turnsById[turnId];
+  const approval = turn.items.find((item) => item.kind === 'approval');
+  assert.ok(approval && approval.kind === 'approval');
+  assert.equal(turn.status, 'completed');
+  assert.equal(turn.evidence.pendingApprovalCount, 0);
+  assert.equal(approval.status, 'error');
+  assert.equal(approval.approvalStatus, 'denied');
+  assert.equal(approval.actionable, false);
+  assert.equal(state.aliases.activeBySession[sessionKey], undefined);
+  assert.equal(selectActiveTurn(state, sessionKey), null);
+});
+
+test('history checkpoint cancels a non-actionable stale approval after restart', () => {
+  const sessionKey = `${SESSION_KEY}:history-stale-approval`;
+  const messages: RawMessage[] = [{
+    role: 'user',
+    id: 'history-stale-approval-user',
+    timestamp: 12,
+    content: 'Request a desktop action.',
+  }, {
+    role: 'assistant',
+    id: 'history-stale-approval-final',
+    timestamp: 12.002,
+    content: 'Waiting for approval.',
+  }];
+  const historyEvents = historyMessagesToConversationEvents(sessionKey, messages);
+  const checkpointIndex = historyEvents.findIndex((event) => event.type === 'history.checkpoint');
+  assert.notEqual(checkpointIndex, -1);
+  const turnId = historyEvents.find((event) => event.type === 'turn.requested')?.turnId;
+  assert.ok(turnId);
+  const approvalAt = 12_001;
+  const approvalEvent: ConversationEvent = {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'history-stale-approval:pending',
+    type: 'approval.updated',
+    source: 'history',
+    authority: 'corroborating',
+    sessionKey,
+    turnId,
+    occurredAt: approvalAt,
+    receivedAt: approvalAt,
+    replayed: true,
+    data: {
+      approvalId: 'history-stale-approval',
+      approvalKind: 'desktop',
+      actionable: false,
+      itemId: 'history-stale-approval',
+      phase: 'requested',
+      status: 'pending',
+    },
+  };
+  const state = reduceConversationEvents(createEmptyConversationState(), [
+    ...historyEvents.slice(0, checkpointIndex),
+    approvalEvent,
+    ...historyEvents.slice(checkpointIndex),
+  ]);
+
+  const turn = state.turnsById[turnId];
+  const approval = turn.items.find((item) => item.kind === 'approval');
+  assert.ok(approval && approval.kind === 'approval');
+  assert.equal(turn.status, 'completed');
+  assert.equal(turn.evidence.pendingApprovalCount, 0);
+  assert.equal(approval.status, 'error');
+  assert.equal(approval.approvalStatus, 'cancelled');
+  assert.equal(approval.resolutionSource, 'history-checkpoint');
+  assert.equal(state.aliases.activeBySession[sessionKey], undefined);
+  assert.equal(selectActiveTurn(state, sessionKey), null);
+});
+
+test('completed run keeps an actionable native approval pending until resolution', () => {
   const approvalId = 'late-native-approval';
   const sessionKey = `${SESSION_KEY}:late-native-approval`;
   const runId = `${RUN_ID}:late-native-approval`;
@@ -3462,8 +4629,10 @@ test('native approval resolution can correct a run-terminal fallback', () => {
   const turnId = state.turnOrderBySession[sessionKey][0];
   let approval = state.turnsById[turnId].items.find((item) => item.kind === 'approval');
   assert.ok(approval && approval.kind === 'approval');
-  assert.equal(approval.resolutionSource, 'run-terminal');
-  assert.equal(approval.status, 'error');
+  assert.equal(state.turnsById[turnId].status, 'waiting_approval');
+  assert.equal(approval.resolutionSource, undefined);
+  assert.equal(approval.status, 'blocked');
+  assert.equal(approval.actionable, true);
 
   state = reduceConversationEvents(state, runtime([{
     type: 'approval.updated',
@@ -3539,6 +4708,57 @@ test('task-only approval fallback closes on task transition without inventing a 
   assert.equal(approval.source, 'derived');
   assert.equal(approval.authority, 'corroborating');
   assert.equal(approval.resolutionSource, 'task-state-transition');
+});
+
+test('task-only approval fallback becomes stopped when its task is aborted', () => {
+  const taskId = 'task-aborted-fallback-approval';
+  const approvalId = `${taskId}:approval`;
+  const state = reduceConversationEvents(createEmptyConversationState(), runtime([
+    { type: 'run.started', runId: RUN_ID, sessionKey: SESSION_KEY, seq: 73, ts: 7_100, producer: 'openclaw' },
+    {
+      type: 'task.updated',
+      runId: RUN_ID,
+      sessionKey: SESSION_KEY,
+      seq: 74,
+      ts: 7_101,
+      producer: 'openclaw',
+      taskId,
+      task: { taskId, title: 'Abort fallback approval', status: 'waiting_approval', updatedAt: 7_101 },
+    },
+    {
+      type: 'approval.updated',
+      runId: RUN_ID,
+      sessionKey: SESSION_KEY,
+      seq: 74,
+      ts: 7_101,
+      producer: 'openclaw',
+      taskId,
+      approvalId,
+      approvalKind: 'task',
+      allowedDecisions: [],
+      actionable: false,
+      itemId: approvalId,
+      phase: 'requested',
+      status: 'pending',
+    },
+    {
+      type: 'task.updated',
+      runId: RUN_ID,
+      sessionKey: SESSION_KEY,
+      seq: 75,
+      ts: 7_102,
+      producer: 'openclaw',
+      taskId,
+      task: { taskId, title: 'Abort fallback approval', status: 'aborted', updatedAt: 7_102 },
+    },
+  ]));
+  const turn = state.turnsById[state.turnOrderBySession[SESSION_KEY][0]];
+  const approval = turn.items.find((item) => item.kind === 'approval');
+  assert.ok(approval && approval.kind === 'approval');
+  assert.equal(approval.status, 'aborted');
+  assert.equal(approval.approvalStatus, 'cancelled');
+  assert.equal(approval.decision, undefined);
+  assert.equal(approval.actionable, false);
 });
 
 test('explicit resolved approval replaces the unique pending task fallback for the same task', () => {
@@ -3894,11 +5114,21 @@ test('authoritative abort closes an existing approval and replay cannot reopen i
   const events = runtime([
     { type: 'run.started', runId: RUN_ID, sessionKey: SESSION_KEY, seq: 60, ts: 6_000, producer: 'openclaw' },
     {
-      type: 'approval.updated',
+      type: 'tool.started',
       runId: RUN_ID,
       sessionKey: SESSION_KEY,
       seq: 61,
       ts: 6_001,
+      producer: 'openclaw',
+      toolCallId: 'tool-before-abort',
+      name: 'exec',
+    },
+    {
+      type: 'approval.updated',
+      runId: RUN_ID,
+      sessionKey: SESSION_KEY,
+      seq: 62,
+      ts: 6_002,
       producer: 'openclaw',
       itemId: 'approval-before-abort',
       status: 'pending',
@@ -3907,19 +5137,19 @@ test('authoritative abort closes an existing approval and replay cannot reopen i
       type: 'task.updated',
       runId: RUN_ID,
       sessionKey: SESSION_KEY,
-      seq: 62,
-      ts: 6_002,
+      seq: 63,
+      ts: 6_003,
       producer: 'openclaw',
       taskId: 'task-before-abort',
-      task: { taskId: 'task-before-abort', title: 'Task before abort', status: 'running', updatedAt: 6_002 },
+      task: { taskId: 'task-before-abort', title: 'Task before abort', status: 'running', updatedAt: 6_003 },
     },
-    { type: 'run.ended', runId: RUN_ID, sessionKey: SESSION_KEY, seq: 63, ts: 6_003, producer: 'openclaw', status: 'aborted' },
+    { type: 'run.ended', runId: RUN_ID, sessionKey: SESSION_KEY, seq: 64, ts: 6_004, producer: 'openclaw', status: 'aborted' },
     {
       type: 'approval.updated',
       runId: RUN_ID,
       sessionKey: SESSION_KEY,
-      seq: 64,
-      ts: 6_004,
+      seq: 65,
+      ts: 6_005,
       producer: 'history',
       itemId: 'approval-before-abort',
       status: 'pending',
@@ -3931,13 +5161,66 @@ test('authoritative abort closes an existing approval and replay cannot reopen i
   const approval = turn.items.find((item) => item.kind === 'approval');
   assert.ok(approval && approval.kind === 'approval');
   assert.equal(turn.status, 'aborted');
-  assert.equal(approval.status, 'error');
+  assert.equal(approval.status, 'aborted');
   assert.equal(approval.approvalStatus, 'cancelled');
-  assert.equal(turn.taskById['task-before-abort'].status, 'error');
+  assert.equal(turn.taskById['task-before-abort'].status, 'aborted');
   const subtask = turn.items.find((item) => item.kind === 'subtask');
   assert.ok(subtask && subtask.kind === 'subtask');
-  assert.equal(subtask.status, 'error');
+  assert.equal(subtask.status, 'aborted');
+  const toolGroup = turn.items.find((item) => item.kind === 'tool-group');
+  assert.ok(toolGroup && toolGroup.kind === 'tool-group');
+  assert.equal(toolGroup.status, 'aborted');
+  assert.equal(toolGroup.entries[0]?.status, 'aborted');
   assert.equal(turn.evidence.pendingApprovalCount, 0);
+});
+
+test('subtask groups prioritize failure, keep active work running, and preserve pure aborts', () => {
+  const sessionKey = `${SESSION_KEY}:subtask-aborted-precedence`;
+  const runId = `${RUN_ID}:subtask-aborted-precedence`;
+  const reduceTasks = (statuses: Array<'completed' | 'aborted' | 'running' | 'error'>) => {
+    const started = statuses.map((_, index): ChatRuntimeEvent => ({
+      type: 'task.updated',
+      producer: 'openclaw',
+      runId,
+      sessionKey,
+      taskId: `precedence-${index}`,
+      ts: 7_000 + index,
+      task: {
+        taskId: `precedence-${index}`,
+        parentTaskId: 'precedence-parent',
+        title: `Precedence task ${index}`,
+        status: 'running',
+        updatedAt: 7_000 + index,
+      },
+    }));
+    const terminal = statuses.flatMap((status, index): ChatRuntimeEvent[] => status === 'running' ? [] : [{
+      type: 'task.updated',
+      producer: 'openclaw',
+      runId,
+      sessionKey,
+      taskId: `precedence-${index}`,
+      ts: 8_000 + index,
+      task: {
+        taskId: `precedence-${index}`,
+        parentTaskId: 'precedence-parent',
+        title: `Precedence task ${index}`,
+        status,
+        updatedAt: 8_000 + index,
+        endedAt: 8_000 + index,
+      },
+    }]);
+    const events = [...started, ...terminal];
+    const state = reduceConversationEvents(createEmptyConversationState(), runtime(events));
+    const turn = state.turnsById[state.turnOrderBySession[sessionKey][0]];
+    const subtask = turn.items.find((item) => item.kind === 'subtask');
+    assert.ok(subtask && subtask.kind === 'subtask');
+    return subtask;
+  };
+
+  assert.equal(reduceTasks(['completed', 'aborted']).status, 'aborted');
+  assert.equal(reduceTasks(['completed', 'aborted', 'running']).status, 'running');
+  assert.equal(reduceTasks(['completed', 'aborted', 'error']).status, 'error');
+  assert.equal(reduceTasks(['completed', 'aborted', 'running', 'error']).status, 'error');
 });
 
 test('task-ledger child runs use owner lineage or the active Turn without creating a top-level Turn', () => {
@@ -4962,7 +6245,7 @@ test('required blocked artifact availability prevents successful terminal comple
   assert.ok(artifactItem && artifactItem.kind === 'artifact-group');
   assert.equal(artifactItem.artifacts[0].availability, 'unavailable');
   assert.equal(turn.evidence.requiredArtifactsSatisfied, false);
-  assert.equal(turn.status, 'partial');
+  assert.equal(turn.status, 'error');
 });
 
 test('skipped artifact availability verification does not downgrade an available artifact', () => {
@@ -5064,15 +6347,12 @@ test('conversation store LRU protects the current and active sessions and replay
   const selectedSession = 'agent:main:lru-selected';
   const store = useConversationStore.getState();
   store.reset();
-  store.setMode('shadow');
   try {
     store.replaceHistory(victimSession, completedHistory(victimSession));
     const victimTurnId = useConversationStore.getState().turnOrderBySession[victimSession][0];
     const victimItemId = useConversationStore.getState().turnsById[victimTurnId].items[0].id;
     store.setItemExpanded(victimItemId, true);
     store.setFollowMode(victimSession, 'detached');
-    assert.ok(useConversationStore.getState().shadowComparisonsBySession[victimSession]?.length);
-    store.setMode('timeline');
 
     store.ingestRuntimeEvent({
       type: 'run.started',
@@ -5095,8 +6375,6 @@ test('conversation store LRU protects the current and active sessions and replay
     assert.equal(state.turnOrderBySession[victimSession], undefined);
     assert.equal(state.expandedItemIds[victimItemId], undefined);
     assert.equal(state.followModeBySession[victimSession], undefined);
-    assert.equal(state.shadowComparisonsBySession[victimSession], undefined);
-    assert.equal(state.shadowComparisonSessionOrder.includes(victimSession), false);
 
     store.setCurrentSession(victimSession);
     store.replaceHistory(victimSession, completedHistory(victimSession, 'revisited'));
@@ -5108,9 +6386,7 @@ test('conversation store LRU protects the current and active sessions and replay
     assert.equal(state.currentSessionKey, victimSession);
     assert.equal(state.sessionAccessOrder.at(-1), victimSession);
     assert.ok(state.sessionAccessOrder.length <= CONVERSATION_SESSION_CACHE_LIMIT);
-    assert.equal(state.shadowComparisonsBySession[victimSession], undefined);
   } finally {
-    useConversationStore.getState().setMode('timeline');
     useConversationStore.getState().reset();
   }
 });
@@ -5122,7 +6398,6 @@ test('conversation store temporarily exceeds its cache limit only for protected 
   );
   const store = useConversationStore.getState();
   store.reset();
-  store.setMode('timeline');
   try {
     store.setCurrentSession(sessions[0]);
     sessions.forEach((sessionKey, index) => {
@@ -5162,6 +6437,178 @@ test('conversation store temporarily exceeds its cache limit only for protected 
   }
 });
 
+test('authoritative chat error closes active tool, task, and approval without late reopen', () => {
+  const sessionKey = 'agent:main:chat-error-pending-work';
+  const turnId = 'turn:chat-error-pending-work';
+  const runId = 'run:chat-error-pending-work';
+  const occurredAt = 1_700_000_800_000;
+  const requested: ConversationEvent = {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'chat-error-pending:requested',
+    type: 'turn.requested',
+    source: 'host',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    messageId: 'chat-error-pending:user',
+    occurredAt,
+    receivedAt: occurredAt,
+    replayed: false,
+    data: {
+      message: {
+        role: 'user',
+        id: 'chat-error-pending:user',
+        content: 'Start work that will fail while child work is pending.',
+        timestamp: occurredAt,
+      },
+    },
+  };
+  const pending = runtime([
+    { type: 'run.started', runId, sessionKey, seq: 1, ts: occurredAt + 1, producer: 'openclaw' },
+    {
+      type: 'tool.started',
+      runId,
+      sessionKey,
+      seq: 2,
+      ts: occurredAt + 2,
+      producer: 'openclaw',
+      toolCallId: 'chat-error-pending:tool',
+      name: 'exec',
+    },
+    {
+      type: 'task.updated',
+      runId,
+      sessionKey,
+      seq: 3,
+      ts: occurredAt + 3,
+      producer: 'openclaw',
+      taskId: 'chat-error-pending:task',
+      task: {
+        taskId: 'chat-error-pending:task',
+        title: 'Pending child task',
+        status: 'running',
+        updatedAt: occurredAt + 3,
+      },
+    },
+    {
+      type: 'approval.updated',
+      runId,
+      sessionKey,
+      seq: 4,
+      ts: occurredAt + 4,
+      producer: 'openclaw',
+      approvalId: 'chat-error-pending:approval',
+      approvalKind: 'exec',
+      allowedDecisions: ['allow-once', 'deny'],
+      actionable: true,
+      itemId: 'chat-error-pending:approval',
+      phase: 'requested',
+      status: 'pending',
+    },
+  ]);
+  const chatErrors = chatEventToConversationEvents({
+    state: 'error',
+    sessionKey,
+    runId,
+    seq: 5,
+    errorMessage: 'Provider request failed while child work was pending.',
+    message: {
+      role: 'assistant',
+      id: 'chat-error-pending:error',
+      content: '',
+      timestamp: (occurredAt + 5) / 1_000,
+    },
+  }, { sessionKey, turnId });
+
+  assert.deepEqual(chatErrors.map((event) => event.type), ['run.ended', 'turn.error']);
+  let state = reduceConversationEvents(createEmptyConversationState(), [requested, ...pending, ...chatErrors]);
+  const terminalTurn = state.turnsById[turnId];
+  const toolGroup = terminalTurn.items.find((item) => item.kind === 'tool-group');
+  const subtask = terminalTurn.items.find((item) => item.kind === 'subtask');
+  const approval = terminalTurn.items.find((item) => item.kind === 'approval');
+  assert.ok(toolGroup && toolGroup.kind === 'tool-group');
+  assert.ok(subtask && subtask.kind === 'subtask');
+  assert.ok(approval && approval.kind === 'approval');
+  assert.equal(terminalTurn.status, 'error');
+  assert.equal(terminalTurn.evidence.runTerminal, 'error');
+  assert.equal(terminalTurn.evidence.runTerminalAuthority, 'authoritative');
+  assert.equal(terminalTurn.evidence.runTerminalSource, 'openclaw-chat');
+  assert.equal(terminalTurn.evidence.pendingToolCount, 0);
+  assert.equal(terminalTurn.evidence.pendingTaskCount, 0);
+  assert.equal(terminalTurn.evidence.pendingApprovalCount, 0);
+  assert.equal(state.aliases.activeBySession[sessionKey], undefined);
+  assert.equal(toolGroup.status, 'error');
+  assert.equal(toolGroup.entries[0]?.status, 'error');
+  assert.equal(subtask.status, 'error');
+  assert.equal(terminalTurn.taskById['chat-error-pending:task']?.status, 'error');
+  assert.equal(approval.status, 'error');
+  assert.equal(approval.approvalStatus, 'cancelled');
+  assert.equal(approval.actionable, false);
+  assert.equal(terminalTurn.items.filter((item) => item.kind === 'error').length, 1);
+
+  state = reduceConversationEvents(state, chatErrors);
+  assert.equal(state.turnsById[turnId], terminalTurn);
+  assert.equal(state.turnsById[turnId].items.filter((item) => item.kind === 'error').length, 1);
+
+  state = reduceConversationEvents(state, runtime([
+    {
+      type: 'tool.updated',
+      runId,
+      sessionKey,
+      seq: 6,
+      ts: occurredAt + 6,
+      producer: 'openclaw',
+      toolCallId: 'chat-error-pending:tool',
+      name: 'exec',
+      partialResult: 'late tool progress',
+    },
+    {
+      type: 'task.updated',
+      runId,
+      sessionKey,
+      seq: 7,
+      ts: occurredAt + 7,
+      producer: 'openclaw',
+      taskId: 'chat-error-pending:task',
+      task: {
+        taskId: 'chat-error-pending:task',
+        title: 'Pending child task',
+        status: 'running',
+        updatedAt: occurredAt + 7,
+      },
+    },
+    {
+      type: 'approval.updated',
+      runId,
+      sessionKey,
+      seq: 8,
+      ts: occurredAt + 8,
+      producer: 'openclaw',
+      approvalId: 'chat-error-pending:approval',
+      approvalKind: 'exec',
+      allowedDecisions: ['allow-once', 'deny'],
+      actionable: true,
+      itemId: 'chat-error-pending:approval',
+      phase: 'requested',
+      status: 'pending',
+    },
+  ]));
+  const afterLateUpdates = state.turnsById[turnId];
+  const lateToolGroup = afterLateUpdates.items.find((item) => item.kind === 'tool-group');
+  const lateApproval = afterLateUpdates.items.find((item) => item.kind === 'approval');
+  assert.ok(lateToolGroup && lateToolGroup.kind === 'tool-group');
+  assert.ok(lateApproval && lateApproval.kind === 'approval');
+  assert.equal(afterLateUpdates.status, 'error');
+  assert.equal(afterLateUpdates.evidence.pendingToolCount, 0);
+  assert.equal(afterLateUpdates.evidence.pendingTaskCount, 0);
+  assert.equal(afterLateUpdates.evidence.pendingApprovalCount, 0);
+  assert.equal(state.aliases.activeBySession[sessionKey], undefined);
+  assert.equal(lateToolGroup.entries[0]?.status, 'error');
+  assert.equal(afterLateUpdates.taskById['chat-error-pending:task']?.status, 'error');
+  assert.equal(lateApproval.status, 'error');
+  assert.equal(lateApproval.actionable, false);
+});
+
 test('live chat and runtime errors keep recoverability separate from Turn lifecycle', () => {
   const sessionKey = 'agent:main:retry-error-semantics';
   const turnId = 'turn:retry-error-semantics';
@@ -5196,6 +6643,7 @@ test('live chat and runtime errors keep recoverability separate from Turn lifecy
     sessionKey,
     turnId,
   });
+  assert.deepEqual(chatErrors.map((event) => event.type), ['run.ended', 'turn.error']);
   const state = reduceConversationEvents(createEmptyConversationState(), [requested, ...chatErrors]);
   const turn = state.turnsById[turnId];
   const errorItem = turn.items.find((item) => item.kind === 'error');
@@ -5224,7 +6672,8 @@ test('live chat and runtime errors keep recoverability separate from Turn lifecy
     state: 'error',
     sessionKey,
     errorMessage: 'Provider quota exceeded',
-  }, { sessionKey, turnId })[0];
+  }, { sessionKey, turnId }).find((event) => event.type === 'turn.error');
+  assert.ok(quotaError);
   assert.deepEqual(quotaError.data, {
     error: 'Provider quota exceeded',
     recoverable: false,

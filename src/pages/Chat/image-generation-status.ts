@@ -13,7 +13,7 @@ const INTER_SESSION_IMAGE_TASK_RE = /sourceSession=image_generate:([0-9a-f-]{36}
 /** Match the canonical managed image-generation timeout. */
 export const IMAGE_GENERATION_TIMEOUT_MS = JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS;
 const IMAGE_GENERATION_TIMEOUT_BUFFER_MS = 15_000;
-const TERMINAL_RUNTIME_TASK_STATUSES = new Set(['completed', 'error', 'partial']);
+const TERMINAL_RUNTIME_TASK_STATUSES = new Set(['completed', 'aborted', 'error', 'partial']);
 const CANCELLATION_MARKERS = new Set(['aborted', 'cancelled', 'canceled']);
 
 type ImageGenerationRuntimeRun = Pick<ChatRuntimeRunState, 'tasks' | 'asyncTaskLedger'>;
@@ -139,7 +139,8 @@ function runtimeRunHasTerminalImageTask(
     const entryMatchesTask = entry.taskId === taskId
       || entry.id === taskId
       || entry.id === `task:${taskId}`;
-    return entryMatchesTask && (entry.status === 'completed' || entry.status === 'error');
+    return entryMatchesTask
+      && (entry.status === 'completed' || entry.status === 'aborted' || entry.status === 'error');
   });
 }
 

@@ -52,6 +52,7 @@ export class ApprovalBroker {
       id: randomUUID(),
       sessionKey: context.sessionKey,
       runId: context.runId,
+      toolCallId: context.toolCallId,
       action: structuredClone(action),
       actionFingerprint: fingerprintDesktopAction(action),
       createdAt: new Date(now).toISOString(),
@@ -79,6 +80,15 @@ export class ApprovalBroker {
       .filter((record) => record.status === 'pending')
       .filter((record) => !context?.sessionKey || record.sessionKey === context.sessionKey)
       .filter((record) => !context?.runId || record.runId === context.runId)
+      .map(publicView);
+  }
+
+  listForReplay(context?: Partial<DesktopRunContext>): DesktopApprovalView[] {
+    this.prune();
+    return [...this.approvals.values()]
+      .filter((record) => !context?.sessionKey || record.sessionKey === context.sessionKey)
+      .filter((record) => !context?.runId || record.runId === context.runId)
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
       .map(publicView);
   }
 

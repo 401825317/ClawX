@@ -88,7 +88,12 @@ export type ConversationFileChange = {
 };
 
 export type ConversationEventData =
-  | { message: ConversationMessageSnapshot; mode?: 'chat' | 'image' | 'video' }
+  | {
+      message: ConversationMessageSnapshot;
+      mode?: 'chat' | 'image' | 'video';
+      /** Deferred local requests are visible queued Turns without owning the active run slot yet. */
+      activate?: boolean;
+    }
   | { startedAt?: number; objective?: string }
   | {
       status: 'completed' | 'error' | 'aborted';

@@ -209,6 +209,22 @@ test('failed and blocked Host tasks never rehydrate deliverable artifacts or suc
   }
 });
 
+test('cancelled Host tasks rehydrate as aborted without deliverable artifacts', () => {
+  const tasks = parseHostTaskBridgeTasks(payload('cancelled', { error: 'Cancelled by user' }));
+  const events = buildHostTaskRehydrationEvents(tasks);
+  const taskEvent = events.find((event) => event.type === 'task.updated');
+  const stepEvent = events.find((event) => event.type === 'run.step.updated');
+  const progressEvent = events.find((event) => event.type === 'progress.update');
+
+  assert.equal(taskEvent?.task.status, 'aborted');
+  assert.equal(taskEvent?.task.terminalOutcome, 'cancelled');
+  assert.equal(stepEvent?.step?.status, 'aborted');
+  assert.equal(progressEvent?.entry.status, 'aborted');
+  assert.equal(events.some((event) => event.type === 'artifact.produced'), false);
+  assert.equal(events.some((event) => event.type === 'tool.completed'), false);
+  assert.equal(apply(events)['run-1']?.status, 'aborted');
+});
+
 test('an active task only seeds run.started when the caller reports that its run is missing', () => {
   const tasks = parseHostTaskBridgeTasks(payload('running'));
   const missingRunEvents = buildHostTaskRehydrationEvents(tasks, { existingRunIds: [] });

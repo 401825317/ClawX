@@ -37,7 +37,7 @@ export interface AttachedFileMeta {
   gatewayUrl?: string;
 }
 
-export type AsyncTaskLedgerStatus = 'pending' | 'completed' | 'error';
+export type AsyncTaskLedgerStatus = 'pending' | 'completed' | 'aborted' | 'error';
 
 export interface AsyncTaskLedgerEntry {
   id: string;
@@ -227,6 +227,16 @@ export interface ChatSendReplayIntent {
   clientPreferences: GatewayTurnPreferences;
 }
 
+/** Internal ownership carried while a local send waits for the same-session run slot. */
+export interface ChatQueuedTurnOwnership {
+  sessionKey: string;
+  turnId: string;
+  userMessage: RawMessage;
+  idempotencyKey: string;
+  acceptedAt: number;
+  dequeuedFromQueue?: boolean;
+}
+
 export interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -264,7 +274,8 @@ export interface ChatState {
   thinkingLevel: string | null;
 
   // Actions
-  loadSessions: () => Promise<void>;
+  loadSessions: (force?: boolean) => Promise<void>;
+  reconcileGatewayRecovery: () => Promise<void>;
   switchSession: (key: string) => void;
   newSession: () => void;
   deleteSession: (key: string) => Promise<void>;
@@ -284,6 +295,7 @@ export interface ChatState {
     imageOptions?: ChatImageSendOptions,
     videoOptions?: ChatVideoSendOptions,
     replayIntent?: ChatSendReplayIntent,
+    queuedOwnership?: ChatQueuedTurnOwnership,
   ) => Promise<void>;
   abortRun: () => Promise<void>;
   retryLastRun: () => Promise<void>;

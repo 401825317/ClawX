@@ -56,8 +56,12 @@ function upsertRuntimeTask(
     if (itemIndex !== index) return item;
     const existingUpdatedAt = typeof item.updatedAt === 'number' ? item.updatedAt : 0;
     const nextUpdatedAt = typeof next.updatedAt === 'number' ? next.updatedAt : 0;
-    const existingTerminal = item.status === 'completed' || item.status === 'error';
-    const nextTerminal = next.status === 'completed' || next.status === 'error';
+    const existingTerminal = item.status === 'completed'
+      || item.status === 'aborted'
+      || item.status === 'error';
+    const nextTerminal = next.status === 'completed'
+      || next.status === 'aborted'
+      || next.status === 'error';
     const keepExisting = (existingTerminal && !nextTerminal) || nextUpdatedAt < existingUpdatedAt;
     return keepExisting
       ? { ...next, ...item, updatedAt: Math.max(existingUpdatedAt, nextUpdatedAt) || undefined }
@@ -93,7 +97,8 @@ function synchronizeProgressWithTasks(
     const action = nextEntries[actionIndex]!;
     const sourceStatus = task.sourceStatus?.toLowerCase();
     const terminalOutcome = task.terminalOutcome?.toLowerCase();
-    const aborted = sourceStatus === 'aborted'
+    const aborted = task.status === 'aborted'
+      || sourceStatus === 'aborted'
       || sourceStatus === 'cancelled'
       || sourceStatus === 'canceled'
       || terminalOutcome === 'aborted'
@@ -137,7 +142,7 @@ function synchronizeProgressWithTasks(
               ? 'runtimeProgress.toolCompleted'
               : action.translationKey,
     };
-    if (status === 'completed' || status === 'blocked' || status === 'error') {
+    if (status === 'completed' || status === 'blocked' || status === 'aborted' || status === 'error') {
       // The command on the initial async entry is requested input, not
       // authoritative output. Remove it once the detached task terminates;
       // the terminal detail carries actual provider facts instead.

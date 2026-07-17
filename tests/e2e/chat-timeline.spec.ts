@@ -69,6 +69,7 @@ async function installTimelineMocks(
     devModeUnlocked?: boolean;
     captureHostApiRequests?: boolean;
     thumbnailResults?: Record<string, unknown>;
+    reasoningLevel?: 'off' | 'on' | 'stream';
   } = {},
 ): Promise<void> {
   const sessions = [{
@@ -76,10 +77,12 @@ async function installTimelineMocks(
     displayName: 'main',
     status: 'done',
     hasActiveRun: false,
+    ...(options.reasoningLevel ? { reasoningLevel: options.reasoningLevel } : {}),
   }];
   const historyResult = {
     messages: history,
     sessionInfo: { hasActiveRun: false },
+    ...(options.reasoningLevel ? { reasoningLevel: options.reasoningLevel } : {}),
   };
 
   const gatewayHistoryResponse = options.historyError
@@ -170,7 +173,7 @@ async function openTimeline(app: ElectronApplication): Promise<Page> {
   }
   page = await getStableWindow(app);
   await expect(page.getByTestId('main-layout')).toBeVisible();
-  await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
+  await expect(page.getByTestId('chat-page')).toBeVisible();
   return page;
 }
 
@@ -453,7 +456,7 @@ test.describe('Codex-style conversation timeline', () => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
-      await installTimelineMocks(app, semanticHistory);
+      await installTimelineMocks(app, semanticHistory, { reasoningLevel: 'on' });
       const page = await openTimeline(app);
 
       const turnRows = page.getByTestId('conversation-turn');
@@ -593,6 +596,8 @@ test.describe('Codex-style conversation timeline', () => {
     const finalText = 'The generated image is ready once.';
     const taskId = 'timeline-completion-wake-task';
     const wakeRunId = `image_generate:${taskId}:ok`;
+    const outputPath = '/tmp/timeline-completion-wake.png';
+    const outputPreview = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
     const timestamp = Date.now() / 1_000;
     const app = await launchElectronApp({ skipSetup: true });
 
@@ -609,12 +614,12 @@ test.describe('Codex-style conversation timeline', () => {
         sessionKey: SESSION_KEY,
         taskId,
         seq: 11,
-        ts: timestamp,
+        ts: timestamp + 2,
         task: {
           taskId,
           title: 'Generate image',
           status: 'running',
-          updatedAt: timestamp,
+          updatedAt: timestamp + 2,
         },
       }]);
       await expect(page.getByTestId('timeline-subtasks')).toBeVisible();
@@ -634,6 +639,43 @@ test.describe('Codex-style conversation timeline', () => {
         },
       });
       await expect(page.getByText('The image task was queued.', { exact: true })).toHaveCount(1);
+      const liveCommentaryTop = await page.getByText('The image task was queued.', { exact: true }).boundingBox();
+      const liveTaskTop = await page.getByTestId('timeline-subtasks').boundingBox();
+      expect(liveCommentaryTop).not.toBeNull();
+      expect(liveTaskTop).not.toBeNull();
+      expect(liveCommentaryTop!.y).toBeLessThan(liveTaskTop!.y);
+
+      await emitRuntimeEvents(app, [{
+        type: 'artifact.produced',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        taskId,
+        seq: 13,
+        ts: timestamp + 3,
+        artifact: {
+          id: 'timeline-completion-wake-artifact',
+          title: 'timeline-completion-wake.png',
+          filePath: outputPath,
+          mimeType: 'image/png',
+          preview: outputPreview,
+          availability: 'available',
+        },
+      }, {
+        type: 'task.updated',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        taskId,
+        seq: 14,
+        ts: timestamp + 4,
+        task: {
+          taskId,
+          title: 'Generate image',
+          status: 'completed',
+          deliveryStatus: 'delivered',
+          updatedAt: timestamp + 4,
+        },
+      }]);
+      await expect(page.getByTestId('timeline-artifacts')).toBeVisible();
 
       await emitGatewayChatMessage(app, {
         message: {
@@ -643,13 +685,13 @@ test.describe('Codex-style conversation timeline', () => {
           message: {
             role: 'assistant',
             id: 'timeline-wake-final',
-            timestamp: timestamp + 2,
+            timestamp: timestamp + 5,
             content: finalText,
           },
         },
       });
       await expect(page.getByText(finalText, { exact: true })).toHaveCount(1);
-      await expect(page.getByText('The image task was queued.', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('The image task was queued.', { exact: true })).toHaveCount(1);
 
       await installTimelineMocks(app, [{
         id: 'timeline-history-user',
@@ -657,16 +699,61 @@ test.describe('Codex-style conversation timeline', () => {
         content: prompt,
         timestamp,
       }, {
+        id: 'timeline-history-process',
+        role: 'assistant',
+        content: [{
+          type: 'text',
+          text: 'The image task was queued.',
+        }, {
+          type: 'toolCall',
+          id: 'timeline-history-image-tool',
+          name: 'image_generate',
+          arguments: { prompt },
+        }],
+        timestamp: timestamp + 1,
+      }, {
+        id: 'timeline-history-tool-result',
+        role: 'toolresult',
+        content: 'Background image task started.',
+        timestamp: timestamp + 3,
+        toolCallId: 'timeline-history-image-tool',
+        toolName: 'image_generate',
+        details: {
+          async: true,
+          status: 'started',
+          taskId,
+          runId: `tool:image_generate:${taskId}`,
+        },
+      }, {
         id: 'timeline-history-final',
         role: 'assistant',
-        content: finalText,
-        timestamp: timestamp + 2,
+        content: `${finalText}\n\nMEDIA:${outputPath}`,
+        timestamp: timestamp + 5,
+        _attachedFiles: [{
+          fileName: 'timeline-completion-wake.png',
+          mimeType: 'image/png',
+          fileSize: 64,
+          preview: outputPreview,
+          filePath: outputPath,
+          availability: 'available',
+          source: 'message-ref',
+          disposition: 'output-delivery',
+        }],
       }]);
       await page.getByRole('button', { name: /Refresh|刷新/u }).click();
 
       await expect(page.getByTestId('conversation-turn')).toHaveCount(1);
       await expect(page.getByText(prompt, { exact: true })).toHaveCount(1);
       await expect(page.getByText(finalText, { exact: true })).toHaveCount(1);
+      await expect(page.getByText('The image task was queued.', { exact: true })).toHaveCount(1);
+      const commentaryTop = await page.getByText('The image task was queued.', { exact: true }).boundingBox();
+      const artifactTop = await page.getByTestId('timeline-artifacts').boundingBox();
+      const finalTop = await page.getByText(finalText, { exact: true }).boundingBox();
+      expect(commentaryTop).not.toBeNull();
+      expect(artifactTop).not.toBeNull();
+      expect(finalTop).not.toBeNull();
+      expect(commentaryTop!.y).toBeLessThan(artifactTop!.y);
+      expect(artifactTop!.y).toBeLessThan(finalTop!.y);
     } finally {
       await closeElectronApp(app);
     }

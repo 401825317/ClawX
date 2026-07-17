@@ -250,7 +250,6 @@ export function TimelineChatPage() {
     <div
       ref={splitContainerRef}
       data-testid="chat-page"
-      data-timeline-mode="timeline"
       className={cn(
         'relative -m-6 flex min-h-0 overflow-hidden bg-background transition-colors duration-500',
         isMac && 'z-20 rounded-tl-2xl shadow-[inset_1px_1px_0_hsl(var(--border)/0.55)]',
@@ -276,6 +275,7 @@ export function TimelineChatPage() {
               <ConversationTimeline
                 ref={timelineRef}
                 sessionKey={currentSessionKey}
+                reasoningLevel={currentSession?.reasoningLevel ?? 'off'}
                 assistantAvatarSrc={avatar}
                 hasMoreHistory={hasMoreHistory}
                 loadingMoreHistory={loadingMoreHistory}

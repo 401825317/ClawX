@@ -25,7 +25,6 @@
             "watermarks": "序列水位",
             "mergeEvidence": "合并依据",
             "assignments": "回合归属",
-            "shadow": "影子对比",
             "performance": "性能指标",
             "none": "暂无记录",
             "retained": "已保留",
@@ -37,9 +36,6 @@
             "staleSequences": "过期序列",
             "lastEventId": "最后事件 ID",
             "records": "记录数",
-            "matched": "一致",
-            "different": "存在差异",
-            "differences": "差异数",
             "ingress": "输入事件",
             "commits": "提交",
             "renders": "渲染",
@@ -123,12 +119,14 @@
     "tools": {
       "running": "正在进行 {{count}} 项{{category}}操作",
       "completed": "已完成 {{count}} 项{{category}}操作",
+      "aborted": "{{count}} 项{{category}}操作中有 {{aborted}} 项已停止",
       "failed": "{{count}} 项{{category}}操作中有 {{failed}} 项失败"
     },
     "subtasks": {
       "running": "{{count}} 个子任务中有 {{running}} 个正在执行",
       "waiting": "{{count}} 个子任务中有 {{waiting}} 个等待批准",
       "completed": "已完成 {{count}} 个子任务",
+      "aborted": "{{count}} 个子任务中有 {{aborted}} 个已停止",
       "failed": "{{count}} 个子任务中有 {{failed}} 个失败"
     },
     "subtaskStatus": {
@@ -136,17 +134,16 @@
       "running": "执行中",
       "waiting_approval": "等待批准",
       "completed": "已完成",
+      "aborted": "已停止",
       "partial": "部分完成",
       "error": "失败"
     },
         "toolCategory": { "read": "读取", "search": "搜索", "command": "命令", "edit": "编辑", "browser": "浏览器", "media": "媒体", "subagent": "子任务", "generic": "工具" },
-        "toolStatus": { "running": "执行中", "completed": "已完成", "error": "失败" },
+        "toolStatus": { "running": "执行中", "completed": "已完成", "aborted": "已停止", "error": "失败" },
         "turnStatus": {
             "queued": "等待执行",
             "running": "正在处理",
-            "waiting_approval": "等待批准",
-            "waiting_background": "等待后台任务",
-            "settling": "正在完成"
+            "waiting_approval": "等待批准"
         }
     },
     "toolbar": {

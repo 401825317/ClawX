@@ -8,7 +8,6 @@ import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
 import { MainLayout } from './components/layout/MainLayout';
-import { DesktopApprovalOverlay } from './components/desktop/DesktopApprovalOverlay';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Models } from './pages/Models';
 import { Chat } from './pages/Chat';
@@ -33,7 +32,6 @@ import { UpdateNotifier } from './components/update/UpdateNotifier';
 import { ManagedAuthGate } from './components/auth/ManagedAuthGate';
 import { ClientConfigInitializer } from './components/client/ClientConfigInitializer';
 import { UrgentAnnouncementDialog } from './components/client/UrgentAnnouncementDialog';
-import { useConversationStore } from './stores/conversation/store';
 
 
 /**
@@ -113,7 +111,6 @@ function App() {
   const initGateway = useGatewayStore((state) => state.init);
   const initUpdate = useUpdateStore((state) => state.init);
   const initProviders = useProviderStore((state) => state.init);
-  const chatTimelineMode = useConversationStore((state) => state.mode);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,7 +227,6 @@ function App() {
         <ClientConfigInitializer enabled={setupComplete && !skipSetupForE2E} />
         <UrgentAnnouncementDialog />
         <ManagedAuthGate enabled={setupComplete && !skipSetupForE2E} />
-        {chatTimelineMode !== 'timeline' && <DesktopApprovalOverlay />}
 
         {/* Global toast notifications */}
         <Toaster

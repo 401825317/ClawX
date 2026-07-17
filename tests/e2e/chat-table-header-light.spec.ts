@@ -58,7 +58,7 @@ const CLOUD_ARTIFACT_PATH = '/opt/cursor/artifacts/chat_table_header_light.png';
 
 test.describe('ClawX chat table header styling', () => {
   test('renders markdown table headers with transparent background and bold text in light theme', async ({ launchElectronApp }, testInfo) => {
-    const app = await launchElectronApp({ skipSetup: true, chatTimelineMode: 'timeline' });
+    const app = await launchElectronApp({ skipSetup: true });
 
     try {
       const sessions = [{
@@ -128,7 +128,7 @@ test.describe('ClawX chat table header styling', () => {
       }
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
-      await expect(page.getByTestId('chat-page')).toHaveAttribute('data-timeline-mode', 'timeline');
+      await expect(page.getByTestId('chat-page')).toBeVisible();
 
       await page.evaluate(() => {
         const root = document.documentElement;

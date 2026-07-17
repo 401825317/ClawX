@@ -9,10 +9,13 @@ import type {
   ChatRuntimeTaskProjection,
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
-import { canAppendToolToGroup, toolCategory, toolGroupSummary } from './tool-grouping';
+import { stripProcessMessagePrefix } from '../../pages/Chat/message-utils';
+import { canAppendToolToGroup, toolCategory, toolGroupStatus, toolGroupSummary } from './tool-grouping';
 import {
   createSessionAliasKey,
   createTurnId,
+  encodeToolSearchParentCallId,
+  parseToolSearchNestedCallId,
   resolveTurnAssignment,
   sessionAliasKeyBelongsTo,
   stableHash,
@@ -50,7 +53,6 @@ export const ASSIGNMENT_DIAGNOSTIC_LIMIT = 128;
 
 const TERMINAL_TURN_STATUSES = new Set<ConversationTurn['status']>([
   'completed',
-  'partial',
   'error',
   'aborted',
 ]);
@@ -291,6 +293,134 @@ function rebuildItemIndex(items: TimelineItem[]): Record<string, number> {
   return Object.fromEntries(items.map((item, index) => [item.id, index]));
 }
 
+const TIMELINE_ITEM_TIE_RANK: Record<TimelineItem['kind'], number> = {
+  'user-message': 0,
+  thinking: 1,
+  commentary: 2,
+  plan: 3,
+  'tool-group': 4,
+  subtask: 5,
+  approval: 6,
+  'artifact-group': 7,
+  'verification-summary': 8,
+  'final-answer': 9,
+  error: 10,
+};
+
+function timelineTerminalRank(item: TimelineItem): number {
+  if (item.kind === 'user-message') return -1;
+  if (item.kind === 'final-answer') return 1;
+  if (item.kind === 'error') return 2;
+  return 0;
+}
+
+/** Keep late transport delivery from changing the canonical visual sequence. */
+function reorderTurnItemsByCanonicalTime(turn: ConversationTurn): ConversationTurn {
+  if (turn.items.length < 2) return turn;
+  const items = turn.items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const terminalOrder = timelineTerminalRank(left.item) - timelineTerminalRank(right.item);
+      if (terminalOrder !== 0) return terminalOrder;
+      return left.item.firstSeenAt - right.item.firstSeenAt
+        || TIMELINE_ITEM_TIE_RANK[left.item.kind] - TIMELINE_ITEM_TIE_RANK[right.item.kind]
+        || left.index - right.index;
+    })
+    .map(({ item }) => item);
+  if (items.every((item, index) => item === turn.items[index])) return turn;
+  return {
+    ...turn,
+    items,
+    itemIndex: rebuildItemIndex(items),
+    revision: turn.revision + 1,
+  };
+}
+
+function isToolGroupBoundary(item: TimelineItem): boolean {
+  return item.kind !== 'user-message'
+    && item.kind !== 'tool-group'
+    && item.kind !== 'final-answer';
+}
+
+/** Split a group when late canonical evidence reveals a narrative boundary. */
+function splitToolGroupsAtCanonicalBoundaries(turn: ConversationTurn): ConversationTurn {
+  const boundaryTimes = turn.items
+    .filter(isToolGroupBoundary)
+    .map((item) => item.firstSeenAt);
+  if (boundaryTimes.length === 0) return turn;
+
+  let changed = false;
+  const items: TimelineItem[] = [];
+  const toolItemByCallId = { ...turn.toolItemByCallId };
+
+  for (const item of turn.items) {
+    if (item.kind !== 'tool-group' || item.entries.length < 2) {
+      items.push(item);
+      continue;
+    }
+
+    const chunks: ToolEntry[][] = [[item.entries[0]]];
+    for (let index = 1; index < item.entries.length; index += 1) {
+      const previous = item.entries[index - 1];
+      const entry = item.entries[index];
+      const hasBoundary = boundaryTimes.some((boundaryAt) => (
+        boundaryAt > previous.startedAt && boundaryAt <= entry.startedAt
+      ));
+      if (hasBoundary) chunks.push([entry]);
+      else chunks[chunks.length - 1].push(entry);
+    }
+    if (chunks.length === 1) {
+      items.push(item);
+      continue;
+    }
+
+    changed = true;
+    const groupIdsByToolCallId = new Map<string, string>();
+    const chunkItems = chunks.map((entries, index): ToolGroupItem => {
+      const id = index === 0
+        ? item.id
+        : `tool-group:${item.category}:${entries[0].toolCallId}`;
+      entries.forEach((entry) => groupIdsByToolCallId.set(entry.toolCallId, id));
+      const summary = toolGroupSummary(item.category, entries);
+      return {
+        ...item,
+        id,
+        entries,
+        toolCallIds: entries.map((entry) => entry.toolCallId),
+        summaryKey: summary.key,
+        summaryParams: summary.params,
+        status: toolGroupStatus(entries),
+        firstSeenAt: Math.min(...entries.map((entry) => entry.startedAt)),
+        updatedAt: Math.max(...entries.map((entry) => entry.updatedAt)),
+        revision: item.revision + 1,
+      };
+    });
+
+    Object.entries(toolItemByCallId).forEach(([alias, ownerItemId]) => {
+      if (ownerItemId !== item.id) return;
+      let targetItemId = groupIdsByToolCallId.get(alias);
+      if (!targetItemId) {
+        const nested = parseToolSearchNestedCallId(alias);
+        const parent = nested && item.entries.find((entry) => (
+          encodeToolSearchParentCallId(entry.toolCallId) === nested.encodedParentToolCallId
+        ));
+        targetItemId = parent ? groupIdsByToolCallId.get(parent.toolCallId) : undefined;
+      }
+      toolItemByCallId[alias] = targetItemId ?? chunkItems[0].id;
+    });
+    items.push(...chunkItems);
+  }
+
+  if (!changed) return turn;
+  return {
+    ...turn,
+    items,
+    itemIndex: rebuildItemIndex(items),
+    toolItemByCallId,
+    revision: turn.revision + 1,
+  };
+}
+
 function updateItem<TItem extends TimelineItem>(
   turn: ConversationTurn,
   id: string,
@@ -452,12 +582,31 @@ function activeNarrativeId(turn: ConversationTurn, kind: 'commentary' | 'thinkin
   return active?.id ?? `${kind}:${event.messageId ?? event.eventId}`;
 }
 
+/** Reuse an exact live assistant commentary when authoritative history enriches the same Turn. */
+function alignedLiveCommentaryId(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+  kind: 'commentary' | 'thinking',
+  data: { text?: string; delta?: string; replace?: boolean },
+): string | undefined {
+  if (event.source !== 'history' || kind !== 'commentary' || !turn.hasLiveEvidence) return undefined;
+  const text = mergeText('', data).trim();
+  if (!text) return undefined;
+  return turn.items.find((item) => (
+    item.kind === 'commentary'
+    && item.origin === 'assistant'
+    && item.text.trim() === text
+    && item.sourceEventIds.some((eventId) => !eventId.startsWith('history:'))
+  ))?.id;
+}
+
 function applyNarrative(turn: ConversationTurn, event: ConversationEvent, kind: 'commentary' | 'thinking'): ConversationTurn {
   const commentaryData = event.data as { entry?: ChatRuntimeProgressEntry; text?: string; delta?: string; replace?: boolean };
   const data = event.type === 'commentary.append' && commentaryData.entry
     ? { text: commentaryData.entry.text, replace: false }
     : commentaryData;
-  const id = activeNarrativeId(turn, kind, event);
+  const id = alignedLiveCommentaryId(turn, event, kind, data)
+    ?? activeNarrativeId(turn, kind, event);
   const origin = event.type === 'assistant.content' ? 'assistant' : 'progress';
   const persistedAfterFinal = event.source === 'history'
     && turn.items.some((item) => item.kind === 'final-answer');
@@ -484,7 +633,8 @@ function applyNarrative(turn: ConversationTurn, event: ConversationEvent, kind: 
 function progressItemStatus(entry: ChatRuntimeProgressEntry): CommentaryItem['status'] {
   if (entry.status === 'completed') return 'completed';
   if (entry.status === 'blocked') return 'blocked';
-  if (entry.status === 'error' || entry.status === 'aborted') return 'error';
+  if (entry.status === 'aborted') return 'aborted';
+  if (entry.status === 'error') return 'error';
   return 'running';
 }
 
@@ -520,6 +670,48 @@ function toolData(event: ConversationEvent): {
   isError?: boolean;
 } {
   return event.data as ReturnType<typeof toolData>;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function delegatedToolName(entry: ToolEntry): string | undefined {
+  if (entry.name.trim().toLowerCase() !== 'tool_call') return undefined;
+  const wrapper = record(entry.args);
+  if (!wrapper) return undefined;
+  for (const key of ['id', 'toolName', 'tool_name', 'name']) {
+    const value = wrapper[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+/** Fold one Tool Search target call into its unique outer tool_call Timeline owner. */
+function canonicalTimelineToolCallId(
+  turn: ConversationTurn,
+  toolCallId: string,
+  toolName: string,
+): string {
+  const nested = parseToolSearchNestedCallId(toolCallId);
+  if (!nested || nested.toolName !== toolName) return toolCallId;
+  const aliasedItemId = turn.toolItemByCallId[toolCallId];
+  const aliasedItemIndex = aliasedItemId == null ? undefined : turn.itemIndex[aliasedItemId];
+  const aliasedItem = aliasedItemIndex == null ? undefined : turn.items[aliasedItemIndex];
+  if (aliasedItem?.kind === 'tool-group') {
+    const aliasedEntries = aliasedItem.entries.filter((entry) => (
+      encodeToolSearchParentCallId(entry.toolCallId) === nested.encodedParentToolCallId
+    ));
+    if (aliasedEntries.length === 1) return aliasedEntries[0].toolCallId;
+  }
+  const candidates = turn.items.flatMap((item) => item.kind === 'tool-group' ? item.entries : [])
+    .filter((entry) => (
+      encodeToolSearchParentCallId(entry.toolCallId) === nested.encodedParentToolCallId
+      && delegatedToolName(entry) === nested.toolName
+    ));
+  return candidates.length === 1 ? candidates[0].toolCallId : toolCallId;
 }
 
 /** Preserve direct tool terminals while allowing them to correct run-level fallbacks. */
@@ -559,8 +751,8 @@ function mergeToolEntry(
   const fields = { ...merged.state.fields };
   const currentStatus = current?.status;
   const currentStatusEvidence = currentMerge?.fields.status;
-  const currentTerminal = currentStatus === 'completed' || currentStatus === 'error';
-  const incomingTerminal = incomingStatus === 'completed' || incomingStatus === 'error';
+  const currentTerminal = currentStatus === 'completed' || currentStatus === 'aborted' || currentStatus === 'error';
+  const incomingTerminal = incomingStatus !== 'running';
   let status = currentStatus ?? incomingStatus;
   if (!currentStatusEvidence) {
     status = incomingStatus;
@@ -596,8 +788,9 @@ function mergeToolEntry(
 
 function applyTool(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
   const data = toolData(event);
-  const toolCallId = event.toolCallId ?? data.toolCallId;
-  if (!toolCallId || !data.name) return turn;
+  const rawToolCallId = event.toolCallId ?? data.toolCallId;
+  if (!rawToolCallId || !data.name) return turn;
+  const toolCallId = canonicalTimelineToolCallId(turn, rawToolCallId, data.name);
   const existingItemId = turn.toolItemByCallId[toolCallId];
   if (
     turn.evidence.runTerminal
@@ -619,12 +812,10 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
         return merged.entry;
       });
       const summary = toolGroupSummary(group.category, entries);
-      const failed = entries.some((entry) => entry.status === 'error');
-      const running = entries.some((entry) => entry.status === 'running');
       return {
         ...group,
         entries,
-        status: failed ? 'error' : running ? 'running' : 'completed',
+        status: toolGroupStatus(entries),
         summaryKey: summary.key,
         summaryParams: summary.params,
         updatedAt: event.occurredAt,
@@ -634,6 +825,9 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
     });
     return {
       ...updated,
+      toolItemByCallId: rawToolCallId === toolCallId
+        ? updated.toolItemByCallId
+        : { ...updated.toolItemByCallId, [rawToolCallId]: existingItemId },
       toolMergeByCallId: { ...updated.toolMergeByCallId, [toolCallId]: nextMerge },
     };
   }
@@ -658,11 +852,7 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
       summaryParams: summary.params,
       toolCallIds: entries.map((tool) => tool.toolCallId),
       entries,
-      status: entries.some((tool) => tool.status === 'error')
-        ? 'error'
-        : entries.some((tool) => tool.status === 'running')
-          ? 'running'
-          : 'completed',
+      status: toolGroupStatus(entries),
       firstSeenAt: current?.firstSeenAt ?? event.occurredAt,
       updatedAt: event.occurredAt,
       sourceEventIds: appendSource(current?.sourceEventIds ?? [], event.eventId),
@@ -679,8 +869,9 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
 /** Transfer one tool's default Timeline ownership to its structured task fact. */
 function removeToolTimelineOwner(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
   const data = toolData(event);
-  const toolCallId = event.toolCallId ?? data.toolCallId;
-  if (!toolCallId) return turn;
+  const rawToolCallId = event.toolCallId ?? data.toolCallId;
+  if (!rawToolCallId) return turn;
+  const toolCallId = canonicalTimelineToolCallId(turn, rawToolCallId, data.name);
   const itemId = turn.toolItemByCallId[toolCallId];
   if (!itemId) return turn;
   const itemIndex = turn.itemIndex[itemId];
@@ -691,8 +882,13 @@ function removeToolTimelineOwner(turn: ConversationTurn, event: ConversationEven
   if (entries.length === item.entries.length) return turn;
   const toolItemByCallId = { ...turn.toolItemByCallId };
   const toolMergeByCallId = { ...turn.toolMergeByCallId };
-  delete toolItemByCallId[toolCallId];
-  delete toolMergeByCallId[toolCallId];
+  const encodedToolCallId = encodeToolSearchParentCallId(toolCallId);
+  Object.keys(toolItemByCallId).forEach((alias) => {
+    const nested = parseToolSearchNestedCallId(alias);
+    if (alias !== toolCallId && nested?.encodedParentToolCallId !== encodedToolCallId) return;
+    delete toolItemByCallId[alias];
+    delete toolMergeByCallId[alias];
+  });
 
   if (entries.length === 0) {
     const items = turn.items.filter((_, index) => index !== itemIndex);
@@ -712,11 +908,7 @@ function removeToolTimelineOwner(turn: ConversationTurn, event: ConversationEven
     ...item,
     entries,
     toolCallIds: entries.map((entry) => entry.toolCallId),
-    status: entries.some((entry) => entry.status === 'error')
-      ? 'error'
-      : entries.some((entry) => entry.status === 'running')
-        ? 'running'
-        : 'completed',
+    status: toolGroupStatus(entries),
     summaryKey: summary.key,
     summaryParams: summary.params,
     updatedAt: Math.max(item.updatedAt, event.occurredAt),
@@ -736,6 +928,7 @@ function removeToolTimelineOwner(turn: ConversationTurn, event: ConversationEven
 
 const TASK_TERMINAL_STATUSES = new Set<ChatRuntimeTaskProjection['status']>([
   'completed',
+  'aborted',
   'error',
   'partial',
 ]);
@@ -803,8 +996,9 @@ const SUBTASK_GROUP_WINDOW_MS = 15_000;
 
 function subtaskItemStatus(tasks: ChatRuntimeTaskProjection[]): SubtaskItem['status'] {
   if (tasks.some((task) => task.status === 'error' || task.status === 'partial')) return 'error';
-  if (tasks.some((task) => task.status === 'waiting_approval')) return 'blocked';
   if (tasks.some((task) => task.status === 'pending' || task.status === 'running')) return 'running';
+  if (tasks.some((task) => task.status === 'waiting_approval')) return 'blocked';
+  if (tasks.some((task) => task.status === 'aborted')) return 'aborted';
   return 'completed';
 }
 
@@ -815,10 +1009,19 @@ function subtaskSummary(tasks: ChatRuntimeTaskProjection[]): {
   const failed = tasks.filter((task) => task.status === 'error' || task.status === 'partial').length;
   const waiting = tasks.filter((task) => task.status === 'waiting_approval').length;
   const running = tasks.filter((task) => task.status === 'pending' || task.status === 'running').length;
-  const status = failed > 0 ? 'failed' : waiting > 0 ? 'waiting' : running > 0 ? 'running' : 'completed';
+  const aborted = tasks.filter((task) => task.status === 'aborted').length;
+  const status = failed > 0
+    ? 'failed'
+    : running > 0
+      ? 'running'
+      : waiting > 0
+        ? 'waiting'
+        : aborted > 0
+          ? 'aborted'
+          : 'completed';
   return {
     key: `timeline.subtasks.${status}`,
-    params: { count: tasks.length, failed, waiting, running },
+    params: { count: tasks.length, failed, waiting, running, aborted },
   };
 }
 
@@ -917,7 +1120,10 @@ function applyTask(turn: ConversationTurn, event: ConversationEvent): Conversati
     parentTaskId: incoming.parentTaskId ?? event.parentTaskId ?? existing?.parentTaskId,
   };
   const nextUpdatedAt = task.updatedAt ?? event.occurredAt;
-  const baseTurn = !existing && !isTaskTerminal(task) ? sealNarrativeItems(turn) : turn;
+  const taskOwnerTurn = !existing && !isTaskTerminal(task)
+    ? demotePrematureFinalForTask(turn, event)
+    : turn;
+  const baseTurn = !existing && !isTaskTerminal(task) ? sealNarrativeItems(taskOwnerTurn) : taskOwnerTurn;
   const nextTurn: ConversationTurn = {
     ...baseTurn,
     taskById: { ...baseTurn.taskById, [task.taskId]: task },
@@ -936,8 +1142,10 @@ function applyTask(turn: ConversationTurn, event: ConversationEvent): Conversati
   };
   const projected = applySubtaskTimeline(nextTurn, event, task);
   const owned = event.toolCallId ? removeToolTimelineOwner(projected, event) : projected;
-  if (existing?.status !== 'waiting_approval' || task.status === 'waiting_approval') return owned;
-  return resolveTaskFallbackApproval(owned, event, task);
+  const resolved = existing?.status !== 'waiting_approval' || task.status === 'waiting_approval'
+    ? owned
+    : resolveTaskFallbackApproval(owned, event, task);
+  return releaseDeferredFinal(resolved);
 }
 
 function applyPlan(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
@@ -1189,8 +1397,13 @@ function applyApproval(turn: ConversationTurn, event: ConversationEvent): Conver
   const id = `approval:${approvalId ?? event.taskId ?? event.eventId}`;
   const incomingStatus = approvalTimelineStatus(data);
   const incomingPending = incomingStatus === 'blocked';
-  if (incomingPending && turn.evidence.runTerminal && turn.evidence.runTerminalAuthority === 'authoritative') {
-    return turn;
+  if (incomingPending && turn.evidence.runTerminalAuthority === 'authoritative') {
+    const terminalAt = turn.evidence.runTerminalMerge?.occurredAt ?? Number.NEGATIVE_INFINITY;
+    const pendingBeforeCompletedTerminal = turn.evidence.runTerminal === 'completed'
+      && data.actionable === true
+      && ['desktop', 'exec', 'plugin'].includes(data.approvalKind ?? '')
+      && event.occurredAt <= terminalAt;
+    if (!pendingBeforeCompletedTerminal) return turn;
   }
   const fallbackAlias = taskFallbackApprovalAlias(turn, event, data, id, incomingStatus);
   const baseTurn = fallbackAlias
@@ -1316,6 +1529,7 @@ function resolveTaskFallbackApproval(
   const approvalMergeById = { ...turn.approvalMergeById };
   const fallbackEvidence = mergeEvidence(event, 'run-fallback');
   const failed = task.status === 'error' || task.status === 'partial';
+  const aborted = task.status === 'aborted';
   const items = turn.items.map((item) => {
     if (
       item.kind !== 'approval'
@@ -1330,8 +1544,8 @@ function resolveTaskFallbackApproval(
     );
     return {
       ...item,
-      status: failed ? 'error' as const : 'completed' as const,
-      approvalStatus: failed ? 'cancelled' : 'resolved',
+      status: aborted ? 'aborted' as const : failed ? 'error' as const : 'completed' as const,
+      approvalStatus: aborted || failed ? 'cancelled' : 'resolved',
       actionable: false,
       authority: 'corroborating' as const,
       source: 'derived' as const,
@@ -1352,12 +1566,59 @@ function resolveTaskFallbackApproval(
     : turn;
 }
 
-function closePendingApprovals(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
+function closePendingApprovals(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+  runStatus: 'completed' | 'error' | 'aborted',
+): ConversationTurn {
   let changed = false;
   const approvalMergeById = { ...turn.approvalMergeById };
   const fallbackEvidence = mergeEvidence(event, 'run-fallback');
   const items = turn.items.map((item) => {
     if (item.kind !== 'approval' || item.status !== 'blocked') return item;
+    // A successful model run may finish after reporting "waiting for approval".
+    // Main-owned actionable approvals remain open until the broker resolves them.
+    if (runStatus === 'completed' && item.actionable) return item;
+    changed = true;
+    approvalMergeById[item.id] = withApprovalFallbackEvidence(
+      approvalMergeById[item.id],
+      fallbackEvidence,
+    );
+    return {
+      ...item,
+      status: runStatus === 'aborted' ? 'aborted' as const : 'error' as const,
+      approvalStatus: 'cancelled',
+      actionable: false,
+      resolutionSource: 'run-terminal' as const,
+      // The run is authoritative that waiting ended, but not which approval
+      // decision was made. Keep this fallback weaker than a late native resolve.
+      authority: 'corroborating' as const,
+      source: 'derived' as const,
+      updatedAt: event.occurredAt,
+      sourceEventIds: appendSource(item.sourceEventIds, event.eventId),
+      revision: item.revision + 1,
+    };
+  });
+  return changed
+    ? {
+        ...turn,
+        items,
+        approvalMergeById,
+        updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+        revision: turn.revision + 1,
+      }
+    : turn;
+}
+
+function closePendingHistoryApprovals(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+): ConversationTurn {
+  let changed = false;
+  const approvalMergeById = { ...turn.approvalMergeById };
+  const fallbackEvidence = mergeEvidence(event, 'run-fallback');
+  const items = turn.items.map((item) => {
+    if (item.kind !== 'approval' || item.status !== 'blocked' || item.actionable) return item;
     changed = true;
     approvalMergeById[item.id] = withApprovalFallbackEvidence(
       approvalMergeById[item.id],
@@ -1368,12 +1629,10 @@ function closePendingApprovals(turn: ConversationTurn, event: ConversationEvent)
       status: 'error' as const,
       approvalStatus: 'cancelled',
       actionable: false,
-      resolutionSource: 'run-terminal' as const,
-      // The run is authoritative that waiting ended, but not which approval
-      // decision was made. Keep this fallback weaker than a late native resolve.
-      authority: 'corroborating' as const,
+      resolutionSource: 'history-checkpoint' as const,
+      authority: 'inferred' as const,
       source: 'derived' as const,
-      updatedAt: event.occurredAt,
+      updatedAt: Math.max(item.updatedAt, event.occurredAt),
       sourceEventIds: appendSource(item.sourceEventIds, event.eventId),
       revision: item.revision + 1,
     };
@@ -1410,7 +1669,7 @@ function closePendingTools(
       };
       return {
         ...entry,
-        status: runStatus === 'completed' ? 'completed' as const : 'error' as const,
+        status: runStatus,
         updatedAt: Math.max(entry.updatedAt, event.occurredAt),
       };
     });
@@ -1418,7 +1677,7 @@ function closePendingTools(
     return {
       ...item,
       entries,
-      status: entries.some((entry) => entry.status === 'error') ? 'error' as const : 'completed' as const,
+      status: toolGroupStatus(entries),
       summaryKey: summary.key,
       summaryParams: summary.params,
       updatedAt: Math.max(item.updatedAt, event.occurredAt),
@@ -1451,7 +1710,7 @@ function closePendingTasks(
     changed = true;
     taskById[task.taskId] = {
       ...task,
-      status: 'error',
+      status: runStatus === 'aborted' ? 'aborted' : 'error',
       terminalOutcome: task.terminalOutcome ?? runStatus,
       endedAt: task.endedAt ?? event.occurredAt,
       updatedAt: Math.max(task.updatedAt ?? 0, event.occurredAt),
@@ -1577,25 +1836,258 @@ function strongestArtifactAvailabilityEvidence(
   return strongest;
 }
 
+type StoredArtifactEntityRecord = {
+  entity: string;
+  itemId: string;
+  artifact: ChatRuntimeArtifact;
+  mergeState: EntityMergeState | undefined;
+};
+
+/** Merge two persisted entity records using each field's original evidence. */
+function mergeStoredEntityFields<T extends object>(
+  current: T | undefined,
+  incoming: T,
+  state: EntityMergeState | undefined,
+  incomingState: EntityMergeState | undefined,
+  prefix = '',
+): { value: T; state: EntityMergeState } {
+  const value = { ...(current ?? {}) } as Record<string, unknown>;
+  const fields = { ...(state?.fields ?? {}) };
+  Object.entries(incoming as Record<string, unknown>).forEach(([field, incomingValue]) => {
+    if (incomingValue === undefined) return;
+    const fieldKey = `${prefix}${field}`;
+    const incomingEvidence = incomingState?.fields[fieldKey];
+    const existingEvidence = fields[fieldKey];
+    if (
+      value[field] === undefined
+      || (
+        incomingEvidence
+        && (!existingEvidence || compareMergeEvidence(incomingEvidence, existingEvidence, fieldKey) > 0)
+      )
+    ) {
+      value[field] = incomingValue;
+      if (incomingEvidence) fields[fieldKey] = incomingEvidence;
+    }
+  });
+  return { value: value as T, state: { fields } };
+}
+
+function artifactEntityForRecord(
+  turn: ConversationTurn,
+  itemId: string,
+  artifact: ChatRuntimeArtifact,
+  matchedEntities: Set<string>,
+): string | undefined {
+  const entities = [...new Set(artifactAliases(artifact).flatMap((alias) => {
+    const mapped = turn.artifactEntityByAlias[alias];
+    return [mapped, matchedEntities.has(alias) ? alias : undefined];
+  }).filter((entity): entity is string => typeof entity === 'string' && matchedEntities.has(entity)))];
+  return entities.find((entity) => turn.artifactItemByEntity[entity] === itemId) ?? entities[0];
+}
+
+/** Collapse previously separate entities when one artifact bridges more than one alias set. */
+function unionArtifactEntities(
+  turn: ConversationTurn,
+  canonicalEntity: string,
+  entities: string[],
+): ConversationTurn {
+  const matchedEntities = new Set(entities);
+  if (matchedEntities.size < 2) return turn;
+
+  const records: StoredArtifactEntityRecord[] = [];
+  const removedArtifactsByItem = new Map<string, Set<ChatRuntimeArtifact>>();
+  for (const item of turn.items) {
+    if (item.kind !== 'artifact-group') continue;
+    for (const artifact of item.artifacts) {
+      const entity = artifactEntityForRecord(turn, item.id, artifact, matchedEntities);
+      if (!entity) continue;
+      records.push({
+        entity,
+        itemId: item.id,
+        artifact,
+        mergeState: turn.artifactMergeByEntity[entity],
+      });
+      const removed = removedArtifactsByItem.get(item.id) ?? new Set<ChatRuntimeArtifact>();
+      removed.add(artifact);
+      removedArtifactsByItem.set(item.id, removed);
+    }
+  }
+
+  let mergedArtifact: ChatRuntimeArtifact | undefined;
+  let mergedState: EntityMergeState | undefined;
+  const orderedRecords = [
+    ...records.filter((record) => record.entity === canonicalEntity),
+    ...records.filter((record) => record.entity !== canonicalEntity),
+  ];
+  for (const record of orderedRecords) {
+    const merged = mergeStoredEntityFields(
+      mergedArtifact,
+      record.artifact,
+      mergedState,
+      record.mergeState,
+    );
+    mergedArtifact = merged.value;
+    mergedState = merged.state;
+  }
+  if (!mergedArtifact) return turn;
+
+  const canonicalItemId = turn.artifactItemByEntity[canonicalEntity]
+    ?? orderedRecords[0]?.itemId;
+  if (!canonicalItemId) return turn;
+
+  // A file change with the same normalized path belongs to the merged artifact.
+  const removedChangesByItem = new Map<string, Set<ConversationFileChange>>();
+  const changesToMerge: Array<{
+    change: ConversationFileChange;
+    mergeState: EntityMergeState | undefined;
+  }> = [];
+  for (const item of turn.items) {
+    if (item.kind !== 'artifact-group') continue;
+    for (const change of item.changes) {
+      const pathAlias = `path:${change.filePath.trim().replace(/\\/gu, '/')}`;
+      const entity = turn.artifactEntityByAlias[pathAlias];
+      if (!entity || !matchedEntities.has(entity)) continue;
+      changesToMerge.push({ change, mergeState: turn.artifactMergeByEntity[entity] });
+      const removed = removedChangesByItem.get(item.id) ?? new Set<ConversationFileChange>();
+      removed.add(change);
+      removedChangesByItem.set(item.id, removed);
+    }
+  }
+
+  const mergedChanges: ConversationFileChange[] = [];
+  for (const record of changesToMerge) {
+    const index = mergedChanges.findIndex((change) => change.filePath === record.change.filePath);
+    const merged = mergeStoredEntityFields(
+      index < 0 ? undefined : mergedChanges[index],
+      record.change,
+      mergedState,
+      record.mergeState,
+      'change.',
+    );
+    mergedState = merged.state;
+    if (index < 0) mergedChanges.push(merged.value);
+    else mergedChanges[index] = merged.value;
+  }
+
+  const itemWillBeRemoved = new Set<string>();
+  for (const item of turn.items) {
+    if (item.kind !== 'artifact-group' || item.id === canonicalItemId) continue;
+    const remainingArtifacts = item.artifacts.filter((artifact) => !removedArtifactsByItem.get(item.id)?.has(artifact));
+    const remainingChanges = item.changes.filter((change) => !removedChangesByItem.get(item.id)?.has(change));
+    if (remainingArtifacts.length === 0 && remainingChanges.length === 0) itemWillBeRemoved.add(item.id);
+  }
+
+  const canonicalItem = turn.items[turn.itemIndex[canonicalItemId]];
+  const sourceItems = turn.items.filter((item) => (
+    item.id === canonicalItemId
+    || removedArtifactsByItem.has(item.id)
+    || removedChangesByItem.has(item.id)
+  ));
+  const sourceEventIds = sourceItems.reduce(
+    (current, item) => item.sourceEventIds.reduce(appendSource, current),
+    [] as string[],
+  );
+  const firstSeenAt = sourceItems.reduce(
+    (current, item) => Math.min(current, item.firstSeenAt),
+    canonicalItem?.firstSeenAt ?? turn.updatedAt,
+  );
+  const updatedAt = sourceItems.reduce(
+    (current, item) => Math.max(current, item.updatedAt),
+    canonicalItem?.updatedAt ?? turn.updatedAt,
+  );
+  const revision = sourceItems.reduce(
+    (current, item) => Math.max(current, item.revision),
+    canonicalItem?.revision ?? 0,
+  ) + 1;
+
+  const items = turn.items.flatMap((item): TimelineItem[] => {
+    if (item.kind !== 'artifact-group') return [item];
+    const removedArtifacts = removedArtifactsByItem.get(item.id);
+    const removedChanges = removedChangesByItem.get(item.id);
+    if (item.id === canonicalItemId) {
+      const firstRemovedIndex = item.artifacts.findIndex((artifact) => removedArtifacts?.has(artifact));
+      const remainingArtifacts = item.artifacts.filter((artifact) => !removedArtifacts?.has(artifact));
+      const insertAt = firstRemovedIndex < 0 ? remainingArtifacts.length : Math.min(firstRemovedIndex, remainingArtifacts.length);
+      const artifacts = [
+        ...remainingArtifacts.slice(0, insertAt),
+        mergedArtifact,
+        ...remainingArtifacts.slice(insertAt),
+      ];
+      const remainingChanges = item.changes.filter((change) => !removedChanges?.has(change));
+      const changes = [...remainingChanges, ...mergedChanges];
+      return [{
+        ...item,
+        artifacts,
+        changes,
+        status: artifactItemStatus(artifacts),
+        firstSeenAt,
+        updatedAt,
+        sourceEventIds,
+        revision,
+      }];
+    }
+
+    const artifacts = item.artifacts.filter((artifact) => !removedArtifacts?.has(artifact));
+    const changes = item.changes.filter((change) => !removedChanges?.has(change));
+    if (artifacts.length === 0 && changes.length === 0) return [];
+    if (artifacts.length === item.artifacts.length && changes.length === item.changes.length) return [item];
+    return [{
+      ...item,
+      artifacts,
+      changes,
+      status: artifactItemStatus(artifacts),
+      revision: item.revision + 1,
+    }];
+  });
+
+  const artifactEntityByAlias = { ...turn.artifactEntityByAlias };
+  Object.entries(artifactEntityByAlias).forEach(([alias, entity]) => {
+    if (matchedEntities.has(entity)) artifactEntityByAlias[alias] = canonicalEntity;
+  });
+  const artifactItemByEntity = { ...turn.artifactItemByEntity };
+  const artifactMergeByEntity = { ...turn.artifactMergeByEntity };
+  matchedEntities.forEach((entity) => {
+    if (entity === canonicalEntity) return;
+    delete artifactItemByEntity[entity];
+    delete artifactMergeByEntity[entity];
+  });
+  artifactItemByEntity[canonicalEntity] = canonicalItemId;
+  artifactMergeByEntity[canonicalEntity] = mergedState ?? { fields: {} };
+
+  return {
+    ...turn,
+    items,
+    itemIndex: rebuildItemIndex(items),
+    artifactEntityByAlias,
+    artifactItemByEntity,
+    artifactMergeByEntity,
+    revision: turn.revision + 1,
+  };
+}
+
 function applyArtifact(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
   const data = event.data as { artifact: ChatRuntimeArtifact; change?: ConversationFileChange };
   const artifact = data.artifact;
   const aliases = artifactAliases(artifact);
-  const entity = aliases.map((alias) => turn.artifactEntityByAlias[alias]).find(Boolean)
+  const matchedEntities = [...new Set(aliases
+    .map((alias) => turn.artifactEntityByAlias[alias])
+    .filter((entity): entity is string => Boolean(entity)))];
+  const entity = matchedEntities[0]
     ?? aliases[0]
     ?? `id:${artifact.id}`;
-  const id = turn.artifactItemByEntity[entity]
+  const reconciledTurn = unionArtifactEntities(turn, entity, matchedEntities);
+  const id = reconciledTurn.artifactItemByEntity[entity]
     ?? `artifacts:${event.taskId ?? event.toolCallId ?? turn.id}`;
   const evidence = mergeEvidence(event, 'artifact');
-  let nextMerge = turn.artifactMergeByEntity[entity];
+  let nextMerge = reconciledTurn.artifactMergeByEntity[entity];
   let mergedArtifact = artifact;
-  const updated = updateItem<ArtifactGroupItem>(turn, id, (current) => {
+  const updated = updateItem<ArtifactGroupItem>(reconciledTurn, id, (current) => {
     const existing = current?.artifacts ?? [];
     const index = existing.findIndex((item) => artifactAliases(item).some((alias) => (
-      alias === entity || turn.artifactEntityByAlias[alias] === entity
+      alias === entity || reconciledTurn.artifactEntityByAlias[alias] === entity
     )));
     const merged = mergeRecordFields(index < 0 ? undefined : existing[index], artifact, nextMerge, evidence);
-    const availabilityEvidence = strongestArtifactAvailabilityEvidence(turn, merged.value);
+    const availabilityEvidence = strongestArtifactAvailabilityEvidence(reconciledTurn, merged.value);
     if (
       availabilityEvidence
       && (
@@ -1640,7 +2132,7 @@ function applyArtifact(turn: ConversationTurn, event: ConversationEvent): Conver
     }
     return {
       id,
-      turnId: turn.id,
+      turnId: reconciledTurn.id,
       kind: 'artifact-group',
       artifacts,
       changes,
@@ -1655,7 +2147,7 @@ function applyArtifact(turn: ConversationTurn, event: ConversationEvent): Conver
   [...aliases, ...artifactAliases(mergedArtifact)].forEach((alias) => {
     artifactEntityByAlias[alias] = entity;
   });
-  return {
+  return releaseDeferredFinal({
     ...updated,
     artifactEntityByAlias,
     artifactItemByEntity: { ...updated.artifactItemByEntity, [entity]: id },
@@ -1663,7 +2155,7 @@ function applyArtifact(turn: ConversationTurn, event: ConversationEvent): Conver
       ...updated.artifactMergeByEntity,
       [entity]: nextMerge ?? { fields: {} },
     },
-  };
+  });
 }
 
 /** Apply a structured availability check to an already-registered artifact. */
@@ -1782,6 +2274,97 @@ function messageVisibleText(message: ConversationMessageSnapshot): string {
     .join('\n\n');
 }
 
+function hasPendingTasks(turn: ConversationTurn): boolean {
+  return Object.values(turn.taskById).some((task) => (
+    task.status === 'pending'
+    || task.status === 'running'
+    || task.status === 'waiting_approval'
+  ));
+}
+
+function hasArtifactTimelineOwner(turn: ConversationTurn): boolean {
+  return turn.items.some((item) => item.kind === 'artifact-group' && item.artifacts.length > 0);
+}
+
+function hasMediaTask(turn: ConversationTurn): boolean {
+  return Object.values(turn.taskById).some((task) => (
+    /(?:image|video|music|media)[_-]?(?:generate|edit|render)/iu.test(
+      `${task.runtime ?? ''} ${task.title ?? ''}`,
+    )
+  ));
+}
+
+function isOwnerRunFinal(turn: ConversationTurn, event: ConversationEvent): boolean {
+  const ownerRunId = event.rootRunId ?? turn.rootRunId;
+  return !event.runId || !ownerRunId || event.runId === ownerRunId;
+}
+
+function isMediaCompletionFinal(event: ConversationEvent): boolean {
+  return /^(?:image_generate|image_edit|video_generate|music_generate):[^:]+:/iu.test(event.runId ?? '');
+}
+
+function applyFinalAsCommentary(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
+  const message = messageData(event);
+  const text = message ? messageVisibleText(message).trim() : '';
+  if (!text) return turn;
+  return applyNarrative(turn, {
+    ...event,
+    type: 'assistant.content',
+    data: { text, replace: true, phase: 'async-task-continuation' },
+  }, 'commentary');
+}
+
+function deferFinal(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
+  const current = turn.deferredFinal;
+  if (current && compareMergeEvidence(
+    mergeEvidence(event, 'final'),
+    mergeEvidence(current, 'final'),
+  ) <= 0) {
+    return turn;
+  }
+  return {
+    ...turn,
+    deferredFinal: event,
+    updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+    revision: turn.revision + 1,
+  };
+}
+
+/** Replace only assistant text blocks while preserving attachment and media evidence. */
+function withMessageVisibleText(
+  message: ConversationMessageSnapshot,
+  text: string,
+): ConversationMessageSnapshot {
+  if (typeof message.content === 'string') return { ...message, content: text };
+  if (!Array.isArray(message.content)) return message;
+
+  let replaced = false;
+  const content = message.content.flatMap((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return [block];
+    const record = block as Record<string, unknown>;
+    if (record.type !== 'text') return [block];
+    if (replaced) return [];
+    replaced = true;
+    return [{ ...record, text }];
+  });
+  if (!replaced) content.unshift({ type: 'text', text });
+  return { ...message, content };
+}
+
+/** Apply the same exact ordered process-prefix fold used by history replay. */
+function normalizeFinalNarrative(
+  turn: ConversationTurn,
+  message: ConversationMessageSnapshot,
+): ConversationMessageSnapshot {
+  const fullText = messageVisibleText(message).trim();
+  if (!fullText) return message;
+  const processSegments = turn.items.flatMap((item) => (
+    item.kind === 'commentary' && item.origin === 'assistant' ? [item.text] : []
+  ));
+  const finalText = stripProcessMessagePrefix(fullText, processSegments);
+  return finalText === fullText ? message : withMessageVisibleText(message, finalText);
+}
+
 function removeDuplicateAssistantNarrative(
   turn: ConversationTurn,
   message: ConversationMessageSnapshot,
@@ -1806,13 +2389,14 @@ function removeDuplicateAssistantNarrative(
   return { turn };
 }
 
-function applyFinal(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
+function applyFinalNow(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
   const message = messageData(event);
   if (!message) return turn;
   const id = `final:${turn.id}`;
   const currentIndex = turn.itemIndex[id];
   const current = currentIndex == null ? undefined : turn.items[currentIndex] as FinalAnswerItem;
-  const merged = mergeRecordFields(current?.message, message, turn.finalMerge, mergeEvidence(event, 'final'));
+  const normalizedMessage = normalizeFinalNarrative(turn, message);
+  const merged = mergeRecordFields(current?.message, normalizedMessage, turn.finalMerge, mergeEvidence(event, 'final'));
   const deduplicated = removeDuplicateAssistantNarrative(sealNarrativeItems(turn), merged.value);
   const updated = updateItem<FinalAnswerItem>(deduplicated.turn, id, (existing) => ({
     id,
@@ -1829,7 +2413,65 @@ function applyFinal(turn: ConversationTurn, event: ConversationEvent): Conversat
     ], event.eventId),
     revision: (existing?.revision ?? 0) + 1,
   }));
-  return { ...updated, finalMerge: merged.state };
+  return { ...updated, finalMerge: merged.state, deferredFinal: undefined };
+}
+
+function releaseDeferredFinal(turn: ConversationTurn): ConversationTurn {
+  const event = turn.deferredFinal;
+  if (!event || hasPendingTasks(turn)) return turn;
+  if (isMediaCompletionFinal(event) && hasMediaTask(turn) && !hasArtifactTimelineOwner(turn)) return turn;
+  return applyFinalNow(turn, event);
+}
+
+function applyFinal(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
+  if (event.source === 'history') return applyFinalNow(turn, event);
+  if (hasPendingTasks(turn)) {
+    return isOwnerRunFinal(turn, event)
+      ? applyFinalAsCommentary(turn, event)
+      : deferFinal(turn, event);
+  }
+  if (isMediaCompletionFinal(event) && hasMediaTask(turn) && !hasArtifactTimelineOwner(turn)) {
+    return deferFinal(turn, event);
+  }
+  return applyFinalNow(turn, event);
+}
+
+function demotePrematureFinalForTask(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+): ConversationTurn {
+  const finalIndex = turn.items.findIndex((item) => item.kind === 'final-answer');
+  if (finalIndex < 0) return turn;
+  const final = turn.items[finalIndex] as FinalAnswerItem;
+  const text = messageVisibleText(final.message).trim();
+  const duplicateCommentary = text
+    ? turn.items.find((item) => item.kind === 'commentary' && item.text === text)
+    : undefined;
+  const items = duplicateCommentary || !text
+    ? turn.items.filter((_, index) => index !== finalIndex)
+    : turn.items.map((item, index) => index === finalIndex
+      ? {
+          id: `commentary:${final.message.id ?? final.id}:pre-task`,
+          turnId: turn.id,
+          kind: 'commentary' as const,
+          text,
+          sealed: true,
+          origin: 'assistant' as const,
+          status: 'completed' as const,
+          firstSeenAt: final.firstSeenAt,
+          updatedAt: Math.max(final.updatedAt, event.occurredAt),
+          sourceEventIds: final.sourceEventIds,
+          revision: final.revision + 1,
+        }
+      : item);
+  return {
+    ...turn,
+    items,
+    itemIndex: rebuildItemIndex(items),
+    finalMerge: { fields: {} },
+    updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+    revision: turn.revision + 1,
+  };
 }
 
 /** Settle interactive work when authoritative backend liveness reports the session idle. */
@@ -1845,7 +2487,7 @@ function applySessionActivityToTurn(
     // later native terminal evidence.
     next = closePendingTools(next, event, 'completed');
     next = closePendingHistoryTasks(next, event);
-    next = closePendingApprovals(next, event);
+    next = closePendingApprovals(next, event, 'aborted');
     next = sealNarrativeItems(next);
   }
   return {
@@ -1861,6 +2503,7 @@ function applySessionActivityToTurn(
  * unsealed assistant segment is the delivered answer, not progress commentary.
  */
 function promoteAssistantNarrativeToFinal(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
+  if (hasPendingTasks(turn)) return turn;
   if (turn.items.some((item) => item.kind === 'final-answer')) return turn;
   let candidateIndex = -1;
   for (let index = turn.items.length - 1; index >= 0; index -= 1) {
@@ -1961,6 +2604,15 @@ function recomputeEvidence(turn: ConversationTurn): ConversationTurn {
     || Boolean(artifact.error)
   ));
   const hasTerminalError = turn.items.some((item) => item.kind === 'error' && item.status === 'error');
+  const desktopApprovalSettled = approvals.some((approval) => {
+    if (approval.approvalKind !== 'desktop' || approval.resolutionSource !== 'desktop-broker') return false;
+    const status = approval.approvalStatus?.trim().toLowerCase();
+    return status === 'denied' || status === 'expired' || status === 'consumed';
+  });
+  const historyApprovalSettled = approvals.some((approval) => (
+    approval.resolutionSource === 'history-checkpoint'
+    && approval.status !== 'blocked'
+  ));
   const terminalPendingTaskCount = evidence.terminalPendingTaskIds.filter((taskId) => {
     const task = turn.taskById[taskId];
     return task && ['pending', 'running', 'waiting_approval'].includes(task.status);
@@ -1981,10 +2633,12 @@ function recomputeEvidence(turn: ConversationTurn): ConversationTurn {
     || !evidence.requiredArtifactsSatisfied
     || artifactDeliveryFailed
   )) {
-    status = hasArtifacts ? 'partial' : 'error';
+    status = 'error';
     settledAt ??= turn.updatedAt;
   } else if (authoritativeTerminal && terminalPendingTaskCount > 0) {
-    status = 'waiting_background';
+    status = 'running';
+  } else if (authoritativeTerminal && evidence.pendingApprovalCount > 0) {
+    status = 'waiting_approval';
   } else if (authoritativeTerminal) {
     status = evidence.finalMessagePresent || hasArtifacts ? 'completed' : 'error';
     settledAt ??= turn.updatedAt;
@@ -2001,10 +2655,23 @@ function recomputeEvidence(turn: ConversationTurn): ConversationTurn {
       !evidence.requiredArtifactsSatisfied || artifactDeliveryFailed
     ))
   ) {
-    status = hasArtifacts ? 'partial' : 'error';
+    status = 'error';
+    settledAt ??= turn.updatedAt;
+  } else if (
+    desktopApprovalSettled
+    && evidence.pendingToolCount === 0
+    && evidence.pendingTaskCount === 0
+    && evidence.pendingApprovalCount === 0
+  ) {
+    // Desktop approvals are Main-owned and do not resume the model after the
+    // broker reaches a terminal state, so the decision itself closes the Turn.
+    status = 'completed';
+    settledAt ??= turn.updatedAt;
+  } else if (historyApprovalSettled && evidence.historyCheckpointed && !turn.hasLiveEvidence) {
+    status = evidence.finalMessagePresent || hasArtifacts ? 'completed' : 'error';
     settledAt ??= turn.updatedAt;
   } else if (evidence.pendingTaskCount > 0 && evidence.runTerminal) {
-    status = 'waiting_background';
+    status = 'running';
   } else if (evidence.pendingToolCount > 0 || evidence.pendingTaskCount > 0) {
     status = 'running';
   } else if (
@@ -2021,7 +2688,7 @@ function recomputeEvidence(turn: ConversationTurn): ConversationTurn {
         status = 'completed';
         settledAt ??= turn.updatedAt;
       } else {
-        status = 'settling';
+        status = 'running';
       }
     } else if (evidence.runTerminal) {
       status = 'error';
@@ -2090,7 +2757,7 @@ function applyEventToTurn(turn: ConversationTurn, event: ConversationEvent): Con
         terminalTurn = data.status === 'completed'
           ? closePendingHistoryTasks(terminalTurn, event)
           : closePendingTasks(terminalTurn, event, data.status);
-        terminalTurn = closePendingApprovals(terminalTurn, event);
+        terminalTurn = closePendingApprovals(terminalTurn, event, data.status);
       }
       const terminalPendingTaskIds = data.status === 'completed'
         ? Object.values(terminalTurn.taskById)
@@ -2170,7 +2837,8 @@ function applyEventToTurn(turn: ConversationTurn, event: ConversationEvent): Con
     rootRunId: next.rootRunId ?? event.rootRunId ?? event.runId,
     updatedAt: Math.max(next.updatedAt, event.occurredAt),
   };
-  return recomputeEvidence(next);
+  const boundaryAware = splitToolGroupsAtCanonicalBoundaries(next);
+  return recomputeEvidence(reorderTurnItemsByCanonicalTime(boundaryAware));
 }
 
 /** Copy large state indexes once for the whole ingress batch. */
@@ -2362,11 +3030,12 @@ function applyCheckpoint(state: ConversationState, event: ConversationEvent): bo
       changed = compactTerminalEventTail(state, turn) || changed;
       return;
     }
+    const checkpointed = closePendingHistoryApprovals(turn, event);
     const next = recomputeEvidence({
-      ...turn,
-      evidence: { ...turn.evidence, historyCheckpointed: true },
-      updatedAt: Math.max(turn.updatedAt, event.occurredAt),
-      revision: turn.revision + 1,
+      ...checkpointed,
+      evidence: { ...checkpointed.evidence, historyCheckpointed: true },
+      updatedAt: Math.max(checkpointed.updatedAt, event.occurredAt),
+      revision: checkpointed.revision + 1,
     });
     state.turnsById[turnId] = next;
     changed ||= next !== turn;
@@ -2400,6 +3069,12 @@ function applySessionActivity(state: ConversationState, event: ConversationEvent
   turnIds.forEach((turnId) => {
     const turn = state.turnsById[turnId];
     if (!turn || isTerminalTurn(turn) || turn.evidence.backendIdle === !data.active) return;
+    // A deferred local request does not own the session run slot until it has
+    // runtime evidence. Session idle for the preceding run must not settle it.
+    const isUnownedQueuedRequest = turn.status === 'queued'
+      && turn.runAliases.length === 0
+      && turn.items.every((item) => item.kind === 'user-message');
+    if (!data.active && isUnownedQueuedRequest) return;
     state.turnsById[turnId] = recomputeEvidence({
       ...applySessionActivityToTurn(turn, event, data.active),
       updatedAt: Math.max(turn.updatedAt, event.occurredAt),
@@ -2564,7 +3239,9 @@ function reduceConversationEventInto(
   const isLocalRequest = event.type === 'turn.requested'
     && event.source === 'host'
     && Boolean(message);
-  if (isLocalRequest) {
+  const activatesLocalRequest = isLocalRequest
+    && (event.data as { activate?: boolean }).activate !== false;
+  if (activatesLocalRequest) {
     state.aliases.pendingLocalBySession[event.sessionKey] = resolvedTurnId;
   } else if (runIds.length > 0
     && state.aliases.pendingLocalBySession[event.sessionKey] === resolvedTurnId) {
@@ -2577,7 +3254,7 @@ function reduceConversationEventInto(
     if (state.aliases.pendingLocalBySession[event.sessionKey] === resolvedTurnId) {
       delete state.aliases.pendingLocalBySession[event.sessionKey];
     }
-  } else {
+  } else if (!isLocalRequest || activatesLocalRequest) {
     state.aliases.activeBySession[event.sessionKey] = resolvedTurnId;
   }
   state.turnsById[resolvedTurnId] = nextTurn;
@@ -2709,6 +3386,69 @@ function sameTurnOrder(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((turnId, index) => turnId === right[index]);
 }
 
+const HISTORY_TIMELINE_EVENT_TYPES: Record<TimelineItem['kind'], Set<ConversationEvent['type']>> = {
+  'user-message': new Set(['turn.requested']),
+  thinking: new Set(['thinking.content']),
+  commentary: new Set(['assistant.content', 'commentary.append', 'progress.updated']),
+  plan: new Set(['plan.updated', 'step.updated']),
+  'tool-group': new Set(['tool.started', 'tool.updated', 'tool.completed']),
+  subtask: new Set(['task.updated']),
+  approval: new Set(['approval.updated']),
+  'artifact-group': new Set(['artifact.updated']),
+  'verification-summary': new Set(['verification.updated']),
+  'final-answer': new Set(['final.message']),
+  error: new Set(['turn.error']),
+};
+
+/** Resolve the persisted position owned by this Timeline item kind. */
+function historyTimelineItemTime(
+  item: TimelineItem,
+  historyEventById: Map<string, ConversationEvent>,
+  historyEvents: ConversationEvent[],
+): number {
+  const ownedTypes = HISTORY_TIMELINE_EVENT_TYPES[item.kind];
+  const ownedOccurredAt = item.sourceEventIds
+    .map((eventId) => historyEventById.get(eventId))
+    .filter((event): event is ConversationEvent => Boolean(event && ownedTypes.has(event.type)))
+    .reduce<number | undefined>((earliest, event) => (
+      earliest == null ? event.occurredAt : Math.min(earliest, event.occurredAt)
+    ), undefined);
+  if (ownedOccurredAt != null) return ownedOccurredAt;
+
+  const fallbackTypes = item.kind === 'artifact-group'
+    ? new Set<ConversationEvent['type']>([...ownedTypes, 'final.message'])
+    : ownedTypes;
+  return historyEvents.find((event) => fallbackTypes.has(event.type))?.occurredAt ?? item.firstSeenAt;
+}
+
+/** Let authoritative transcript time repair a wrong live insertion order. */
+function reorderHistoryEnrichedTurn(
+  turn: ConversationTurn,
+  historyEvents: ConversationEvent[],
+): ConversationTurn {
+  const historyEventById = new Map(historyEvents.map((event) => [event.eventId, event]));
+  const items = turn.items
+    .map((item, index) => ({
+      item,
+      index,
+      historyTime: historyTimelineItemTime(item, historyEventById, historyEvents),
+    }))
+    .sort((left, right) => (
+      timelineTerminalRank(left.item) - timelineTerminalRank(right.item)
+      || left.historyTime - right.historyTime
+      || TIMELINE_ITEM_TIE_RANK[left.item.kind] - TIMELINE_ITEM_TIE_RANK[right.item.kind]
+      || left.index - right.index
+    ))
+    .map(({ item }) => item);
+  if (items.every((item, index) => item === turn.items[index])) return turn;
+  return {
+    ...turn,
+    items,
+    itemIndex: rebuildItemIndex(items),
+    revision: turn.revision + 1,
+  };
+}
+
 export function replaceSessionTurns(
   state: ConversationState,
   sessionKey: string,
@@ -2743,12 +3483,20 @@ export function replaceSessionTurns(
   const changedHistoryTurnIds = new Set(historyTurnIds.filter((turnId) => (
     state.turnsById[turnId]?.historyReplayFingerprint !== historyFingerprintByTurnId.get(turnId)
   )));
+  const historyOrderRepairTurnIds = new Set(historyTurnIds.filter((turnId) => {
+    const turn = state.turnsById[turnId];
+    return Boolean(turn && reorderHistoryEnrichedTurn(
+      turn,
+      historyEventsByTurnId.get(turnId) ?? [],
+    ) !== turn);
+  }));
   const hasUnownedReplayEvidence = replayInputEvents.some((event) => (
     !event.turnId && event.type !== 'history.checkpoint'
   ));
   if (
     removedTurnIds.size === 0
     && changedHistoryTurnIds.size === 0
+    && historyOrderRepairTurnIds.size === 0
     && !hasUnownedReplayEvidence
     && sameTurnOrder(currentTurnIds, nextTurnIds)
   ) {
@@ -2801,6 +3549,16 @@ export function replaceSessionTurns(
   ));
   let next = reduceConversationEvents(base, replayEvents);
   let turnsById = next.turnsById;
+  let turnsChanged = false;
+  new Set([...changedHistoryTurnIds, ...historyOrderRepairTurnIds]).forEach((turnId) => {
+    const turn = turnsById[turnId];
+    if (!turn) return;
+    const reordered = reorderHistoryEnrichedTurn(turn, historyEventsByTurnId.get(turnId) ?? []);
+    if (reordered === turn) return;
+    if (!turnsChanged) turnsById = { ...turnsById };
+    turnsById[turnId] = reordered;
+    turnsChanged = true;
+  });
   let fingerprintsChanged = false;
   historyFingerprintByTurnId.forEach((fingerprint, turnId) => {
     const turn = turnsById[turnId];
@@ -2809,7 +3567,7 @@ export function replaceSessionTurns(
     turnsById[turnId] = { ...turn, historyReplayFingerprint: fingerprint };
     fingerprintsChanged = true;
   });
-  if (fingerprintsChanged) next = { ...next, turnsById };
+  if (turnsChanged || fingerprintsChanged) next = { ...next, turnsById };
   return next;
 }
 

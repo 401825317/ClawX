@@ -96,6 +96,24 @@ test('patched TaskSummary uses explicit delivery and terminal outcome evidence',
   assert.equal(blocked?.taskStatus, 'partial');
 });
 
+test('task ledger projection preserves cancelled tasks as aborted', () => {
+  const event = projectTaskLedgerRecord({
+    id: 'task-cancelled',
+    runtime: 'subagent',
+    sessionKey: 'agent:main:session-1',
+    runId: 'run-cancelled',
+    title: 'Cancelled task',
+    status: 'cancelled',
+    terminalOutcome: 'cancelled',
+    updatedAt: 12_000,
+    endedAt: 12_000,
+  });
+
+  assert.equal(event?.taskStatus, 'aborted');
+  assert.equal(event?.type === 'task.updated' ? event.task.status : undefined, 'aborted');
+  assert.equal(event?.type === 'task.updated' ? event.task.sourceStatus : undefined, 'cancelled');
+});
+
 test('monitor paginates, rebuilds nested lineage, and normalizes descendants to the root session', async () => {
   const events: ChatRuntimeEvent[] = [];
   const calls: Array<{ cursor?: string; limit: number; status: string[] }> = [];

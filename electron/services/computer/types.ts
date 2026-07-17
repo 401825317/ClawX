@@ -156,6 +156,7 @@ export interface ComputerUseBackend {
 export interface DesktopRunContext {
   sessionKey: string;
   runId: string;
+  toolCallId?: string;
 }
 
 export interface DesktopActionRequest extends DesktopRunContext {

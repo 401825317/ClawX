@@ -68,7 +68,6 @@ import {
   CHAT_RUNTIME_CONTRACT_VERSION,
   type ChatRuntimeEvent,
 } from '../../shared/chat-runtime-events';
-import { normalizeConversationTimelineMode } from '../../shared/conversation-rollout';
 import { desktopRunCoordinator, type DesktopApprovalView } from '../services/computer';
 import {
   GatewayApprovalRecoveryCoordinator,
@@ -82,7 +81,6 @@ const isE2EMode = process.env.CLAWX_E2E === '1';
 const portableModeInfo = applyPortableEnvironment();
 const requestedUserDataDir = process.env.CLAWX_USER_DATA_DIR?.trim();
 const requestedRemoteDebuggingPort = process.env.CLAWX_REMOTE_DEBUGGING_PORT?.trim();
-const chatTimelineModeOverride = normalizeConversationTimelineMode(process.env.CLAWX_CHAT_TIMELINE_MODE);
 let extensionsLoadPromise: Promise<void> | null = null;
 
 type JunFeiAILocalStatus = Awaited<ReturnType<typeof getJunFeiAILocalStatus>>;
@@ -272,6 +270,7 @@ function desktopApprovalRuntimeEvent(
     type: 'approval.updated',
     runId: approval.runId,
     sessionKey: approval.sessionKey,
+    toolCallId: approval.toolCallId,
     ts: pending && Number.isFinite(requestedAt) ? requestedAt : observedAt,
     approvalId: approval.id,
     approvalKind: 'desktop',
@@ -294,9 +293,18 @@ function desktopApprovalRuntimeEvent(
   };
 }
 
-function sendPendingDesktopApprovals(win: BrowserWindow): void {
-  for (const approval of desktopRunCoordinator.approvals.listPending()) {
+function sendDesktopApprovalReplay(win: BrowserWindow): void {
+  for (const approval of desktopRunCoordinator.approvals.listForReplay()) {
     win.webContents.send('chat:runtime-event', desktopApprovalRuntimeEvent(approval));
+  }
+}
+
+function scheduleDesktopApprovalReplay(win: BrowserWindow): void {
+  for (const delayMs of [0, 1_000, 4_000]) {
+    const timer = setTimeout(() => {
+      if (!win.isDestroyed()) sendDesktopApprovalReplay(win);
+    }, delayMs);
+    timer.unref();
   }
 }
 
@@ -349,9 +357,6 @@ function createWindow(): BrowserWindow {
     icon: getAppIcon(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      additionalArguments: chatTimelineModeOverride
-        ? [`--clawx-chat-timeline-mode=${chatTimelineModeOverride}`]
-        : [],
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false,
@@ -431,7 +436,7 @@ function createMainWindow(): BrowserWindow {
 
   win.webContents.on('did-finish-load', () => {
     if (!win.isDestroyed()) {
-      sendPendingDesktopApprovals(win);
+      scheduleDesktopApprovalReplay(win);
       // If connection recovery is already listing approvals, run once more
       // after it finishes so this newly loaded renderer cannot miss delivery.
       void replayPendingGatewayApprovals({ queueAfterActive: true });

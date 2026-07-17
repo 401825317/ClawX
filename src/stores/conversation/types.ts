@@ -9,16 +9,12 @@ import type {
 } from '../../../shared/chat-runtime-events';
 import type { ConversationEvent, ConversationFileChange, ConversationMessageSnapshot } from '../../../shared/conversation-events';
 import type { ConversationEventAuthority, ConversationEventSource } from '../../../shared/conversation-events';
-export type { ConversationTimelineMode } from '../../../shared/conversation-rollout';
 
 export type TurnStatus =
   | 'queued'
   | 'running'
   | 'waiting_approval'
-  | 'waiting_background'
-  | 'settling'
   | 'completed'
-  | 'partial'
   | 'error'
   | 'aborted';
 
@@ -26,12 +22,10 @@ export type TurnStatus =
 export function isActiveTurnStatus(status: TurnStatus | undefined): boolean {
   return status === 'queued'
     || status === 'running'
-    || status === 'waiting_approval'
-    || status === 'waiting_background'
-    || status === 'settling';
+    || status === 'waiting_approval';
 }
 
-export type TimelineItemStatus = 'pending' | 'running' | 'completed' | 'error' | 'blocked';
+export type TimelineItemStatus = 'pending' | 'running' | 'completed' | 'aborted' | 'error' | 'blocked';
 export type ToolCategory = 'read' | 'search' | 'command' | 'edit' | 'browser' | 'media' | 'subagent' | 'generic';
 export type TimelineItemKind =
   | 'user-message'
@@ -44,8 +38,7 @@ export type TimelineItemKind =
   | 'artifact-group'
   | 'verification-summary'
   | 'final-answer'
-  | 'error'
-  | 'system-notice';
+  | 'error';
 
 export type TimelineItemBase = {
   id: string;
@@ -79,7 +72,7 @@ export type ThinkingItem = TimelineItemBase & {
 export type ToolEntry = {
   toolCallId: string;
   name: string;
-  status: 'running' | 'completed' | 'error';
+  status: 'running' | 'completed' | 'aborted' | 'error';
   args?: unknown;
   partialResult?: unknown;
   result?: unknown;
@@ -160,11 +153,6 @@ export type ErrorItem = TimelineItemBase & {
   recoverable: boolean;
 };
 
-export type SystemNoticeItem = TimelineItemBase & {
-  kind: 'system-notice';
-  message: string;
-};
-
 export type TimelineItem =
   | UserMessageItem
   | CommentaryItem
@@ -176,8 +164,7 @@ export type TimelineItem =
   | ArtifactGroupItem
   | VerificationSummaryItem
   | FinalAnswerItem
-  | ErrorItem
-  | SystemNoticeItem;
+  | ErrorItem;
 
 export type TurnEvidence = {
   runTerminal?: 'completed' | 'error' | 'aborted';
@@ -257,6 +244,7 @@ export type ConversationTurn = {
   verificationItemByEntity: Record<string, string>;
   verificationMergeByEntity: Record<string, EntityMergeState>;
   finalMerge: EntityMergeState;
+  deferredFinal?: ConversationEvent;
   sequenceWatermarks: Record<string, number>;
   historyReplayFingerprint?: string;
   hasLiveEvidence: boolean;

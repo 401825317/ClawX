@@ -396,7 +396,7 @@ function normalizePlanStep(value: unknown, index: number): NonNullable<Extract<C
   const step: NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']> = {
     id,
     title,
-    status: readStatus(record.status, ['pending', 'running', 'completed', 'error', 'blocked', 'skipped'], 'pending') as NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']>['status'],
+    status: readStatus(record.status, ['pending', 'running', 'completed', 'aborted', 'error', 'blocked', 'skipped'], 'pending') as NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']>['status'],
     detail: readString(record.detail) ?? readString(record.summary),
     kind: readString(record.kind),
     order: readNumber(record.order) ?? index,
@@ -782,7 +782,12 @@ function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string,
     ]) ?? readFirstString(records.slice(6), ['status', 'state', 'phase']),
   );
 
-  if (['failed', 'failure', 'error', 'aborted', 'cancelled', 'canceled', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
+  if (['failed', 'failure', 'error', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
+  if (
+    ['aborted', 'cancelled', 'canceled', 'stopped', 'terminated'].includes(status)
+    || ['aborted', 'cancelled', 'canceled'].includes(terminalOutcome)
+    || ['aborted', 'cancelled', 'canceled'].includes(deliveryStatus)
+  ) return 'aborted';
   if (
     ['waiting_approval', 'approval_required', 'requires_approval', 'pending_approval'].includes(status)
     || ['waiting', 'pending', 'required'].includes(approvalStatus)
@@ -802,6 +807,7 @@ function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string,
 
 function nativeTaskStepStatus(lifecycle: NativeTaskLifecycle): NonNullable<Extract<ChatRuntimeEvent, { type: 'run.step.updated' }>['step']>['status'] {
   if (lifecycle === 'completed') return 'completed';
+  if (lifecycle === 'aborted') return 'aborted';
   if (lifecycle === 'error') return 'error';
   if (lifecycle === 'waiting_approval' || lifecycle === 'partial') return 'blocked';
   return lifecycle === 'running' ? 'running' : 'pending';
@@ -809,6 +815,7 @@ function nativeTaskStepStatus(lifecycle: NativeTaskLifecycle): NonNullable<Extra
 
 function nativeTaskProgressStatus(lifecycle: NativeTaskLifecycle): ChatRuntimeProgressEntry['status'] {
   if (lifecycle === 'completed') return 'completed';
+  if (lifecycle === 'aborted') return 'aborted';
   if (lifecycle === 'error') return 'error';
   if (lifecycle === 'waiting_approval' || lifecycle === 'partial') return 'blocked';
   return 'running';
@@ -970,7 +977,7 @@ function normalizeNativeTaskRuntimeEvents(payload: unknown): ChatRuntimeEvent[] 
       timelineVisibility: 'diagnostics',
       entry: {
         id: `task:${taskId}:progress`,
-        kind: lifecycle === 'error' || lifecycle === 'waiting_approval' || lifecycle === 'partial' ? 'status' : 'action',
+        kind: lifecycle === 'aborted' || lifecycle === 'error' || lifecycle === 'waiting_approval' || lifecycle === 'partial' ? 'status' : 'action',
         text: detail,
         status: nativeTaskProgressStatus(lifecycle),
         toolCallId,

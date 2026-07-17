@@ -7,6 +7,8 @@ import { buildOpenClawControlUiUrl } from '../../utils/openclaw-control-ui';
 import { getSetting } from '../../utils/store';
 import { logger } from '../../utils/logger';
 import { agentTurnPreferenceStore, normalizeUClawTurnPreferences } from '../../services/agent-runtime/turn-preference-store';
+import { chatSendOutboxService } from '../../services/chat-send-outbox';
+import type { ChatSendOutboxItem } from '../../../shared/chat-send-outbox';
 import { ensureJunFeiAIProviderSeeded } from '../../services/junfeiai/junfeiai-service';
 import {
   buildOpenClawInlineImageAttachment,
@@ -380,6 +382,54 @@ export async function handleGatewayRoutes(
     return true;
   }
 
+  if (url.pathname === '/api/chat/outbox' && req.method === 'GET') {
+    try {
+      const result = await chatSendOutboxService.list(url.searchParams.get('sessionKey') || undefined);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/chat/outbox' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ item?: ChatSendOutboxItem }>(req);
+      if (!body.item) throw new Error('Outbox item is required');
+      const result = await chatSendOutboxService.enqueue(body.item);
+      sendJson(res, 200, { success: true, ...result });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  const outboxItemMatch = url.pathname.match(/^\/api\/chat\/outbox\/([^/]+)\/(ack|cancel)$/u);
+  if (outboxItemMatch && outboxItemMatch[1] !== 'session' && req.method === 'POST') {
+    try {
+      const id = decodeURIComponent(outboxItemMatch[1]);
+      const removed = outboxItemMatch[2] === 'ack'
+        ? await chatSendOutboxService.acknowledge(id)
+        : await chatSendOutboxService.cancel(id);
+      sendJson(res, 200, { success: true, removed });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/chat/outbox/session/cancel' && req.method === 'POST') {
+    try {
+      const body = await parseJsonBody<{ sessionKey?: string }>(req);
+      if (!body.sessionKey?.trim()) throw new Error('sessionKey is required');
+      const removed = await chatSendOutboxService.cancelSession(body.sessionKey.trim());
+      sendJson(res, 200, { success: true, removed });
+    } catch (error) {
+      sendJson(res, 400, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname === '/api/chat/send' && req.method === 'POST') {
     const startedAt = Date.now();
     let sessionKeyForLog = 'unknown';
@@ -499,7 +549,6 @@ export async function handleGatewayRoutes(
             if (!inlineImage.attachment) {
               logger.warn('[chat.send] Skipping inline image attachment above OpenClaw safe inline cap', {
                 sessionKey: sessionKeyForLog,
-                fileName: m.fileName,
                 bytes: inlineImage.inputBytes,
                 limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
                 reason: inlineImage.skippedReason,
@@ -509,7 +558,6 @@ export async function handleGatewayRoutes(
             if (inlineImage.resized) {
               logger.info('[chat.send] Resized inline image attachment for OpenClaw parser safety', {
                 sessionKey: sessionKeyForLog,
-                fileName: m.fileName,
                 inputBytes: inlineImage.inputBytes,
                 outputBytes: inlineImage.outputBytes,
                 outputMimeType: inlineImage.outputMimeType,
@@ -520,7 +568,6 @@ export async function handleGatewayRoutes(
           } else if (!shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
             logger.info('[chat.send] Using media path reference without inline attachment', {
               sessionKey: sessionKeyForLog,
-              fileName: m.fileName,
               mimeType: m.mimeType,
             });
           }
