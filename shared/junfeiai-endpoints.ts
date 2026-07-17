@@ -8,6 +8,11 @@ const VALID_DEFAULT_THINKING_LEVELS = new Set([
   'high',
   'xhigh',
 ]);
+const VALID_OPENCLAW_EXEC_SECURITY = new Set(['deny', 'allowlist', 'full']);
+const VALID_OPENCLAW_EXEC_ASK = new Set(['off', 'on-miss', 'always']);
+
+export type JunFeiAIOpenClawExecSecurity = 'deny' | 'allowlist' | 'full';
+export type JunFeiAIOpenClawExecAsk = 'off' | 'on-miss' | 'always';
 
 /** Shared production endpoints for JunFeiAI consumers in both Electron processes. */
 export const JUNFEIAI_PRODUCTION_ORIGIN = endpoints.productionOrigin.replace(/\/+$/, '');
@@ -33,6 +38,19 @@ if (!VALID_DEFAULT_THINKING_LEVELS.has(endpoints.defaultThinkingLevel)) {
 
 /** Shared default thinking level for managed JunFeiAI chat. */
 export const JUNFEIAI_DEFAULT_THINKING_LEVEL = endpoints.defaultThinkingLevel;
+
+if (!VALID_OPENCLAW_EXEC_SECURITY.has(endpoints.openClawExec.security)) {
+  throw new Error('openClawExec.security in shared/junfeiai-endpoints.json must be deny, allowlist, or full');
+}
+if (!VALID_OPENCLAW_EXEC_ASK.has(endpoints.openClawExec.ask)) {
+  throw new Error('openClawExec.ask in shared/junfeiai-endpoints.json must be off, on-miss, or always');
+}
+
+/** Default OpenClaw host-command security policy for the managed desktop runtime. */
+export const JUNFEIAI_OPENCLAW_EXEC_SECURITY = endpoints.openClawExec.security as JunFeiAIOpenClawExecSecurity;
+
+/** Default OpenClaw host-command approval policy for the managed desktop runtime. */
+export const JUNFEIAI_OPENCLAW_EXEC_ASK = endpoints.openClawExec.ask as JunFeiAIOpenClawExecAsk;
 
 function readPositiveTimeoutMs(value: unknown, key: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {

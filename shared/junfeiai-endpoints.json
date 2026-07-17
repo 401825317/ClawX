@@ -3,7 +3,12 @@
   "defaultModelContextWindow": 258000,
   "defaultApiProtocol": "openai-responses",
   "defaultThinkingLevel": "medium",
+  "openClawExec": {
+    "security": "full",
+    "ask": "off"
+  },
   "_comments": {
+    "openClawExec": "OpenClaw 主机命令执行策略。security 支持 deny/allowlist/full；ask 支持 off/on-miss/always。",
     "imageGenerationTimeoutMs": "托管图片生成请求的超时时间，单位：毫秒。",
     "videoGenerationTimeoutMs": "托管视频生成请求的超时时间，单位：毫秒。",
     "videoGenerationPollIntervalMs": "托管视频生成任务的状态查询间隔，单位：毫秒。",

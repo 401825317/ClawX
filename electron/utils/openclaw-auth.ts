@@ -65,6 +65,8 @@ import {
   JUNFEIAI_DEFAULT_THINKING_LEVEL,
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
+  JUNFEIAI_OPENCLAW_EXEC_ASK,
+  JUNFEIAI_OPENCLAW_EXEC_SECURITY,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
   getJunFeiAIProviderBaseUrl,
@@ -3161,6 +3163,33 @@ export function ensureManagedMediaLimitInConfig(config: Record<string, unknown>)
   return true;
 }
 
+/** Apply the endpoint-configured OpenClaw host-command approval defaults. */
+export function ensureJunFeiAIExecDefaultsInConfig(config: Record<string, unknown>): boolean {
+  const tools = (
+    config.tools && typeof config.tools === 'object' && !Array.isArray(config.tools)
+      ? { ...(config.tools as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const exec = (
+    tools.exec && typeof tools.exec === 'object' && !Array.isArray(tools.exec)
+      ? { ...(tools.exec as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (
+    exec.security === JUNFEIAI_OPENCLAW_EXEC_SECURITY
+    && exec.ask === JUNFEIAI_OPENCLAW_EXEC_ASK
+  ) {
+    return false;
+  }
+
+  exec.security = JUNFEIAI_OPENCLAW_EXEC_SECURITY;
+  exec.ask = JUNFEIAI_OPENCLAW_EXEC_ASK;
+  tools.exec = exec;
+  config.tools = tools;
+  return true;
+}
+
 /** Keep every tool available while sending only a small, locally selected set
  * of schemas on each model call. Directory selection does not use embeddings. */
 function ensureManagedToolDirectoryInConfig(config: Record<string, unknown>): boolean {
@@ -3851,23 +3880,18 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     }
 
     // ── tools.exec approvals (OpenClaw 3.28+) ──────────────────────
-    // ClawX is a local desktop app where the user is the trusted operator.
-    // Exec approval prompts add unnecessary friction in this context, so we
-    // set security="full" (allow all commands) and ask="off" (never prompt).
+    // The managed distribution owns these defaults in junfeiai-endpoints.json.
     // If a user has manually configured a stricter ~/.openclaw/exec-approvals.json,
     // OpenClaw's minSecurity/maxAsk merge will still respect their intent.
-    const execConfig = (toolsConfig.exec as Record<string, unknown> | undefined) || {};
-    if (execConfig.security !== 'full' || execConfig.ask !== 'off') {
-      execConfig.security = 'full';
-      execConfig.ask = 'off';
-      toolsConfig.exec = execConfig;
-      toolsModified = true;
-      console.log('[sanitize] Set tools.exec.security="full" and tools.exec.ask="off" to disable exec approvals for ClawX desktop');
-    }
-
     if (toolsModified) {
       config.tools = toolsConfig;
       modified = true;
+    }
+    if (ensureJunFeiAIExecDefaultsInConfig(config)) {
+      modified = true;
+      console.log(
+        `[sanitize] Set tools.exec.security="${JUNFEIAI_OPENCLAW_EXEC_SECURITY}" and tools.exec.ask="${JUNFEIAI_OPENCLAW_EXEC_ASK}" from junfeiai-endpoints.json`,
+      );
     }
 
     // ── plugins.entries.feishu cleanup ──────────────────────────────
