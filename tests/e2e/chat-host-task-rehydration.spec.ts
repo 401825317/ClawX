@@ -175,7 +175,7 @@ async function expectDurableTaskRecovery(page: Page): Promise<void> {
   await expect(page.getByTestId('timeline-plan')).toHaveCount(0);
   await expect(page.getByTestId('timeline-tool-group')).toHaveCount(0);
   await expect(page.getByTestId('timeline-artifacts')).toContainText(ARTIFACT_TITLE);
-  await expect(page.getByTestId('timeline-verification')).toBeVisible();
+  await expect(page.getByTestId('timeline-verification')).toHaveCount(0);
 
   await page.getByTestId('timeline-execution-details').click();
   const dialog = page.getByRole('dialog');

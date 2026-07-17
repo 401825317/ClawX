@@ -284,9 +284,8 @@ test.describe('ClawX chat run state events', () => {
       await expect(turn).toHaveAttribute('data-turn-status', 'running');
       await expect(page.getByTestId('timeline-turn-status')).toBeVisible();
       const toolGroups = page.getByTestId('timeline-tool-group');
-      await expect(toolGroups).toHaveCount(2);
+      await expect(toolGroups).toHaveCount(1);
       await expect(toolGroups.nth(0)).toHaveAttribute('data-status', 'completed');
-      await expect(toolGroups.nth(1)).toHaveAttribute('data-status', 'error');
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
       await expect(page.getByText(/No such file or directory/i)).toHaveCount(0);
@@ -295,7 +294,10 @@ test.describe('ClawX chat run state events', () => {
       await page.getByTestId('timeline-execution-details').click();
       await expect(page.getByRole('dialog')).toBeVisible();
       await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'read' })).toBeVisible();
-      await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'exec' })).toBeVisible();
+      const failedExec = page.getByTestId('chat-execution-step').filter({ hasText: 'exec' });
+      await expect(failedExec).toBeVisible();
+      await failedExec.locator('button').click();
+      await expect(failedExec).toContainText('No such file or directory');
       await page.keyboard.press('Escape');
       await expect(page.getByRole('dialog')).toHaveCount(0);
 

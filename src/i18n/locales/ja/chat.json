@@ -114,6 +114,11 @@
       "deny": "拒否"
     },
     "approvalActionFailed": "承認の決定を送信できませんでした",
+    "outcome": {
+      "failed": "このリクエストを完了できませんでした。",
+      "retryableFailure": "完了できませんでした。再試行できます。",
+      "resultUnavailable": "結果を完了できませんでした。もう一度お試しください。"
+    },
         "verificationFailed": "必須の検証に失敗しました",
         "verificationPassed": "{{count}} 件の検証に成功しました",
     "tools": {

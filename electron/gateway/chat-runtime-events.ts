@@ -575,6 +575,9 @@ function commandVerificationTitle(event: CommandOutputEvent): string {
 function normalizeCommandVerificationEvents(event: ChatRuntimeEvent): ChatRuntimeEvent[] {
   if (event.type !== 'command.output' || !commandIsTerminal(event)) return [];
 
+  // Exit code 42 represents a controlled command termination and must remain diagnostic-only.
+  if (event.exitCode === 42) return [];
+
   const status = commandVerificationStatus(event);
   if (!status) return [];
 

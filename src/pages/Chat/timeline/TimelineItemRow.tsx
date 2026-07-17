@@ -61,6 +61,7 @@ function ToolGroupBlock({ item }: { item: ToolGroupItem }) {
   const expanded = useConversationStore((state) => Boolean(state.expandedItemIds[item.id]));
   const setItemExpanded = useConversationStore((state) => state.setItemExpanded);
   const running = item.status === 'running';
+  const terminalInternalFailure = item.status === 'error';
 
   return (
     <section className="ml-1 border-l border-border/70 pl-4" data-testid="timeline-tool-group" data-status={item.status}>
@@ -68,26 +69,34 @@ function ToolGroupBlock({ item }: { item: ToolGroupItem }) {
         <button
           type="button"
           className="group flex min-w-0 items-center gap-2 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() => setItemExpanded(item.id, !expanded)}
-          aria-expanded={expanded}
+          onClick={() => {
+            if (!terminalInternalFailure) setItemExpanded(item.id, !expanded);
+          }}
+          aria-expanded={terminalInternalFailure ? undefined : expanded}
           data-testid="timeline-tool-group-toggle"
         >
           <span className={cn(
             'flex h-5 w-5 shrink-0 items-center justify-center',
-            item.status === 'error' && 'text-red-700 dark:text-red-400',
+            terminalInternalFailure && 'text-red-700 dark:text-red-400',
           )}>
-            {categoryIcon(item.category, running)}
+            {terminalInternalFailure
+              ? <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
+              : categoryIcon(item.category, running)}
           </span>
           <span className="min-w-0 truncate font-medium">
-            {t(item.summaryKey, {
-              ...item.summaryParams,
-              category: t(`timeline.toolCategory.${item.category}`),
-            })}
+            {terminalInternalFailure
+              ? t('timeline.outcome.failed')
+              : t(item.summaryKey, {
+                  ...item.summaryParams,
+                  category: t(`timeline.toolCategory.${item.category}`),
+                })}
           </span>
-          <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', expanded && 'rotate-180')} aria-hidden="true" />
+          {!terminalInternalFailure && (
+            <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', expanded && 'rotate-180')} aria-hidden="true" />
+          )}
         </button>
       </div>
-      {expanded && (
+      {expanded && !terminalInternalFailure && (
         <div className="space-y-2 pb-2 pt-1" data-testid="timeline-tool-details">
           {item.entries.map((entry) => {
             const input = stringifyRuntimeDisplayValue(entry.args);
@@ -134,6 +143,7 @@ function SubtaskBlock({ item }: { item: SubtaskItem }) {
   const expanded = useConversationStore((state) => Boolean(state.expandedItemIds[item.id]));
   const setItemExpanded = useConversationStore((state) => state.setItemExpanded);
   const running = item.status === 'running';
+  const terminalInternalFailure = item.status === 'error';
 
   return (
     <section className="ml-1 border-l border-border/70 pl-4" data-testid="timeline-subtasks" data-status={item.status}>
@@ -141,28 +151,34 @@ function SubtaskBlock({ item }: { item: SubtaskItem }) {
         <button
           type="button"
           className="group flex min-w-0 items-center gap-2 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
-          onClick={() => setItemExpanded(item.id, !expanded)}
-          aria-expanded={expanded}
+          onClick={() => {
+            if (!terminalInternalFailure) setItemExpanded(item.id, !expanded);
+          }}
+          aria-expanded={terminalInternalFailure ? undefined : expanded}
           data-testid="timeline-subtasks-toggle"
         >
           <span className={cn(
             'flex h-5 w-5 shrink-0 items-center justify-center',
-            item.status === 'error' && 'text-red-700 dark:text-red-400',
+            terminalInternalFailure && 'text-red-700 dark:text-red-400',
             item.status === 'aborted' && 'text-muted-foreground',
           )}>
             {running
               ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-              : item.status === 'error'
+              : terminalInternalFailure
                 ? <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
                 : item.status === 'aborted'
                   ? <CircleStop className="h-3.5 w-3.5" aria-hidden="true" />
                 : <GitBranch className="h-3.5 w-3.5" aria-hidden="true" />}
           </span>
-          <span className="min-w-0 truncate font-medium">{t(item.summaryKey, item.summaryParams)}</span>
-          <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', expanded && 'rotate-180')} aria-hidden="true" />
+          <span className="min-w-0 truncate font-medium">
+            {terminalInternalFailure ? t('timeline.outcome.failed') : t(item.summaryKey, item.summaryParams)}
+          </span>
+          {!terminalInternalFailure && (
+            <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', expanded && 'rotate-180')} aria-hidden="true" />
+          )}
         </button>
       </div>
-      {expanded && (
+      {expanded && !terminalInternalFailure && (
         <div className="space-y-2 pb-2 pt-1" data-testid="timeline-subtask-details">
           {item.tasks.map((task) => {
             const detail = stringifyRuntimeDisplayValue(task.detail ?? task.terminalOutcome ?? task.deliveryStatus);
@@ -219,8 +235,8 @@ function ApprovalBlock({ item }: { item: ApprovalItem }) {
         decision,
       });
     } catch (approvalError) {
-      const detail = approvalError instanceof Error ? approvalError.message : String(approvalError);
-      setError(`${t('timeline.approvalActionFailed')}: ${detail}`);
+      void approvalError;
+      setError(t('timeline.approvalActionFailed'));
     } finally {
       setSubmitting(null);
     }
@@ -375,7 +391,6 @@ function ArtifactBlock({
               <span className="ml-2 opacity-80">
                 {t(`timeline.artifactStatus.${status}`)}
               </span>
-              {artifact.error && <span className="mt-1 block break-words opacity-80">{artifact.error}</span>}
             </span>
           </div>
         );
@@ -429,6 +444,7 @@ function ErrorBlock({
   const { t } = useTranslation('chat');
   const [retrying, setRetrying] = useState(false);
   const canRetry = item.recoverable && retryable && Boolean(onRetryTurn);
+  const message = canRetry ? t('timeline.outcome.retryableFailure') : t('timeline.outcome.failed');
 
   const retry = async (): Promise<void> => {
     if (!canRetry || retrying) return;
@@ -448,7 +464,7 @@ function ErrorBlock({
     >
       <div className="flex items-start gap-2">
         <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        <span className="min-w-0 flex-1 break-words">{item.message}</span>
+        <span className="min-w-0 flex-1 break-words">{message}</span>
       </div>
       {canRetry && (
         <button
@@ -553,14 +569,13 @@ function ItemContent(props: TimelineItemRowProps & { item: TimelineItem }) {
         />
       );
     case 'verification-summary': {
-      const failed = item.status === 'error';
       return (
-        <section className={cn(
-          'ml-1 flex items-start gap-2 border-l pl-4 text-xs',
-          failed ? 'border-red-500/30 text-red-700 dark:text-red-400' : 'border-green-500/30 text-green-700 dark:text-green-400',
-        )} data-testid="timeline-verification">
-          {failed ? <AlertCircle className="mt-0.5 h-3.5 w-3.5" /> : <CheckCircle2 className="mt-0.5 h-3.5 w-3.5" />}
-          <span>{failed ? t('timeline.verificationFailed') : t('timeline.verificationPassed', { count: item.verifications.length })}</span>
+        <section
+          className="ml-1 flex items-start gap-2 border-l border-red-500/30 pl-4 text-xs text-red-700 dark:text-red-400"
+          data-testid="timeline-verification"
+        >
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5" />
+          <span>{t('timeline.outcome.resultUnavailable')}</span>
         </section>
       );
     }

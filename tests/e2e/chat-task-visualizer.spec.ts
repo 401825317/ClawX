@@ -598,12 +598,12 @@ test.describe('ClawX chat execution graph', () => {
       const timelineError = page.getByTestId('timeline-error');
       await expect(timelineError).toBeVisible({ timeout: 30_000 });
       await expect(timelineError).toHaveAttribute('data-recoverable', 'false');
-      await expect(timelineError).toContainText('404 Resource not found');
+      await expect(timelineError).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
       await expect(page.getByTestId('timeline-error-retry')).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-step-thinking-trailing')).toHaveCount(0);
       await expect(page.getByTestId('timeline-turn-status')).toHaveCount(0);
-      await expect(page.getByText('404 Resource not found')).toHaveCount(1);
+      await expect(page.getByText('404 Resource not found')).toHaveCount(0);
 
       await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
       await page.getByTestId('timeline-execution-details').click();
@@ -615,7 +615,7 @@ test.describe('ClawX chat execution graph', () => {
       await expect(errorRow).toHaveAttribute('data-parent-id', 'agent-run');
       await page.keyboard.press('Escape');
       await expect(dialog).toHaveCount(0);
-      await expect(page.getByText('404 Resource not found')).toHaveCount(1);
+      await expect(page.getByText('404 Resource not found')).toHaveCount(0);
       await page.getByTestId('chat-composer-input').fill('retry');
       await expect(page.getByTestId('chat-composer-send')).toBeEnabled();
     } finally {

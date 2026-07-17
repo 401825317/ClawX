@@ -641,11 +641,10 @@ test.describe('structured OpenClaw task projection', () => {
       }]);
 
       await expect(subtasks).toHaveAttribute('data-status', 'error');
-      await page.getByTestId('timeline-subtasks-toggle').click();
-      const subtaskDetails = page.getByTestId('timeline-subtask-details');
-      await expect(subtaskDetails.locator(':scope > div')).toHaveCount(1);
-      await expect(subtaskDetails).toContainText('生成 1 分钟宣传片');
-      await expect(subtaskDetails).toContainText('HTTP 503');
+      await expect(subtasks).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
+      await expect(page.getByTestId('timeline-subtasks-toggle')).not.toHaveAttribute('aria-expanded');
+      await expect(page.getByTestId('timeline-subtask-details')).toHaveCount(0);
+      await expect(page.getByText('HTTP 503', { exact: false })).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
       await page.getByTestId('timeline-execution-details').click();
@@ -658,6 +657,7 @@ test.describe('structured OpenClaw task projection', () => {
       await expect(taskRow).toHaveCount(1);
       await expect(taskRow).toHaveAttribute('data-step-status', 'error');
       await expect(taskRow).toHaveAttribute('data-parent-id', 'agent-run');
+      await expect(taskRow).toContainText('HTTP 503');
       await expect(page.getByTestId('timeline-error')).toHaveCount(0);
       await page.keyboard.press('Escape');
       await expect(dialog).toHaveCount(0);
@@ -728,10 +728,10 @@ test.describe('structured OpenClaw task projection', () => {
       }]);
 
       const toolGroup = page.getByTestId('timeline-tool-group');
-      await expect(toolGroup).toHaveCount(1);
-      await expect(toolGroup).toHaveAttribute('data-status', 'error');
+      await expect(toolGroup).toHaveCount(0);
       const timelineError = page.getByTestId('timeline-error');
       await expect(timelineError).toHaveCount(1);
+      await expect(timelineError).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
       await expect(page.locator('body')).not.toContainText(commandSecret);
       await expect(page.locator('body')).not.toContainText(errorSecret);
       await expect(page.locator('body')).not.toContainText('signed-ui-secret');
@@ -835,11 +835,10 @@ test.describe('structured OpenClaw task projection', () => {
       const subtasks = page.getByTestId('timeline-subtasks');
       await expect(subtasks).toHaveCount(1);
       await expect(subtasks).toHaveAttribute('data-status', 'error');
-      await page.getByTestId('timeline-subtasks-toggle').click();
-      const subtaskDetails = page.getByTestId('timeline-subtask-details');
-      await expect(subtaskDetails.locator(':scope > div')).toHaveCount(1);
-      await expect(subtaskDetails).toContainText('生成产品视频');
-      await expect(subtaskDetails).toContainText('后台任务恢复后确认生成失败');
+      await expect(subtasks).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
+      await expect(page.getByTestId('timeline-subtasks-toggle')).not.toHaveAttribute('aria-expanded');
+      await expect(page.getByTestId('timeline-subtask-details')).toHaveCount(0);
+      await expect(page.getByText('后台任务恢复后确认生成失败', { exact: true })).toHaveCount(0);
 
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
@@ -854,6 +853,8 @@ test.describe('structured OpenClaw task projection', () => {
       await expect(taskRow).toHaveAttribute('data-step-status', 'error');
       await expect(taskRow).toHaveAttribute('data-parent-id', 'agent-run');
       await expect(taskRow).toContainText('生成产品视频');
+      await taskRow.locator('button').click();
+      await expect(taskRow).toContainText('后台任务恢复后确认生成失败');
       await page.keyboard.press('Escape');
       await expect(dialog).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
@@ -1028,7 +1029,7 @@ test.describe('structured OpenClaw task projection', () => {
       await expect(page.getByTestId('timeline-approval')).toHaveCount(1);
       await expect(page.getByTestId('timeline-approval')).toHaveAttribute('data-status', 'completed');
       await expect(page.getByTestId('timeline-artifacts')).toHaveCount(1);
-      await expect(page.getByTestId('timeline-verification')).toHaveCount(1);
+      await expect(page.getByTestId('timeline-verification')).toHaveCount(0);
       await expect(parentRow).toHaveAttribute('data-step-status', 'completed');
       await expect(childRow).toHaveAttribute('data-step-status', 'completed');
       await expect(approvalRow).toHaveCount(1);

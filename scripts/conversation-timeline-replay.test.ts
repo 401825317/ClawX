@@ -58,6 +58,34 @@ function runtime(events: ChatRuntimeEvent[]) {
   return events.map(runtimeEventToConversationEvent).filter((event): event is NonNullable<typeof event> => Boolean(event));
 }
 
+test('command exit code 42 remains diagnostic-only while other exit codes keep verification semantics', () => {
+  const normalizeCommandOutput = (exitCode: number) => normalizeGatewayChatRuntimeEvents({
+    stream: 'command_output',
+    runId: `run-command-exit-${exitCode}`,
+    sessionKey: SESSION_KEY,
+    ts: 1_700_000_000_000 + exitCode,
+    data: {
+      phase: 'end',
+      toolCallId: `tool-command-exit-${exitCode}`,
+      name: 'exec',
+      title: 'Command output',
+      output: `exit ${exitCode}`,
+      exitCode,
+    },
+  });
+
+  const passedEvents = normalizeCommandOutput(0);
+  const failedEvents = normalizeCommandOutput(1);
+  const controlledTerminationEvents = normalizeCommandOutput(42);
+
+  assert.equal(passedEvents.some((event) => event.type === 'verification.completed'), true);
+  assert.equal(failedEvents.some((event) => event.type === 'verification.completed'), true);
+  assert.equal(controlledTerminationEvents.some((event) => event.type === 'verification.completed'), false);
+  assert.equal(controlledTerminationEvents.some((event) => (
+    event.type === 'command.output' && event.exitCode === 42
+  )), true);
+});
+
 function completedHistory(sessionKey: string, revision = 'initial'): RawMessage[] {
   return [{
     role: 'user',

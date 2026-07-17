@@ -12,6 +12,8 @@ touchedAreas:
   - shared/chat-send-outbox.ts
   - shared/conversation-events.ts
   - shared/conversation-rollout.ts
+  - shared/junfeiai-endpoints.json
+  - shared/junfeiai-endpoints.ts
   - shared/chat-timeline/**
   - electron/preload/index.ts
   - electron/main/index.ts
@@ -68,6 +70,7 @@ touchedAreas:
   - scripts/chat-abort-detached-tasks.test.ts
   - scripts/chat-final-runtime-replay.test.ts
   - scripts/junfeiai-provider-seed-stability.test.ts
+  - scripts/junfeiai-distribution-defaults.test.ts
   - scripts/gateway-task-ledger-monitor.test.ts
   - scripts/runtime-display-sanitizer.test.ts
   - scripts/runtime-task-graph.test.ts
@@ -109,6 +112,7 @@ touchedAreas:
 expectedUserBehavior:
   - Each user request owns one stable turn whose commentary, tool activity, artifacts, verification, approvals, final answer, and terminal status remain correctly attributed during streaming, session switches, refresh, and restart.
   - The default information flow is a calm linear timeline: user message, concise commentary and grouped tool summaries, independently visible artifacts or approvals, and one final answer.
+  - Recovered internal tool/task failures and passed verification stay out of the default information flow; a true terminal failure renders at most one friendly outcome while raw errors and verification evidence remain in execution details.
   - Repeated low-level events for one tool call do not create repeated cards; users can expand a tool group for useful details without seeing raw transport payloads.
   - The full execution graph is no longer rendered by default in the main information flow; an accessible execution-details action remains available, while raw event and correlation diagnostics remain developer-only.
   - Streaming updates do not pull a reader back to the bottom after the reader scrolls upward, and expanding details preserves the current viewport anchor.
@@ -166,7 +170,7 @@ acceptance:
   - Event ordering, duplicate suppression, terminal-state precedence, and late-event handling are deterministic, session-scoped, idempotent, and memory-bounded.
   - A terminal final answer and terminal run lifecycle remain distinct facts: the answer may render before completion, but only authoritative lifecycle or backend-idle evidence closes the turn.
   - Timeline projection produces stable user-message, commentary, thinking, tool-group, approval, subtask, artifact, verification, final-answer, and error items without duplicating one fact across progress, graph, reasoning, and chat cards.
-  - Adjacent compatible tool calls are grouped by stable ownership and chronology; raw command output, arguments, results, duration, and errors remain lazy details rather than default top-level items.
+  - Adjacent compatible tool calls are grouped by stable ownership and chronology; raw command output, arguments, results, duration, and errors remain lazy execution details rather than default top-level items, including after live/history reconciliation.
   - The main timeline shows no default expanded execution graph; normal users retain an execution-details action and developer diagnostics retain raw events, IDs, provenance, ordering, and the complete graph.
   - Streaming assistant deltas are coalesced to at most one visible-item store commit per animation frame, and a delta does not rebuild or rerender completed turns.
   - A 500-message replay keeps the mounted turn/item DOM bounded by the viewport and overscan rather than total history size, while keyboard navigation, selection, expansion, and search targets remain usable.
@@ -450,7 +454,7 @@ Implementation review must include:
 
 Current status: Phases 1-5 are implemented. Timeline is the sole conversation renderer; the legacy page projection, shadow comparison state, renderer rollout flags, and legacy-only approval overlay have been removed after explicit product and rollback sign-off. Rollback is now a code/version revert and requires no Gateway, transcript, or persisted-conversation migration.
 
-Latest automated evidence: the required script/static/build/comms/Harness gates pass. Script suites pass `334/334` with their native runners (`288/288` TypeScript through `tsx`, `46/46` ESM through Node), including the encrypted durable-outbox security cases. The conversation reducer replay suite passes `108/108`, including real async image/video transcript shapes and sealed live-commentary reconciliation. The complete required Electron suite passes `72/72`. Public UI/IPC coverage proves same-session queue serialization, stable queued Turn identity, media-intent preservation, durable restart restoration, transcript reconciliation without duplicate commentary, authoritative abort ownership, normal reconnect convergence, and recovery when Renderer misses the intermediate stopped/reconnecting status and observes only a new running Gateway generation. Retained performance evidence verifies approximately 60 FPS, zero long tasks, one store commit per frame, zero completed-Turn rerenders, and 22 mounted rows for both 500- and 1000-message fixtures. Communication replay/compare reports zero duplicates, loss, ordering violations, or RPC timeout regression. The Harness spec validates and dry-runs against `feature/uclaw-general-agent-orchestration`.
+Latest automated evidence: the required script/static/build/comms/Harness gates pass. Script suites pass `334/334` with their native runners (`288/288` TypeScript through `tsx`, `46/46` ESM through Node), including the encrypted durable-outbox security cases. The conversation reducer replay suite passes `108/108`, including real async image/video transcript shapes and sealed live-commentary reconciliation. The complete required Electron suite passes `73/73`, including the recovered multi-tool-failure regression and ordinary-user error layering. Public UI/IPC coverage proves same-session queue serialization, stable queued Turn identity, media-intent preservation, durable restart restoration, transcript reconciliation without duplicate commentary, authoritative abort ownership, normal reconnect convergence, and recovery when Renderer misses the intermediate stopped/reconnecting status and observes only a new running Gateway generation. Retained performance evidence verifies approximately 60 FPS, zero long tasks, one store commit per frame, zero completed-Turn rerenders, and 22 mounted rows for both 500- and 1000-message fixtures. Communication replay/compare reports zero duplicates, loss, ordering violations, or RPC timeout regression. The Harness spec validates and dry-runs against `feature/uclaw-general-agent-orchestration`.
 
 The final continuation audit after the media-order fix also passes the current required boundaries: the combined TypeScript script run passes `236/236`, `uclaw-task-bridge` harness passes, TypeScript and production Vite/Electron builds pass, ESLint reports zero errors with the same six pre-existing warnings, performance evidence verifies, comms replay/compare remains zero-loss/zero-duplicate/zero-ordering-violation, and the task Harness validates and dry-runs from `origin/feature/uclaw-general-agent-orchestration`. After the last canonical-boundary repair, the focused reducer replay passes `110/110`, the canonical golden passes `4/4`, and the required Electron matrix passes `72/72` in one serial invocation against the final build. The live-frame gate records zero long tasks, at most one store commit per frame, zero completed-Turn rerenders, and bounded mounted rows for the 500-, 1000-, and single-long-Turn fixtures.
 

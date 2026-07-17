@@ -323,7 +323,11 @@ test.describe('Codex-style conversation timeline', () => {
       });
 
       await expect(sendButton).toHaveAttribute('title', /Send|发送/);
-      await expect(page.getByTestId('timeline-error')).toContainText('connection reset while the legacy recovery timer is still active');
+      const timelineError = page.getByTestId('timeline-error');
+      await expect(timelineError).toContainText(/This request was not completed|这次没有完成/u);
+      await expect(timelineError).toHaveAttribute('data-recoverable', 'true');
+      await expect(page.getByTestId('timeline-error-retry')).toBeVisible();
+      await expect(page.getByText('connection reset while the legacy recovery timer is still active')).toHaveCount(0);
       await expect(page.getByTestId('chat-run-error')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
@@ -426,10 +430,109 @@ test.describe('Codex-style conversation timeline', () => {
       }]);
 
       const timelineError = page.getByTestId('timeline-error');
-      await expect(timelineError).toContainText('Provider quota exceeded');
+      await expect(timelineError).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
       await expect(timelineError).toHaveAttribute('data-recoverable', 'false');
       await expect(page.getByTestId('timeline-error-retry')).toHaveCount(0);
+      await expect(page.getByText('Provider quota exceeded')).toHaveCount(0);
       await expect(page.getByTestId('chat-run-error')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('keeps recovered internal failures in execution details while showing one successful final answer', async ({ launchElectronApp }, testInfo) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const prompt = 'Recover from two internal failures and finish normally.';
+    const finalText = 'The requested result is ready.';
+    const history = [{
+      id: 'recovered-failures-user',
+      role: 'user',
+      content: prompt,
+      timestamp: 10_000,
+    }, {
+      id: 'recovered-exec-call-message',
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'recovered-exec-failure',
+        name: 'exec',
+        arguments: { command: 'cat /tmp/missing-input.txt' },
+      }],
+      timestamp: 10_001,
+    }, {
+      id: 'recovered-exec-result',
+      role: 'toolResult',
+      toolCallId: 'recovered-exec-failure',
+      toolName: 'exec',
+      content: 'exit code 1: missing input file',
+      isError: true,
+      timestamp: 10_002,
+    }, {
+      id: 'recovered-failures-commentary',
+      role: 'assistant',
+      content: 'Trying another route.',
+      timestamp: 10_003,
+    }, {
+      id: 'recovered-search-call-message',
+      role: 'assistant',
+      content: [{
+        type: 'toolCall',
+        id: 'recovered-search-failure',
+        name: 'web_search',
+        arguments: { query: 'fallback source' },
+      }],
+      timestamp: 10_004,
+    }, {
+      id: 'recovered-search-result',
+      role: 'toolResult',
+      toolCallId: 'recovered-search-failure',
+      toolName: 'web_search',
+      content: 'HTTP 502: upstream search unavailable',
+      isError: true,
+      timestamp: 10_005,
+    }, {
+      id: 'recovered-failures-final',
+      role: 'assistant',
+      content: finalText,
+      timestamp: 10_006,
+    }];
+
+    try {
+      await installTimelineMocks(app, history);
+      const page = await openTimeline(app);
+
+      const promptRow = page.getByTestId('conversation-turn').filter({ hasText: prompt });
+      const finalRow = page.getByTestId('conversation-turn-fragment').filter({ hasText: finalText });
+      const turnId = await promptRow.getAttribute('data-turn-id');
+      expect(turnId).toBeTruthy();
+      await expect(promptRow).toHaveAttribute('data-turn-status', 'completed');
+      await expect(finalRow).toHaveAttribute('data-turn-id', turnId!);
+      await expect(page.getByTestId('timeline-tool-group')).toHaveCount(0);
+      await expect(page.locator('body')).not.toContainText(/actions failed|项工具操作中有 \d+ 项失败/u);
+      await expect(page.getByText('exit code 1: missing input file', { exact: true })).toHaveCount(0);
+      await expect(page.getByText('HTTP 502: upstream search unavailable', { exact: true })).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+
+      const screenshotPath = testInfo.outputPath('timeline-recovered-internal-failures.png');
+      await finalRow.screenshot({ path: screenshotPath });
+      await testInfo.attach('timeline-recovered-internal-failures', {
+        path: screenshotPath,
+        contentType: 'image/png',
+      });
+
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const failedExec = dialog.getByTestId('chat-execution-step').filter({ hasText: 'missing input file' });
+      const failedSearch = dialog.getByTestId('chat-execution-step').filter({ hasText: 'upstream search unavailable' });
+      const execRow = dialog.getByTestId('chat-execution-step').filter({ hasText: 'exec' });
+      const searchRow = dialog.getByTestId('chat-execution-step').filter({ hasText: 'web_search' });
+      await execRow.locator('button').click();
+      await searchRow.locator('button').click();
+      await expect(failedExec).toHaveCount(1);
+      await expect(failedExec).toHaveAttribute('data-step-status', 'error');
+      await expect(failedSearch).toHaveCount(1);
+      await expect(failedSearch).toHaveAttribute('data-step-status', 'error');
     } finally {
       await closeElectronApp(app);
     }
@@ -981,7 +1084,7 @@ test.describe('Codex-style conversation timeline', () => {
       await expect(subtaskDetails).toContainText(/Running|执行中/);
       await expect(page.getByTestId('timeline-approval')).toContainText('Approve release publication');
       await expect(page.getByTestId('timeline-artifacts')).toContainText('timeline-release.txt');
-      await expect(page.getByTestId('timeline-verification')).toBeVisible();
+      await expect(page.getByTestId('timeline-verification')).toHaveCount(0);
 
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);

@@ -114,6 +114,11 @@
       "deny": "拒绝"
     },
     "approvalActionFailed": "提交审批决定失败",
+    "outcome": {
+      "failed": "暂时无法完成这项请求。",
+      "retryableFailure": "这次没有完成，可以重试。",
+      "resultUnavailable": "结果未能完成，请重试。"
+    },
         "verificationFailed": "必需验证未通过",
         "verificationPassed": "{{count}} 项验证已通过",
     "tools": {

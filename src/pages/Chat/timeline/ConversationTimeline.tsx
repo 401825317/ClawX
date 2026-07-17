@@ -23,7 +23,12 @@ import {
   startConversationPerformanceObservers,
 } from '@/stores/conversation/metrics';
 import type { ConversationPerformanceSnapshot } from '@/stores/conversation/metrics';
-import { isActiveTurnStatus, type TimelineItemKind } from '@/stores/conversation/types';
+import {
+  isActiveTurnStatus,
+  type ConversationTurn,
+  type TimelineItem,
+  type TimelineItemKind,
+} from '@/stores/conversation/types';
 import { ExecutionDetailsSheet } from './ExecutionDetailsSheet';
 import { TimelineItemRow } from './TimelineItemRow';
 
@@ -160,9 +165,70 @@ function createTimelineRowKeySelector(
   const segmentCache = new Map<string, {
     active: boolean;
     includeThinking: boolean;
-    itemIndex: Record<string, number>;
+    revision: number;
     rowKeys: string[];
   }>();
+
+  const sameRowKeys = (left: string[] | undefined, right: string[]): boolean => (
+    left?.length === right.length && right.every((key, index) => left[index] === key)
+  );
+
+  const isInternalFailure = (item: TimelineItem): boolean => (
+    (item.kind === 'tool-group' || item.kind === 'subtask') && item.status === 'error'
+  );
+
+  const isBlockingVerification = (item: TimelineItem): boolean => (
+    item.kind === 'verification-summary'
+    && item.verifications.some((verification) => (
+      verification.required
+      && verification.severity === 'blocking'
+      && (verification.status === 'failed' || verification.status === 'blocked')
+    ))
+  );
+
+  /** Keep internal failures diagnosable without presenting every failed attempt as a product error. */
+  const userFacingItems = (turn: ConversationTurn, includeThinking: boolean): TimelineItem[] => {
+    const candidates = includeThinking
+      ? turn.items
+      : turn.items.filter((item) => item.kind !== 'thinking');
+    const hasErrorItem = candidates.some((item) => item.kind === 'error');
+    const hasArtifactFailure = candidates.some((item) => (
+      item.kind === 'artifact-group' && (item.status === 'error' || item.status === 'blocked')
+    ));
+    const blockingVerification = candidates.find(isBlockingVerification);
+    const latestUserOutcomeAt = candidates.reduce((latestAt, item) => (
+      item.kind === 'final-answer'
+      || (item.kind === 'artifact-group' && item.status === 'completed')
+        ? Math.max(latestAt, item.updatedAt)
+        : latestAt
+    ), Number.NEGATIVE_INFINITY);
+    const unresolvedInternalFailure = candidates.find((item) => (
+      isInternalFailure(item) && item.updatedAt > latestUserOutcomeAt
+    ));
+    const terminalFailureAfterUserOutcome = unresolvedInternalFailure?.kind === 'subtask'
+      && Number.isFinite(latestUserOutcomeAt);
+    const internalFailureFallbackId = (
+      turn.status === 'error'
+      || turn.status === 'completed'
+      || terminalFailureAfterUserOutcome
+    )
+      && !hasErrorItem
+      && !hasArtifactFailure
+      && !blockingVerification
+      ? unresolvedInternalFailure?.id
+      : undefined;
+
+    return candidates.filter((item) => {
+      if (item.kind === 'verification-summary') {
+        return item.id === blockingVerification?.id
+          && turn.status === 'error'
+          && !hasErrorItem
+          && !hasArtifactFailure;
+      }
+      if (isInternalFailure(item)) return item.id === internalFailureFallbackId;
+      return true;
+    });
+  };
 
   return (state) => {
     const turnIds = state.turnOrderBySession[sessionKey] ?? [];
@@ -175,28 +241,40 @@ function createTimelineRowKeySelector(
       const includeThinking = reasoningLevel === 'on'
         || (reasoningLevel === 'stream' && active && !turn.evidence.finalMessagePresent);
       const cached = segmentCache.get(turnId);
-      const segment = cached?.itemIndex === turn.itemIndex
+      const segment = cached?.revision === turn.revision
         && cached.active === active
         && cached.includeThinking === includeThinking
         ? cached.rowKeys
         : (() => {
-            const visibleItems = includeThinking
-              ? turn.items
-              : turn.items.filter((item) => item.kind !== 'thinking');
+            const visibleItems = userFacingItems(turn, includeThinking);
+            const visibleItemIds = new Set(visibleItems.map((item) => item.id));
+            const hasHiddenExecutionEvidence = turn.items.some((item) => (
+              EXECUTION_DETAILS_ITEM_KINDS.has(item.kind) && !visibleItemIds.has(item.id)
+            ));
             const executionDetailsItemId = visibleItems.find(
               (item) => EXECUTION_DETAILS_ITEM_KINDS.has(item.kind),
-            )?.id;
-            return [
+            )?.id ?? (hasHiddenExecutionEvidence
+              ? visibleItems.find((item) => item.kind === 'final-answer')?.id
+                ?? visibleItems.find((item) => item.kind === 'commentary')?.id
+                ?? visibleItems[0]?.id
+              : undefined);
+            const nextRowKeys = [
               ...visibleItems.map((item) => timelineItemRowKey(turnId, item.id, item.id === executionDetailsItemId)),
               ...(active ? [timelineStatusRowKey(turnId)] : []),
             ];
+            return sameRowKeys(cached?.rowKeys, nextRowKeys) ? cached!.rowKeys : nextRowKeys;
           })();
       if (segment !== previousSegments[index]) changed = true;
-      if (segment !== cached?.rowKeys) {
+      if (
+        cached?.revision !== turn.revision
+        || cached.active !== active
+        || cached.includeThinking !== includeThinking
+        || segment !== cached.rowKeys
+      ) {
         segmentCache.set(turnId, {
           active,
           includeThinking,
-          itemIndex: turn.itemIndex,
+          revision: turn.revision,
           rowKeys: segment,
         });
       }

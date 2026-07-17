@@ -198,7 +198,8 @@ test.describe('Codex-style timeline approvals', () => {
       await allowOnce.focus();
       await expect(allowOnce).toBeFocused();
       await page.keyboard.press('Enter');
-      await expect(page.getByTestId('timeline-approval-error')).toContainText('temporary approval failure');
+      await expect(page.getByTestId('timeline-approval-error')).toContainText(/Could not submit approval decision|提交审批决定失败/u);
+      await expect(page.getByText('temporary approval failure', { exact: true })).toHaveCount(0);
 
       await allowOnce.focus();
       await page.keyboard.press('Enter');
@@ -310,7 +311,8 @@ test.describe('Codex-style timeline approvals', () => {
       const allowOnce = page.getByTestId('timeline-approval-allow-once');
       await expect(approval).toHaveAttribute('data-status', 'blocked');
       await allowOnce.click();
-      await expect(page.getByTestId('timeline-approval-error')).toContainText('temporary desktop approval failure');
+      await expect(page.getByTestId('timeline-approval-error')).toContainText(/Could not submit approval decision|提交审批决定失败/u);
+      await expect(page.getByText('temporary desktop approval failure', { exact: true })).toHaveCount(0);
       await expect(allowOnce).toBeVisible();
 
       await allowOnce.click();

@@ -114,6 +114,11 @@
       "deny": "Deny"
     },
     "approvalActionFailed": "Could not submit approval decision",
+    "outcome": {
+      "failed": "This request could not be completed.",
+      "retryableFailure": "This request was not completed. You can retry it.",
+      "resultUnavailable": "The result could not be completed. Please try again."
+    },
         "verificationFailed": "A required verification failed",
         "verificationPassed": "{{count}} verifications passed",
     "tools": {
