@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 const PATCH_MARKER = 'UCLAW_VIDEO_SEGMENT_DEDUPE_V2';
 const PREVIOUS_PATCH_MARKER = 'UCLAW_VIDEO_SEGMENT_DEDUPE_V1';
+const VIDEO_COPY_HINT = 'When uclaw_video_project returns nextGenerationInput or generationInput, copy that object exactly. Do not reconstruct or omit parentTaskId or segmentId.';
 
 function countOccurrences(content, search) {
   return content.split(search).length - 1;
@@ -11,6 +12,11 @@ function countOccurrences(content, search) {
 function replaceUnique(content, search, replacement, label, filePath) {
   const count = countOccurrences(content, search);
   if (count !== 1) {
+    if (count === 0) {
+      if (replacement === '' || countOccurrences(content, replacement) > 0) {
+        return content;
+      }
+    }
     throw new Error(
       `[openclaw-video-segment-dedupe-patch] Expected exactly one ${label} anchor in ${filePath}; found ${count}.`,
     );
@@ -107,31 +113,10 @@ const VIDEO_STATUS_TEXT_PATCH = `function buildVideoGenerationTaskStatusText(tas
 \t\t.replace("Do not call video_generate again for the same request;", "Do not resubmit this same logical video segment;");
 }`;
 
-const VIDEO_ACTIVE_PROMPT_ANCHOR = `function buildActiveVideoGenerationTaskPromptContextForSession(sessionKey) {
-\treturn buildActiveMediaGenerationTaskPromptContextForSession({
-\t\tsessionKey,
-\t\ttaskKind: VIDEO_GENERATION_TASK_KIND,
-\t\tsourcePrefix: VIDEO_GENERATION_SOURCE_PREFIX,
-\t\tnounLabel: "Video generation",
-\t\ttoolName: "video_generate",
-\t\tcompletionLabel: "videos"
-\t});
-}`;
+const VIDEO_ACTIVE_PROMPT_ANCHOR = `"Do not resubmit the same logical segment while it is active; use video_generate action:\\"status\\" with its parentTaskId and segmentId when checking that segment.",`;
 
-const VIDEO_ACTIVE_PROMPT_PATCH = `function buildActiveVideoGenerationTaskPromptContextForSession(sessionKey) {
-\tconst tasks = listActiveMediaGenerationTasksForSession({
-\t\tsessionKey,
-\t\ttaskKind: VIDEO_GENERATION_TASK_KIND,
-\t\tsourcePrefix: VIDEO_GENERATION_SOURCE_PREFIX
-\t});
-\tif (tasks.length === 0) return;
-\treturn [
-\t\t\`${'${tasks.length}'} active video generation ${'${tasks.length === 1 ? "task is" : "tasks are"}'} queued or running for this session.\`,
-\t\t...tasks.map((task) => \`- Task ${'${task.taskId}'} is ${'${task.status}'}${'${task.progressSummary ? `: ${task.progressSummary}` : "."}'}\`),
-\t\t"Do not resubmit the same logical segment while it is active; use video_generate action:\\\"status\\\" with its parentTaskId and segmentId when checking that segment.",
-\t\t"For an explicit long-form composition plan, continue with a small bounded batch of distinct segmentId values under the same parentTaskId, then verify and compose their outputs."
-\t].join("\\n");
-}`;
+const VIDEO_ACTIVE_PROMPT_PATCH = `"Do not resubmit the same logical segment while it is active; use video_generate action:\\"status\\" with its parentTaskId and segmentId when checking that segment.",
+\t\t"When uclaw_video_project returns nextGenerationInput or generationInput, copy that object exactly. Do not reconstruct or omit parentTaskId or segmentId.",`;
 
 const VIDEO_SCHEMA_ANCHOR = `const VideoGenerateToolProperties = {
 \taction: Type.Optional(Type.String({ description: "\\\"generate\\\" default, \\\"status\\\" active task, \\\"list\\\" providers/models." })),
@@ -151,9 +136,9 @@ const VIDEO_SCHEMA_PATCH = `const VideoGenerateToolProperties = {
 \t})),
 \tprompt: Type.Optional(Type.String({ description: "Video prompt." })),`;
 
-const VIDEO_DESCRIPTION_ANCHOR = `description: "Create videos. Session chats: background task; do not call video_generate again for same request; wait completion, then report through the current visible-reply contract with generated media attached using structured media fields. \\\"status\\\" checks active task. Duration may round to provider-supported value.",`;
+const VIDEO_DESCRIPTION_ANCHOR = `description: \`Create videos. Session chats use background tasks. Do not resubmit the same logical segment while it is queued or running; use status instead. Long-form work may call video_generate multiple times with one shared parentTaskId and a unique segmentId per shot, verify every segment, then compose the final video. If requested duration exceeds provider limits, plan enough distinct segments instead of replacing generated motion with a still-image timeline. ${'${formatActiveVideoGenerationCapabilityProfile(activeCapabilityProfile)}'}\`,`;
 
-const VIDEO_DESCRIPTION_PATCH = `description: "Create videos. Session chats use background tasks. Do not resubmit the same logical segment while it is queued or running; use status instead. Long-form work may call video_generate multiple times with one shared parentTaskId and a unique segmentId per shot, verify every segment, then compose the final video. If requested duration exceeds provider limits, plan enough distinct segments instead of replacing generated motion with a still-image timeline. Duration may round to a provider-supported value.",`;
+const VIDEO_DESCRIPTION_PATCH = `description: \`Create videos. Session chats use background tasks. Do not resubmit the same logical segment while it is queued or running; use status instead. Long-form work may call video_generate multiple times with one shared parentTaskId and a unique segmentId per shot, verify every segment, then compose the final video. When uclaw_video_project returns nextGenerationInput or generationInput, copy that object exactly. Do not reconstruct or omit parentTaskId or segmentId. If requested duration exceeds provider limits, plan enough distinct segments instead of replacing generated motion with a still-image timeline. ${'${formatActiveVideoGenerationCapabilityProfile(activeCapabilityProfile)}'}\`,`;
 
 const VIDEO_EXECUTE_HEAD_ANCHOR = `\t\texecute: async (_toolCallId, rawArgs) => {
 \t\t\tconst args = rawArgs;
@@ -288,8 +273,17 @@ export function patchOpenClawVideoSegmentDedupeContent(content, filePath = '<fix
   if (!content.includes('function createVideoGenerateTool(options)')) {
     return { content, changed: false, matched: false };
   }
-  if (content.includes(PATCH_MARKER)) {
+  if (content.includes(PATCH_MARKER) && countOccurrences(content, VIDEO_COPY_HINT) >= 2) {
     return { content, changed: false, matched: true };
+  }
+  if (content.includes(PATCH_MARKER)) {
+    let patched = content;
+    patched = replaceUnique(patched, VIDEO_ACTIVE_PROMPT_ANCHOR, VIDEO_ACTIVE_PROMPT_PATCH, 'active video prompt context', filePath);
+    patched = replaceUnique(patched, VIDEO_DESCRIPTION_ANCHOR, VIDEO_DESCRIPTION_PATCH, 'video tool description', filePath);
+    if (patched === content) {
+      return { content, changed: false, matched: true };
+    }
+    return { content: patched, changed: true, matched: true };
   }
   if (content.includes(PREVIOUS_PATCH_MARKER)) {
     let migrated = content;

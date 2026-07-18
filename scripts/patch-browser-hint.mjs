@@ -16,6 +16,7 @@ import { patchInstalledOpenClawNativeImageDeliveryRuntime } from './openclaw-nat
 import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
 import { patchInstalledOpenClawNativeMediaCompletionQueueRuntime } from './openclaw-native-media-completion-queue-patch.mjs';
 import { patchInstalledOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
+import { patchInstalledOpenClawImageModelLockRuntime } from './openclaw-image-model-lock-patch.mjs';
 import { cleanupInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchInstalledOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
 import { patchInstalledOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
@@ -30,6 +31,7 @@ import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './opencla
 import { patchInstalledOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchInstalledOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchInstalledOpenClawPluginSkillsSymlinkRuntime } from './openclaw-plugin-skills-symlink-patch.mjs';
+import { patchInstalledOpenClawSessionYieldGuardRuntime } from './openclaw-session-yield-guard-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchInstalledOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -62,8 +64,10 @@ try {
   patchInstalledOpenClawNativeMediaCancellationRuntime();
   patchInstalledOpenClawNativeMediaCompletionQueueRuntime();
   patchInstalledOpenClawManagedMediaTimeoutRuntime();
+  patchInstalledOpenClawImageModelLockRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
   cleanupInstalledOpenClawNativeMediaAcceptanceRuntime();
+  patchInstalledOpenClawSessionYieldGuardRuntime();
   patchInstalledOpenClawVideoSegmentDedupeRuntime();
   patchInstalledOpenClawVideoProviderCatalogRuntime();
   patchInstalledOpenClawVideoCapabilityContractRuntime();

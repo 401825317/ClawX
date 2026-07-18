@@ -320,6 +320,12 @@ function publicShot(project, shot, providers) {
   };
 }
 
+function pendingGenerationInputs(project, providers) {
+  return project.shots
+    .filter((shot) => shot.status === 'planned' || shot.status === 'retry_ready')
+    .map((shot) => shotGenerationInput(project, shot, providers));
+}
+
 function projectStatus(project) {
   if (project.finalization?.status === 'delivered') return 'completed';
   if (project.finalization?.status === 'assembled') return 'assembled';
@@ -359,22 +365,29 @@ function projectSummary(project) {
 }
 
 function projectResult(project, operation, providers) {
+  const pendingInputs = pendingGenerationInputs(project, providers);
   const result = {
     schema: PROJECT_SCHEMA,
     ok: true,
     operation,
+    pendingGenerationInputs: pendingInputs,
     project: {
       ...project,
       shots: project.shots.map((shot) => publicShot(project, shot, providers)),
       summary: projectSummary(project),
     },
   };
+  if (pendingInputs.length === 1) {
+    result.nextGenerationInput = pendingInputs[0];
+  }
   if (project.status === 'ready_to_compose') {
     result.next = 'Every shot is accepted. Call uclaw_video_project action:compose once to create the durable Host composition and final-QA workflow. Do not deliver a multi-shot video before that workflow reports a verified final artifact.';
   } else if (project.status === 'composing') {
     result.next = 'VideoProject composition is running or waiting for bridge delivery. Do not create another composition task; inspect this durable project state or wait for the Host completion event.';
   } else if (project.status === 'generating' || project.status === 'planned') {
-    result.next = 'Generate only planned or retry_ready shots with video_generate using each returned generationInput. Record every provider result with uclaw_video_shot.';
+    result.next = pendingInputs.length === 1
+      ? 'Generate the single pending shot with video_generate using nextGenerationInput exactly as returned. Do not reconstruct parentTaskId or segmentId manually.'
+      : 'Generate only planned or retry_ready shots with video_generate using each returned generationInput exactly as returned. Record every provider result with uclaw_video_shot.';
   } else if (project.status === 'reviewing') {
     result.next = 'Run deterministic Host QA and semantic review for produced shots. Record QA on the attempt, then accept it or mark the shot retry_ready.';
   } else {
@@ -966,7 +979,7 @@ function createTools(toolContext, options = {}) {
       name: 'uclaw_video_project',
       label: 'UClaw VideoProject',
       description: 'Create, inspect, compose, list, or finalize a durable video project. This tool never calls a video provider. After accepted multi-shot generation, action:compose creates one idempotent Host composition task and a final-QA task; only the final verified artifact is delivered.',
-      promptSnippet: 'Use uclaw_video_project for durable video state, not for provider generation. Create once per user video goal. Reuse its projectId as video_generate parentTaskId and the returned shotId as segmentId. Keep provider output and QA evidence in the project. When every multi-shot video is accepted, call action:compose exactly once and wait for its durable final-QA result before delivery.',
+      promptSnippet: 'Use uclaw_video_project for durable video state, not for provider generation. Create once per user video goal. Reuse its projectId as video_generate parentTaskId and the returned shotId as segmentId. When the project result exposes nextGenerationInput or a shot generationInput, copy that object exactly; do not reconstruct or omit parentTaskId or segmentId. Keep provider output and QA evidence in the project. When every multi-shot video is accepted, call action:compose exactly once and wait for its durable final-QA result before delivery.',
       parameters: Type.Object({
         action: Type.Union([Type.Literal('create'), Type.Literal('get'), Type.Literal('list'), Type.Literal('compose'), Type.Literal('finalize')]),
         projectId: Type.Optional(Type.String({ maxLength: 120 })),

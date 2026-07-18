@@ -16,6 +16,7 @@ assert.match(first.content, /UCLAW_VIDEO_SEGMENT_DEDUPE_V2/u);
 assert.match(first.content, /parentTaskId: Type\.Optional/u);
 assert.match(first.content, /segmentId: Type\.Optional/u);
 assert.match(first.content, /Long-form work may call video_generate multiple times/u);
+assert.match(first.content, /copy that object exactly\. Do not reconstruct or omit parentTaskId or segmentId/u);
 assert.doesNotMatch(first.content, /do not call video_generate again for same request/iu);
 
 // Legacy calls retain the existing session-wide single-flight guard.

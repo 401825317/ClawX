@@ -29,6 +29,7 @@ import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
 import { patchOpenClawNativeMediaCompletionQueueRuntime } from './openclaw-native-media-completion-queue-patch.mjs';
 import { patchOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
+import { patchOpenClawImageModelLockRuntime } from './openclaw-image-model-lock-patch.mjs';
 import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
 import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
@@ -43,6 +44,7 @@ import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-s
 import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
 import { patchOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchOpenClawPluginSkillsSymlinkRuntime } from './openclaw-plugin-skills-symlink-patch.mjs';
+import { patchOpenClawSessionYieldGuardRuntime } from './openclaw-session-yield-guard-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
 import { patchOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
@@ -1223,6 +1225,15 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${streamingRuntimePatch.patchedFiles} streaming runtime file(s)`;
   }
 
+  // --- Image model lock patch ---
+  // Keep OpenClaw's image_generate tool and provider on gpt-image-2 only.
+  const imageModelLockPatch = patchOpenClawImageModelLockRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (imageModelLockPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${imageModelLockPatch.patchedFiles} image model runtime file(s)`;
+  }
+
   // --- Final model request contract diagnostics patch ---
   // Log only non-sensitive request shape metadata at the guarded fetch entry
   // so packaged diagnostics can confirm the contract that actually left the SDK.
@@ -1309,6 +1320,13 @@ function patchBundledRuntime(outputDir) {
   // --- Segment-scoped native video idempotency patch ---
   // Keep legacy single-flight behavior for old calls while allowing an
   // explicit long-form plan to generate distinct segment ids safely.
+  const sessionYieldGuardPatch = patchOpenClawSessionYieldGuardRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (sessionYieldGuardPatch.patchedFiles > 0) {
+    echo`   馃┕ Patched ${sessionYieldGuardPatch.patchedFiles} session yield guard runtime file(s)`;
+  }
+
   const videoSegmentDedupePatch = patchOpenClawVideoSegmentDedupeRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });

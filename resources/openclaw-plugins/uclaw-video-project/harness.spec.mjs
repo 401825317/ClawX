@@ -85,6 +85,9 @@ try {
   });
   const project = created.details.project;
   const shot = project.shots[0];
+  assert.equal(created.details.pendingGenerationInputs.length, 1);
+  assert.equal(created.details.nextGenerationInput.parentTaskId, project.projectId);
+  assert.equal(created.details.nextGenerationInput.segmentId, 'shot-1');
   assert.equal(shot.generationInput.parentTaskId, project.projectId);
   assert.equal(shot.generationInput.segmentId, 'shot-1');
   assert.equal(shot.generationInput.image, '/managed/reference.png');
