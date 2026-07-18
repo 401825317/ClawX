@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils';
 const inputClasses =
   'h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-sm text-foreground/80 font-bold';
+const IMAGE_GENERATION_MODEL = 'gpt-image-2';
 
 function extractTestOutputPath(result: unknown): string | null {
   if (!result || typeof result !== 'object') return null;
@@ -43,7 +44,7 @@ export function ImageGenerationSettings() {
   const [snapshot, setSnapshot] = useState<ImageGenerationSettingsSnapshot | null>(null);
 
   const [relayBaseUrl, setRelayBaseUrl] = useState('');
-  const [relayModel, setRelayModel] = useState('gpt-image-2');
+  const [relayModel, setRelayModel] = useState(IMAGE_GENERATION_MODEL);
   const [testAgentId, setTestAgentId] = useState('');
 
   const load = useCallback(async () => {
@@ -52,7 +53,7 @@ export function ImageGenerationSettings() {
       const settings = await fetchImageGenerationSettings();
       setSnapshot(settings);
       setRelayBaseUrl(settings.openAiRelay?.baseUrl ?? '');
-      setRelayModel(settings.openAiRelay?.model || 'gpt-image-2');
+      setRelayModel(IMAGE_GENERATION_MODEL);
       setTestAgentId(settings.defaultAgentId);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -69,7 +70,6 @@ export function ImageGenerationSettings() {
     if (!snapshot) return false;
     return (
       relayBaseUrl.trim() !== (snapshot.openAiRelay?.baseUrl ?? '').trim()
-      || relayModel.trim() !== (snapshot.openAiRelay?.model ?? '').trim()
     );
   }, [snapshot, relayBaseUrl, relayModel]);
 
@@ -85,20 +85,14 @@ export function ImageGenerationSettings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      if (!relayModel.trim()) {
-        throw new Error(t('imageGeneration.errors.relayModelRequired'));
-      }
-      if (relayModel.includes('/')) {
-        throw new Error(t('imageGeneration.errors.relayModelInvalid'));
-      }
       const next = await saveImageGenerationSettings({
         openAiRelayEnabled: true,
         openAiRelayBaseUrl: relayBaseUrl.trim(),
-        openAiRelayModel: relayModel.trim(),
+        openAiRelayModel: IMAGE_GENERATION_MODEL,
       });
       setSnapshot(next);
       setRelayBaseUrl(next.openAiRelay?.baseUrl ?? '');
-      setRelayModel(next.openAiRelay?.model || 'gpt-image-2');
+      setRelayModel(IMAGE_GENERATION_MODEL);
       toast.success(t('imageGeneration.toast.saved'));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -113,7 +107,7 @@ export function ImageGenerationSettings() {
       const next = await clearImageGenerationSettings();
       setSnapshot(next);
       setRelayBaseUrl('');
-      setRelayModel('gpt-image-2');
+      setRelayModel(IMAGE_GENERATION_MODEL);
       setClearConfirmOpen(false);
       toast.success(t('imageGeneration.toast.cleared'));
     } catch (error) {
@@ -224,8 +218,8 @@ export function ImageGenerationSettings() {
                   <Input
                     id="image-gen-relay-model"
                     value={relayModel}
-                    onChange={(e) => setRelayModel(e.target.value)}
-                    placeholder="gpt-image-2"
+                    readOnly
+                    placeholder={IMAGE_GENERATION_MODEL}
                     className={inputClasses}
                     data-testid="image-generation-relay-model"
                   />

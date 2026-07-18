@@ -103,7 +103,7 @@
             "apiKeyInherited": "現在のアカウントから継承",
             "apiKeyInheritedHelp": "画像生成は現在サインイン中のアカウントの認証を再利用します。ここで別途 API キーを入力する必要はありません。",
             "model": "モデル名",
-            "modelHint": "gpt-image-2 のようなモデル ID のみを入力してください。provider/model は入力しないでください。"
+            "modelHint": "画像生成モデルは gpt-image-2 に固定されています。"
         },
         "errors": {
             "invalidTimeout": "タイムアウトは正の数である必要があります",

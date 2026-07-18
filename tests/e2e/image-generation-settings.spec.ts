@@ -36,9 +36,11 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('image-generation-save')).toBeVisible();
     await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('https://zz-cn.lingzhiwuxian.com/v1');
     await expect(page.getByTestId('image-generation-relay-base-url')).toHaveAttribute('readonly', '');
+    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-2');
+    await expect(page.getByTestId('image-generation-relay-model')).toHaveAttribute('readonly', '');
   });
 
-  test('configures the managed image model while keeping its endpoint fixed', async ({ page }) => {
+  test('locks the managed image model while keeping its endpoint fixed', async ({ page }) => {
     await expect(page.getByTestId('setup-page')).toBeVisible();
     await page.getByTestId('setup-skip-button').click();
 
@@ -49,11 +51,11 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('image-generation-settings')).toBeVisible();
     await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('https://zz-cn.lingzhiwuxian.com/v1');
     await expect(page.getByTestId('image-generation-relay-base-url')).toHaveAttribute('readonly', '');
-    await page.getByTestId('image-generation-relay-model').fill('gpt-image-2-e2e');
+    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-2');
+    await expect(page.getByTestId('image-generation-relay-model')).toHaveAttribute('readonly', '');
     await expect(page.getByTestId('image-generation-relay-api-key')).toHaveAttribute('readonly', '');
 
-    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-2-e2e');
-    await expect(page.getByTestId('image-generation-save')).toBeEnabled();
+    await expect(page.getByTestId('image-generation-save')).toBeDisabled();
   });
 
   test('shows configured image API key like custom language model keys', async ({ electronApp, page }) => {

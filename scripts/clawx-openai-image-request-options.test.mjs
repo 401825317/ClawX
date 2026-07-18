@@ -126,6 +126,23 @@ test('generation forwards OpenAI image options and labels JPEG base64 output cor
   }
 });
 
+test('generation ignores non-default image model overrides', async () => {
+  const upstream = await listenCaptureServer({ data: [] });
+  try {
+    const provider = await loadProvider();
+    await provider.generateImage({
+      cfg: providerConfig(upstream.baseUrl),
+      prompt: 'locked model request',
+      model: 'legacy-image-model',
+    });
+
+    assert.equal(upstream.requests.length, 1);
+    assert.equal(JSON.parse(upstream.requests[0].body.toString('utf8')).model, 'gpt-image-2');
+  } finally {
+    await upstream.close();
+  }
+});
+
 test('editing forwards OpenAI image options as multipart fields', async () => {
   const upstream = await listenCaptureServer({
     data: [{

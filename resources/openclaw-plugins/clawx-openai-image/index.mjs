@@ -560,7 +560,7 @@ function buildProvider() {
       const editImages = mode === 'edit' ? resolveEditInputImages(inputImages) : [];
       const providerConfig = resolveProviderConfig(req);
       const apiKey = resolveApiKey(req, providerConfig);
-      const model = String(req.model || DEFAULT_MODEL).split('/').pop() || DEFAULT_MODEL;
+      const model = DEFAULT_MODEL;
       const count = resolveCount(req);
       const baseUrl = normalizeRelayBaseUrl(providerConfig.baseUrl, DEFAULT_BASE_URL);
       const outputOptions = resolveOpenAIImageOptions(req);

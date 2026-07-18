@@ -103,7 +103,7 @@
             "apiKeyInherited": "跟随当前登录账号",
             "apiKeyInheritedHelp": "图像生成默认复用当前登录账号的鉴权，不需要单独填写 API Key。",
             "model": "模型名",
-            "modelHint": "只填写模型 ID，例如 gpt-image-2；不要填写 provider/model。"
+            "modelHint": "图片模型固定为 gpt-image-2。"
         },
         "errors": {
             "invalidTimeout": "超时必须为正数",

@@ -22,6 +22,7 @@ import {
 import { OPENAI_CODEX_RUNTIME_PROVIDER_KEY } from './provider-keys';
 import {
   CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
+  CLAWX_OPENAI_IMAGE_DEFAULT_REF,
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
 import { getJunFeiAIDefaultBaseUrl, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
@@ -133,26 +134,11 @@ function normalizeModelRef(raw: unknown): string | null {
   return null;
 }
 
-function extractImageModelId(raw: string | null | undefined, fallbackModel: string): string {
-  const fallback = fallbackModel.includes('/')
-    ? fallbackModel.slice(fallbackModel.indexOf('/') + 1).trim()
-    : fallbackModel.trim();
-  const candidate = raw?.trim();
-  if (!candidate) {
-    return fallback || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
-  }
-  const slash = candidate.indexOf('/');
-  if (slash > 0 && slash < candidate.length - 1) {
-    return candidate.slice(slash + 1).trim() || fallback || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
-  }
-  return candidate || fallback || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
-}
-
 export function toManagedOpenAiImageModelRef(
-  raw: string | null | undefined,
-  fallbackModel = CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
+  _raw: string | null | undefined,
+  _fallbackModel = CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
 ): string {
-  return `${CLAWX_OPENAI_IMAGE_PROVIDER_KEY}/${extractImageModelId(raw, fallbackModel)}`;
+  return CLAWX_OPENAI_IMAGE_DEFAULT_REF;
 }
 
 export function resolveChatImageTimeoutMs(_timeoutMs: number | null | undefined): number {
@@ -184,9 +170,15 @@ async function loadInputImages(
 }
 
 function parseImageGenerationModelConfig(raw: unknown): ImageGenerationModelConfig {
+  const normalizeConfig = (config: ImageGenerationModelConfig): ImageGenerationModelConfig => ({
+    primary: config.primary ? CLAWX_OPENAI_IMAGE_DEFAULT_REF : null,
+    fallbacks: [],
+    timeoutMs: config.timeoutMs,
+  });
+
   if (typeof raw === 'string') {
     const primary = normalizeModelRef(raw);
-    return { primary, fallbacks: [], timeoutMs: null };
+    return normalizeConfig({ primary, fallbacks: [], timeoutMs: null });
   }
 
   if (!isRecord(raw)) {
@@ -203,7 +195,7 @@ function parseImageGenerationModelConfig(raw: unknown): ImageGenerationModelConf
   const timeoutMs = typeof raw.timeoutMs === 'number' && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0
     ? Math.floor(raw.timeoutMs)
     : null;
-  return { primary, fallbacks: [...new Set(fallbacks)], timeoutMs };
+  return normalizeConfig({ primary, fallbacks: [...new Set(fallbacks)], timeoutMs });
 }
 
 function buildImageGenerationModelConfigWrite(
@@ -275,14 +267,6 @@ export async function readImageGenerationConfig(): Promise<ImageGenerationModelC
 export async function setImageGenerationConfig(
   next: ImageGenerationModelConfig,
 ): Promise<ImageGenerationModelConfig> {
-  if (next.primary && !isValidImageModelRef(next.primary)) {
-    throw new Error('primary must be in "provider/model" format');
-  }
-  for (const fallback of next.fallbacks) {
-    if (!isValidImageModelRef(fallback)) {
-      throw new Error(`Invalid fallback model ref "${fallback}"`);
-    }
-  }
   return withConfigLock(async () => {
     const config = await readOpenClawConfig();
     const agents = (config.agents && typeof config.agents === 'object'
@@ -293,8 +277,8 @@ export async function setImageGenerationConfig(
       : {}) as Record<string, unknown>;
 
     const writeValue = buildImageGenerationModelConfigWrite({
-      primary: next.primary,
-      fallbacks: [...new Set(next.fallbacks.map((ref) => ref.trim()).filter(Boolean))],
+      primary: next.primary ? CLAWX_OPENAI_IMAGE_DEFAULT_REF : null,
+      fallbacks: [],
       timeoutMs: IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS,
     });
 
@@ -344,51 +328,11 @@ async function buildAgentAuthRows(
   return rows;
 }
 
-function extractModelIdFromProviderEntry(provider: unknown): string | null {
-  if (!provider || typeof provider !== 'object') {
-    return null;
-  }
-  const models = (provider as Record<string, unknown>).models;
-  if (!Array.isArray(models)) {
-    return null;
-  }
-  for (const model of models) {
-    if (typeof model === 'string' && model.trim()) {
-      return model.trim();
-    }
-    if (model && typeof model === 'object') {
-      const id = (model as Record<string, unknown>).id;
-      if (typeof id === 'string' && id.trim()) {
-        return id.trim();
-      }
-    }
-  }
-  return null;
-}
-
 function resolveOpenAiImageRelayModelId(
-  config: ImageGenerationModelConfig,
-  openclawConfig: Record<string, unknown>,
+  _config: ImageGenerationModelConfig,
+  _openclawConfig: Record<string, unknown>,
 ): string {
-  const primary = config.primary?.trim();
-  if (primary) {
-    const slash = primary.indexOf('/');
-    if (slash > 0 && slash < primary.length - 1) {
-      const provider = primary.slice(0, slash).toLowerCase();
-      if (provider === CLAWX_OPENAI_IMAGE_PROVIDER_KEY || provider === 'openai') {
-        return primary.slice(slash + 1).trim() || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
-      }
-    }
-  }
-
-  const models = openclawConfig.models;
-  const providers = models && typeof models === 'object'
-    ? (models as Record<string, unknown>).providers
-    : null;
-  const providerEntry = providers && typeof providers === 'object'
-    ? (providers as Record<string, unknown>)[CLAWX_OPENAI_IMAGE_PROVIDER_KEY]
-    : null;
-  return extractModelIdFromProviderEntry(providerEntry) ?? CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
+  return CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
 }
 
 export async function getImageGenerationSettingsSnapshot(): Promise<ImageGenerationSettingsSnapshot> {
@@ -432,22 +376,12 @@ export async function applyOpenAiImageRelaySettings(params: {
   apiKey?: string;
   model?: string | null;
 }): Promise<void> {
-  const imageModelIds: string[] = [];
-  const explicitModel = params.model?.trim();
-  if (explicitModel) {
-    const slash = explicitModel.indexOf('/');
-    imageModelIds.push(slash > 0 ? explicitModel.slice(slash + 1).trim() : explicitModel);
-  }
-  if (imageModelIds.length === 0) {
-    imageModelIds.push(CLAWX_OPENAI_IMAGE_DEFAULT_MODEL);
-  }
-
   const managedDefaults = await getManagedImageRelayDefaults();
   await syncOpenAiCompatibleImageRelay({
     enabled: params.enabled,
     baseUrl: params.enabled ? ((params.baseUrl ?? '').trim() || managedDefaults.baseUrl) : null,
     apiKey: params.apiKey?.trim() || managedDefaults.apiKey || undefined,
-    imageModelIds,
+    imageModelIds: [CLAWX_OPENAI_IMAGE_DEFAULT_MODEL],
   });
   if (params.enabled) {
     ensureClawXOpenAiImagePluginInstalled();
@@ -482,11 +416,7 @@ export async function runImageGenerationTest(params: {
     throw new Error(`Agent "${agentId}" not found`);
   }
 
-  const config = await readImageGenerationConfig();
-  const model = params.model?.trim() || config.primary;
-  if (!model) {
-    throw new Error('No image generation model configured. Set a primary model first.');
-  }
+  const model = CLAWX_OPENAI_IMAGE_DEFAULT_REF;
 
   const providerKey = parseProviderFromModelRef(model);
   if (!providerKey) {
@@ -550,8 +480,8 @@ export async function ensureManagedOpenAiImageRelay(
     return;
   }
   const current = await getImageGenerationSettingsSnapshot();
-  const model = current.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
-  const managedModelRef = toManagedOpenAiImageModelRef(model);
+  const model = CLAWX_OPENAI_IMAGE_DEFAULT_MODEL;
+  const managedModelRef = CLAWX_OPENAI_IMAGE_DEFAULT_REF;
   const timeoutMs = IMAGE_GEN_CHAT_DEFAULT_TIMEOUT_MS;
   const relayState = readOpenAiCompatibleImageRelayState(config as Record<string, unknown>);
   const relayModel = resolveOpenAiImageRelayModelId(current.config, config as Record<string, unknown>);
@@ -606,12 +536,8 @@ export async function generateImageForChatSession(params: {
   }
 
   const config = await readOpenClawConfig();
-  const requestedModel = params.model?.trim();
-  const current = requestedModel ? null : await getImageGenerationSettingsSnapshot();
-  const configuredModel = toManagedOpenAiImageModelRef(
-    requestedModel || current?.config.primary || current?.openAiRelay.model,
-    current?.openAiRelay.model || CLAWX_OPENAI_IMAGE_DEFAULT_MODEL,
-  );
+  const current = await getImageGenerationSettingsSnapshot();
+  const configuredModel = CLAWX_OPENAI_IMAGE_DEFAULT_REF;
   const inputImageRefs = normalizeInputImageRefs(params.inputImages);
   const loadedInputImages = await loadInputImages(inputImageRefs);
 

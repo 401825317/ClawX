@@ -103,7 +103,7 @@
             "apiKeyInherited": "Inherited from current account",
             "apiKeyInheritedHelp": "Image generation reuses the current signed-in account's authentication. No separate API key is required here.",
             "model": "Model name",
-            "modelHint": "Enter only the model id, for example gpt-image-2. Do not include provider/model."
+            "modelHint": "Image generation is fixed to gpt-image-2."
         },
         "errors": {
             "invalidTimeout": "Timeout must be a positive number",
