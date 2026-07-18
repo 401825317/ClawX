@@ -37,6 +37,8 @@ import {
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
   getJunFeiAIOrigin,
@@ -80,18 +82,45 @@ function normalizeBaseUrl(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
 }
 
-function getOpenAiRuntimeProvider(data: Record<string, unknown>): Record<string, unknown> | null {
+function getRuntimeProvider(data: Record<string, unknown>, providerKey: string): Record<string, unknown> | null {
   const models = isRecord(data.models) ? data.models : {};
   const providers = isRecord(models.providers) ? models.providers : {};
-  return isRecord(providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID])
-    ? providers[JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID]
+  return isRecord(providers[providerKey])
+    ? providers[providerKey]
     : null;
+}
+
+function getOpenAiRuntimeProvider(data: Record<string, unknown>): Record<string, unknown> | null {
+  return getRuntimeProvider(data, JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
 }
 
 export function isManagedOpenAiRuntimeForMigration(value: unknown): boolean {
   return isRecord(value)
     && value.api === JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL
     && normalizeBaseUrl(value.baseUrl) === normalizeBaseUrl(getJunFeiAIProviderBaseUrl());
+}
+
+/** Validate the configured fallback Provider written beside managed OpenAI. */
+export function isManagedTextFailoverRuntimeForMigration(data: Record<string, unknown>): boolean {
+  if (!JUNFEIAI_OPENCLAW_TEXT_FAILOVER.enabled) {
+    return true;
+  }
+
+  const fallback = getRuntimeProvider(data, JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackProvider);
+  const models = fallback && Array.isArray(fallback.models) ? fallback.models : [];
+  const agents = isRecord(data.agents) ? data.agents : {};
+  const defaults = isRecord(agents.defaults) ? agents.defaults : {};
+  const modelConfig = isRecord(defaults.model) ? defaults.model : {};
+  const fallbacks = Array.isArray(modelConfig.fallbacks) ? modelConfig.fallbacks : [];
+
+  return Boolean(
+    fallback
+    && fallback.api === JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackApiProtocol
+    && normalizeBaseUrl(fallback.baseUrl) === normalizeBaseUrl(getJunFeiAIProviderBaseUrl())
+    && models.some((model) => isRecord(model) && model.id === JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackModel)
+    && fallbacks.length === 1
+    && fallbacks[0] === JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF
+  );
 }
 
 export function isManagedOpenAiAccountForMigration(account: ProviderAccount | null): boolean {
@@ -351,6 +380,8 @@ export async function isManagedOpenAiChatMigrated(): Promise<boolean> {
   if (store.get(MIGRATION_FLAG_KEY) !== true) return false;
   const account = await getProviderAccount(JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID);
   if (!isManagedOpenAiAccountForMigration(account)) return false;
+  const accountMetadata = isRecord(account.metadata) ? account.metadata : {};
+  if (accountMetadata.managedRuntimeContractVersion !== JUNFEIAI_RUNTIME_CONTRACT_VERSION) return false;
 
   const document = await readJsonStrict(getOpenClawConfigPath(), true);
   const runtimeOpenAi = document ? getOpenAiRuntimeProvider(document.data) : null;
@@ -359,6 +390,7 @@ export async function isManagedOpenAiChatMigrated(): Promise<boolean> {
   const model = isRecord(defaults.model) ? defaults.model : {};
   return Boolean(
     isManagedOpenAiRuntimeForMigration(runtimeOpenAi)
+    && isManagedTextFailoverRuntimeForMigration(document.data)
     && typeof model.primary === 'string'
     && model.primary.startsWith(`${JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID}/`),
   );

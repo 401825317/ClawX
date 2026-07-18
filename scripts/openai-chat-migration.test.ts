@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   isManagedOpenAiAccountForMigration,
   isManagedOpenAiRuntimeForMigration,
+  isManagedTextFailoverRuntimeForMigration,
   rewriteManagedChatModelRefsForMigration,
 } from '../electron/services/providers/openai-chat-migration';
 
@@ -75,5 +76,39 @@ test('recognizes only the managed Responses runtime provider', () => {
   assert.equal(isManagedOpenAiRuntimeForMigration({
     baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
     api: 'openai-completions',
+  }), false);
+});
+
+test('requires the managed text fallback to reuse the relay with Chat Completions', () => {
+  const managedRuntime = {
+    models: {
+      providers: {
+        deepseek: {
+          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          api: 'openai-completions',
+          models: [{ id: 'deepseek-v4-pro', name: 'deepseek-v4-pro' }],
+        },
+      },
+    },
+    agents: {
+      defaults: {
+        model: {
+          fallbacks: ['deepseek/deepseek-v4-pro'],
+        },
+      },
+    },
+  };
+
+  assert.equal(isManagedTextFailoverRuntimeForMigration(managedRuntime), true);
+  assert.equal(isManagedTextFailoverRuntimeForMigration({
+    ...managedRuntime,
+    models: {
+      providers: {
+        deepseek: {
+          ...managedRuntime.models.providers.deepseek,
+          api: 'openai-responses',
+        },
+      },
+    },
   }), false);
 });

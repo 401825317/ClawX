@@ -69,6 +69,7 @@ import {
   JUNFEIAI_OPENCLAW_EXEC_SECURITY,
   JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
   JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
   JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
@@ -2595,6 +2596,47 @@ export async function syncOpenAiProviderToManagedRelay(params: {
   }
 }
 
+/**
+ * Register the request-scoped text fallback on the same managed relay as
+ * OpenAI while preserving the fallback Provider's own transport protocol.
+ */
+export async function syncManagedTextFailoverProviderToOpenClaw(params: {
+  baseUrl: string;
+  apiKey?: string;
+}): Promise<void> {
+  if (!JUNFEIAI_OPENCLAW_TEXT_FAILOVER.enabled) {
+    return;
+  }
+
+  const baseUrl = normalizeOpenAiRelayBaseUrl(params.baseUrl);
+  const trimmedApiKey = params.apiKey?.trim();
+  const {
+    fallbackProvider,
+    fallbackModel,
+    fallbackApiProtocol,
+  } = JUNFEIAI_OPENCLAW_TEXT_FAILOVER;
+
+  await withConfigLock(async () => {
+    const config = await readOpenClawJson();
+    upsertOpenClawProviderEntry(config, fallbackProvider, {
+      baseUrl,
+      api: fallbackApiProtocol,
+      apiKey: trimmedApiKey ?? null,
+      timeoutSeconds: JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
+      request: { allowPrivateNetwork: true },
+      modelIds: [fallbackModel],
+      replaceExistingProvider: true,
+    });
+    await writeOpenClawJson(config);
+  });
+
+  if (trimmedApiKey) {
+    await saveProviderKeyToOpenClaw(fallbackProvider, trimmedApiKey);
+  } else {
+    await removeProviderKeyFromOpenClaw(fallbackProvider);
+  }
+}
+
 function readModelsProvider(config: Record<string, unknown>, providerKey: string): Record<string, unknown> | null {
   const models = config.models;
   if (!models || typeof models !== 'object') {
@@ -3523,7 +3565,7 @@ type AgentModelProviderEntry = {
     maxTokens?: number;
     [key: string]: unknown;
   }>;
-  apiKey?: string;
+  apiKey?: string | null;
   /** When true, pi-ai sends Authorization: Bearer instead of x-api-key */
   authHeader?: boolean;
   timeoutSeconds?: number;

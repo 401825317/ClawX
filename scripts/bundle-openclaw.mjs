@@ -35,7 +35,7 @@ import { patchOpenClawPluginToolRunContextRuntime } from './openclaw-plugin-tool
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
-import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
+import { patchOpenClawTextProviderFailoverRuntime } from './openclaw-text-provider-failover-patch.mjs';
 import { patchOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
@@ -1128,14 +1128,14 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
   }
 
-  // --- Native Responses compatibility fallback ---
-  // A managed relay that does not expose /responses may retry once through
-  // Chat Completions, but only before any response output has started.
-  const responsesFallbackPatch = patchOpenClawResponsesCompatibleFallbackRuntime(distDir, {
+  // --- Request-scoped text Provider failover ---
+  // Reuse OpenClaw's native failover safety while keeping the configured
+  // fallback ephemeral so every new model call starts from the primary.
+  const textProviderFailoverPatch = patchOpenClawTextProviderFailoverRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
-  if (responsesFallbackPatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${responsesFallbackPatch.patchedFiles} Responses fallback runtime file(s)`;
+  if (textProviderFailoverPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${textProviderFailoverPatch.patchedFiles} text Provider failover runtime file(s)`;
   }
 
   // --- Thinking effort vs reasoning visibility prompt patch ---

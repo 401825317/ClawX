@@ -22,7 +22,7 @@ touchedAreas:
   - electron/gateway/reload-policy.ts
   - shared/junfeiai-endpoints.json
   - shared/junfeiai-endpoints.ts
-  - scripts/openclaw-responses-compatible-fallback-patch.mjs
+  - scripts/openclaw-text-provider-failover-patch.mjs
   - scripts/junfeiai-distribution-defaults.test.ts
   - scripts/junfeiai-reasoning-defaults.test.ts
   - scripts/managed-runtime-bootstrap.test.ts
@@ -60,7 +60,7 @@ expectedUserBehavior:
   - Taking over `openai` replaces its account metadata, secret, runtime endpoint, headers, and model registry with the signed-in Relay configuration; malformed JSON, model-reference key collisions, and failed writes still stop the migration.
   - Managed image and video providers, plugins, authentication, and default models are ready before the first native Agent turn instead of depending on a prior settings-page save or media request.
   - Image, video, PPT, desktop, and long-task execution continue through the current unified OpenClaw Agent and Host Task paths; the migration does not restore renderer-owned media planners.
-  - If the managed relay returns HTTP 404 before a Responses stream starts, the same Agent turn retries once through Chat Completions. No retry occurs after output starts, after cancellation, or for other errors.
+  - If managed OpenAI fails before visible output or tool side effects, only the current model call retries through the configured fallback Provider. The next call starts from OpenAI again.
 acceptance:
 - The migration creates or updates the managed `openai` account with the JunFeiAI relay base URL and `openai-responses`, then rewrites only `lingzhiwuxian/*` model references in OpenClaw config, agent model files, and session indexes.
 - In the managed distribution, an existing non-managed `openai` account or runtime entry is replaced rather than treated as an ownership conflict; non-managed distributions retain the conflict guard.
@@ -71,7 +71,7 @@ acceptance:
   - Managed startup runs the migration and media bootstrap idempotently before Gateway auto-start when authentication and the relay token are ready.
   - OpenClaw config writers atomically replace complete JSON documents, and readers retry a transient parse failure instead of treating a partial file as an empty configuration.
   - Gateway auto-start reuses an already completed managed-provider preflight result instead of immediately running a second equivalent runtime sync.
-  - Legacy `lingzhiwuxian` remains a Chat Completions compatibility provider, while managed `openai` remains the only native Responses provider and the only provider eligible for the narrow 404 fallback.
+  - Legacy `lingzhiwuxian` remains available for migration compatibility, while managed `openai` remains the primary Responses provider and uses the centrally configured cross-Provider fallback.
   - The managed runtime contract version changes when the shipped protocol or context defaults change, forcing existing persisted accounts to resync.
   - A clean state receives `clawx-openai-image/gpt-image-2`, the managed OpenAI video models, disabled automatic media-provider fallback, and the required plugin registrations without a manual settings action.
   - Automatic bootstrap repairs missing or UClaw-managed media defaults but does not replace an explicitly selected third-party image or video provider, and relay credential rotation refreshes the managed image provider key.
@@ -100,6 +100,7 @@ docs:
 - Non-managed distributions keep the personal `openai` conflict guard and do
   not run the managed bootstrap automatically.
 - Migrated `openai/*` accounts always start with Responses. The runtime fallback
-  is a narrow availability fallback, not a persisted protocol downgrade.
+  uses the configured Provider's own protocol for one model call and is never
+  persisted as a session model downgrade.
 - Older packaged clients are unaffected because the server endpoint and legacy
   provider contract remain available.

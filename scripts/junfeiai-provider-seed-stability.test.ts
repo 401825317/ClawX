@@ -8,6 +8,7 @@ import {
   shouldSyncJunFeiAIRuntime,
   type JunFeiAIBootstrapPayload,
 } from '../electron/services/junfeiai/junfeiai-service.ts';
+import { JUNFEIAI_RUNTIME_CONTRACT_VERSION } from '../electron/utils/junfeiai-distribution.ts';
 
 const bootstrap: JunFeiAIBootstrapPayload = {
   service: {
@@ -29,7 +30,10 @@ const bootstrap: JunFeiAIBootstrapPayload = {
   },
 };
 
-function existingAccount(isDefault: boolean): ProviderAccount {
+function existingAccount(
+  isDefault: boolean,
+  runtimeContractVersion = JUNFEIAI_RUNTIME_CONTRACT_VERSION,
+): ProviderAccount {
   return {
     id: 'lingzhiwuxian',
     vendorId: 'lingzhiwuxian',
@@ -45,7 +49,7 @@ function existingAccount(isDefault: boolean): ProviderAccount {
       resourceUrl: 'https://zz-cn.lingzhiwuxian.com',
       managedDefaultModel: 'smart-latest',
       managedAllowedModels: ['smart-latest'],
-      managedRuntimeContractVersion: 4,
+      managedRuntimeContractVersion: runtimeContractVersion,
     },
     createdAt: '2026-07-10T00:00:00.000Z',
     updatedAt: '2026-07-15T00:00:00.000Z',
@@ -58,6 +62,13 @@ test('managed status refresh preserves the migrated OpenAI default ownership', (
 
   assert.equal(rebuilt.isDefault, false);
   assert.equal(hasJunFeiAIProviderAccountChanged(existing, rebuilt), false);
+});
+
+test('an older managed runtime contract triggers a provider resync', () => {
+  const existing = existingAccount(false, JUNFEIAI_RUNTIME_CONTRACT_VERSION - 1);
+  const rebuilt = buildJunFeiAIProviderAccount(bootstrap, existing);
+
+  assert.equal(hasJunFeiAIProviderAccountChanged(existing, rebuilt), true);
 });
 
 test('the first managed provider seed remains default before migration', () => {

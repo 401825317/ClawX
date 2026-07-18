@@ -13,6 +13,8 @@ import {
   JUNFEIAI_OPENCLAW_EXEC_SECURITY,
   JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
   JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,
   JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
   JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS,
@@ -31,6 +33,11 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
   assert.equal(JUNFEIAI_DEFAULT_THINKING_LEVEL, endpoints.defaultThinkingLevel);
   assert.equal(JUNFEIAI_OPENCLAW_EXEC_SECURITY, endpoints.openClawExec.security);
   assert.equal(JUNFEIAI_OPENCLAW_EXEC_ASK, endpoints.openClawExec.ask);
+  assert.deepEqual(JUNFEIAI_OPENCLAW_TEXT_FAILOVER, endpoints.openClawTextFailover);
+  assert.equal(
+    JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,
+    `${endpoints.openClawTextFailover.fallbackProvider}/${endpoints.openClawTextFailover.fallbackModel}`,
+  );
   assert.equal(
     JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
     endpoints.openClawCompaction.midTurnPrecheck.enabled,
@@ -51,7 +58,7 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
     JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS,
     endpoints.mediaGenerationClientTimeoutBufferMs,
   );
-  assert.equal(JUNFEIAI_RUNTIME_CONTRACT_VERSION, 4);
+  assert.equal(JUNFEIAI_RUNTIME_CONTRACT_VERSION, 5);
 });
 
 test('applies endpoint-configured OpenClaw exec defaults without dropping adjacent settings', () => {

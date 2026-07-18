@@ -14,6 +14,7 @@ import {
   saveProviderKeyToOpenClaw,
   setOpenClawDefaultModel,
   setOpenClawDefaultModelWithOverride,
+  syncManagedTextFailoverProviderToOpenClaw,
   syncOpenAiProviderToManagedRelay,
   syncProviderConfigToOpenClaw,
   updateAgentModelProvider,
@@ -32,6 +33,8 @@ import {
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
   getJunFeiAIProviderBaseUrl,
@@ -118,6 +121,18 @@ function isManagedOpenAiChatConfig(config: ProviderConfig): boolean {
 
 function isManagedRelayTextConfig(config: ProviderConfig): boolean {
   return config.type === JUNFEIAI_PROVIDER_ID || isManagedOpenAiChatConfig(config);
+}
+
+/** Return true only for the managed primary Provider owned by this failover policy. */
+function isManagedTextFailoverPrimary(
+  config: ProviderConfig,
+  runtimeProviderKey: string,
+): boolean {
+  return Boolean(
+    JUNFEIAI_OPENCLAW_TEXT_FAILOVER.enabled
+    && isManagedOpenAiChatConfig(config)
+    && runtimeProviderKey === JUNFEIAI_OPENCLAW_TEXT_FAILOVER.primaryProvider
+  );
 }
 
 function getRuntimeApiKeyEnv(config: ProviderConfig, apiKeyEnv?: string): string | undefined {
@@ -279,6 +294,17 @@ export function getProviderModelRef(config: ProviderConfig): string | undefined 
   return defaultModel.startsWith(`${providerKey}/`)
     ? defaultModel
     : `${providerKey}/${defaultModel}`;
+}
+
+/** Managed OpenAI uses exactly one centrally configured cross-Provider fallback. */
+async function resolveProviderFallbackModelRefs(
+  config: ProviderConfig,
+  runtimeProviderKey: string,
+): Promise<string[]> {
+  if (isManagedTextFailoverPrimary(config, runtimeProviderKey)) {
+    return [JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF];
+  }
+  return getProviderFallbackModelRefs(config);
 }
 
 export async function getProviderFallbackModelRefs(config: ProviderConfig): Promise<string[]> {
@@ -513,6 +539,7 @@ async function syncRuntimeProviderConfig(
       modelIds: [normalizeRuntimeModelId(config, config.model)].filter((model): model is string => Boolean(model)),
       replaceExistingProvider: options?.replaceManagedOpenAiRuntime,
     });
+    await syncManagedTextFailoverRuntime(config, accountApiKey);
     return;
   }
   await syncProviderConfigToOpenClaw(context.runtimeProviderKey, normalizeRuntimeModelId(config, config.model), {
@@ -750,6 +777,43 @@ async function syncManagedRelayAgentModelsAcrossDiscoveredAgents(
   }, { createIfMissing: false });
 }
 
+/**
+ * Mirror the managed OpenAI endpoint and credential into the configured text
+ * fallback Provider while preserving its own model and API protocol.
+ */
+async function syncManagedTextFailoverRuntime(
+  config: ProviderConfig,
+  apiKey: string | null | undefined,
+): Promise<void> {
+  const runtimeProviderKey = getOpenClawProviderKey(config.type, config.id);
+  if (!isManagedTextFailoverPrimary(config, runtimeProviderKey)) {
+    return;
+  }
+
+  const meta = getProviderConfig(config.type);
+  const baseUrl = normalizeProviderBaseUrl(
+    config,
+    config.baseUrl || meta?.baseUrl,
+    config.apiProtocol || meta?.api,
+  );
+  if (!baseUrl) {
+    return;
+  }
+
+  const managedApiKey = apiKey?.trim() || undefined;
+  await syncManagedTextFailoverProviderToOpenClaw({
+    baseUrl,
+    apiKey: managedApiKey,
+  });
+  await updateAgentModelProvider(JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackProvider, {
+    baseUrl,
+    api: JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackApiProtocol,
+    models: [piAiModelsJsonModelEntry(JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackModel)],
+    apiKey: managedApiKey ?? null,
+    timeoutSeconds: JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
+  });
+}
+
 async function syncManagedRelayAuthProfiles(apiKey: string | undefined): Promise<void> {
   if (apiKey === undefined) {
     return;
@@ -821,7 +885,7 @@ export async function syncUpdatedProviderToRuntime(
   }
 
   const ock = context.runtimeProviderKey;
-  const fallbackModels = await getProviderFallbackModelRefs(config);
+  const fallbackModels = await resolveProviderFallbackModelRefs(config, ock);
 
   const defaultProviderId = await getDefaultProvider();
   const isDefaultProvider = defaultProviderId === config.id;
@@ -954,10 +1018,12 @@ export async function syncDefaultProviderToRuntime(
   const ock = await resolveRuntimeProviderKey(provider);
   const providerMeta = getProviderConfig(provider.type);
   const providerKey = normalizeRuntimeApiKey(provider, await getApiKey(providerId), providerMeta?.apiKeyEnv);
-  const fallbackModels = await getProviderFallbackModelRefs(provider);
+  const fallbackModels = await resolveProviderFallbackModelRefs(provider, ock);
   const oauthTypes = ['minimax-portal', 'minimax-portal-cn'];
   const browserOAuthRuntimeProvider = await getBrowserOAuthRuntimeProvider(provider);
   const isOAuthProvider = (oauthTypes.includes(provider.type) && !providerKey) || Boolean(browserOAuthRuntimeProvider);
+
+  await syncManagedTextFailoverRuntime(provider, providerKey);
 
   if (!isOAuthProvider) {
     const modelOverride = normalizeProviderModelRef(provider, ock, provider.model);

@@ -22,7 +22,7 @@ import { patchInstalledOpenClawPluginToolRunContextRuntime } from './openclaw-pl
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
-import { patchInstalledOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
+import { patchInstalledOpenClawTextProviderFailoverRuntime } from './openclaw-text-provider-failover-patch.mjs';
 import { patchInstalledOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
@@ -41,7 +41,7 @@ try {
   patchInstalledOpenClawCompactionSessionStateRuntime();
   patchInstalledOpenClawSessionCwdRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
-  patchInstalledOpenClawResponsesCompatibleFallbackRuntime();
+  patchInstalledOpenClawTextProviderFailoverRuntime();
   patchInstalledOpenClawSystemPromptReasoningLabelRuntime();
   patchInstalledOpenClawToolDirectoryI18nRuntime();
   cleanupInstalledOpenClawRequiredContractToolRuntime();

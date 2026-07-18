@@ -114,8 +114,8 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 本地产物执行采用“审查、修复、验证”闭环：由当前文本模型完成语义规划，主题、长度、媒体和交互等明确要求随实际选中的能力或持久任务一起保存。完成状态只由真实工具/任务终态、能力专属验证和规范会话交付共同决定；模型不再先调用元数据工具给自己的执行授权，也不能用声明证明已经完成。
 独立 PPT 请求现在走 `presentation-maker` 视觉工作室：agent 先做叙事、素材和逐页构图，再由 `create_designed_pptx_file` 用 PptxGenJS 自由画布写入图片、图表、表格、形状和文本。五套内置语义主题只保留给 `create_pptx_file` 与迁移前任务恢复做基础兜底，不再冒充高设计主链路。
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
-零至无限托管安装将 `openai` 保留给登录账户的 Relay。启动时会把旧 `lingzhiwuxian/*` 引用，以及此前个人 OpenAI 的账户或端点一并迁移为托管的原生 Responses 配置。旧 provider 仍保留为 Chat Completions 兼容路径；JSON 损坏、模型引用键冲突和写入失败仍会中止迁移。
-Gateway 启动前，同一套幂等流程会把聊天收敛为使用托管 372K 上下文和配置推理默认等级的 `openai/smart-latest`，并在首个 Agent 回合前准备好图片和视频 Provider。只有 `/responses` 在尚未开始输出时返回 404，才会回退一次 Chat Completions。
+零至无限托管安装将 `openai` 保留给登录账户的 Relay。启动时会把旧 `lingzhiwuxian/*` 引用，以及此前个人 OpenAI 的账户或端点一并迁移为托管的原生 Responses 配置。JSON 损坏、模型引用键冲突和写入失败仍会中止迁移。
+Gateway 启动前，同一套幂等流程会把聊天收敛为使用托管 372K 上下文和配置推理默认等级的 `openai/smart-latest`，并在首个 Agent 回合前准备好图片和视频 Provider。每次文本模型调用都先使用 OpenAI Responses；若 Provider 在产生可见输出或工具副作用前失败，仅当前调用会降级到 `shared/junfeiai-endpoints.json` 配置的备用 Provider。默认备用模型为 `deepseek/deepseek-v4-pro`，复用 OpenAI Relay 的 Base URL 和 API Key，但通过 Chat Completions（`/chat/completions`）请求；后续调用仍从 OpenAI 开始。
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
 聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物的结构化媒体默认值；只有 Agent 已选择原生媒体工具时才会补到工具参数中，绝不会拼接进模型提示词。模式不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决，也不无条件唤醒模型生成“完成播报”。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。

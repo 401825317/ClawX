@@ -10,10 +10,22 @@ const VALID_DEFAULT_THINKING_LEVELS = new Set([
 ]);
 const VALID_OPENCLAW_EXEC_SECURITY = new Set(['deny', 'allowlist', 'full']);
 const VALID_OPENCLAW_EXEC_ASK = new Set(['off', 'on-miss', 'always']);
+const VALID_OPENCLAW_TEXT_FAILOVER_API_PROTOCOLS = new Set(['openai-completions', 'openai-responses']);
 
 export type JunFeiAIOpenClawExecSecurity = 'deny' | 'allowlist' | 'full';
 export type JunFeiAIOpenClawExecAsk = 'off' | 'on-miss' | 'always';
 export type JunFeiAIOpenClawTranscriptLimit = number | string;
+export type JunFeiAIOpenClawTextFailoverApiProtocol = 'openai-completions' | 'openai-responses';
+
+export interface JunFeiAIOpenClawTextFailoverConfig {
+  enabled: boolean;
+  primaryProvider: string;
+  fallbackProvider: string;
+  fallbackModel: string;
+  fallbackApiProtocol: JunFeiAIOpenClawTextFailoverApiProtocol;
+  reusePrimaryBaseUrl: true;
+  reusePrimaryApiKey: true;
+}
 
 /** Shared production endpoints for JunFeiAI consumers in both Electron processes. */
 export const JUNFEIAI_PRODUCTION_ORIGIN = endpoints.productionOrigin.replace(/\/+$/, '');
@@ -52,6 +64,54 @@ export const JUNFEIAI_OPENCLAW_EXEC_SECURITY = endpoints.openClawExec.security a
 
 /** Default OpenClaw host-command approval policy for the managed desktop runtime. */
 export const JUNFEIAI_OPENCLAW_EXEC_ASK = endpoints.openClawExec.ask as JunFeiAIOpenClawExecAsk;
+
+function readNonEmptyString(value: unknown, key: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+const textFailover = endpoints.openClawTextFailover;
+if (typeof textFailover.enabled !== 'boolean') {
+  throw new Error('openClawTextFailover.enabled in shared/junfeiai-endpoints.json must be boolean');
+}
+const textFailoverPrimaryProvider = readNonEmptyString(
+  textFailover.primaryProvider,
+  'openClawTextFailover.primaryProvider',
+);
+const textFailoverFallbackProvider = readNonEmptyString(
+  textFailover.fallbackProvider,
+  'openClawTextFailover.fallbackProvider',
+);
+if (textFailoverPrimaryProvider === textFailoverFallbackProvider) {
+  throw new Error('openClawTextFailover fallbackProvider must differ from primaryProvider');
+}
+const textFailoverFallbackModel = readNonEmptyString(
+  textFailover.fallbackModel,
+  'openClawTextFailover.fallbackModel',
+);
+if (!VALID_OPENCLAW_TEXT_FAILOVER_API_PROTOCOLS.has(textFailover.fallbackApiProtocol)) {
+  throw new Error('openClawTextFailover.fallbackApiProtocol must be an OpenAI protocol');
+}
+if (textFailover.reusePrimaryBaseUrl !== true || textFailover.reusePrimaryApiKey !== true) {
+  throw new Error('openClawTextFailover must reuse the primary base URL and API key');
+}
+
+/** Request-scoped text Provider fallback owned by the managed desktop runtime. */
+export const JUNFEIAI_OPENCLAW_TEXT_FAILOVER: Readonly<JunFeiAIOpenClawTextFailoverConfig> = Object.freeze({
+  enabled: textFailover.enabled,
+  primaryProvider: textFailoverPrimaryProvider,
+  fallbackProvider: textFailoverFallbackProvider,
+  fallbackModel: textFailoverFallbackModel,
+  fallbackApiProtocol: textFailover.fallbackApiProtocol as JunFeiAIOpenClawTextFailoverApiProtocol,
+  reusePrimaryBaseUrl: true,
+  reusePrimaryApiKey: true,
+});
+
+/** Fully-qualified fallback ref written into OpenClaw model fallback chains. */
+export const JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF =
+  `${JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackProvider}/${JUNFEIAI_OPENCLAW_TEXT_FAILOVER.fallbackModel}`;
 
 if (typeof endpoints.openClawCompaction.midTurnPrecheck.enabled !== 'boolean') {
   throw new Error('openClawCompaction.midTurnPrecheck.enabled in shared/junfeiai-endpoints.json must be boolean');
