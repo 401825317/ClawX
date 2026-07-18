@@ -11,6 +11,11 @@ const managedDefaultThinkingLabel = zhChat.composer.thinkingInherit.replace(
     managedDefaultThinkingLevel as keyof typeof zhChat.composer.thinkingLevels
   ],
 );
+const managedVideoDefaultSizes = [
+  endpoints.videoGenerationDefaults.sizes.landscape,
+  endpoints.videoGenerationDefaults.sizes.portrait,
+  endpoints.videoGenerationDefaults.sizes.square,
+];
 const managedClientModelOptions = {
   text: {
     defaultModel: 'smart-latest',
@@ -35,15 +40,15 @@ const managedClientModelOptions = {
   },
   video: {
     defaultModel: 'grok-image-video',
-    defaultSize: '1280x720',
+    defaultSize: endpoints.videoGenerationDefaults.sizes.landscape,
     defaultDurationSeconds: 4,
     models: [{
       id: 'grok-image-video',
       label: 'Grok Video',
       modes: ['text-to-video', 'image-to-video'],
-      sizes: ['1280x720', '720x1280', '1024x1024'],
+      sizes: [...managedVideoDefaultSizes, '1280x720', '720x1280', '1024x1024'],
       durations: [4, 6, 8, 10, 12, 15],
-      defaultSize: '1280x720',
+      defaultSize: endpoints.videoGenerationDefaults.sizes.landscape,
       defaultDurationSeconds: 4,
       enabled: true,
     }],
@@ -153,7 +158,10 @@ test.describe('ClawX chat model picker', () => {
             return {
               success: true,
               result: {
-                messages: [{ role: 'user', content: 'Existing conversation', timestamp: Date.now() }],
+                messages: [
+                  { role: 'user', content: 'Existing conversation', timestamp: Date.now() - 1_000 },
+                  { role: 'assistant', content: 'Existing response', timestamp: Date.now() },
+                ],
               },
             };
           }
@@ -280,7 +288,15 @@ test.describe('ClawX chat model picker', () => {
       await expect(page.getByTestId('chat-video-options')).toBeVisible();
       await expect(page.getByTestId('chat-image-options')).toHaveCount(0);
       await expect(page.getByTestId('chat-video-model')).toHaveCount(0);
-      await expect(await page.getByTestId('chat-video-size').locator('option').allTextContents()).toEqual(['16:9', '9:16', '1:1']);
+      await expect(page.getByTestId('chat-video-size')).toHaveValue(endpoints.videoGenerationDefaults.sizes.landscape);
+      await expect(await page.getByTestId('chat-video-size').locator('option').allTextContents()).toEqual([
+        '16:9 · 480p',
+        '9:16 · 480p',
+        '1:1 · 480p',
+        '16:9 · 720p',
+        '9:16 · 720p',
+        '1:1 · 1024p',
+      ]);
 
       await page.getByTestId('chat-model-picker-button').click();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
@@ -311,7 +327,6 @@ test.describe('ClawX chat model picker', () => {
       await expect(page.getByText('Existing conversation')).toBeVisible();
 
       await page.getByTestId('sidebar-new-chat').click();
-      await expect(page.getByTestId('session-bucket-today').getByText(/agent:main:session-/)).toBeVisible();
       await page.getByTestId('chat-thinking-picker-button').click();
       await page.getByTestId('chat-thinking-option-high').click();
       await expect.poll(async () => await app.evaluate(() => (

@@ -131,7 +131,7 @@ function resolveDefaultChatVideoOptions(hasSourceImage = false): ChatVideoSendOp
   const model = hasSourceImage
     ? options.models.find((entry) => entry.requiresImage) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0]
     : options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const size = strongestSize(model?.sizes, model?.defaultSize ?? options.defaultSize);
+  const size = preferredOptionValue(model?.defaultSize ?? options.defaultSize, model?.sizes, options.defaultSize);
   const durationSeconds = strongestDuration(model?.durations, model?.defaultDurationSeconds ?? options.defaultDurationSeconds);
   return {
     model: model?.id ?? options.defaultModel,

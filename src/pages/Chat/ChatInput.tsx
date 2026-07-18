@@ -177,36 +177,18 @@ function preferredOptionValue<T>(value: T | undefined, options: T[], fallback: T
   return options[0] ?? fallback;
 }
 
-function dimensionArea(value: string): number {
-  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
-  if (!match) return 0;
-  return Number(match[1]) * Number(match[2]);
-}
-
-function strongestSizeOption(options: string[] | undefined, fallback: string): string {
-  const candidates = (options ?? []).filter(Boolean);
-  if (candidates.length === 0) return fallback;
-  return candidates.reduce((best, current) => (
-    dimensionArea(current) > dimensionArea(best) ? current : best
-  ), candidates[0]!);
-}
-
 function strongestDurationOption(options: number[] | undefined, fallback: number): number {
   const candidates = (options ?? []).filter((value) => Number.isFinite(value) && value > 0);
   return candidates.length > 0 ? Math.max(...candidates) : fallback;
 }
 
 function formatVideoSizeLabel(value: string): string {
-  switch (value) {
-    case '1280x720':
-      return '16:9';
-    case '720x1280':
-      return '9:16';
-    case '1024x1024':
-      return '1:1';
-    default:
-      return value;
-  }
+  const match = value.match(/^(\d+)x(\d+)$/u);
+  if (!match) return value;
+  const width = Number.parseInt(match[1], 10);
+  const height = Number.parseInt(match[2], 10);
+  const aspectRatio = width === height ? '1:1' : width > height ? '16:9' : '9:16';
+  return `${aspectRatio} · ${Math.min(width, height)}p`;
 }
 
 function formatImageQualityLabel(value: string, t: ReturnType<typeof useTranslation>['t']): string {
@@ -473,7 +455,11 @@ export function ChatInput({
     const configuredFallbackDuration = model?.defaultDurationSeconds
       ?? clientModelOptions.video.defaultDurationSeconds
       ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultDurationSeconds;
-    const fallbackSize = strongestSizeOption(model?.sizes, configuredFallbackSize);
+    const fallbackSize = preferredOptionValue(
+      configuredFallbackSize,
+      model?.sizes ?? [],
+      DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultSize,
+    );
     const fallbackDuration = strongestDurationOption(model?.durations, configuredFallbackDuration);
     return {
       model: model?.id ?? clientModelOptions.video.defaultModel,

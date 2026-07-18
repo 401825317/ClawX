@@ -17,6 +17,9 @@ import {
   JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,
   JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
+  JUNFEIAI_VIDEO_GENERATION_DEFAULT_RESOLUTION,
+  JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
+  JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZES,
   JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS,
   JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS,
 } from '../electron/utils/junfeiai-distribution.ts';
@@ -51,6 +54,13 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
     endpoints.openClawCompaction.maxActiveTranscriptBytes,
   );
   assert.equal(JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS, endpoints.imageGenerationTimeoutMs);
+  assert.equal(JUNFEIAI_VIDEO_GENERATION_DEFAULT_RESOLUTION, endpoints.videoGenerationDefaults.resolution);
+  assert.equal(JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE, endpoints.videoGenerationDefaults.sizes.landscape);
+  assert.deepEqual(JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZES, [
+    endpoints.videoGenerationDefaults.sizes.landscape,
+    endpoints.videoGenerationDefaults.sizes.portrait,
+    endpoints.videoGenerationDefaults.sizes.square,
+  ]);
   assert.equal(JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS, endpoints.videoGenerationTimeoutMs);
   assert.equal(JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS, endpoints.videoGenerationPollIntervalMs);
   assert.equal(JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS, endpoints.mediaGenerationTestTimeoutMs);

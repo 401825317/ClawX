@@ -11,11 +11,13 @@ const VALID_DEFAULT_THINKING_LEVELS = new Set([
 const VALID_OPENCLAW_EXEC_SECURITY = new Set(['deny', 'allowlist', 'full']);
 const VALID_OPENCLAW_EXEC_ASK = new Set(['off', 'on-miss', 'always']);
 const VALID_OPENCLAW_TEXT_FAILOVER_API_PROTOCOLS = new Set(['openai-completions', 'openai-responses']);
+const VALID_VIDEO_GENERATION_RESOLUTIONS = new Set(['480p', '720p']);
 
 export type JunFeiAIOpenClawExecSecurity = 'deny' | 'allowlist' | 'full';
 export type JunFeiAIOpenClawExecAsk = 'off' | 'on-miss' | 'always';
 export type JunFeiAIOpenClawTranscriptLimit = number | string;
 export type JunFeiAIOpenClawTextFailoverApiProtocol = 'openai-completions' | 'openai-responses';
+export type JunFeiAIVideoGenerationResolution = '480p' | '720p';
 
 export interface JunFeiAIOpenClawTextFailoverConfig {
   enabled: boolean;
@@ -135,6 +137,73 @@ export const JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION = endpoints.openClawCom
 
 /** Preflight transcript-size threshold that triggers local compaction. */
 export const JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES = transcriptLimit as JunFeiAIOpenClawTranscriptLimit;
+
+function readVideoGenerationSize(
+  value: unknown,
+  key: string,
+  orientation: 'landscape' | 'portrait' | 'square',
+  shortEdge: number,
+): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a WxH string`);
+  }
+  const normalized = value.trim().toLowerCase();
+  const match = normalized.match(/^(\d+)x(\d+)$/u);
+  if (!match) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a WxH string`);
+  }
+  const width = Number.parseInt(match[1], 10);
+  const height = Number.parseInt(match[2], 10);
+  const orientationMatches = orientation === 'landscape'
+    ? width > height
+    : orientation === 'portrait'
+      ? height > width
+      : width === height;
+  if (!orientationMatches || Math.min(width, height) !== shortEdge) {
+    throw new Error(`${key} must match the configured resolution and ${orientation} orientation`);
+  }
+  return `${width}x${height}`;
+}
+
+const videoGenerationDefaults = endpoints.videoGenerationDefaults;
+if (!VALID_VIDEO_GENERATION_RESOLUTIONS.has(videoGenerationDefaults.resolution)) {
+  throw new Error('videoGenerationDefaults.resolution must be 480p or 720p');
+}
+const videoGenerationResolution = videoGenerationDefaults.resolution as JunFeiAIVideoGenerationResolution;
+const videoGenerationShortEdge = Number.parseInt(videoGenerationResolution, 10);
+const videoGenerationDefaultSizes = Object.freeze({
+  landscape: readVideoGenerationSize(
+    videoGenerationDefaults.sizes.landscape,
+    'videoGenerationDefaults.sizes.landscape',
+    'landscape',
+    videoGenerationShortEdge,
+  ),
+  portrait: readVideoGenerationSize(
+    videoGenerationDefaults.sizes.portrait,
+    'videoGenerationDefaults.sizes.portrait',
+    'portrait',
+    videoGenerationShortEdge,
+  ),
+  square: readVideoGenerationSize(
+    videoGenerationDefaults.sizes.square,
+    'videoGenerationDefaults.sizes.square',
+    'square',
+    videoGenerationShortEdge,
+  ),
+});
+
+/** Canonical default resolution for managed video generation. */
+export const JUNFEIAI_VIDEO_GENERATION_DEFAULT_RESOLUTION = videoGenerationResolution;
+
+/** Canonical managed video sizes ordered as landscape, portrait, then square. */
+export const JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZES = Object.freeze([
+  videoGenerationDefaultSizes.landscape,
+  videoGenerationDefaultSizes.portrait,
+  videoGenerationDefaultSizes.square,
+]);
+
+/** Canonical default video size used when no aspect ratio is specified. */
+export const JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE = videoGenerationDefaultSizes.landscape;
 
 function readPositiveTimeoutMs(value: unknown, key: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {

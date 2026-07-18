@@ -15,20 +15,48 @@ import {
   resolveOpenAiVideoCapabilityContractProfile,
 } from './openclaw-video-capability-contract-patch.mjs';
 
+const endpoints = JSON.parse(readFileSync(join(process.cwd(), 'shared', 'junfeiai-endpoints.json'), 'utf8'));
+const configuredVideoSizes = [
+  endpoints.videoGenerationDefaults.sizes.landscape,
+  endpoints.videoGenerationDefaults.sizes.portrait,
+  endpoints.videoGenerationDefaults.sizes.square,
+];
+const grokVideoSizes = [
+  ...configuredVideoSizes,
+  '1280x720',
+  '720x1280',
+  '1024x1024',
+];
+
+assert.equal(resolveMappedVideoSizeForCapabilityContract({
+  resolution: '480P',
+  aspectRatio: '9:16',
+  supportedSizes: grokVideoSizes,
+}), endpoints.videoGenerationDefaults.sizes.portrait);
+assert.equal(resolveMappedVideoSizeForCapabilityContract({
+  resolution: '480P',
+  aspectRatio: '16:9',
+  supportedSizes: grokVideoSizes,
+}), endpoints.videoGenerationDefaults.sizes.landscape);
+assert.equal(resolveMappedVideoSizeForCapabilityContract({
+  resolution: '480P',
+  aspectRatio: '1:1',
+  supportedSizes: grokVideoSizes,
+}), endpoints.videoGenerationDefaults.sizes.square);
 assert.equal(resolveMappedVideoSizeForCapabilityContract({
   resolution: '720P',
   aspectRatio: '9:16',
-  supportedSizes: ['1280x720', '720x1280', '1024x1024'],
+  supportedSizes: grokVideoSizes,
 }), '720x1280');
 assert.equal(resolveMappedVideoSizeForCapabilityContract({
   resolution: '720P',
   aspectRatio: '16:9',
-  supportedSizes: ['1280x720', '720x1280', '1024x1024'],
+  supportedSizes: grokVideoSizes,
 }), '1280x720');
 assert.equal(resolveMappedVideoSizeForCapabilityContract({
   resolution: '720P',
   aspectRatio: '1:1',
-  supportedSizes: ['1280x720', '720x1280', '1024x1024'],
+  supportedSizes: grokVideoSizes,
 }), '1024x1024');
 assert.equal(resolveMappedVideoSizeForCapabilityContract({
   resolution: '720P',
@@ -41,7 +69,7 @@ assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-image-video',
   maxDurationSeconds: 15,
   supportedDurationSeconds: [4, 6, 8, 10, 12, 15],
   supportsSize: true,
-  sizes: ['1280x720', '720x1280', '1024x1024'],
+  sizes: grokVideoSizes,
 });
 assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-video-1.5', 'generate'), {
   enabled: false,
@@ -53,7 +81,7 @@ assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-video-1.5', '
   maxDurationSeconds: 15,
   supportedDurationSeconds: [4, 6, 8, 10, 12, 15],
   supportsSize: true,
-  sizes: ['1280x720', '720x1280', '1024x1024'],
+  sizes: grokVideoSizes,
 });
 assert.equal(resolveOpenAiVideoCapabilityContractProfile('sora-2', 'generate'), undefined);
 
@@ -93,15 +121,24 @@ try {
   assert.match(toolContent, /else delete properties\.audio/u);
   assert.match(toolContent, /else delete properties\.watermark/u);
   assert.match(toolContent, /does not support text-to-video/u);
-  assert.match(runtimeContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1/u);
+  assert.match(runtimeContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V2/u);
+  assert.doesNotMatch(runtimeContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1/u);
   assert.match(runtimeContent, /caps\.modelCapabilities\?\.\[model\]/u);
   assert.match(runtimeContent, /derivedFrom: "resolution\+aspectRatio"/u);
+  assert.match(runtimeContent, new RegExp(`UCLAW_VIDEO_DEFAULT_RESOLUTION = ${JSON.stringify(endpoints.videoGenerationDefaults.resolution.toUpperCase())}`, 'u'));
+  assert.match(runtimeContent, /configuredDefaultSize && params\.supportedSizes\?\.includes\(configuredDefaultSize\)/u);
   assert.match(runtimeContent, /resolution = void 0/u);
   assert.match(runtimeContent, /audio = void 0/u);
   assert.match(runtimeContent, /watermark = void 0/u);
-  assert.match(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1/u);
+  assert.match(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V2/u);
+  assert.doesNotMatch(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1/u);
   assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SECONDS/u);
   assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SIZES/u);
+  assert.match(providerContent, new RegExp(`UCLAW_OPENAI_GROK_VIDEO_DEFAULT_SIZE = ${JSON.stringify(endpoints.videoGenerationDefaults.sizes.landscape)}`, 'u'));
+  assert.match(providerContent, new RegExp(`"16:9": ${JSON.stringify(endpoints.videoGenerationDefaults.sizes.landscape)}`, 'u'));
+  assert.match(providerContent, new RegExp(`"9:16": ${JSON.stringify(endpoints.videoGenerationDefaults.sizes.portrait)}`, 'u'));
+  assert.match(providerContent, new RegExp(`"1:1": ${JSON.stringify(endpoints.videoGenerationDefaults.sizes.square)}`, 'u'));
+  assert.match(providerContent, /if \(grokVideoModel\) return UCLAW_OPENAI_GROK_VIDEO_DEFAULT_SIZE/u);
   assert.match(providerContent, /resolveDurationSeconds\(req\.durationSeconds, model\)/u);
   assert.match(providerContent, /grok-video-1\.5 requires exactly one reference image/u);
   assert.match(providerContent, /const OPENAI_VIDEO_SECONDS = \[\s*4,\s*8,\s*12\s*\]/u);

@@ -118,7 +118,7 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 Gateway 启动前，同一套幂等流程会把聊天收敛为使用托管 372K 上下文和配置推理默认等级的 `openai/smart-latest`，并在首个 Agent 回合前准备好图片和视频 Provider。每次文本模型调用都先使用 OpenAI Responses；若 Provider 在产生可见输出或工具副作用前失败，仅当前调用会降级到 `shared/junfeiai-endpoints.json` 配置的备用 Provider。默认备用模型为 `deepseek/deepseek-v4-pro`，复用 OpenAI Relay 的 Base URL 和 API Key，但通过 Chat Completions（`/chat/completions`）请求；后续调用仍从 OpenAI 开始。
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
-聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物的结构化媒体默认值；只有 Agent 已选择原生媒体工具时才会补到工具参数中，绝不会拼接进模型提示词。模式不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决，也不无条件唤醒模型生成“完成播报”。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。
+聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物的结构化媒体默认值；只有 Agent 已选择原生媒体工具时才会补到工具参数中，绝不会拼接进模型提示词。托管视频生成默认使用 480P，并按方向从 `shared/junfeiai-endpoints.json` 读取 `854x480`、`480x854` 或 `480x480`；720P 仍可显式选择。模式不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决，也不无条件唤醒模型生成“完成播报”。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。
 图片格式、背景和兼容的压缩参数会真实透传给图片 provider；用户未自定义时，托管安装的生成媒体交付上限默认为 16 MiB。若生成结果仍超过上限，UClaw 会在保存前自动转码并逐级压缩，不再丢弃 provider 已成功生成的图片。即使内部完成消息被隔离，任务账本中的成功、失败、部分完成或取消终态也会立即关闭等待状态和计时。
 
 桌面观察当前只支持截图；原生桌面动作驱动尚未实现，本版本也不宣称 Computer Use 可以操作 UClaw 窗口。内置 Blender runtime 接收声明式 SceneSpec，在不加载启动扩展的本地 Blender 中渲染，并校验 `.blend`、`.glb`、预览图和 manifest 后再投递到会话。Blender 是可选的本地依赖，平台或可执行文件不可用时会明确返回能力状态，不会把未产出当作完成；三维预览只会在打开兼容模型文件时按需加载，不增加普通聊天路径的负担。
