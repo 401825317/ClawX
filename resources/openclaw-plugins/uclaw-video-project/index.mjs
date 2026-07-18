@@ -606,6 +606,14 @@ function hostTaskVideoArtifact(task) {
   return normalizeArtifact(artifact, 'final_video');
 }
 
+function finalQaExpectedDurationSeconds(composition, sourceArtifact) {
+  const actualDurationSeconds = Number(sourceArtifact?.durationSeconds);
+  if (Number.isFinite(actualDurationSeconds) && actualDurationSeconds > 0) {
+    return Math.round(actualDurationSeconds * 1000) / 1000;
+  }
+  return composition.plan.targetDurationSeconds;
+}
+
 function hostTaskVerification(task, kind) {
   return Array.isArray(task?.verifications)
     ? task.verifications.find((candidate) => cleanText(candidate?.kind, 160) === kind && cleanText(candidate?.status, 80) === 'passed')
@@ -664,7 +672,7 @@ function finalQaTaskRequest(project, composition, sourceArtifact) {
     title: `Verify final ${project.title}`.slice(0, 500),
     input: {
       sourcePath: sourceArtifact.filePath,
-      expectedDurationSeconds: composition.plan.targetDurationSeconds,
+      expectedDurationSeconds: finalQaExpectedDurationSeconds(composition, sourceArtifact),
       durationToleranceSeconds: 0.35,
       expectedWidth: composition.plan.width,
       expectedHeight: composition.plan.height,

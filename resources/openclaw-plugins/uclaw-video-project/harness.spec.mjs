@@ -220,7 +220,13 @@ try {
 
   Object.assign(renderTask, {
     status: 'succeeded',
-    artifacts: [{ id: 'artifact:host-compose-1:video', kind: 'video', filePath: '/managed/two-shot-composed.mp4', mimeType: 'video/mp4' }],
+    artifacts: [{
+      id: 'artifact:host-compose-1:video',
+      kind: 'video',
+      filePath: '/managed/two-shot-composed.mp4',
+      mimeType: 'video/mp4',
+      durationSeconds: 8.042,
+    }],
     verifications: [{ id: 'verification:host-compose-1:metadata', kind: 'media.metadata', status: 'passed' }],
   });
   const renderReconciled = await projectTool.execute('tool-compose-get', {
@@ -231,6 +237,7 @@ try {
   assert.equal(hostRequests[1].kind, 'local.video.shot.qa');
   assert.equal(hostRequests[1].completion.mode, 'direct');
   assert.equal(hostRequests[1].input.includeSourceArtifact, true);
+  assert.equal(hostRequests[1].input.expectedDurationSeconds, 8.042);
 
   Object.assign(finalQaTask, {
     status: 'succeeded',

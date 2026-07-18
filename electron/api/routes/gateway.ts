@@ -53,8 +53,33 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildChatSendDiagnostic(message: string, options: { media: boolean; mediaCount?: number; deliver?: boolean }) {
-  const normalized = String(message ?? '');
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function extractChatSendText(message: unknown): string {
+  if (typeof message === 'string') return message;
+  if (Array.isArray(message)) {
+    return message
+      .flatMap((part) => {
+        if (!isRecord(part)) return [];
+        const type = typeof part.type === 'string' ? part.type.toLowerCase() : '';
+        const text = typeof part.text === 'string' ? part.text : '';
+        return type === 'text' && text ? [text] : [];
+      })
+      .join('\n');
+  }
+  if (isRecord(message)) {
+    const nested = message.content ?? message.text ?? message.message;
+    if (nested !== message) {
+      return extractChatSendText(nested);
+    }
+  }
+  return '';
+}
+
+function buildChatSendDiagnostic(message: unknown, options: { media: boolean; mediaCount?: number; deliver?: boolean }) {
+  const normalized = extractChatSendText(message);
   return {
     messageChars: Array.from(normalized).length,
     containsCjk: CJK_RE.test(normalized),
@@ -71,13 +96,13 @@ function normalizeThinkingLevelOverride(value: unknown): string | undefined {
   return CHAT_THINKING_LEVELS.has(normalized) ? normalized : undefined;
 }
 
-function resolveChatSendThinkingOverride(message: string, explicitThinking?: unknown): { thinking: string; reason: string } | null {
+function resolveChatSendThinkingOverride(message: unknown, explicitThinking?: unknown): { thinking: string; reason: string } | null {
   const explicit = normalizeThinkingLevelOverride(explicitThinking);
   if (explicit) {
     return { thinking: explicit, reason: 'explicit' };
   }
 
-  const normalized = String(message ?? '').replace(/\s+/gu, ' ').trim();
+  const normalized = extractChatSendText(message).replace(/\s+/gu, ' ').trim();
   if (!normalized || Array.from(normalized).length > LIGHTWEIGHT_CHAT_MAX_CHARS) {
     return null;
   }
@@ -386,13 +411,14 @@ export async function handleGatewayRoutes(
     try {
       const body = await parseJsonBody<{
         sessionKey: string;
-        message: string;
+        message: unknown;
         deliver?: boolean;
         idempotencyKey: string;
         thinking?: string | null;
         clientPreferences?: unknown;
       }>(req);
       sessionKeyForLog = body.sessionKey;
+      const messageText = extractChatSendText(body.message);
       const sendDiagnostic = buildChatSendDiagnostic(body.message, {
         media: false,
         deliver: body.deliver ?? false,
@@ -410,7 +436,7 @@ export async function handleGatewayRoutes(
       });
       const rpcParams: ChatSendRpcParams = {
         sessionKey: body.sessionKey,
-        message: body.message,
+        message: messageText,
         deliver: body.deliver ?? false,
         idempotencyKey: body.idempotencyKey,
       };
@@ -422,7 +448,7 @@ export async function handleGatewayRoutes(
         ? agentTurnPreferenceStore.enqueue({
             sessionKey: body.sessionKey,
             idempotencyKey: body.idempotencyKey,
-            message: body.message,
+            message: messageText,
             preferences,
           })
         : undefined;
@@ -479,7 +505,7 @@ export async function handleGatewayRoutes(
     try {
       const body = await parseJsonBody<{
         sessionKey: string;
-        message: string;
+        message: unknown;
         deliver?: boolean;
         idempotencyKey: string;
         thinking?: string | null;
@@ -527,9 +553,10 @@ export async function handleGatewayRoutes(
         }
       }
 
+      const baseMessage = extractChatSendText(body.message);
       const message = fileReferences.length > 0
-        ? [body.message, ...fileReferences].filter(Boolean).join('\n')
-        : body.message;
+        ? [baseMessage, ...fileReferences].filter(Boolean).join('\n')
+        : baseMessage;
       const sendDiagnostic = buildChatSendDiagnostic(message, {
         media: true,
         mediaCount: body.media?.length ?? 0,
