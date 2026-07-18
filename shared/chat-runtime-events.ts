@@ -37,6 +37,8 @@ export type ChatRuntimeEventBase = {
   parentTaskId?: string;
   /** Native task lifecycle state when OpenClaw emits a detached-task projection. */
   taskStatus?: ChatRuntimeTaskStatus;
+  /** Stable OpenClaw item identity for streamed assistant/reasoning segments. */
+  itemId?: string;
   /** Stable tool identity when another structured fact takes over its default Timeline ownership. */
   toolCallId?: string;
   /** Diagnostics-only events stay canonical but do not create a default Timeline row. */

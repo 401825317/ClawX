@@ -49,6 +49,7 @@ type ConversationActions = {
       reason?: 'initial-load' | 'terminal-refresh' | 'manual-refresh';
       transcriptMtime?: number;
       additionalEvents?: ConversationEvent[];
+      prependMissingTurns?: boolean;
     },
   ) => void;
   beginLocalTurn: (input: {
@@ -246,7 +247,9 @@ export const useConversationStore = create<ConversationStore>((set) => {
       const replayStartedAt = conversationPerformanceNow();
       set((state) => {
         const current = stateSlice(state);
-        const next = replaceSessionTurns(current, sessionKey, replayEvents);
+        const next = replaceSessionTurns(current, sessionKey, replayEvents, {
+          prependMissingTurns: options?.prependMissingTurns,
+        });
         const reduced = next === current ? state : { ...state, ...next };
         const retained = retainBoundedSessions(reduced, [sessionKey]);
         if (retained === state) return state;

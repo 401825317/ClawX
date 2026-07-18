@@ -257,6 +257,10 @@ function eventData(event: ChatRuntimeEvent): ConversationEventData {
 /** Keep entity identity independent from sequence numbers shared by gateway fan-out. */
 function eventEntityId(event: ChatRuntimeEvent): string | undefined {
   switch (event.type) {
+    case 'assistant.delta':
+      return event.itemId ? `assistant:${event.itemId}` : undefined;
+    case 'thinking.delta':
+      return event.itemId ? `thinking:${event.itemId}` : undefined;
     case 'tool.started':
     case 'tool.updated':
     case 'tool.completed':
@@ -326,6 +330,9 @@ export function runtimeEventToConversationEvent(event: ChatRuntimeEvent): Conver
   const phase = eventIdentityPhase(event, data, occurredAt);
   const source = sourceFor(event);
   const entityId = eventEntityId(event);
+  const messageId = event.type === 'assistant.delta' || event.type === 'thinking.delta'
+    ? event.itemId
+    : undefined;
   const rootRunId = event.rootRunId
     ?? (source === 'task-ledger' ? undefined : event.runId);
   return {
@@ -336,6 +343,7 @@ export function runtimeEventToConversationEvent(event: ChatRuntimeEvent): Conver
       runId: event.runId,
       seq: event.seq,
       entityId,
+      messageId,
       toolCallId,
       taskId,
       phase,
@@ -348,6 +356,7 @@ export function runtimeEventToConversationEvent(event: ChatRuntimeEvent): Conver
     sessionKey,
     rootRunId,
     runId: event.runId,
+    messageId,
     taskId,
     parentTaskId,
     toolCallId,

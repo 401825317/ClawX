@@ -380,8 +380,10 @@ function projectSegment(
   const toolNames = new Map<string, string>();
   const delegatedParents = new Map<string, { toolCallId: string; toolName: string }>();
 
+  let assistantSegmentOrdinal = 0;
   segment.forEach(({ message, occurredAt, locationId }, index) => {
     let taskToolCallId = message.toolCallId;
+    const historyMessageId = message.id ?? locationId;
     const thinking = extractThinking(message);
     if (thinking) {
       events.push(baseEvent({
@@ -390,12 +392,12 @@ function projectSegment(
         sessionKey,
         turnId,
         occurredAt,
-        messageId: message.id,
+        messageId: historyMessageId,
         data: { text: thinking, replace: true },
       }));
     }
 
-    for (const tool of extractToolUse(message)) {
+    const preparedTools = extractToolUse(message).map((tool) => {
       const rawToolCallId = tool.id || `history-tool:${stableHash({ turnId, index, name: tool.name })}`;
       const delegatedName = delegatedToolName(tool.name, tool.input);
       if (delegatedName) {
@@ -406,13 +408,55 @@ function projectSegment(
       }
       const toolCallId = canonicalHistoryToolCallId(rawToolCallId, tool.name, delegatedParents);
       toolNames.set(toolCallId, tool.name);
+      return { tool, rawToolCallId, toolCallId };
+    });
+
+    const text = message.role === 'assistant' ? extractText(message).trim() : '';
+    const messageArtifacts = message.role === 'assistant'
+      ? artifactEvents(sessionKey, turnId, message, occurredAt, locationId)
+      : [];
+    const isTerminal = terminal?.index === index;
+    const isFinal = message.role === 'assistant' && !isTerminal && Boolean(text) && index === finalIndex;
+    const segmentOrdinal = message.role === 'assistant' && !isTerminal && text
+      ? assistantSegmentOrdinal++
+      : undefined;
+    const anchorToolCallIds = preparedTools.map(({ toolCallId }) => toolCallId);
+
+    // Persisted assistant text precedes the tools emitted by the same message.
+    // This matches live arrival order and gives both sources the same segment owner.
+    if (message.role === 'assistant' && !isTerminal && text) {
+      const type = isFinal ? 'final.message' : 'assistant.content';
+      const data = isFinal
+        ? {
+            message: conversationMessageSnapshot(finalHistoryMessage(message, processSegments)),
+            segmentOrdinal,
+          }
+        : {
+            text,
+            replace: true,
+            segmentOrdinal,
+            anchorToolCallIds,
+          };
+      if (isFinal) events.push(...messageArtifacts);
+      events.push(baseEvent({
+        eventId: createEventId({ source: 'history', type, messageId: historyMessageId, phase: isFinal ? 'final' : 'commentary', occurredAt, data: message.content }),
+        type,
+        sessionKey,
+        turnId,
+        occurredAt,
+        messageId: historyMessageId,
+        data,
+      }));
+    }
+
+    for (const { tool, rawToolCallId, toolCallId } of preparedTools) {
       events.push(baseEvent({
         eventId: createEventId({ source: 'history', type: 'tool.started', toolCallId: rawToolCallId, phase: 'start', occurredAt, data: tool.input }),
         type: 'tool.started',
         sessionKey,
         turnId,
         occurredAt,
-        messageId: message.id,
+        messageId: historyMessageId,
         toolCallId,
         data: { toolCallId, name: tool.name, args: tool.input },
       }));
@@ -437,23 +481,21 @@ function projectSegment(
         sessionKey,
         turnId,
         occurredAt,
-        messageId: message.id,
+        messageId: historyMessageId,
         toolCallId,
         data: { toolCallId, name, result: toolResultContent(message), isError: message.isError },
       }));
     }
 
     if (message.role === 'assistant') {
-      const text = extractText(message).trim();
-      const messageArtifacts = artifactEvents(sessionKey, turnId, message, occurredAt, locationId);
-      if (terminal?.index === index) {
+      if (isTerminal) {
         events.push(baseEvent({
           eventId: createEventId({ source: 'history', type: 'turn.error', messageId: message.id ?? locationId, phase: `turn-${terminal.status}`, occurredAt, data: terminal.error }),
           type: 'turn.error',
           sessionKey,
           turnId,
           occurredAt,
-          messageId: message.id,
+          messageId: historyMessageId,
           data: { error: terminal.error, recoverable: false },
         }));
         events.push(baseEvent({
@@ -462,7 +504,7 @@ function projectSegment(
           sessionKey,
           turnId,
           occurredAt,
-          messageId: message.id,
+          messageId: historyMessageId,
           data: {
             status: terminal.status,
             endedAt: occurredAt,
@@ -470,35 +512,17 @@ function projectSegment(
             stopReason: terminal.stopReason,
           },
         }));
-      } else if (text) {
-        const isFinal = index === finalIndex;
-        const type = isFinal ? 'final.message' : 'commentary.append';
-        const data = isFinal
-          ? { message: conversationMessageSnapshot(finalHistoryMessage(message, processSegments)) }
-          : { text, replace: true };
-        // A delivered artifact is part of the result evidence, so it must own
-        // its timeline position before the final answer from the same message.
-        if (isFinal) events.push(...messageArtifacts);
-        events.push(baseEvent({
-          eventId: createEventId({ source: 'history', type, messageId: message.id ?? locationId, phase: isFinal ? 'final' : 'commentary', occurredAt, data: message.content }),
-          type,
-          sessionKey,
-          turnId,
-          occurredAt,
-          messageId: message.id,
-          data,
-        }));
-        if (!isFinal) events.push(...messageArtifacts);
-      } else {
+      } else if (!text) {
         events.push(...messageArtifacts);
       }
+      if (text && !isFinal) events.push(...messageArtifacts);
     }
 
     events.push(...asyncTaskPayloadToConversationEvents(message, {
       sessionKey,
       turnId,
       toolCallId: taskToolCallId,
-      messageId: message.id,
+      messageId: historyMessageId,
       occurredAt,
       receivedAt: occurredAt,
       replayed: true,

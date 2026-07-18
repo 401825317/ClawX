@@ -136,7 +136,7 @@
                   }
                 },
                 {
-                  "id": "commentary:message:families:stream",
+                  "id": "commentary:assistant:turn:fixture:families:0",
                   "turnId": "turn:fixture:families",
                   "kind": "commentary",
                   "text": "I will inspect the inputs and build the bundle.",
@@ -148,7 +148,9 @@
                     "families:assistant-content"
                   ],
                   "revision": 2,
-                  "origin": "assistant"
+                  "origin": "assistant",
+                  "segmentOrdinal": 0,
+                  "assistantPhase": "commentary"
                 },
                 {
                   "id": "thinking:message:families:thinking",
@@ -811,7 +813,7 @@
                   }
                 },
                 {
-                  "id": "commentary:message:order:stream",
+                  "id": "commentary:assistant:turn:fixture:order:0",
                   "turnId": "turn:fixture:order",
                   "kind": "commentary",
                   "text": "Newest streamed replacement.",
@@ -823,7 +825,8 @@
                     "order:assistant-newest"
                   ],
                   "revision": 2,
-                  "origin": "assistant"
+                  "origin": "assistant",
+                  "segmentOrdinal": 0
                 },
                 {
                   "id": "commentary:order:no-sequence-commentary",
@@ -1353,21 +1356,6 @@
                     "id": "message:restart:user",
                     "content": "Resume this restored session."
                   }
-                },
-                {
-                  "id": "commentary:message:restart:live-stream",
-                  "turnId": "turn:fixture:restart",
-                  "kind": "commentary",
-                  "text": "Live continuation after reconnect.",
-                  "sealed": true,
-                  "status": "completed",
-                  "firstSeenAt": 1700000300040,
-                  "updatedAt": 1700000300040,
-                  "sourceEventIds": [
-                    "restart:assistant-live"
-                  ],
-                  "revision": 2,
-                  "origin": "assistant"
                 },
                 {
                   "id": "final:turn:fixture:restart",

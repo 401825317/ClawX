@@ -123,10 +123,11 @@ function resolveRuntimeTaskContext(payload: Record<string, unknown>): RuntimeTas
 function withBase(
   type: ChatRuntimeEvent['type'],
   payload: Record<string, unknown>,
-): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'type' | 'runId' | 'rootRunId' | 'sessionKey' | 'taskId' | 'parentTaskId' | 'taskStatus' | 'seq' | 'ts'> | null {
+): Pick<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'type' | 'runId' | 'rootRunId' | 'sessionKey' | 'taskId' | 'parentTaskId' | 'taskStatus' | 'itemId' | 'seq' | 'ts'> | null {
   const taskContext = resolveRuntimeTaskContext(payload);
   const runId = taskContext.runId ?? (taskContext.taskId ? `task:${taskContext.taskId}` : undefined);
   if (!runId) return null;
+  const itemId = readFirstString([payload, taskContext.data], ['itemId', 'item_id']);
   return {
     contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
     producer: readFirstString([payload, taskContext.data, taskContext.task], ['producer', 'source']) ?? 'gateway',
@@ -140,6 +141,7 @@ function withBase(
       const task = resolveNativeTaskRecord(payload);
       return task ? nativeTaskLifecycle(task, taskContext.data) : undefined;
     })(),
+    ...(itemId ? { itemId } : {}),
     seq: readNumber(payload.seq),
     ts: readNumber(payload.ts),
   };
@@ -1192,6 +1194,26 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
           itemId: readString(data.itemId),
         }
       : null;
+  }
+
+  if (stream === 'item') {
+    const kind = normalizeMarker(data.kind);
+    const text = readString(data.progressText)
+      ?? readString(data.progress_text)
+      ?? readString(data.text);
+    // Codex-style OpenClaw runs expose commentary as a stable preamble item,
+    // not as the ordinary assistant stream used for final-answer tokens.
+    if ((kind === 'preamble' || kind === 'commentary') && text) {
+      const base = withBase('assistant.delta', raw);
+      return base
+        ? {
+            ...base,
+            text,
+            replace: true,
+            phase: 'commentary',
+          }
+        : null;
+    }
   }
 
   if (stream === 'assistant') {

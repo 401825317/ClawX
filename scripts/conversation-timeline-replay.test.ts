@@ -194,7 +194,271 @@ test('gateway mixed assistant preamble and tool call stays commentary instead of
     text: 'I will generate a natural summer lifestyle scene.',
     replace: true,
     phase: 'final',
+    anchorToolCallIds: ['media-preamble-tool-call'],
   });
+});
+
+test('real OpenClaw preamble frames stream before tools and stay separate from the folded final', () => {
+  const sessionKey = `${SESSION_KEY}:native-preamble-stream`;
+  const runId = `${RUN_ID}:native-preamble-stream`;
+  const turnId = createTurnId({ sessionKey, idempotencyKey: 'native-preamble-stream-user' });
+  const itemId = 'native-preamble-stream-item';
+  const toolCallId = 'native-preamble-stream-tool';
+  const preambleStart = 'I will inspect';
+  const preamble = 'I will inspect the session first.';
+  const finalStart = 'The tool finished';
+  const finalAnswer = 'The tool finished and the result is valid.';
+  const foldedFinal = `${preamble}${finalAnswer}`;
+  const baseTime = 1_700_000_000_000;
+  const normalize = (seq: number, stream: string, data: Record<string, unknown>) => (
+    normalizeGatewayChatRuntimeEvents({
+      runId,
+      sessionKey,
+      seq,
+      ts: baseTime + seq,
+      stream,
+      data,
+    })
+  );
+
+  const lifecycle = normalize(1, 'lifecycle', { phase: 'start' });
+  const firstPreambleFrame = normalize(2, 'item', {
+    itemId,
+    kind: 'preamble',
+    title: 'Preamble',
+    phase: 'update',
+    progressText: preambleStart,
+    source: 'codex-app-server',
+  });
+  const secondPreambleFrame = normalize(3, 'item', {
+    itemId,
+    kind: 'preamble',
+    title: 'Preamble',
+    phase: 'update',
+    progressText: preamble,
+    source: 'codex-app-server',
+  });
+  assert.equal(firstPreambleFrame.length, 1);
+  assert.equal(firstPreambleFrame[0]?.type, 'assistant.delta');
+  assert.equal(firstPreambleFrame[0]?.itemId, itemId);
+  assert.equal(firstPreambleFrame[0]?.phase, 'commentary');
+  assert.equal(firstPreambleFrame[0]?.text, preambleStart);
+  assert.equal(firstPreambleFrame[0]?.replace, true);
+  assert.equal(runtimeEventToConversationEvent(firstPreambleFrame[0]!)?.messageId, itemId);
+  assert.equal(runtimeEventToConversationEvent(secondPreambleFrame[0]!)?.messageId, itemId);
+
+  const requested: ConversationEvent = {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'native-preamble-stream:requested',
+    type: 'turn.requested',
+    source: 'host',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    messageId: 'native-preamble-stream-user',
+    occurredAt: baseTime,
+    receivedAt: baseTime,
+    replayed: false,
+    data: {
+      message: {
+        role: 'user',
+        id: 'native-preamble-stream-user',
+        idempotencyKey: 'native-preamble-stream-user',
+        content: 'Inspect the session and report back.',
+        timestamp: baseTime,
+      },
+    },
+  };
+  let state = reduceConversationEvents(createEmptyConversationState(), [
+    requested,
+    ...runtime(lifecycle),
+    ...runtime(firstPreambleFrame),
+  ]);
+  let turn = state.turnsById[turnId];
+  const firstCommentary = turn.items.find((item) => item.kind === 'commentary');
+  assert.ok(firstCommentary && firstCommentary.kind === 'commentary');
+  assert.equal(firstCommentary.text, preambleStart);
+  assert.equal(firstCommentary.assistantPhase, 'commentary');
+  const preambleTimelineItemId = firstCommentary.id;
+
+  state = reduceConversationEvents(state, runtime(secondPreambleFrame));
+  turn = state.turnsById[turnId];
+  const completedPreamble = turn.items.find((item) => item.id === preambleTimelineItemId);
+  assert.ok(completedPreamble && completedPreamble.kind === 'commentary');
+  assert.equal(completedPreamble.text, preamble);
+  assert.equal(turn.items.filter((item) => item.kind === 'commentary').length, 1);
+
+  state = reduceConversationEvents(state, runtime([
+    ...normalize(4, 'tool', { phase: 'start', toolCallId, name: 'tool_search', args: { query: 'status' } }),
+    ...normalize(5, 'tool', { phase: 'result', toolCallId, name: 'tool_search', result: [] }),
+  ]));
+  turn = state.turnsById[turnId];
+  assert.deepEqual(turn.items.map((item) => item.kind), [
+    'user-message',
+    'commentary',
+    'tool-group',
+  ]);
+  assert.equal(turn.assistantItemByToolCallId[toolCallId], preambleTimelineItemId);
+  const preambleIndex = turn.itemIndex[preambleTimelineItemId];
+  const toolIndex = turn.items.findIndex((item) => item.kind === 'tool-group');
+  assert.ok(preambleIndex < toolIndex);
+
+  const firstFinalFrame = normalize(6, 'assistant', { text: finalStart, delta: finalStart });
+  const secondFinalFrame = normalize(7, 'assistant', {
+    text: finalAnswer,
+    delta: ' and the result is valid.',
+  });
+  state = reduceConversationEvents(state, runtime(firstFinalFrame));
+  turn = state.turnsById[turnId];
+  const streamingFinal = turn.items.at(-1);
+  assert.ok(streamingFinal && streamingFinal.kind === 'commentary');
+  assert.equal(streamingFinal.text, finalStart);
+  const streamingFinalItemId = streamingFinal.id;
+
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'delta',
+    runId,
+    sessionKey,
+    seq: 6,
+    message: {
+      role: 'assistant',
+      timestamp: baseTime + 6,
+      content: [{ type: 'text', text: `${preamble}${finalStart}` }],
+    },
+  }, { sessionKey, activeRunId: runId, turnId }));
+  turn = state.turnsById[turnId];
+  const chatDeltaStreamingFinal = turn.items.find((item) => item.id === streamingFinalItemId);
+  assert.ok(chatDeltaStreamingFinal && chatDeltaStreamingFinal.kind === 'commentary');
+  assert.equal(chatDeltaStreamingFinal.text, finalStart);
+
+  state = reduceConversationEvents(state, runtime(secondFinalFrame));
+  turn = state.turnsById[turnId];
+  const updatedStreamingFinal = turn.items.find((item) => item.id === streamingFinalItemId);
+  assert.ok(updatedStreamingFinal && updatedStreamingFinal.kind === 'commentary');
+  assert.equal(updatedStreamingFinal.text, finalAnswer);
+
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'delta',
+    runId,
+    sessionKey,
+    seq: 7,
+    message: {
+      role: 'assistant',
+      timestamp: baseTime + 7,
+      content: [{ type: 'text', text: `${preamble}${finalAnswer}` }],
+    },
+  }, { sessionKey, activeRunId: runId, turnId }));
+  turn = state.turnsById[turnId];
+  const completedChatDeltaStreamingFinal = turn.items.find((item) => item.id === streamingFinalItemId);
+  assert.ok(completedChatDeltaStreamingFinal && completedChatDeltaStreamingFinal.kind === 'commentary');
+  assert.equal(completedChatDeltaStreamingFinal.text, finalAnswer);
+
+  // OpenClaw keeps its item stream segmented but folds every assistant item
+  // into the terminal chat envelope. Existing live rows must remain stable.
+  assert.equal(turn.itemIndex[preambleTimelineItemId], preambleIndex);
+  assert.equal(turn.items.findIndex((item) => item.kind === 'tool-group'), toolIndex);
+
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'final',
+    runId,
+    sessionKey,
+    seq: 8,
+    message: {
+      role: 'assistant',
+      timestamp: baseTime + 8,
+      content: [{ type: 'text', text: foldedFinal }],
+    },
+  }, { sessionKey, activeRunId: runId, turnId }));
+  assertConversationState(state);
+  turn = state.turnsById[turnId];
+  assert.deepEqual(turn.items.map((item) => item.kind), [
+    'user-message',
+    'commentary',
+    'tool-group',
+    'final-answer',
+  ]);
+  assert.equal(turn.items[preambleIndex]?.id, preambleTimelineItemId);
+  assert.equal(turn.items[toolIndex]?.kind, 'tool-group');
+  const final = turn.items.at(-1);
+  assert.ok(final && final.kind === 'final-answer');
+  assert.equal(final.id, `final:${turnId}`);
+  assert.equal(final.message.content instanceof Array
+    ? (final.message.content[0] as { text?: string }).text
+    : final.message.content, finalAnswer);
+});
+
+test('late mixed chat echo updates its tool-anchored live assistant segment in place', () => {
+  const sessionKey = `${SESSION_KEY}:late-mixed-chat-echo`;
+  const runId = `${RUN_ID}:late-mixed-chat-echo`;
+  const toolCallId = 'late-mixed-chat-echo-tool';
+  let state = reduceConversationEvents(createEmptyConversationState(), runtime([
+    { type: 'run.started', runId, sessionKey, seq: 1, ts: 1_700_000_100, producer: 'openclaw' },
+    {
+      type: 'assistant.delta',
+      runId,
+      sessionKey,
+      seq: 2,
+      ts: 1_700_000_101,
+      producer: 'openclaw',
+      text: 'I will inspect the file first.',
+      replace: true,
+    },
+    {
+      type: 'tool.started',
+      runId,
+      sessionKey,
+      seq: 3,
+      ts: 1_700_000_102,
+      producer: 'openclaw',
+      toolCallId,
+      name: 'read_file',
+      args: { path: '/tmp/example' },
+    },
+    {
+      type: 'tool.completed',
+      runId,
+      sessionKey,
+      seq: 4,
+      ts: 1_700_000_103,
+      producer: 'openclaw',
+      toolCallId,
+      name: 'read_file',
+      result: 'ok',
+    },
+  ]));
+  const turnId = state.turnOrderBySession[sessionKey][0];
+  const before = state.turnsById[turnId];
+  const liveCommentary = before.items.find((item) => item.kind === 'commentary');
+  assert.ok(liveCommentary && liveCommentary.kind === 'commentary');
+  assert.deepEqual(before.items.map((item) => item.kind), ['commentary', 'tool-group']);
+
+  const lateChatEcho = chatEventToConversationEvents({
+    state: 'final',
+    runId,
+    sessionKey,
+    seq: 5,
+    message: {
+      role: 'assistant',
+      timestamp: 1_700_000_104,
+      content: [{
+        type: 'text',
+        text: 'I will inspect the file first.',
+      }, {
+        type: 'toolCall',
+        id: toolCallId,
+        name: 'read_file',
+        arguments: { path: '/tmp/example' },
+      }],
+    },
+  }, { sessionKey, activeRunId: runId, turnId });
+  state = reduceConversationEvents(state, lateChatEcho);
+  assertConversationState(state);
+  const after = state.turnsById[turnId];
+  const commentaries = after.items.filter((item) => item.kind === 'commentary');
+  assert.deepEqual(after.items.map((item) => item.kind), ['commentary', 'tool-group']);
+  assert.equal(commentaries.length, 1);
+  assert.equal(commentaries[0].id, liveCommentary.id);
+  assert.equal(commentaries[0].sealed, true);
 });
 
 test('Gateway agent thinking preview normalizes into canonical reasoning evidence', () => {
@@ -1332,7 +1596,7 @@ test('history replay creates one stable turn with commentary, grouped tools, and
   assert.deepEqual(timelineKinds(messages), ['user-message', 'commentary', 'tool-group', 'final-answer']);
 });
 
-test('late commentary splits a compatible tool group at its canonical boundary', () => {
+test('late commentary appends without moving or splitting already rendered tool rows', () => {
   const sessionKey = `${SESSION_KEY}:late-tool-boundary`;
   const turnId = 'turn:late-tool-boundary';
   const event = (
@@ -1384,11 +1648,10 @@ test('late commentary splits a compatible tool group at its canonical boundary',
     'user-message',
     'tool-group',
     'commentary',
-    'tool-group',
   ]);
   assert.deepEqual(
     turn.items.filter((item) => item.kind === 'tool-group').map((group) => group.entries.map((entry) => entry.toolCallId)),
-    [['late-tool-boundary:first'], ['late-tool-boundary:second']],
+    [['late-tool-boundary:first', 'late-tool-boundary:second']],
   );
 });
 
@@ -2325,6 +2588,52 @@ test('appending a history Turn preserves every unchanged completed Turn referenc
   assert.equal(appended.turnOrderBySession[sessionKey].length, 2);
   assert.equal(appended.turnsById[firstTurnId], firstTurn);
   assert.equal(appended.turnsById[firstTurnId].revision, firstTurn.revision);
+});
+
+test('history recovery appends missing Turns without moving live Turns', () => {
+  const sessionKey = `${SESSION_KEY}:history-appends-missing-turns`;
+  const requested = (
+    source: ConversationEvent['source'],
+    turnId: string,
+    order: number,
+  ): ConversationEvent => ({
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: `${source}:${turnId}:${order}`,
+    type: 'turn.requested',
+    source,
+    authority: source === 'history' ? 'authoritative' : 'corroborating',
+    sessionKey,
+    turnId,
+    messageId: `${turnId}:message`,
+    occurredAt: 10_300 + order,
+    receivedAt: 10_300 + order,
+    replayed: source === 'history',
+    data: {
+      message: {
+        role: 'user',
+        id: `${turnId}:message`,
+        content: `Request ${turnId}`,
+        timestamp: 10_300 + order,
+      },
+    },
+  });
+  const liveTurnIds = ['turn:live-a', 'turn:live-b', 'turn:live-c'];
+  let state = reduceConversationEvents(
+    createEmptyConversationState(),
+    liveTurnIds.map((turnId, index) => requested('host', turnId, index)),
+  );
+
+  state = replaceSessionTurns(state, sessionKey, [
+    requested('history', liveTurnIds[0], 0),
+    requested('history', 'turn:recovered-x', 1),
+    requested('history', liveTurnIds[1], 2),
+    requested('history', liveTurnIds[2], 3),
+  ]);
+
+  assert.deepEqual(state.turnOrderBySession[sessionKey], [
+    ...liveTurnIds,
+    'turn:recovered-x',
+  ]);
 });
 
 test('assistant-only history replacement keeps its orphan Turn reference stable', () => {
@@ -3372,9 +3681,9 @@ test('real async image and video transcripts keep process, media, then final ord
   });
 });
 
-test('live reducer and history replacement preserve media timeline order when transport delivery is late', () => {
-  const sessionKey = `${SESSION_KEY}:history-repairs-live-media-order`;
-  const turnId = 'turn:history-repairs-live-media-order';
+test('history recovery updates existing media in place without appending missing assistant text', () => {
+  const sessionKey = `${SESSION_KEY}:history-preserves-live-media-order`;
+  const turnId = 'turn:history-preserves-live-media-order';
   const occurredAt = 8_000_000;
   const event = (
     source: ConversationEvent['source'],
@@ -3389,11 +3698,11 @@ test('live reducer and history replacement preserve media timeline order when tr
     authority: source === 'history' ? 'authoritative' : 'corroborating',
     sessionKey,
     turnId,
-    runId: 'run:history-repairs-live-media-order',
+    runId: 'run:history-preserves-live-media-order',
     messageId: type === 'commentary.append'
-      ? 'history-repairs-live-media-order:commentary'
+      ? 'history-preserves-live-media-order:commentary'
       : type === 'final.message'
-        ? 'history-repairs-live-media-order:final'
+        ? 'history-preserves-live-media-order:final'
         : undefined,
     occurredAt: occurredAt + offset,
     receivedAt: occurredAt + offset,
@@ -3403,87 +3712,68 @@ test('live reducer and history replacement preserve media timeline order when tr
   const requestedData = {
     message: {
       role: 'user' as const,
-      id: 'history-repairs-live-media-order:user',
+      id: 'history-preserves-live-media-order:user',
       content: 'Generate media.',
     },
   };
   const commentaryData = { text: 'I will generate a natural scene.', replace: true };
   const artifactData = {
     artifact: {
-      id: 'history-repairs-live-media-order:artifact',
-      title: 'generated.mp4',
+      id: 'history-preserves-live-media-order:artifact',
+      title: 'live-generated.mp4',
       filePath: '/tmp/generated.mp4',
       mimeType: 'video/mp4',
-      availability: 'available' as const,
+      availability: 'registered' as const,
     },
   };
   const finalData = {
     message: {
       role: 'assistant' as const,
-      id: 'history-repairs-live-media-order:final',
+      id: 'history-preserves-live-media-order:final',
       content: 'The media is ready.',
     },
   };
   const liveEvents = [
     event('host', 'turn.requested', 0, requestedData),
-    event('openclaw-chat', 'final.message', 3, finalData),
     event('openclaw-runtime', 'artifact.updated', 3, artifactData),
-    // The preamble occurred first but its transport envelope arrived last.
-    event('openclaw-runtime', 'commentary.append', 1, commentaryData),
+    event('openclaw-chat', 'final.message', 4, finalData),
   ];
   let state = reduceConversationEvents(createEmptyConversationState(), liveEvents);
   assert.deepEqual(state.turnsById[turnId].items.map((item) => item.kind), [
     'user-message',
-    'commentary',
     'artifact-group',
     'final-answer',
   ]);
+  const liveTurn = state.turnsById[turnId];
+  const liveArtifact = liveTurn.items.find((item) => item.kind === 'artifact-group');
+  const liveArtifactIndex = liveTurn.items.findIndex((item) => item.kind === 'artifact-group');
+  const liveFinalIndex = liveTurn.items.findIndex((item) => item.kind === 'final-answer');
+  assert.ok(liveArtifact && liveArtifact.kind === 'artifact-group');
 
   const historyEvents = [
     event('history', 'turn.requested', 0, requestedData),
     event('history', 'commentary.append', 1, commentaryData),
-    event('history', 'artifact.updated', 3, artifactData),
-    event('history', 'final.message', 3, finalData),
+    event('history', 'artifact.updated', 3, {
+      artifact: {
+        ...artifactData.artifact,
+        availability: 'available' as const,
+      },
+    }),
+    event('history', 'final.message', 4, finalData),
   ];
   state = replaceSessionTurns(state, sessionKey, historyEvents);
   assertConversationState(state);
   assert.deepEqual(state.turnsById[turnId].items.map((item) => item.kind), [
     'user-message',
-    'commentary',
     'artifact-group',
     'final-answer',
   ]);
-
-  const repairedTurn = state.turnsById[turnId];
-  const staleItems = [
-    repairedTurn.items.find((item) => item.kind === 'user-message'),
-    repairedTurn.items.find((item) => item.kind === 'final-answer'),
-    repairedTurn.items.find((item) => item.kind === 'artifact-group'),
-    repairedTurn.items.find((item) => item.kind === 'commentary'),
-  ]
-    .filter((item): item is NonNullable<typeof item> => Boolean(item))
-    .map((item) => ({
-      ...item,
-      sourceEventIds: item.sourceEventIds.filter((eventId) => !eventId.startsWith('history:')),
-    }));
-  state = {
-    ...state,
-    turnsById: {
-      ...state.turnsById,
-      [turnId]: {
-        ...repairedTurn,
-        items: staleItems,
-        itemIndex: Object.fromEntries(staleItems.map((item, index) => [item.id, index])),
-      },
-    },
-  };
-  state = replaceSessionTurns(state, sessionKey, historyEvents);
-  assert.deepEqual(state.turnsById[turnId].items.map((item) => item.kind), [
-    'user-message',
-    'commentary',
-    'artifact-group',
-    'final-answer',
-  ]);
+  const recoveredTurn = state.turnsById[turnId];
+  const recoveredArtifacts = recoveredTurn.items.filter((item) => item.kind === 'artifact-group');
+  assert.equal(recoveredArtifacts.length, 1);
+  assert.equal(recoveredTurn.items.findIndex((item) => item.id === liveArtifact.id), liveArtifactIndex);
+  assert.equal(recoveredTurn.items.findIndex((item) => item.kind === 'final-answer'), liveFinalIndex);
+  assert.equal(recoveredArtifacts[0]?.artifacts[0]?.availability, 'available');
 });
 
 test('history replacement reuses an identical sealed live commentary', () => {
@@ -3598,6 +3888,142 @@ test('history replacement reuses an identical sealed live commentary', () => {
   assert.equal(commentaries.length, 1);
   assert.equal(commentaries[0].id, liveCommentary.id);
   assert.ok(commentaries[0].sourceEventIds.some((eventId) => eventId.startsWith('history:')));
+});
+
+test('history messages without assistant ids update stable live segments without appending duplicates', () => {
+  const sessionKey = `${SESSION_KEY}:history-segment-identity`;
+  const runId = `${RUN_ID}:history-segment-identity`;
+  const toolCallId = 'history-segment-identity-tool';
+  const turnId = createTurnId({ sessionKey, idempotencyKey: 'history-segment-identity-user' });
+  const requested: ConversationEvent = {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'history-segment-identity:requested',
+    type: 'turn.requested',
+    source: 'host',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    messageId: 'history-segment-identity-user',
+    occurredAt: 8_200_000,
+    receivedAt: 8_200_000,
+    replayed: false,
+    data: {
+      message: {
+        role: 'user',
+        id: 'history-segment-identity-user',
+        idempotencyKey: 'history-segment-identity-user',
+        content: 'Inspect the file and report back.',
+        timestamp: 8_200_000,
+      },
+    },
+  };
+  let state = reduceConversationEvents(createEmptyConversationState(), [
+    requested,
+    ...runtime([
+      { type: 'run.started', runId, sessionKey, seq: 1, ts: 8_200_001, producer: 'openclaw' },
+      {
+        type: 'assistant.delta',
+        runId,
+        sessionKey,
+        seq: 2,
+        ts: 8_200_002,
+        producer: 'openclaw',
+        text: 'I will inspect the file.',
+        replace: true,
+      },
+      {
+        type: 'tool.started',
+        runId,
+        sessionKey,
+        seq: 3,
+        ts: 8_200_003,
+        producer: 'openclaw',
+        toolCallId,
+        name: 'read_file',
+      },
+      {
+        type: 'tool.completed',
+        runId,
+        sessionKey,
+        seq: 4,
+        ts: 8_200_004,
+        producer: 'openclaw',
+        toolCallId,
+        name: 'read_file',
+        result: 'ok',
+      },
+      {
+        type: 'assistant.delta',
+        runId,
+        sessionKey,
+        seq: 5,
+        ts: 8_200_005,
+        producer: 'openclaw',
+        text: 'The file is valid.',
+        replace: true,
+        phase: 'final_answer',
+      },
+    ]),
+  ]);
+  state = reduceConversationEvents(state, chatEventToConversationEvents({
+    state: 'final',
+    runId,
+    sessionKey,
+    seq: 6,
+    message: {
+      role: 'assistant',
+      timestamp: 8_200_006,
+      content: 'The file is valid.',
+    },
+  }, { sessionKey, activeRunId: runId, turnId }));
+  const liveTurn = state.turnsById[turnId];
+  const liveItemIds = liveTurn.items.map((item) => item.id);
+  const liveCommentary = liveTurn.items.find((item) => item.kind === 'commentary');
+  assert.ok(liveCommentary && liveCommentary.kind === 'commentary');
+  assert.deepEqual(liveTurn.items.map((item) => item.kind), [
+    'user-message',
+    'commentary',
+    'tool-group',
+    'final-answer',
+  ]);
+
+  const historyEvents = historyMessagesToConversationEvents(sessionKey, [{
+    role: 'user',
+    id: 'history-segment-identity-user',
+    idempotencyKey: 'history-segment-identity-user',
+    timestamp: 8_200,
+    content: 'Inspect the file and report back.',
+  }, {
+    role: 'assistant',
+    timestamp: 8_200.002,
+    content: [{
+      type: 'text',
+      text: 'I will inspect the file.',
+    }, {
+      type: 'toolCall',
+      id: toolCallId,
+      name: 'read_file',
+      arguments: {},
+    }],
+  }, {
+    role: 'toolresult',
+    timestamp: 8_200.004,
+    toolCallId,
+    toolName: 'read_file',
+    content: 'ok',
+  }, {
+    role: 'assistant',
+    timestamp: 8_200.006,
+    content: 'The file is valid.',
+  }]);
+  state = replaceSessionTurns(state, sessionKey, historyEvents);
+  assertConversationState(state);
+  const reconciled = state.turnsById[turnId];
+  assert.deepEqual(reconciled.items.map((item) => item.id), liveItemIds);
+  assert.equal(reconciled.items.filter((item) => item.kind === 'commentary').length, 1);
+  assert.ok(reconciled.items.find((item) => item.id === liveCommentary.id)?.sourceEventIds.some(
+    (eventId) => eventId.startsWith('history:'),
+  ));
 });
 
 test('chat tool payload promotes the first structured image task with owner lineage', () => {
@@ -4083,6 +4509,42 @@ test('history-first live run reuses the latest owning Turn instead of creating a
   assert.equal(state.turnsById[turnId].hasLiveEvidence, true);
   assert.equal(state.aliases.byRunId[createSessionAliasKey(sessionKey, runId)], turnId);
   assert.equal(state.turnsById[turnId].items.some((item) => item.kind === 'final-answer'), true);
+});
+
+test('history-first live run claims a checkpointed user-only Turn instead of creating a sibling', () => {
+  const sessionKey = `${SESSION_KEY}:history-first-user-only-run`;
+  const runId = `${RUN_ID}:history-first-user-only-run`;
+  let state = reduceConversationEvents(
+    createEmptyConversationState(),
+    historyMessagesToConversationEvents(sessionKey, [{
+      role: 'user',
+      id: 'history-first-user-only-run-user',
+      idempotencyKey: 'history-first-user-only-run-idempotency',
+      timestamp: 4_100,
+      content: 'Keep the persisted request and attach its live run here.',
+    }]),
+  );
+  const turnId = state.turnOrderBySession[sessionKey][0];
+  assert.equal(state.turnsById[turnId].status, 'queued');
+  assert.equal(state.turnsById[turnId].evidence.historyCheckpointed, true);
+  assert.equal(state.turnsById[turnId].hasLiveEvidence, false);
+  assert.deepEqual(state.turnsById[turnId].runAliases, []);
+
+  state = reduceConversationEvents(state, runtime([{
+    type: 'run.started',
+    runId,
+    sessionKey,
+    seq: 1,
+    ts: 4_101,
+    producer: 'openclaw',
+  }]));
+
+  assert.deepEqual(state.turnOrderBySession[sessionKey], [turnId]);
+  assert.equal(state.turnsById[turnId].status, 'running');
+  assert.equal(state.turnsById[turnId].hasLiveEvidence, true);
+  assert.deepEqual(state.turnsById[turnId].runAliases, [runId]);
+  assert.equal(state.aliases.byRunId[createSessionAliasKey(sessionKey, runId)], turnId);
+  assert.equal(state.aliases.activeBySession[sessionKey], turnId);
 });
 
 test('run-scoped active liveness reuses checkpointed history and never creates an empty Turn', () => {

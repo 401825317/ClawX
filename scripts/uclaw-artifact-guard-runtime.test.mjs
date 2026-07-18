@@ -94,6 +94,13 @@ __test.registerArtifactGuard({
 });
 const beforePromptBuild = lifecycleHooks.get('before_prompt_build');
 assert.equal(typeof beforePromptBuild, 'function');
+assert.equal(
+  lifecycleHooks.has('before_agent_finalize'),
+  false,
+  'before_agent_finalize makes OpenClaw defer every assistant frame until terminal delivery',
+);
+const agentEnd = lifecycleHooks.get('agent_end');
+assert.equal(typeof agentEnd, 'function');
 const ordinaryPromptContext = await beforePromptBuild({
   runId: 'prompt:ordinary',
   userMessage: '解释一下 PPT 是什么，不要生成文件。',
@@ -166,10 +173,8 @@ try {
   assert.equal(valid.shouldRevise, false);
   assert.match(valid.artifacts[0]?.verification.detail ?? '', /可读、非空的普通文件/u);
 
-  const beforeAgentFinalize = lifecycleHooks.get('before_agent_finalize');
-  assert.equal(typeof beforeAgentFinalize, 'function');
   const eventCountBeforeFinalize = runtimeEvents.length;
-  assert.equal(beforeAgentFinalize(finalizeEvent(
+  assert.equal(agentEnd(finalizeEvent(
     'artifact:finalize-hook',
     '生成图片',
     `已生成。\nMEDIA:${validPath}`,

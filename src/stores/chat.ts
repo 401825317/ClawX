@@ -1168,10 +1168,7 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
   if (!released) return;
   _withheldFinalDeliveryByRun.delete(runId);
   if (controlsActiveLifecycle) beginSessionBackendIdleSettlement(withheld.sessionKey, runId);
-  if (useChatStore.getState().currentSessionKey === withheld.sessionKey) {
-    forceNextHistoryLoad(withheld.sessionKey);
-    void useChatStore.getState().loadHistory(true);
-  } else {
+  if (useChatStore.getState().currentSessionKey !== withheld.sessionKey) {
     markSessionNeedsTerminalHistoryRefresh(withheld.sessionKey);
   }
 }
@@ -1506,8 +1503,6 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
       useChatStore.getState,
       confirmedSessions ?? useChatStore.getState().sessions,
     );
-    forceNextHistoryLoad(sessionKey);
-    void useChatStore.getState().loadHistory(true);
   })();
 }
 
@@ -3771,6 +3766,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearHistoryPoll();
     clearBaselines();
     set((s) => buildSessionSwitchPatch(s, key));
+    forceNextHistoryLoad(key);
     deferSessionSwitchHistoryLoad(get);
     scheduleQueuedChatSendFlush(key);
   },
@@ -4918,7 +4914,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         useConversationStore.getState().replaceHistory(
           currentSessionKey,
           canonicalHistoryMessages,
-          { reason: 'manual-refresh' },
+          { reason: 'manual-refresh', prependMissingTurns: true },
         );
       } catch (error) {
         console.warn('[conversation-timeline] Failed to replay paged chat history:', error);
@@ -4960,7 +4956,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           useConversationStore.getState().replaceHistory(
             currentSessionKey,
             hydratedCanonicalMessages,
-            { reason: 'manual-refresh' },
+            { reason: 'manual-refresh', prependMissingTurns: true },
           );
         } catch (error) {
           console.warn('[conversation-timeline] Failed to replay hydrated paged history:', error);
@@ -5713,7 +5709,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         && getMessageStopReason(event.message as Record<string, unknown>) != null);
     const eventSessionKey = completionWakeOwner?.sessionKey ?? inferredEventSessionKey;
     const completionWakeOwnerRunId = completionWakeOwner?.rootRunId;
-    const correlatedCompletionWake = completionWakeOwnerRunId != null;
     const runId = completionWakeOwnerRunId ?? eventRunId;
     const asyncTaskEvidence = extractAsyncTaskEvidence(event.message ?? event);
     if (asyncTaskEvidence.length > 0) {
@@ -5779,13 +5774,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     // Only process events for the active run (or if no active run set).
-    // Inbound channel traffic (Feishu/Telegram/etc.) on the current session uses a
-    // different runId than a stale desktop activeRunId  - still refresh history on finals.
+    // Inbound channel traffic (Feishu/Telegram/etc.) on the current session can use
+    // a different runId than a stale desktop activeRunId. Its live events remain
+    // independent and must not trigger a transcript replay into the visible stream.
     if (activeRunId && runId && runId !== activeRunId) {
-      const isCurrentSession = eventSessionKey == null || eventSessionKey === currentSessionKey;
-      if (isCurrentSession && terminalEvent) {
-        void get().loadHistory(true);
-      }
       return;
     }
 
@@ -5890,9 +5882,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           const updates = collectToolUpdates(normalizedFinalMessage, resolvedState);
           // Filter out internal-only final responses (NO_REPLY, HEARTBEAT_OK, etc.)
-          // before adding to messages. Without this guard, the internal token appears
-          // briefly in the UI until loadHistory replaces the message list  - and if the
-          // quiet-mode reload is debounced away, the token can stay visible permanently.
+          // before they enter the visible message stream.
           if (isInternalMessage(normalizedFinalMessage)) {
             const sessionKeyForReload = get().currentSessionKey;
             set({
@@ -5903,8 +5893,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
             clearHistoryPoll();
             beginSessionBackendIdleSettlement(sessionKeyForReload, runId ?? get().activeRunId);
-            forceNextHistoryLoad(sessionKeyForReload);
-            void get().loadHistory(true);
             break;
           }
           if (isToolResultRole(normalizedFinalMessage.role)) {
@@ -6149,29 +6137,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               sessionKey: eventSessionKey ?? currentSessionKey,
             }, finalArtifactsToVerify);
           }
-          // Defer the transcript refresh until OpenClaw confirms the session is idle.
-          // A snapshot fetched while the final payload is still being persisted can
-          // otherwise erase the live final reply from the renderer.
+          // Keep controls active until OpenClaw confirms the session is idle. The
+          // visible Timeline remains owned by live events and is not replayed here.
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
           if (clearLifecycle && !toolOnly && !withheldFinalMessage) {
             clearHistoryPoll();
             beginSessionBackendIdleSettlement(sessionKeyAtFinal, runId ?? get().activeRunId);
-            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-
-          } else if (clearLifecycle && !toolOnly && correlatedCompletionWake) {
-            // Completion-wake finals have their MEDIA directives removed from
-            // the live chat payload. Keep the gate closed, but reload the
-            // authoritative transcript so the original run can recover the
-            // persisted artifact and verification evidence before reevaluation.
-            clearHistoryPoll();
-            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-            [0, 500, 1500].forEach((delayMs) => {
-              setTimeout(() => {
-                if (get().currentSessionKey !== sessionKeyAtFinal) return;
-                forceNextHistoryLoad(sessionKeyAtFinal);
-                void get().loadHistory(true);
-              }, delayMs);
-            });
           }
         } else {
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
@@ -6179,14 +6150,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const terminalRunId = runId || latestState.activeRunId;
           set({ streamingText: '', streamingMessage: null, pendingFinal: true });
           beginSessionBackendIdleSettlement(sessionKeyAtFinal, terminalRunId);
-          markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-          [0, 500, 1500, 4000].forEach((delayMs) => {
-            setTimeout(() => {
-              if (get().currentSessionKey !== sessionKeyAtFinal) return;
-              forceNextHistoryLoad(sessionKeyAtFinal);
-              void get().loadHistory(true);
-            }, delayMs);
-          });
         }
         break;
       }
@@ -6255,10 +6218,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearErrorRecoveryTimer();
           markSessionRunIdle(sessionKeyAtError);
           clearPendingRuntimeIntent(sessionKeyAtError);
-          if (wasSending) {
-            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtError);
-            void get().loadHistory(true);
-          }
         };
 
         if (recoverable) {
@@ -6557,20 +6516,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (eventForSession.type === 'run.ended') {
-      const sessionKeyAtTerminal = eventSessionKey ?? currentSessionKey;
-      if (matchesCurrentSession && eventForSession.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER) {
-        // Gateway terminal events can arrive before, or instead of, the final
-        // assistant payload. Rehydrate the persisted transcript so normal
-        // replies and completion-wake replies share the same delivery path.
-        markSessionNeedsTerminalHistoryRefresh(sessionKeyAtTerminal);
-        [0, 500, 1500, 4000].forEach((delayMs) => {
-          setTimeout(() => {
-            if (get().currentSessionKey !== sessionKeyAtTerminal) return;
-            forceNextHistoryLoad(sessionKeyAtTerminal);
-            void get().loadHistory(true);
-          }, delayMs);
-        });
-      }
       if (isCompletionWake) {
         set(nextPatch);
         return;
@@ -6617,7 +6562,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         if (!shouldKeepLifecycle) {
           markSessionRunIdle(currentSessionKey);
-          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
           clearPendingRuntimeIntent(currentSessionKey);
         } else if (matchesCurrentSession && eventForSession.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER) {
           scheduleRuntimeBackendIdleReconciliation(

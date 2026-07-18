@@ -9,6 +9,7 @@ const MAIN_EMPTY_PAYLOAD_MARKER = `${PATCH_MARKER}_MAIN_EMPTY_PAYLOAD`;
 const MAIN_EMPTY_VISIBLE_MARKER = `${PATCH_MARKER}_MAIN_EMPTY_VISIBLE`;
 const INCREMENT_HELPER_MARKER = `${PATCH_MARKER}_INCREMENT_HELPER`;
 const SESSION_UPDATE_MARKER = `${PATCH_MARKER}_SESSION_UPDATE`;
+const LIFECYCLE_TERMINAL_MARKER = `${PATCH_MARKER}_LIFECYCLE_TERMINAL`;
 
 const SESSION_STORE_ANCHOR = `\t\tconst hasUsageTotalTokens = typeof totalTokens === "number" && Number.isFinite(totalTokens) && totalTokens > 0;
 \t\tconst useCompactionSnapshot = compactionTokensAfter !== void 0 && !hasUsageTotalTokens;`;
@@ -179,6 +180,17 @@ const SESSION_UPDATE_PATCH = `\t} else {
 \t\tnext.cacheWrite = void 0;
 \t}`;
 
+const LIFECYCLE_TERMINAL_ANCHOR = `\t\tif (phase === "finishing") {
+\t\t\tdeferredError = readStringValue(evt.data.error) ?? deferredError;
+\t\t\tObject.assign(deferredTerminalMetadata, resolveAgentLifecycleTerminalMetadata(evt.data));
+\t\t}`;
+
+const LIFECYCLE_TERMINAL_PATCH = `\t\tif (phase === "finishing") {
+\t\t\tdeferredError = readStringValue(evt.data.error); // ${LIFECYCLE_TERMINAL_MARKER}
+\t\t\tfor (const key of DEFERRED_TERMINAL_METADATA_KEYS) delete deferredTerminalMetadata[key];
+\t\t\tObject.assign(deferredTerminalMetadata, resolveAgentLifecycleTerminalMetadata(evt.data));
+\t\t}`;
+
 function walkFiles(rootDir) {
   const files = [];
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
@@ -219,6 +231,7 @@ function patchFileContent(content, filePath) {
     { anchor: MAIN_EMPTY_PAYLOAD_ANCHOR, patch: MAIN_EMPTY_PAYLOAD_PATCH, label: MAIN_EMPTY_PAYLOAD_MARKER, category: 'main-empty-payload' },
     { anchor: MAIN_EMPTY_VISIBLE_ANCHOR, patch: MAIN_EMPTY_VISIBLE_PATCH, label: MAIN_EMPTY_VISIBLE_MARKER, category: 'main-empty-visible' },
     { anchor: SESSION_UPDATE_ANCHOR, patch: SESSION_UPDATE_PATCH, label: SESSION_UPDATE_MARKER, category: 'session-update' },
+    { anchor: LIFECYCLE_TERMINAL_ANCHOR, patch: LIFECYCLE_TERMINAL_PATCH, label: LIFECYCLE_TERMINAL_MARKER, category: 'lifecycle-terminal' },
   ];
 
   for (const replacement of replacements) {
@@ -266,6 +279,7 @@ export function patchOpenClawCompactionSessionStateRuntime(distDir, options = {}
     'main-empty-payload',
     'main-empty-visible',
     'session-update',
+    'lifecycle-terminal',
   ];
   for (const category of expected) {
     const count = counts.get(category) ?? 0;
@@ -290,3 +304,7 @@ export function patchOpenClawCompactionSessionStateRuntime(distDir, options = {}
 export function patchInstalledOpenClawCompactionSessionStateRuntime(cwd = process.cwd(), options = {}) {
   return patchOpenClawCompactionSessionStateRuntime(join(cwd, 'node_modules', 'openclaw', 'dist'), options);
 }
+
+export const __test = {
+  patchFileContent,
+};

@@ -5,6 +5,7 @@ import {
   dispatchCanonicalApprovalRuntimeEvent,
   dispatchJsonRpcNotification,
   dispatchProtocolEvent,
+  shouldLogChatMessageDiagnostic,
 } from '../electron/gateway/event-dispatch.ts';
 import {
   GatewayApprovalRecoveryCoordinator,
@@ -39,6 +40,30 @@ function runtimeEvents(emissions: Emission[]): ChatRuntimeEvent[] {
     .filter((emission) => emission.event === 'chat:runtime-event')
     .map((emission) => emission.payload as ChatRuntimeEvent);
 }
+
+test('plain text deltas skip Main diagnostics while structured and terminal chat signals remain visible', () => {
+  assert.equal(shouldLogChatMessageDiagnostic({
+    state: 'delta',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'growing text' }],
+    },
+  }), false);
+  assert.equal(shouldLogChatMessageDiagnostic({
+    state: 'delta',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'tool-1', name: 'tool_search', arguments: {} }],
+    },
+  }), true);
+  assert.equal(shouldLogChatMessageDiagnostic({
+    state: 'final',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'done' }],
+    },
+  }), true);
+});
 
 test('terminal assistant final closes the matching runtime run', () => {
   const payload = {

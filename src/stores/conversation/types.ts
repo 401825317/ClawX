@@ -61,6 +61,8 @@ export type CommentaryItem = TimelineItemBase & {
   text: string;
   sealed: boolean;
   origin: 'assistant' | 'progress';
+  segmentOrdinal?: number;
+  assistantPhase?: string;
 };
 
 export type ThinkingItem = TimelineItemBase & {
@@ -232,6 +234,10 @@ export type ConversationTurn = {
   items: TimelineItem[];
   itemIndex: Record<string, number>;
   toolItemByCallId: Record<string, string>;
+  /** Stable assistant text owner for a tool boundary, including late chat/history echoes. */
+  assistantItemByToolCallId: Record<string, string>;
+  /** Message IDs are aliases for an existing narrative item, never independent visual identity. */
+  narrativeItemByMessageId: Record<string, string>;
   toolMergeByCallId: Record<string, EntityMergeState>;
   approvalMergeById: Record<string, EntityMergeState>;
   taskItemById: Record<string, string>;

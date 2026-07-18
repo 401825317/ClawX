@@ -268,6 +268,8 @@ function createTurn(turnId: string, event: ConversationEvent, message?: Conversa
     items: message ? [trigger] : [],
     itemIndex: message ? { [trigger.id]: 0 } : {},
     toolItemByCallId: {},
+    assistantItemByToolCallId: {},
+    narrativeItemByMessageId: {},
     toolMergeByCallId: {},
     approvalMergeById: {},
     taskItemById: {},
@@ -291,134 +293,6 @@ function createTurn(turnId: string, event: ConversationEvent, message?: Conversa
 
 function rebuildItemIndex(items: TimelineItem[]): Record<string, number> {
   return Object.fromEntries(items.map((item, index) => [item.id, index]));
-}
-
-const TIMELINE_ITEM_TIE_RANK: Record<TimelineItem['kind'], number> = {
-  'user-message': 0,
-  thinking: 1,
-  commentary: 2,
-  plan: 3,
-  'tool-group': 4,
-  subtask: 5,
-  approval: 6,
-  'artifact-group': 7,
-  'verification-summary': 8,
-  'final-answer': 9,
-  error: 10,
-};
-
-function timelineTerminalRank(item: TimelineItem): number {
-  if (item.kind === 'user-message') return -1;
-  if (item.kind === 'final-answer') return 1;
-  if (item.kind === 'error') return 2;
-  return 0;
-}
-
-/** Keep late transport delivery from changing the canonical visual sequence. */
-function reorderTurnItemsByCanonicalTime(turn: ConversationTurn): ConversationTurn {
-  if (turn.items.length < 2) return turn;
-  const items = turn.items
-    .map((item, index) => ({ item, index }))
-    .sort((left, right) => {
-      const terminalOrder = timelineTerminalRank(left.item) - timelineTerminalRank(right.item);
-      if (terminalOrder !== 0) return terminalOrder;
-      return left.item.firstSeenAt - right.item.firstSeenAt
-        || TIMELINE_ITEM_TIE_RANK[left.item.kind] - TIMELINE_ITEM_TIE_RANK[right.item.kind]
-        || left.index - right.index;
-    })
-    .map(({ item }) => item);
-  if (items.every((item, index) => item === turn.items[index])) return turn;
-  return {
-    ...turn,
-    items,
-    itemIndex: rebuildItemIndex(items),
-    revision: turn.revision + 1,
-  };
-}
-
-function isToolGroupBoundary(item: TimelineItem): boolean {
-  return item.kind !== 'user-message'
-    && item.kind !== 'tool-group'
-    && item.kind !== 'final-answer';
-}
-
-/** Split a group when late canonical evidence reveals a narrative boundary. */
-function splitToolGroupsAtCanonicalBoundaries(turn: ConversationTurn): ConversationTurn {
-  const boundaryTimes = turn.items
-    .filter(isToolGroupBoundary)
-    .map((item) => item.firstSeenAt);
-  if (boundaryTimes.length === 0) return turn;
-
-  let changed = false;
-  const items: TimelineItem[] = [];
-  const toolItemByCallId = { ...turn.toolItemByCallId };
-
-  for (const item of turn.items) {
-    if (item.kind !== 'tool-group' || item.entries.length < 2) {
-      items.push(item);
-      continue;
-    }
-
-    const chunks: ToolEntry[][] = [[item.entries[0]]];
-    for (let index = 1; index < item.entries.length; index += 1) {
-      const previous = item.entries[index - 1];
-      const entry = item.entries[index];
-      const hasBoundary = boundaryTimes.some((boundaryAt) => (
-        boundaryAt > previous.startedAt && boundaryAt <= entry.startedAt
-      ));
-      if (hasBoundary) chunks.push([entry]);
-      else chunks[chunks.length - 1].push(entry);
-    }
-    if (chunks.length === 1) {
-      items.push(item);
-      continue;
-    }
-
-    changed = true;
-    const groupIdsByToolCallId = new Map<string, string>();
-    const chunkItems = chunks.map((entries, index): ToolGroupItem => {
-      const id = index === 0
-        ? item.id
-        : `tool-group:${item.category}:${entries[0].toolCallId}`;
-      entries.forEach((entry) => groupIdsByToolCallId.set(entry.toolCallId, id));
-      const summary = toolGroupSummary(item.category, entries);
-      return {
-        ...item,
-        id,
-        entries,
-        toolCallIds: entries.map((entry) => entry.toolCallId),
-        summaryKey: summary.key,
-        summaryParams: summary.params,
-        status: toolGroupStatus(entries),
-        firstSeenAt: Math.min(...entries.map((entry) => entry.startedAt)),
-        updatedAt: Math.max(...entries.map((entry) => entry.updatedAt)),
-        revision: item.revision + 1,
-      };
-    });
-
-    Object.entries(toolItemByCallId).forEach(([alias, ownerItemId]) => {
-      if (ownerItemId !== item.id) return;
-      let targetItemId = groupIdsByToolCallId.get(alias);
-      if (!targetItemId) {
-        const nested = parseToolSearchNestedCallId(alias);
-        const parent = nested && item.entries.find((entry) => (
-          encodeToolSearchParentCallId(entry.toolCallId) === nested.encodedParentToolCallId
-        ));
-        targetItemId = parent ? groupIdsByToolCallId.get(parent.toolCallId) : undefined;
-      }
-      toolItemByCallId[alias] = targetItemId ?? chunkItems[0].id;
-    });
-    items.push(...chunkItems);
-  }
-
-  if (!changed) return turn;
-  return {
-    ...turn,
-    items,
-    itemIndex: rebuildItemIndex(items),
-    toolItemByCallId,
-    revision: turn.revision + 1,
-  };
 }
 
 function updateItem<TItem extends TimelineItem>(
@@ -572,62 +446,211 @@ function sealNarrativeItems(turn: ConversationTurn): ConversationTurn {
     : turn;
 }
 
-function activeNarrativeId(turn: ConversationTurn, kind: 'commentary' | 'thinking', event: ConversationEvent): string {
-  const origin = event.type === 'assistant.content' ? 'assistant' : 'progress';
-  const active = [...turn.items].reverse().find((item) => (
+type NarrativeEventData = {
+  entry?: ChatRuntimeProgressEntry;
+  text?: string;
+  delta?: string;
+  replace?: boolean;
+  phase?: string;
+  segmentOrdinal?: number;
+  anchorToolCallIds?: string[];
+};
+
+function narrativeOrigin(event: ConversationEvent, data: NarrativeEventData): CommentaryItem['origin'] {
+  if (event.type === 'assistant.content') return 'assistant';
+  if (event.source === 'history' && !data.entry) return 'assistant';
+  return 'progress';
+}
+
+function activeNarrativeId(
+  turn: ConversationTurn,
+  kind: 'commentary' | 'thinking',
+  origin: CommentaryItem['origin'],
+): string | undefined {
+  return [...turn.items].reverse().find((item) => (
     item.kind === kind
     && !item.sealed
     && (item.kind !== 'commentary' || item.origin === origin)
-  ));
-  return active?.id ?? `${kind}:${event.messageId ?? event.eventId}`;
+  ))?.id;
 }
 
-/** Reuse an exact live assistant commentary when authoritative history enriches the same Turn. */
-function alignedLiveCommentaryId(
+function assistantSegmentItemId(turnId: string, segmentOrdinal: number): string {
+  return `commentary:assistant:${turnId}:${segmentOrdinal}`;
+}
+
+function nextAssistantSegmentOrdinal(turn: ConversationTurn): number {
+  return turn.items.reduce((next, item) => (
+    item.kind === 'commentary'
+    && item.origin === 'assistant'
+    && item.segmentOrdinal != null
+      ? Math.max(next, item.segmentOrdinal + 1)
+      : next
+  ), turn.items.filter((item) => item.kind === 'commentary' && item.origin === 'assistant').length);
+}
+
+function eventSegmentOrdinal(data: NarrativeEventData): number | undefined {
+  return Number.isInteger(data.segmentOrdinal) && (data.segmentOrdinal ?? -1) >= 0
+    ? data.segmentOrdinal
+    : undefined;
+}
+
+/** Resolve stable assistant ownership before using exact text as a legacy compatibility fallback. */
+function alignedAssistantNarrativeId(
   turn: ConversationTurn,
   event: ConversationEvent,
   kind: 'commentary' | 'thinking',
-  data: { text?: string; delta?: string; replace?: boolean },
+  origin: CommentaryItem['origin'],
+  data: NarrativeEventData,
 ): string | undefined {
-  if (event.source !== 'history' || kind !== 'commentary' || !turn.hasLiveEvidence) return undefined;
+  if (kind !== 'commentary' || origin !== 'assistant') return undefined;
+  if (event.messageId) {
+    const messageOwner = turn.narrativeItemByMessageId?.[event.messageId];
+    const ownerItem = messageOwner == null ? undefined : turn.items[turn.itemIndex[messageOwner]];
+    if (ownerItem?.kind === 'commentary' && ownerItem.origin === 'assistant') return messageOwner;
+  }
+  for (const toolCallId of data.anchorToolCallIds ?? []) {
+    const toolOwner = turn.assistantItemByToolCallId?.[toolCallId];
+    const ownerItem = toolOwner == null ? undefined : turn.items[turn.itemIndex[toolOwner]];
+    if (ownerItem?.kind === 'commentary' && ownerItem.origin === 'assistant') return toolOwner;
+  }
+  const segmentOrdinal = eventSegmentOrdinal(data);
+  if (segmentOrdinal != null) {
+    const segmentOwner = turn.items.find((item) => (
+      item.kind === 'commentary'
+      && item.origin === 'assistant'
+      && item.segmentOrdinal === segmentOrdinal
+    ));
+    if (segmentOwner) return segmentOwner.id;
+    const stableId = assistantSegmentItemId(turn.id, segmentOrdinal);
+    if (turn.itemIndex[stableId] != null) return stableId;
+  }
+  if (event.source !== 'history' && event.source !== 'openclaw-chat') return undefined;
   const text = mergeText('', data).trim();
   if (!text) return undefined;
   return turn.items.find((item) => (
     item.kind === 'commentary'
     && item.origin === 'assistant'
     && item.text.trim() === text
-    && item.sourceEventIds.some((eventId) => !eventId.startsWith('history:'))
   ))?.id;
 }
 
+/** Project OpenClaw's run-wide chat delta back onto the currently visible assistant segment. */
+function normalizeLiveNarrativeData(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+  kind: 'commentary' | 'thinking',
+  origin: CommentaryItem['origin'],
+  ownerId: string | undefined,
+  data: NarrativeEventData,
+): NarrativeEventData {
+  if (
+    event.source !== 'openclaw-chat'
+    || kind !== 'commentary'
+    || origin !== 'assistant'
+    || data.replace !== true
+    || !data.text
+  ) {
+    return data;
+  }
+
+  // OpenClaw accumulates every assistant message in one chat buffer while its
+  // item stream keeps those messages as separate timeline rows.
+  const text = stripProcessMessagePrefix(
+    data.text,
+    processNarrativeSegmentsBefore(turn, ownerId),
+  );
+  return text === data.text ? data : { ...data, text, delta: undefined };
+}
+
 function applyNarrative(turn: ConversationTurn, event: ConversationEvent, kind: 'commentary' | 'thinking'): ConversationTurn {
-  const commentaryData = event.data as { entry?: ChatRuntimeProgressEntry; text?: string; delta?: string; replace?: boolean };
-  const data = event.type === 'commentary.append' && commentaryData.entry
+  const commentaryData = event.data as NarrativeEventData;
+  const rawData = event.type === 'commentary.append' && commentaryData.entry
     ? { text: commentaryData.entry.text, replace: false }
     : commentaryData;
-  const id = alignedLiveCommentaryId(turn, event, kind, data)
-    ?? activeNarrativeId(turn, kind, event);
-  const origin = event.type === 'assistant.content' ? 'assistant' : 'progress';
+  const origin = narrativeOrigin(event, commentaryData);
+  const alignedId = alignedAssistantNarrativeId(turn, event, kind, origin, rawData);
+  const activeId = alignedId ? undefined : activeNarrativeId(turn, kind, origin);
+  const data = normalizeLiveNarrativeData(
+    turn,
+    event,
+    kind,
+    origin,
+    alignedId ?? activeId,
+    rawData,
+  );
+  const explicitSegmentOrdinal = eventSegmentOrdinal(data);
+  const segmentOrdinal = kind === 'commentary' && origin === 'assistant'
+    ? explicitSegmentOrdinal
+      ?? (alignedId != null
+        ? (turn.items[turn.itemIndex[alignedId]] as CommentaryItem | undefined)?.segmentOrdinal
+        : undefined)
+      ?? (activeId != null
+        ? (turn.items[turn.itemIndex[activeId]] as CommentaryItem | undefined)?.segmentOrdinal
+        : undefined)
+      ?? nextAssistantSegmentOrdinal(turn)
+    : undefined;
+  const id = alignedId
+    ?? activeId
+    ?? (segmentOrdinal != null
+      ? assistantSegmentItemId(turn.id, segmentOrdinal)
+      : `${kind}:${event.messageId ?? event.eventId}`);
+  const existing = turn.itemIndex[id] != null;
+  const hasDeliveredFinal = turn.items.some((item) => item.kind === 'final-answer');
+  if (
+    kind === 'commentary'
+    && origin === 'assistant'
+    && !existing
+    && ((event.source === 'history' && turn.hasLiveEvidence) || hasDeliveredFinal)
+  ) {
+    return turn;
+  }
   const persistedAfterFinal = event.source === 'history'
-    && turn.items.some((item) => item.kind === 'final-answer');
-  return updateItem<CommentaryItem | ThinkingItem>(turn, id, (current) => {
+    && hasDeliveredFinal;
+  let next = updateItem<CommentaryItem | ThinkingItem>(turn, id, (current) => {
     const text = mergeText(current?.text ?? '', data);
+    const sealed = current?.sealed === true || persistedAfterFinal;
     const base = {
       id,
       turnId: turn.id,
       kind,
       text,
-      sealed: persistedAfterFinal,
-      status: persistedAfterFinal ? 'completed' as const : 'running' as const,
+      sealed,
+      status: sealed ? 'completed' as const : 'running' as const,
       firstSeenAt: current?.firstSeenAt ?? event.occurredAt,
-      updatedAt: event.occurredAt,
+      updatedAt: Math.max(current?.updatedAt ?? event.occurredAt, event.occurredAt),
       sourceEventIds: appendSource(current?.sourceEventIds ?? [], event.eventId),
       revision: (current?.revision ?? 0) + 1,
     };
     return kind === 'commentary'
-      ? { ...base, kind, origin } as CommentaryItem
+      ? {
+          ...base,
+          kind,
+          origin,
+          segmentOrdinal,
+          assistantPhase: data.phase ?? (current as CommentaryItem | undefined)?.assistantPhase,
+        } as CommentaryItem
       : base as ThinkingItem;
   });
+  if (kind !== 'commentary' || origin !== 'assistant') return next;
+  if (event.messageId && next.narrativeItemByMessageId?.[event.messageId] !== id) {
+    next = {
+      ...next,
+      narrativeItemByMessageId: { ...(next.narrativeItemByMessageId ?? {}), [event.messageId]: id },
+    };
+  }
+  const missingToolAliases = (data.anchorToolCallIds ?? []).filter((toolCallId) => (
+    next.assistantItemByToolCallId?.[toolCallId] !== id
+  ));
+  if (missingToolAliases.length > 0) {
+    next = {
+      ...next,
+      assistantItemByToolCallId: {
+        ...(next.assistantItemByToolCallId ?? {}),
+        ...Object.fromEntries(missingToolAliases.map((toolCallId) => [toolCallId, id])),
+      },
+    };
+  }
+  return next;
 }
 
 function progressItemStatus(entry: ChatRuntimeProgressEntry): CommentaryItem['status'] {
@@ -786,11 +809,54 @@ function mergeToolEntry(
   };
 }
 
+/** Bind a tool call to the assistant segment that immediately introduced it. */
+function assistantOwnerForTool(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+  rawToolCallId: string,
+  toolCallId: string,
+): string | undefined {
+  const explicitOwner = turn.assistantItemByToolCallId?.[toolCallId]
+    ?? turn.assistantItemByToolCallId?.[rawToolCallId]
+    ?? (event.messageId ? turn.narrativeItemByMessageId?.[event.messageId] : undefined);
+  if (explicitOwner) return explicitOwner;
+  const activeOwner = [...turn.items].reverse().find((item) => (
+    item.kind === 'commentary' && item.origin === 'assistant' && !item.sealed
+  ));
+  if (activeOwner) return activeOwner.id;
+  const trailingGroup = turn.items.at(-1);
+  if (trailingGroup?.kind !== 'tool-group') return undefined;
+  for (const entry of [...trailingGroup.entries].reverse()) {
+    const groupedOwner = turn.assistantItemByToolCallId?.[entry.toolCallId];
+    if (groupedOwner) return groupedOwner;
+  }
+  return undefined;
+}
+
+function bindAssistantToolOwner(
+  turn: ConversationTurn,
+  rawToolCallId: string,
+  toolCallId: string,
+  assistantItemId: string | undefined,
+): ConversationTurn {
+  if (!assistantItemId) return turn;
+  const aliases = [...new Set([rawToolCallId, toolCallId])];
+  if (aliases.every((alias) => turn.assistantItemByToolCallId?.[alias] === assistantItemId)) return turn;
+  return {
+    ...turn,
+    assistantItemByToolCallId: {
+      ...(turn.assistantItemByToolCallId ?? {}),
+      ...Object.fromEntries(aliases.map((alias) => [alias, assistantItemId])),
+    },
+  };
+}
+
 function applyTool(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
   const data = toolData(event);
   const rawToolCallId = event.toolCallId ?? data.toolCallId;
   if (!rawToolCallId || !data.name) return turn;
   const toolCallId = canonicalTimelineToolCallId(turn, rawToolCallId, data.name);
+  const assistantItemId = assistantOwnerForTool(turn, event, rawToolCallId, toolCallId);
   const existingItemId = turn.toolItemByCallId[toolCallId];
   if (
     turn.evidence.runTerminal
@@ -823,13 +889,13 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
         revision: group.revision + 1,
       };
     });
-    return {
+    return bindAssistantToolOwner({
       ...updated,
       toolItemByCallId: rawToolCallId === toolCallId
         ? updated.toolItemByCallId
         : { ...updated.toolItemByCallId, [rawToolCallId]: existingItemId },
       toolMergeByCallId: { ...updated.toolMergeByCallId, [toolCallId]: nextMerge },
-    };
+    }, rawToolCallId, toolCallId, assistantItemId);
   }
 
   const mergedEntry = mergeToolEntry(undefined, undefined, event, data, toolCallId);
@@ -859,11 +925,11 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
       revision: (current?.revision ?? 0) + 1,
     };
   });
-  return {
+  return bindAssistantToolOwner({
     ...nextTurn,
     toolItemByCallId: { ...nextTurn.toolItemByCallId, [toolCallId]: itemId },
     toolMergeByCallId: { ...nextTurn.toolMergeByCallId, [toolCallId]: mergedEntry.merge },
-  };
+  }, rawToolCallId, toolCallId, assistantItemId);
 }
 
 /** Transfer one tool's default Timeline ownership to its structured task fact. */
@@ -2351,42 +2417,100 @@ function withMessageVisibleText(
   return { ...message, content };
 }
 
-/** Apply the same exact ordered process-prefix fold used by history replay. */
+function assistantItemOwnsTool(turn: ConversationTurn, itemId: string): boolean {
+  return Object.values(turn.assistantItemByToolCallId ?? {}).includes(itemId);
+}
+
+/** Collect only process narration that precedes the candidate final item. */
+function processNarrativeSegmentsBefore(
+  turn: ConversationTurn,
+  finalNarrativeId?: string,
+): string[] {
+  const finalIndex = finalNarrativeId == null
+    ? turn.items.length
+    : turn.itemIndex[finalNarrativeId] ?? turn.items.length;
+  return turn.items.slice(0, finalIndex).flatMap((item) => (
+    item.kind === 'commentary'
+    && item.origin === 'assistant'
+    && (item.assistantPhase !== 'final_answer' || assistantItemOwnsTool(turn, item.id))
+      ? [item.text]
+      : []
+  ));
+}
+
+function finalNarrativeCandidate(
+  turn: ConversationTurn,
+  event: ConversationEvent,
+  message: ConversationMessageSnapshot,
+): CommentaryItem | undefined {
+  const data = event.data as { segmentOrdinal?: number };
+  const messageOwner = event.messageId ? turn.narrativeItemByMessageId?.[event.messageId] : undefined;
+  const segmentOrdinal = Number.isInteger(data.segmentOrdinal) ? data.segmentOrdinal : undefined;
+  const finalText = messageVisibleText(message).trim();
+  const candidates = [...turn.items].reverse().filter((item): item is CommentaryItem => (
+    item.kind === 'commentary'
+    && item.origin === 'assistant'
+    && !assistantItemOwnsTool(turn, item.id)
+  ));
+  if (messageOwner) {
+    const owned = candidates.find((item) => item.id === messageOwner);
+    if (owned) return owned;
+  }
+  if (segmentOrdinal != null) {
+    const owned = candidates.find((item) => item.segmentOrdinal === segmentOrdinal);
+    if (owned) return owned;
+  }
+  if (!finalText) return undefined;
+  return candidates.find((item) => {
+    const candidateText = item.text.trim();
+    if (!candidateText) return false;
+    if (candidateText === finalText) return true;
+    // OpenClaw's chat terminal concatenates every assistant item in the run.
+    // Remove only the ordered process prefix before matching its live final item.
+    const projectedFinalText = stripProcessMessagePrefix(
+      finalText,
+      processNarrativeSegmentsBefore(turn, item.id),
+    ).trim();
+    if (candidateText === projectedFinalText) return true;
+    return item.assistantPhase === 'final_answer'
+      && (
+        projectedFinalText.startsWith(candidateText)
+        || candidateText.startsWith(projectedFinalText)
+      );
+  });
+}
+
+/** Apply the same ordered process-prefix fold used by history replay. */
 function normalizeFinalNarrative(
   turn: ConversationTurn,
   message: ConversationMessageSnapshot,
+  finalNarrativeId?: string,
 ): ConversationMessageSnapshot {
   const fullText = messageVisibleText(message).trim();
   if (!fullText) return message;
-  const processSegments = turn.items.flatMap((item) => (
-    item.kind === 'commentary' && item.origin === 'assistant' ? [item.text] : []
-  ));
+  const processSegments = processNarrativeSegmentsBefore(turn, finalNarrativeId);
   const finalText = stripProcessMessagePrefix(fullText, processSegments);
   return finalText === fullText ? message : withMessageVisibleText(message, finalText);
 }
 
-function removeDuplicateAssistantNarrative(
+function replaceNarrativeWithFinal(
   turn: ConversationTurn,
-  message: ConversationMessageSnapshot,
-): { turn: ConversationTurn; narrative?: CommentaryItem } {
-  const finalText = messageVisibleText(message);
-  if (!finalText) return { turn };
-  for (let index = turn.items.length - 1; index >= 0; index -= 1) {
-    const item = turn.items[index];
-    if (item.kind !== 'commentary' || item.origin !== 'assistant') continue;
-    if (item.text !== finalText) return { turn };
-    const items = turn.items.filter((_, itemIndex) => itemIndex !== index);
-    return {
-      narrative: item,
-      turn: {
-        ...turn,
-        items,
-        itemIndex: rebuildItemIndex(items),
-        revision: turn.revision + 1,
-      },
-    };
-  }
-  return { turn };
+  narrative: CommentaryItem,
+  finalItem: FinalAnswerItem,
+): ConversationTurn {
+  const narrativeIndex = turn.itemIndex[narrative.id];
+  if (narrativeIndex == null) return updateItem<FinalAnswerItem>(turn, finalItem.id, () => finalItem);
+  const items = turn.items.map((item, index) => (index === narrativeIndex ? finalItem : item));
+  return {
+    ...turn,
+    items,
+    itemIndex: rebuildItemIndex(items),
+    narrativeItemByMessageId: Object.fromEntries(
+      Object.entries(turn.narrativeItemByMessageId ?? {}).filter(([, itemId]) => itemId !== narrative.id),
+    ),
+    updatedAt: Math.max(turn.updatedAt, finalItem.updatedAt),
+    revision: turn.revision + 1,
+  };
 }
 
 function applyFinalNow(turn: ConversationTurn, event: ConversationEvent): ConversationTurn {
@@ -2395,24 +2519,28 @@ function applyFinalNow(turn: ConversationTurn, event: ConversationEvent): Conver
   const id = `final:${turn.id}`;
   const currentIndex = turn.itemIndex[id];
   const current = currentIndex == null ? undefined : turn.items[currentIndex] as FinalAnswerItem;
-  const normalizedMessage = normalizeFinalNarrative(turn, message);
+  const sealedTurn = sealNarrativeItems(turn);
+  const narrative = current ? undefined : finalNarrativeCandidate(sealedTurn, event, message);
+  const normalizedMessage = normalizeFinalNarrative(sealedTurn, message, narrative?.id);
   const merged = mergeRecordFields(current?.message, normalizedMessage, turn.finalMerge, mergeEvidence(event, 'final'));
-  const deduplicated = removeDuplicateAssistantNarrative(sealNarrativeItems(turn), merged.value);
-  const updated = updateItem<FinalAnswerItem>(deduplicated.turn, id, (existing) => ({
+  const finalItem: FinalAnswerItem = {
     id,
     turnId: turn.id,
     kind: 'final-answer',
     message: merged.value,
-    authoritative: existing?.authoritative === true || event.authority === 'authoritative',
+    authoritative: current?.authoritative === true || event.authority === 'authoritative',
     status: 'completed',
-    firstSeenAt: existing?.firstSeenAt ?? deduplicated.narrative?.firstSeenAt ?? event.occurredAt,
-    updatedAt: Math.max(existing?.updatedAt ?? event.occurredAt, event.occurredAt),
+    firstSeenAt: current?.firstSeenAt ?? narrative?.firstSeenAt ?? event.occurredAt,
+    updatedAt: Math.max(current?.updatedAt ?? event.occurredAt, event.occurredAt),
     sourceEventIds: appendSource([
-      ...(existing?.sourceEventIds ?? []),
-      ...(deduplicated.narrative?.sourceEventIds ?? []),
+      ...(current?.sourceEventIds ?? []),
+      ...(narrative?.sourceEventIds ?? []),
     ], event.eventId),
-    revision: (existing?.revision ?? 0) + 1,
-  }));
+    revision: (current?.revision ?? narrative?.revision ?? 0) + 1,
+  };
+  const updated = narrative
+    ? replaceNarrativeWithFinal(sealedTurn, narrative, finalItem)
+    : updateItem<FinalAnswerItem>(sealedTurn, id, () => finalItem);
   return { ...updated, finalMerge: merged.state, deferredFinal: undefined };
 }
 
@@ -2545,15 +2673,11 @@ function promoteAssistantNarrativeToFinal(turn: ConversationTurn, event: Convers
     sourceEventIds: appendSource(candidate.sourceEventIds, event.eventId),
     revision: candidate.revision + 1,
   };
-  const items = turn.items.filter((_, index) => index !== candidateIndex);
-  items.push(finalItem);
+  const promoted = replaceNarrativeWithFinal(turn, candidate, finalItem);
   return {
-    ...turn,
-    items,
-    itemIndex: rebuildItemIndex(items),
+    ...promoted,
     finalMerge: merged.state,
     updatedAt: Math.max(turn.updatedAt, event.occurredAt),
-    revision: turn.revision + 1,
   };
 }
 
@@ -2837,8 +2961,9 @@ function applyEventToTurn(turn: ConversationTurn, event: ConversationEvent): Con
     rootRunId: next.rootRunId ?? event.rootRunId ?? event.runId,
     updatedAt: Math.max(next.updatedAt, event.occurredAt),
   };
-  const boundaryAware = splitToolGroupsAtCanonicalBoundaries(next);
-  return recomputeEvidence(reorderTurnItemsByCanonicalTime(boundaryAware));
+  // Timeline order is append-only. Later evidence may update an existing item,
+  // but it must never move rows that the user has already seen.
+  return recomputeEvidence(next);
 }
 
 /** Copy large state indexes once for the whole ingress batch. */
@@ -2973,11 +3098,12 @@ function compactTerminalEventTail(state: ConversationState, turn: ConversationTu
   return true;
 }
 
-/** Only a checkpoint-completed history Turn may be corrected by later live liveness. */
-function canReopenHistoryCheckpointedTurn(turn: ConversationTurn): boolean {
-  return turn.status === 'completed'
+/** A history-only Turn without a run owner may be claimed by its first live lifecycle. */
+function canClaimHistoryCheckpointedTurn(turn: ConversationTurn): boolean {
+  return (turn.status === 'queued' || turn.status === 'completed')
     && turn.evidence.historyCheckpointed
     && !turn.hasLiveEvidence
+    && turn.runAliases.length === 0
     && turn.evidence.runTerminal == null;
 }
 
@@ -2986,19 +3112,25 @@ function latestHistoryCheckpointedTurnId(
   sessionKey: string,
 ): string | undefined {
   const turnIds = state.turnOrderBySession[sessionKey] ?? [];
-  if (turnIds.some((turnId) => {
-    const turn = state.turnsById[turnId];
-    return turn && !isTerminalTurn(turn);
-  })) return undefined;
+  let candidateTurnId: string | undefined;
   for (let index = turnIds.length - 1; index >= 0; index -= 1) {
     const turnId = turnIds[index];
     const turn = state.turnsById[turnId];
-    if (turn && canReopenHistoryCheckpointedTurn(turn)) return turnId;
+    if (turn && canClaimHistoryCheckpointedTurn(turn)) {
+      candidateTurnId = turnId;
+      break;
+    }
   }
-  return undefined;
+  if (!candidateTurnId) return undefined;
+  const hasConflictingLiveTurn = turnIds.some((turnId) => {
+    if (turnId === candidateTurnId) return false;
+    const turn = state.turnsById[turnId];
+    return Boolean(turn?.hasLiveEvidence && !isTerminalTurn(turn));
+  });
+  return hasConflictingLiveTurn ? undefined : candidateTurnId;
 }
 
-function reopenHistoryCheckpointedTurn(
+function claimHistoryCheckpointedTurn(
   turn: ConversationTurn,
   event: ConversationEvent,
 ): ConversationTurn {
@@ -3050,7 +3182,7 @@ function applyCheckpoint(state: ConversationState, event: ConversationEvent): bo
   return changed;
 }
 
-/** Apply session liveness, correcting only the latest checkpoint-completed history Turn. */
+/** Apply session liveness, claiming only the latest eligible history Turn. */
 function applySessionActivity(state: ConversationState, event: ConversationEvent): boolean {
   const data = event.data as { active: boolean };
   const turnIds = state.turnOrderBySession[event.sessionKey] ?? [];
@@ -3061,7 +3193,7 @@ function applySessionActivity(state: ConversationState, event: ConversationEvent
       const historyTurnId = latestHistoryCheckpointedTurnId(state, event.sessionKey);
       const historyTurn = historyTurnId ? state.turnsById[historyTurnId] : undefined;
       if (historyTurnId && historyTurn) {
-        state.turnsById[historyTurnId] = reopenHistoryCheckpointedTurn(historyTurn, event);
+        state.turnsById[historyTurnId] = claimHistoryCheckpointedTurn(historyTurn, event);
         state.aliases.activeBySession[event.sessionKey] = historyTurnId;
       }
     }
@@ -3190,7 +3322,7 @@ function reduceConversationEventInto(
   let turn = existing ?? createTurn(resolvedTurnId, event, message ?? undefined);
   const firstLiveEvidence = event.source !== 'history' && !turn.hasLiveEvidence;
   if (firstLiveEvidence) {
-    const shouldReopen = canReopenHistoryCheckpointedTurn(turn)
+    const shouldReopen = canClaimHistoryCheckpointedTurn(turn)
       && (event.type === 'run.started' || activeSessionActivity);
     turn = {
       ...turn,
@@ -3386,60 +3518,20 @@ function sameTurnOrder(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((turnId, index) => turnId === right[index]);
 }
 
-const HISTORY_TIMELINE_EVENT_TYPES: Record<TimelineItem['kind'], Set<ConversationEvent['type']>> = {
-  'user-message': new Set(['turn.requested']),
-  thinking: new Set(['thinking.content']),
-  commentary: new Set(['assistant.content', 'commentary.append', 'progress.updated']),
-  plan: new Set(['plan.updated', 'step.updated']),
-  'tool-group': new Set(['tool.started', 'tool.updated', 'tool.completed']),
-  subtask: new Set(['task.updated']),
-  approval: new Set(['approval.updated']),
-  'artifact-group': new Set(['artifact.updated']),
-  'verification-summary': new Set(['verification.updated']),
-  'final-answer': new Set(['final.message']),
-  error: new Set(['turn.error']),
-};
-
-/** Resolve the persisted position owned by this Timeline item kind. */
-function historyTimelineItemTime(
-  item: TimelineItem,
-  historyEventById: Map<string, ConversationEvent>,
-  historyEvents: ConversationEvent[],
-): number {
-  const ownedTypes = HISTORY_TIMELINE_EVENT_TYPES[item.kind];
-  const ownedOccurredAt = item.sourceEventIds
-    .map((eventId) => historyEventById.get(eventId))
-    .filter((event): event is ConversationEvent => Boolean(event && ownedTypes.has(event.type)))
-    .reduce<number | undefined>((earliest, event) => (
-      earliest == null ? event.occurredAt : Math.min(earliest, event.occurredAt)
-    ), undefined);
-  if (ownedOccurredAt != null) return ownedOccurredAt;
-
-  const fallbackTypes = item.kind === 'artifact-group'
-    ? new Set<ConversationEvent['type']>([...ownedTypes, 'final.message'])
-    : ownedTypes;
-  return historyEvents.find((event) => fallbackTypes.has(event.type))?.occurredAt ?? item.firstSeenAt;
-}
-
-/** Let authoritative transcript time repair a wrong live insertion order. */
-function reorderHistoryEnrichedTurn(
+/** Keep rendered item identities in place and append evidence first discovered by recovery. */
+function preserveExistingTimelineItemOrder(
   turn: ConversationTurn,
-  historyEvents: ConversationEvent[],
+  existingItemIds: readonly string[],
 ): ConversationTurn {
-  const historyEventById = new Map(historyEvents.map((event) => [event.eventId, event]));
-  const items = turn.items
-    .map((item, index) => ({
-      item,
-      index,
-      historyTime: historyTimelineItemTime(item, historyEventById, historyEvents),
-    }))
-    .sort((left, right) => (
-      timelineTerminalRank(left.item) - timelineTerminalRank(right.item)
-      || left.historyTime - right.historyTime
-      || TIMELINE_ITEM_TIE_RANK[left.item.kind] - TIMELINE_ITEM_TIE_RANK[right.item.kind]
-      || left.index - right.index
-    ))
-    .map(({ item }) => item);
+  if (existingItemIds.length === 0 || turn.items.length < 2) return turn;
+  const itemById = new Map(turn.items.map((item) => [item.id, item]));
+  const existingItemSet = new Set(existingItemIds);
+  const items = [
+    ...existingItemIds
+      .map((itemId) => itemById.get(itemId))
+      .filter((item): item is TimelineItem => Boolean(item)),
+    ...turn.items.filter((item) => !existingItemSet.has(item.id)),
+  ];
   if (items.every((item, index) => item === turn.items[index])) return turn;
   return {
     ...turn,
@@ -3453,10 +3545,16 @@ export function replaceSessionTurns(
   state: ConversationState,
   sessionKey: string,
   historyEvents: ConversationEvent[],
+  options?: { prependMissingTurns?: boolean },
 ): ConversationState {
   // History is an enrichment source for live turns, so preserve their reduced
   // projection instead of attempting to reconstruct it from a compacted tail.
   const currentTurnIds = state.turnOrderBySession[sessionKey] ?? [];
+  const currentTurnSet = new Set(currentTurnIds);
+  const existingItemOrderByTurnId = new Map(currentTurnIds.map((turnId) => [
+    turnId,
+    state.turnsById[turnId]?.items.map((item) => item.id) ?? [],
+  ]));
   const alignedHistory = alignHistoryTurnsToLiveState(state, sessionKey, historyEvents);
   const replayInputEvents = alignedHistory.events;
   const historyEventsByTurnId = new Map<string, ConversationEvent[]>();
@@ -3474,29 +3572,27 @@ export function replaceSessionTurns(
     ]),
   );
   const historyTurnSet = new Set(historyTurnIds);
-  const liveOnlyTurnIds = currentTurnIds.filter((turnId) => (
-    !historyTurnSet.has(turnId) && state.turnsById[turnId]?.hasLiveEvidence
+  const retainedCurrentTurnIds = currentTurnIds.filter((turnId) => (
+    historyTurnSet.has(turnId) || state.turnsById[turnId]?.hasLiveEvidence
   ));
-  const nextTurnIds = [...historyTurnIds, ...liveOnlyTurnIds];
+  const recoveredHistoryTurnIds = historyTurnIds.filter((turnId) => !currentTurnSet.has(turnId));
+  // Explicit backwards pagination may add older Turns before the viewport.
+  // Recovery refreshes still append genuinely missing Turns so visible order
+  // never changes unexpectedly.
+  const nextTurnIds = options?.prependMissingTurns
+    ? [...recoveredHistoryTurnIds, ...retainedCurrentTurnIds]
+    : [...retainedCurrentTurnIds, ...recoveredHistoryTurnIds];
   const retainedTurnIds = new Set(nextTurnIds);
   const removedTurnIds = new Set(currentTurnIds.filter((turnId) => !retainedTurnIds.has(turnId)));
   const changedHistoryTurnIds = new Set(historyTurnIds.filter((turnId) => (
     state.turnsById[turnId]?.historyReplayFingerprint !== historyFingerprintByTurnId.get(turnId)
   )));
-  const historyOrderRepairTurnIds = new Set(historyTurnIds.filter((turnId) => {
-    const turn = state.turnsById[turnId];
-    return Boolean(turn && reorderHistoryEnrichedTurn(
-      turn,
-      historyEventsByTurnId.get(turnId) ?? [],
-    ) !== turn);
-  }));
   const hasUnownedReplayEvidence = replayInputEvents.some((event) => (
     !event.turnId && event.type !== 'history.checkpoint'
   ));
   if (
     removedTurnIds.size === 0
     && changedHistoryTurnIds.size === 0
-    && historyOrderRepairTurnIds.size === 0
     && !hasUnownedReplayEvidence
     && sameTurnOrder(currentTurnIds, nextTurnIds)
   ) {
@@ -3550,13 +3646,14 @@ export function replaceSessionTurns(
   let next = reduceConversationEvents(base, replayEvents);
   let turnsById = next.turnsById;
   let turnsChanged = false;
-  new Set([...changedHistoryTurnIds, ...historyOrderRepairTurnIds]).forEach((turnId) => {
+  changedHistoryTurnIds.forEach((turnId) => {
     const turn = turnsById[turnId];
-    if (!turn) return;
-    const reordered = reorderHistoryEnrichedTurn(turn, historyEventsByTurnId.get(turnId) ?? []);
-    if (reordered === turn) return;
+    const existingItemIds = existingItemOrderByTurnId.get(turnId);
+    if (!turn || !existingItemIds) return;
+    const stabilized = preserveExistingTimelineItemOrder(turn, existingItemIds);
+    if (stabilized === turn) return;
     if (!turnsChanged) turnsById = { ...turnsById };
-    turnsById[turnId] = reordered;
+    turnsById[turnId] = stabilized;
     turnsChanged = true;
   });
   let fingerprintsChanged = false;

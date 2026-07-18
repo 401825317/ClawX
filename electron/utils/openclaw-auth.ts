@@ -67,6 +67,9 @@ import {
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
   JUNFEIAI_OPENCLAW_EXEC_ASK,
   JUNFEIAI_OPENCLAW_EXEC_SECURITY,
+  JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
+  JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
   getJunFeiAIProviderBaseUrl,
@@ -3163,6 +3166,49 @@ export function ensureManagedMediaLimitInConfig(config: Record<string, unknown>)
   return true;
 }
 
+/** Apply the endpoint-configured OpenClaw long-session compaction policy. */
+export function ensureJunFeiAICompactionDefaultsInConfig(config: Record<string, unknown>): boolean {
+  const agents = (
+    config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+      ? { ...(config.agents as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const defaults = (
+    agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+      ? { ...(agents.defaults as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const compaction = (
+    defaults.compaction && typeof defaults.compaction === 'object' && !Array.isArray(defaults.compaction)
+      ? { ...(defaults.compaction as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const midTurnPrecheck = (
+    compaction.midTurnPrecheck
+      && typeof compaction.midTurnPrecheck === 'object'
+      && !Array.isArray(compaction.midTurnPrecheck)
+      ? { ...(compaction.midTurnPrecheck as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (
+    midTurnPrecheck.enabled === JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED
+    && compaction.truncateAfterCompaction === JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION
+    && compaction.maxActiveTranscriptBytes === JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES
+  ) {
+    return false;
+  }
+
+  midTurnPrecheck.enabled = JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED;
+  compaction.midTurnPrecheck = midTurnPrecheck;
+  compaction.truncateAfterCompaction = JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION;
+  compaction.maxActiveTranscriptBytes = JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES;
+  defaults.compaction = compaction;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
 /** Apply the endpoint-configured OpenClaw host-command approval defaults. */
 export function ensureJunFeiAIExecDefaultsInConfig(config: Record<string, unknown>): boolean {
   const tools = (
@@ -3393,6 +3439,9 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
       modified = true;
     }
     if (ensureManagedMediaLimitInConfig(config)) {
+      modified = true;
+    }
+    if (ensureJunFeiAICompactionDefaultsInConfig(config)) {
       modified = true;
     }
     if (ensureManagedToolDirectoryInConfig(config)) {
@@ -3730,6 +3779,16 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     if (ensureManagedMediaLimitInConfig(config)) {
       modified = true;
       console.log('[sanitize] Defaulted generated media delivery limit to 16 MiB');
+    }
+
+    if (ensureJunFeiAICompactionDefaultsInConfig(config)) {
+      modified = true;
+      console.log(
+        `[sanitize] Applied OpenClaw compaction defaults from junfeiai-endpoints.json `
+        + `(midTurnPrecheck=${JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED}, `
+        + `truncateAfterCompaction=${JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION}, `
+        + `maxActiveTranscriptBytes=${JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES})`,
+      );
     }
 
     if (ensureManagedToolDirectoryInConfig(config)) {

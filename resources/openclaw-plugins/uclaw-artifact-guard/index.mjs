@@ -5,6 +5,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 
 const PLUGIN_ID = 'uclaw-artifact-guard';
 const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
+const TERMINAL_OBSERVER_HOOK_ID = `${PLUGIN_ID}:terminal-artifact-observer`;
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:prompt-history-maintenance`;
 const MEDIA_TOOL_PREPARATION_HOOK_ID = `${PLUGIN_ID}:media-tool-preparation`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
@@ -133,14 +134,31 @@ function extractAssistantVisibleText(message) {
   return parts.filter(Boolean).join('\n');
 }
 
+const MESSAGE_LIST_KEYS = [
+  'messages',
+  'messagesSnapshot',
+  'finalMessages',
+  'transcript',
+  'conversation',
+];
+
 function extractMessageLists(event) {
-  return [
-    event?.messages,
-    event?.messagesSnapshot,
-    event?.finalMessages,
-    event?.transcript,
-    event?.conversation,
-  ].filter(Array.isArray);
+  return MESSAGE_LIST_KEYS.map((key) => event?.[key]).filter(Array.isArray);
+}
+
+function replaceEventMessageList(event, original, replacement) {
+  let replaced = false;
+  for (const key of MESSAGE_LIST_KEYS) {
+    if (event?.[key] !== original) continue;
+    try {
+      event[key] = replacement;
+      replaced = true;
+    } catch {
+      // OpenClaw currently freezes message payloads, not the hook event. If a
+      // future runtime freezes the event too, skip this maintenance pass.
+    }
+  }
+  return replaced;
 }
 
 function latestUserMessageIndex(messages) {
@@ -705,18 +723,30 @@ function sanitizePromptHistoryMessages(event) {
   for (const messages of extractMessageLists(event)) {
     if (visited.has(messages)) continue;
     visited.add(messages);
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const decision = sanitizeInternalTranscriptMessage(messages[index]);
-      if (decision.action === 'keep') continue;
-      const reason = decision.reason ?? 'internal_runtime_message';
-      result.reasons[reason] = (result.reasons[reason] ?? 0) + 1;
-      if (decision.action === 'block') {
-        messages.splice(index, 1);
-        result.blocked += 1;
-      } else {
-        messages[index] = decision.message;
-        result.rewritten += 1;
+    const listResult = { blocked: 0, rewritten: 0, reasons: {} };
+    let changed = false;
+    const nextMessages = [];
+    for (const message of messages) {
+      const decision = sanitizeInternalTranscriptMessage(message);
+      if (decision.action === 'keep') {
+        nextMessages.push(message);
+        continue;
       }
+      const reason = decision.reason ?? 'internal_runtime_message';
+      listResult.reasons[reason] = (listResult.reasons[reason] ?? 0) + 1;
+      changed = true;
+      if (decision.action === 'block') {
+        listResult.blocked += 1;
+      } else {
+        nextMessages.push(decision.message);
+        listResult.rewritten += 1;
+      }
+    }
+    if (!changed || !replaceEventMessageList(event, messages, nextMessages)) continue;
+    result.blocked += listResult.blocked;
+    result.rewritten += listResult.rewritten;
+    for (const [reason, count] of Object.entries(listResult.reasons)) {
+      result.reasons[reason] = (result.reasons[reason] ?? 0) + count;
     }
   }
   return result;
@@ -769,6 +799,74 @@ function compactPresentationInvocationArgs(toolName, rawArgs) {
   return { value: wasString ? serialized : compactArgs, omittedChars };
 }
 
+// Clone only the tool-call branch that actually loses large presentation data.
+function compactPresentationToolCallContainer(container) {
+  const originalFunction = isPlainRecord(container.function) ? container.function : container;
+  const toolName = String(originalFunction.name ?? container.name ?? '');
+  let nextFunction = originalFunction;
+  let compacted = 0;
+  let omittedChars = 0;
+
+  for (const key of ['arguments', 'input']) {
+    if (!(key in originalFunction)) continue;
+    const compactResult = compactPresentationInvocationArgs(toolName, originalFunction[key]);
+    if (compactResult.omittedChars <= 0) continue;
+    if (nextFunction === originalFunction) nextFunction = { ...originalFunction };
+    nextFunction[key] = compactResult.value;
+    compacted += 1;
+    omittedChars += compactResult.omittedChars;
+  }
+
+  if (nextFunction === originalFunction) return { value: container, compacted, omittedChars };
+  return {
+    value: originalFunction === container
+      ? nextFunction
+      : { ...container, function: nextFunction },
+    compacted,
+    omittedChars,
+  };
+}
+
+// Keep untouched history entries referentially stable for long-session performance.
+function compactPresentationAssistantMessage(message) {
+  let nextMessage = message;
+  let compacted = 0;
+  let omittedChars = 0;
+
+  if (Array.isArray(message.content)) {
+    let contentChanged = false;
+    const nextContent = message.content.map((part) => {
+      if (!isPlainRecord(part)) return part;
+      const compactResult = compactPresentationToolCallContainer(part);
+      if (compactResult.value !== part) contentChanged = true;
+      compacted += compactResult.compacted;
+      omittedChars += compactResult.omittedChars;
+      return compactResult.value;
+    });
+    if (contentChanged) nextMessage = { ...nextMessage, content: nextContent };
+  }
+
+  const toolCallsKey = Array.isArray(message.tool_calls)
+    ? 'tool_calls'
+    : Array.isArray(message.toolCalls)
+      ? 'toolCalls'
+      : undefined;
+  if (toolCallsKey) {
+    let callsChanged = false;
+    const nextCalls = message[toolCallsKey].map((call) => {
+      if (!isPlainRecord(call)) return call;
+      const compactResult = compactPresentationToolCallContainer(call);
+      if (compactResult.value !== call) callsChanged = true;
+      compacted += compactResult.compacted;
+      omittedChars += compactResult.omittedChars;
+      return compactResult.value;
+    });
+    if (callsChanged) nextMessage = { ...nextMessage, [toolCallsKey]: nextCalls };
+  }
+
+  return { value: nextMessage, compacted, omittedChars };
+}
+
 function compactHistoricalPresentationToolCalls(event) {
   const result = { compacted: 0, omittedChars: 0 };
   const visited = new Set();
@@ -787,26 +885,22 @@ function compactHistoricalPresentationToolCalls(event) {
     const historyEnd = latestUserIndex < 0
       ? messages.length
       : (currentPromptAlreadyInMessages || isFinalizeRevision ? latestUserIndex : messages.length);
+    let nextMessages = messages;
+    let listCompacted = 0;
+    let listOmittedChars = 0;
     for (let index = 0; index < historyEnd; index += 1) {
       const message = messages[index];
       if (!isPlainRecord(message) || String(message.role ?? '').toLowerCase() !== 'assistant') continue;
-      const containers = [];
-      if (Array.isArray(message.content)) containers.push(...message.content.filter(isPlainRecord));
-      const topLevelCalls = Array.isArray(message.tool_calls) ? message.tool_calls : message.toolCalls;
-      if (Array.isArray(topLevelCalls)) containers.push(...topLevelCalls.filter(isPlainRecord));
-      for (const container of containers) {
-        const fn = isPlainRecord(container.function) ? container.function : container;
-        const toolName = String(fn.name ?? container.name ?? '');
-        for (const key of ['arguments', 'input']) {
-          if (!(key in fn)) continue;
-          const compacted = compactPresentationInvocationArgs(toolName, fn[key]);
-          if (compacted.omittedChars <= 0) continue;
-          fn[key] = compacted.value;
-          result.compacted += 1;
-          result.omittedChars += compacted.omittedChars;
-        }
-      }
+      const compactResult = compactPresentationAssistantMessage(message);
+      if (compactResult.value === message) continue;
+      if (nextMessages === messages) nextMessages = messages.slice();
+      nextMessages[index] = compactResult.value;
+      listCompacted += compactResult.compacted;
+      listOmittedChars += compactResult.omittedChars;
     }
+    if (nextMessages === messages || !replaceEventMessageList(event, messages, nextMessages)) continue;
+    result.compacted += listCompacted;
+    result.omittedChars += listOmittedChars;
   }
   return result;
 }
@@ -2435,9 +2529,13 @@ function registerArtifactGuard(api) {
       description: 'Stage media inputs, rewrite managed screenshot paths, and project native media tool progress.',
       priority: 100,
     });
-    registerLifecycleHook(api, 'before_agent_finalize', (event, ctx) => {
+    // OpenClaw buffers every assistant frame until terminal delivery whenever
+    // any before_agent_finalize hook is registered. Keep this observation on
+    // agent_end so ordinary commentary and final-answer deltas remain live.
+    registerLifecycleHook(api, 'agent_end', (event, ctx) => {
       const analysis = analyzeArtifactFinal(event, ctx);
-      logDiagnostic('finalize-check', {
+      const suppressedRevision = analysis.shouldRevise ? buildRevision(analysis) : undefined;
+      logDiagnostic('terminal-observation', {
         eventId: eventId(event, ctx),
         finalTextChars: analysis.finalText.length,
         emptyFinal: analysis.emptyFinal,
@@ -2454,13 +2552,12 @@ function registerArtifactGuard(api) {
         shouldReviseEmptyFinal: analysis.shouldReviseEmptyFinal,
         shouldReviseArtifact: analysis.shouldReviseArtifact,
         shouldRevise: analysis.shouldRevise,
+        revisionSuppressedForStreaming: Boolean(suppressedRevision),
       });
       emitFinalArtifactEvents(api, event, analysis);
-      if (!analysis.shouldRevise) return;
-      return buildRevision(analysis);
     }, {
-      name: REVISION_ID,
-      description: 'Verify concrete artifact references and recover empty internal final responses.',
+      name: TERMINAL_OBSERVER_HOOK_ID,
+      description: 'Observe final artifact availability without delaying assistant stream delivery.',
     });
   }
 }
@@ -2468,7 +2565,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.2.2',
+  version: '0.2.4',
   register(api) {
     registerArtifactGuard(api);
   },

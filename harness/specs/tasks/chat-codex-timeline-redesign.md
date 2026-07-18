@@ -25,6 +25,8 @@ touchedAreas:
   - electron/services/computer/approval-broker.ts
   - electron/services/computer/desktop-run-coordinator.ts
   - electron/services/computer/types.ts
+  - electron/utils/junfeiai-distribution.ts
+  - electron/utils/openclaw-auth.ts
   - electron/gateway/chat-runtime-events.ts
   - electron/gateway/event-dispatch.ts
   - electron/gateway/manager.ts
@@ -71,6 +73,10 @@ touchedAreas:
   - scripts/chat-final-runtime-replay.test.ts
   - scripts/junfeiai-provider-seed-stability.test.ts
   - scripts/junfeiai-distribution-defaults.test.ts
+  - scripts/openclaw-compaction-session-state-patch.mjs
+  - scripts/openclaw-compaction-session-state-patch.test.mjs
+  - scripts/uclaw-artifact-guard-runtime.test.mjs
+  - scripts/uclaw-presentation-history-compact.test.mjs
   - scripts/gateway-task-ledger-monitor.test.ts
   - scripts/runtime-display-sanitizer.test.ts
   - scripts/runtime-task-graph.test.ts
@@ -85,6 +91,7 @@ touchedAreas:
   - harness/evidence/chat-codex-timeline-performance.json
   - harness/evidence/chat-codex-timeline-performance.md
   - resources/openclaw-plugins/uclaw-desktop-control/index.mjs
+  - resources/openclaw-plugins/uclaw-artifact-guard/**
   - resources/openclaw-plugins/uclaw-task-bridge/**
   - tests/e2e/chat-host-task-rehydration.spec.ts
   - tests/e2e/chat-approval-actions.spec.ts
@@ -117,7 +124,7 @@ expectedUserBehavior:
   - The full execution graph is no longer rendered by default in the main information flow; an accessible execution-details action remains available, while raw event and correlation diagnostics remain developer-only.
   - Streaming updates do not pull a reader back to the bottom after the reader scrolls upward, and expanding details preserves the current viewport anchor.
   - Long conversations remain responsive because completed turns keep stable render identity and offscreen turns are virtualized.
-  - Live delivery and history reload produce the same visible turn and timeline result for the same authoritative evidence.
+  - Live delivery owns the visible order. Once a Turn or Timeline item is shown, its position is permanent. History reload updates matching identities in place and may append a genuinely missing restored Turn, but it never inserts a new assistant narrative row into an existing live Turn. Explicit backwards pagination may prepend older Turns while preserving the relative order and pixel anchor of every visible Turn.
   - Ordinary chat, image and video generation, planner/task flow, execution queue, artifacts, verification, subagents, approvals, cancellation, failures, and restored sessions retain their existing product behavior.
 requiredProfiles:
   - fast
@@ -147,6 +154,10 @@ requiredTests:
   - pnpm exec tsx --test scripts/chat-abort-detached-tasks.test.ts
   - pnpm exec tsx --test scripts/chat-final-runtime-replay.test.ts
   - pnpm exec tsx --test scripts/junfeiai-provider-seed-stability.test.ts
+  - pnpm exec tsx --test scripts/junfeiai-distribution-defaults.test.ts
+  - node --test scripts/uclaw-presentation-history-compact.test.mjs
+  - node --test scripts/uclaw-artifact-guard-runtime.test.mjs
+  - node --test scripts/openclaw-compaction-session-state-patch.test.mjs
   - pnpm exec tsx --test scripts/chat-timeline-performance.test.ts
   - pnpm exec tsx --test scripts/gateway-task-ledger-monitor.test.ts
   - pnpm exec tsx --test scripts/host-task-lifecycle.test.ts
@@ -168,6 +179,8 @@ acceptance:
   - Live Gateway delivery and transcript/task-ledger replay enter the same turn reducer and timeline projector instead of maintaining separate renderer semantics.
   - The turn reducer is the sole owner of queued, running, waiting-approval, completed, error, and aborted transitions; React components do not infer whether a turn is open by rescanning message arrays.
   - Event ordering, duplicate suppression, terminal-state precedence, and late-event handling are deterministic, session-scoped, idempotent, and memory-bounded.
+  - A visible session does not automatically replay `chat.history` on final, error, abort, completion wake, or backend-idle settlement. Initial entry, explicit session switch, manual refresh, and Gateway reconnect remain the recovery boundaries.
+  - Bundled OpenClaw plugins do not register `before_agent_finalize` for ordinary UI delivery because OpenClaw buffers all assistant deltas while that hook exists. Terminal artifact observation uses `agent_end`; tool-result artifact evidence and the canonical Turn gates remain authoritative.
   - A terminal final answer and terminal run lifecycle remain distinct facts: the answer may render before completion, but only authoritative lifecycle or backend-idle evidence closes the turn.
   - Timeline projection produces stable user-message, commentary, thinking, tool-group, approval, subtask, artifact, verification, final-answer, and error items without duplicating one fact across progress, graph, reasoning, and chat cards.
   - Adjacent compatible tool calls are grouped by stable ownership and chronology; raw command output, arguments, results, duration, and errors remain lazy execution details rather than default top-level items, including after live/history reconciliation.
@@ -183,6 +196,9 @@ acceptance:
   - Approval requests remain visible and actionable until authoritative approval, rejection, cancellation, expiry, or an error/abort that invalidates the request. Successful model Run completion does not cancel a Main-owned pending approval, and replay never reopens a terminal approval.
   - Artifact and verification items come from structured evidence, retain availability/error state, may appear before the final answer, and do not treat path-like prose as produced output.
   - Abort, error, disconnect, stale history, late tool results, duplicate finals, missing sequence numbers, and backend-idle recovery converge to one deterministic visible state.
+  - Long tool loops run OpenClaw's mid-turn context precheck before the next model call, rotate the active transcript after successful compaction, and use the endpoint-owned transcript byte threshold without dropping adjacent user compaction settings.
+  - Artifact-guard prompt maintenance treats OpenClaw history as immutable, replaces only changed message branches, preserves current-turn tool arguments, and never fails the whole prompt-build hook because a historical tool call is frozen.
+  - A recovered overflow attempt cannot leave a stale deferred lifecycle error after a later successful finishing event; genuine compaction failure remains terminal and diagnostic.
   - Renderer pages and components add no direct Gateway HTTP, direct IPC, transport switching, polling ownership, semantic planner, or completion inference.
   - All new user-facing strings use the four chat locales and all timeline UI follows existing design tokens and accessibility behavior.
   - README language variants document the changed default process display and the retained execution-details/diagnostic path before legacy removal.
@@ -337,7 +353,7 @@ React components consume turn/item selectors. They must not rescan all messages,
 - Rebuild a session by replaying canonical events through the same turn reducer and timeline projector. Do not maintain a history-only UI reconstruction algorithm.
 - Compare normalized semantic snapshots, not timestamps or ephemeral transport IDs, between live and replay results.
 - Backend liveness remains authoritative for whether an interrupted/restored run is active. A stale open tool segment may remain visible as history without rearming the composer.
-- History refresh merges by stable identity and source authority. It must not duplicate a live item, downgrade a terminal task, reopen an approval, or replace newer text with an older snapshot.
+- History refresh merges by stable identity and source authority. It must not duplicate or move an existing live item, downgrade a terminal task, reopen an approval, or replace newer text with an older snapshot. Stable assistant identity is derived from the owning Turn, the Turn-local assistant segment ordinal, and the following tool-call boundary when present; message IDs are aliases only. For an existing live Turn, history assistant text must hit one of those identities and update it in place or be ignored. A genuinely missing restored Turn may append after the already-rendered Turn order; the explicit load-earlier path alone may prepend older Turns without changing the relative order of existing Turns.
 
 ## Timeline Projection
 
@@ -460,11 +476,17 @@ The final continuation audit after the media-order fix also passes the current r
 
 `src/stores/chat.ts` no longer remains at the previously questioned 8,000-line scale. This continuation reduced it from `7,602` to `6,658` lines without changing the Zustand Store API or canonical Timeline ownership. Media model/default/prompt resolution now lives in `src/stores/chat/media-send-preferences.ts`; session title cleanup, summary hydration, and rename deduplication live in `src/stores/chat/session-label-controller.ts`; transport-shaped tool call/result compatibility lives in `src/stores/chat/tool-status.ts`; and optimistic user-message/history-echo reconciliation plus streaming snapshots live in `src/stores/chat/optimistic-message-reconciliation.ts`. `chat.ts` remains the orchestration facade for send, session lifecycle, artifact/history hydration, and compatibility state used outside rendering, while visible conversation projection continues to come only from canonical Turns.
 
-Latest real-OpenClaw manual evidence: image history renders one artifact block; video history renders one player and one file block with durable metadata. Real image and video transcripts persist the same semantic order: assistant process commentary, async media task evidence, delivered `MEDIA:` artifact, then one completion answer. The user's follow-up screenshots proved that history replay parity alone was insufficient: the live reducer could still show `completion text -> media -> process text` until a later history refresh. The OpenClaw transcript itself was correctly ordered, so the remaining defect was in canonical projection rather than the provider, media API, Gateway, or service restart state. Mixed assistant messages containing both a preamble and a tool call are now classified as `assistant.content`, never `final.message`; Turn items are ordered by canonical occurrence time with user input pinned first and final/error evidence pinned after execution, artifacts, and verification. Tool groups are also split again when late commentary reveals a canonical narrative boundary, and history enrichment uses the same terminal rank as live projection, preventing execution-detail ownership from oscillating during refresh. The running renderer accepted this through Vite HMR, automatically replayed `chat.history`, and immediately showed both real Turns as `process commentary -> tool/task evidence -> media artifact -> completion answer`. Electron PID `27806` and Gateway PID `27896` remained unchanged from their `2026-07-17 08:44` starts, proving the correction did not depend on a restart. The full conversation replay now passes `110/110`; TypeScript, ESLint, `git diff --check`, production Vite/Electron build, artifact-ownership E2E, completion-wake E2E, the live Y-position regression, the history/live execution-details owner regression, and the hundreds-of-items single-Turn regression all pass. History refresh, media-to-report-to-media session switching, and renderer reload preserve the same ownership without duplicate final/artifact/commentary media. A real subagent request in main session `4c8a1c1d-0dd9-445a-b6af-a5bdfa2ad1c0` and child session `35ea50d1-81c9-4f9a-9483-a2193a6c4c33` rendered one owning Turn, one completed subtask summary, two completed tool operations, and exactly one `SUBAGENT_OK MAIN_OK` final across session switching and refresh. A real authoritative abort in session `c8ae509d-80f1-4bfa-903a-29e4947f069d`, run `d979971d-6c40-40b3-8c67-12eee463f00c`, persisted `stopReason=aborted` and `Request was aborted.`, produced no assistant final, and never rendered `MUST_NOT_RENDER`.
+Latest real-OpenClaw manual evidence: image history renders one artifact block; video history renders one player and one file block with durable metadata. Real image and video transcripts persist the same semantic order: assistant process commentary, async media task evidence, delivered `MEDIA:` artifact, then one completion answer. The user's follow-up screenshots proved that history replay parity alone was insufficient: the live reducer could still show late, merged, or repeated text until a later refresh. The current invariant is append-only: the first visible position of a Timeline item never changes; matching evidence updates that item in place; history evidence without a stable Turn-local owner is ignored instead of being appended. Native OpenClaw `itemId` is the preferred assistant identity, and `stream=item` with `kind=preamble` or `commentary` becomes live assistant commentary. A mixed assistant message containing pre-tool text and a tool call remains commentary, while only the post-tool answer converges into `final-answer`. Initial entry, explicit session switch, manual refresh, and Gateway reconnect are the only full history replay boundaries.
+
+The remaining no-streaming defect was upstream of the reducer. OpenClaw 2026.6.11 sets `deferBlockReplyDelivery` whenever any plugin registers `before_agent_finalize`, buffering every assistant frame until terminal delivery while tool events remain live. `uclaw-artifact-guard` 0.2.4 therefore moves terminal artifact inspection to observation-only `agent_end`; its prompt-history maintenance, tool-result compaction, media preparation, tool-level artifact and verification evidence, and canonical media completion gates remain unchanged. This intentionally removes pre-delivery automatic revision in favor of stable real-time delivery. Real session `agent:main:session-1784288492423`, run `8a0ef6e7-c926-4f90-b026-fc01268aaa67`, then delivered pre-tool text through growing frames from 3 to 576 characters before `tool.started` sequence 105 and `tool.completed` sequence 107, followed by growing final text and one terminal answer. The page retained `commentary -> tool-group -> final-answer` with distinct item IDs. Plain text `state=delta` diagnostics are no longer written once per token-sized frame; structured tool deltas and terminal chat signals remain logged. The real Gateway stayed healthy through the run, and the plugin observer ran before terminal settlement without restarting it.
+
+The later approved product decision supersedes terminal-time automatic history replay. Final, error, abort, completion-wake, and backend-idle events now settle only the live lifecycle and never call `chat.history` for the visible session. Existing Turn and Timeline item positions remain fixed after first render. Matching history evidence updates those identities in place; assistant history that cannot match the Turn-local segment ordinal, message alias, or following tool-call boundary is ignored instead of becoming a new row at the end. Only a genuinely missing restored Turn may append after the visible Turn order. Full replay remains available on initial entry, explicit session switch, manual refresh, and Gateway reconnect. This removes the source of mid-stream transcript insertion without changing default chat/image/video routing, planner ownership, queues, approvals, artifact verification, packaging, or restored-session behavior.
 
 Gateway restart evidence remains separate from renderer ordering. A background JunFeiAI provider-status refresh no longer interprets provider/default metadata drift as an authentication change, so it does not schedule a Gateway runtime reload. The final full development restart at `2026-07-17 08:44` started Electron PID `27806` and Gateway PID `27896`, upgraded the bundled `uclaw-task-bridge` plugin from `0.1.8` to `0.1.9`, and contains one `start_requested` plus one Gateway process start with no later restart. Relay-token changes and explicit runtime synchronization still retain their required restart behavior.
 
 OpenClaw host-exec policy ownership is now configuration-driven. `shared/junfeiai-endpoints.json` owns `openClawExec.security` and `openClawExec.ask`; the shared endpoint module validates the supported OpenClaw values and the startup sanitizer copies them into `tools.exec` while preserving adjacent exec settings. The checked-in defaults remain `security=full` and `ask=off`, so this migration does not itself enable approval prompts or change current runtime behavior. A future policy change in the endpoint file requires a Main/Gateway restart so startup sanitization can apply it to `~/.openclaw/openclaw.json`.
+
+OpenClaw long-session compaction policy is owned by the same endpoint configuration. `openClawCompaction` enables the tool-loop mid-turn precheck, rotates the active transcript after successful semantic compaction, and sets the active-transcript trigger to `20mb`; startup sanitization copies those values into `agents.defaults.compaction` while retaining unrelated compaction fields. Artifact-guard prompt maintenance now uses clone-on-write for frozen historical tool calls, and the bundled OpenClaw lifecycle patch treats the newest deferred finishing event as authoritative so a recovered overflow cannot leave the Run terminal in error after a later successful `stop`. Genuine compaction exhaustion still emits the native blocked/error outcome and remains available in diagnostics.
 
 The old task-delivery warning loop is now closed rather than merely identified. Four cancelled `agent:main:route-test` Host tasks had no completion acknowledgement and targeted a non-existent session, so completion injection remained not ready forever. The task bridge now enforces both attempt and elapsed-time budgets, persists a `delivered` or `abandoned` completion settlement in the Host task and journal, and reserves explicit redelivery for a new revision. On the real restarted runtime all four old tasks exhausted at five attempts, persisted `task.completion_abandoned` with `reason=injection_not_ready`, retained their task evidence without deleting local data, and produced zero further retry warnings after `2026-07-17 08:48:35`; Gateway PID `27896` remained unchanged.
 

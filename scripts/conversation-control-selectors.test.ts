@@ -73,6 +73,8 @@ function turn(input: {
     items,
     itemIndex: Object.fromEntries(items.map((item, index) => [item.id, index])),
     toolItemByCallId: {},
+    assistantItemByToolCallId: {},
+    narrativeItemByMessageId: {},
     toolMergeByCallId: {},
     approvalMergeById: {},
     taskItemById: {},

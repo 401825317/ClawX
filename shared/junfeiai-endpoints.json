@@ -7,8 +7,16 @@
     "security": "full",
     "ask": "off"
   },
+  "openClawCompaction": {
+    "midTurnPrecheck": {
+      "enabled": true
+    },
+    "truncateAfterCompaction": true,
+    "maxActiveTranscriptBytes": "20mb"
+  },
   "_comments": {
     "openClawExec": "OpenClaw 主机命令执行策略。security 支持 deny/allowlist/full；ask 支持 off/on-miss/always。",
+    "openClawCompaction": "OpenClaw 长会话压缩策略。中途预检在工具循环超限前触发恢复；压缩后轮转活跃 transcript，并在达到字节阈值时提前压缩。",
     "imageGenerationTimeoutMs": "托管图片生成请求的超时时间，单位：毫秒。",
     "videoGenerationTimeoutMs": "托管视频生成请求的超时时间，单位：毫秒。",
     "videoGenerationPollIntervalMs": "托管视频生成任务的状态查询间隔，单位：毫秒。",

@@ -13,6 +13,7 @@ const VALID_OPENCLAW_EXEC_ASK = new Set(['off', 'on-miss', 'always']);
 
 export type JunFeiAIOpenClawExecSecurity = 'deny' | 'allowlist' | 'full';
 export type JunFeiAIOpenClawExecAsk = 'off' | 'on-miss' | 'always';
+export type JunFeiAIOpenClawTranscriptLimit = number | string;
 
 /** Shared production endpoints for JunFeiAI consumers in both Electron processes. */
 export const JUNFEIAI_PRODUCTION_ORIGIN = endpoints.productionOrigin.replace(/\/+$/, '');
@@ -51,6 +52,29 @@ export const JUNFEIAI_OPENCLAW_EXEC_SECURITY = endpoints.openClawExec.security a
 
 /** Default OpenClaw host-command approval policy for the managed desktop runtime. */
 export const JUNFEIAI_OPENCLAW_EXEC_ASK = endpoints.openClawExec.ask as JunFeiAIOpenClawExecAsk;
+
+if (typeof endpoints.openClawCompaction.midTurnPrecheck.enabled !== 'boolean') {
+  throw new Error('openClawCompaction.midTurnPrecheck.enabled in shared/junfeiai-endpoints.json must be boolean');
+}
+if (typeof endpoints.openClawCompaction.truncateAfterCompaction !== 'boolean') {
+  throw new Error('openClawCompaction.truncateAfterCompaction in shared/junfeiai-endpoints.json must be boolean');
+}
+const transcriptLimit = endpoints.openClawCompaction.maxActiveTranscriptBytes;
+if (
+  !(typeof transcriptLimit === 'number' && Number.isInteger(transcriptLimit) && transcriptLimit > 0)
+  && !(typeof transcriptLimit === 'string' && /^\d+(?:\.\d+)?(?:b|kb|mb|gb)$/iu.test(transcriptLimit.trim()))
+) {
+  throw new Error('openClawCompaction.maxActiveTranscriptBytes in shared/junfeiai-endpoints.json must be a positive byte size');
+}
+
+/** Run context-pressure recovery between tool results and the next model call. */
+export const JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED = endpoints.openClawCompaction.midTurnPrecheck.enabled;
+
+/** Rotate the active transcript after successful semantic compaction. */
+export const JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION = endpoints.openClawCompaction.truncateAfterCompaction;
+
+/** Preflight transcript-size threshold that triggers local compaction. */
+export const JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES = transcriptLimit as JunFeiAIOpenClawTranscriptLimit;
 
 function readPositiveTimeoutMs(value: unknown, key: string): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {

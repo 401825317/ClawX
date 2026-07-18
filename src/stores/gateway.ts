@@ -7,10 +7,7 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { GatewayHealth, GatewayStatus } from '../types/gateway';
-import {
-  CHAT_SYNTHETIC_TERMINAL_PRODUCER,
-  type ChatRuntimeEvent,
-} from '../../shared/chat-runtime-events';
+import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
 import { createChatEventContext, normalizeGatewayChatEnvelope } from './conversation/chat-adapter';
 import {
   completionWakeTaskIdFromRunId,
@@ -25,9 +22,7 @@ let gatewayReconcileTimer: ReturnType<typeof setInterval> | null = null;
 const gatewayEventDedupe = new Map<string, number>();
 const GATEWAY_EVENT_DEDUPE_TTL_MS = 30_000;
 const LOAD_SESSIONS_MIN_INTERVAL_MS = 1_200;
-const LOAD_HISTORY_MIN_INTERVAL_MS = 800;
 let lastLoadSessionsAt = 0;
-let lastLoadHistoryAt = 0;
 let cronRepairTriggeredThisSession = false;
 
 interface GatewayState {
@@ -161,16 +156,6 @@ function maybeLoadSessions(
   void state.loadSessions();
 }
 
-function maybeLoadHistory(
-  state: { loadHistory: (quiet?: boolean) => Promise<void> },
-  force = false,
-): void {
-  const now = Date.now();
-  if (!force && now - lastLoadHistoryAt < LOAD_HISTORY_MIN_INTERVAL_MS) return;
-  lastLoadHistoryAt = now;
-  void state.loadHistory(true);
-}
-
 /** Bump sidebar ordering when any session receives gateway traffic (e.g. Feishu DM). */
 function touchSessionActivity(sessionKey: string | null | undefined, activityMs = Date.now()): void {
   if (!sessionKey) return;
@@ -272,16 +257,6 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
 
       if (shouldRefreshSessions) {
         maybeLoadSessions(nextState, true);
-      }
-
-      // The matching legacy final is dispatched immediately after this
-      // synthesized terminal event and owns backend-idle history settlement.
-      if (event.producer === CHAT_SYNTHETIC_TERMINAL_PRODUCER) return;
-
-      const matchesCurrentSession = resolvedSessionKey != null && resolvedSessionKey === nextState.currentSessionKey;
-      const matchesActiveRun = nextState.activeRunId != null && event.runId === nextState.activeRunId;
-      if (matchesCurrentSession || matchesActiveRun) {
-        maybeLoadHistory(nextState, true);
       }
     })
     .catch(() => {});

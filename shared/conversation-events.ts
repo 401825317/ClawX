@@ -93,6 +93,8 @@ export type ConversationEventData =
       mode?: 'chat' | 'image' | 'video';
       /** Deferred local requests are visible queued Turns without owning the active run slot yet. */
       activate?: boolean;
+      segmentOrdinal?: number;
+      anchorToolCallIds?: string[];
     }
   | { startedAt?: number; objective?: string }
   | {
@@ -102,7 +104,17 @@ export type ConversationEventData =
       stopReason?: string;
       backendIdle?: boolean;
     }
-  | { text?: string; delta?: string; replace?: boolean; phase?: string; mediaUrls?: string[] }
+  | {
+      text?: string;
+      delta?: string;
+      replace?: boolean;
+      phase?: string;
+      mediaUrls?: string[];
+      /** Stable position of one assistant text segment within its Turn. */
+      segmentOrdinal?: number;
+      /** Tool calls emitted by the same assistant message anchor late live/history evidence. */
+      anchorToolCallIds?: string[];
+    }
   | { entry: ChatRuntimeProgressEntry }
   | { toolCallId: string; name: string; args?: unknown; partialResult?: unknown; result?: unknown; meta?: unknown; durationMs?: number; isError?: boolean }
   | { task: ChatRuntimeTaskProjection }

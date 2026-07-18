@@ -197,9 +197,14 @@ export function chatEventToConversationEvents(
   if (!message || message.role !== 'assistant') return taskEvents;
   const text = extractText(message);
   if (!text && !(message._attachedFiles?.length)) return taskEvents;
+  const toolUses = extractToolUse(message);
+  const anchorToolCallIds = toolUses.map((tool) => tool.id).filter(Boolean);
+  const assistantPhase = typeof (message as RawMessage & { phase?: unknown }).phase === 'string'
+    ? (message as RawMessage & { phase?: string }).phase
+    : undefined;
   // OpenClaw completes each assistant model message, including mixed
   // preamble + tool-call messages. Only a tool-free envelope is deliverable.
-  const final = state === 'final' && extractToolUse(message).length === 0;
+  const final = state === 'final' && toolUses.length === 0;
   return [{
     ...base,
     eventId: createEventId({
@@ -216,7 +221,12 @@ export function chatEventToConversationEvents(
     authority: final ? 'corroborating' : 'corroborating',
     data: final
       ? { message: snapshotMessage(message) }
-      : { text, replace: true, phase: state },
+      : {
+          text,
+          replace: true,
+          phase: assistantPhase ?? state,
+          anchorToolCallIds,
+        },
   }, ...taskEvents];
 }
 

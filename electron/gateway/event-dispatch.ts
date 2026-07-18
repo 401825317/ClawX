@@ -288,8 +288,32 @@ function summarizeChatMessagePayload(payload: unknown): Record<string, unknown> 
   };
 }
 
+export function shouldLogChatMessageDiagnostic(payload: unknown): boolean {
+  const summary = summarizeChatMessagePayload(payload);
+  const envelope = isRecord(payload) ? payload : null;
+  const state = typeof envelope?.state === 'string' ? envelope.state : undefined;
+  const structuredContent = Array.isArray(summary.contentTypes)
+    && summary.contentTypes.some((type) => (
+      type === 'toolCall'
+      || type === 'toolResult'
+      || type === 'function_call'
+      || type === 'function_call_output'
+    ));
+  const structuredDelta = summary.hasToolCalls === true
+    || summary.hasFunctionCall === true
+    || structuredContent
+    || (typeof summary.outputCount === 'number' && summary.outputCount > 0);
+  // Plain text deltas can arrive dozens of times per second. Logging each one
+  // competes with the renderer for the same Main-process event loop.
+  return state !== 'delta' || structuredDelta;
+}
+
 function logChatMessageDiagnostic(payload: unknown): void {
-  logger.info('[diagnostic] chat.message.signal', summarizeChatMessagePayload(payload));
+  if (!shouldLogChatMessageDiagnostic(payload)) return;
+  const envelope = isRecord(payload) ? payload : null;
+  const state = typeof envelope?.state === 'string' ? envelope.state : undefined;
+  const summary = summarizeChatMessagePayload(payload);
+  logger.info('[diagnostic] chat.message.signal', { state, ...summary });
 }
 
 function logChatRuntimeDiagnostic(event: ReturnType<typeof normalizeGatewayChatRuntimeEvent>): void {

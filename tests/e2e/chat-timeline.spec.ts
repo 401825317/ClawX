@@ -746,7 +746,9 @@ test.describe('Codex-style conversation timeline', () => {
       const liveTaskTop = await page.getByTestId('timeline-subtasks').boundingBox();
       expect(liveCommentaryTop).not.toBeNull();
       expect(liveTaskTop).not.toBeNull();
-      expect(liveCommentaryTop!.y).toBeLessThan(liveTaskTop!.y);
+      // The task arrived first, so append-only live order keeps it above the
+      // later owner message instead of moving an already-rendered row.
+      expect(liveTaskTop!.y).toBeLessThan(liveCommentaryTop!.y);
 
       await emitRuntimeEvents(app, [{
         type: 'artifact.produced',

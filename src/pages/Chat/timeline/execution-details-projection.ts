@@ -160,7 +160,10 @@ function verificationDetail(verification: ChatRuntimeVerification): string | und
 
 /** Read one displayable process message without exposing diagnostic-only events. */
 function commentaryEventText(event: ConversationEvent): string | undefined {
-  if (event.timelineVisibility === 'diagnostics' || event.type !== 'commentary.append') return undefined;
+  if (
+    event.timelineVisibility === 'diagnostics'
+    || (event.type !== 'commentary.append' && event.type !== 'assistant.content')
+  ) return undefined;
   const data = event.data as { entry?: { text?: string }; text?: string; delta?: string };
   const text = data.entry?.text ?? data.text ?? data.delta;
   if (typeof text !== 'string') return undefined;

@@ -11,11 +11,17 @@ import {
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_OPENCLAW_EXEC_ASK,
   JUNFEIAI_OPENCLAW_EXEC_SECURITY,
+  JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
+  JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
   JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS,
   JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS,
 } from '../electron/utils/junfeiai-distribution.ts';
-import { ensureJunFeiAIExecDefaultsInConfig } from '../electron/utils/openclaw-auth.ts';
+import {
+  ensureJunFeiAICompactionDefaultsInConfig,
+  ensureJunFeiAIExecDefaultsInConfig,
+} from '../electron/utils/openclaw-auth.ts';
 import endpoints from '../shared/junfeiai-endpoints.json';
 
 test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
@@ -25,6 +31,18 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
   assert.equal(JUNFEIAI_DEFAULT_THINKING_LEVEL, endpoints.defaultThinkingLevel);
   assert.equal(JUNFEIAI_OPENCLAW_EXEC_SECURITY, endpoints.openClawExec.security);
   assert.equal(JUNFEIAI_OPENCLAW_EXEC_ASK, endpoints.openClawExec.ask);
+  assert.equal(
+    JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+    endpoints.openClawCompaction.midTurnPrecheck.enabled,
+  );
+  assert.equal(
+    JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
+    endpoints.openClawCompaction.truncateAfterCompaction,
+  );
+  assert.equal(
+    JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
+    endpoints.openClawCompaction.maxActiveTranscriptBytes,
+  );
   assert.equal(JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS, endpoints.imageGenerationTimeoutMs);
   assert.equal(JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS, endpoints.videoGenerationTimeoutMs);
   assert.equal(JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS, endpoints.videoGenerationPollIntervalMs);
@@ -55,4 +73,34 @@ test('applies endpoint-configured OpenClaw exec defaults without dropping adjace
     timeoutSec: 600,
   });
   assert.equal(ensureJunFeiAIExecDefaultsInConfig(config), false);
+});
+
+test('applies endpoint-configured OpenClaw compaction defaults without dropping adjacent settings', () => {
+  const config = {
+    agents: {
+      defaults: {
+        compaction: {
+          mode: 'safeguard',
+          reserveTokensFloor: 24000,
+          midTurnPrecheck: {
+            enabled: false,
+            futureSetting: 'keep',
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(ensureJunFeiAICompactionDefaultsInConfig(config), true);
+  assert.deepEqual(config.agents.defaults.compaction, {
+    mode: 'safeguard',
+    reserveTokensFloor: 24000,
+    midTurnPrecheck: {
+      enabled: endpoints.openClawCompaction.midTurnPrecheck.enabled,
+      futureSetting: 'keep',
+    },
+    truncateAfterCompaction: endpoints.openClawCompaction.truncateAfterCompaction,
+    maxActiveTranscriptBytes: endpoints.openClawCompaction.maxActiveTranscriptBytes,
+  });
+  assert.equal(ensureJunFeiAICompactionDefaultsInConfig(config), false);
 });
