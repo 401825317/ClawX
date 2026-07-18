@@ -17,6 +17,7 @@ import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw
 import { patchInstalledOpenClawNativeMediaCompletionQueueRuntime } from './openclaw-native-media-completion-queue-patch.mjs';
 import { patchInstalledOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
 import { patchInstalledOpenClawImageModelLockRuntime } from './openclaw-image-model-lock-patch.mjs';
+import { patchInstalledOpenClawSmartLatestRateLimitRetryRuntime } from './openclaw-smart-latest-rate-limit-retry-patch.mjs';
 import { cleanupInstalledOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchInstalledOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
 import { patchInstalledOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
@@ -65,6 +66,7 @@ try {
   patchInstalledOpenClawNativeMediaCompletionQueueRuntime();
   patchInstalledOpenClawManagedMediaTimeoutRuntime();
   patchInstalledOpenClawImageModelLockRuntime();
+  patchInstalledOpenClawSmartLatestRateLimitRetryRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
   cleanupInstalledOpenClawNativeMediaAcceptanceRuntime();
   patchInstalledOpenClawSessionYieldGuardRuntime();

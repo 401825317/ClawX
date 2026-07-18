@@ -72,7 +72,10 @@ function isRecoverableRuntimeError(errorMessage: string): boolean {
   return /\bterminated\b/.test(normalized)
     || /\baborted\b/.test(normalized)
     || normalized.includes('econnreset')
-    || normalized.includes('connection reset');
+    || normalized.includes('connection reset')
+    || normalized.includes('rate limit')
+    || normalized.includes('too many requests')
+    || /\b429\b/.test(normalized);
 }
 
 function scheduleRecoverableRuntimeError(commit: () => void): void {

@@ -1521,7 +1521,10 @@ function isRecoverableRuntimeError(errorMessage: string): boolean {
   return /\bterminated\b/.test(normalized)
     || /\baborted\b/.test(normalized)
     || normalized.includes('econnreset')
-    || normalized.includes('connection reset');
+    || normalized.includes('connection reset')
+    || normalized.includes('rate limit')
+    || normalized.includes('too many requests')
+    || /\b429\b/.test(normalized);
 }
 
 function isReplySessionInitializationConflictError(errorMessage: string): boolean {
@@ -1548,6 +1551,13 @@ function normalizeChatRunErrorMessage(errorMessage: string): string {
     || lower.includes('context length')
   ) {
     return 'The task context became too large for the model. Start a new conversation or ask UClaw to summarize and continue.';
+  }
+  if (
+    lower.includes('rate limit')
+    || lower.includes('too many requests')
+    || /\b429\b/.test(lower)
+  ) {
+    return 'The model service hit a temporary rate limit. Please retry after a short wait.';
   }
   if (
     lower.includes('non_deliverable_terminal_turn')

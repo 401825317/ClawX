@@ -30,6 +30,7 @@ import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-m
 import { patchOpenClawNativeMediaCompletionQueueRuntime } from './openclaw-native-media-completion-queue-patch.mjs';
 import { patchOpenClawManagedMediaTimeoutRuntime } from './openclaw-managed-media-timeout-patch.mjs';
 import { patchOpenClawImageModelLockRuntime } from './openclaw-image-model-lock-patch.mjs';
+import { patchOpenClawSmartLatestRateLimitRetryRuntime } from './openclaw-smart-latest-rate-limit-retry-patch.mjs';
 import { cleanupOpenClawNativeMediaAcceptanceRuntime } from './openclaw-native-media-acceptance-cleanup.mjs';
 import { patchOpenClawVideoActualSpecRuntime } from './openclaw-video-actual-spec-patch.mjs';
 import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
@@ -1230,6 +1231,12 @@ function patchBundledRuntime(outputDir) {
   const imageModelLockPatch = patchOpenClawImageModelLockRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
+  const smartLatestRateLimitRetryPatch = patchOpenClawSmartLatestRateLimitRetryRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (smartLatestRateLimitRetryPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${smartLatestRateLimitRetryPatch.patchedFiles} smart-latest rate-limit retry runtime file(s)`;
+  }
   if (imageModelLockPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${imageModelLockPatch.patchedFiles} image model runtime file(s)`;
   }
