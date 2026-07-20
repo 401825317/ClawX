@@ -21,6 +21,7 @@ export type PackagedAppContext = {
   appRoot: string;
   portableRoot: string;
   osHome: string;
+  runtimeCacheRoot: string;
   gatewayPort: number;
   hostApiPort: number;
   startupMs: number;
@@ -32,6 +33,7 @@ type LaunchOptions = {
   appRoot: string;
   portableRoot: string;
   osHome: string;
+  runtimeCacheRoot?: string;
   gatewayPort: number;
   hostApiPort: number;
   managed: boolean;
@@ -171,6 +173,10 @@ export async function launchPackagedApp(options: LaunchOptions): Promise<Package
   await mkdir(path.join(options.osHome, 'AppData', 'Roaming'), { recursive: true });
   await mkdir(path.join(options.osHome, 'AppData', 'Local'), { recursive: true });
   await mkdir(path.join(options.osHome, 'Temp'), { recursive: true });
+  const runtimeCacheRoot = options.runtimeCacheRoot
+    ? path.resolve(options.runtimeCacheRoot)
+    : path.join(options.osHome, 'AppData', 'Local', 'UClawRuntime');
+  await mkdir(runtimeCacheRoot, { recursive: true });
   const executablePath = path.join(options.appRoot, 'UClaw.exe');
   const cdpPort = await allocatePort();
   const env: NodeJS.ProcessEnv = {
@@ -182,7 +188,7 @@ export async function launchPackagedApp(options: LaunchOptions): Promise<Package
     TEMP: path.join(options.osHome, 'Temp'),
     TMP: path.join(options.osHome, 'Temp'),
     CLAWX_PORTABLE_ROOT: options.portableRoot,
-    CLAWX_RUNTIME_CACHE_ROOT: path.join(options.osHome, 'AppData', 'Local', 'UClawRuntime'),
+    CLAWX_RUNTIME_CACHE_ROOT: runtimeCacheRoot,
     CLAWX_MANAGED_PROVIDER: options.managed ? '1' : '0',
     CLAWX_E2E: '0',
     CLAWX_E2E_SKIP_SETUP: '0',
@@ -223,6 +229,7 @@ export async function launchPackagedApp(options: LaunchOptions): Promise<Package
       appRoot: options.appRoot,
       portableRoot: options.portableRoot,
       osHome: options.osHome,
+      runtimeCacheRoot,
       gatewayPort: options.gatewayPort,
       hostApiPort: options.hostApiPort,
       startupMs: Date.now() - startedAt,
@@ -240,13 +247,22 @@ export async function closePackagedApp(context: PackagedAppContext | null, timeo
   if (!context) return;
   try {
     await Promise.race([
-      context.browser.close(),
-      new Promise((resolve) => setTimeout(resolve, Math.floor(timeoutMs / 2))),
+      context.page.evaluate(async () => {
+        const electronApi = (window as unknown as {
+          electron: { ipcRenderer: { invoke(channel: string): Promise<unknown> } };
+        }).electron;
+        await electronApi.ipcRenderer.invoke('app:quit');
+      }),
+      new Promise((resolve) => setTimeout(resolve, Math.min(3_000, Math.floor(timeoutMs / 3)))),
     ]);
   } catch {
-    // Continue to process cleanup after a disconnected CDP session.
+    // The renderer may disappear while the application is quitting.
   }
-  if (await waitForProcessExit(context.process, Math.ceil(timeoutMs / 2))) return;
+  if (await waitForProcessExit(context.process, timeoutMs)) {
+    await context.browser.close().catch(() => undefined);
+    return;
+  }
+  await context.browser.close().catch(() => undefined);
   terminateProcessTree(context.process);
   await waitForProcessExit(context.process, 5_000);
 }

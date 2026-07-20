@@ -94,10 +94,11 @@
     "package:mac:local": "pnpm run prep:mac-binaries && SKIP_PREINSTALLED_SKILLS=1 pnpm run package && node scripts/run-electron-builder.mjs --mac --publish never",
     "package:mac:usb": "pnpm run prep:mac-binaries && pnpm run updater:build:mac && pnpm run package && node scripts/run-electron-builder.mjs --mac dir --publish never && node scripts/build-usb-release.mjs --mac",
     "package:win": "pnpm run prep:win-binaries && pnpm run package && node scripts/patch-nsis-win.mjs && node scripts/run-electron-builder.mjs --win --publish never",
+    "package:win:verify": "pnpm run package:win && pnpm run release:refresh:win && pnpm run release:validate:win",
     "package:win:portable": "pnpm run prep:win-binaries && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win portable --publish never",
     "package:win:usb": "node scripts/build-usb-release.mjs --clean-only --require-clean-source --win --arch=x64 && pnpm run prep:win-binaries && pnpm run updater:build:win && pnpm run package && node scripts/run-electron-builder.mjs --skip-nsis-patch --win dir --x64 --publish never && node scripts/build-usb-release.mjs --win --arch=x64 && node scripts/windows-support/run-packaged-regression.mjs --latest --profile full",
     "package:linux": "pnpm run prep:linux-binaries && pnpm run package && node scripts/run-electron-builder.mjs --linux --publish never",
-    "release": "node scripts/prep-bundled-binaries.mjs && pnpm run package && node scripts/run-electron-builder.mjs --publish always",
+    "release": "node scripts/release.mjs",
     "preversion": "node scripts/pre-version-fetch-tags.mjs",
     "version": "node scripts/assert-release-version.mjs",
     "version:patch": "pnpm version patch",
@@ -107,6 +108,9 @@
     "version:prerelease-alpha": "pnpm version prerelease --preid=alpha",
     "version:prerelease-beta": "pnpm version prerelease --preid=beta",
     "release:validate": "node scripts/assert-tag-matches-package.mjs",
+    "release:build": "node scripts/release.mjs --no-publish",
+    "release:refresh:win": "node scripts/windows-support/refresh-nsis-release-metadata.mjs",
+    "release:validate:win": "node scripts/windows-support/validate-nsis-release.mjs --require-update-metadata --require-blockmap --require-clean-source",
     "postversion": "node scripts/post-version-push.mjs"
   },
   "dependencies": {

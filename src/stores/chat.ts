@@ -1171,6 +1171,7 @@ const _lastHistoryLoadAtBySession = new Map<string, number>();
 const _forceNextHistoryLoadBySession = new Set<string>();
 const _foregroundHistoryLoadSeen = new Set<string>();
 const _sessionHistoryCache = new Map<string, { messages: RawMessage[]; thinkingLevel: string | null }>();
+const _runtimeArtifactFallbackBySession = new Map<string, Map<string, RawMessage>>();
 const _historyLoadGenerationBySession = new Map<string, number>();
 let _historyLoadGenerationCounter = 0;
 let _deferredHistoryLoadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1537,10 +1538,26 @@ function isReplySessionInitializationConflictError(errorMessage: string): boolea
     );
 }
 
+function isQuotaChatRunError(errorMessage: string): boolean {
+  const normalized = errorMessage.trim().toLowerCase();
+  return normalized.includes('insufficient_user_quota')
+    || normalized.includes('insufficient quota')
+    || normalized.includes('quota exceeded')
+    || normalized.includes('insufficient balance')
+    || errorMessage.includes('预扣费额度失败')
+    || errorMessage.includes('用户剩余额度')
+    || errorMessage.includes('余额不足')
+    || errorMessage.includes('残高が不足')
+    || errorMessage.includes('Недостаточно средств');
+}
+
 function normalizeChatRunErrorMessage(errorMessage: string): string {
   const normalized = errorMessage.trim();
   const lower = normalized.toLowerCase();
   if (!normalized) return 'The task ended without a model response. Please retry.';
+  if (isQuotaChatRunError(normalized)) {
+    return i18n.t('chat:runError.quota');
+  }
   if (isReplySessionInitializationConflictError(normalized)) {
     return 'UClaw hit a reply session handoff conflict while the previous turn was still settling. The conversation was refreshed; retry this message.';
   }
@@ -2282,7 +2299,43 @@ function getCachedSessionHistory(sessionKey: string): { messages: RawMessage[]; 
 
 function clearCachedSessionHistory(sessionKey: string): void {
   _sessionHistoryCache.delete(sessionKey);
+  _runtimeArtifactFallbackBySession.delete(sessionKey);
   _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
+}
+
+function mergeRuntimeArtifactFallbackMessages(sessionKey: string, messages: RawMessage[]): RawMessage[] {
+  const fallbackMap = _runtimeArtifactFallbackBySession.get(sessionKey);
+  const fallbacks = [...(fallbackMap?.values() ?? [])];
+  if (fallbacks.length === 0) return messages;
+  const mergedMessages = messages.map((message) => {
+    const fallback = message.id ? fallbackMap?.get(message.id) : undefined;
+    return fallback ?? message;
+  });
+  const existingIds = new Set(mergedMessages.map((message) => message.id).filter(Boolean));
+  return [
+    ...mergedMessages,
+    ...fallbacks.filter((message) => !message.id || !existingIds.has(message.id)),
+  ].sort((left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0));
+}
+
+function rememberRuntimeArtifactFallback(sessionKey: string, message: RawMessage): void {
+  if (!message.id) return;
+  const entries = _runtimeArtifactFallbackBySession.get(sessionKey) ?? new Map<string, RawMessage>();
+  const existing = entries.get(message.id);
+  const merged = existing
+    ? {
+        ...existing,
+        ...message,
+        _attachedFiles: dedupeAttachedFiles([
+          ...(existing._attachedFiles ?? []),
+          ...(message._attachedFiles ?? []),
+        ]),
+      }
+    : message;
+  entries.delete(message.id);
+  entries.set(message.id, merged);
+  while (entries.size > 100) entries.delete(entries.keys().next().value as string);
+  _runtimeArtifactFallbackBySession.set(sessionKey, entries);
 }
 
 function captureSessionRunState(sessionKey: string, state: SessionRunState): void {
@@ -3869,6 +3922,7 @@ function reconcileCurrentSessionLifecycleFromBackend(
       lastUserMessageAt: state.lastUserMessageAt ?? current?.updatedAt ?? Date.now(),
       error: null,
       runError: null,
+      runErrorKind: null,
     });
     captureSessionRunState(state.currentSessionKey, get());
     return;
@@ -4376,6 +4430,7 @@ function buildSessionSwitchPatch(
     ...cachedRunState,
     error: null,
     runError: null,
+    runErrorKind: null,
   };
 }
 
@@ -5335,6 +5390,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   hasMoreHistory: false,
   error: null,
   runError: null,
+  runErrorKind: null,
 
   sending: false,
   pendingImageGenerationLocal: false,
@@ -5670,6 +5726,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingVideoGenerationLocal: false,
         error: null,
         runError: null,
+        runErrorKind: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         pendingToolImages: [],
@@ -5900,7 +5957,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       get().currentSessionKey === currentSessionKey
       && isCurrentHistoryLoad(currentSessionKey, historyLoadGeneration)
     );
-    if (shouldShowForegroundLoading) set({ loading: true, error: null, runError: null });
+    if (shouldShowForegroundLoading) set({ loading: true, error: null, runError: null, runErrorKind: null });
 
     // Safety guard: if history loading takes too long, force loading to false
     // to prevent the UI from being stuck in a spinner forever.
@@ -6155,6 +6212,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           terminalArtifactFallbackMessage,
         ];
       }
+      finalMessages = mergeRuntimeArtifactFallbackMessages(currentSessionKey, finalMessages);
 
       if (backendSessionCanClose) {
         nextRuntimeRuns = alignRuntimeRunsWithBackendSessionTerminalState(
@@ -6198,19 +6256,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
         );
       }
 
-      set({
-        messages: finalMessages,
-        thinkingLevel,
-        ...(reasoningLevel ? {
-          sessions: get().sessions.map((session) => (
-            session.key === currentSessionKey ? { ...session, reasoningLevel } : session
-          )),
-        } : {}),
-        loading: false,
-        runError: historyErrorIsTransient || terminalArtifactFallbackMessage
+      set((currentState) => {
+        const retainedLiveQuotaError = !historyErrorIsTransient
+          && !terminalArtifactFallbackMessage
+          && currentState.runErrorKind === 'quota'
+          && currentState.runError
+          ? currentState.runError
+          : null;
+        const historyRunError = historyErrorIsTransient || terminalArtifactFallbackMessage
           ? null
-          : normalizedTerminalAssistantErrorMessage,
-        runtimeRuns: nextRuntimeRuns,
+          : retainedLiveQuotaError ?? normalizedTerminalAssistantErrorMessage;
+        return {
+          messages: finalMessages,
+          thinkingLevel,
+          ...(reasoningLevel ? {
+            sessions: currentState.sessions.map((session) => (
+              session.key === currentSessionKey ? { ...session, reasoningLevel } : session
+            )),
+          } : {}),
+          loading: false,
+          runError: historyRunError,
+          runErrorKind: historyRunError && (
+            retainedLiveQuotaError != null
+            || isQuotaChatRunError(latestTerminalAssistantErrorMessage || '')
+          )
+            ? 'quota'
+            : null,
+          runtimeRuns: nextRuntimeRuns,
+        };
       });
       scheduleWithheldFinalReevaluationForSession(currentSessionKey);
       for (const run of Object.values(nextRuntimeRuns)) {
@@ -6316,10 +6389,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // user's message counts as progress so the safety timeout does not emit a
       // false "No response received" error while tool chains are still running.
       const progressSegment = openRunSegment;
-      if (isSendingNow && segmentHasMeaningfulAssistantProgress(progressSegment)) {
+      if (isSendingNow && get().sending && segmentHasMeaningfulAssistantProgress(progressSegment)) {
         _lastChatEventAt = Date.now();
         if (get().error || get().runError) {
-          set({ error: null, runError: null });
+          set({ error: null, runError: null, runErrorKind: null });
         }
       }
 
@@ -6432,6 +6505,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ?? optionalToMs(findLastRealUserMessage(filteredMessages)?.timestamp ?? null)
               ?? Date.now(),
             runError: null,
+            runErrorKind: null,
           });
           captureSessionRunState(currentSessionKey, get());
         }
@@ -6831,6 +6905,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         error: error instanceof Error ? error.message : String(error),
         runError: null,
+        runErrorKind: null,
         sending: false,
       });
       return;
@@ -6875,6 +6950,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: true,
       error: null,
       runError: null,
+      runErrorKind: null,
       pendingImageGenerationLocal: false,
       pendingVideoGenerationLocal: false,
       streamingText: '',
@@ -7018,7 +7094,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (hasProgress) {
         _lastChatEventAt = Date.now();
         if (state.error || state.runError) {
-          set({ error: null, runError: null });
+          set({ error: null, runError: null, runErrorKind: null });
         }
         setTimeout(checkStuck, 10_000);
         return;
@@ -7027,7 +7103,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (hasRecentRuntimeActivityForSend(state, currentSessionKey)) {
         _lastChatEventAt = Date.now();
         if (state.error || state.runError) {
-          set({ error: null, runError: null });
+          set({ error: null, runError: null, runErrorKind: null });
         }
         setTimeout(checkStuck, 10_000);
         return;
@@ -7331,10 +7407,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     })();
     if (!previous) {
-      set({ runError: i18n.t('chat:runError.retryUnavailable') });
+      set({ runError: i18n.t('chat:runError.retryUnavailable'), runErrorKind: null });
       return;
     }
-    set({ error: null, runError: null });
+    set({ error: null, runError: null, runErrorKind: null });
     await get().sendMessage(
       previous.text,
       cloneQueuedAttachments(previous.attachments),
@@ -7474,7 +7550,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Background :main heartbeat runs must not surface "Thinking..." in the UI.
       const { sending } = get();
       if (!sending && runId && shouldTrackInboundRunLifecycle(get(), currentSessionKey)) {
-        set({ sending: true, activeRunId: runId, error: null, runError: null });
+        set({ sending: true, activeRunId: runId, error: null, runError: null, runErrorKind: null });
       }
     }
 
@@ -7484,7 +7560,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (runId) {
           set((state) => ({
             ...(!currentSending && shouldTrackInboundRunLifecycle(state, currentSessionKey)
-              ? { sending: true, activeRunId: runId, error: null, runError: null }
+              ? { sending: true, activeRunId: runId, error: null, runError: null, runErrorKind: null }
               : {}),
             runtimeRuns: applyRuntimeContractEvents(
               state.runtimeRuns,
@@ -7504,7 +7580,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearErrorRecoveryTimer();
         }
         if (get().error || get().runError) {
-          set({ error: null, runError: null });
+          set({ error: null, runError: null, runErrorKind: null });
         }
         const updates = collectToolUpdates(event.message, resolvedState);
         // Capture baseline file content from disk before the runtime
@@ -7527,20 +7603,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       case 'final': {
         clearErrorRecoveryTimer();
-        if (get().error || get().runError) set({ error: null, runError: null });
         // Message complete - add to history and clear streaming
         const finalMsg = event.message as RawMessage | undefined;
         if (finalMsg) {
           const normalizedFinalMessage = normalizeStreamingMessage(finalMsg) as RawMessage;
-          if (isTerminalAssistantErrorMessage(normalizedFinalMessage)) {
+          const finalErrorMessage = String(getMessageErrorMessage(normalizedFinalMessage)
+            ?? event.errorMessage
+            ?? getMessageText(normalizedFinalMessage.content));
+          const preservesQuotaTerminal = get().runErrorKind === 'quota'
+            && isQuotaChatRunError(finalErrorMessage);
+          if (isTerminalAssistantErrorMessage(normalizedFinalMessage) || preservesQuotaTerminal) {
             get().handleChatEvent({
               ...event,
               state: 'error',
-              errorMessage: getMessageErrorMessage(normalizedFinalMessage) ?? event.errorMessage,
+              errorMessage: finalErrorMessage,
               message: normalizedFinalMessage,
             });
             break;
           }
+          if (get().error || get().runError) set({ error: null, runError: null, runErrorKind: null });
           const updates = collectToolUpdates(normalizedFinalMessage, resolvedState);
           // Filter out internal-only final responses (NO_REPLY, HEARTBEAT_OK, etc.)
           // before adding to messages. Without this guard, the internal token appears
@@ -7741,6 +7822,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 streamingTools: [],
                 runtimeRuns,
                 runError: emptyTerminalFailure,
+                runErrorKind: null,
                 ...clearPendingImages,
               };
             }
@@ -7850,6 +7932,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const sessionKeyAtError = eventSessionKey ?? currentSessionKey;
         const recoverable = wasSending && isRecoverableRuntimeError(errorMsg);
         const replySessionInitConflict = isReplySessionInitializationConflictError(errorMsg);
+        const quotaError = isQuotaChatRunError(errorMsg);
 
         const commitRuntimeError = () => {
           const currentStream = get().streamingMessage as RawMessage | null;
@@ -7881,12 +7964,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   } satisfies ChatRuntimeEvent],
                 )
               : get().runtimeRuns,
-            error: suppressGlobalError || terminalAssistantError || replySessionInitConflict ? null : normalizedErrorMsg,
+            error: suppressGlobalError || terminalAssistantError || replySessionInitConflict || quotaError
+              ? null
+              : normalizedErrorMsg,
             runError: suppressGlobalError
               ? null
-              : terminalAssistantError || replySessionInitConflict
+              : terminalAssistantError || replySessionInitConflict || quotaError
                 ? normalizedErrorMsg
                 : null,
+            runErrorKind: suppressGlobalError || !(terminalAssistantError || replySessionInitConflict || quotaError)
+              ? null
+              : quotaError ? 'quota' : null,
             sending: false,
             pendingImageGenerationLocal: false,
             pendingVideoGenerationLocal: false,
@@ -8057,6 +8145,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
         eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
         [eventForSession.artifact],
       );
+
+      const taskId = eventForSession.artifact.taskId ?? eventForSession.taskId;
+      const owningTask = taskId
+        ? Object.values(runtimeRuns)
+          .flatMap((run) => run.tasks ?? [])
+          .find((task) => task.taskId === taskId)
+        : undefined;
+      const deliveryStatus = owningTask?.deliveryStatus?.trim().toLowerCase().replace(/[\s-]+/gu, '_');
+      const deliveryFailed = ['failed', 'partial', 'blocked', 'parent_missing'].includes(deliveryStatus ?? '');
+      const queuedTooLong = deliveryStatus === 'session_queued'
+        && typeof owningTask?.endedAt === 'number'
+        && Date.now() - (owningTask.endedAt < 1e12 ? owningTask.endedAt * 1000 : owningTask.endedAt) > 30_000;
+      const artifactTarget = eventForSession.artifact.filePath ?? eventForSession.artifact.url;
+      const sessionForArtifact = eventSessionKey ?? eventForSession.sessionKey ?? currentSessionKey;
+      if (
+        taskId
+        && artifactTarget
+        && eventForSession.artifact.source === 'openclaw-native-media'
+        && (deliveryFailed || queuedTooLong)
+      ) {
+        const mimeType = eventForSession.artifact.mimeType
+          ?? (eventForSession.artifact.kind === 'image'
+            ? 'image/png'
+            : eventForSession.artifact.kind === 'video'
+              ? 'video/mp4'
+              : 'application/octet-stream');
+        const attachedFile = makeAttachedFile(
+          { filePath: artifactTarget, mimeType },
+          'tool-result',
+          'output-delivery',
+        );
+        const fallbackMessage: RawMessage = {
+          id: `uclaw-native-media-fallback:${taskId}`,
+          role: 'assistant',
+          content: i18n.t('chat:runtimeDelivery.artifactReadyDeliveryPending'),
+          timestamp: (eventForSession.ts ?? Date.now()) / 1000,
+          _attachedFiles: [attachedFile],
+        };
+        rememberRuntimeArtifactFallback(sessionForArtifact, fallbackMessage);
+        if (matchesCurrentSession) {
+          const mergedMessages = mergeRuntimeArtifactFallbackMessages(sessionForArtifact, initialState.messages);
+          nextPatch.messages = mergedMessages;
+          cacheSessionHistory(sessionForArtifact, mergedMessages, initialState.thinkingLevel ?? null);
+        }
+      }
     }
 
     if (eventForSession.type === 'tool.completed') {
@@ -8223,6 +8356,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           )
             ? null
             : normalizeChatRunErrorMessage(eventForSession.error);
+          nextPatch.runErrorKind = nextPatch.runError && isQuotaChatRunError(eventForSession.error)
+            ? 'quota'
+            : null;
         }
         if (eventForSession.status === 'aborted') {
           nextPatch.streamingMessage = null;
@@ -8254,7 +8390,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await Promise.all([loadHistory(), loadSessions()]);
   },
 
-  clearError: () => set({ error: null, runError: null }),
+  clearError: () => set({ error: null, runError: null, runErrorKind: null }),
 }));
 
 useChatStore.subscribe((state, previousState) => {

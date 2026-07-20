@@ -2,6 +2,11 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { app } from 'electron';
+import {
+  preparePortableRuntimeState,
+  resolvePortableRuntimeLayout,
+  type PortableRuntimeLayout,
+} from './portable-runtime-state';
 
 const PORTABLE_DATA_DIR_NAME = 'UClawData';
 const PORTABLE_FLAG_FILE = 'portable.flag';
@@ -32,6 +37,11 @@ export type PortableModeInfo = {
   runtimeBrowserCacheDir: string | null;
   runtimeXdgCacheDir: string | null;
   runtimeCrabboxSyncDir: string | null;
+  portableId: string | null;
+  runtimeProfileDir: string | null;
+  runtimeOpenClawStateDir: string | null;
+  runtimeSnapshotDir: string | null;
+  portableRuntimeLayout: PortableRuntimeLayout | null;
 };
 
 let cachedPortableModeInfo: PortableModeInfo | null = null;
@@ -109,6 +119,15 @@ export function getPortableModeInfo(): PortableModeInfo {
     || existsSync(path.join(rootDir, PORTABLE_FLAG_FILE))
     || existsSync(dataDir);
 
+  const runtimeLayout = enabled
+    ? resolvePortableRuntimeLayout({
+        rootDir,
+        dataDir,
+        legacyStateDir: path.join(dataDir, 'openclaw-home', '.openclaw'),
+        runtimeRootDir,
+      })
+    : null;
+
   cachedPortableModeInfo = enabled
     ? {
         enabled: true,
@@ -133,6 +152,11 @@ export function getPortableModeInfo(): PortableModeInfo {
         runtimeBrowserCacheDir: path.join(runtimeRootDir, 'browser-cache'),
         runtimeXdgCacheDir: path.join(runtimeRootDir, 'xdg-cache'),
         runtimeCrabboxSyncDir: path.join(runtimeRootDir, 'crabbox-sync'),
+        portableId: runtimeLayout?.portableId ?? null,
+        runtimeProfileDir: runtimeLayout?.profileDir ?? null,
+        runtimeOpenClawStateDir: runtimeLayout?.stateDir ?? null,
+        runtimeSnapshotDir: runtimeLayout?.snapshotDir ?? null,
+        portableRuntimeLayout: runtimeLayout,
       }
     : {
         enabled: false,
@@ -157,6 +181,11 @@ export function getPortableModeInfo(): PortableModeInfo {
         runtimeBrowserCacheDir: null,
         runtimeXdgCacheDir: null,
         runtimeCrabboxSyncDir: null,
+        portableId: null,
+        runtimeProfileDir: null,
+        runtimeOpenClawStateDir: null,
+        runtimeSnapshotDir: null,
+        portableRuntimeLayout: null,
       };
 
   return cachedPortableModeInfo;
@@ -192,6 +221,9 @@ export function ensurePortableDataDirs(): PortableModeInfo {
     info.runtimeBrowserCacheDir,
     info.runtimeXdgCacheDir,
     info.runtimeCrabboxSyncDir,
+    info.runtimeProfileDir,
+    info.runtimeOpenClawStateDir,
+    info.runtimeSnapshotDir,
   ]) {
     if (dir) {
       mkdirSync(dir, { recursive: true });
@@ -207,13 +239,23 @@ export function applyPortableEnvironment(): PortableModeInfo {
     return info;
   }
 
+  if (info.portableRuntimeLayout) {
+    preparePortableRuntimeState(info.portableRuntimeLayout);
+  }
+
   process.env.CLAWX_PORTABLE = '1';
   process.env.CLAWX_PORTABLE_MODE = info.mode ?? 'high-performance';
   process.env.CLAWX_USER_DATA_DIR = info.clawxDataDir;
   process.env.OPENCLAW_HOME = info.openclawHomeDir;
-  process.env.OPENCLAW_STATE_DIR = info.openclawConfigDir;
-  process.env.OPENCLAW_CONFIG_PATH = pathApi().join(info.openclawConfigDir, 'openclaw.json');
+  process.env.OPENCLAW_STATE_DIR = info.runtimeOpenClawStateDir ?? info.openclawConfigDir;
+  process.env.OPENCLAW_CONFIG_PATH = pathApi().join(
+    info.runtimeOpenClawStateDir ?? info.openclawConfigDir,
+    'openclaw.json',
+  );
   process.env.OPENCLAW_CONFIG = process.env.OPENCLAW_CONFIG_PATH;
+  if (info.runtimeSnapshotDir) process.env.CLAWX_PORTABLE_RUNTIME_SNAPSHOT_DIR = info.runtimeSnapshotDir;
+  if (info.portableId) process.env.CLAWX_PORTABLE_ID = info.portableId;
+  process.env.CLAWX_PORTABLE_RUNTIME_STATE = 'local';
 
   if (info.runtimeRootDir) {
     process.env.CLAWX_RUNTIME_CACHE_DIR = info.runtimeRootDir;

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { getOpenClawConfigDir } from '../../utils/paths';
+import { getPortableModeInfo } from '../../utils/portable-mode';
 import type { BlenderJobSnapshot } from './types';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
@@ -10,7 +11,11 @@ const PRIVATE_FILE_MODE = 0o600;
 export class BlenderJobStore {
   readonly rootDir: string;
 
-  constructor(rootDir = path.join(getOpenClawConfigDir(), 'uclaw-runtime', 'blender-jobs')) {
+  constructor(rootDir = path.join(
+    getPortableModeInfo().runtimeOpenClawStateDir ?? getOpenClawConfigDir(),
+    'uclaw-runtime',
+    'blender-jobs',
+  )) {
     this.rootDir = rootDir;
   }
 

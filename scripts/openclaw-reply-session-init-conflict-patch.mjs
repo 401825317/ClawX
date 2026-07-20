@@ -5,11 +5,13 @@ const PATCH_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS';
 const QUEUE_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_MARKER';
 const QUEUE_CLEANUP_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_CLEANUP_MARKER';
 const QUEUE_GUARD_MARKER = '__uclawReplySessionInitQueued';
+const SESSION_COORDINATOR_MARKER = 'UCLAW_SESSION_COORDINATOR_V1';
 const STALE_SNAPSHOT_RELOAD_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RELOAD_MARKER';
 const STABLE_REVISION_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_STABLE_REVISION_MARKER';
 const RETRY_TIMEOUT_MS = 30_000;
 const RETRY_TIMEOUT_DECLARATION_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS = [^;]+;/u;
 const RETRY_BASE_DECLARATION_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_BASE_DELAY_MS = [^;]+;/u;
+const LEGACY_QUEUE_BLOCK_RE = /const UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_MARKER = true;[\s\S]*?function isUclawReplySessionInitializationConflict\(error\) \{/u;
 
 const INIT_SESSION_STATE_ANCHOR = `async function initSessionState(params) {
 \treturn await initSessionStateAttempt(params, false);
@@ -34,34 +36,40 @@ const SESSION_KEY_QUEUE_GUARD = `${SESSION_KEY_ANCHOR}\tif (!params.__uclawReply
 
 const INIT_SESSION_QUEUE_HELPERS = `const ${QUEUE_MARKER} = true;
 const ${QUEUE_CLEANUP_MARKER} = true;
-const UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES = globalThis.__uclawReplySessionInitConflictQueues || (globalThis.__uclawReplySessionInitConflictQueues = new Map());
-function runUclawReplySessionInitializationInQueue(sessionKey, task) {
+const ${SESSION_COORDINATOR_MARKER} = true;
+const UCLAW_SESSION_COORDINATOR = globalThis[Symbol.for("uclaw.session.coordinator.v1")] || (globalThis[Symbol.for("uclaw.session.coordinator.v1")] = { queues: new Map() });
+function runUclawSessionCoordinator(sessionKey, operation, task) {
 \tconst key = String(sessionKey || "__unknown__");
-\tconst previous = UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) || Promise.resolve();
+\tconst queueKey = String(operation || "unknown") + ":" + key;
+\tconst previous = UCLAW_SESSION_COORDINATOR.queues.get(queueKey) || Promise.resolve();
 \tconst run = previous.catch(() => void 0).then(task);
 \tconst cleanup = run.catch(() => void 0).then(() => {
-\t\tif (UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) === cleanup) {
-\t\t\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.delete(key);
-\t\t}
+\t\tif (UCLAW_SESSION_COORDINATOR.queues.get(queueKey) === cleanup) UCLAW_SESSION_COORDINATOR.queues.delete(queueKey);
 \t});
-\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.set(key, cleanup);
+\tUCLAW_SESSION_COORDINATOR.queues.set(queueKey, cleanup);
 \treturn run;
+}
+function runUclawReplySessionInitializationInQueue(sessionKey, task) {
+\treturn runUclawSessionCoordinator(sessionKey, "reply-init", task);
 }
 `;
 
 const LEGACY_INIT_SESSION_QUEUE_HELPERS = `const ${QUEUE_MARKER} = true;
-const UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES = globalThis.__uclawReplySessionInitConflictQueues || (globalThis.__uclawReplySessionInitConflictQueues = new Map());
-function runUclawReplySessionInitializationInQueue(sessionKey, task) {
+const ${SESSION_COORDINATOR_MARKER} = true;
+const UCLAW_SESSION_COORDINATOR = globalThis[Symbol.for("uclaw.session.coordinator.v1")] || (globalThis[Symbol.for("uclaw.session.coordinator.v1")] = { queues: new Map() });
+function runUclawSessionCoordinator(sessionKey, operation, task) {
 \tconst key = String(sessionKey || "__unknown__");
-\tconst previous = UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) || Promise.resolve();
+\tconst queueKey = String(operation || "unknown") + ":" + key;
+\tconst previous = UCLAW_SESSION_COORDINATOR.queues.get(queueKey) || Promise.resolve();
 \tconst run = previous.catch(() => void 0).then(task);
 \tconst cleanup = run.finally(() => {
-\t\tif (UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.get(key) === cleanup) {
-\t\t\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.delete(key);
-\t\t}
+\t\tif (UCLAW_SESSION_COORDINATOR.queues.get(queueKey) === cleanup) UCLAW_SESSION_COORDINATOR.queues.delete(queueKey);
 \t});
-\tUCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUES.set(key, cleanup);
+\tUCLAW_SESSION_COORDINATOR.queues.set(queueKey, cleanup);
 \treturn run;
+}
+function runUclawReplySessionInitializationInQueue(sessionKey, task) {
+\treturn runUclawSessionCoordinator(sessionKey, "reply-init", task);
 }
 `;
 
@@ -130,9 +138,17 @@ async function initSessionStateAttempt(params, staleSnapshotRetried) {
 `;
 
 function patchQueueHelper(content) {
-  if (!content.includes(QUEUE_MARKER) || content.includes(QUEUE_CLEANUP_MARKER)) {
+  if (content.includes(SESSION_COORDINATOR_MARKER)) {
     return content;
   }
+  if (content.includes(QUEUE_MARKER)) {
+    const migrated = content.replace(
+      LEGACY_QUEUE_BLOCK_RE,
+      INIT_SESSION_QUEUE_HELPERS + 'function isUclawReplySessionInitializationConflict(error) {',
+    );
+    if (migrated !== content) return migrated;
+  }
+  if (!content.includes(QUEUE_MARKER)) return content;
   return content.replace(LEGACY_INIT_SESSION_QUEUE_HELPERS, INIT_SESSION_QUEUE_HELPERS);
 }
 

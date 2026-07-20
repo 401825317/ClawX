@@ -63,10 +63,25 @@ function resolveClawXDataDir(): string {
   return process.env.CLAWX_ELECTRON_STORE_CWD?.trim() || getDataDir();
 }
 
+export function getGeneratedMediaRootDir(): string {
+  return join(resolveClawXDataDir(), 'generated-media');
+}
+
+export function getGeneratedMediaOutputDir(subdir: string): string {
+  const segments = subdir.split(/[\\/]+/u).filter(Boolean);
+  if (segments.some((segment) => segment === '.' || segment === '..' || !/^[A-Za-z0-9._-]+$/u.test(segment))) {
+    throw new Error(`Unsafe generated media subdirectory: ${subdir}`);
+  }
+  return join(getGeneratedMediaRootDir(), ...segments);
+}
+
 function uniqueCandidateDirs(): string[] {
   return [...new Set([
+    // Generated deliverables belong to the portable user-data layer. The
+    // OpenClaw media directory may be a local Runtime working copy in USB
+    // mode and is therefore a fallback, not the canonical artifact location.
+    getGeneratedMediaRootDir(),
     join(getOpenClawMediaDir(), 'generated'),
-    join(resolveClawXDataDir(), 'generated-media'),
     join(tmpdir(), 'uclaw-generated-media'),
   ])];
 }

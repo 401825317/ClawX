@@ -7,6 +7,7 @@ import type {
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
 import { getOpenClawConfigDir } from '../../utils/paths';
+import { getPortableModeInfo } from '../../utils/portable-mode';
 
 export type HostTaskStatus = 'queued' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'blocked' | 'cancelled' | 'timed_out' | 'lost';
 export type HostTaskData = null | boolean | number | string | HostTaskData[] | { [key: string]: HostTaskData };
@@ -260,7 +261,12 @@ function runtimeProgressStatus(status: HostTaskStatus): 'running' | 'completed' 
 }
 
 function taskRoot(): string {
-  return path.join(getOpenClawConfigDir(), 'uclaw-runtime', 'host-tasks');
+  const portable = getPortableModeInfo();
+  return path.join(
+    portable.runtimeOpenClawStateDir ?? getOpenClawConfigDir(),
+    'uclaw-runtime',
+    'host-tasks',
+  );
 }
 
 /**

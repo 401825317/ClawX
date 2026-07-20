@@ -8,6 +8,7 @@
 
 import { patchInstalledOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchInstalledOpenClawBrowserLifecycleRuntime } from './openclaw-browser-lifecycle-patch.mjs';
+import { patchInstalledOpenClawBillingErrorClassificationRuntime } from './openclaw-billing-error-classification-patch.mjs';
 import { patchInstalledOpenClawCronRuntimePolicy } from './openclaw-cron-runtime-policy-patch.mjs';
 import { cleanupInstalledOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
@@ -66,6 +67,7 @@ try {
   patchInstalledOpenClawNativeMediaCompletionQueueRuntime();
   patchInstalledOpenClawManagedMediaTimeoutRuntime();
   patchInstalledOpenClawImageModelLockRuntime();
+  patchInstalledOpenClawBillingErrorClassificationRuntime();
   patchInstalledOpenClawSmartLatestRateLimitRetryRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
   cleanupInstalledOpenClawNativeMediaAcceptanceRuntime();
@@ -75,6 +77,7 @@ try {
   patchInstalledOpenClawVideoCapabilityContractRuntime();
   patchInstalledOpenClawVideoModelValidationRuntime();
   patchInstalledOpenClawVideoActualSpecRuntime();
+  patchInstalledOpenClawVideoSegmentDedupeRuntime();
   patchInstalledOpenClawTaskSummaryDeliveryRuntime();
 } catch (error) {
   console.error(

@@ -2,9 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
-import { getOpenClawConfigDir } from '../../utils/paths';
+import { getGeneratedMediaOutputDir } from '../../utils/generated-media-store';
 import type { HostCapabilityTaskContext } from './host-capability-registry';
-import { assessLocalMediaRuntime, resolveLocalMediaTools } from './local-media-runtime';
+import { assessLocalMediaRuntime, resolveLocalMediaTools, resolveManagedLocalMediaFile } from './local-media-runtime';
 
 export type LocalVideoShotQaInput = {
   sourcePath: string;
@@ -111,15 +111,7 @@ export function normalizeLocalVideoShotQaInput(value: unknown): LocalVideoShotQa
 }
 
 async function managedVideoPath(sourcePath: string): Promise<string> {
-  const managedRoot = await fs.realpath(getOpenClawConfigDir());
-  const actual = await fs.realpath(sourcePath);
-  const relative = path.relative(managedRoot, actual);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new Error(`Shot video is outside the managed OpenClaw directory: ${sourcePath}`);
-  }
-  const fileStat = await fs.stat(actual);
-  if (!fileStat.isFile() || fileStat.size <= 0) throw new Error(`Shot video is not a readable file: ${sourcePath}`);
-  return actual;
+  return await resolveManagedLocalMediaFile(sourcePath, 'Shot video');
 }
 
 async function runProcess(taskId: string, executable: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -296,7 +288,7 @@ export async function runLocalVideoShotQa(context: HostCapabilityTaskContext): P
     return;
   }
 
-  const outputDir = path.join(getOpenClawConfigDir(), 'media', 'outbound', 'video-shot-qa', context.task.taskId);
+  const outputDir = getGeneratedMediaOutputDir(path.join('video-shot-qa', context.task.taskId));
   await fs.mkdir(outputDir, { recursive: true, mode: 0o700 });
   const timestamps = sampleTimestamps(metadata.durationSeconds!, input.sampleFrameCount);
   await context.update({

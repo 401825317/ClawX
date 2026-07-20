@@ -51,6 +51,10 @@ export type ChatRuntimeTaskProjection = {
   childSessionKey?: string;
   status: ChatRuntimeTaskStatus;
   sourceStatus?: string;
+  /** Provider/tool execution state, independent from artifact and delivery. */
+  executionStatus?: string;
+  /** Whether a durable output artifact is available, missing, or unverified. */
+  artifactStatus?: string;
   deliveryStatus?: string;
   terminalOutcome?: string;
   createdAt?: number;

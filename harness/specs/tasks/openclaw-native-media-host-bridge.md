@@ -85,6 +85,7 @@ touchedAreas:
   - src/pages/Chat/ExecutionGraphCard.tsx
   - src/pages/Chat/task-visualization.ts
   - tests/e2e/**
+  - tests/packaged-e2e/**
   - vite.config.ts
   - README.md
   - README.zh-CN.md
@@ -92,6 +93,7 @@ touchedAreas:
 expectedUserBehavior:
   - A normal chat can invoke native image_generate or video_generate based on the full OpenClaw session context; UClaw does not require a keyword matcher or second semantic planning pass.
   - Image and video modes remain visible product affordances. They supply current-turn media constraints and selected input artifacts, but do not bypass the OpenClaw agent loop. For video, the Agent explicitly selects a compatible model from the request, reference inputs, and advertised provider capabilities; UI defaults never become a silent model override.
+  - Selecting image or video mode is explicit current-turn user intent. OpenClaw receives that mode in ephemeral system context and must attempt the matching native media tool before ending the turn; a text-only promise is revised once, while a real provider or capability failure remains visible to the user.
   - Native OpenClaw media task start, progress, completion, failure, and produced attachments project into the existing UClaw runtime graph and artifact UI.
   - A native async media completion resumes the same session through OpenClaw's completion path. UClaw does not synthesize an assistant reply to pretend that an Agent tool returned.
   - OpenClaw remains the only semantic decision maker for when to invoke a capability. UClaw guard code may validate ownership, cost, parameter bounds, media staging, and result evidence, but may not authorize a tool from natural-language regexes.
@@ -137,6 +139,7 @@ requiredTests:
 acceptance:
   - The renderer has no direct media job/polling branch for a normal agent turn.
   - Image/video mode preferences reach the matching OpenClaw turn without being persisted as user-authored system instructions.
+  - A concrete image-mode or video-mode request cannot complete successfully with zero matching native media tool attempts; the bounded artifact guard retry preserves the same Agent loop and never relies on natural-language keyword authorization.
   - Native image_generate and video_generate retain their OpenClaw task ledger, duplicate guard, completion wake, and normal session delivery semantics.
   - Replaying one `parentTaskId + segmentId` pair reuses the active or recent successful video task, while a different `segmentId` under the same parent may start another planned shot.
   - Calls that omit `parentTaskId` and `segmentId` preserve the session-level native video single-flight guard.

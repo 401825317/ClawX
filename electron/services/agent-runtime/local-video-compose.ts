@@ -1,12 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { getOpenClawConfigDir } from '../../utils/paths';
+import { getGeneratedMediaOutputDir } from '../../utils/generated-media-store';
 import type { HostCapabilityTaskContext } from './host-capability-registry';
 import {
   assessLocalMediaRuntime,
   DEFAULT_NARRATION_VOICE,
   probeMediaFile,
+  resolveManagedLocalMediaFile,
   resolveLocalMediaTools,
   synthesizeNarration,
   type ProbedMediaMetadata,
@@ -72,15 +73,9 @@ function normalizeInput(value: unknown): ComposeInput {
 }
 
 async function managedSegmentPaths(segments: string[]): Promise<string[]> {
-  const managedRoot = await fs.realpath(getOpenClawConfigDir());
   const resolved: string[] = [];
   for (const segment of segments) {
-    const actual = await fs.realpath(segment);
-    const relative = path.relative(managedRoot, actual);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Video segment is outside the managed OpenClaw directory: ${segment}`);
-    const fileStat = await fs.stat(actual);
-    if (!fileStat.isFile() || fileStat.size <= 0) throw new Error(`Video segment is not a readable file: ${segment}`);
-    resolved.push(actual);
+    resolved.push(await resolveManagedLocalMediaFile(segment, 'Video segment'));
   }
   return resolved;
 }
@@ -173,7 +168,7 @@ export async function runLocalVideoCompose(context: HostCapabilityTaskContext): 
   const width = input.width ?? Math.max(2, Math.floor((firstVideo.width ?? 1_280) / 2) * 2);
   const height = input.height ?? Math.max(2, Math.floor((firstVideo.height ?? 720) / 2) * 2);
 
-  const outputDir = path.join(getOpenClawConfigDir(), 'media', 'outbound', 'composed-video', context.task.taskId);
+  const outputDir = getGeneratedMediaOutputDir(path.join('composed-video', context.task.taskId));
   await fs.mkdir(outputDir, { recursive: true, mode: 0o700 });
   const finalPath = path.join(outputDir, input.filename);
   const temporaryPath = path.join(outputDir, `.${input.filename}.${process.pid}.tmp.mp4`);

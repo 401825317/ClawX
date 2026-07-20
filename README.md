@@ -153,7 +153,7 @@ In **Settings → General**, you can enable **Launch at system startup** so Claw
 ClawX can automatically check for new versions on startup. When an update is available, it shows an in-app prompt; downloading and installing only happen after you choose the action.
 
 ### 💾 High-Performance Portable Mode
-Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in and Chromium session state, OpenClaw config, agents, sessions, skills, and channel credentials in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable or machine-local data such as update downloads, Python, uv, temporary files, logs, crash dumps, browser disk cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth. A newly packaged artifact always starts with an empty `UClawData/`; it never inherits the packager's account or runtime state.
+Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in and Chromium session state, OpenClaw config, agents, sessions, skills, and channel credentials in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable or machine-local data such as update downloads, Python, uv, temporary files, logs, crash dumps, browser disk cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth. High-frequency OpenClaw state uses a stable per-device profile under `UClawRuntime/profiles/<portable-id>/openclaw-state`; `UClawData/` retains the portable identity, user data, and only verified runtime snapshots. A newly packaged artifact always starts with an empty `UClawData/`; it never inherits the packager's account or runtime state.
 
 The Windows packaging flow requires a committed, clean source tree and removes stale unpacked builds and old USB artifacts before building. Finalization verifies the source version and Git commit against `app.asar`, checks all four shipped Windows executables as x64 PE files, validates all 12 bundled UClaw and channel/search plugins with their runtime dependencies, and writes `uclaw-usb-build.json` plus a companion release JSON. The build fails instead of publishing when these identities or package contents disagree.
 
@@ -391,7 +391,10 @@ pnpm package              # Package for current platform (includes bundled prein
 pnpm package:mac          # Package for macOS
 pnpm package:mac:usb      # Package an install-free high-performance portable macOS folder
 pnpm package:win          # Package for Windows
+pnpm run package:win:verify # Build and validate the Windows NSIS installer lifecycle
 pnpm package:win:usb      # Package Windows USB ZIP and gate it with the full packaged regression
+pnpm run release:build     # Build and validate without publishing
+pnpm run release           # Build, validate, then publish the exact artifacts
 pnpm package:linux        # Package for Linux
 ```
 

@@ -810,6 +810,7 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
       {/* Error Message Display */}
       {errorMessage && (
         <motion.div
+          data-testid="setup-install-error"
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           className="p-4 rounded-lg bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 text-sm"
@@ -840,6 +841,7 @@ function InstallingContent({ skills, onComplete, onSkip }: InstallingContentProp
       )}
       <div className="flex justify-end">
         <Button
+          data-testid="setup-install-skip-button"
           variant="ghost"
           className="text-muted-foreground"
           onClick={onSkip}

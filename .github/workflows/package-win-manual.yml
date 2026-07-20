@@ -87,6 +87,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm run package:win
 
+      - name: Refresh final NSIS blockmap and update metadata
+        if: ${{ inputs.package_type == 'installer' }}
+        shell: pwsh
+        run: pnpm run release:refresh:win
+
+      - name: Validate final Windows NSIS installer lifecycle
+        if: ${{ inputs.package_type == 'installer' }}
+        shell: pwsh
+        run: pnpm run release:validate:win
+
       - name: Upload Windows USB ZIP
         if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' }}
         uses: actions/upload-artifact@v7
@@ -140,5 +150,14 @@ jobs:
           path: |
             release/*.yml
             !release/builder-debug.yml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload NSIS validation report
+        if: ${{ always() && inputs.package_type == 'installer' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-validation-report
+          path: release/regression/nsis-*/*
           if-no-files-found: warn
           retention-days: 7

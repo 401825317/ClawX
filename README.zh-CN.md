@@ -156,7 +156,7 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。
 
 ### 💾 高性能便携模式
-macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、Chromium 会话状态、OpenClaw 配置、Agent、会话、技能和通道凭据保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；更新下载、Python、uv、临时文件、日志、崩溃转储、浏览器磁盘缓存和编译缓存会放到当前电脑的本机目录 `UClawRuntime/`，避免 U 盘被频繁读写拖慢或快速占满。新生成的包一定从空白 `UClawData/` 开始，不会带入打包电脑上的账号或运行状态。
+macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、Chromium 会话状态、OpenClaw 配置、Agent、会话、技能和通道凭据保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；更新下载、Python、uv、临时文件、日志、崩溃转储、浏览器磁盘缓存和编译缓存会放到当前电脑的本机目录 `UClawRuntime/`，避免 U 盘被频繁读写拖慢或快速占满。高频 OpenClaw 状态会进一步放到按便携身份隔离的 `UClawRuntime/profiles/<portable-id>/openclaw-state`，`UClawData/` 只保留便携身份、用户数据和已验证的 Runtime 快照。新生成的包一定从空白 `UClawData/` 开始，不会带入打包电脑上的账号或运行状态。
 
 Windows 打包必须从已经提交且 worktree 干净的源码开始，并会先清理旧的解包目录和历史 USB 产物。封装阶段会核对源码版本、Git commit 与 `app.asar`，把随包的 4 个 Windows 可执行文件全部校验为 x64 PE，并检查 12 个 UClaw 内置及渠道/搜索插件和它们的运行依赖，随后生成 `uclaw-usb-build.json` 和配套发布 JSON；任何身份或内容不一致都会直接让构建失败，不再发布看似成功的旧包。
 
@@ -393,8 +393,11 @@ pnpm build                # 完整生产构建（含打包资源）
 pnpm package              # 为当前平台打包（包含预装技能资源）
 pnpm package:mac          # 为 macOS 打包
 pnpm package:mac:usb      # 为 macOS 生成免安装高性能便携包
-pnpm package:win          # 为 Windows 打包
-pnpm package:win:usb      # 生成 Windows USB ZIP，并自动通过打包版完整回归门禁
+pnpm package:win           # 为 Windows 打包
+pnpm run package:win:verify # 构建并验证 Windows NSIS 安装包生命周期
+pnpm package:win:usb       # 生成 Windows USB ZIP，并自动通过打包版完整回归门禁
+pnpm run release:build     # 构建并验证，但不上传
+pnpm run release           # 构建、验证后才发布最终产物
 pnpm package:linux        # 为 Linux 打包
 ```
 

@@ -84,6 +84,23 @@ test('patches actual video specification, non-blocking probes, differences, and 
   assert.equal(second.content, result.content);
 });
 
+test('keeps actual video specification compatible with the native media completion contract', () => {
+  const completionFixture = fixture()
+    .replace(
+      'import { something } from "./somewhere.js";',
+      'const UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2 = true;\nimport { something } from "./somewhere.js";',
+    )
+    .replace(
+      __test.ASYNC_TERMINAL_ANCHOR,
+      '\t\t\t\tpaths: executed.paths,\n\t\t\t\tterminalResult: { terminalSummary: [executed.contentText, artifactContract].join("\\n") }\n\t\t\t});',
+    );
+  const result = patchOpenClawVideoActualSpecContent(completionFixture, { mediaServices });
+  assert.equal(result.changed, true);
+  assert.match(result.content, /UCLAW_VIDEO_ACTUAL_SPEC_V1/u);
+  assert.match(result.content, /terminalSummary: \[executed\.contentText, artifactContract\]/u);
+  assert.match(result.content, /terminalResult: \{ terminalSummary: executed\.contentText \}/u);
+});
+
 test('parses macOS avmediainfo dimensions, duration, and audio in the injected helper', () => {
   const helperSource = `${__test.parseGeneratedVideoAvMediaInfoSource}\nexport { parseGeneratedVideoAvMediaInfoUClaw };`;
   const helperUrl = `data:text/javascript;base64,${Buffer.from(helperSource).toString('base64')}`;

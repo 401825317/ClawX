@@ -102,11 +102,29 @@ jobs:
           }
           Write-Host "Signed executables copied to release/ ($($finalExeFiles.Count) file(s))"
 
+      - name: Rebuild NSIS block map and final update metadata
+        shell: pwsh
+        run: pnpm run release:refresh:win
+
+      - name: Validate final Windows NSIS installer lifecycle
+        shell: pwsh
+        run: pnpm run release:validate:win
+
       - name: Upload signed Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: signed-win-exe-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release/*.exe
+            release/*.blockmap
             release/latest*.yml
+          retention-days: 7
+
+      - name: Upload NSIS validation report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsis-validation-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/regression/nsis-*/*
+          if-no-files-found: warn
           retention-days: 7

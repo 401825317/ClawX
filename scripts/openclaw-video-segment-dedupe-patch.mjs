@@ -4,6 +4,36 @@ import { join } from 'node:path';
 const PATCH_MARKER = 'UCLAW_VIDEO_SEGMENT_DEDUPE_V2';
 const PREVIOUS_PATCH_MARKER = 'UCLAW_VIDEO_SEGMENT_DEDUPE_V1';
 const VIDEO_COPY_HINT = 'When uclaw_video_project returns nextGenerationInput or generationInput, copy that object exactly. Do not reconstruct or omit parentTaskId or segmentId.';
+const LEGACY_VIDEO_ACTIVE_PROMPT_ANCHOR = [
+  'function buildActiveVideoGenerationTaskPromptContextForSession(sessionKey) {',
+  '\treturn buildActiveMediaGenerationTaskPromptContextForSession({',
+  '\t\tsessionKey,',
+  '\t\ttaskKind: VIDEO_GENERATION_TASK_KIND,',
+  '\t\tsourcePrefix: VIDEO_GENERATION_SOURCE_PREFIX,',
+  '\t\tnounLabel: "Video generation",',
+  '\t\ttoolName: "video_generate",',
+  '\t\tcompletionLabel: "videos"',
+  '\t});',
+  '}',
+].join('\n');
+const LEGACY_VIDEO_ACTIVE_PROMPT_PATCH = [
+  'function buildActiveVideoGenerationTaskPromptContextForSession(sessionKey) {',
+  '\tconst tasks = listActiveMediaGenerationTasksForSession({',
+  '\t\tsessionKey,',
+  '\t\ttaskKind: VIDEO_GENERATION_TASK_KIND,',
+  '\t\tsourcePrefix: VIDEO_GENERATION_SOURCE_PREFIX',
+  '\t});',
+  '\tif (tasks.length === 0) return;',
+  '\treturn [',
+  '\t\tString(tasks.length) + " active video generation " + (tasks.length === 1 ? "task is" : "tasks are") + " queued or running for this session.",',
+  '\t\t...tasks.map((task) => "- Task " + task.taskId + " is " + task.status + (task.progressSummary ? ": " + task.progressSummary : ".")),',
+  '\t\t"Do not resubmit the same logical segment while it is active; use video_generate action:\\"status\\" with its parentTaskId and segmentId when checking that segment.",',
+  '\t\t"For an explicit long-form composition plan, continue with a small bounded batch of distinct segmentId values under the same parentTaskId, then verify and compose their outputs."',
+  '\t].join("\\n");',
+  '}',
+].join('\n');
+const LEGACY_VIDEO_DESCRIPTION_ANCHOR = '\t\tdescription: "Create videos. Session chats: background task; do not call video_generate again for same request; wait completion, then report through the current visible-reply contract with generated media attached using structured media fields. \\"status\\" checks active task. Duration may round to provider-supported value.",';
+const LEGACY_VIDEO_DESCRIPTION_PATCH = '\t\tdescription: "Create videos. Session chats use background tasks. Do not resubmit the same logical segment while it is queued or running; use status instead. Long-form work may call video_generate multiple times with one shared parentTaskId and a unique segmentId per shot, verify every segment, then compose the final video. If requested duration exceeds provider limits, plan enough distinct segments instead of replacing generated motion with a still-image timeline. Duration may round to a provider-supported value.",';
 
 function countOccurrences(content, search) {
   return content.split(search).length - 1;
@@ -322,9 +352,9 @@ export function patchOpenClawVideoSegmentDedupeContent(content, filePath = '<fix
   patched = replaceUnique(patched, VIDEO_DUPLICATE_FINDER_ANCHOR, '', 'legacy video duplicate finder', filePath);
   patched = replaceUnique(patched, VIDEO_STATUS_HELPER_ANCHOR, VIDEO_STATUS_HELPER_PATCH, 'video status helper', filePath);
   patched = replaceUnique(patched, VIDEO_STATUS_TEXT_ANCHOR, VIDEO_STATUS_TEXT_PATCH, 'video duplicate status text', filePath);
-  patched = replaceUnique(patched, VIDEO_ACTIVE_PROMPT_ANCHOR, VIDEO_ACTIVE_PROMPT_PATCH, 'active video prompt context', filePath);
+  patched = replaceUnique(patched, LEGACY_VIDEO_ACTIVE_PROMPT_ANCHOR, LEGACY_VIDEO_ACTIVE_PROMPT_PATCH, 'legacy active video prompt context', filePath);
   patched = replaceUnique(patched, VIDEO_SCHEMA_ANCHOR, VIDEO_SCHEMA_PATCH, 'video tool schema', filePath);
-  patched = replaceUnique(patched, VIDEO_DESCRIPTION_ANCHOR, VIDEO_DESCRIPTION_PATCH, 'video tool description', filePath);
+  patched = replaceUnique(patched, LEGACY_VIDEO_DESCRIPTION_ANCHOR, LEGACY_VIDEO_DESCRIPTION_PATCH, 'legacy video tool description', filePath);
   patched = replaceUnique(patched, VIDEO_EXECUTE_HEAD_ANCHOR, VIDEO_EXECUTE_HEAD_PATCH, 'video execute head', filePath);
   patched = replaceUnique(patched, VIDEO_BROAD_GUARD_ANCHOR, VIDEO_BROAD_GUARD_PATCH, 'broad video duplicate guard', filePath);
   patched = replaceUnique(patched, VIDEO_REQUEST_KEY_ANCHOR, VIDEO_REQUEST_KEY_PATCH, 'video request key', filePath);

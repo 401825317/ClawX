@@ -209,6 +209,7 @@ export interface ChatState {
   hasMoreHistory: boolean;
   error: string | null;
   runError: string | null;
+  runErrorKind: 'quota' | null;
 
   // Streaming
   sending: boolean;

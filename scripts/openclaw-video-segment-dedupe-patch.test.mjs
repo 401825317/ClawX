@@ -10,6 +10,10 @@ const runtimeFile = readdirSync(distDir).find((name) => name.startsWith('opencla
 assert.ok(runtimeFile, 'OpenClaw tool runtime was not found');
 
 const source = readFileSync(join(distDir, runtimeFile), 'utf8');
+const postinstallSource = readFileSync(join(process.cwd(), 'scripts', 'patch-browser-hint.mjs'), 'utf8');
+const bundleSource = readFileSync(join(process.cwd(), 'scripts', 'bundle-openclaw.mjs'), 'utf8');
+assert.equal(postinstallSource.split('patchInstalledOpenClawVideoSegmentDedupeRuntime();').length - 1, 2);
+assert.equal(bundleSource.split('patchOpenClawVideoSegmentDedupeRuntime(distDir, {').length - 1, 2);
 const first = patchOpenClawVideoSegmentDedupeContent(source, runtimeFile);
 assert.equal(first.matched, true);
 assert.match(first.content, /UCLAW_VIDEO_SEGMENT_DEDUPE_V2/u);

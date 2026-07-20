@@ -12,6 +12,7 @@ import {
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   isClawXOpenAiVideoModelId,
 } from './openclaw-video-relay-constants';
+import { saveGeneratedMediaBuffer } from './generated-media-store';
 
 export interface VideoGenerationInputImageAsset {
   filePath: string;
@@ -65,16 +66,6 @@ type VideoGenerationRuntimeModule = {
   }>;
 };
 
-type MediaStoreModule = {
-  saveMediaBuffer: (
-    buffer: Buffer,
-    mimeType: string,
-    subdir: string,
-    maxBytes: number,
-    originalFilename?: string,
-  ) => Promise<{ path: string; contentType: string; size: number }>;
-};
-
 type DirectOpenAiCompatibleVideoOptions = {
   baseUrl: string;
   apiKey: string;
@@ -97,12 +88,10 @@ type DirectVideoTaskPayload = {
 };
 
 const OPENCLAW_VIDEO_GENERATION_RUNTIME = 'openclaw/plugin-sdk/video-generation-runtime';
-const OPENCLAW_MEDIA_STORE = 'openclaw/plugin-sdk/media-store';
 const OFFICIAL_OPENAI_API_BASE_URL = 'https://api.openai.com/v1';
 const DIRECT_POLL_INTERVAL_MS = JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS;
 
 let videoRuntimeModule: VideoGenerationRuntimeModule | null = null;
-let mediaStoreModule: MediaStoreModule | null = null;
 
 async function importOpenClawSdkModule<T>(specifier: string): Promise<T> {
   const modulePath = resolveOpenClawRuntimeModulePath(specifier);
@@ -121,16 +110,6 @@ async function getVideoGenerationRuntime(): Promise<VideoGenerationRuntimeModule
     };
   }
   return videoRuntimeModule;
-}
-
-async function getMediaStore(): Promise<MediaStoreModule> {
-  if (!mediaStoreModule) {
-    const mod = await importOpenClawSdkModule<{ saveMediaBuffer: MediaStoreModule['saveMediaBuffer'] }>(
-      OPENCLAW_MEDIA_STORE,
-    );
-    mediaStoreModule = { saveMediaBuffer: mod.saveMediaBuffer };
-  }
-  return mediaStoreModule;
 }
 
 function resolvePrimaryRef(videoGenerationModel: unknown): string | undefined {
@@ -657,7 +636,6 @@ export async function generateVideoInProcess(params: {
   }
 
   const { generateVideo } = runtime;
-  const { saveMediaBuffer } = await getMediaStore();
 
   const result = await generateVideo({
     cfg: params.config,
@@ -672,11 +650,9 @@ export async function generateVideoInProcess(params: {
 
   const outputs = await Promise.all(result.videos.map(async (video, index) => {
     if (video.buffer && video.buffer.length > 0) {
-      const saved = await saveMediaBuffer(
+      const saved = await saveGeneratedMediaBuffer(
         video.buffer,
         video.mimeType,
-        'generated',
-        Number.MAX_SAFE_INTEGER,
         video.fileName,
       );
       return {

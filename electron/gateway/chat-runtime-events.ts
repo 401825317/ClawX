@@ -473,6 +473,49 @@ function isNativeTaskRecord(record: Record<string, unknown> | null): record is R
   return hasTaskShape && Boolean(readString(record.id) ?? readString(record.runId) ?? readString(record.run_id));
 }
 
+const NATIVE_ARTIFACT_STATUS_RE = /UCLAW_ARTIFACT_STATUS=(available|missing)(?:;UCLAW_ARTIFACTS=([A-Za-z0-9_-]+))?/u;
+
+function nativeArtifactContractFromRecords(records: Array<Record<string, unknown> | null>): {
+  status?: string;
+  artifacts: unknown[];
+} {
+  const summary = readFirstString(records, ['terminalSummary', 'terminal_summary']);
+  const match = summary?.match(NATIVE_ARTIFACT_STATUS_RE);
+  if (!match) return { artifacts: [] };
+  let payload: { paths?: unknown; attachments?: unknown } = {};
+  if (match[2]) {
+    try {
+      payload = JSON.parse(Buffer.from(match[2], 'base64url').toString('utf8')) as typeof payload;
+    } catch {
+      payload = {};
+    }
+  }
+  const artifacts: unknown[] = [];
+  if (Array.isArray(payload.attachments)) {
+    for (const candidate of payload.attachments) {
+      const attachment = asRecord(candidate);
+      const filePath = readString(attachment?.path);
+      if (!filePath) continue;
+      artifacts.push({
+        filePath,
+        mimeType: readString(attachment?.mimeType),
+        title: readString(attachment?.name),
+      });
+    }
+  }
+  if (Array.isArray(payload.paths)) {
+    for (const filePath of payload.paths) {
+      if (typeof filePath === 'string' && filePath.trim()) artifacts.push({ filePath: filePath.trim() });
+    }
+  }
+  return { status: match[1], artifacts };
+}
+
+function stripNativeArtifactContract(value: string | undefined): string | undefined {
+  const cleaned = value?.replace(NATIVE_ARTIFACT_STATUS_RE, '').replace(/\s{2,}/gu, ' ').trim();
+  return cleaned || undefined;
+}
+
 function resolveNativeTaskRecord(payload: Record<string, unknown>): Record<string, unknown> | null {
   const context = resolveRuntimeTaskContext(payload);
   if (isNativeTaskRecord(context.task)) return context.task;
@@ -510,6 +553,11 @@ function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string,
   );
   const deliveryStatus = normalizeMarker(readFirstString(records, ['deliveryStatus', 'delivery_status']));
   const terminalOutcome = normalizeMarker(readFirstString(records, ['terminalOutcome', 'terminal_outcome']));
+  const executionStatus = normalizeMarker(readFirstString(records, ['executionStatus', 'execution_status']) ?? status);
+  const artifactStatus = normalizeMarker(
+    readFirstString(records, ['artifactStatus', 'artifact_status'])
+      ?? nativeArtifactContractFromRecords(records).status,
+  );
   const approvalStatus = normalizeMarker(
     readFirstString(records, [
       'approvalStatus',
@@ -519,6 +567,12 @@ function nativeTaskLifecycle(task: Record<string, unknown>, data: Record<string,
     ]) ?? readFirstString(records.slice(6), ['status', 'state', 'phase']),
   );
 
+  if (
+    ['succeeded', 'success', 'completed', 'complete', 'done', 'finished'].includes(executionStatus)
+    && ['available', 'ready', 'produced', 'verified'].includes(artifactStatus)
+  ) {
+    return ['pending', 'queued', 'running', 'session_queued'].includes(deliveryStatus) ? 'running' : 'completed';
+  }
   if (['failed', 'failure', 'error', 'aborted', 'cancelled', 'canceled', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
   if (
     ['waiting_approval', 'approval_required', 'requires_approval', 'pending_approval'].includes(status)
@@ -575,9 +629,9 @@ function nativeTaskTitle(task: Record<string, unknown>, data: Record<string, unk
 function nativeTaskDetail(task: Record<string, unknown>, data: Record<string, unknown>): string | undefined {
   const records = nativeTaskStateRecords(task, data);
   const lifecycle = nativeTaskLifecycle(task, data);
-  return readFirstString(records, lifecycle === 'running' || lifecycle === 'pending'
+  return stripNativeArtifactContract(readFirstString(records, lifecycle === 'running' || lifecycle === 'pending'
     ? ['progressSummary', 'progress_summary', 'terminalSummary', 'terminal_summary', 'error', 'message', 'summary']
-    : ['terminalSummary', 'terminal_summary', 'error', 'progressSummary', 'progress_summary', 'message', 'summary']);
+    : ['terminalSummary', 'terminal_summary', 'error', 'progressSummary', 'progress_summary', 'message', 'summary']));
 }
 
 function nativeTaskProjection(
@@ -607,6 +661,9 @@ function nativeTaskProjection(
     childSessionKey: readFirstString(records, ['childSessionKey', 'child_session_key']),
     status: lifecycle,
     sourceStatus: readFirstString(records, ['status', 'state', 'phase']),
+    executionStatus: readFirstString(records, ['executionStatus', 'execution_status', 'status', 'state', 'phase']),
+    artifactStatus: readFirstString(records, ['artifactStatus', 'artifact_status'])
+      ?? nativeArtifactContractFromRecords(records).status,
     deliveryStatus: readFirstString(records, ['deliveryStatus', 'delivery_status']),
     terminalOutcome: readFirstString(records, ['terminalOutcome', 'terminal_outcome']),
     createdAt: readTimestamp(task.createdAt) ?? readTimestamp(data.createdAt),
@@ -641,6 +698,7 @@ function collectNativeTaskArtifactEntries(task: Record<string, unknown>, data: R
       entries.push(...nativeTaskArtifactEntries(record[key]));
     }
   }
+  entries.push(...nativeArtifactContractFromRecords(nativeTaskStateRecords(task, data)).artifacts);
   return entries;
 }
 

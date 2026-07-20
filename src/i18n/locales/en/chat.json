@@ -110,13 +110,17 @@
         "missingInputOrFailed": "Required input was unavailable or execution failed.",
         "verificationComplete": "Basic verification is complete: local files were checked for content and availability, and media has file or metadata evidence.",
         "historySyncFailed": "The deliverables were generated, but conversation history could not be synchronized. The current results are still usable.",
-        "historySyncFailedDetail": "The deliverables were generated, but conversation history could not be synchronized. Keep the current results and retry synchronization."
+        "historySyncFailedDetail": "The deliverables were generated, but conversation history could not be synchronized. Keep the current results and retry synchronization.",
+        "artifactReadyDeliveryPending": "The artifact was generated successfully, but the automatic conversation reply was not delivered. The result below is still available."
     },
     "runError": {
         "title": "Model call failed",
         "retry": "Retry this run",
         "emptyFinal": "The task ended without a visible result. Please retry this run.",
-        "retryUnavailable": "The original request is unavailable. Please send it again."
+        "retryUnavailable": "The original request is unavailable. Please send it again.",
+        "quotaTitle": "Insufficient balance",
+        "quota": "Your balance is not enough to run this request. Recharge before trying again; UClaw will not retry this chargeable operation automatically.",
+        "recharge": "Go to recharge"
     },
     "artifactPanel": {
         "tabs": {

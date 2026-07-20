@@ -34,6 +34,7 @@ import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
 import { applyPortableEnvironment, isPortableMode } from '../utils/portable-mode';
+import { PortableRuntimeSnapshotService } from '../utils/portable-runtime-state';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
@@ -216,6 +217,12 @@ let hostEventBus!: HostEventBus;
 let hostApiServer: Server | null = null;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+const portableRuntimeSnapshotService = portableModeInfo.portableRuntimeLayout
+  ? new PortableRuntimeSnapshotService(
+      portableModeInfo.portableRuntimeLayout,
+      (message, details) => logger.info(message, details),
+    )
+  : null;
 
 /**
  * Resolve the icons directory path (works in both dev and packaged mode)
@@ -382,6 +389,7 @@ async function initialize(): Promise<void> {
   // Initialize logger first
   logger.init();
   logger.info('=== UClaw Application Starting ===');
+  portableRuntimeSnapshotService?.start();
   logger.debug(
     `Runtime: platform=${process.platform}/${process.arch}, electron=${process.versions.electron}, node=${process.versions.node}, packaged=${app.isPackaged}, pid=${process.pid}, ppid=${process.ppid}`
   );
@@ -893,6 +901,13 @@ if (gotTheLock) {
       setTimeout(() => resolve('timeout'), 5000);
     });
 
+    const finalizePortableShutdown = async (): Promise<void> => {
+      portableRuntimeSnapshotService?.stop();
+      await portableRuntimeSnapshotService?.sync('shutdown');
+      markQuitCleanupCompleted(quitLifecycleState);
+      app.quit();
+    };
+
     void Promise.race([stopPromise.then(() => 'stopped' as const), timeoutPromise]).then((result) => {
       if (result === 'timeout') {
         logger.warn('Gateway shutdown timed out during app quit; proceeding with forced quit');
@@ -902,10 +917,12 @@ if (gotTheLock) {
           }
         }).catch((err) => {
           logger.warn('Forced gateway termination failed after quit timeout:', err);
+        }).finally(() => {
+          void finalizePortableShutdown();
         });
+        return;
       }
-      markQuitCleanupCompleted(quitLifecycleState);
-      app.quit();
+      void finalizePortableShutdown();
     });
   });
 

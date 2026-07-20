@@ -457,3 +457,46 @@ test('same-session native media tasks never become parents of unrelated work', a
   assert.equal(independent?.parentTaskId, undefined);
   assert.equal(independent?.runId, 'run-independent');
 });
+
+test('native media artifact remains completed and is emitted when reply delivery fails', async () => {
+  const artifactPath = 'C:\\UClawData\\clawx\\generated-media\\result.png';
+  const events: ChatRuntimeEvent[] = [];
+  const task = {
+    id: 'native-media-delivery-failed',
+    runtime: 'cli',
+    kind: 'image_generation',
+    sessionKey: 'agent:main:session-1',
+    runId: 'run-native-media',
+    status: 'completed',
+    executionStatus: 'completed',
+    artifactStatus: 'available',
+    artifacts: [
+      { path: artifactPath, mimeType: 'image/png', name: 'result.png' },
+      { path: 'https://example.invalid/signed.png?token=secret', mimeType: 'image/png', name: 'remote.png' },
+    ],
+    deliveryStatus: 'failed',
+    terminalSummary: 'Generated media artifact. UCLAW_ARTIFACT_STATUS=available;UCLAW_ARTIFACTS=truncated',
+    updatedAt: 19_500,
+    endedAt: 19_500,
+  };
+  const monitor = new GatewayTaskLedgerMonitor({
+    listTasks: async (params) => params.status[0] === 'completed' ? { tasks: [task] } : { tasks: [] },
+    getTask: async () => ({ task }),
+    emit: (event) => events.push(event),
+    now: () => 20_000,
+  });
+
+  await monitor.pollOnce();
+  const taskEvent = events.find((event) => event.type === 'task.updated');
+  const artifactEvents = events.filter((event) => event.type === 'artifact.produced');
+  const artifactEvent = artifactEvents[0];
+  assert.equal(artifactEvents.length, 1);
+  assert.equal(taskEvent?.taskStatus, 'completed');
+  if (taskEvent?.type !== 'task.updated') throw new Error('Expected task.updated');
+  assert.equal(taskEvent.task.executionStatus, 'completed');
+  assert.equal(taskEvent.task.artifactStatus, 'available');
+  assert.equal(taskEvent.task.deliveryStatus, 'failed');
+  if (artifactEvent?.type !== 'artifact.produced') throw new Error('Expected artifact.produced');
+  assert.equal(artifactEvent.artifact.filePath, artifactPath);
+  assert.equal(artifactEvent.artifact.mimeType, 'image/png');
+});

@@ -480,6 +480,10 @@ export function deriveRuntimeTaskSteps(runState: ChatRuntimeRunState | null | un
         const startedAt = toolStartedAt.get(event.toolCallId);
         const completedAt = typeof event.ts === 'number' ? event.ts : Date.now();
         const inferredDurationMs = startedAt != null && completedAt >= startedAt ? completedAt - startedAt : undefined;
+        const existingIndex = stepIndexById.get(event.toolCallId);
+        if (event.isError && existingIndex != null) {
+          steps[existingIndex] = { ...steps[existingIndex], detail: undefined };
+        }
         upsertStep({
           id: event.toolCallId,
           label: event.name,

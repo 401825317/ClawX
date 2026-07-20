@@ -3,6 +3,8 @@ import { constants as fsConstants, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EdgeTTS } from 'node-edge-tts';
+import { getGeneratedMediaRootDir } from '../../utils/generated-media-store';
+import { getOpenClawConfigDir, resolveOpenClawHomeDir } from '../../utils/paths';
 
 export const DEFAULT_NARRATION_VOICE = 'zh-CN-XiaoxiaoNeural';
 
@@ -31,6 +33,31 @@ export type ProcessRunner = (
   args: string[],
   stdin?: string,
 ) => Promise<{ stdout: string; stderr: string }>;
+
+export async function resolveManagedLocalMediaFile(filePath: string, label: string): Promise<string> {
+  const actual = await fs.realpath(filePath);
+  const candidateRoots = [...new Set([
+    getOpenClawConfigDir(),
+    getGeneratedMediaRootDir(),
+    path.join(resolveOpenClawHomeDir(), '.openclaw'),
+  ])];
+  const managedRoots = (await Promise.all(candidateRoots.map(async (root) => {
+    try {
+      return await fs.realpath(root);
+    } catch {
+      return undefined;
+    }
+  }))).filter((root): root is string => Boolean(root));
+  const isManaged = managedRoots.some((root) => {
+    const relative = path.relative(root, actual);
+    return relative === ''
+      || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  });
+  if (!isManaged) throw new Error(`${label} is outside the managed UClaw media directories: ${filePath}`);
+  const fileStat = await fs.stat(actual);
+  if (!fileStat.isFile() || fileStat.size <= 0) throw new Error(`${label} is not a readable file: ${filePath}`);
+  return actual;
+}
 
 function executableName(name: 'ffmpeg' | 'ffprobe'): string {
   return process.platform === 'win32' ? `${name}.exe` : name;

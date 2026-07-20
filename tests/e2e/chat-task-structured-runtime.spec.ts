@@ -1,4 +1,7 @@
 import type { ElectronApplication } from '@playwright/test';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { normalizeGatewayChatRuntimeEvents } from '../../electron/gateway/chat-runtime-events';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
 import { deriveRuntimeTaskSteps } from '../../src/pages/Chat/runtime-task-visualization';
@@ -1068,6 +1071,74 @@ test.describe('structured OpenClaw task projection', () => {
       await expect(taskRow.locator('[data-status-icon="aborted"]')).toBeVisible();
     } finally {
       await closeElectronApp(app);
+    }
+  });
+
+  test('keeps a native media artifact visible when automatic reply delivery fails', async ({ launchElectronApp }) => {
+    const artifactDir = await mkdtemp(path.join(tmpdir(), 'uclaw-media-delivery-'));
+    const artifactPath = path.join(artifactDir, 'generated-result.png');
+    await writeFile(artifactPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z3i8AAAAASUVORK5CYII=', 'base64'));
+    const app = await launchElectronApp({ skipSetup: true });
+    try {
+      await installChatMocks(app);
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByTestId('chat-page')).toBeVisible({ timeout: 30_000 });
+      const now = Date.now();
+      const taskId = 'native-media-delivery-failed';
+      await emitRuntimeEvents(app, [{
+        type: 'run.started',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        startedAt: now,
+        ts: now,
+      }, {
+        type: 'task.updated',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        taskId,
+        taskStatus: 'completed',
+        task: {
+          taskId,
+          runtime: 'cli',
+          kind: 'image_generation',
+          title: 'Generated media',
+          status: 'completed',
+          sourceStatus: 'completed',
+          executionStatus: 'completed',
+          artifactStatus: 'available',
+          deliveryStatus: 'failed',
+          endedAt: now + 10,
+        },
+        ts: now + 10,
+      }, {
+        type: 'artifact.produced',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        taskId,
+        artifact: {
+          id: 'native-media-artifact',
+          kind: 'image',
+          title: 'generated-result.png',
+          filePath: artifactPath,
+          mimeType: 'image/png',
+          taskId,
+          source: 'openclaw-native-media',
+        },
+        ts: now + 20,
+      }]);
+
+      await expect(page.getByText(/generated successfully|生成成功|生成には成功|успешно создан/u)).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('chat-image-preview-card')).toBeVisible();
+      await expect(page.getByRole('img', { name: 'generated-result.png' })).toBeVisible();
+      await expect(page.getByTestId('chat-run-error')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+      await rm(artifactDir, { recursive: true, force: true });
     }
   });
 });

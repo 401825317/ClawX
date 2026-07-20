@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
 import { createReadStream, existsSync } from 'node:fs';
 import {
   cp,
@@ -14,6 +14,7 @@ import {
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { generateRegressionReport } from './generate-regression-report.mjs';
 
@@ -32,6 +33,7 @@ function parseArgs(argv) {
     latest: false,
     liveProfile: '',
     liveLoginStdin: false,
+    liveRegisterAdminStdin: false,
     allowDesktopCapture: false,
     allowExternalDelivery: false,
   };
@@ -51,6 +53,9 @@ function parseArgs(argv) {
         break;
       case '--live-login-stdin':
         options.liveLoginStdin = true;
+        break;
+      case '--live-register-admin-stdin':
+        options.liveRegisterAdminStdin = true;
         break;
       case '--latest':
         options.latest = true;
@@ -76,14 +81,17 @@ function parseArgs(argv) {
   if (!PROFILE_NAMES.has(options.profile)) {
     throw new Error(`Unsupported profile "${options.profile}". Use core, full, or live.`);
   }
-  if (options.profile === 'live' && !options.liveProfile && !options.liveLoginStdin) {
-    throw new Error('The live profile requires --live-profile <isolated UClawData directory> or --live-login-stdin.');
+  if (options.profile === 'live' && !options.liveProfile && !options.liveLoginStdin && !options.liveRegisterAdminStdin) {
+    throw new Error('The live profile requires --live-profile, --live-login-stdin, or --live-register-admin-stdin.');
   }
   if (options.liveLoginStdin && options.profile !== 'live') {
     throw new Error('--live-login-stdin is only valid with --profile live.');
   }
-  if (options.liveLoginStdin && options.liveProfile) {
-    throw new Error('Use either --live-profile or --live-login-stdin, not both.');
+  if (options.liveRegisterAdminStdin && options.profile !== 'live') {
+    throw new Error('--live-register-admin-stdin is only valid with --profile live.');
+  }
+  if ([options.liveProfile, options.liveLoginStdin, options.liveRegisterAdminStdin].filter(Boolean).length > 1) {
+    throw new Error('Use exactly one live profile, existing-account login, or fresh-account registration input mode.');
   }
   if (options.allowExternalDelivery) {
     if (options.profile !== 'live') {
@@ -119,6 +127,9 @@ Options:
   --live-profile <dir>         Prepared test-only UClawData directory. Never read implicitly.
   --live-login-stdin           Read one {"username","password"} JSON line without echo and
                                authenticate only inside the isolated package sandbox.
+  --live-register-admin-stdin  Read one root/admin {"username","password"} JSON line without
+                               echo, create a one-time activation code, register a fresh
+                               generated account through the packaged UI, relogin, then clean up.
   --allow-desktop-capture      Allow the desktop.observe scenario.
   --allow-external-delivery    Send to the dedicated live destination supplied through
                                UCLAW_REGRESSION_DELIVERY_CHANNEL,
@@ -198,6 +209,92 @@ function runCommand(command, args, options = {}) {
   });
   if (result.error) throw result.error;
   return result;
+}
+
+async function runInheritedCommand(command, args, options = {}) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? ROOT,
+      env: options.env ?? process.env,
+      stdio: 'inherit',
+      windowsHide: true,
+    });
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolve({ status: status ?? 1, signal }));
+  });
+}
+
+async function readSensitiveStdinLine() {
+  const stdin = process.stdin;
+  const previousRawMode = stdin.isTTY ? stdin.isRaw : false;
+  return await new Promise((resolve, reject) => {
+    let buffer = '';
+    const cleanup = () => {
+      stdin.off('data', onData);
+      stdin.off('error', onError);
+      if (stdin.isTTY && typeof stdin.setRawMode === 'function') stdin.setRawMode(previousRawMode);
+      stdin.pause();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk) => {
+      buffer += String(chunk);
+      const lineEnd = buffer.search(/[\r\n]/u);
+      if (lineEnd < 0) return;
+      const line = buffer.slice(0, lineEnd);
+      buffer = '';
+      cleanup();
+      resolve(line);
+    };
+    if (stdin.isTTY && typeof stdin.setRawMode === 'function') stdin.setRawMode(true);
+    stdin.setEncoding('utf8');
+    stdin.on('data', onData);
+    stdin.once('error', onError);
+    stdin.resume();
+  });
+}
+
+async function createSensitiveInputBroker(line) {
+  const endpoint = process.platform === 'win32'
+    ? `\\\\.\\pipe\\uclaw-regression-${process.pid}-${randomUUID()}`
+    : path.join(os.tmpdir(), `uclaw-regression-${process.pid}-${randomUUID()}.sock`);
+  const payload = Buffer.from(`${line}\n`, 'utf8');
+  let consumed = false;
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    if (consumed) {
+      socket.destroy();
+      return;
+    }
+    consumed = true;
+    socket.end(payload, () => {
+      payload.fill(0);
+      server.close();
+    });
+  });
+  await new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once('error', onError);
+    server.listen(endpoint, () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+  return {
+    endpoint,
+    async close() {
+      payload.fill(0);
+      for (const socket of sockets) socket.destroy();
+      if (server.listening) {
+        await new Promise((resolve) => server.close(() => resolve()));
+      }
+      if (process.platform !== 'win32') await rm(endpoint, { force: true }).catch(() => undefined);
+    },
+  };
 }
 
 async function extractZip(zipPath, destination) {
@@ -288,10 +385,14 @@ async function walkDiagnosticFiles(rootDir, output, depth = 0) {
   }
 }
 
-async function collectSanitizedDiagnostics(appRoot, sandboxRoot, reportDir) {
+async function collectSanitizedDiagnostics(appRoot, sandboxRoot, runtimeRoot, reportDir) {
   const files = [];
   for (const rootDir of [
+    path.join(runtimeRoot, 'logs'),
+    path.join(runtimeRoot, 'profiles'),
     path.join(sandboxRoot, 'os-home', 'AppData', 'Local', 'UClawRuntime', 'logs'),
+    path.join(sandboxRoot, 'os-home', 'AppData', 'Local', 'UClawRuntime', 'profiles'),
+    path.join(sandboxRoot, 'live-os-home', 'AppData', 'Local', 'UClawRuntime', 'profiles'),
     path.join(appRoot, 'UClawData', 'clawx', 'logs'),
     path.join(appRoot, 'UClawData', 'openclaw-home', '.openclaw', 'logs'),
   ]) {
@@ -325,15 +426,23 @@ async function main() {
   const artifacts = await resolveArtifacts(options);
   const runId = `${String(artifacts.metadata.version || 'unknown').replace(/[^A-Za-z0-9._-]+/gu, '_')}-${new Date().toISOString().replace(/[:.]/gu, '')}`;
   const sandboxRoot = assertSafeTempChild(path.join(os.tmpdir(), `UClaw Packaged Regression ${runId}`));
+  const runtimeRoot = assertSafeTempChild(path.join(
+    os.tmpdir(),
+    'ucr',
+    createHash('sha256').update(runId).digest('hex').slice(0, 12),
+  ));
   const appRoot = path.join(sandboxRoot, 'app');
   const reportDir = path.join(RELEASE_DIR, 'regression', runId);
   await mkdir(reportDir, { recursive: true });
   await rm(sandboxRoot, { recursive: true, force: true });
+  await rm(runtimeRoot, { recursive: true, force: true });
   await mkdir(appRoot, { recursive: true });
+  await mkdir(runtimeRoot, { recursive: true });
 
   let playwrightExitCode = null;
   let staticSummary = null;
   let failure = null;
+  let sensitiveInputBroker = null;
   try {
     console.log(`[packaged-regression] ZIP: ${artifacts.zipPath}`);
     console.log(`[packaged-regression] Profile: ${options.profile}`);
@@ -348,7 +457,12 @@ async function main() {
     if (!existsSync(playwrightCli)) {
       throw new Error('Playwright is not installed. Run pnpm install first.');
     }
-    const testResult = runCommand(process.execPath, [
+    if (options.liveLoginStdin || options.liveRegisterAdminStdin) {
+      const sensitiveLine = await readSensitiveStdinLine();
+      sensitiveInputBroker = await createSensitiveInputBroker(sensitiveLine);
+    }
+
+    const testResult = await runInheritedCommand(process.execPath, [
       playwrightCli,
       'test',
       '--config',
@@ -360,12 +474,15 @@ async function main() {
         ...process.env,
         UCLAW_PACKAGED_ROOT: appRoot,
         UCLAW_REGRESSION_SANDBOX: sandboxRoot,
+        UCLAW_REGRESSION_RUNTIME_ROOT: runtimeRoot,
         UCLAW_REGRESSION_REPORT_DIR: reportDir,
         UCLAW_REGRESSION_PROFILE: options.profile,
         UCLAW_REGRESSION_RUN_ID: runId,
         UCLAW_REGRESSION_ALLOW_DESKTOP_CAPTURE: options.allowDesktopCapture ? '1' : '0',
         UCLAW_REGRESSION_ALLOW_EXTERNAL_DELIVERY: options.allowExternalDelivery ? '1' : '0',
         UCLAW_REGRESSION_LIVE_LOGIN_STDIN: options.liveLoginStdin ? '1' : '0',
+        UCLAW_REGRESSION_LIVE_REGISTER_ADMIN_STDIN: options.liveRegisterAdminStdin ? '1' : '0',
+        ...(sensitiveInputBroker ? { UCLAW_REGRESSION_SENSITIVE_PIPE: sensitiveInputBroker.endpoint } : {}),
       },
     });
     playwrightExitCode = testResult.status ?? 1;
@@ -375,9 +492,10 @@ async function main() {
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
+    await sensitiveInputBroker?.close().catch(() => undefined);
     let diagnosticFiles = 0;
     try {
-      diagnosticFiles = await collectSanitizedDiagnostics(appRoot, sandboxRoot, reportDir);
+      diagnosticFiles = await collectSanitizedDiagnostics(appRoot, sandboxRoot, runtimeRoot, reportDir);
     } catch (error) {
       await writeFile(path.join(reportDir, 'diagnostic-collection-error.txt'), redact(error), 'utf8');
     }
@@ -407,6 +525,7 @@ async function main() {
       diagnosticFiles,
       liveProfileSupplied: Boolean(options.liveProfile),
       liveLoginViaStdin: options.liveLoginStdin,
+      liveRegistrationViaAdminStdin: options.liveRegisterAdminStdin,
       failure: failure ? redact(failure.stack || failure.message) : null,
       sandboxKept: Boolean(options.keep || failure),
     };
@@ -428,8 +547,13 @@ async function main() {
       summary.failure = redact(reportFailure.stack || reportFailure.message);
       await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
     }
-    if (!options.keep && !failure) await rm(sandboxRoot, { recursive: true, force: true });
-    else console.log(`[packaged-regression] Sandbox kept: ${sandboxRoot}`);
+    if (!options.keep && !failure) {
+      await rm(sandboxRoot, { recursive: true, force: true });
+      await rm(runtimeRoot, { recursive: true, force: true });
+    } else {
+      console.log(`[packaged-regression] Sandbox kept: ${sandboxRoot}`);
+      console.log(`[packaged-regression] Runtime sandbox kept: ${runtimeRoot}`);
+    }
   }
 
   if (failure) throw failure;

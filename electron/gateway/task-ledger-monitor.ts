@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import type {
   ChatRuntimeEvent,
   ChatRuntimeTaskProjection,
@@ -46,6 +47,11 @@ const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled', 'tim
 const DELIVERY_PENDING = new Set(['pending', 'queued', 'running', 'session_queued']);
 const DELIVERY_FAILED = new Set(['failed', 'partial', 'blocked', 'parent_missing']);
 const DELIVERY_COMPLETED = new Set(['delivered', 'not_applicable']);
+const ARTIFACT_STATUS_RE = /UCLAW_ARTIFACT_STATUS=(available|missing)(?:;UCLAW_ARTIFACTS=([A-Za-z0-9_-]+))?/u;
+
+function localArtifactPath(value: unknown): value is string {
+  return typeof value === 'string' && isAbsolute(value.trim());
+}
 
 function record(value: unknown): TaskLedgerRecord | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -68,6 +74,73 @@ function timestamp(value: unknown): number | undefined {
 
 function marker(value: unknown): string {
   return text(value, 120)?.toLowerCase().replace(/[\s-]+/gu, '_') ?? '';
+}
+
+type NativeArtifactContract = {
+  status: 'available' | 'missing';
+  paths: string[];
+  attachments: Array<{ path: string; mimeType?: string; name?: string }>;
+};
+
+function nativeArtifactContract(task: TaskLedgerRecord): NativeArtifactContract | undefined {
+  const structuredStatus = marker(task.artifactStatus ?? task.artifact_status);
+  if (structuredStatus === 'available' || structuredStatus === 'missing') {
+    const byPath = new Map<string, { path: string; mimeType?: string; name?: string }>();
+    const structuredArtifacts = Array.isArray(task.artifacts) ? task.artifacts : [];
+    for (const value of structuredArtifacts) {
+      const artifact = record(value);
+      if (!artifact || !localArtifactPath(artifact.path)) continue;
+      const artifactPath = artifact.path.trim();
+      byPath.set(artifactPath, {
+        path: artifactPath,
+        ...(typeof artifact.mimeType === 'string' && artifact.mimeType.trim()
+          ? { mimeType: artifact.mimeType.trim() }
+          : {}),
+        ...(typeof artifact.name === 'string' && artifact.name.trim()
+          ? { name: artifact.name.trim() }
+          : {}),
+      });
+    }
+    return {
+      status: structuredStatus,
+      paths: [...byPath.keys()],
+      attachments: [...byPath.values()],
+    };
+  }
+  const summary = text(task.terminalSummary ?? task.terminal_summary, 50_000);
+  const match = summary?.match(ARTIFACT_STATUS_RE);
+  if (!match) return undefined;
+  let payload: { paths?: unknown; attachments?: unknown } = {};
+  if (match[2]) {
+    try {
+      payload = JSON.parse(Buffer.from(match[2], 'base64url').toString('utf8')) as typeof payload;
+    } catch {
+      payload = {};
+    }
+  }
+  const paths = Array.isArray(payload.paths)
+    ? [...new Set(payload.paths.filter(localArtifactPath).map((value) => value.trim()))]
+    : [];
+  const attachments = Array.isArray(payload.attachments)
+    ? payload.attachments
+      .filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value)))
+      .map((value) => ({
+        path: localArtifactPath(value.path) ? value.path.trim() : '',
+        ...(typeof value.mimeType === 'string' && value.mimeType.trim() ? { mimeType: value.mimeType.trim() } : {}),
+        ...(typeof value.name === 'string' && value.name.trim() ? { name: value.name.trim() } : {}),
+      }))
+      .filter((value): value is { path: string; mimeType?: string; name?: string } => Boolean(value.path))
+    : [];
+  return { status: match[1] === 'available' ? 'available' : 'missing', paths, attachments };
+}
+
+function cleanNativeArtifactContractText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const cleaned = value
+    .replace(/UCLAW_ARTIFACT_STATUS=(?:available|missing)(?:;UCLAW_ARTIFACTS=[A-Za-z0-9_-]+)?/u, '')
+    .replace(/\s{2,}/gu, ' ')
+    .trim();
+  return cleaned || undefined;
 }
 
 function pageRecords(payload: unknown): { tasks: TaskLedgerRecord[]; nextCursor?: string } {
@@ -118,6 +191,13 @@ function taskStatus(task: TaskLedgerRecord): ChatRuntimeTaskStatus {
   const status = marker(task.status ?? task.state);
   const deliveryStatus = marker(task.deliveryStatus ?? task.delivery_status);
   const terminalOutcome = marker(task.terminalOutcome ?? task.terminal_outcome);
+  const executionStatus = marker(task.executionStatus ?? task.execution_status) || status;
+  const artifactStatus = marker(task.artifactStatus ?? task.artifact_status) || nativeArtifactContract(task)?.status;
+  const executionSucceeded = ['succeeded', 'success', 'completed', 'complete', 'done', 'finished'].includes(executionStatus);
+  const artifactReady = ['available', 'ready', 'produced', 'verified'].includes(artifactStatus ?? '');
+  if (executionSucceeded && artifactReady) {
+    return DELIVERY_PENDING.has(deliveryStatus) ? 'running' : 'completed';
+  }
   if (['failed', 'error', 'cancelled', 'canceled', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
   if (['waiting_approval', 'approval_required', 'pending_approval'].includes(status)) return 'waiting_approval';
   if (
@@ -145,6 +225,8 @@ function taskFingerprint(task: TaskLedgerRecord, context: TaskProjectionContext)
     task.progressSummary ?? task.progress_summary,
     task.terminalSummary ?? task.terminal_summary,
     task.error,
+    task.executionStatus ?? task.execution_status,
+    task.artifactStatus ?? task.artifact_status,
     task.updatedAt ?? task.updated_at ?? task.lastEventAt ?? task.last_event_at,
     task.startedAt ?? task.started_at,
     task.endedAt ?? task.ended_at,
@@ -172,6 +254,54 @@ function taskTerminalActivityAt(task: TaskLedgerRecord): number | undefined {
 function taskTitle(task: TaskLedgerRecord): string {
   return text(task.title ?? task.label, 240)
     ?? (marker(task.runtime) === 'subagent' ? 'Subagent task' : 'Background task');
+}
+
+function taskArtifacts(task: TaskLedgerRecord): Array<{ path: string; mimeType?: string; name?: string }> {
+  const contract = nativeArtifactContract(task);
+  if (!contract || contract.status !== 'available') return [];
+  const byPath = new Map<string, { path: string; mimeType?: string; name?: string }>();
+  for (const entry of contract.attachments) byPath.set(entry.path, entry);
+  for (const filePath of contract.paths) {
+    if (!byPath.has(filePath)) byPath.set(filePath, { path: filePath });
+  }
+  return [...byPath.values()];
+}
+
+function artifactId(taskIdValue: string, filePath: string, index: number): string {
+  const encoded = Buffer.from(filePath, 'utf8').toString('base64url').slice(0, 48);
+  return `native-media:${taskIdValue}:${index}:${encoded}`;
+}
+
+function emitNativeTaskArtifacts(
+  task: TaskLedgerRecord,
+  runId: string,
+  sessionKey: string,
+  emit: (event: ChatRuntimeEvent) => void,
+): void {
+  const id = taskId(task);
+  if (!id || !sessionKey) return;
+  for (const [index, entry] of taskArtifacts(task).entries()) {
+    const mimeType = entry.mimeType;
+    emit({
+      contractVersion: 1,
+      producer: 'openclaw-task-ledger',
+      type: 'artifact.produced',
+      runId,
+      sessionKey,
+      taskId: id,
+      ts: timestamp(task.updatedAt ?? task.updated_at ?? task.lastEventAt ?? task.last_event_at) ?? Date.now(),
+      artifact: {
+        id: artifactId(id, entry.path, index),
+        kind: mimeType?.startsWith('image/') ? 'image' : mimeType?.startsWith('video/') ? 'video' : 'file',
+        title: entry.name ?? entry.path.split(/[\\/]/u).pop() ?? 'Generated artifact',
+        filePath: entry.path,
+        ...(mimeType ? { mimeType } : {}),
+        taskId: id,
+        source: 'openclaw-native-media',
+      },
+      itemId: id,
+    });
+  }
 }
 
 function buildProjectionContexts(tasks: TaskLedgerRecord[]): Map<string, TaskProjectionContext> {
@@ -248,15 +378,17 @@ export function projectTaskLedgerRecord(
     kind: text(task.kind ?? task.taskKind ?? task.task_kind, 160),
     runtime: text(task.runtime, 120),
     title: taskTitle(task),
-    detail: text(status === 'partial' || status === 'error' || status === 'completed'
+    detail: cleanNativeArtifactContractText(text(status === 'partial' || status === 'error' || status === 'completed'
       ? task.terminalSummary ?? task.terminal_summary ?? task.error ?? task.progressSummary ?? task.progress_summary
-      : task.progressSummary ?? task.progress_summary ?? task.terminalSummary ?? task.terminal_summary ?? task.error),
+      : task.progressSummary ?? task.progress_summary ?? task.terminalSummary ?? task.terminal_summary ?? task.error)),
     agentId: text(task.agentId ?? task.agent_id, 160),
     sessionKey,
     childSessionKey: taskChildSessionKey(task),
     status,
     sourceStatus: text(task.status ?? task.state, 120),
     deliveryStatus: text(task.deliveryStatus ?? task.delivery_status, 120),
+    executionStatus: text(task.executionStatus ?? task.execution_status ?? task.status ?? task.state, 120),
+    artifactStatus: text(task.artifactStatus ?? task.artifact_status ?? nativeArtifactContract(task)?.status, 120),
     terminalOutcome: text(task.terminalOutcome ?? task.terminal_outcome, 120),
     createdAt: timestamp(task.createdAt ?? task.created_at),
     startedAt: timestamp(task.startedAt ?? task.started_at),
@@ -485,7 +617,10 @@ export class GatewayTaskLedgerMonitor {
         if (previous === fingerprint) continue;
 
         const event = projectTaskLedgerRecord(task, context);
-        if (event) this.options.emit(event);
+        if (event) {
+          this.options.emit(event);
+          emitNativeTaskArtifacts(task, event.runId, event.sessionKey ?? taskSessionKey(task) ?? '', this.options.emit);
+        }
       }
       this.activeTaskIds.clear();
       currentActiveIds.forEach((id) => this.activeTaskIds.add(id));

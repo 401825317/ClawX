@@ -110,13 +110,17 @@
         "missingInputOrFailed": "缺少可用输入或执行失败。",
         "verificationComplete": "基础验证已完成：本地文件已检查内容和可用性，媒体产物已检查文件或元数据证据。",
         "historySyncFailed": "产物已生成，但会话历史同步失败；当前结果仍可使用。",
-        "historySyncFailedDetail": "产物已生成，但会话历史同步失败。请先保留当前结果，再重试同步。"
+        "historySyncFailedDetail": "产物已生成，但会话历史同步失败。请先保留当前结果，再重试同步。",
+        "artifactReadyDeliveryPending": "产物已经生成成功，但自动会话回复没有送达。下面的结果仍然可以直接使用。"
     },
     "runError": {
         "title": "模型调用失败",
         "retry": "重试本轮",
         "emptyFinal": "任务已经结束，但模型没有交付可见结果。请重试本轮。",
-        "retryUnavailable": "找不到可重试的原始指令，请重新发送。"
+        "retryUnavailable": "找不到可重试的原始指令，请重新发送。",
+        "quotaTitle": "余额不足",
+        "quota": "当前余额不足，无法执行这次请求。请先充值再手动重试，UClaw 不会自动重试这类计费操作。",
+        "recharge": "去充值"
     },
     "artifactPanel": {
         "tabs": {

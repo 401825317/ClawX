@@ -1,12 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { getOpenClawConfigDir } from '../../utils/paths';
+import { getGeneratedMediaOutputDir } from '../../utils/generated-media-store';
 import type { HostCapabilityTaskContext } from './host-capability-registry';
 import {
   assessLocalMediaRuntime,
   DEFAULT_NARRATION_VOICE,
   probeMediaFile,
+  resolveManagedLocalMediaFile,
   resolveLocalMediaTools,
   synthesizeNarration,
   type ProbedMediaMetadata,
@@ -165,23 +166,13 @@ export function normalizeLocalVideoTimelineInput(value: unknown): LocalVideoTime
   };
 }
 
-async function managedFilePath(filePath: string, label: string): Promise<string> {
-  const managedRoot = await fs.realpath(getOpenClawConfigDir());
-  const actual = await fs.realpath(filePath);
-  const relative = path.relative(managedRoot, actual);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`${label} is outside the managed OpenClaw directory: ${filePath}`);
-  const fileStat = await fs.stat(actual);
-  if (!fileStat.isFile() || fileStat.size <= 0) throw new Error(`${label} is not a readable file: ${filePath}`);
-  return actual;
-}
-
 async function managedTimelineInput(input: LocalVideoTimelineInput): Promise<LocalVideoTimelineInput> {
   const scenes = await Promise.all(input.scenes.map(async (scene, index) => ({
     ...scene,
-    sourcePath: await managedFilePath(scene.sourcePath, `Timeline scene ${index + 1}`),
+    sourcePath: await resolveManagedLocalMediaFile(scene.sourcePath, `Timeline scene ${index + 1}`),
   })));
   const backgroundMusicPath = input.backgroundMusicPath
-    ? await managedFilePath(input.backgroundMusicPath, 'Timeline background music')
+    ? await resolveManagedLocalMediaFile(input.backgroundMusicPath, 'Timeline background music')
     : undefined;
   return { ...input, scenes, backgroundMusicPath };
 }
@@ -430,7 +421,7 @@ export async function runLocalVideoTimelineRender(context: HostCapabilityTaskCon
     return await probeMediaFile(tools.ffprobe, scene.sourcePath);
   }));
   const preserveOriginalAudio = input.keepOriginalAudio && sceneMetadata.some((metadata) => metadata.hasAudio);
-  const outputDir = path.join(getOpenClawConfigDir(), 'media', 'outbound', 'timeline-video', context.task.taskId);
+  const outputDir = getGeneratedMediaOutputDir(path.join('timeline-video', context.task.taskId));
   await fs.mkdir(outputDir, { recursive: true, mode: 0o700 });
   const finalPath = path.join(outputDir, input.filename);
   const temporaryPath = path.join(outputDir, `.${input.filename}.${process.pid}.tmp.mp4`);

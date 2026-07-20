@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const PATCH_MARKER = 'UCLAW_VIDEO_ACTUAL_SPEC_V1';
+const MEDIA_COMPLETION_CONTRACT_MARKER = 'UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2';
 
 const EXECUTE_ANCHOR = 'async function executeVideoGenerationJob(params) {';
 const SAVE_ANCHOR = `\tconst mediaMaxBytes = resolveGeneratedMediaMaxBytes(params.effectiveCfg, "video");
@@ -275,7 +276,9 @@ export function patchOpenClawVideoActualSpecContent(content, options) {
   patched = replaceExactlyOnce(patched, SPECIFICATION_ANCHOR, SPECIFICATION_PATCH, 'specification');
   patched = replaceExactlyOnce(patched, LINES_ANCHOR, LINES_PATCH, 'result lines');
   patched = replaceExactlyOnce(patched, DETAILS_ANCHOR, DETAILS_PATCH, 'details');
-  patched = replaceExactlyOnce(patched, ASYNC_TERMINAL_ANCHOR, ASYNC_TERMINAL_PATCH, 'async terminal summary');
+  if (!patched.includes(MEDIA_COMPLETION_CONTRACT_MARKER)) {
+    patched = replaceExactlyOnce(patched, ASYNC_TERMINAL_ANCHOR, ASYNC_TERMINAL_PATCH, 'async terminal summary');
+  }
   patched = replaceExactlyOnce(patched, SYNC_TERMINAL_ANCHOR, SYNC_TERMINAL_PATCH, 'sync terminal summary');
   return { content: patched, changed: true, matched: true };
 }

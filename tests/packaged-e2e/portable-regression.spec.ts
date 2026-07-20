@@ -1,10 +1,14 @@
 import { expect, test, type Page } from '@playwright/test';
 import { spawn } from 'node:child_process';
-import { createServer, type Server } from 'node:net';
+import { randomBytes } from 'node:crypto';
+import { createConnection, createServer, type Server } from 'node:net';
 import {
   access,
+  cp,
   mkdir,
   readFile,
+  readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -60,6 +64,9 @@ const runId = process.env.UCLAW_REGRESSION_RUN_ID || `manual-${Date.now()}`;
 const allowDesktopCapture = process.env.UCLAW_REGRESSION_ALLOW_DESKTOP_CAPTURE === '1';
 const allowExternalDelivery = process.env.UCLAW_REGRESSION_ALLOW_EXTERNAL_DELIVERY === '1';
 const liveLoginStdin = process.env.UCLAW_REGRESSION_LIVE_LOGIN_STDIN === '1';
+const liveRegisterAdminStdin = process.env.UCLAW_REGRESSION_LIVE_REGISTER_ADMIN_STDIN === '1';
+const managedBackendOrigin = process.env.UCLAW_REGRESSION_BACKEND_ORIGIN?.trim()
+  || 'https://zz-cn.lingzhiwuxian.com';
 const externalDelivery = {
   channel: process.env.UCLAW_REGRESSION_DELIVERY_CHANNEL?.trim() || '',
   accountId: process.env.UCLAW_REGRESSION_DELIVERY_ACCOUNT_ID?.trim() || '',
@@ -68,10 +75,23 @@ const externalDelivery = {
 let regressionModelRef = '';
 let regressionAccountId = '';
 let fallbackAccountId = '';
+let portableId = '';
 
 type LiveLoginCredentials = {
   username: string;
   password: string;
+};
+
+type AdminSession = {
+  userId: number;
+  cookie: string;
+};
+
+type FreshManagedAccount = {
+  username: string;
+  password: string;
+  activationCode: string;
+  userId?: number;
 };
 
 function requiredEnv(name: string): string {
@@ -84,6 +104,20 @@ function safeName(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/gu, '_').slice(0, 100);
 }
 
+async function resolvePortableRuntimeStateDir(
+  portableRoot: string,
+  osHome: string,
+  runtimeCacheRoot?: string,
+): Promise<{ portableId: string; stateDir: string }> {
+  const portableId = (await readFile(path.join(portableRoot, 'UClawData', '.uclaw-portable-id'), 'utf8')).trim();
+  if (!/^[A-Za-z0-9_-]{8,128}$/u.test(portableId)) throw new Error('Portable identity is missing or invalid.');
+  const runtimeRoot = runtimeCacheRoot ?? path.join(osHome, 'AppData', 'Local', 'UClawRuntime');
+  return {
+    portableId,
+    stateDir: path.join(runtimeRoot, 'profiles', portableId, 'openclaw-state'),
+  };
+}
+
 function redactedError(error: unknown): string {
   return String(error instanceof Error ? error.stack || error.message : error)
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/gu, 'sk-[REDACTED]')
@@ -92,11 +126,11 @@ function redactedError(error: unknown): string {
     .replace(/([?&#](?:token|signature|sig|key)=)[^&#\s]+/giu, '$1[REDACTED]');
 }
 
-async function readLiveLoginCredentials(): Promise<LiveLoginCredentials> {
-  if (!liveLoginStdin) throw new Error('Live login stdin was not enabled.');
+async function readSensitiveStdinRecord(label: string): Promise<Record<string, unknown>> {
+  const pipeEndpoint = process.env.UCLAW_REGRESSION_SENSITIVE_PIPE?.trim();
   const stdin = process.stdin;
   const previousRawMode = stdin.isTTY ? stdin.isRaw : false;
-  const line = await new Promise<string>((resolve, reject) => {
+  const readFromStdin = async (): Promise<string> => await new Promise<string>((resolve, reject) => {
     let buffer = '';
     const cleanup = (): void => {
       stdin.off('data', onData);
@@ -122,18 +156,62 @@ async function readLiveLoginCredentials(): Promise<LiveLoginCredentials> {
     stdin.once('error', onError);
     stdin.resume();
   });
+  const readFromPipe = async (endpoint: string): Promise<string> => await new Promise<string>((resolve, reject) => {
+    const socket = createConnection(endpoint);
+    let buffer = '';
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(label + ' credential pipe timed out.'));
+    }, 30_000);
+    const finish = (error?: Error, value?: string): void => {
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      socket.destroy();
+      buffer = '';
+      if (error) reject(error);
+      else resolve(value ?? '');
+    };
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      buffer += chunk;
+      if (buffer.length > 64 * 1024) {
+        finish(new Error(label + ' credential pipe exceeded the input limit.'));
+        return;
+      }
+      const lineEnd = buffer.search(/[\r\n]/u);
+      if (lineEnd >= 0) finish(undefined, buffer.slice(0, lineEnd));
+    });
+    socket.once('error', (error) => finish(error));
+    socket.once('end', () => finish(new Error(label + ' credential pipe ended before a JSON line was received.')));
+  });
+  const line = pipeEndpoint ? await readFromPipe(pipeEndpoint) : await readFromStdin();
+  delete process.env.UCLAW_REGRESSION_SENSITIVE_PIPE;
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    throw new Error('Live login stdin must be one JSON line.');
+    throw new Error(label + ' stdin must be one JSON line.');
   }
-  const record = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? parsed as Record<string, unknown>
     : {};
+}
+
+async function readLiveLoginCredentials(): Promise<LiveLoginCredentials> {
+  if (!liveLoginStdin) throw new Error('Live login stdin was not enabled.');
+  const record = await readSensitiveStdinRecord('Live login');
   const username = typeof record.username === 'string' ? record.username.trim() : '';
   const password = typeof record.password === 'string' ? record.password : '';
   if (!username || !password) throw new Error('Live login stdin requires username and password.');
+  return { username, password };
+}
+
+async function readLiveAdminCredentials(): Promise<LiveLoginCredentials> {
+  if (!liveRegisterAdminStdin) throw new Error('Live registration admin stdin was not enabled.');
+  const record = await readSensitiveStdinRecord('Live registration admin');
+  const username = typeof record.username === 'string' ? record.username.trim() : '';
+  const password = typeof record.password === 'string' ? record.password : '';
+  if (!username || !password) throw new Error('Live registration admin stdin requires username and password.');
   return { username, password };
 }
 
@@ -156,6 +234,89 @@ async function loginManagedAccount(hostApiPort: number, credentials: LiveLoginCr
     deviceActivated: payload.deviceActivated === true,
     activationRequired: payload.activationRequired === true,
   };
+}
+
+function plainRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+async function loginRegressionAdmin(credentials: LiveLoginCredentials): Promise<AdminSession> {
+  const response = await fetch(managedBackendOrigin + '/api/user/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(credentials),
+  });
+  const payload = plainRecord(await response.json().catch(() => ({})));
+  const data = plainRecord(payload.data);
+  const userId = typeof data.id === 'number' ? data.id : Number(data.id);
+  const role = typeof data.role === 'number' ? data.role : Number(data.role);
+  const headerWithCookies = response.headers as Headers & { getSetCookie?: () => string[] };
+  const setCookies = headerWithCookies.getSetCookie?.()
+    ?? [response.headers.get('set-cookie')].filter((value): value is string => Boolean(value));
+  const cookie = setCookies.map((value) => value.split(';', 1)[0]).filter(Boolean).join('; ');
+  if (!response.ok || payload.success !== true || !Number.isInteger(userId) || role < 10 || !cookie) {
+    throw new Error('Production admin login failed or did not establish an authorized session.');
+  }
+  return { userId, cookie };
+}
+
+async function adminJson(
+  session: AdminSession,
+  requestPath: string,
+  method = 'GET',
+  body?: unknown,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(managedBackendOrigin + requestPath, {
+    method,
+    headers: {
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      Cookie: session.cookie,
+      'New-Api-User': String(session.userId),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const payload = plainRecord(await response.json().catch(() => ({})));
+  if (!response.ok || payload.success === false) {
+    throw new Error('Production admin request failed for ' + method + ' ' + requestPath + '.');
+  }
+  return payload;
+}
+
+async function createFreshActivationCode(session: AdminSession): Promise<string> {
+  const statusResponse = await fetch(managedBackendOrigin + '/api/status');
+  const statusPayload = plainRecord(await statusResponse.json().catch(() => ({})));
+  const statusData = Object.keys(plainRecord(statusPayload.data)).length > 0
+    ? plainRecord(statusPayload.data)
+    : statusPayload;
+  const quotaPerUnitRaw = statusData.quota_per_unit ?? statusData.quotaPerUnit;
+  const quotaPerUnit = typeof quotaPerUnitRaw === 'number' && Number.isFinite(quotaPerUnitRaw)
+    ? quotaPerUnitRaw
+    : 500_000;
+  const payload = await adminJson(session, '/api/redemption/', 'POST', {
+    name: 'uclaw-live-reg',
+    quota: Math.round(quotaPerUnit * 20),
+    expired_time: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+    count: 1,
+  });
+  const codes = Array.isArray(payload.data)
+    ? payload.data.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+  if (!codes[0]) throw new Error('Production activation-code creation returned no usable code.');
+  return codes[0];
+}
+
+function generateFreshManagedAccount(activationCode: string): FreshManagedAccount {
+  const username = ('uclaw' + Date.now().toString(36) + randomBytes(2).toString('hex'))
+    .toLowerCase()
+    .slice(0, 20);
+  const password = ('Ua!' + randomBytes(12).toString('base64url')).slice(0, 20);
+  return { username, password, activationCode };
+}
+
+async function deleteFreshManagedAccount(session: AdminSession, userId: number): Promise<void> {
+  await adminJson(session, '/api/user/' + encodeURIComponent(String(userId)), 'DELETE');
 }
 
 async function sanitizedControlUiInfo(page: Page): Promise<{
@@ -217,6 +378,26 @@ async function listGatewaySessions(page: Page): Promise<Array<Record<string, unk
   return Array.isArray(payload.result?.sessions) ? payload.result.sessions : [];
 }
 
+async function gatewayRpc<T>(page: Page, method: string, params?: unknown, timeoutMs = 30_000): Promise<T> {
+  const response = await page.evaluate(async (request) => {
+    const electronApi = (window as unknown as {
+      electron: {
+        ipcRenderer: {
+          invoke(channel: string, method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+        };
+      };
+    }).electron;
+    return await electronApi.ipcRenderer.invoke('gateway:rpc', request.method, request.params, request.timeoutMs);
+  }, { method, params, timeoutMs });
+  const record = response && typeof response === 'object' && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : {};
+  if (record.success !== true) {
+    throw new Error(typeof record.error === 'string' ? record.error : `Gateway RPC failed: ${method}`);
+  }
+  return record.result as T;
+}
+
 class ScenarioRunner {
   readonly results: ScenarioResult[] = [];
   private pageProvider: () => Page | null = () => null;
@@ -229,7 +410,7 @@ class ScenarioRunner {
     id: string,
     title: string,
     execute: () => Promise<unknown>,
-    options?: { skip?: string },
+    options?: { skip?: string; sensitive?: boolean },
   ): Promise<void> {
     const startedAtMs = Date.now();
     const startedAt = new Date(startedAtMs).toISOString();
@@ -244,7 +425,7 @@ class ScenarioRunner {
       } catch (error) {
         let screenshot: string | undefined;
         const page = this.pageProvider();
-        if (page && !page.isClosed()) {
+        if (!options?.sensitive && page && !page.isClosed()) {
           screenshot = path.join(reportDir, 'scenario-failures', `${safeName(id)}.png`);
           try {
             await mkdir(path.dirname(screenshot), { recursive: true });
@@ -358,6 +539,73 @@ async function sendChat(page: Page, prompt: string, expectedText: string, timeou
   await expect(expected).toBeVisible({ timeout: Math.max(1, deadline - Date.now()) });
   await expect(sendButton).toHaveAttribute('title', /Send|发送/iu, { timeout: 60_000 });
   return Date.now() - startedAt;
+}
+
+async function waitForGeneratedMedia(
+  page: Page,
+  kind: 'image' | 'video',
+  messageCountBeforeSend: number,
+  timeoutMs: number,
+): Promise<number> {
+  const startedAt = Date.now();
+  const artifact = kind === 'image'
+    ? page.locator('[data-testid="chat-image-preview-card"]:visible').first()
+    : page.locator('video:visible').first();
+  const indicator = page.getByTestId(kind === 'image'
+    ? 'chat-image-generating-indicator'
+    : 'chat-video-generating-indicator');
+  const runError = page.getByTestId('chat-run-error');
+  const transcriptFailure = page.getByText(
+    /Agent failed before reply:|The agent run failed before producing a reply\.?|LLM request failed\.?/iu,
+  ).last();
+  const chatMessages = page.locator('[data-testid^="chat-message-"]');
+  const sendButton = page.getByTestId('chat-composer-send');
+  const executionGraph = page.getByTestId('chat-execution-graph').last();
+  const deadline = startedAt + timeoutMs;
+  let observedBusy = false;
+  while (Date.now() < deadline) {
+    if (await artifact.isVisible().catch(() => false)) return Date.now() - startedAt;
+    if (await runError.isVisible().catch(() => false)) {
+      throw new Error(`${kind} generation failed: ${await runError.innerText()}`);
+    }
+    if (await transcriptFailure.isVisible().catch(() => false)) {
+      throw new Error(`${kind} generation failed: ${await transcriptFailure.innerText()}`);
+    }
+    const indicatorVisible = await indicator.isVisible().catch(() => false);
+    const sendTitle = await sendButton.getAttribute('title') ?? '';
+    const isIdle = /Send|\u53d1\u9001/iu.test(sendTitle);
+    const graphStatus = await executionGraph.getAttribute('data-compact-status').catch(() => null);
+    const executionPending = graphStatus === 'running' || graphStatus === 'blocked';
+    const executionFailed = graphStatus === 'error' || graphStatus === 'aborted';
+    if (!isIdle || indicatorVisible || executionPending) observedBusy = true;
+    if (executionFailed) {
+      await page.waitForTimeout(750);
+      if (await artifact.isVisible().catch(() => false)) return Date.now() - startedAt;
+      const graphText = await executionGraph.innerText().catch(() => '');
+      throw new Error(
+        `${kind} generation reached terminal execution status ${graphStatus} without a rendered artifact.`
+        + `${graphText ? ` Execution: ${graphText.trim().slice(0, 800)}` : ''}`,
+      );
+    }
+    const messageCount = await chatMessages.count();
+    const settledWithoutArtifact = isIdle
+      && !indicatorVisible
+      && !executionPending
+      && messageCount >= messageCountBeforeSend + 1
+      && (observedBusy || Date.now() - startedAt >= 30_000);
+    if (settledWithoutArtifact) {
+      await page.waitForTimeout(750);
+      if (await artifact.isVisible().catch(() => false)) return Date.now() - startedAt;
+      const finalMessage = messageCount > 0
+        ? (await chatMessages.nth(messageCount - 1).innerText()).trim().slice(0, 800)
+        : '';
+      throw new Error(
+        `${kind} run completed without a rendered artifact.${finalMessage ? ` Final message: ${finalMessage}` : ''}`,
+      );
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`${kind} generation did not render an artifact within ${timeoutMs}ms.`);
 }
 
 async function waitForChatFailure(page: Page, expectedText?: string, timeoutMs = 120_000): Promise<string> {
@@ -500,42 +748,373 @@ async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: numb
   });
 }
 
+async function runChildWithOutput(
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
+): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => { stdout = (stdout + String(chunk)).slice(-200_000); });
+  child.stderr?.on('data', (chunk) => { stderr = (stderr + String(chunk)).slice(-200_000); });
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // Ignore cleanup failure.
+      }
+      reject(new Error(`Child process timed out after ${options.timeoutMs ?? 60_000}ms.`));
+    }, options.timeoutMs ?? 60_000);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      resolve(code);
+    });
+  });
+  return { exitCode, stdout, stderr };
+}
+
+async function assertPathInside(root: string, candidate: string, label: string): Promise<string> {
+  const [resolvedRoot, resolvedCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
+  const relative = path.relative(resolvedRoot, resolvedCandidate);
+  expect(
+    relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative),
+    `${label} must stay under ${resolvedRoot}; received ${resolvedCandidate}`,
+  ).toBe(true);
+  return relative;
+}
+
+async function findPackagedTaskRegistryModule(): Promise<string> {
+  const distDir = path.join(appRoot, 'resources', 'openclaw', 'dist');
+  const entries = await readdir(distDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^task-registry-.*\.js$/u.test(entry.name)) continue;
+    const filePath = path.join(distDir, entry.name);
+    const content = await readFile(filePath, 'utf8');
+    if (content.includes('function createTaskRecord(params)') && /createTaskRecord as [A-Za-z_$][\w$]*/u.test(content)) {
+      return filePath;
+    }
+  }
+  throw new Error('Packaged OpenClaw task registry module was not found.');
+}
+
+async function seedPackagedNativeMediaTask(params: {
+  context: PackagedAppContext;
+  stateDir: string;
+  sessionKey: string;
+  artifactPath: string;
+}): Promise<{ taskId: string; runId: string }> {
+  const injectionDir = path.join(sandboxRoot, 'runtime-task-injection');
+  await mkdir(injectionDir, { recursive: true });
+  const taskModulePath = await findPackagedTaskRegistryModule();
+  const runId = `uclaw-regression-delivery-${Date.now()}`;
+  const artifactPayload = Buffer.from(JSON.stringify({
+    paths: [params.artifactPath],
+    attachments: [{
+      path: params.artifactPath,
+      mimeType: 'image/png',
+      name: path.basename(params.artifactPath),
+    }],
+  }), 'utf8').toString('base64url');
+  const payloadPath = path.join(injectionDir, `${runId}.json`);
+  const scriptPath = path.join(injectionDir, 'seed-task-registry.mjs');
+  await writeFile(payloadPath, `${JSON.stringify({
+    runtime: 'cli',
+    taskKind: 'image_generation',
+    sourceId: 'uclaw-packaged-regression',
+    requesterSessionKey: params.sessionKey,
+    ownerKey: params.sessionKey,
+    scopeKind: 'session',
+    agentId: 'main',
+    requesterAgentId: 'main',
+    runId,
+    label: 'Packaged native media delivery recovery',
+    task: 'Generate deterministic packaged recovery image',
+    status: 'succeeded',
+    deliveryStatus: 'failed',
+    notifyPolicy: 'silent',
+    terminalOutcome: 'succeeded',
+    startedAt: Date.now() - 2_000,
+    lastEventAt: Date.now(),
+    terminalSummary: `Generated media artifact. UCLAW_ARTIFACT_STATUS=available;UCLAW_ARTIFACTS=${artifactPayload}`,
+  }, null, 2)}\n`, 'utf8');
+  await writeFile(scriptPath, `import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+const [modulePath, payloadPath] = process.argv.slice(2);
+const source = await readFile(modulePath, 'utf8');
+const alias = source.match(/createTaskRecord as ([A-Za-z_$][\\w$]*)/u)?.[1];
+if (!alias) throw new Error('createTaskRecord export alias was not found.');
+const runtime = await import(pathToFileURL(modulePath).href);
+const createTaskRecord = runtime[alias];
+if (typeof createTaskRecord !== 'function') throw new Error('createTaskRecord export is unavailable.');
+const record = createTaskRecord(JSON.parse(await readFile(payloadPath, 'utf8')));
+if (!record?.taskId) throw new Error('Task registry rejected the regression task.');
+process.stdout.write(JSON.stringify({ taskId: record.taskId }) + '\\n');
+`, 'utf8');
+  const result = await runChildWithOutput(process.execPath, [scriptPath, taskModulePath, payloadPath], {
+    cwd: appRoot,
+    env: {
+      ...params.context.env,
+      OPENCLAW_STATE_DIR: params.stateDir,
+      NODE_NO_WARNINGS: '1',
+    },
+    timeoutMs: 90_000,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(`Task registry injection failed (exit=${result.exitCode}): ${redactedError(result.stderr || result.stdout)}`);
+  }
+  const jsonLine = result.stdout.trim().split(/\r?\n/u).reverse().find((line) => line.trim().startsWith('{'));
+  const parsed = jsonLine ? JSON.parse(jsonLine) as { taskId?: string } : {};
+  if (!parsed.taskId) throw new Error(`Task registry injection returned no task id: ${redactedError(result.stdout)}`);
+  return { taskId: parsed.taskId, runId };
+}
+
+function managedStatusUserId(status: Record<string, unknown>): number | undefined {
+  const auth = plainRecord(status.auth);
+  const user = plainRecord(auth.user);
+  const raw = user.id;
+  const parsed = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+type PackagedEntrySurface = 'setup' | 'main';
+
+async function waitForPackagedEntrySurface(
+  page: Page,
+  timeoutMs = 180_000,
+): Promise<PackagedEntrySurface> {
+  let surface: PackagedEntrySurface | null = null;
+  await expect(async () => {
+    if (await page.getByTestId('main-layout').isVisible().catch(() => false)) {
+      surface = 'main';
+      return;
+    }
+    if (await page.getByTestId('setup-page').isVisible().catch(() => false)) {
+      surface = 'setup';
+      return;
+    }
+    throw new Error('Packaged entry surface is still loading.');
+  }).toPass({ timeout: timeoutMs, intervals: [250, 500, 1_000] });
+  if (!surface) throw new Error('Packaged entry surface did not stabilize.');
+  return surface;
+}
+
+async function clickSetupNextButton(page: Page, timeoutMs = 180_000): Promise<void> {
+  await expect(async () => {
+    if (await page.getByTestId('main-layout').isVisible().catch(() => false)) return;
+    const nextButton = page.getByTestId('setup-next-button');
+    await expect(nextButton).toBeVisible({ timeout: 2_000 });
+    await expect(nextButton).toBeEnabled({ timeout: 2_000 });
+    await nextButton.click({ timeout: 5_000 });
+  }).toPass({ timeout: timeoutMs, intervals: [250, 500, 1_000] });
+}
+
+async function waitForSetupInstallationComplete(page: Page, timeoutMs = 15 * 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const installError = page.getByTestId('setup-install-error');
+  const nextButton = page.getByTestId('setup-next-button');
+  while (Date.now() < deadline) {
+    if (await installError.isVisible().catch(() => false)) {
+      const detail = (await installError.innerText()).replace(/\s+/gu, ' ').trim().slice(0, 2_000);
+      throw new Error(`Packaged setup installation failed: ${detail}`);
+    }
+    if (
+      await nextButton.isVisible().catch(() => false)
+      && await nextButton.isEnabled().catch(() => false)
+    ) return;
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`Packaged setup installation did not complete within ${timeoutMs}ms.`);
+}
+
+async function submitManagedAuthPanel(
+  page: Page,
+  credentials: Pick<FreshManagedAccount, 'username' | 'password'>,
+  activationCode?: string,
+): Promise<void> {
+  const panel = page.getByTestId('managed-account-auth-panel');
+  await expect(panel).toBeVisible({ timeout: 120_000 });
+  const textInputs = panel.locator('input:not([type="password"])');
+  await textInputs.first().fill(credentials.username);
+  await panel.locator('input[type="password"]').fill(credentials.password);
+  if (activationCode) {
+    expect(await textInputs.count()).toBeGreaterThanOrEqual(2);
+    const activationInput = textInputs.nth(1);
+    await activationInput.fill(activationCode);
+    const activationGrid = activationInput.locator('xpath=../..');
+    const checkButton = activationGrid.locator('button');
+    await expect(checkButton).toBeEnabled();
+    await checkButton.click();
+    await expect(activationGrid.locator('p')).toBeVisible({ timeout: 60_000 });
+  }
+  const submitButton = panel.locator('button').last();
+  await expect(submitButton).toBeEnabled();
+  await submitButton.click();
+  await expect(panel.locator('input')).toHaveCount(0, { timeout: 180_000 });
+}
+
+async function registerFreshAccountThroughPackagedUi(
+  page: Page,
+  account: FreshManagedAccount,
+): Promise<number> {
+  await expect(page.getByTestId('setup-page')).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByTestId('setup-welcome-step')).toBeVisible();
+  await clickSetupNextButton(page);
+  await expect(page.getByTestId('managed-account-auth-panel')).toBeVisible({ timeout: 120_000 });
+  const status = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status');
+  const bootstrap = plainRecord(status.bootstrap);
+  const auth = plainRecord(bootstrap.auth);
+  if (auth.emailVerifyEnabled === true) {
+    throw new Error('Fresh-account registration is blocked because production email verification is enabled.');
+  }
+  await submitManagedAuthPanel(page, account, account.activationCode);
+  account.activationCode = '';
+  const local = await hostApiJson<Record<string, unknown>>(page, '/api/junfeiai/status/local');
+  const userId = managedStatusUserId(local);
+  if (!userId) throw new Error('Fresh registration succeeded but the managed user identity was not persisted.');
+  account.userId = userId;
+
+  await clickSetupNextButton(page);
+  await expect(page.getByTestId('managed-account-auth-panel')).toHaveCount(0, { timeout: 30_000 });
+  await clickSetupNextButton(page, 10 * 60_000);
+  await expect(page.getByTestId('setup-next-button')).toHaveCount(0, { timeout: 30_000 });
+  await waitForSetupInstallationComplete(page);
+  await clickSetupNextButton(page);
+  await expect(page.getByTestId('main-layout')).toBeVisible({ timeout: 180_000 });
+  await expect(page.getByTestId('setup-page')).toHaveCount(0);
+  return userId;
+}
+
+async function loginFreshAccountThroughPackagedUi(
+  page: Page,
+  account: Pick<FreshManagedAccount, 'username' | 'password'>,
+): Promise<void> {
+  const surface = await waitForPackagedEntrySurface(page);
+  expect(surface, 'Setup completion must persist across logout and relaunch.').toBe('main');
+  await expect(page.getByTestId('main-layout')).toBeVisible();
+  await expect(page.getByTestId('setup-page')).toHaveCount(0);
+  await expect(page.getByTestId('managed-auth-gate')).toBeVisible({ timeout: 180_000 });
+  await submitManagedAuthPanel(page, account);
+  await expect(page.getByTestId('managed-auth-gate')).toHaveCount(0, { timeout: 180_000 });
+  await expect(page.getByTestId('main-layout')).toBeVisible();
+}
+
 async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
   let context: PackagedAppContext | null = null;
+  let adminSession: AdminSession | null = null;
+  let freshAccount: FreshManagedAccount | null = null;
   runner.setPageProvider(() => context?.page ?? null);
   const gatewayPort = await allocatePort();
   const hostApiPort = await allocatePort();
   const osHome = path.join(sandboxRoot, 'live-os-home');
+  const runtimeCacheRoot = requiredEnv('UCLAW_REGRESSION_RUNTIME_ROOT');
   await seedGatewaySettings(appRoot, gatewayPort);
 
   await runner.run('live.startup', 'start managed package with the supplied isolated profile', async () => {
-    context = await launchPackagedApp({ appRoot, portableRoot: appRoot, osHome, gatewayPort, hostApiPort, managed: true });
-    const setupVisible = await context.page.getByTestId('setup-page').isVisible().catch(() => false);
-    if (!setupVisible) await expect(context.page.getByTestId('main-layout')).toBeVisible({ timeout: 120_000 });
-    return { startupMs: context.startupMs, setupVisible, loginViaStdin: liveLoginStdin };
+    context = await launchPackagedApp({
+      appRoot,
+      portableRoot: appRoot,
+      osHome,
+      runtimeCacheRoot,
+      gatewayPort,
+      hostApiPort,
+      managed: true,
+    });
+    const surface = await waitForPackagedEntrySurface(context.page);
+    return {
+      startupMs: context.startupMs,
+      surface,
+      setupVisible: surface === 'setup',
+      loginViaStdin: liveLoginStdin,
+      freshRegistrationViaAdminStdin: liveRegisterAdminStdin,
+    };
   });
 
-  await runner.run('live.auth.login', 'authenticate the isolated managed test profile without persisting credentials in reports', async () => {
-    const current = contextOrThrow(context);
-    let login: Record<string, unknown> | null = null;
-    if (liveLoginStdin) {
-      const credentials = await readLiveLoginCredentials();
+  if (liveRegisterAdminStdin) {
+    await runner.run('live.auth.register', 'create a one-time activation code and register a fresh account through the packaged UI', async () => {
+      const current = contextOrThrow(context);
+      const adminCredentials = await readLiveAdminCredentials();
       try {
-        login = await loginManagedAccount(current.hostApiPort, credentials);
+        adminSession = await loginRegressionAdmin(adminCredentials);
       } finally {
-        credentials.username = '';
-        credentials.password = '';
+        adminCredentials.username = '';
+        adminCredentials.password = '';
       }
-      await current.page.reload({ waitUntil: 'domcontentloaded' });
-    }
-    await expect(current.page.getByTestId('main-layout')).toBeVisible({ timeout: 180_000 });
-    await expect(current.page.getByTestId('setup-page')).toHaveCount(0);
-    const gateway = await waitForGatewayReady(current.page, 240_000);
-    return { login, gateway: gateway.state };
-  });
+      const activationCode = await createFreshActivationCode(adminSession);
+      freshAccount = generateFreshManagedAccount(activationCode);
+      const userId = await registerFreshAccountThroughPackagedUi(current.page, freshAccount);
+      const gateway = await waitForGatewayReady(current.page, 240_000);
+      return {
+        activationCodeCreated: true,
+        accountRegistered: true,
+        deviceActivated: true,
+        relayBootstrapped: true,
+        setupCompleted: true,
+        userIdentityPersisted: userId > 0,
+        gateway: gateway.state,
+      };
+    }, { sensitive: true });
+
+    await runner.run('live.auth.login', 'logout, relaunch, and log the fresh account back in through the packaged UI', async () => {
+      const account = freshAccount;
+      if (!account) throw new Error('Fresh registration did not produce an account for relogin.');
+      const previous = contextOrThrow(context);
+      await hostApiJson(previous.page, '/api/junfeiai/logout', 'POST', {});
+      await closePackagedApp(previous);
+      context = null;
+      const nextHostApiPort = await allocatePort();
+      context = await launchPackagedApp({
+        appRoot,
+        portableRoot: appRoot,
+        osHome,
+        runtimeCacheRoot,
+        gatewayPort,
+        hostApiPort: nextHostApiPort,
+        managed: true,
+      });
+      await loginFreshAccountThroughPackagedUi(context.page, account);
+      const gateway = await waitForGatewayReady(context.page, 240_000);
+      return {
+        logoutCompleted: true,
+        relaunchCompleted: true,
+        reloginCompleted: true,
+        gateway: gateway.state,
+      };
+    }, { sensitive: true });
+  } else {
+    await runner.run('live.auth.login', 'authenticate the isolated managed test profile without persisting credentials in reports', async () => {
+      const current = contextOrThrow(context);
+      let login: Record<string, unknown> | null = null;
+      if (liveLoginStdin) {
+        const credentials = await readLiveLoginCredentials();
+        try {
+          login = await loginManagedAccount(current.hostApiPort, credentials);
+        } finally {
+          credentials.username = '';
+          credentials.password = '';
+        }
+        await current.page.reload({ waitUntil: 'domcontentloaded' });
+      }
+      await expect(current.page.getByTestId('main-layout')).toBeVisible({ timeout: 180_000 });
+      await expect(current.page.getByTestId('setup-page')).toHaveCount(0);
+      const gateway = await waitForGatewayReady(current.page, 240_000);
+      return { login, gateway: gateway.state };
+    }, { sensitive: liveLoginStdin });
+  }
 
   await runner.run('live.managed.contract', 'verify managed Responses and media runtime configuration without reading secret values', async () => {
-    const configPath = path.join(appRoot, 'UClawData', 'openclaw-home', '.openclaw', 'openclaw.json');
+    const runtime = await resolvePortableRuntimeStateDir(appRoot, osHome, runtimeCacheRoot);
+    const configPath = path.join(runtime.stateDir, 'openclaw.json');
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     const agents = config.agents && typeof config.agents === 'object' ? config.agents as Record<string, unknown> : {};
     const defaults = agents.defaults && typeof agents.defaults === 'object' ? agents.defaults as Record<string, unknown> : {};
@@ -614,10 +1193,12 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
     const page = contextOrThrow(context).page;
     await startNewChat(page);
     await page.getByTestId('chat-composer-mode-image').click();
+    const messageCountBeforeSend = await page.locator('[data-testid^="chat-message-"]').count();
     await page.getByTestId('chat-composer-input').fill(`[UCLAW LIVE REGRESSION ${runId}] 生成一张白底红色正方形测试图`);
     await page.getByTestId('chat-composer-send').click();
-    await expect(page.getByTestId('chat-image-preview-card')).toBeVisible({ timeout: 10 * 60_000 });
+    const latencyMs = await waitForGeneratedMedia(page, 'image', messageCountBeforeSend, 10 * 60_000);
     await expect(page.getByTestId('chat-image-generating-indicator')).toHaveCount(0, { timeout: 60_000 });
+    return { latencyMs };
   });
 
   await runner.run('live.media.video', 'generate and render one real managed video', async () => {
@@ -625,10 +1206,12 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
     await startNewChat(page);
     await page.getByTestId('chat-composer-mode-video').click();
     await page.getByTestId('chat-video-duration').selectOption({ index: 0 });
+    const messageCountBeforeSend = await page.locator('[data-testid^="chat-message-"]').count();
     await page.getByTestId('chat-composer-input').fill(`[UCLAW LIVE REGRESSION ${runId}] 生成一个最短时长的纯色测试视频`);
     await page.getByTestId('chat-composer-send').click();
-    await expect(page.locator('video')).toBeVisible({ timeout: 20 * 60_000 });
+    const latencyMs = await waitForGeneratedMedia(page, 'video', messageCountBeforeSend, 20 * 60_000);
     await expect(page.getByTestId('chat-video-generating-indicator')).toHaveCount(0, { timeout: 60_000 });
+    return { latencyMs };
   });
 
   await runner.run('live.channels.status', 'probe configured external channel status without sending', async () => {
@@ -684,10 +1267,22 @@ async function runLiveRegression(runner: ScenarioRunner): Promise<void> {
 
   await closePackagedApp(context);
   context = null;
+  if (adminSession && freshAccount?.userId) {
+    await runner.run('live.auth.cleanup', 'delete the temporary managed regression account after all live checks', async () => {
+      await deleteFreshManagedAccount(adminSession as AdminSession, freshAccount?.userId as number);
+      return { temporaryAccountDeleted: true };
+    }, { sensitive: true });
+  }
+  if (freshAccount) {
+    freshAccount.username = '';
+    freshAccount.password = '';
+    freshAccount.activationCode = '';
+  }
+  if (adminSession) adminSession.cookie = '';
 }
 
 test('runs the packaged UClaw regression matrix', async () => {
-  test.setTimeout(30 * 60_000);
+  test.setTimeout((liveRegisterAdminStdin ? 60 : 30) * 60_000);
   const runner = new ScenarioRunner();
   let context: PackagedAppContext | null = null;
   let provider: DeterministicOpenAiServer | null = null;
@@ -819,6 +1414,19 @@ test('runs the packaged UClaw regression matrix', async () => {
       const status = await waitForGatewayReady(contextOrThrow(context).page, 180_000);
       expect(status.port).toBe(gatewayPort);
       return status;
+    });
+
+    await runner.run('portable.runtime-state', 'keep high-frequency OpenClaw state on the isolated local Runtime profile and create verified snapshots', async () => {
+      const current = contextOrThrow(context);
+      const runtime = await resolvePortableRuntimeStateDir(appRoot, current.osHome);
+      portableId = runtime.portableId;
+      await access(runtime.stateDir);
+      await access(path.join(runtime.stateDir, 'openclaw.json'));
+      return {
+        portableIdPresent: true,
+        stateDir: 'isolated-local-runtime-profile',
+        usbStateRoot: 'portable-data-only',
+      };
     });
 
     await runner.run('gateway.stop-start', 'stop and restart the real packaged Gateway', async () => {
@@ -1062,6 +1670,31 @@ test('runs the packaged UClaw regression matrix', async () => {
         { skip: profile !== 'full' ? 'Requires deterministic transient-error injection.' : undefined },
       );
     }
+
+    await runner.run(
+      'chat.insufficient-quota',
+      'route a deterministic insufficient-quota response to recharge without automatic retry',
+      async () => {
+        const page = contextOrThrow(context).page;
+        const beforeAttempts = providerRequestCount(provider, 'QUOTA');
+        await startNewChat(page);
+        await page.getByTestId('chat-composer-input').fill('[REGRESSION:QUOTA] reject this chargeable operation');
+        await page.getByTestId('chat-composer-send').click();
+        const callout = page.getByTestId('chat-run-error');
+        await expect(callout).toBeVisible({ timeout: 120_000 });
+        await expect(callout).toContainText(/Insufficient balance|余额不足|残高不足|Недостаточно средств/iu);
+        await expect(page.getByTestId('chat-run-recharge')).toBeVisible();
+        await expect(page.getByTestId('chat-run-retry')).toHaveCount(0);
+        await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/iu, { timeout: 120_000 });
+        const attempts = providerRequestCount(provider, 'QUOTA') - beforeAttempts;
+        expect(attempts, 'A chargeable insufficient-quota operation must not be retried automatically.').toBe(1);
+        await page.getByTestId('chat-run-recharge').click();
+        await expect(page.getByTestId('recharge-page')).toBeVisible();
+        await startNewChat(page);
+        return { attempts, retryActionVisible: false, rechargeNavigation: true };
+      },
+      { skip: profile !== 'full' ? 'Requires deterministic quota-error injection through the packaged Provider path.' : undefined },
+    );
 
     await runner.run(
       'chat.malformed-stream',
@@ -1371,6 +2004,100 @@ test('runs the packaged UClaw regression matrix', async () => {
       };
     });
 
+    await runner.run(
+      'skills.user-owned-preservation',
+      'preserve a user-owned Skill collision and remove only stale manifest-owned copies',
+      async () => {
+        const current = contextOrThrow(context);
+        const page = current.page;
+        const runtime = await resolvePortableRuntimeStateDir(appRoot, current.osHome);
+        const pluginSkillsDir = path.join(runtime.stateDir, 'plugin-skills');
+        await hostApiJson(page, '/api/skills/local');
+        const entries = await readdir(pluginSkillsDir, { withFileTypes: true });
+        let managedName = '';
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.name.startsWith('.uclaw-skill-')) continue;
+          try {
+            const manifest = JSON.parse(
+              await readFile(path.join(pluginSkillsDir, entry.name, '.uclaw-skill-manifest.json'), 'utf8'),
+            ) as Record<string, unknown>;
+            if (
+              (manifest.schema === 'uclaw.plugin-skill-copy/v1' || manifest.schema === 'uclaw.plugin-skill-copy/v2')
+              && manifest.name === entry.name
+            ) {
+              managedName = entry.name;
+              break;
+            }
+          } catch {
+            // Ordinary user-owned entries intentionally have no ownership manifest.
+          }
+        }
+        if (!managedName) throw new Error('No manifest-owned packaged plugin Skill was published.');
+
+        const managedEntry = path.join(pluginSkillsDir, managedName);
+        const managedBackup = path.join(sandboxRoot, 'skill-preservation-backup', managedName);
+        const staleName = 'uclaw-regression-stale-managed-skill';
+        const staleEntry = path.join(pluginSkillsDir, staleName);
+        let gatewayStopped = false;
+        let userCollisionInstalled = false;
+        const stopGateway = async (): Promise<void> => {
+          await hostApiJson(page, '/api/gateway/stop', 'POST', {});
+          await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
+          gatewayStopped = true;
+        };
+        const startGateway = async (): Promise<void> => {
+          await hostApiJson(page, '/api/gateway/start', 'POST', {});
+          await waitForGatewayReady(page, 180_000);
+          gatewayStopped = false;
+        };
+
+        try {
+          await stopGateway();
+          await rm(managedBackup, { recursive: true, force: true });
+          await mkdir(path.dirname(managedBackup), { recursive: true });
+          await cp(managedEntry, managedBackup, { recursive: true });
+          await rm(managedEntry, { recursive: true, force: true });
+          await mkdir(managedEntry, { recursive: true });
+          await writeFile(path.join(managedEntry, 'SKILL.md'), '# User-owned collision\n', 'utf8');
+          await writeFile(path.join(managedEntry, 'user-sentinel.txt'), 'preserve-me\n', 'utf8');
+          userCollisionInstalled = true;
+
+          await mkdir(staleEntry, { recursive: true });
+          await writeFile(path.join(staleEntry, '.uclaw-skill-manifest.json'), `${JSON.stringify({
+            schema: 'uclaw.plugin-skill-copy/v1',
+            name: staleName,
+            sourcePath: 'regression-stale-source',
+          }, null, 2)}\n`, 'utf8');
+          await writeFile(path.join(staleEntry, 'stale.txt'), 'remove-me\n', 'utf8');
+
+          await startGateway();
+          await hostApiJson(page, '/api/skills/local');
+          expect(await readFile(path.join(managedEntry, 'user-sentinel.txt'), 'utf8')).toBe('preserve-me\n');
+          expect(await access(path.join(managedEntry, '.uclaw-skill-manifest.json')).then(() => true).catch(() => false)).toBe(false);
+          expect(await access(staleEntry).then(() => true).catch(() => false)).toBe(false);
+          return {
+            collisionName: managedName,
+            userOwnedPreserved: true,
+            staleManagedRemoved: true,
+            automaticManagedRepublishRequired: false,
+          };
+        } finally {
+          if (gatewayStopped) await startGateway().catch(() => undefined);
+          if (userCollisionInstalled) {
+            await hostApiJson(page, '/api/gateway/stop', 'POST', {}).catch(() => undefined);
+            await waitForGateway(page, (status) => status.state === 'stopped', 60_000).catch(() => undefined);
+            await rm(managedEntry, { recursive: true, force: true }).catch(() => undefined);
+            await cp(managedBackup, managedEntry, { recursive: true }).catch(() => undefined);
+            userCollisionInstalled = false;
+            await hostApiJson(page, '/api/gateway/start', 'POST', {}).catch(() => undefined);
+            await waitForGatewayReady(page, 180_000).catch(() => undefined);
+          }
+          await rm(managedBackup, { recursive: true, force: true }).catch(() => undefined);
+        }
+      },
+      { skip: profile !== 'full' ? 'Requires a real packaged Gateway Skill publication cycle.' : undefined },
+    );
+
     await runner.run('skills.marketplace-capability', 'probe packaged Skill marketplace capability without installing from the network', async () => {
       const page = contextOrThrow(context).page;
       const response = await hostApiJson<{ success?: boolean; capability?: Record<string, unknown> }>(
@@ -1385,7 +2112,11 @@ test('runs the packaged UClaw regression matrix', async () => {
     });
 
     let renderedVideoPath = '';
+    let renderedVideoTaskId = '';
     let composedVideoPath = '';
+    let composedVideoTaskId = '';
+    let shotQaTaskId = '';
+    let shotQaArtifactPaths: string[] = [];
     await runner.run(
       'media.timeline',
       'render and verify a real local image timeline with packaged FFmpeg',
@@ -1418,6 +2149,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         const task = await waitForHostTask(page, taskId, 240_000);
         expect(task.status, task.error).toBe('succeeded');
         expect(task.verifications).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'passed', kind: 'media.metadata' })]));
+        renderedVideoTaskId = taskId;
         renderedVideoPath = task.artifacts?.find((artifact) => artifact.kind === 'video')?.filePath || '';
         expect(renderedVideoPath).toBeTruthy();
         expect((await stat(renderedVideoPath)).size).toBeGreaterThan(0);
@@ -1442,6 +2174,7 @@ test('runs the packaged UClaw regression matrix', async () => {
         }, 'compose');
         const task = await waitForHostTask(page, taskId, 240_000);
         expect(task.status, task.error).toBe('succeeded');
+        composedVideoTaskId = taskId;
         composedVideoPath = task.artifacts?.find((artifact) => artifact.kind === 'video')?.filePath || '';
         expect((await stat(composedVideoPath)).size).toBeGreaterThan(0);
         return { taskId, output: composedVideoPath };
@@ -1468,9 +2201,89 @@ test('runs the packaged UClaw regression matrix', async () => {
         const task = await waitForHostTask(page, taskId, 240_000);
         expect(task.status, task.error).toBe('succeeded');
         expect(task.verifications).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'passed', kind: 'media.shot.qa' })]));
+        shotQaTaskId = taskId;
+        shotQaArtifactPaths = (task.artifacts ?? []).map((artifact) => artifact.filePath || '').filter(Boolean);
         return { taskId, artifactCount: task.artifacts?.length || 0 };
       },
       { skip: profile !== 'full' ? 'The core profile does not execute media work.' : undefined },
+    );
+
+    await runner.run(
+      'media.stable-runtime-paths',
+      'keep media deliverables on portable user data and Host Task state on the local Runtime profile',
+      async () => {
+        const current = contextOrThrow(context);
+        if (!renderedVideoPath || !renderedVideoTaskId || !composedVideoPath || !composedVideoTaskId || !shotQaTaskId) {
+          throw new Error('Media path evidence is incomplete.');
+        }
+        const generatedRoot = path.join(appRoot, 'UClawData', 'clawx', 'generated-media');
+        const runtime = await resolvePortableRuntimeStateDir(appRoot, current.osHome);
+        const hostTaskRoot = path.join(runtime.stateDir, 'uclaw-runtime', 'host-tasks', 'jobs');
+        const timelineRelative = await assertPathInside(
+          path.join(generatedRoot, 'timeline-video'),
+          renderedVideoPath,
+          'Timeline output',
+        );
+        const composeRelative = await assertPathInside(
+          path.join(generatedRoot, 'composed-video'),
+          composedVideoPath,
+          'Composed video output',
+        );
+        const shotQaRelative = await Promise.all(shotQaArtifactPaths.map(async (artifactPath) => await assertPathInside(
+          generatedRoot,
+          artifactPath,
+          'Shot QA artifact',
+        )));
+        expect(shotQaRelative.some((relative) => relative.startsWith(`video-shot-qa${path.sep}`))).toBe(true);
+        const taskIds = [renderedVideoTaskId, composedVideoTaskId, shotQaTaskId];
+        for (const taskId of taskIds) {
+          await access(path.join(hostTaskRoot, taskId, 'task.json'));
+          const legacyTaskPath = path.join(
+            appRoot,
+            'UClawData',
+            'openclaw-home',
+            '.openclaw',
+            'uclaw-runtime',
+            'host-tasks',
+            'jobs',
+            taskId,
+            'task.json',
+          );
+          expect(await access(legacyTaskPath).then(() => true).catch(() => false)).toBe(false);
+        }
+        return {
+          generatedMediaRoot: 'UClawData/clawx/generated-media',
+          hostTaskRoot: 'LOCALAPPDATA/UClawRuntime/profiles/<portable-id>/openclaw-state/uclaw-runtime/host-tasks',
+          timelineRelative,
+          composeRelative,
+          shotQaArtifacts: shotQaRelative.length,
+          legacyPortableTaskCopies: 0,
+        };
+      },
+      { skip: profile !== 'full' ? 'Requires completed packaged media and Host Task evidence.' : undefined },
+    );
+
+    await runner.run(
+      'media.outside-managed-source',
+      'reject an existing media input outside UClaw-managed data and Runtime roots',
+      async () => {
+        const page = contextOrThrow(context).page;
+        const outsidePath = path.join(sandboxRoot, 'outside-managed-media.png');
+        await sharp({ create: { width: 320, height: 240, channels: 3, background: '#2d7ff9' } }).png().toFile(outsidePath);
+        const taskId = await createHostTask(page, 'local.video.timeline.render', 'Regression outside managed root', {
+          scenes: [{ sourcePath: outsidePath, kind: 'image', durationSeconds: 1 }],
+          filename: 'must-not-render-outside-root.mp4',
+          width: 320,
+          height: 240,
+          fps: 12,
+        }, 'outside-managed-media');
+        const task = await waitForHostTask(page, taskId, 120_000);
+        expect(['failed', 'blocked']).toContain(task.status);
+        expect(task.artifacts?.length || 0).toBe(0);
+        expect(task.error ?? '').toMatch(/outside the managed UClaw media directories/iu);
+        return { taskId, status: task.status, existingOutsideInputRejected: true };
+      },
+      { skip: profile !== 'full' ? 'The core profile does not execute media boundary checks.' : undefined },
     );
 
     await runner.run(
@@ -1504,6 +2317,109 @@ test('runs the packaged UClaw regression matrix', async () => {
       await expect(page.getByTestId('chat-video-size')).toBeVisible();
       await expect(page.getByTestId('chat-video-duration')).toBeVisible();
     });
+
+    await runner.run(
+      'media.delivery-failure-recovery',
+      'recover a durable native media artifact from the packaged task ledger when reply delivery failed',
+      async () => {
+        const current = contextOrThrow(context);
+        const page = current.page;
+        await startNewChat(page);
+        await sendChat(
+          page,
+          '[REGRESSION:DELIVERY_SESSION] persist the task owner session',
+          'UCLAW_REGRESSION_DELIVERY_SESSION_OK',
+        );
+        const sessionKey = await page.evaluate(() => (
+          window.localStorage.getItem('clawx:chat:current-session-key') || 'agent:main:main'
+        ));
+        expect(sessionKey).toMatch(/^agent:/u);
+        const runtime = await resolvePortableRuntimeStateDir(appRoot, current.osHome);
+        const artifactDir = path.join(appRoot, 'UClawData', 'clawx', 'generated-media', 'native-delivery-regression');
+        const artifactPath = path.join(artifactDir, 'packaged-delivery-recovery.png');
+        await mkdir(artifactDir, { recursive: true });
+        await sharp({ create: { width: 96, height: 64, channels: 3, background: '#19a974' } }).png().toFile(artifactPath);
+        let gatewayStopped = false;
+        try {
+          await hostApiJson(page, '/api/gateway/stop', 'POST', {});
+          await waitForGateway(page, (status) => status.state === 'stopped', 60_000);
+          gatewayStopped = true;
+          const injected = await seedPackagedNativeMediaTask({
+            context: current,
+            stateDir: runtime.stateDir,
+            sessionKey,
+            artifactPath,
+          });
+          await hostApiJson(page, '/api/gateway/start', 'POST', {});
+          await waitForGatewayReady(page, 180_000);
+          gatewayStopped = false;
+
+          await expect.poll(async () => {
+            try {
+              const result = await gatewayRpc<{ task?: { taskId?: string } }>(
+                page,
+                'tasks.get',
+                { taskId: injected.taskId },
+                15_000,
+              );
+              return result.task?.taskId ?? '';
+            } catch {
+              return '';
+            }
+          }, { timeout: 60_000, intervals: [250, 500, 1_000] }).toBe(injected.taskId);
+          const taskEvidence = await gatewayRpc<{
+            task?: {
+              taskId?: string;
+              status?: string;
+              deliveryStatus?: string;
+              artifactStatus?: string;
+              artifacts?: Array<{ path?: string; mimeType?: string }>;
+            };
+          }>(page, 'tasks.get', { taskId: injected.taskId }, 15_000);
+          expect(taskEvidence.task?.status).toBe('completed');
+          expect(taskEvidence.task?.deliveryStatus).toBe('failed');
+          expect(taskEvidence.task?.artifactStatus).toBe('available');
+          expect(taskEvidence.task?.artifacts).toEqual(expect.arrayContaining([
+            expect.objectContaining({ path: artifactPath, mimeType: 'image/png' }),
+          ]));
+          const listedTasks = await gatewayRpc<{ tasks?: Array<{ taskId?: string }> }>(
+            page,
+            'tasks.list',
+            { status: ['completed'], limit: 500 },
+            15_000,
+          );
+          expect(listedTasks.tasks?.some((task) => task.taskId === injected.taskId)).toBe(true);
+
+          await expect(page.getByText(/artifact was generated successfully|产物已经生成成功|生成には成功|успешно создан/iu)).toBeVisible({ timeout: 90_000 });
+          await expect(page.getByTestId('chat-image-preview-card')).toBeVisible();
+          await expect(page.getByRole('img', { name: path.basename(artifactPath) })).toBeVisible();
+          await expect(page.getByTestId('chat-run-error')).toHaveCount(0);
+          await assertPathInside(
+            path.join(appRoot, 'UClawData', 'clawx', 'generated-media'),
+            artifactPath,
+            'Recovered native media artifact',
+          );
+          await startNewChat(page);
+          return {
+            taskId: injected.taskId,
+            runId: injected.runId,
+            executionStatus: 'succeeded',
+            artifactStatus: 'available',
+            deliveryStatus: 'failed',
+            gatewayTaskVisible: true,
+            structuredArtifactContract: true,
+            artifactRendered: true,
+            globalRunErrorVisible: false,
+          };
+        } finally {
+          if (gatewayStopped) {
+            await hostApiJson(page, '/api/gateway/start', 'POST', {}).catch(() => undefined);
+            await waitForGatewayReady(page, 180_000).catch(() => undefined);
+          }
+        }
+      },
+      { skip: profile !== 'full' ? 'Requires the exact packaged Gateway task ledger and renderer recovery path.' : undefined },
+    );
 
     await runner.run('diagnostics.logs', 'read packaged runtime logs and verify credential redaction', async () => {
       const page = contextOrThrow(context).page;
@@ -1598,11 +2514,31 @@ test('runs the packaged UClaw regression matrix', async () => {
       const previous = contextOrThrow(context);
       await closePackagedApp(previous);
       context = null;
+      const snapshotRoot = path.join(appRoot, 'UClawData', 'runtime-snapshots');
+      const snapshotEntries = await readdir(snapshotRoot, { withFileTypes: true });
+      const completeSnapshots = [];
+      for (const entry of snapshotEntries) {
+        if (!entry.isDirectory() || !entry.name.startsWith('snapshot-')) continue;
+        const complete = await access(path.join(snapshotRoot, entry.name, 'snapshot-complete.json'))
+          .then(() => true)
+          .catch(() => false);
+        if (complete) completeSnapshots.push(entry);
+      }
+      expect(completeSnapshots.length).toBeGreaterThan(0);
+      const latestSnapshot = completeSnapshots.sort((left, right) => right.name.localeCompare(left.name))[0];
+      const snapshotManifest = JSON.parse(await readFile(path.join(snapshotRoot, latestSnapshot.name, 'snapshot-complete.json'), 'utf8')) as Record<string, unknown>;
+      expect(snapshotManifest.schema).toBe('uclaw.portable-runtime-snapshot/v1');
+      expect(snapshotManifest.portableId).toBe(portableId);
+      expect(Number(snapshotManifest.fileCount)).toBeGreaterThanOrEqual(0);
+      const incompleteSnapshot = path.join(snapshotRoot, 'snapshot-' + (Date.now() + 60_000) + '-incomplete');
+      await mkdir(path.join(incompleteSnapshot, 'state'), { recursive: true });
+      await writeFile(path.join(incompleteSnapshot, 'state', 'openclaw.json'), '{ invalid snapshot');
+      const migratedOsHome = path.join(sandboxRoot, 'os-home-after-disk-move');
       const nextHostPort = await allocatePort();
       context = rememberContext(await launchPackagedApp({
         appRoot,
         portableRoot: appRoot,
-        osHome,
+        osHome: migratedOsHome,
         gatewayPort,
         hostApiPort: nextHostPort,
         managed: false,
@@ -1615,7 +2551,17 @@ test('runs the packaged UClaw regression matrix', async () => {
         await expect(context.page.locator('[data-testid^="provider-card-"]').filter({ hasText: 'UClaw Regression Local' })).toBeVisible();
         expect(await readFile(toolTargetPath, 'utf8')).toContain('UCLAW_REGRESSION_TOOL_FILE_OK');
       }
-      return { startupMs: context.startupMs };
+      const migratedRuntime = await resolvePortableRuntimeStateDir(appRoot, migratedOsHome);
+      expect(migratedRuntime.portableId).toBe(portableId);
+      const restoredConfig = JSON.parse(
+        await readFile(path.join(migratedRuntime.stateDir, 'openclaw.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(restoredConfig).toBeTruthy();
+      return {
+        startupMs: context.startupMs,
+        diskMoveRestoredFromVerifiedSnapshot: true,
+        incompleteSnapshotIgnored: true,
+      };
     });
 
     await closePackagedApp(context);

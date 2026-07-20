@@ -21,6 +21,7 @@ import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './opencl
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawBrowserLifecycleRuntime } from './openclaw-browser-lifecycle-patch.mjs';
+import { patchOpenClawBillingErrorClassificationRuntime } from './openclaw-billing-error-classification-patch.mjs';
 import { patchOpenClawCronRuntimePolicyRuntime } from './openclaw-cron-runtime-policy-patch.mjs';
 import { cleanupOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
@@ -1146,14 +1147,14 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${compactionSessionStatePatch.patchedFiles} compaction session-state runtime file(s)`;
   }
 
-  // --- Plugin skills symlink retry patch ---
-  // On Windows, stale generated junctions can survive cleanup and make the
-  // following symlink creation fail with EISDIR. Retry after one forced cleanup.
+  // --- Plugin skills copy contract patch ---
+  // Publish managed Skill copies with an ownership manifest. This avoids
+  // junction writes on portable volumes and preserves user-owned entries.
   const pluginSkillsSymlinkPatch = patchOpenClawPluginSkillsSymlinkRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
   if (pluginSkillsSymlinkPatch.patchedFiles > 0) {
-    echo`   馃┕ Patched ${pluginSkillsSymlinkPatch.patchedFiles} plugin skill symlink runtime file(s)`;
+    echo`   🩹 Patched ${pluginSkillsSymlinkPatch.patchedFiles} plugin skill copy runtime file(s)`;
   }
 
   // --- Ordinary session cwd patch ---
@@ -1231,6 +1232,12 @@ function patchBundledRuntime(outputDir) {
   const imageModelLockPatch = patchOpenClawImageModelLockRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
+  const billingErrorClassificationPatch = patchOpenClawBillingErrorClassificationRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (billingErrorClassificationPatch.patchedFiles > 0) {
+    echo`   Patched ${billingErrorClassificationPatch.patchedFiles} billing error classification runtime file(s)`;
+  }
   const smartLatestRateLimitRetryPatch = patchOpenClawSmartLatestRateLimitRetryRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
@@ -1293,14 +1300,14 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${nativeMediaCancellationPatch.patchedFiles} native media cancellation runtime file(s)`;
   }
 
-  // Completion callbacks for one parent session must enter OpenClaw one at a
-  // time. Parallel video segments otherwise compete for the same embedded
-  // session and can fail with takeover or gateway timeout errors.
+  // Completion callbacks for one parent session must serialize their artifact
+  // state and delivery contract. A wake failure must not erase a provider
+  // artifact or turn a completed execution into a false task failure.
   const nativeMediaCompletionQueuePatch = patchOpenClawNativeMediaCompletionQueueRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
   if (nativeMediaCompletionQueuePatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${nativeMediaCompletionQueuePatch.patchedFiles} native media completion queue file(s)`;
+    echo`   🩹 Patched ${nativeMediaCompletionQueuePatch.patchedFiles} native media completion contract file(s)`;
   }
 
   const managedMediaTimeoutPatch = patchOpenClawManagedMediaTimeoutRuntime(distDir, {
@@ -1377,6 +1384,10 @@ function patchBundledRuntime(outputDir) {
   if (videoActualSpecPatch.patchedFiles > 0) {
     echo`   🩹 Patched ${videoActualSpecPatch.patchedFiles} video actual specification runtime file(s)`;
   }
+
+  patchOpenClawVideoSegmentDedupeRuntime(distDir, {
+    logger: { log: () => undefined },
+  });
 
   // --- Public task delivery outcome patch ---
   // Keep the gateway TaskSummary response backward compatible while exposing

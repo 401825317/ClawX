@@ -294,6 +294,38 @@ async function requestTurnPreferencesFromHost(event, ctx) {
   }
 }
 
+function buildTurnPreferenceSystemContext(preferences) {
+  if (!isPlainRecord(preferences)) return '';
+  const mode = preferences.mode === 'image' || preferences.mode === 'video'
+    ? preferences.mode
+    : undefined;
+  if (!mode) return '';
+
+  const media = isPlainRecord(preferences[mode]) ? preferences[mode] : {};
+  const constraints = [];
+  for (const key of mode === 'image'
+    ? ['model', 'size', 'quality']
+    : ['size', 'durationSeconds']) {
+    const value = media[key];
+    if (typeof value === 'string' && value.trim()) constraints.push(`${key}=${value.trim()}`);
+    else if (typeof value === 'number' && Number.isFinite(value)) constraints.push(`${key}=${value}`);
+  }
+  const selectedArtifactCount = Array.isArray(preferences.selectedArtifacts)
+    ? preferences.selectedArtifacts.length
+    : 0;
+  if (selectedArtifactCount > 0) constraints.push(`selectedArtifacts=${selectedArtifactCount}`);
+
+  const executionInstruction = mode === 'image'
+    ? 'Produce a real image artifact by calling image_generate. Do not answer with only a description or promise.'
+    : 'Produce a real video artifact by calling video_generate after any required uclaw_video_project setup. Do not answer with only a description or promise.';
+  return [
+    `The UClaw client explicitly selected ${mode} mode for this turn. Treat this UI mode as explicit current-turn user intent, not as an optional hint.`,
+    executionInstruction,
+    constraints.length > 0 ? `Apply these UI constraints unless the user explicitly overrides them in the message: ${constraints.join(', ')}.` : '',
+    'If the requested media cannot be produced, report the concrete capability or tool failure only after a real tool attempt or capability check.',
+  ].filter(Boolean).join(' ');
+}
+
 function normalizeToolName(event) {
   const direct = normalizeOptionalString(event?.toolName)
     ?? normalizeOptionalString(event?.name)
@@ -1769,6 +1801,18 @@ function analyzeArtifactFinal(event, ctx) {
   const heartbeatOk = isHeartbeatOk(finalText);
   const currentRunId = getRunId(event, ctx);
   const runToolEvidence = getToolEvidenceForRun(currentRunId);
+  const preferences = getTurnPreferences(event, ctx);
+  const requestedMediaMode = preferences?.mode === 'image' || preferences?.mode === 'video'
+    ? preferences.mode
+    : undefined;
+  const requestedMediaTool = requestedMediaMode === 'image'
+    ? 'image_generate'
+    : requestedMediaMode === 'video'
+      ? 'video_generate'
+      : undefined;
+  const requestedMediaToolAttempts = requestedMediaTool
+    ? runToolEvidence.attempts.filter((attempt) => attempt.toolName === requestedMediaTool)
+    : [];
   const artifacts = bindArtifactsToCurrentRunToolEvidence(
     buildArtifactEvidence({ cwd: event?.cwd }, finalText),
     runToolEvidence,
@@ -1781,6 +1825,12 @@ function analyzeArtifactFinal(event, ctx) {
   const verificationBlocked = failedArtifacts.length > 0;
   const passedArtifactCount = artifacts.filter(({ verification }) => verification.status === 'passed').length;
   const shouldReviseArtifact = failedArtifacts.length > 0;
+  const shouldReviseMissingMediaAttempt = Boolean(
+    requestedMediaTool
+    && activeUserText.trim()
+    && !heartbeatPoll
+    && requestedMediaToolAttempts.length === 0,
+  );
   const shouldReviseHeartbeat = Boolean(
     heartbeatPoll
     && !heartbeatOk,
@@ -1788,9 +1838,11 @@ function analyzeArtifactFinal(event, ctx) {
   const shouldReviseEmptyFinal = Boolean(
     activeUserText.trim()
     && !heartbeatPoll
-    && emptyFinal,
+    && emptyFinal
+    && !shouldReviseMissingMediaAttempt,
   );
   const shouldRevise = shouldReviseHeartbeat
+    || shouldReviseMissingMediaAttempt
     || shouldReviseEmptyFinal
     || shouldReviseArtifact;
   return {
@@ -1800,6 +1852,9 @@ function analyzeArtifactFinal(event, ctx) {
     heartbeatPoll,
     heartbeatOk,
     currentRunId,
+    requestedMediaMode,
+    requestedMediaTool,
+    requestedMediaToolAttemptCount: requestedMediaToolAttempts.length,
     currentRunToolAttemptCount: runToolEvidence.attempts.length,
     currentRunFailedToolCount: runToolEvidence.attempts.filter((attempt) => attempt.failed).length,
     currentRunSuccessfulArtifactCount: runToolEvidence.attempts.reduce(
@@ -1811,6 +1866,7 @@ function analyzeArtifactFinal(event, ctx) {
     verificationPassed,
     verificationBlocked,
     shouldReviseHeartbeat,
+    shouldReviseMissingMediaAttempt,
     shouldReviseEmptyFinal,
     shouldReviseArtifact,
     shouldRevise,
@@ -1829,6 +1885,25 @@ function buildRevision(analysis) {
           '最新用户消息是内部心跳 `[OpenClaw heartbeat poll]`，不是用户的新任务。',
           '不要继续历史任务、不要评价上一轮、不要承诺补做，也不要输出任何产物说明。',
           '本轮最终回复必须只包含：HEARTBEAT_OK',
+        ].join('\n'),
+      },
+    };
+  }
+  if (analysis?.shouldReviseMissingMediaAttempt) {
+    const mode = analysis.requestedMediaMode === 'video' ? 'video' : 'image';
+    const toolName = mode === 'video' ? 'video_generate' : 'image_generate';
+    return {
+      action: 'revise',
+      reason: `UClaw ${mode} mode ended without a ${toolName} attempt.`,
+      retry: {
+        idempotencyKey: `${REVISION_ID}:missing-${mode}-attempt`,
+        maxAttempts: 1,
+        instruction: [
+          `The UClaw client explicitly selected ${mode} mode for this turn, but the previous response ended without calling ${toolName}.`,
+          mode === 'video'
+            ? 'Continue the same request now: use the required uclaw_video_project flow when applicable, then call video_generate and deliver the verified video artifact.'
+            : 'Continue the same request now: call image_generate and deliver the verified image artifact.',
+          'Do not answer with another promise or capability description. If execution is unavailable or fails, report the concrete tool or provider failure after the real attempt.',
         ].join('\n'),
       },
     };
@@ -2404,10 +2479,20 @@ function registerArtifactGuard(api) {
       }
       const preferences = await requestTurnPreferencesFromHost(event, ctx);
       cacheTurnPreferences(event, ctx, preferences);
-      return { appendSystemContext: VIDEO_MODEL_PLANNING_CONTEXT };
+      const turnPreferenceContext = buildTurnPreferenceSystemContext(preferences);
+      if (turnPreferenceContext) {
+        logDiagnostic('turn-preferences-consumed', {
+          eventId: eventId(event, ctx),
+          mode: preferences.mode,
+          selectedArtifactCount: Array.isArray(preferences.selectedArtifacts) ? preferences.selectedArtifacts.length : 0,
+        });
+      }
+      return {
+        appendSystemContext: [VIDEO_MODEL_PLANNING_CONTEXT, turnPreferenceContext].filter(Boolean).join('\n\n'),
+      };
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
-      description: 'Sanitize prompt history and retain per-turn media defaults without adding UClaw context to the model prompt.',
+      description: 'Sanitize prompt history and project explicit per-turn media mode and constraints into the model prompt.',
       timeoutMs: TURN_PREFERENCES_TIMEOUT_MS + 2_000,
     });
     registerLifecycleHook(api, 'before_tool_call', async (event, ctx) => {
@@ -2503,6 +2588,9 @@ function registerArtifactGuard(api) {
         emptyFinal: analysis.emptyFinal,
         heartbeatPoll: analysis.heartbeatPoll,
         heartbeatOk: analysis.heartbeatOk,
+        requestedMediaMode: analysis.requestedMediaMode,
+        requestedMediaTool: analysis.requestedMediaTool,
+        requestedMediaToolAttemptCount: analysis.requestedMediaToolAttemptCount,
         currentRunToolAttemptCount: analysis.currentRunToolAttemptCount,
         currentRunFailedToolCount: analysis.currentRunFailedToolCount,
         currentRunSuccessfulArtifactCount: analysis.currentRunSuccessfulArtifactCount,
@@ -2511,6 +2599,7 @@ function registerArtifactGuard(api) {
         verificationPassed: analysis.verificationPassed,
         verificationBlocked: analysis.verificationBlocked,
         shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
+        shouldReviseMissingMediaAttempt: analysis.shouldReviseMissingMediaAttempt,
         shouldReviseEmptyFinal: analysis.shouldReviseEmptyFinal,
         shouldReviseArtifact: analysis.shouldReviseArtifact,
         shouldRevise: analysis.shouldRevise,
@@ -2520,7 +2609,7 @@ function registerArtifactGuard(api) {
       return buildRevision(analysis);
     }, {
       name: REVISION_ID,
-      description: 'Verify concrete artifact references and recover empty internal final responses.',
+      description: 'Verify concrete artifact references and recover missing media execution or empty final responses.',
     });
   }
 }
@@ -2528,7 +2617,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.2.8',
+  version: '0.2.9',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -2547,6 +2636,7 @@ export const __test = {
   sanitizeInternalTranscriptMessage,
   compactHistoricalPresentationToolCalls,
   cacheTurnPreferences,
+  buildTurnPreferenceSystemContext,
   applyTurnMediaDefaults,
   VIDEO_MODEL_PLANNING_CONTEXT,
   registerArtifactGuard,

@@ -5,7 +5,8 @@
  * are in the toolbar; messages render with markdown + streaming.
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, Loader2, RotateCcw } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, CreditCard, Loader2, RotateCcw } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { useChatStore, type ChatRuntimeRunState, type RawMessage } from '@/stores/chat';
 import {
   buildStreamingAssistantMessageFromRuntimeRun,
@@ -696,6 +697,7 @@ function setBoundedSessionEntry<K, V>(map: Map<K, V>, key: K, value: V, maxEntri
 
 export function Chat() {
   const { t } = useTranslation('chat');
+  const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
 
@@ -713,6 +715,8 @@ export function Chat() {
   const pendingVideoGenerationLocal = useChatStore((s) => s.pendingVideoGenerationLocal);
   const error = useChatStore((s) => s.error);
   const runError = useChatStore((s) => s.runError);
+  const runErrorKind = useChatStore((s) => s.runErrorKind);
+  const runErrorIsQuota = Boolean(runError && runErrorKind === 'quota');
   const streamingMessage = useChatStore((s) => s.streamingMessage);
   const streamingTools = useChatStore((s) => s.streamingTools);
   const pendingFinal = useChatStore((s) => s.pendingFinal);
@@ -1954,20 +1958,32 @@ export function Chat() {
           <div className="max-w-4xl mx-auto rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-3">
             <p className="text-sm font-medium text-destructive flex items-center gap-2">
               <AlertCircle className="h-4 w-4" />
-              {t('runError.title')}
+              {runErrorIsQuota ? t('runError.quotaTitle') : t('runError.title')}
             </p>
             <p className="mt-1 text-sm text-destructive/90 break-words">
               {runError}
             </p>
-            <button
-              type="button"
-              onClick={() => void retryLastRun()}
-              data-testid="chat-run-retry"
-              className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-destructive hover:underline"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              {t('runError.retry')}
-            </button>
+            {runErrorIsQuota ? (
+              <button
+                type="button"
+                onClick={() => navigate('/recharge')}
+                data-testid="chat-run-recharge"
+                className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-destructive hover:underline"
+              >
+                <CreditCard className="h-3.5 w-3.5" />
+                {t('runError.recharge')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void retryLastRun()}
+                data-testid="chat-run-retry"
+                className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-destructive hover:underline"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {t('runError.retry')}
+              </button>
+            )}
           </div>
         </div>
       )}

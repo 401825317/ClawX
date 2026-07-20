@@ -17,10 +17,14 @@ const EXPECTED_ANALYSIS_KEYS = [
   'heartbeatOk',
   'heartbeatPoll',
   'passedArtifactCount',
+  'requestedMediaMode',
+  'requestedMediaTool',
+  'requestedMediaToolAttemptCount',
   'shouldRevise',
   'shouldReviseArtifact',
   'shouldReviseEmptyFinal',
   'shouldReviseHeartbeat',
+  'shouldReviseMissingMediaAttempt',
   'verificationBlocked',
   'verificationPassed',
 ].sort();
@@ -103,6 +107,35 @@ assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /select the provi
 assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /grok-video-1\.5 only with exactly one managed reference image/iu);
 assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /create a uclaw_video_project before generation/iu);
 assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /uclaw_video_project action:compose exactly once/iu);
+
+const explicitVideoModeContext = __test.buildTurnPreferenceSystemContext({
+  mode: 'video',
+  video: { size: '854x480', durationSeconds: 6 },
+});
+assert.match(explicitVideoModeContext, /explicit current-turn user intent/iu);
+assert.match(explicitVideoModeContext, /calling video_generate/iu);
+assert.match(explicitVideoModeContext, /size=854x480/iu);
+assert.match(explicitVideoModeContext, /durationSeconds=6/iu);
+
+const missingVideoAttemptEvent = finalizeEvent(
+  'media:missing-video-attempt',
+  'Generate a short test video.',
+  'I will prepare a video for you.',
+);
+__test.cacheTurnPreferences(missingVideoAttemptEvent, { runId: missingVideoAttemptEvent.runId }, {
+  mode: 'video',
+  video: { size: '854x480', durationSeconds: 6 },
+});
+const missingVideoAttempt = __test.analyzeArtifactFinal(
+  missingVideoAttemptEvent,
+  { runId: missingVideoAttemptEvent.runId },
+);
+assert.equal(missingVideoAttempt.requestedMediaTool, 'video_generate');
+assert.equal(missingVideoAttempt.requestedMediaToolAttemptCount, 0);
+assert.equal(missingVideoAttempt.shouldReviseMissingMediaAttempt, true);
+assert.equal(missingVideoAttempt.shouldRevise, true);
+assert.match(__test.buildRevision(missingVideoAttempt)?.retry?.idempotencyKey ?? '', /missing-video-attempt/u);
+assert.match(__test.buildRevision(missingVideoAttempt)?.retry?.instruction ?? '', /Do not answer with another promise/iu);
 
 const compactablePresentationArgs = JSON.stringify({
   id: 'create_designed_pptx_file',
