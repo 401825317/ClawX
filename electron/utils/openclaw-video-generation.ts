@@ -19,6 +19,7 @@ import {
 import { OPENAI_CODEX_RUNTIME_PROVIDER_KEY } from './provider-keys';
 import {
   CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
+  CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS,
   CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
   CLAWX_OPENAI_VIDEO_MODEL_OPTIONS,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
@@ -90,9 +91,9 @@ export interface VideoGenerationTestResult {
   result?: unknown;
 }
 
-const DEFAULT_TEST_PROMPT = 'A cinematic four-second shot of a small red paper airplane gliding over a white desk.';
+const DEFAULT_TEST_PROMPT = 'A cinematic six-second shot of a small red paper airplane gliding over a white desk.';
 const DEFAULT_TEST_VIDEO_SIZE = '1280x720';
-const DEFAULT_TEST_DURATION_SECONDS = 4;
+const DEFAULT_TEST_DURATION_SECONDS = CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS;
 export const VIDEO_GEN_UI_TEST_MAX_TIMEOUT_MS = CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
 
 type AgentModelConfigShape = {

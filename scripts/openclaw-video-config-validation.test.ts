@@ -3,6 +3,7 @@ import {
   normalizeRegisteredVideoModelRef,
   type VideoGenerationProviderRow,
 } from '../electron/utils/openclaw-video-generation';
+import { normalizeClawXOpenAiVideoDurationSeconds } from '../electron/utils/openclaw-video-relay-constants';
 
 function provider(params: {
   id: string;
@@ -45,5 +46,11 @@ assert.equal(
 );
 assert.equal(normalizeRegisteredVideoModelRef('openai/smart-latest', providers), null);
 assert.equal(normalizeRegisteredVideoModelRef('unknown/fal-ai/minimax/video-01-live', providers), null);
+assert.equal(normalizeClawXOpenAiVideoDurationSeconds(), 6);
+assert.equal(normalizeClawXOpenAiVideoDurationSeconds(4), 6);
+assert.equal(normalizeClawXOpenAiVideoDurationSeconds(6), 6);
+assert.equal(normalizeClawXOpenAiVideoDurationSeconds(9), 10);
+assert.equal(normalizeClawXOpenAiVideoDurationSeconds(12), 10);
+assert.equal(normalizeClawXOpenAiVideoDurationSeconds(14), 15);
 
 console.log('openclaw video config validation tests passed');

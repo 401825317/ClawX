@@ -4,9 +4,10 @@ import { join } from 'node:path';
 const TOOL_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_TOOL_V1';
 const RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1';
 const OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1';
+const OPENAI_DURATION_PATCH_MARKER = 'UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2';
 
 const GROK_VIDEO_MODELS = new Set(['grok-image-video', 'grok-video-1.5']);
-const GROK_VIDEO_DURATIONS = [4, 6, 8, 10, 12, 15];
+const GROK_VIDEO_DURATIONS = [6, 10, 15];
 const GROK_VIDEO_SIZES = ['1280x720', '720x1280', '1024x1024'];
 
 function countOccurrences(content, search) {
@@ -421,12 +422,10 @@ const OPENAI_CONSTANTS_PATCH = `const OPENAI_VIDEO_SIZES = [
 const ${OPENAI_PATCH_MARKER} = true;
 const UCLAW_OPENAI_GROK_VIDEO_MODEL = "grok-image-video";
 const UCLAW_OPENAI_GROK_VIDEO_15_MODEL = "grok-video-1.5";
+const ${OPENAI_DURATION_PATCH_MARKER} = true;
 const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
-\t4,
 \t6,
-\t8,
 \t10,
-\t12,
 \t15
 ];
 const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
@@ -437,6 +436,22 @@ const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
 function isUClawOpenAIGrokVideoModel(model) {
 \treturn model === UCLAW_OPENAI_GROK_VIDEO_MODEL || model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL;
 }`;
+
+const OPENAI_LEGACY_GROK_DURATION_PATCH = `const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
+\t4,
+\t6,
+\t8,
+\t10,
+\t12,
+\t15
+];`;
+
+const OPENAI_CURRENT_GROK_DURATION_PATCH = `const ${OPENAI_DURATION_PATCH_MARKER} = true;
+const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
+\t6,
+\t10,
+\t15
+];`;
 
 const OPENAI_DURATION_ANCHOR = `function resolveDurationSeconds(durationSeconds) {
 \tif (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds)) return;
@@ -599,7 +614,22 @@ const OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model
 
 export function patchOpenClawOpenAiVideoCapabilityContent(content, filePath = '<memory>') {
   if (!content.includes('function buildOpenAIVideoGenerationProvider()')) return null;
-  if (content.includes(OPENAI_PATCH_MARKER)) return { content, changed: false, category: 'openai-provider' };
+  if (content.includes(OPENAI_PATCH_MARKER)) {
+    if (content.includes(OPENAI_DURATION_PATCH_MARKER)) {
+      return { content, changed: false, category: 'openai-provider' };
+    }
+    return {
+      content: replaceUnique(
+        content,
+        OPENAI_LEGACY_GROK_DURATION_PATCH,
+        OPENAI_CURRENT_GROK_DURATION_PATCH,
+        'legacy OpenAI Grok video durations',
+        filePath,
+      ),
+      changed: true,
+      category: 'openai-provider',
+    };
+  }
   let patched = replaceUnique(content, OPENAI_CONSTANTS_ANCHOR, OPENAI_CONSTANTS_PATCH, 'OpenAI video constants', filePath);
   patched = replaceUnique(patched, OPENAI_DURATION_ANCHOR, OPENAI_DURATION_PATCH, 'OpenAI video duration resolver', filePath);
   patched = replaceUnique(patched, OPENAI_SIZE_ANCHOR, OPENAI_SIZE_PATCH, 'OpenAI video size resolver', filePath);

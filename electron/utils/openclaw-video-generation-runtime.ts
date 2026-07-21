@@ -11,6 +11,7 @@ import {
   CLAWX_OPENAI_VIDEO_15_MODEL,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   isClawXOpenAiVideoModelId,
+  normalizeClawXOpenAiVideoDurationSeconds,
 } from './openclaw-video-relay-constants';
 import { saveGeneratedMediaBuffer } from './generated-media-store';
 
@@ -166,7 +167,10 @@ function parseVideoSize(size: string | undefined): { width?: number; height?: nu
   };
 }
 
-function normalizeDurationSeconds(durationSeconds: number | undefined): number {
+function normalizeDurationSeconds(durationSeconds: number | undefined, model: string): number {
+  if (isClawXOpenAiVideoModelId(model)) {
+    return normalizeClawXOpenAiVideoDurationSeconds(durationSeconds);
+  }
   return typeof durationSeconds === 'number' && Number.isFinite(durationSeconds)
     ? Math.max(1, Math.round(durationSeconds))
     : 4;
@@ -573,7 +577,7 @@ export async function generateVideoInProcess(params: {
   const inputImages = await loadInputImages(params.inputImages);
   const imageCount = inputImages?.filter((image) => image.buffer && image.buffer.length > 0).length ?? 0;
   const requestedSize = params.size?.trim() || '1280x720';
-  const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds);
+  const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds, parsedModel.model);
   const requestedDimensions = parseVideoSize(requestedSize);
 
   if (parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY

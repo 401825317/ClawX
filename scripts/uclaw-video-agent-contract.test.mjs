@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -10,8 +10,12 @@ process.env.OPENCLAW_HOME = stateRoot;
 try {
   const artifactGuard = await import('../resources/openclaw-plugins/uclaw-artifact-guard/index.mjs');
   const videoProject = await import('../resources/openclaw-plugins/uclaw-video-project/index.mjs');
+  const artifactGuardPackage = JSON.parse(await readFile(
+    new URL('../resources/openclaw-plugins/uclaw-artifact-guard/package.json', import.meta.url),
+    'utf8',
+  ));
 
-  assert.equal(artifactGuard.default.version, '0.2.7');
+  assert.equal(artifactGuard.default.version, artifactGuardPackage.version);
 
   const lifecycleHooks = new Map();
   artifactGuard.__test.registerArtifactGuard({
