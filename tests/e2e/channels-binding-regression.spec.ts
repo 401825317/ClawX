@@ -101,17 +101,21 @@ test.describe('Channels binding regression', () => {
     const feishuGroupHeader = page.locator('div.rounded-2xl').filter({ hasText: 'Feishu / Lark' }).first();
     await expect(feishuGroupHeader).toContainText(/Connected|已连接|接続済み|Подключён/);
 
-    await page.getByRole('button', { name: /Add Account|添加账号|アカウントを追加/ }).click();
-    await expect(page.getByText(/Configure Feishu \/ Lark|dialog\.configureTitle/)).toBeVisible();
+    await page.getByRole('button', {
+      name: /Add Account|添加账号|アカウントを追加|Добавить учётную запись/i,
+    }).click();
 
     const accountIdInput = page.locator('#account-id');
+    await expect(accountIdInput).toBeVisible();
     const newAccountId = await accountIdInput.inputValue();
     await expect(accountIdInput).toHaveValue(/feishu-/);
     await page.locator('#appId').fill('cli_test');
     await page.locator('#appSecret').fill('secret_test');
 
-    await page.getByRole('button', { name: /Save & Connect|dialog\.saveAndConnect/ }).click();
-    await expect(page.getByText(/Configure Feishu \/ Lark|dialog\.configureTitle/)).toBeHidden();
+    await page.getByRole('button', {
+      name: /Save & Connect|保存并连接|保存して接続|Сохранить и подключить/i,
+    }).click();
+    await expect(accountIdInput).toBeHidden();
 
     const newAccountRow = page.locator('div.rounded-xl').filter({ hasText: newAccountId }).first();
     await expect(newAccountRow).toBeVisible();

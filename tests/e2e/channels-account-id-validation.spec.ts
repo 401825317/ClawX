@@ -74,15 +74,21 @@ test.describe('Channels account ID validation', () => {
     await expect(page.getByTestId('channels-page')).toBeVisible();
     await expect(page.getByText('Feishu / Lark')).toBeVisible();
 
-    await page.getByRole('button', { name: /Add Account|account\.add/i }).click();
-    await expect(page.getByText(/Configure Feishu \/ Lark|dialog\.configureTitle/)).toBeVisible();
+    await page.getByRole('button', {
+      name: /Add Account|添加账号|アカウントを追加|Добавить учётную запись/i,
+    }).click();
+    await expect(page.locator('#account-id')).toBeVisible();
 
     await page.locator('#account-id').fill('测试账号');
     await page.locator('#appId').fill('cli_test');
     await page.locator('#appSecret').fill('secret_test');
 
-    await page.getByRole('button', { name: /Save & Connect|dialog\.saveAndConnect/ }).click();
-    await expect(page.getByText(/account\.invalidCanonicalId|must use lowercase letters/i).first()).toBeVisible();
+    await page.getByRole('button', {
+      name: /Save & Connect|保存并连接|保存して接続|Сохранить и подключить/i,
+    }).click();
+    await expect(page.getByText(
+      /must use lowercase letters|账号 ID 仅支持小写字母|アカウント ID は英小文字|ID учётной записи должен содержать строчные буквы/i,
+    ).first()).toBeVisible();
 
     const saveCalls = await electronApp.evaluate(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

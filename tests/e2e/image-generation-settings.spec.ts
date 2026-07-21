@@ -179,7 +179,9 @@ test.describe('Image generation settings page', () => {
       await page.getByTestId('image-generation-clear').click();
       const confirmDialog = page.getByRole('dialog');
       await expect(confirmDialog).toBeVisible();
-      await confirmDialog.getByRole('button', { name: 'Clear', exact: true }).click();
+      await confirmDialog.getByRole('button', {
+        name: /^(Clear|清除|クリア|Очистить)$/,
+      }).click();
 
       await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('');
       await expect(page.getByTestId('image-generation-clear')).toBeDisabled();
