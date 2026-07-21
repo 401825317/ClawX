@@ -830,6 +830,7 @@ function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string
 export function buildJunFeiAIProviderAccount(
   bootstrap: JunFeiAIBootstrapPayload,
   existing?: ProviderAccount | null,
+  isDefault = existing?.isDefault ?? true,
 ): ProviderAccount {
   const runtime = bootstrap.runtime ?? {};
   const now = new Date().toISOString();
@@ -848,9 +849,7 @@ export function buildJunFeiAIProviderAccount(
     model: resolveRuntimeDefaultModel(bootstrap),
     fallbackModels: normalizeFallbackModels(runtime.fallbackModels),
     enabled: true,
-    // Default ownership is maintained by setDefaultProvider(). Preserve that
-    // state so a migrated OpenAI account does not make status checks oscillate.
-    isDefault: existing?.isDefault ?? true,
+    isDefault,
     metadata: {
       resourceUrl: bootstrap.service?.apiOrigin || getJunFeiAIOrigin(),
       ...modelMetadata,
@@ -1489,8 +1488,16 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   const activation = await applyLocalDeviceActivationState(bootstrap, authUser);
   bootstrap = activation.bootstrap;
 
+  const managedOpenAiChatActive = await isManagedOpenAiChatMigrated();
+  const targetDefaultProvider = managedOpenAiChatActive
+    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
+    : JUNFEIAI_PROVIDER_ID;
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
-  const account = buildJunFeiAIProviderAccount(bootstrap, existing);
+  const account = buildJunFeiAIProviderAccount(
+    bootstrap,
+    existing,
+    targetDefaultProvider === JUNFEIAI_PROVIDER_ID,
+  );
   try {
     await selfHealManagedTextModelsFromClientConfig(bootstrap.client?.modelOptions);
   } catch (error) {
@@ -1501,10 +1508,6 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     await saveProviderAccount(account);
   }
 
-  const managedOpenAiChatActive = await isManagedOpenAiChatMigrated();
-  const targetDefaultProvider = managedOpenAiChatActive
-    ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
-    : JUNFEIAI_PROVIDER_ID;
   const defaultProvider = await getDefaultProvider();
   const defaultProviderChanged = defaultProvider !== targetDefaultProvider;
   if (defaultProvider !== targetDefaultProvider) {
@@ -1603,7 +1606,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     if (!shouldClearRuntimeKey) {
       try {
         await ensureManagedOpenAiImageRelay();
-        await ensureManagedOpenAiVideoRelay();
+        await ensureManagedOpenAiVideoRelay({ preserveExisting: true });
         if (runtimeSyncGatewayManager?.getStatus().state === 'running') {
           await runtimeSyncGatewayManager.reload({
             reason: 'junfeiai-managed-media-timeout-sync',

@@ -2,9 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  JUNFEIAI_APP_UPDATE_LEGACY_INSTALLED_FEED_BASE_URL,
+  JUNFEIAI_APP_UPDATE_MANAGED_API_PATH,
+  JUNFEIAI_APP_UPDATE_MANAGED_FEED_PATH,
   JUNFEIAI_DEFAULT_API_PROTOCOL,
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
   JUNFEIAI_DEFAULT_THINKING_LEVEL,
+  JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL,
+  JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL_REF,
   JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS,
   JUNFEIAI_MEDIA_GENERATION_CLIENT_TIMEOUT_BUFFER_MS,
   JUNFEIAI_MEDIA_GENERATION_TEST_TIMEOUT_MS,
@@ -34,8 +39,16 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
   assert.equal(JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL, 'openai-responses');
   assert.equal(JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW, endpoints.defaultModelContextWindow);
   assert.equal(JUNFEIAI_DEFAULT_THINKING_LEVEL, endpoints.defaultThinkingLevel);
+  assert.equal(JUNFEIAI_APP_UPDATE_MANAGED_FEED_PATH, endpoints.appUpdates.managedFeedPath);
+  assert.equal(JUNFEIAI_APP_UPDATE_MANAGED_API_PATH, endpoints.appUpdates.managedApiPath);
+  assert.equal(
+    JUNFEIAI_APP_UPDATE_LEGACY_INSTALLED_FEED_BASE_URL,
+    endpoints.appUpdates.legacyInstalledFeedBaseUrl,
+  );
   assert.equal(JUNFEIAI_OPENCLAW_EXEC_SECURITY, endpoints.openClawExec.security);
   assert.equal(JUNFEIAI_OPENCLAW_EXEC_ASK, endpoints.openClawExec.ask);
+  assert.equal(JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL_REF, endpoints.imageGenerationDefaults.modelRef);
+  assert.equal(JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL, 'gpt-image-2');
   assert.deepEqual(JUNFEIAI_OPENCLAW_TEXT_FAILOVER, endpoints.openClawTextFailover);
   assert.equal(
     JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,

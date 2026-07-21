@@ -1,4 +1,8 @@
 import sharp from 'sharp';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const JPEG_QUALITY_STEPS = [88, 82, 76, 70, 64, 58, 52, 46, 40, 34];
 const SCALE_STEPS = [1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3];
@@ -44,6 +48,60 @@ function fileNameForFormat(fileName, format) {
   return /\.[^./\\]+$/u.test(normalized)
     ? normalized.replace(/\.[^./\\]+$/u, `.${extension}`)
     : `${normalized}.${extension}`;
+}
+
+function deliveryFileExtension(image) {
+  const fileName = typeof image?.fileName === 'string' ? image.fileName.trim() : '';
+  const fileMatch = fileName.match(/\.(png|jpe?g|webp)$/iu);
+  if (fileMatch) return fileMatch[1].toLowerCase().replace('jpeg', 'jpg');
+  const format = formatForMimeType(image?.mimeType);
+  return format === 'jpeg' ? 'jpg' : format ?? 'bin';
+}
+
+function shouldUseLocalTempFallback(error, platform) {
+  if (platform !== 'win32') return false;
+  const code = typeof error?.code === 'string' ? error.code.toUpperCase() : '';
+  if (['PATH-MISMATCH', 'EACCES', 'EBUSY', 'EIO', 'ENODEV', 'ENOENT', 'EPERM', 'EROFS'].includes(code)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:path|store directory|fallback target|fallback temp) changed during write|operation not permitted|permission denied|resource busy/iu.test(message);
+}
+
+export async function saveGeneratedImageForDelivery(saveMediaBuffer, image, options = {}) {
+  try {
+    return await saveMediaBuffer(
+      image.buffer,
+      image.mimeType,
+      'tool-image-generation',
+      options.maxBytes,
+      options.originalFilename || image.fileName,
+    );
+  } catch (error) {
+    const platform = options.platform ?? process.platform;
+    if (!shouldUseLocalTempFallback(error, platform)) throw error;
+
+    const outputDir = join(options.tempRoot ?? tmpdir(), 'openclaw', 'tool-image-generation');
+    await mkdir(outputDir, { recursive: true });
+    const id = `${randomUUID()}.${deliveryFileExtension(image)}`;
+    const outputPath = join(outputDir, id);
+    await writeFile(outputPath, image.buffer, { flag: 'wx', mode: 0o600 });
+    const persisted = await readFile(outputPath);
+    if (!persisted.equals(image.buffer)) {
+      throw new Error(`Generated image local fallback verification failed: ${outputPath}`, { cause: error });
+    }
+    console.warn('[uclaw-native-image-delivery] OpenClaw media store write failed; used local temp fallback', {
+      code: typeof error?.code === 'string' ? error.code : undefined,
+      path: outputPath,
+      size: image.buffer.byteLength,
+    });
+    return {
+      id,
+      path: outputPath,
+      size: image.buffer.byteLength,
+      contentType: image.mimeType,
+    };
+  }
 }
 
 function qualitySteps(requested) {

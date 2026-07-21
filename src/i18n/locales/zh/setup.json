@@ -240,7 +240,8 @@
         "components": "组件",
         "gateway": "网关",
         "running": "运行中",
-        "footer": "您可以在设置中自定义技能并连接渠道"
+    "footer": "您可以在设置中自定义技能并连接渠道",
+    "persistError": "设置状态保存失败。请确认 UClawData 目录可写后重试。"
     },
     "nav": {
         "next": "下一步",

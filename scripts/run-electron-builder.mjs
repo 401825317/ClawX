@@ -15,9 +15,13 @@ const ELECTRON_BUILDER_BIN = process.platform === 'win32'
 const passthroughArgs = process.argv.slice(2);
 const skipNsisPatch = passthroughArgs.includes('--skip-nsis-patch');
 const args = passthroughArgs.filter((arg) => arg !== '--skip-nsis-patch');
+const electronBuilderEnv = {
+  ...process.env,
+  ...(skipNsisPatch ? { CLAWX_SKIP_NSIS_PATCH: '1' } : {}),
+};
 
 function isWindowsBuild() {
-  return process.platform === 'win32' && args.some((arg) => arg === '--win' || arg === 'portable');
+  return args.some((arg) => arg === '--win' || arg === 'portable');
 }
 
 function cleanWindowsBuildOutput() {
@@ -53,7 +57,7 @@ function spawnElectronBuilder() {
     return spawn('/bin/bash', ['-lc', command], {
       cwd: ROOT,
       stdio: 'inherit',
-      env: process.env,
+      env: electronBuilderEnv,
     });
   }
 
@@ -62,8 +66,7 @@ function spawnElectronBuilder() {
       cwd: ROOT,
       stdio: 'inherit',
       env: {
-        ...process.env,
-        ...(skipNsisPatch ? { CLAWX_SKIP_NSIS_PATCH: '1' } : {}),
+        ...electronBuilderEnv,
         PATH: `${__dirname}${pathDelimiter}${process.env.PATH ?? ''}`,
       },
       shell: false,
@@ -73,7 +76,7 @@ function spawnElectronBuilder() {
   return spawn(ELECTRON_BUILDER_BIN, args, {
     cwd: ROOT,
     stdio: 'inherit',
-    env: process.env,
+    env: electronBuilderEnv,
     shell: false,
   });
 }

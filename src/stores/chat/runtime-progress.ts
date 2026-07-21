@@ -38,6 +38,7 @@ type RuntimeToolProgressContext = {
 const HIDDEN_TOOL_PROGRESS_NAMES = new Set([
   'tool_describe',
   'tool_search',
+  'update_plan',
   'uclaw_get_runtime_capabilities',
   'uclaw_get_task_bridge_capabilities',
   'uclaw_get_host_task',
@@ -96,6 +97,26 @@ function matchingToolStart(
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const candidate = events[index];
     if (candidate?.type === 'tool.started' && candidate.toolCallId === toolCallId) return candidate;
+  }
+  return undefined;
+}
+
+function matchingDelegatedParentToolStart(
+  run: ChatRuntimeRunState | undefined,
+  delegatedParentToolCallId: string,
+): Extract<ChatRuntimeEvent, { type: 'tool.started' }> | undefined {
+  const exact = matchingToolStart(run, delegatedParentToolCallId);
+  if (exact) return exact;
+
+  const events = run?.events ?? [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const candidate = events[index];
+    if (
+      candidate?.type === 'tool.started'
+      && encodeToolSearchParentCallId(candidate.toolCallId) === delegatedParentToolCallId
+    ) {
+      return candidate;
+    }
   }
   return undefined;
 }
@@ -289,9 +310,6 @@ function inferToolNarration(name: string, command: string | undefined): { key: s
     if (/\b(?:pgrep|ps)\b/iu.test(command)) {
       return { key: 'confirm-process', text: '我再确认应用是否仍在运行。' };
     }
-    if (/\b(?:cat|sed|awk|jq|plutil|defaults)\b/iu.test(command)) {
-      return { key: 'inspect-context', text: '我先查看相关信息。' };
-    }
     return null;
   }
 
@@ -320,10 +338,7 @@ function canonicalProgressToolCallId(
 ): string {
   const nested = parseToolSearchNestedCallId(event.toolCallId);
   if (!nested) return event.toolCallId;
-  const parentStart = [...(run?.events ?? [])].reverse().find((candidate): candidate is RuntimeToolEvent => (
-    candidate?.type === 'tool.started'
-    && encodeToolSearchParentCallId(candidate.toolCallId) === nested.encodedParentToolCallId
-  ));
+  const parentStart = matchingDelegatedParentToolStart(run, nested.encodedParentToolCallId);
   if (!parentStart) return event.toolCallId;
   const parentContext = resolveRuntimeToolProgressContext(run, parentStart);
   const childToolName = canonicalToolName(nested.toolName);

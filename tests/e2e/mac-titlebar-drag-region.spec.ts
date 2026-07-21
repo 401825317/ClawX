@@ -1,4 +1,4 @@
-import { expect, test } from './fixtures/electron';
+import { completeSetup, expect, test } from './fixtures/electron';
 import {
   MAC_SIDEBAR_CHROME_HEIGHT,
   SIDEBAR_COLLAPSED_WIDTH,
@@ -8,10 +8,8 @@ test.describe('macOS frameless chrome', () => {
   test.skip(process.platform !== 'darwin', 'macOS drag-region chrome only');
 
   test('keeps a draggable strip above non-chat pages and stacks chat above it', async ({ page }) => {
-    await expect(page.getByTestId('setup-page')).toBeVisible();
-    await page.getByTestId('setup-skip-button').click();
+    await completeSetup(page);
 
-    await expect(page.getByTestId('main-layout')).toBeVisible();
     await expect(page.getByTestId('main-layout')).toHaveAttribute('data-platform', 'darwin');
 
     const mainDragRegion = page.getByTestId('mac-main-drag-region');

@@ -15,6 +15,13 @@ const TURN_PREFERENCES_CACHE_MAX_ENTRIES = 256;
 const turnPreferencesByRunId = new Map();
 const MEDIA_SIDE_EFFECT_TOOLS = new Set(['image_generate', 'video_generate', 'create_blender_scene', 'repair_blender_scene']);
 const NATIVE_MEDIA_GENERATION_TOOLS = new Set(['image_generate', 'video_generate']);
+const NATIVE_MEDIA_PROMPT_MAX_CHARACTERS = 4_096;
+const VIDEO_MODEL_PLANNING_CONTEXT = [
+  'For video generation, select the provider model explicitly from the active video capability list and the current request inputs; call video_generate action:list when the compatible candidate is unclear.',
+  'Do not treat a UI default model as a routing decision. Respect user-requested size and duration when they are supplied as tool constraints.',
+  'For configured UClaw Grok candidates, use grok-image-video for text-only video and use grok-video-1.5 only with exactly one managed reference image. Never send grok-video-1.5 without that image.',
+  'For a requested final video, create a uclaw_video_project before generation. Use one shot when one generated clip satisfies the brief; plan multiple shots only when the requested duration or creative structure requires them. Record every video_generate result, run deterministic shot QA plus semantic review before accepting a shot. When every required multi-shot clip is accepted, call uclaw_video_project action:compose exactly once; do not manually start a separate final Host task or deliver an intermediate clip.',
+].join(' ');
 const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
 const MEDIA_INPUT_PARAM_KEYS = new Set(['image', 'images', 'mask', 'video', 'videos']);
 const IMAGE_INPUT_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/iu;
@@ -1723,6 +1730,20 @@ function canonicalAuthorizationToolName(event) {
   return direct.includes(':') ? direct.split(':').at(-1) : direct;
 }
 
+function nativeMediaPromptLengthBlock(event) {
+  const toolName = canonicalAuthorizationToolName(event);
+  if (!NATIVE_MEDIA_GENERATION_TOOLS.has(toolName)) return undefined;
+  const prompt = normalizeEffectiveToolParams(event).prompt;
+  if (typeof prompt !== 'string') return undefined;
+  const characterCount = Array.from(prompt).length;
+  if (characterCount <= NATIVE_MEDIA_PROMPT_MAX_CHARACTERS) return undefined;
+  return {
+    toolName,
+    characterCount,
+    reason: `${toolName} prompt exceeds the unified ${NATIVE_MEDIA_PROMPT_MAX_CHARACTERS}-character limit (${characterCount}). Shorten the prompt before retrying.`,
+  };
+}
+
 function applyTurnMediaDefaults(event, ctx) {
   const toolName = canonicalAuthorizationToolName(event);
   const preferences = getTurnPreferences(event, ctx);
@@ -1740,7 +1761,10 @@ function applyTurnMediaDefaults(event, ctx) {
   const appliedKeys = [];
   for (const key of toolName === 'image_generate'
     ? ['model', 'size', 'quality']
-    : ['model', 'size', 'durationSeconds']) {
+    // Video model selection remains owned by the Agent and the configured
+    // provider primary. Renderer preferences only carry explicit geometry and
+    // timing constraints for the current turn.
+    : ['size', 'durationSeconds']) {
     const value = defaults[key];
     if (nextParams[key] !== undefined || value === undefined || value === null || value === '') continue;
     nextParams[key] = value;
@@ -1987,10 +2011,10 @@ function registerArtifactGuard(api) {
       }
       const preferences = await requestTurnPreferencesFromHost(event, ctx);
       cacheTurnPreferences(event, ctx, preferences);
-      return undefined;
+      return { appendSystemContext: VIDEO_MODEL_PLANNING_CONTEXT };
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
-      description: 'Sanitize prompt history and retain per-turn media defaults without adding UClaw context to the model prompt.',
+      description: 'Sanitize prompt history, retain per-turn media defaults, and expose the stable video planning contract.',
       timeoutMs: TURN_PREFERENCES_TIMEOUT_MS + 2_000,
     });
     registerLifecycleHook(api, 'before_tool_call', async (event, ctx) => {
@@ -2011,6 +2035,27 @@ function registerArtifactGuard(api) {
       }
 
       const toolName = normalizeToolName(effectiveEvent);
+      const promptLengthBlock = nativeMediaPromptLengthBlock(effectiveEvent);
+      if (promptLengthBlock) {
+        logDiagnostic('native-media-prompt-too-long', {
+          eventId: eventId(event, ctx),
+          toolName: promptLengthBlock.toolName,
+          characterCount: promptLengthBlock.characterCount,
+          limit: NATIVE_MEDIA_PROMPT_MAX_CHARACTERS,
+        });
+        return {
+          block: true,
+          blockReason: promptLengthBlock.reason,
+          reason: promptLengthBlock.reason,
+        };
+      }
+      if (toolName && MEDIA_SIDE_EFFECT_TOOLS.has(toolName)) {
+        logDiagnostic('native-media-tool-call', {
+          eventId: eventId(event, ctx),
+          toolName,
+          authorization: 'native_agent_tool_selection',
+        });
+      }
       const staging = await stageMediaToolInputs(effectiveEvent, ctx);
       if (staging.blockReason) {
         logDiagnostic('media-input-staging-failed', {
@@ -2052,7 +2097,7 @@ function registerArtifactGuard(api) {
       return undefined;
     }, {
       name: MEDIA_TOOL_PREPARATION_HOOK_ID,
-      description: 'Stage media inputs, rewrite managed screenshot paths, and apply per-turn media defaults.',
+      description: 'Validate and stage media inputs, rewrite managed screenshot paths, and apply per-turn media defaults.',
       priority: 100,
     });
     // OpenClaw buffers every assistant frame until terminal delivery whenever
@@ -2082,7 +2127,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.2.5',
+  version: '0.2.8',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -2098,5 +2143,7 @@ export const __test = {
   compactHistoricalPresentationToolCalls,
   cacheTurnPreferences,
   applyTurnMediaDefaults,
+  nativeMediaPromptLengthBlock,
   registerArtifactGuard,
+  VIDEO_MODEL_PLANNING_CONTEXT,
 };

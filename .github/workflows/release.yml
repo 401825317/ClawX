@@ -54,8 +54,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '22.22.3'
           cache: 'pnpm'
+
+      - name: Setup Go for Windows portable updater
+        if: matrix.platform == 'win'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: false
 
       - name: Prefer HTTPS for public GitHub git dependencies
         run: |
@@ -63,7 +70,7 @@ jobs:
           git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Download uv binaries for macOS
         if: matrix.platform == 'mac'
@@ -127,7 +134,9 @@ jobs:
       # Windows specific steps
       - name: Build Windows
         if: matrix.platform == 'win'
-        run: pnpm run package:win
+        run: |
+          pnpm run package:win
+          pnpm run package:win:usb
 
       # Detect release channel from tag to skip code signing for alpha/beta builds
       - name: Detect Windows release channel
@@ -203,73 +212,134 @@ jobs:
           if ($env:UNSIGNED_EXE_COUNT -and ($finalExeFiles.Count -ne [int]$env:UNSIGNED_EXE_COUNT)) {
             throw "Final release .exe count ($($finalExeFiles.Count)) does not match unsigned count ($env:UNSIGNED_EXE_COUNT)"
           }
+          foreach ($file in $finalExeFiles) {
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            Write-Host "Authenticode $($file.Name): $($signature.Status)"
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.Name): $($signature.Status)"
+            }
+          }
           Write-Host "Signed executables copied to release/ ($($finalExeFiles.Count) file(s))"
 
-      # Code signing changes the .exe binary, invalidating the sha512 hash that
-      # electron-builder wrote into latest.yml during the initial build.
-      # Recalculate the hash for each signed .exe and patch the yml files so
-      # electron-updater can verify the download successfully.
-      #
-      # Actual latest.yml structure (from electron-builder NSIS):
-      #   files:
-      #     - url: ClawX-0.2.4-win-x64.exe    ← files[] entries have url/sha512/size
-      #       sha512: <base64>
-      #       size: 430775882
-      #   path: ClawX-0.2.4-win-arm64.exe      ← top-level has path/sha512 (no size!)
-      #   sha512: <base64>
-      #   releaseDate: '...'
-      - name: Update latest.yml sha512 after code signing
+      - name: Validate Windows USB deep-signing configuration
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        shell: pwsh
+        env:
+          SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG)) {
+            throw "Repository variable SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG is required for stable Windows USB releases"
+          }
+          $usbZipFiles = @(Get-ChildItem -Path "release" -Filter "UClaw-*-win-x64-usb.zip" -File)
+          if ($usbZipFiles.Count -ne 1) {
+            throw "Expected exactly one unsigned Windows USB ZIP before SignPath, found $($usbZipFiles.Count)"
+          }
+          $signingInputDir = "release/signpath-input"
+          Remove-Item -Path $signingInputDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $signingInputDir -Force | Out-Null
+          $signingInputName = "$([IO.Path]::GetFileNameWithoutExtension($usbZipFiles[0].Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
+          Copy-Item -LiteralPath $usbZipFiles[0].FullName -Destination (Join-Path $signingInputDir $signingInputName) -Force
+          Write-Host "USB artifact configuration: $env:SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG"
+          Write-Host "Unsigned USB ZIP: $($usbZipFiles[0].Name)"
+          Write-Host "Unique SignPath input: $signingInputName"
+
+      # Upload the ZIP itself, not another GitHub-generated wrapper ZIP, so the
+      # SignPath artifact configuration can deep-sign the UClaw-owned PE files.
+      - name: Upload unsigned Windows USB ZIP for SignPath
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        id: upload-unsigned-windows-usb-artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-win-usb-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/signpath-input/*.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Deep-sign Windows USB ZIP via SignPath
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        id: signpath-sign-windows-usb
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: "78e37079-23df-4800-b41c-33312ad7c1e3"
+          project-slug: "ValueCell"
+          signing-policy-slug: "ValueCell-sign"
+          artifact-configuration-slug: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned-windows-usb-artifact.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: release/signed-usb
+          skip-decompress: true
+
+      - name: Replace and verify signed Windows USB ZIP
         if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
         shell: pwsh
         run: |
-          $ymlFiles = Get-ChildItem -Path "release" -Filter "*.yml" -File | Where-Object { $_.Name -ne "builder-debug.yml" }
-          $exeFiles = Get-ChildItem -Path "release" -Filter "*.exe" -File
+          $signedUsbZipFiles = @(Get-ChildItem -Path "release/signed-usb" -Filter "*.zip" -File -Recurse)
+          $targetUsbZipFiles = @(Get-ChildItem -Path "release" -Filter "UClaw-*-win-x64-usb.zip" -File)
+          if ($signedUsbZipFiles.Count -ne 1 -or $targetUsbZipFiles.Count -ne 1) {
+            throw "Expected one signed and one target Windows USB ZIP; signed=$($signedUsbZipFiles.Count) target=$($targetUsbZipFiles.Count)"
+          }
+          $expectedSignedUsbName = "$([IO.Path]::GetFileNameWithoutExtension($targetUsbZipFiles[0].Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
+          if ($signedUsbZipFiles[0].Name -ne $expectedSignedUsbName) {
+            throw "Signed USB ZIP filename mismatch: expected=$expectedSignedUsbName actual=$($signedUsbZipFiles[0].Name)"
+          }
+          Copy-Item -Path $signedUsbZipFiles[0].FullName -Destination $targetUsbZipFiles[0].FullName -Force
 
-          foreach ($yml in $ymlFiles) {
-            $content = Get-Content $yml.FullName -Raw
-            $modified = $false
-
-            foreach ($exe in $exeFiles) {
-              # Compute new sha512 (base64) for the signed exe
-              $hash = Get-FileHash -Path $exe.FullName -Algorithm SHA512
-              $hashBytes = [byte[]]::new($hash.Hash.Length / 2)
-              for ($i = 0; $i -lt $hashBytes.Length; $i++) {
-                $hashBytes[$i] = [Convert]::ToByte($hash.Hash.Substring($i * 2, 2), 16)
+          $extractRoot = Join-Path $env:RUNNER_TEMP "uclaw-signed-usb-${{ github.run_id }}-${{ github.run_attempt }}"
+          Remove-Item -Path $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          try {
+            Expand-Archive -LiteralPath $targetUsbZipFiles[0].FullName -DestinationPath $extractRoot -Force
+            $ownedExecutablePaths = @(
+              (Join-Path $extractRoot "UClaw.exe")
+              (Join-Path $extractRoot "resources\resources\updater\win32-x64\uclaw-portable-updater.exe")
+            )
+            foreach ($executablePath in $ownedExecutablePaths) {
+              if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+                throw "Signed USB ZIP is missing required executable: $executablePath"
               }
-              $newSha512 = [Convert]::ToBase64String($hashBytes)
-              $newSize = (Get-Item $exe.FullName).Length
-              $escapedName = [Regex]::Escape($exe.Name)
-
-              # 1) files[] entries:  url: <name>\n    sha512: <hash>\n    size: <n>
-              $urlPattern = "(?m)(url:\s*${escapedName}\s*\r?\n\s*sha512:\s*)(\S+)(\s*\r?\n\s*size:\s*)(\d+)"
-              if ($content -match $urlPattern) {
-                $content = $content -replace $urlPattern, "`${1}${newSha512}`${3}${newSize}"
-                $modified = $true
-                Write-Host "Updated $($yml.Name) files[]: $($exe.Name) sha512=$newSha512 size=$newSize"
-              }
-
-              # 2) Top-level entry:  path: <name>\nsha512: <hash>\n  (no size field)
-              $pathPattern = "(?m)(path:\s*${escapedName}\s*\r?\n)sha512:\s*\S+"
-              if ($content -match $pathPattern) {
-                $content = $content -replace $pathPattern, "`${1}sha512: ${newSha512}"
-                $modified = $true
-                Write-Host "Updated $($yml.Name) top-level: $($exe.Name) sha512=$newSha512"
+              $signature = Get-AuthenticodeSignature -FilePath $executablePath
+              Write-Host "Authenticode signed USB ZIP $executablePath: $($signature.Status)"
+              if ($signature.Status -ne 'Valid') {
+                throw "Invalid Authenticode signature in signed USB ZIP: $executablePath ($($signature.Status))"
               }
             }
-
-            if ($modified) {
-              Set-Content -Path $yml.FullName -Value $content -NoNewline
-              Write-Host "Saved updated $($yml.Name)"
-            }
+          } finally {
+            Remove-Item -Path $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
           }
 
-          Write-Host ""
-          Write-Host "=== Final yml contents ==="
-          foreach ($yml in $ymlFiles) {
-            Write-Host "--- $($yml.Name) ---"
-            Get-Content $yml.FullName
-            Write-Host ""
-          }
+      - name: Refresh Windows USB metadata after code signing
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        run: pnpm run release:refresh-win-usb-metadata
+
+      # SignPath changes the installer bytes. Rebuild the differential blockmap
+      # and refresh the manifest from the signed file before publishing either.
+      - name: Refresh Windows update metadata after code signing
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        run: pnpm run release:refresh-win-metadata
+
+      - name: Validate signed Windows USB package
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        run: pnpm run test:packaged:win:full
+
+      # The customer downloads signed bytes, so the final installer/ZIP and
+      # refreshed metadata must pass the same cross-version paths as the
+      # unsigned pre-release artifacts.
+      - name: Run signed Windows cross-version upgrade matrix
+        if: matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true'
+        env:
+          UCLAW_UPGRADE_INSTALLER_101_URL: ${{ secrets.UCLAW_UPGRADE_INSTALLER_101_URL }}
+          UCLAW_UPGRADE_INSTALLER_101_SHA512: ${{ secrets.UCLAW_UPGRADE_INSTALLER_101_SHA512 }}
+        run: pnpm run test:upgrade:win
+
+      - name: Upload signed Windows upgrade matrix report
+        if: ${{ always() && matrix.platform == 'win' && steps.win-channel.outputs.is_stable == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-upgrade-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/regression/windows-upgrade-matrix-*
+          if-no-files-found: warn
+          retention-days: 14
 
       # Linux specific steps
       - name: Build Linux
@@ -289,6 +359,7 @@ jobs:
             release/*.deb
             release/*.rpm
             release/*.yml
+            release/UClaw-*-win-x64-usb.json
             !release/builder-debug.yml
           retention-days: 7
 
@@ -331,6 +402,7 @@ jobs:
             release-artifacts/**/*.deb
             release-artifacts/**/*.rpm
             release-artifacts/**/*.yml
+            release-artifacts/**/*.json
           draft: false
           prerelease: true
           make_latest: false
@@ -345,19 +417,19 @@ jobs:
             Please select the appropriate installer for your operating system and architecture:
             
             #### macOS
-            - **Apple Silicon (M1/M2/M3/M4)**: `ClawX-*-mac-arm64.dmg`
-            - **Intel (x64)**: `ClawX-*-mac-x64.dmg`
+            - **Apple Silicon (M1/M2/M3/M4)**: `UClaw-*-mac-arm64.dmg`
+            - **Intel (x64)**: `UClaw-*-mac-x64.dmg`
             
             #### Windows
-            - **Installer (x64)**: `ClawX-*-win-x64.exe`
-            - **Installer (ARM64)**: `ClawX-*-win-arm64.exe`
+            - **Installer (x64)**: `UClaw-*-win-x64.exe`
+            - **USB portable (x64)**: `UClaw-*-win-x64-usb.zip`
             
             #### Linux
-            - **AppImage (x64)**: `ClawX-*-linux-x86_64.AppImage` (Universal format, recommended)
-            - **AppImage (ARM64)**: `ClawX-*-linux-arm64.AppImage`
-            - **Debian/Ubuntu (x64)**: `ClawX-*-linux-amd64.deb`
-            - **Debian/Ubuntu (ARM64)**: `ClawX-*-linux-arm64.deb`
-            - **RPM (x64)**: `ClawX-*-linux-x86_64.rpm`
+            - **AppImage (x64)**: `UClaw-*-linux-x86_64.AppImage` (Universal format, recommended)
+            - **AppImage (ARM64)**: `UClaw-*-linux-arm64.AppImage`
+            - **Debian/Ubuntu (x64)**: `UClaw-*-linux-amd64.deb`
+            - **Debian/Ubuntu (ARM64)**: `UClaw-*-linux-arm64.deb`
+            - **RPM (x64)**: `UClaw-*-linux-x86_64.rpm`
             
             ### 📝 Release Notes
             
@@ -367,7 +439,7 @@ jobs:
             
             - **macOS**: On first launch, you may see "cannot verify developer". Go to System Preferences → Security & Privacy to allow the app to run
             - **Windows**: SmartScreen may block the app. Click "More info" → "Run anyway" to proceed
-            - **Linux AppImage**: First run `chmod +x ClawX-*.AppImage` to add execute permission. On Ubuntu 22.04 you may also need `sudo apt install libfuse2`; on Ubuntu 24.04 use `sudo apt install libfuse2t64`
+            - **Linux AppImage**: First run `chmod +x UClaw-*.AppImage` to add execute permission. On Ubuntu 22.04 you may also need `sudo apt install libfuse2`; on Ubuntu 24.04 use `sudo apt install libfuse2t64`
             - **Linux .deb (Ubuntu 24.04)**: If installation fails due to missing dependencies, use `sudo apt install libgtk-3-0t64 libnotify4t64 libxss1t64` before installing
             
             ---
@@ -391,6 +463,10 @@ jobs:
   upload-oss:
     needs: release
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      channel: ${{ steps.version.outputs.channel }}
 
     steps:
       - name: Download release artifacts only
@@ -448,9 +524,53 @@ jobs:
       # Channel separation is achieved by directory: /alpha/, /beta/, /latest/.
       - name: Verify yml files present
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           CHANNEL="${{ steps.version.outputs.channel }}"
+          if [ "${CHANNEL}" = "latest" ]; then
+            YML_PREFIX="latest"
+          else
+            YML_PREFIX="${CHANNEL}"
+          fi
+
           echo "=== staging/${CHANNEL}/ (update metadata) ==="
-          ls -la staging/${CHANNEL}/*.yml 2>/dev/null || echo "No yml files found (check electron-builder outputs)"
+          REQUIRED_YMLS=(
+            "${YML_PREFIX}.yml"
+            "${YML_PREFIX}-mac.yml"
+            "${YML_PREFIX}-linux.yml"
+          )
+          for manifest in "${REQUIRED_YMLS[@]}"; do
+            test -f "staging/${CHANNEL}/${manifest}" || {
+              echo "Missing required update manifest: staging/${CHANNEL}/${manifest}" >&2
+              exit 1
+            }
+          done
+
+          USB_ZIP="staging/${CHANNEL}/UClaw-${VERSION}-win-x64-usb.zip"
+          USB_JSON="staging/${CHANNEL}/UClaw-${VERSION}-win-x64-usb.json"
+          test -f "${USB_ZIP}" || {
+            echo "Missing required Windows USB package: ${USB_ZIP}" >&2
+            exit 1
+          }
+          test -f "${USB_JSON}" || {
+            echo "Missing required Windows USB metadata: ${USB_JSON}" >&2
+            exit 1
+          }
+
+          USB_SIZE="$(stat -c '%s' "${USB_ZIP}")"
+          USB_SHA512="$(sha512sum "${USB_ZIP}" | awk '{print $1}')"
+          jq -e \
+            --arg version "${VERSION}" \
+            --arg fileName "$(basename "${USB_ZIP}")" \
+            --arg sha512 "${USB_SHA512}" \
+            --argjson size "${USB_SIZE}" \
+            '.version == $version
+              and (.package_type == "portable_zip" or .packageType == "portable_zip")
+              and (.file_name == $fileName or .fileName == $fileName)
+              and .sha512 == $sha512
+              and .size == $size' \
+            "${USB_JSON}" >/dev/null
+
+          ls -la staging/${CHANNEL}/*.yml "${USB_ZIP}" "${USB_JSON}"
 
       - name: Generate release-info.json
         run: |
@@ -470,19 +590,19 @@ jobs:
               releaseDate: $date,
               downloads: {
                 mac: {
-                  x64: ($base + "/ClawX-" + $version + "-mac-x64.dmg"),
-                  arm64: ($base + "/ClawX-" + $version + "-mac-arm64.dmg")
+                  x64: ($base + "/UClaw-" + $version + "-mac-x64.dmg"),
+                  arm64: ($base + "/UClaw-" + $version + "-mac-arm64.dmg")
                 },
                 win: {
-                  x64: ($base + "/ClawX-" + $version + "-win-x64.exe"),
-                  arm64: ($base + "/ClawX-" + $version + "-win-arm64.exe")
+                  x64: ($base + "/UClaw-" + $version + "-win-x64.exe"),
+                  portable_x64: ($base + "/UClaw-" + $version + "-win-x64-usb.zip")
                 },
                 linux: {
-                  deb_amd64: ($base + "/ClawX-" + $version + "-linux-amd64.deb"),
-                  deb_arm64: ($base + "/ClawX-" + $version + "-linux-arm64.deb"),
-                  appimage_x64: ($base + "/ClawX-" + $version + "-linux-x86_64.AppImage"),
-                  appimage_arm64: ($base + "/ClawX-" + $version + "-linux-arm64.AppImage"),
-                  rpm_x64: ($base + "/ClawX-" + $version + "-linux-x86_64.rpm")
+                  deb_amd64: ($base + "/UClaw-" + $version + "-linux-amd64.deb"),
+                  deb_arm64: ($base + "/UClaw-" + $version + "-linux-arm64.deb"),
+                  appimage_x64: ($base + "/UClaw-" + $version + "-linux-x86_64.AppImage"),
+                  appimage_arm64: ($base + "/UClaw-" + $version + "-linux-arm64.AppImage"),
+                  rpm_x64: ($base + "/UClaw-" + $version + "-linux-x86_64.rpm")
                 }
               },
               changelog: $changelog
@@ -512,15 +632,34 @@ jobs:
       - name: "Upload to OSS: {channel}/ (overwrite)"
         run: |
           CHANNEL="${{ steps.version.outputs.channel }}"
+          TARGET="oss://valuecell-clawx/${CHANNEL}"
+          CACHE_CONTROL="Cache-Control:no-cache,no-store,must-revalidate"
 
-          # Only clean the current channel's directory — never touch other channels
-          ossutil rm -r -f oss://valuecell-clawx/${CHANNEL}/ || true
+          # Keep the previous manifests live while large application packages upload.
+          # Versioned files can coexist; publish metadata last to switch clients atomically.
+          find "staging/${CHANNEL}" -maxdepth 1 -type f \
+            ! -name '*.yml' \
+            ! -name 'release-info.json' \
+            -print0 | while IFS= read -r -d '' file; do
+              filename="$(basename "${file}")"
+              ossutil cp -f --meta="${CACHE_CONTROL}" "${file}" "${TARGET}/${filename}"
+            done
 
-          # Upload all files with no-cache so clients always get the freshest version
-          ossutil cp -r -f \
-            --meta="Cache-Control:no-cache,no-store,must-revalidate" \
-            staging/${CHANNEL}/ \
-            oss://valuecell-clawx/${CHANNEL}/
+          if [ "${CHANNEL}" = "latest" ]; then
+            echo "Stable channel metadata is intentionally deferred until managed update records pass verification."
+          else
+            find "staging/${CHANNEL}" -maxdepth 1 -type f -name '*.yml' -print0 \
+              | sort -z \
+              | while IFS= read -r -d '' file; do
+                filename="$(basename "${file}")"
+                ossutil cp -f --meta="${CACHE_CONTROL}" "${file}" "${TARGET}/${filename}"
+              done
+
+            ossutil cp -f \
+              --meta="${CACHE_CONTROL}" \
+              "staging/${CHANNEL}/release-info.json" \
+              "${TARGET}/release-info.json"
+          fi
 
           echo "Uploaded to ${CHANNEL}/"
 
@@ -536,8 +675,9 @@ jobs:
 
           echo "Uploaded to releases/${TAG}/"
 
-      - name: Verify OSS upload
+      - name: Verify versioned OSS payload upload
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           TAG="${{ steps.version.outputs.tag }}"
           CHANNEL="${{ steps.version.outputs.channel }}"
 
@@ -548,23 +688,181 @@ jobs:
           echo "=== releases/${TAG}/ ==="
           ossutil ls oss://valuecell-clawx/releases/${TAG}/ --short
 
-          echo ""
-          echo "=== Verify release-info.json ==="
-          ossutil cp oss://valuecell-clawx/${CHANNEL}/release-info.json /tmp/release-info.json -f
-          jq . /tmp/release-info.json
+          if [ "${CHANNEL}" != "latest" ]; then
+            YML_PREFIX="${CHANNEL}"
+            REQUIRED_YMLS=(
+              "${YML_PREFIX}.yml"
+              "${YML_PREFIX}-mac.yml"
+              "${YML_PREFIX}-linux.yml"
+            )
+            for manifest in "${REQUIRED_YMLS[@]}"; do
+              local_manifest="/tmp/${manifest}"
+              ossutil cp "oss://valuecell-clawx/${CHANNEL}/${manifest}" "${local_manifest}" -f
+              actual_version="$(sed -n 's/^version:[[:space:]]*//p' "${local_manifest}" | head -n 1 | tr -d "'\"")"
+              if [ "${actual_version}" != "${VERSION}" ]; then
+                echo "Unexpected ${manifest} version: expected=${VERSION}, actual=${actual_version}" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          USB_JSON="UClaw-${VERSION}-win-x64-usb.json"
+          ossutil cp \
+            "oss://valuecell-clawx/${CHANNEL}/${USB_JSON}" \
+            "/tmp/${USB_JSON}" \
+            -f
+          jq -e \
+            --arg version "${VERSION}" \
+            '.version == $version
+              and (.package_type == "portable_zip" or .packageType == "portable_zip")
+              and (.sha512 | type == "string" and length == 128)
+              and (.size | type == "number" and . > 0)' \
+            "/tmp/${USB_JSON}" >/dev/null
 
           echo ""
-          echo "=== Verify update yml ==="
-          if [ "${CHANNEL}" = "latest" ]; then
-            YML_PREFIX="latest"
-          else
-            YML_PREFIX="${CHANNEL}"
-          fi
-          echo "electron-updater expects ${YML_PREFIX}-mac.yml, ${YML_PREFIX}.yml, etc. in ${CHANNEL}/:"
-          ossutil ls oss://valuecell-clawx/${CHANNEL}/ --short | grep "${YML_PREFIX}.*\\.yml" || echo "(none found)"
-          
-          echo ""
-          echo "All files uploaded and verified successfully!"
+          echo "All versioned payloads uploaded and verified successfully."
+
+  # Stable channel manifests are promoted only after the managed installer and
+  # portable records already point at the exact signed artifacts. If the
+  # managed records have not been updated yet, this job fails closed and the
+  # GitHub release remains a pre-release. Update the records, then rerun failed
+  # jobs; versioned OSS payloads remain available throughout.
+  promote-update-channels:
+    needs: [publish, upload-oss]
+    if: startsWith(github.ref, 'refs/tags/') && needs.upload-oss.outputs.channel == 'latest'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22.22.3'
+          cache: 'pnpm'
+
+      - name: Install verifier dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download release artifacts only
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: release-*
+
+      - name: Prepare stable promotion payload
+        run: |
+          VERSION="${{ needs.upload-oss.outputs.version }}"
+          CHANNEL="latest"
+          mkdir -p "staging/${CHANNEL}"
+
+          find release-artifacts/ -type f | while read file; do
+            cp "$file" "staging/${CHANNEL}/$(basename "$file")"
+          done
+
+          for manifest in latest.yml latest-mac.yml latest-linux.yml; do
+            test -f "staging/${CHANNEL}/${manifest}" || {
+              echo "Missing required update manifest: ${manifest}" >&2
+              exit 1
+            }
+          done
+
+          USB_ZIP="staging/${CHANNEL}/UClaw-${VERSION}-win-x64-usb.zip"
+          USB_JSON="staging/${CHANNEL}/UClaw-${VERSION}-win-x64-usb.json"
+          test -f "${USB_ZIP}" || { echo "Missing ${USB_ZIP}" >&2; exit 1; }
+          test -f "${USB_JSON}" || { echo "Missing ${USB_JSON}" >&2; exit 1; }
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg channel "$CHANNEL" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg base "https://oss.intelli-spectrum.com/${CHANNEL}" \
+            --arg changelog "https://github.com/${{ github.repository }}/releases/tag/v${VERSION}" \
+            '{
+              version: $version,
+              channel: $channel,
+              releaseDate: $date,
+              downloads: {
+                mac: {
+                  x64: ($base + "/UClaw-" + $version + "-mac-x64.dmg"),
+                  arm64: ($base + "/UClaw-" + $version + "-mac-arm64.dmg")
+                },
+                win: {
+                  x64: ($base + "/UClaw-" + $version + "-win-x64.exe"),
+                  portable_x64: ($base + "/UClaw-" + $version + "-win-x64-usb.zip")
+                },
+                linux: {
+                  deb_amd64: ($base + "/UClaw-" + $version + "-linux-amd64.deb"),
+                  deb_arm64: ($base + "/UClaw-" + $version + "-linux-arm64.deb"),
+                  appimage_x64: ($base + "/UClaw-" + $version + "-linux-x86_64.AppImage"),
+                  appimage_arm64: ($base + "/UClaw-" + $version + "-linux-arm64.AppImage"),
+                  rpm_x64: ($base + "/UClaw-" + $version + "-linux-x86_64.rpm")
+                }
+              },
+              changelog: $changelog
+            }' > "staging/${CHANNEL}/release-info.json"
+
+      - name: Verify managed records before legacy feed promotion
+        run: |
+          VERSION="${{ needs.upload-oss.outputs.version }}"
+          pnpm run test:update-channel -- \
+            --version "${VERSION}" \
+            --managed-only \
+            --installer-manifest staging/latest/latest.yml \
+            --mac-manifest staging/latest/latest-mac.yml \
+            --linux-manifest staging/latest/latest-linux.yml \
+            --portable-metadata "staging/latest/UClaw-${VERSION}-win-x64-usb.json"
+
+      - name: Install and configure ossutil
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+        run: |
+          curl -sL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+          cat > $HOME/.ossutilconfig << EOF
+          [Credentials]
+          language=EN
+          endpoint=oss-cn-hangzhou.aliyuncs.com
+          accessKeyID=${OSS_ACCESS_KEY_ID}
+          accessKeySecret=${OSS_ACCESS_KEY_SECRET}
+          EOF
+
+      - name: Promote stable manifests last
+        run: |
+          TARGET="oss://valuecell-clawx/latest"
+          CACHE_CONTROL="Cache-Control:no-cache,no-store,must-revalidate"
+
+          find staging/latest -maxdepth 1 -type f -name '*.yml' -print0 \
+            | sort -z \
+            | while IFS= read -r -d '' file; do
+              ossutil cp -f --meta="${CACHE_CONTROL}" "${file}" "${TARGET}/$(basename "${file}")"
+            done
+
+          ossutil cp -f \
+            --meta="${CACHE_CONTROL}" \
+            staging/latest/release-info.json \
+            "${TARGET}/release-info.json"
+
+      - name: Verify all public update channels before latest promotion
+        run: |
+          VERSION="${{ needs.upload-oss.outputs.version }}"
+          for attempt in 1 2 3 4 5 6; do
+            if pnpm run test:update-channel -- \
+              --version "${VERSION}" \
+              --installer-manifest staging/latest/latest.yml \
+              --mac-manifest staging/latest/latest-mac.yml \
+              --linux-manifest staging/latest/latest-linux.yml \
+              --portable-metadata "staging/latest/UClaw-${VERSION}-win-x64-usb.json"; then
+              exit 0
+            fi
+            echo "Public update metadata has not converged yet (attempt ${attempt}/6)."
+            sleep 10
+          done
+          exit 1
 
   # ──────────────────────────────────────────────────────────────
   # Job: Finalize Release
@@ -575,7 +873,7 @@ jobs:
   # all platform artifacts are ready.
   # ──────────────────────────────────────────────────────────────
   finalize:
-    needs: [publish, upload-oss]
+    needs: [publish, upload-oss, promote-update-channels]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
 

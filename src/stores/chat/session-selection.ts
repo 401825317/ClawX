@@ -3,11 +3,22 @@ import type { ChatSession } from './types';
 
 export const CURRENT_SESSION_STORAGE_KEY = 'clawx:chat:current-session-key';
 const MAX_SESSION_KEY_LENGTH = 2_048;
+const INTERNAL_HEARTBEAT_SESSION_KEY_RE = /^agent:[^:\s]+:[^:\s]+(?::[^:\s]+)*:heartbeat$/;
 
 export function isCanonicalSessionKey(value: unknown): value is string {
   return typeof value === 'string'
     && value.length <= MAX_SESSION_KEY_LENGTH
     && /^agent:[^:\s]+:[^:\s]+(?::[^:\s]+)*$/.test(value);
+}
+
+export function isInternalHeartbeatSession(
+  session: string | Pick<ChatSession, 'key' | 'heartbeatIsolatedBaseSessionKey'>,
+): boolean {
+  const key = typeof session === 'string' ? session : session.key;
+  if (INTERNAL_HEARTBEAT_SESSION_KEY_RE.test(key)) return true;
+  return typeof session !== 'string'
+    && typeof session.heartbeatIsolatedBaseSessionKey === 'string'
+    && session.heartbeatIsolatedBaseSessionKey.trim().length > 0;
 }
 
 function getLocalStorage(): Storage | null {
@@ -25,7 +36,7 @@ export function readPersistedCurrentSessionKey(): string | null {
   try {
     const value = storage.getItem(CURRENT_SESSION_STORAGE_KEY);
     if (value == null) return null;
-    if (isCanonicalSessionKey(value)) return value;
+    if (isCanonicalSessionKey(value) && !isInternalHeartbeatSession(value)) return value;
     storage.removeItem(CURRENT_SESSION_STORAGE_KEY);
   } catch {
     // localStorage can be unavailable in restricted renderer contexts.
@@ -38,7 +49,7 @@ export function persistCurrentSessionKey(sessionKey: string): void {
   if (!storage) return;
 
   try {
-    if (isCanonicalSessionKey(sessionKey)) {
+    if (isCanonicalSessionKey(sessionKey) && !isInternalHeartbeatSession(sessionKey)) {
       storage.setItem(CURRENT_SESSION_STORAGE_KEY, sessionKey);
     } else {
       storage.removeItem(CURRENT_SESSION_STORAGE_KEY);
@@ -67,19 +78,20 @@ export function pickStartupSessionFallback(
   currentSessionKey: string,
   sessions: ChatSession[],
 ): string | null {
-  if (sessions.length === 0) return null;
+  const visibleSessions = sessions.filter((session) => !isInternalHeartbeatSession(session));
+  if (visibleSessions.length === 0) return null;
 
   const agentId = getAgentIdFromSessionKey(currentSessionKey);
   const agentMainKey = `agent:${agentId}:main`;
-  const agentMain = sessions.find((session) => session.key === agentMainKey);
+  const agentMain = visibleSessions.find((session) => session.key === agentMainKey);
   if (agentMain) return agentMain.key;
 
   const agentNonCron = sortByUpdatedAtDesc(
-    sessions.filter((session) => session.key.startsWith(`agent:${agentId}:`) && !isCronSessionKey(session.key)),
+    visibleSessions.filter((session) => session.key.startsWith(`agent:${agentId}:`) && !isCronSessionKey(session.key)),
   );
   if (agentNonCron.length > 0) return agentNonCron[0]!.key;
 
-  const nonCron = sortByUpdatedAtDesc(sessions.filter((session) => !isCronSessionKey(session.key)));
+  const nonCron = sortByUpdatedAtDesc(visibleSessions.filter((session) => !isCronSessionKey(session.key)));
   if (nonCron.length > 0) return nonCron[0]!.key;
 
   return null;

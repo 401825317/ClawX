@@ -26,7 +26,11 @@ export const EXTRACT_APP_PACKAGE_NSH = join(
   'extractAppPackage.nsh',
 );
 
-const PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail closed';
+const PATCH_MARKER = 'ClawX-patched-v6: extract directly to $INSTDIR, fail closed, and restore installer rollback';
+const LEGACY_V5_PATCH_MARKER = 'ClawX-patched-v5: extract directly to $INSTDIR, fail closed, and restore installer rollback';
+const LEGACY_V4_PATCH_MARKER = 'ClawX-patched-v4: extract directly to $INSTDIR, fail closed, and restore rollback';
+const LEGACY_V3_PATCH_MARKER = 'ClawX-patched-v3: extract directly to $INSTDIR and fail closed';
+const LEGACY_V2_PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail closed';
 const LEGACY_PATCH_MARKER = 'ClawX-patched: extract directly to $INSTDIR';
 const LEGACY_CONTINUE_ON_EXTRACT_FAILURE = 'continuing overwrite install anyway';
 const FATAL_EXTRACT_FAILURE_DETAIL = 'Failed to extract UClaw files after multiple attempts.';
@@ -34,6 +38,7 @@ const ROLLBACK_EXTRACT_FAILURE_DETAIL = 'Restoring the previous UClaw installati
 
 function rollbackExtractFailureLines(labelPrefix) {
   return [
+    '  !ifdef CLAWX_INSTALLER_ROLLBACK',
     '    ${if} $clawxRollbackDir != ""',
     `      IfFileExists "$clawxRollbackDir\\" 0 ${labelPrefix}_show_error`,
     '      DetailPrint "Restoring the previous UClaw installation after the failed update..."',
@@ -49,6 +54,7 @@ function rollbackExtractFailureLines(labelPrefix) {
     '      DetailPrint "Previous UClaw installation restored."',
     '    ${endIf}',
     `  ${labelPrefix}_show_error:`,
+    '  !endif',
   ];
 }
 
@@ -66,6 +72,9 @@ const PATCHED_EXTRACT_MACRO = [
   '    ${if} $R9 < 5',
   '      DetailPrint "Releasing file locks before retry..."',
   '      nsExec::ExecToStack \'taskkill /F /T /IM "${APP_EXECUTABLE_FILENAME}"\'',
+  '      Pop $0',
+  '      Pop $1',
+  '      nsExec::ExecToStack \'taskkill /F /T /IM ClawX.exe\'',
   '      Pop $0',
   '      Pop $1',
   '      nsExec::ExecToStack \'taskkill /F /IM openclaw-gateway.exe\'',
@@ -111,18 +120,24 @@ function countExtractMacros(content) {
 function isTemplateHealthy(content) {
   return content.includes(PATCH_MARKER)
     && countExtractMacros(content) === 1
+    && (content.match(/!ifdef CLAWX_INSTALLER_ROLLBACK/g) || []).length === 2
     && content.includes(FATAL_EXTRACT_FAILURE_DETAIL)
     && content.includes(ROLLBACK_EXTRACT_FAILURE_DETAIL)
     && content.includes('$(decompressionFailed)')
     && content.includes('SetErrorLevel 2')
     && content.includes('Quit')
+    && content.includes('taskkill /F /T /IM ClawX.exe')
     && !content.includes('$(appCannotBeClosed)')
     && !content.includes(LEGACY_CONTINUE_ON_EXTRACT_FAILURE);
 }
 
 function hasStaleExtractPatch(content) {
   return content.includes(PATCH_MARKER)
+    || content.includes(LEGACY_V5_PATCH_MARKER)
+    || content.includes(LEGACY_V4_PATCH_MARKER)
+    || content.includes(LEGACY_V3_PATCH_MARKER)
     || content.includes(LEGACY_PATCH_MARKER)
+    || content.includes(LEGACY_V2_PATCH_MARKER)
     || content.includes(LEGACY_CONTINUE_ON_EXTRACT_FAILURE)
     || content.includes('$(appCannotBeClosed)');
 }
@@ -172,6 +187,12 @@ export function patchNsisExtractTemplate(targetPath = EXTRACT_APP_PACKAGE_NSH) {
 
   if (hasStaleExtractPatch(original)) {
     console.warn('[patch-nsis-extract] Stale UClaw extract patch detected; replacing with fail-closed patch.');
+    original = restoreExtractAppPackageTemplate(original);
+    writeFileSync(targetPath, original, 'utf8');
+    if (isTemplateHealthy(original)) {
+      console.log('[patch-nsis-extract] Replaced stale extractAppPackage.nsh patch.');
+      return true;
+    }
   } else if (!original.includes('CopyFiles')) {
     console.warn('[patch-nsis-extract] CopyFiles not found — NSIS template may have changed.');
     return false;

@@ -78,6 +78,7 @@ import {
 } from './junfeiai-distribution';
 import { parseJsonWithBom } from './json';
 import { readJsonFileWithRetry, writeJsonFileAtomically } from './json-file-io';
+import { isTransientPluginInstallPath } from './plugin-install-paths';
 
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = 'auth-profiles.json';
@@ -960,6 +961,7 @@ const UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID = 'uclaw-local-artifacts';
 const UCLAW_DESKTOP_CONTROL_PLUGIN_ID = 'uclaw-desktop-control';
 const UCLAW_BLENDER_PLUGIN_ID = 'uclaw-blender';
 const UCLAW_TASK_BRIDGE_PLUGIN_ID = 'uclaw-task-bridge';
+const UCLAW_VIDEO_PROJECT_PLUGIN_ID = 'uclaw-video-project';
 const ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN = process.env.CLAWX_DISABLE_ARTIFACT_GUARD !== '1';
 const BUNDLED_ALLOWLIST_PRESERVE_IDS = new Set([
   'browser',
@@ -1252,18 +1254,71 @@ function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>):
   }
 }
 
+function compareOpenClawReleaseVersions(left: string, right: string): number | null {
+  const parse = (value: string): [number, number, number, number] | null => {
+    const match = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-(\d+))?$/.exec(value.trim());
+    if (!match) return null;
+    return [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] ?? 0)];
+  };
+
+  const leftParts = parse(left);
+  const rightParts = parse(right);
+  if (!leftParts || !rightParts) return null;
+
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] !== rightParts[index]) {
+      return leftParts[index] > rightParts[index] ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+async function resolveBundledOpenClawVersion(): Promise<string> {
+  const manifestPath = join(getOpenClawResolvedDir(), 'package.json');
+  const manifest = await readJsonFileWithRetry<{ version?: unknown }>(manifestPath);
+  const version = typeof manifest?.version === 'string' ? manifest.version.trim() : '';
+  if (!version) {
+    throw new Error(`Unable to resolve bundled OpenClaw version from ${manifestPath}`);
+  }
+  return version;
+}
+
+async function prepareOpenClawJsonForWrite(config: Record<string, unknown>): Promise<void> {
+  normalizeAgentsDefaultsCompactionMode(config);
+
+  // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
+  const commands = (
+    config.commands && typeof config.commands === 'object'
+      ? { ...(config.commands as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  commands.restart = true;
+  config.commands = commands;
+
+  // Match OpenClaw-owned config writes so downgrade guards see the true writer version.
+  const runtimeVersion = await resolveBundledOpenClawVersion();
+  const meta = isPlainRecord(config.meta) ? { ...config.meta } : {};
+  const previousVersion = typeof meta.lastTouchedVersion === 'string'
+    ? meta.lastTouchedVersion.trim()
+    : '';
+  const versionComparison = previousVersion
+    ? compareOpenClawReleaseVersions(previousVersion, runtimeVersion)
+    : 0;
+  if (previousVersion && (versionComparison === null || versionComparison > 0)) {
+    throw new Error(
+      `Refusing to write openclaw.json because meta.lastTouchedVersion=${previousVersion} `
+      + `is newer than or incompatible with bundled OpenClaw ${runtimeVersion}. `
+      + 'Restore the matching runtime or a pre-upgrade config backup before writing.',
+    );
+  }
+  meta.lastTouchedVersion = runtimeVersion;
+  meta.lastTouchedAt = new Date().toISOString();
+  config.meta = meta;
+}
+
 async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
   return withConfigLock(async () => {
-    normalizeAgentsDefaultsCompactionMode(config);
-
-    // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
-    const commands = (
-      config.commands && typeof config.commands === 'object'
-        ? { ...(config.commands as Record<string, unknown>) }
-        : {}
-    ) as Record<string, unknown>;
-    commands.restart = true;
-    config.commands = commands;
+    await prepareOpenClawJsonForWrite(config);
 
     await writeJsonFile(getOpenClawConfigPath(), config);
   });
@@ -1385,6 +1440,32 @@ export async function saveProviderKeyToOpenClaw(
     await writeAuthProfiles(store, id);
   }
   console.log(`Saved API key for provider "${provider}" to OpenClaw auth store (agents: ${agentIds.join(', ')})`);
+}
+
+export async function clearProviderAuthFailureState(
+  provider: string,
+  agentId?: string,
+): Promise<void> {
+  const agentIds = agentId ? [agentId] : await discoverAgentIds();
+  if (agentIds.length === 0) agentIds.push('main');
+  const profileId = `${provider}:default`;
+  const runtime = await getOpenClawProviderAuthRuntime().catch(() => null);
+  if (!runtime?.updateAuthProfileStoreWithLock) {
+    console.warn(`OpenClaw auth runtime unavailable while clearing failure state for provider "${provider}"`);
+    return;
+  }
+
+  for (const id of agentIds) {
+    await runtime.updateAuthProfileStoreWithLock({
+      agentDir: getOpenClawAgentDir(id),
+      updater: (store) => {
+        if (!store.usageStats?.[profileId]) return false;
+        delete store.usageStats[profileId];
+        if (Object.keys(store.usageStats).length === 0) delete store.usageStats;
+        return true;
+      },
+    });
+  }
 }
 
 /**
@@ -2685,7 +2766,7 @@ function ensurePluginRegistrationEnabled(config: Record<string, unknown>, plugin
 export async function syncOpenAiCompatibleImageRelay(params: {
   enabled: boolean;
   baseUrl?: string | null;
-  apiKey?: string;
+  apiKey?: string | null;
   imageModelIds?: string[];
 }): Promise<void> {
   return withConfigLock(async () => {
@@ -3402,12 +3483,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
 
   await withConfigLock(async () => {
     const config = await readOpenClawJson();
-    let modified = true;
+    const serializedConfigBeforeSync = JSON.stringify(config);
 
     shouldSyncJunFeiAIReasoningCompat = Boolean(getJunFeiAIDefaultProvider(config));
-    if (ensureJunFeiAIReasoningDefaultsInConfig(config)) {
-      modified = true;
-    }
+    ensureJunFeiAIReasoningDefaultsInConfig(config);
 
     // ── Gateway token + controlUi ──
     const gateway = (
@@ -3445,83 +3524,50 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (browser.enabled === undefined) {
       browser.enabled = true;
       config.browser = browser;
-      modified = true;
     }
     if (browser.defaultProfile === undefined) {
       browser.defaultProfile = 'openclaw';
       config.browser = browser;
-      modified = true;
     }
     // Default ssrfPolicy to allow private network access for enterprise/internal use
     if (browser.ssrfPolicy == null) {
       browser.ssrfPolicy = { dangerouslyAllowPrivateNetwork: true };
       config.browser = browser;
-      modified = true;
     } else if (
       typeof browser.ssrfPolicy === 'object' &&
       (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork === undefined
     ) {
       (browser.ssrfPolicy as Record<string, unknown>).dangerouslyAllowPrivateNetwork = true;
       config.browser = browser;
-      modified = true;
     }
 
     // ── web_fetch SSRF policy (fake-IP / transparent-proxy environments) ──
-    if (ensureWebFetchSsrfPolicyInConfig(config)) {
-      modified = true;
-    }
+    ensureWebFetchSsrfPolicyInConfig(config);
     // ── web_search provider (key-free default) ──
-    if (ensureFreeWebSearchProviderInConfig(config)) {
-      modified = true;
-    }
-    if (ensureToolSearchDirectoryDefaultInConfig(config)) {
-      modified = true;
-    }
-    if (ensureManagedHeartbeatIsolationInConfig(config)) {
-      modified = true;
-    }
-    if (ensureManagedMediaLimitInConfig(config)) {
-      modified = true;
-    }
-    if (ensureJunFeiAICompactionDefaultsInConfig(config)) {
-      modified = true;
-    }
-    if (ensureManagedToolDirectoryInConfig(config)) {
-      modified = true;
-    }
+    ensureFreeWebSearchProviderInConfig(config);
+    ensureToolSearchDirectoryDefaultInConfig(config);
+    ensureManagedHeartbeatIsolationInConfig(config);
+    ensureManagedMediaLimitInConfig(config);
+    ensureJunFeiAICompactionDefaultsInConfig(config);
+    ensureJunFeiAIExecDefaultsInConfig(config);
+    ensureManagedToolDirectoryInConfig(config);
 
-    if (removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID])) {
-      modified = true;
-    }
+    removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID]);
     if (ENABLE_UCLAW_ARTIFACT_GUARD_PLUGIN) {
-      if (ensurePluginEntryEnabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
-        modified = true;
-      }
-      if (ensurePluginHookAccess(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
-        modified = true;
-      }
-    } else if (ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID)) {
-      modified = true;
+      ensurePluginEntryEnabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID);
+      ensurePluginHookAccess(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID);
+    } else {
+      ensurePluginEntryDisabled(config, UCLAW_ARTIFACT_GUARD_PLUGIN_ID);
     }
-    if (ensurePluginEntryEnabled(config, UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensurePluginEntryEnabled(config, UCLAW_DESKTOP_CONTROL_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensurePluginEntryEnabled(config, UCLAW_BLENDER_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensurePluginEntryEnabled(config, UCLAW_TASK_BRIDGE_PLUGIN_ID)) {
-      modified = true;
-    }
-    if (ensureParallelWebSearchPluginRegistration(config)) {
-      modified = true;
-    }
+    ensurePluginEntryEnabled(config, UCLAW_LOCAL_ARTIFACTS_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_DESKTOP_CONTROL_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_BLENDER_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_TASK_BRIDGE_PLUGIN_ID);
+    ensurePluginEntryEnabled(config, UCLAW_VIDEO_PROJECT_PLUGIN_ID);
+    ensureParallelWebSearchPluginRegistration(config);
 
     const pinnedProviderRuntimes = applyOpenClawProviderAgentRuntimePinsToConfig(config);
     if (pinnedProviderRuntimes.length > 0) {
-      modified = true;
       console.log(`[batch-sync] Pinned embedded agent runtime for models.providers entries: ${pinnedProviderRuntimes.join(', ')}`);
     }
 
@@ -3538,10 +3584,10 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     if (!hasExplicitSessionConfig) {
       session.idleMinutes = DEFAULT_IDLE_MINUTES;
       config.session = session;
-      modified = true;
     }
 
-    if (modified) {
+    prepareOpenClawJsonForWrite(config);
+    if (JSON.stringify(config) !== serializedConfigBeforeSync) {
       await writeOpenClawJson(config);
       console.log('Synced gateway token, browser config, web_fetch/web_search config, and session idle to openclaw.json');
     }
@@ -3846,7 +3892,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
         const validPlugins: unknown[] = [];
         for (const p of plugins) {
           if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-            if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+            if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
               console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
               modified = true;
             } else {
@@ -3863,7 +3909,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
           const validLoad: unknown[] = [];
           for (const p of pluginsObj.load) {
             if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-              if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+              if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                 console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from openclaw.json`);
                 modified = true;
               } else {
@@ -3882,7 +3928,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
             const countBefore = loadObj.paths.length;
             for (const p of loadObj.paths) {
               if (typeof p === 'string' && isAbsolutePluginPath(p)) {
-                if (isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
+                if (isTransientPluginInstallPath(p) || isBundledOpenClawPluginPath(p) || !(await fileExists(p))) {
                   console.log(`[sanitize] Removing stale/bundled plugin path "${p}" from plugins.load.paths`);
                   modified = true;
                 } else {

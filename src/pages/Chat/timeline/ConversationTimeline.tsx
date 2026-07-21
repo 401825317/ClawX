@@ -689,30 +689,40 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
       if (attemptsRemaining > 1) scheduleVisibleRowRestore(anchor, attemptsRemaining - 1);
     });
   }, [markProgrammaticScroll, sessionKey]);
-  const restoreScrollHeightDelta = useCallback(function scheduleScrollHeightRestore(
+  const restoreDynamicLayoutAnchor = useCallback(function scheduleDynamicLayoutRestore(
     snapshot: DynamicLayoutSnapshot,
     attemptsRemaining: number,
   ) {
     anchorRestoreFrameRef.current = window.requestAnimationFrame(() => {
       anchorRestoreFrameRef.current = null;
       const scroller = scrollerElementRef.current;
+      if (dynamicLayoutSnapshotRef.current !== snapshot) return;
       if (!scroller || useConversationStore.getState().followModeBySession[sessionKey] !== 'detached') {
         dynamicLayoutSnapshotRef.current = null;
         return;
       }
-      const targetScrollTop = snapshot.scrollTop + (scroller.scrollHeight - snapshot.scrollHeight);
-      const correction = targetScrollTop - scroller.scrollTop;
+
+      // Virtuoso can move mounted rows before its total scroll height reflects
+      // the new measurement. Preserve the real row offset first and use the
+      // height delta only while the anchor row is temporarily recycled.
+      const row = Array.from(scroller.querySelectorAll<HTMLElement>('[data-timeline-row-id]'))
+        .find((candidate) => candidate.dataset.timelineRowId === snapshot.anchor.rowId);
+      const correction = row
+        ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - snapshot.anchor.offsetTop
+        : snapshot.scrollTop + (scroller.scrollHeight - snapshot.scrollHeight) - scroller.scrollTop;
       if (Math.abs(correction) > 0.5) {
         recordTimelineScrollCorrection(correction);
         markProgrammaticScroll();
-        scroller.scrollTop = targetScrollTop;
+        scroller.scrollTop += correction;
         lastScrollTopRef.current = scroller.scrollTop;
       }
+      snapshot.scrollTop = scroller.scrollTop;
+      snapshot.scrollHeight = scroller.scrollHeight;
+      detachedVisibleAnchorRef.current = snapshot.anchor;
       if (attemptsRemaining > 1) {
-        scheduleScrollHeightRestore(snapshot, attemptsRemaining - 1);
+        scheduleDynamicLayoutRestore(snapshot, attemptsRemaining - 1);
       } else {
         dynamicLayoutSnapshotRef.current = null;
-        detachedVisibleAnchorRef.current = snapshot.anchor;
         restoreVisibleRow(snapshot.anchor, 4);
       }
     });
@@ -744,7 +754,7 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
         anchor,
       };
       dynamicLayoutSnapshotRef.current = snapshot;
-      restoreScrollHeightDelta(snapshot, DYNAMIC_LAYOUT_ANCHOR_RESTORE_FRAMES);
+      restoreDynamicLayoutAnchor(snapshot, DYNAMIC_LAYOUT_ANCHOR_RESTORE_FRAMES);
       return;
     }
     dynamicLayoutSnapshotRef.current = null;
@@ -752,7 +762,7 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
   }, [
     cancelAnchorRestore,
     captureVisibleRow,
-    restoreScrollHeightDelta,
+    restoreDynamicLayoutAnchor,
     restoreVisibleRow,
     sessionKey,
     setFollowMode,
@@ -772,6 +782,7 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
           detachedVisibleAnchorRef.current = null;
           return;
         }
+        if (dynamicLayoutSnapshotRef.current) return;
         detachedVisibleAnchorRef.current = captureVisibleRow();
       });
     };

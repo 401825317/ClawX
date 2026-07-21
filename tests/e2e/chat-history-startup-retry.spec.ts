@@ -61,7 +61,7 @@ test.describe('ClawX startup chat history recovery', () => {
               },
             };
           }
-          if (key === stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 200, maxChars: 500000 }])) {
+          if (key === stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 100, maxChars: 500000 }])) {
             chatHistoryCallCount += 1;
             if (chatHistoryCallCount === 1) {
               return {
@@ -124,7 +124,19 @@ test.describe('ClawX startup chat history recovery', () => {
               json: { success: true, agents: [{ id: 'main', name: 'main' }] },
             },
           },
-          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=200&includeFamily=true', 'GET'])]: {
+          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=100', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                messages: [
+                  { role: 'assistant', content: 'local transcript while gateway is pending', timestamp: 1000 },
+                ],
+              },
+            },
+          },
+          [stableStringify(['/api/sessions/transcript?sessionKey=agent%3Amain%3Amain&limit=100&includeFamily=true', 'GET'])]: {
             ok: true,
             data: {
               status: 200,
@@ -162,7 +174,7 @@ test.describe('ClawX startup chat history recovery', () => {
               },
             };
           }
-          if (key === stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 200, maxChars: 500000 }])) {
+          if (key === stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 100, maxChars: 500000 }])) {
             await new Promise((resolve) => setTimeout(resolve, 5_000));
             return {
               success: true,

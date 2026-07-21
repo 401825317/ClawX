@@ -207,6 +207,57 @@ function compareMergeEvidence(
   return incoming.eventId.localeCompare(existing.eventId);
 }
 
+/** Identify the same persisted fact replayed after its payload was hydrated. */
+function isSameMergeEvidence(
+  incoming: ConversationMergeEvidence,
+  existing: ConversationMergeEvidence,
+  field: string,
+): boolean {
+  return compareMergeEvidence(incoming, existing, field) === 0
+    && incoming.domain === existing.domain
+    && incoming.authority === existing.authority
+    && incoming.source === existing.source
+    && incoming.eventId === existing.eventId
+    && incoming.occurredAt === existing.occurredAt
+    && incoming.receivedAt === existing.receivedAt
+    && incoming.sequenceRunId === existing.sequenceRunId
+    && incoming.seq === existing.seq;
+}
+
+/** Let one artifact event refine only placeholder fields after preview hydration. */
+function isArtifactPlaceholderRefinement(
+  field: string,
+  currentValue: unknown,
+  incomingValue: unknown,
+  incomingEvidence: ConversationMergeEvidence,
+  existingEvidence: ConversationMergeEvidence,
+): boolean {
+  if (
+    field.includes('.')
+    || incomingEvidence.domain !== 'artifact'
+    || existingEvidence.domain !== 'artifact'
+    || !isSameMergeEvidence(incomingEvidence, existingEvidence, field)
+  ) {
+    return false;
+  }
+  if (field === 'preview') {
+    return (currentValue == null || currentValue === '')
+      && typeof incomingValue === 'string'
+      && incomingValue.trim().length > 0;
+  }
+  if (field === 'sizeBytes') {
+    return currentValue === 0
+      && typeof incomingValue === 'number'
+      && Number.isFinite(incomingValue)
+      && incomingValue > 0;
+  }
+  if (field === 'availability') {
+    return currentValue === 'registered'
+      && (incomingValue === 'available' || incomingValue === 'unavailable' || incomingValue === 'error');
+  }
+  return false;
+}
+
 /** Merge only the fields for which the incoming event owns stronger evidence. */
 function mergeRecordFields<T extends object>(
   current: T | undefined,
@@ -221,7 +272,18 @@ function mergeRecordFields<T extends object>(
     if (incomingValue === undefined) return;
     const fieldKey = `${prefix}${field}`;
     const existingEvidence = fields[fieldKey];
-    if (value[field] === undefined || !existingEvidence || compareMergeEvidence(evidence, existingEvidence, fieldKey) > 0) {
+    if (
+      value[field] === undefined
+      || !existingEvidence
+      || compareMergeEvidence(evidence, existingEvidence, fieldKey) > 0
+      || isArtifactPlaceholderRefinement(
+        fieldKey,
+        value[field],
+        incomingValue,
+        evidence,
+        existingEvidence,
+      )
+    ) {
       value[field] = incomingValue;
       fields[fieldKey] = evidence;
     }
@@ -746,6 +808,12 @@ function mergeToolEntry(
   toolCallId: string,
 ): { entry: ToolEntry; merge: EntityMergeState } {
   const evidence = mergeEvidence(event, 'tool');
+  const currentToolName = current?.name.trim().toLowerCase();
+  const preserveConcreteToolName = Boolean(
+    currentToolName
+    && currentToolName !== 'tool_call'
+    && data.name.trim().toLowerCase() === 'tool_call',
+  );
   const incomingStatus: ToolEntry['status'] = event.type === 'tool.completed'
     ? (data.isError ? 'error' : 'completed')
     : 'running';
@@ -760,7 +828,8 @@ function mergeToolEntry(
       parentTaskId: current.parentTaskId,
     },
     {
-      name: data.name,
+      // A late wrapper completion must not overwrite the concrete nested tool identity.
+      name: preserveConcreteToolName ? undefined : data.name,
       args: data.args,
       partialResult: data.partialResult,
       result: data.result,
@@ -877,9 +946,12 @@ function applyTool(turn: ConversationTurn, event: ConversationEvent): Conversati
         nextMerge = merged.merge;
         return merged.entry;
       });
-      const summary = toolGroupSummary(group.category, entries);
+      // A delegated wrapper can acquire its concrete tool name on the nested event.
+      const category = entries.length === 1 ? toolCategory(entries[0].name) : group.category;
+      const summary = toolGroupSummary(category, entries);
       return {
         ...group,
+        category,
         entries,
         status: toolGroupStatus(entries),
         summaryKey: summary.key,
@@ -3708,6 +3780,44 @@ export function removeConversationSession(
   removeAliases(next.aliases.byMessageId);
   delete next.aliases.activeBySession[sessionKey];
   delete next.aliases.pendingLocalBySession[sessionKey];
+  return next;
+}
+
+/** Remove one unaccepted local Turn and every canonical index that references it. */
+export function removeConversationTurn(
+  state: ConversationState,
+  sessionKey: string,
+  turnId: string,
+): ConversationState {
+  const turn = state.turnsById[turnId];
+  const events = state.eventsByTurnId[turnId] ?? [];
+  if (turn?.sessionKey !== sessionKey && !events.some((event) => event.sessionKey === sessionKey)) {
+    return state;
+  }
+
+  const next = createConversationDraft(state);
+  next.turnOrderBySession[sessionKey] = (next.turnOrderBySession[sessionKey] ?? [])
+    .filter((candidate) => candidate !== turnId);
+  delete next.turnsById[turnId];
+  delete next.eventsByTurnId[turnId];
+  delete next.eventRetentionByTurnId[turnId];
+  delete next.noSequenceDedupeByScope[noSequenceDedupeScopeKey(sessionKey, `turn:${turnId}`)];
+
+  const removeTurnAliases = (aliases: Record<string, string>) => {
+    Object.entries(aliases).forEach(([key, ownerTurnId]) => {
+      if (ownerTurnId === turnId) delete aliases[key];
+    });
+  };
+  removeTurnAliases(next.aliases.byRunId);
+  removeTurnAliases(next.aliases.byTaskId);
+  removeTurnAliases(next.aliases.byToolCallId);
+  removeTurnAliases(next.aliases.byMessageId);
+  if (next.aliases.activeBySession[sessionKey] === turnId) {
+    delete next.aliases.activeBySession[sessionKey];
+  }
+  if (next.aliases.pendingLocalBySession[sessionKey] === turnId) {
+    delete next.aliases.pendingLocalBySession[sessionKey];
+  }
   return next;
 }
 

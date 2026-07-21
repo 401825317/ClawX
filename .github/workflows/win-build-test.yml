@@ -28,8 +28,14 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version: "22.22.3"
           cache: "pnpm"
+
+      - name: Setup Go for Windows portable updater
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: false
 
       - name: Prefer HTTPS for public GitHub git dependencies
         run: |
@@ -46,7 +52,9 @@ jobs:
         run: pnpm run agent-browser:download:win
 
       - name: Build Windows
-        run: pnpm run package:win
+        run: |
+          pnpm run package:win
+          pnpm run package:win:usb
 
       - name: Validate unsigned Windows artifacts before SignPath
         shell: pwsh
@@ -100,7 +108,117 @@ jobs:
           if ($env:UNSIGNED_EXE_COUNT -and ($finalExeFiles.Count -ne [int]$env:UNSIGNED_EXE_COUNT)) {
             throw "Final release .exe count ($($finalExeFiles.Count)) does not match unsigned count ($env:UNSIGNED_EXE_COUNT)"
           }
+          foreach ($file in $finalExeFiles) {
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            Write-Host "Authenticode $($file.Name): $($signature.Status)"
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($file.Name): $($signature.Status)"
+            }
+          }
           Write-Host "Signed executables copied to release/ ($($finalExeFiles.Count) file(s))"
+
+      - name: Validate Windows USB deep-signing configuration
+        shell: pwsh
+        env:
+          SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG)) {
+            throw "Repository variable SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG is required"
+          }
+          $usbZipFiles = @(Get-ChildItem -Path "release" -Filter "UClaw-*-win-x64-usb.zip" -File)
+          if ($usbZipFiles.Count -ne 1) {
+            throw "Expected exactly one unsigned Windows USB ZIP before SignPath, found $($usbZipFiles.Count)"
+          }
+          $signingInputDir = "release/signpath-input"
+          Remove-Item -Path $signingInputDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $signingInputDir -Force | Out-Null
+          $signingInputName = "$([IO.Path]::GetFileNameWithoutExtension($usbZipFiles[0].Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
+          Copy-Item -LiteralPath $usbZipFiles[0].FullName -Destination (Join-Path $signingInputDir $signingInputName) -Force
+          Write-Host "Unique SignPath input: $signingInputName"
+
+      - name: Upload unsigned Windows USB ZIP for SignPath
+        id: upload-unsigned-windows-usb-artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-win-usb-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/signpath-input/*.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Deep-sign Windows USB ZIP via SignPath
+        id: signpath-sign-windows-usb
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: "78e37079-23df-4800-b41c-33312ad7c1e3"
+          project-slug: "ValueCell"
+          signing-policy-slug: "ValueCell-sign"
+          artifact-configuration-slug: ${{ vars.SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned-windows-usb-artifact.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: release/signed-usb
+          skip-decompress: true
+
+      - name: Replace and verify signed Windows USB ZIP
+        shell: pwsh
+        run: |
+          $signedUsbZipFiles = @(Get-ChildItem -Path "release/signed-usb" -Filter "*.zip" -File -Recurse)
+          $targetUsbZipFiles = @(Get-ChildItem -Path "release" -Filter "UClaw-*-win-x64-usb.zip" -File)
+          if ($signedUsbZipFiles.Count -ne 1 -or $targetUsbZipFiles.Count -ne 1) {
+            throw "Expected one signed and one target Windows USB ZIP; signed=$($signedUsbZipFiles.Count) target=$($targetUsbZipFiles.Count)"
+          }
+          $expectedSignedUsbName = "$([IO.Path]::GetFileNameWithoutExtension($targetUsbZipFiles[0].Name)).signpath-${{ github.run_id }}-${{ github.run_attempt }}.zip"
+          if ($signedUsbZipFiles[0].Name -ne $expectedSignedUsbName) {
+            throw "Signed USB ZIP filename mismatch: expected=$expectedSignedUsbName actual=$($signedUsbZipFiles[0].Name)"
+          }
+          Copy-Item -Path $signedUsbZipFiles[0].FullName -Destination $targetUsbZipFiles[0].FullName -Force
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "uclaw-signed-usb-${{ github.run_id }}-${{ github.run_attempt }}"
+          Remove-Item -Path $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          try {
+            Expand-Archive -LiteralPath $targetUsbZipFiles[0].FullName -DestinationPath $extractRoot -Force
+            $ownedExecutablePaths = @(
+              (Join-Path $extractRoot "UClaw.exe")
+              (Join-Path $extractRoot "resources\resources\updater\win32-x64\uclaw-portable-updater.exe")
+            )
+            foreach ($executablePath in $ownedExecutablePaths) {
+              if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
+                throw "Signed USB ZIP is missing required executable: $executablePath"
+              }
+              $signature = Get-AuthenticodeSignature -FilePath $executablePath
+              Write-Host "Authenticode signed USB ZIP $executablePath: $($signature.Status)"
+              if ($signature.Status -ne 'Valid') {
+                throw "Invalid Authenticode signature in signed USB ZIP: $executablePath ($($signature.Status))"
+              }
+            }
+          } finally {
+            Remove-Item -Path $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Refresh Windows USB metadata after code signing
+        run: pnpm run release:refresh-win-usb-metadata
+
+      - name: Refresh Windows update metadata after code signing
+        run: pnpm run release:refresh-win-metadata
+
+      - name: Validate signed Windows USB package
+        run: pnpm run test:packaged:win:full
+
+      - name: Run signed Windows cross-version upgrade matrix
+        env:
+          UCLAW_UPGRADE_INSTALLER_101_URL: ${{ secrets.UCLAW_UPGRADE_INSTALLER_101_URL }}
+          UCLAW_UPGRADE_INSTALLER_101_SHA512: ${{ secrets.UCLAW_UPGRADE_INSTALLER_101_SHA512 }}
+        run: pnpm run test:upgrade:win
+
+      - name: Upload signed Windows upgrade matrix report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-upgrade-matrix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/regression/windows-upgrade-matrix-*
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload signed Windows artifacts
         uses: actions/upload-artifact@v4
@@ -108,5 +226,8 @@ jobs:
           name: signed-win-exe-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             release/*.exe
+            release/UClaw-*-win-x64-usb.zip
+            release/UClaw-*-win-x64-usb.json
+            release/*.blockmap
             release/latest*.yml
           retention-days: 7

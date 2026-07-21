@@ -6,6 +6,9 @@ ownedPaths:
   - electron/gateway/**
   - electron/utils/openclaw-auth.ts
   - electron/utils/paths.ts
+  - scripts/after-pack.cjs
+  - scripts/build-usb-release.mjs
+  - scripts/windows-support/**
   - src/stores/gateway.ts
   - src/pages/Dreams/**
 requiredProfiles:
@@ -21,6 +24,10 @@ requiredRules:
 ---
 
 Use this spec when ClawX shows the Gateway as starting/running but UI data does not refresh, Dreams cannot load, or Gateway RPC calls time out after a restart.
+
+For a distributed Windows USB build, start with the root-level `UClaw-SelfCheck.cmd`. It must use the bundled `resources/bin/node.exe` and must not require system Node.js, Python, Git, PowerShell execution-policy changes, or administrator privileges. Before probing host state, the check validates `uclaw-usb-build.json` against the packaged build identity and all four shipped x64 PE executables, then verifies the metadata, entrypoint, version, and declared runtime dependencies of all 12 bundled UClaw and channel/search plugins. Installed plugin copies are checked separately so a package defect can be distinguished from an interrupted first-run install or upgrade. Dynamic log scanning is limited to the last 24 hours and must not include logs older than the packaged build.
+
+The Windows USB finalizer must require a committed, clean source tree, start from a freshly generated `win-unpacked`, reset `UClawData` to an empty portable layout, and reject stale or mixed artifacts when the source version, Git commit, `app.asar` version, build ID, target architecture, executable PE machine, bundled plugin metadata, or plugin runtime dependencies disagree. The release artifact includes both the ZIP and its companion JSON identity/checksum metadata.
 
 ClawX should prefer OpenClaw-native signals over stderr string matching:
 
@@ -253,6 +260,11 @@ pnpm exec openclaw gateway call status >/tmp/clawx-status.json
 
 ## Acceptance Criteria
 
+- A Windows USB ZIP contains one standalone `UClaw-SelfCheck.cmd` at its root; its embedded payload is extracted with the bundled Node runtime and deleted after execution.
+- USB packaging fails before ZIP creation when the bundled Node, uv, agent-browser, OpenClaw runtime, app archive, or required local plugin TypeBox dependencies are missing.
+- The self-check produces a redacted report under `UClawData/diagnostics/`, or under the host temporary directory when the USB data directory is not writable.
+- The report does not read or print credential-file contents, raw logs, API keys, passwords, bearer tokens, cookies, or signed URLs.
+- Multiple `UClaw.exe` processes are reported as Electron's normal process model, not as an automatic duplicate-instance failure.
 - Gateway starts without restart loops.
 - `configSyncMs` stays small relative to total startup time.
 - `system-presence` succeeds after startup settles.

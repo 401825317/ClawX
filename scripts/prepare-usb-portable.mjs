@@ -48,9 +48,11 @@ if (!fs.existsSync(releaseDir)) {
 
 const portableRoot = resolvePortableRoot();
 const dataDir = path.join(portableRoot, 'UClawData');
+fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
 fs.mkdirSync(path.join(dataDir, 'updates'), { recursive: true });
 fs.writeFileSync(path.join(portableRoot, 'portable.flag'), 'UClaw USB portable mode\n', 'utf-8');
 fs.writeFileSync(path.join(dataDir, '.keep'), '', 'utf-8');
 
-console.log(`[prepare-usb-portable] Added portable.flag and UClawData to ${path.relative(ROOT, portableRoot)}.`);
+console.log(`[prepare-usb-portable] Reset UClawData and added portable.flag to ${path.relative(ROOT, portableRoot)}.`);
+console.log('[prepare-usb-portable] The packaged UClawData directory contains no account, token, config, log, or cache data.');
 console.log('[prepare-usb-portable] Runtime caches and update downloads are created on the host machine as UClawRuntime.');

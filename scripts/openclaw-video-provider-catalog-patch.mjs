@@ -1,10 +1,11 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V4';
-const PREVIOUS_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V3';
-const OLDER_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V2';
-const LEGACY_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG';
+const PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V5';
+const PREVIOUS_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V4';
+const OLDER_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V3';
+const LEGACY_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG_V2';
+const INITIAL_PATCH_MARKER = 'UCLAW_CONFIGURED_VIDEO_MODELS_IN_CATALOG';
 
 export function patchOpenClawVideoProviderCatalogContent(content) {
   const anchor = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
@@ -29,14 +30,40 @@ export function patchOpenClawVideoProviderCatalogContent(content) {
 \treturn providers.map((provider) => {
 \t\tconst configuredProvider = params?.config?.models?.providers?.[provider.id];
 \t\tconst providerModels = Array.isArray(configuredProvider?.models) ? configuredProvider.models.map((entry) => typeof entry === "string" ? entry : entry?.id).filter((model) => typeof model === "string" && model.trim()) : [];
+\t\tconst explicitModels = [...new Set([...(configuredByProvider.get(provider.id) ?? []), ...providerModels])];
+\t\treturn {
+\t\t\t...provider,
+\t\t\tdefaultModel: primaryModelRef?.provider === provider.id ? primaryModelRef.model : provider.defaultModel,
+\t\t\tmodels: explicitModels.length > 0 ? explicitModels : [...new Set(provider.models ?? [])]
+\t\t};
+\t}); // ${PREVIOUS_PATCH_MARKER}
+}`;
+  const olderAnchor = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
+\tconst providers = (deps.listProviders ?? listVideoGenerationProviders)(params?.config);
+\tconst modelConfig = params?.config?.agents?.defaults?.videoGenerationModel;
+\tconst primaryRef = typeof modelConfig === "string" ? modelConfig : modelConfig?.primary;
+\tconst primaryModelRef = typeof primaryRef === "string" ? parseVideoGenerationModelRef(primaryRef) : undefined;
+\tconst configuredRefs = typeof modelConfig === "string" ? [modelConfig] : [modelConfig?.primary, ...Array.isArray(modelConfig?.fallbacks) ? modelConfig.fallbacks : []];
+\tconst configuredByProvider = new Map();
+\tfor (const ref of configuredRefs) {
+\t\tif (typeof ref !== "string") continue;
+\t\tconst parsed = parseVideoGenerationModelRef(ref);
+\t\tif (!parsed?.provider || !parsed?.model) continue;
+\t\tconst models = configuredByProvider.get(parsed.provider) ?? [];
+\t\tif (!models.includes(parsed.model)) models.push(parsed.model);
+\t\tconfiguredByProvider.set(parsed.provider, models);
+\t}
+\treturn providers.map((provider) => {
+\t\tconst configuredProvider = params?.config?.models?.providers?.[provider.id];
+\t\tconst providerModels = Array.isArray(configuredProvider?.models) ? configuredProvider.models.map((entry) => typeof entry === "string" ? entry : entry?.id).filter((model) => typeof model === "string" && model.trim()) : [];
 \t\treturn {
 \t\t\t...provider,
 \t\t\tdefaultModel: primaryModelRef?.provider === provider.id ? primaryModelRef.model : provider.defaultModel,
 \t\t\tmodels: [...new Set([...(configuredByProvider.get(provider.id) ?? []), ...providerModels, ...(provider.models ?? [])])]
 \t\t};
-\t}); // ${PREVIOUS_PATCH_MARKER}
+\t}); // ${OLDER_PATCH_MARKER}
 }`;
-  const olderAnchor = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
+  const legacyAnchor = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
 \tconst providers = (deps.listProviders ?? listVideoGenerationProviders)(params?.config);
 \tconst modelConfig = params?.config?.agents?.defaults?.videoGenerationModel;
 \tconst configuredRefs = typeof modelConfig === "string" ? [modelConfig] : [modelConfig?.primary, ...Array.isArray(modelConfig?.fallbacks) ? modelConfig.fallbacks : []];
@@ -56,9 +83,9 @@ export function patchOpenClawVideoProviderCatalogContent(content) {
 \t\t\t...provider,
 \t\t\tmodels: [...new Set([...(configuredByProvider.get(provider.id) ?? []), ...providerModels, ...(provider.models ?? [])])]
 \t\t};
-\t}); // ${OLDER_PATCH_MARKER}
+\t}); // ${LEGACY_PATCH_MARKER}
 }`;
-  const legacyAnchor = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
+  const initialAnchor = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
 \tconst providers = (deps.listProviders ?? listVideoGenerationProviders)(params?.config);
 \tconst modelConfig = params?.config?.agents?.defaults?.videoGenerationModel;
 \tconst configuredRefs = typeof modelConfig === "string" ? [modelConfig] : [modelConfig?.primary, ...Array.isArray(modelConfig?.fallbacks) ? modelConfig.fallbacks : []];
@@ -74,7 +101,7 @@ export function patchOpenClawVideoProviderCatalogContent(content) {
 \treturn providers.map((provider) => ({
 \t\t...provider,
 \t\tmodels: [...new Set([...(configuredByProvider.get(provider.id) ?? []), ...(provider.models ?? [])])]
-\t})); // ${LEGACY_PATCH_MARKER}
+\t})); // ${INITIAL_PATCH_MARKER}
 }`;
   const patchAnchor = content.includes(previousAnchor)
     ? previousAnchor
@@ -82,7 +109,9 @@ export function patchOpenClawVideoProviderCatalogContent(content) {
       ? olderAnchor
       : content.includes(legacyAnchor)
         ? legacyAnchor
-        : anchor;
+        : content.includes(initialAnchor)
+          ? initialAnchor
+          : anchor;
   if (!content.includes(patchAnchor)) return { content, changed: false, matched: false };
   const replacement = `function listRuntimeVideoGenerationProviders(params, deps = {}) {
 \tconst providers = (deps.listProviders ?? listVideoGenerationProviders)(params?.config);
@@ -101,12 +130,23 @@ export function patchOpenClawVideoProviderCatalogContent(content) {
 \t}
 \treturn providers.map((provider) => {
 \t\tconst configuredProvider = params?.config?.models?.providers?.[provider.id];
-\t\tconst providerModels = Array.isArray(configuredProvider?.models) ? configuredProvider.models.map((entry) => typeof entry === "string" ? entry : entry?.id).filter((model) => typeof model === "string" && model.trim()) : [];
-\t\tconst explicitModels = [...new Set([...(configuredByProvider.get(provider.id) ?? []), ...providerModels])];
+\t\tconst hasConfiguredModels = Array.isArray(configuredProvider?.models);
+\t\tconst configuredModels = hasConfiguredModels ? configuredProvider.models.map((entry) => typeof entry === "string" ? entry : entry?.id).filter((model) => typeof model === "string" && model.trim()) : [];
+\t\tconst configuredModelSet = new Set(configuredModels);
+\t\tconst nativeModels = Array.isArray(provider.models) ? provider.models.filter((model) => typeof model === "string" && model.trim()) : [];
+\t\tconst nativeModelSet = new Set(nativeModels);
+\t\tconst capabilityModels = Object.values(provider.capabilities ?? {}).flatMap((capability) => capability && typeof capability === "object" && capability.modelCapabilities && typeof capability.modelCapabilities === "object" ? Object.keys(capability.modelCapabilities) : []).filter((model) => configuredModelSet.has(model));
+\t\tconst capabilityModelSet = new Set(capabilityModels);
+\t\tconst isVideoModel = (model) => nativeModelSet.has(model) || capabilityModelSet.has(model);
+\t\tconst configuredVideoModels = (configuredByProvider.get(provider.id) ?? []).filter(isVideoModel);
+\t\tconst catalogModels = hasConfiguredModels ? configuredModels.filter(isVideoModel) : nativeModels;
+\t\tconst models = [...new Set([...configuredVideoModels, ...catalogModels])];
+\t\tconst requestedDefault = primaryModelRef?.provider === provider.id ? primaryModelRef.model : undefined;
+\t\tconst defaultModel = requestedDefault && models.includes(requestedDefault) ? requestedDefault : models.includes(provider.defaultModel) ? provider.defaultModel : models[0];
 \t\treturn {
 \t\t\t...provider,
-\t\t\tdefaultModel: primaryModelRef?.provider === provider.id ? primaryModelRef.model : provider.defaultModel,
-\t\t\tmodels: explicitModels.length > 0 ? explicitModels : [...new Set(provider.models ?? [])]
+\t\t\tdefaultModel,
+\t\t\tmodels
 \t\t};
 \t}); // ${PATCH_MARKER}
 }`;

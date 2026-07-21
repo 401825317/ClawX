@@ -1,0 +1,20 @@
+{
+  "id": "uclaw-video-project",
+  "name": "UClaw Video Project",
+  "description": "Persists VideoProject, shots, reference media, generation attempts, acceptance decisions, and final delivery state without owning media generation.",
+  "version": "0.1.2",
+  "entry": "index.mjs",
+  "enabledByDefault": false,
+  "activation": { "onStartup": true },
+  "contracts": {
+    "tools": [
+      "uclaw_video_project",
+      "uclaw_video_shot"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

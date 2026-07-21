@@ -19,11 +19,26 @@ export function patchOpenClawNativeImageDeliveryContent(content, filePath = '<fi
   if (!content.includes('async function executeImageGenerationJob')) {
     return { content, changed: false, category: null };
   }
-  if (content.includes(PATCH_MARKER)) {
+  if (content.includes(PATCH_MARKER) && content.includes('saveGeneratedImageForDeliveryUClaw')) {
     return { content, changed: false, category: 'image-runtime' };
   }
 
-  const importLine = `import { normalizeGeneratedImageForDelivery as normalizeGeneratedImageForDeliveryUClaw } from "./${TARGET_RUNTIME_FILE}"; // ${PATCH_MARKER}\n`;
+  const importLine = `import { normalizeGeneratedImageForDelivery as normalizeGeneratedImageForDeliveryUClaw, saveGeneratedImageForDelivery as saveGeneratedImageForDeliveryUClaw } from "./${TARGET_RUNTIME_FILE}"; // ${PATCH_MARKER}\n`;
+  const legacyImportLine = `import { normalizeGeneratedImageForDelivery as normalizeGeneratedImageForDeliveryUClaw } from "./${TARGET_RUNTIME_FILE}"; // ${PATCH_MARKER}\n`;
+  const legacySaveAnchor = '\tconst savedImages = await Promise.all(deliveryImages.map((image) => saveMediaBuffer(image.buffer, image.mimeType, "tool-image-generation", mediaMaxBytes, params.filename || image.fileName)));';
+  const upgradedSave = `\tconst savedImages = await Promise.all(deliveryImages.map((image) => saveGeneratedImageForDeliveryUClaw(saveMediaBuffer, image, {
+\t\tmaxBytes: mediaMaxBytes,
+\t\toriginalFilename: params.filename || image.fileName
+\t})));`;
+  if (content.includes(PATCH_MARKER)) {
+    const withImport = replaceOnce(content, legacyImportLine, importLine, 'legacy image delivery import', filePath);
+    return {
+      content: replaceOnce(withImport, legacySaveAnchor, upgradedSave, 'legacy image save', filePath),
+      changed: true,
+      category: 'image-runtime',
+    };
+  }
+
   const saveAnchor = '\tconst mediaMaxBytes = resolveGeneratedMediaMaxBytes(params.effectiveCfg, "image");\n\tconst savedImages = await Promise.all(result.images.map((image) => saveMediaBuffer(image.buffer, image.mimeType, "tool-image-generation", mediaMaxBytes, params.filename || image.fileName)));';
   const savePatch = `\tconst mediaMaxBytes = resolveGeneratedMediaMaxBytes(params.effectiveCfg, "image");
 \tconst deliveryImages = await Promise.all(result.images.map((image) => normalizeGeneratedImageForDeliveryUClaw(image, {
@@ -32,7 +47,7 @@ export function patchOpenClawNativeImageDeliveryContent(content, filePath = '<fi
 \t\toutputCompression: params.providerOptions?.openai?.outputCompression,
 \t\tbackground: params.background ?? params.providerOptions?.openai?.background
 \t})));
-\tconst savedImages = await Promise.all(deliveryImages.map((image) => saveMediaBuffer(image.buffer, image.mimeType, "tool-image-generation", mediaMaxBytes, params.filename || image.fileName)));`;
+${upgradedSave}`;
 
   const patched = replaceOnce(content, saveAnchor, savePatch, 'image save', filePath);
   return { content: `${importLine}${patched}`, changed: true, category: 'image-runtime' };

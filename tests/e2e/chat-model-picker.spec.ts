@@ -1,16 +1,9 @@
 import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
 import endpoints from '../../shared/junfeiai-endpoints.json';
-import zhChat from '../../src/i18n/locales/zh/chat.json';
 
 const alphaModelRef = 'openai/smart-latest';
 const betaModelRef = 'openai/qwen-latest';
 const managedDefaultThinkingLevel = endpoints.defaultThinkingLevel;
-const managedDefaultThinkingLabel = zhChat.composer.thinkingInherit.replace(
-  '{{level}}',
-  zhChat.composer.thinkingLevels[
-    managedDefaultThinkingLevel as keyof typeof zhChat.composer.thinkingLevels
-  ],
-);
 const managedVideoDefaultSizes = [
   endpoints.videoGenerationDefaults.sizes.landscape,
   endpoints.videoGenerationDefaults.sizes.portrait,
@@ -306,7 +299,7 @@ test.describe('ClawX chat model picker', () => {
       await page.getByTestId('chat-thinking-picker-button').click();
       const thinkingMenu = page.getByTestId('chat-thinking-picker-menu');
       await expect(thinkingMenu).toBeVisible();
-      await expect(thinkingMenu.getByRole('button', { name: managedDefaultThinkingLabel })).toBeVisible();
+      await expect(page.getByTestId('chat-thinking-option-inherit')).toBeVisible();
       await page.getByTestId('chat-thinking-option-medium').click();
 
       await expect.poll(async () => app.evaluate(() => (

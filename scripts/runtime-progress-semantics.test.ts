@@ -50,6 +50,25 @@ assert.deepEqual(apply(base({
   result: { id: 'openclaw:core:video_generate', name: 'video_generate', label: 'Video Generation' },
 })), []);
 
+const updatePlanCallId = 'call-update-plan';
+assert.deepEqual(apply(base({
+  type: 'tool.started',
+  toolCallId: updatePlanCallId,
+  name: 'update_plan',
+  args: {
+    plan: [
+      { step: 'Inspect the workspace', status: 'completed' },
+      { step: 'Build the application', status: 'in_progress' },
+    ],
+  },
+})), []);
+assert.deepEqual(apply(base({
+  type: 'tool.completed',
+  toolCallId: updatePlanCallId,
+  name: 'update_plan',
+  result: { message: 'Plan updated' },
+})), []);
+
 const searchCallId = 'call-web-search';
 apply(base({
   type: 'tool.started',
@@ -345,6 +364,58 @@ assert.equal(directoryActions[0]?.id, `progress:tool:${directoryParentCallId}`);
 assert.equal(directoryActions[0]?.toolCallId, directoryParentCallId);
 assert.equal(directoryActions[0]?.toolName, 'image_generate');
 assert.equal(directoryActions[0]?.translationKey, 'runtimeProgress.toolSubmitted');
+
+const sanitizedDirectoryRunId = 'run-directory-wrapper-sanitized-parent-dedupe';
+const unsanitizedDirectoryParentCallId = 'call-directory-image|fc_4f13f53d';
+const sanitizedDirectoryParentCallId = unsanitizedDirectoryParentCallId.replaceAll('|', '_');
+const sanitizedDirectoryNestedCallId = `tool_search_code:${sanitizedDirectoryParentCallId}:image_generate:2`;
+let sanitizedDirectoryRuns: Record<string, ChatRuntimeRunState> = {};
+for (const event of [{
+  type: 'tool.started' as const,
+  runId: sanitizedDirectoryRunId,
+  sessionKey,
+  ts: 1,
+  toolCallId: unsanitizedDirectoryParentCallId,
+  name: 'tool_call',
+  args: { id: 'image_generate', args: { prompt: '生成汽车图片' } },
+}, {
+  type: 'tool.started' as const,
+  runId: sanitizedDirectoryRunId,
+  sessionKey,
+  ts: 2,
+  toolCallId: sanitizedDirectoryNestedCallId,
+  name: 'image_generate',
+  args: { prompt: '生成汽车图片' },
+}, {
+  type: 'tool.completed' as const,
+  runId: sanitizedDirectoryRunId,
+  sessionKey,
+  ts: 3,
+  toolCallId: sanitizedDirectoryNestedCallId,
+  name: 'image_generate',
+  result: { details: { async: true, status: 'started', taskId: 'sanitized-directory-image-task' } },
+}, {
+  type: 'tool.completed' as const,
+  runId: sanitizedDirectoryRunId,
+  sessionKey,
+  ts: 4,
+  toolCallId: unsanitizedDirectoryParentCallId,
+  name: 'tool_call',
+  result: {
+    tool: { name: 'image_generate', label: 'Image Generation' },
+    result: { details: { async: true, status: 'started', taskId: 'sanitized-directory-image-task' } },
+  },
+}]) {
+  sanitizedDirectoryRuns = applyWithDerivedProgress(sanitizedDirectoryRuns, event);
+}
+const sanitizedDirectoryActions = sanitizedDirectoryRuns[sanitizedDirectoryRunId]?.progressEntries?.filter((entry) => (
+  entry.kind === 'action'
+)) ?? [];
+assert.equal(sanitizedDirectoryActions.length, 1);
+assert.equal(sanitizedDirectoryActions[0]?.id, `progress:tool:${unsanitizedDirectoryParentCallId}`);
+assert.equal(sanitizedDirectoryActions[0]?.toolCallId, unsanitizedDirectoryParentCallId);
+assert.equal(sanitizedDirectoryActions[0]?.toolName, 'image_generate');
+assert.equal(sanitizedDirectoryActions[0]?.translationKey, 'runtimeProgress.toolSubmitted');
 
 const independentRunId = 'run-independent-image-tools';
 let independentRuns: Record<string, ChatRuntimeRunState> = {};

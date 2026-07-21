@@ -1,6 +1,6 @@
 {
   "name": "uclaw-artifact-guard-plugin",
-  "version": "0.2.5",
+  "version": "0.2.8",
   "description": "UClaw artifact evidence and runtime event bridge for OpenClaw",
   "private": true,
   "type": "module",

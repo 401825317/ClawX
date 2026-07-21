@@ -13,6 +13,18 @@ import { isRecoverableConversationError } from './chat-adapter';
 import { createEventId, stableHash } from './identity';
 
 const COMPLETION_WAKE_MEDIA_RUN_RE = /^(?:image_generate|image_edit|video_generate|music_generate):([^:]+):[^:]+$/iu;
+const DIAGNOSTIC_ONLY_TOOL_NAMES = new Set(['update_plan']);
+
+function runtimeTimelineVisibility(event: ChatRuntimeEvent) {
+  if (event.timelineVisibility) return event.timelineVisibility;
+  if (
+    (event.type === 'tool.started' || event.type === 'tool.updated' || event.type === 'tool.completed')
+    && DIAGNOSTIC_ONLY_TOOL_NAMES.has(event.name.trim().toLowerCase())
+  ) {
+    return 'diagnostics' as const;
+  }
+  return undefined;
+}
 
 function mediaMimeType(value: string): string {
   const cleanPath = value.split(/[?#]/u, 1)[0]?.toLowerCase() ?? '';
@@ -360,7 +372,7 @@ export function runtimeEventToConversationEvent(event: ChatRuntimeEvent): Conver
     taskId,
     parentTaskId,
     toolCallId,
-    timelineVisibility: event.timelineVisibility,
+    timelineVisibility: runtimeTimelineVisibility(event),
     seq: event.seq,
     occurredAt,
     receivedAt: Date.now(),

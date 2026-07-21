@@ -4,7 +4,7 @@ import { join } from 'path';
 const PATCH_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RETRY_TIMEOUT_MS';
 const QUEUE_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_MARKER';
 const QUEUE_CLEANUP_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_QUEUE_CLEANUP_MARKER';
-const QUEUE_GUARD_MARKER = '__uclawReplySessionInitQueued';
+const OUTER_QUEUE_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_OUTER_QUEUE_MARKER';
 const STALE_SNAPSHOT_RELOAD_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_RELOAD_MARKER';
 const STABLE_REVISION_MARKER = 'UCLAW_REPLY_SESSION_INIT_CONFLICT_STABLE_REVISION_MARKER';
 const RETRY_TIMEOUT_MS = 30_000;
@@ -26,6 +26,22 @@ const SESSION_KEY_ANCHOR = `\tconst sessionKey = canonicalizeMainSessionAlias({
 
 const SESSION_KEY_QUEUE_GUARD = `${SESSION_KEY_ANCHOR}\tif (!params.__uclawReplySessionInitQueued) {
 \t\treturn await runUclawReplySessionInitializationInQueue(sessionKey, () => initSessionStateAttempt({
+\t\t\t...params,
+\t\t\t__uclawReplySessionInitQueued: true
+\t\t}, staleSnapshotRetried));
+\t}
+`;
+
+const INIT_SESSION_ATTEMPT_ANCHOR = `async function initSessionStateAttempt(params, staleSnapshotRetried) {
+\tconst attemptContext = resolveInitSessionStateAttemptContext(params);
+`;
+
+const INIT_SESSION_ATTEMPT_QUEUE_GUARD = `async function initSessionStateAttempt(params, staleSnapshotRetried) {
+\tconst attemptContext = resolveInitSessionStateAttemptContext(params);
+\t// ${OUTER_QUEUE_MARKER}: serialize before acquiring the non-reentrant session store lock.
+\tif (!params.__uclawReplySessionInitQueued) {
+\t\tconst queueSessionKey = String(attemptContext.storePath) + "::" + String(attemptContext.sessionCtxForState.SessionKey || "__unknown__");
+\t\treturn await runUclawReplySessionInitializationInQueue(queueSessionKey, () => initSessionStateAttempt({
 \t\t\t...params,
 \t\t\t__uclawReplySessionInitQueued: true
 \t\t}, staleSnapshotRetried));
@@ -138,8 +154,11 @@ function patchQueueHelper(content) {
 
 function patchQueueGuard(content) {
   let next = patchQueueHelper(content);
-  if (next.includes(QUEUE_MARKER) && next.includes(QUEUE_GUARD_MARKER)) {
-    return next;
+
+  // Older UClaw builds injected the queue from initSessionStateAttemptLocked.
+  // That recursively reacquired the same store lock and deadlocked every turn.
+  if (next.includes(SESSION_KEY_QUEUE_GUARD)) {
+    next = next.replace(SESSION_KEY_QUEUE_GUARD, SESSION_KEY_ANCHOR);
   }
 
   if (!next.includes(QUEUE_MARKER)) {
@@ -151,8 +170,15 @@ function patchQueueGuard(content) {
       return content;
     }
   }
-  if (!next.includes(QUEUE_GUARD_MARKER)) {
-    next = next.replace(SESSION_KEY_ANCHOR, SESSION_KEY_QUEUE_GUARD);
+  if (!next.includes(OUTER_QUEUE_MARKER)) {
+    const withOuterQueue = next.replace(INIT_SESSION_ATTEMPT_ANCHOR, INIT_SESSION_ATTEMPT_QUEUE_GUARD);
+    if (withOuterQueue === next) {
+      throw new Error('[openclaw-reply-session-init-conflict-patch] Missing outer session queue anchor');
+    }
+    next = withOuterQueue;
+  }
+  if (next.includes(SESSION_KEY_QUEUE_GUARD)) {
+    throw new Error('[openclaw-reply-session-init-conflict-patch] Session queue remained inside the store lock');
   }
   return next;
 }

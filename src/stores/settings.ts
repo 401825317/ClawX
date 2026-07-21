@@ -40,6 +40,7 @@ interface SettingsState {
 
   // Setup
   setupComplete: boolean;
+  initialized: boolean;
 
   // Actions
   init: () => Promise<void>;
@@ -61,7 +62,7 @@ interface SettingsState {
   setSidebarCollapsed: (value: boolean) => void;
   setSidebarWidth: (value: number) => void;
   setDevModeUnlocked: (value: boolean) => void;
-  markSetupComplete: () => void;
+  markSetupComplete: () => Promise<void>;
   resetSettings: () => void;
 }
 
@@ -85,6 +86,7 @@ const defaultSettings = {
   sidebarWidth: 280,
   devModeUnlocked: false,
   setupComplete: false,
+  initialized: false,
 };
 
 const clampSidebarWidth = (value: number) => Math.min(420, Math.max(220, Math.round(value)));
@@ -103,6 +105,8 @@ export const useSettingsStore = create<SettingsState>()(
           set((state) => ({
             ...state,
             ...settings,
+            setupComplete: settings.setupComplete === true,
+            initialized: true,
             ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
             ...(typeof settings.sidebarWidth === 'number'
               ? { sidebarWidth: clampSidebarWidth(settings.sidebarWidth) }
@@ -112,8 +116,9 @@ export const useSettingsStore = create<SettingsState>()(
             i18n.changeLanguage(resolvedLanguage);
           }
         } catch {
-          // Keep renderer-persisted settings as a fallback when the main
-          // process store is not reachable.
+          // setupComplete is Main-owned. A renderer cache from another
+          // portable data instance must never bypass first-run setup.
+          set({ setupComplete: false, initialized: true });
         }
       },
 
@@ -186,11 +191,38 @@ export const useSettingsStore = create<SettingsState>()(
           body: JSON.stringify({ value: devModeUnlocked }),
         }).catch(() => { });
       },
-      markSetupComplete: () => set({ setupComplete: true }),
-      resetSettings: () => set(defaultSettings),
+      markSetupComplete: async () => {
+        await hostApiFetch('/api/settings/setupComplete', {
+          method: 'PUT',
+          body: JSON.stringify({ value: true }),
+        });
+        set({ setupComplete: true });
+      },
+      resetSettings: () => set({ ...defaultSettings, initialized: true }),
     }),
     {
       name: 'clawx-settings',
+      partialize: (state) => {
+        const {
+          setupComplete: _setupComplete,
+          initialized: _initialized,
+          ...persisted
+        } = state;
+        return persisted;
+      },
+      merge: (persistedState, currentState) => {
+        const {
+          setupComplete: _setupComplete,
+          initialized: _initialized,
+          ...persisted
+        } = (persistedState ?? {}) as Partial<SettingsState>;
+        return {
+          ...currentState,
+          ...persisted,
+          setupComplete: false,
+          initialized: false,
+        };
+      },
     }
   )
 );

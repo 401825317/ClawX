@@ -562,7 +562,7 @@ function updateTaskOnlyRunStatus(run: ChatRuntimeRunState): void {
     event.type === 'run.started' || event.type === 'run.ended'
   ));
   if (hasExplicitRunLifecycle) return;
-  const tasks = run.tasks ?? [];
+  const tasks = unresolvedRuntimeTasks(run.tasks ?? []);
   if (tasks.length === 0) return;
   const hasActiveTask = tasks.some((task) => (
     task.status === 'pending'

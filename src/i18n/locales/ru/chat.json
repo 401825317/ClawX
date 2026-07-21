@@ -188,6 +188,7 @@
     },
     "runtimeProgress": {
         "title": "Ход работы",
+        "processingRequest": "Обрабатываю запрос…",
         "commandDetails": "Показать детали команды",
         "executing": "Выполняется",
         "blocked": "Требуется внимание",
@@ -206,9 +207,9 @@
         "toolPartial": "Выполнено частично: {{tool}}",
         "toolWaitingApproval": "Ожидает одобрения: {{tool}}",
         "toolLabels": {
-            "command": "Команда",
-            "exec": "Команда",
-            "exec_command": "Команда",
+            "command": "Этап выполнения",
+            "exec": "Этап выполнения",
+            "exec_command": "Этап выполнения",
             "web_search": "Веб-поиск",
             "web_fetch": "Открытие страницы",
             "browser": "Действие в браузере",

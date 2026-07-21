@@ -94,7 +94,8 @@ pnpm run dev:junfeiai
 ```bash
 pnpm run typecheck
 pnpm run lint:check
-pnpm test
+pnpm run test:e2e
+pnpm run test:packaged:win:full
 ```
 
 通信链路相关改动额外执行：

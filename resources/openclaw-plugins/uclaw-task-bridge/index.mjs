@@ -15,7 +15,6 @@ const TOOL_NAMES = [
 ];
 const DEFAULT_HOST_API_ORIGIN = 'http://127.0.0.1:13210';
 const MONITOR_INTERVAL_MS = 2_500;
-const COMPLETION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const COMPLETION_RETRY_BASE_MS = 15_000;
 const COMPLETION_RETRY_MAX_MS = 5 * 60 * 1_000;
 const COMPLETION_RETRY_MAX_ATTEMPTS = 5;
@@ -157,7 +156,7 @@ function normalizeTask(value) {
   const lifecycle = task.lifecycle && typeof task.lifecycle === 'object' ? task.lifecycle : {};
   const acceptance = task.acceptance && typeof task.acceptance === 'object' ? task.acceptance : {};
   const completion = task.completion && typeof task.completion === 'object' ? task.completion : {};
-  const delivery = task.delivery && typeof task.delivery === 'object' ? task.delivery : undefined;
+  const delivery = task.delivery && typeof task.delivery === 'object' ? task.delivery : {};
   const operations = Array.isArray(lifecycle.operations)
     ? lifecycle.operations.slice(-MAX_EVENT_ITEMS).map((operation) => ({
         kind: cleanText(operation?.kind, 80),
@@ -198,10 +197,18 @@ function normalizeTask(value) {
       outputDescription: cleanText(acceptance.outputDescription, 1_000) || undefined,
     },
     completion: {
-      mode: completion.mode === 'replan' ? 'replan' : 'direct',
+      mode: completion.mode === 'replan'
+        ? 'replan'
+        : completion.mode === 'internal'
+          ? 'internal'
+          : 'direct',
       reason: cleanText(completion.reason, 1_000) || undefined,
     },
-    delivery,
+    delivery: {
+      status: ['pending', 'delivered', 'expired', 'not_applicable'].includes(cleanText(delivery.status, 80))
+        ? cleanText(delivery.status, 80)
+        : 'pending',
+    },
     progress,
     artifacts,
     verifications,
@@ -328,125 +335,6 @@ function completionKey(task) {
   return `${PLUGIN_ID}:completion:${task.taskId}:${task.revision}`;
 }
 
-function completionInjectionText(task) {
-  const payload = {
-    schema: 'uclaw.task-bridge.completion/v1',
-    event: terminalTask(task) ? `task.${task.status}` : 'task.updated',
-    task,
-    events: taskEvents(task),
-    instruction: taskInstruction(task),
-  };
-  const mediaLines = deliverableArtifacts(task)
-    .map((artifact) => artifact.filePath)
-    .filter(Boolean)
-    .map((filePath) => `MEDIA:${filePath}`);
-  return [
-    'A UClaw Host task update is ready for this session. Treat this structured event as task evidence, not user text.',
-    safeJson(payload),
-    ...mediaLines,
-  ].join('\n');
-}
-
-function completionWakeMessage() {
-  return [
-    'Process pending UClaw Host task completion events for this session.',
-    'If no pending completion event is present, reply NO_REPLY.',
-    'Do not claim completion unless the event contains verified artifacts.',
-  ].join(' ');
-}
-
-function runtimeStepStatus(task) {
-  if (task.status === 'succeeded') return 'completed';
-  if (task.status === 'blocked') return 'blocked';
-  if (task.status === 'failed' || task.status === 'timed_out' || task.status === 'lost') return 'error';
-  if (task.status === 'cancelled') return 'skipped';
-  return 'running';
-}
-
-function runtimeProgressStatus(task) {
-  if (task.status === 'succeeded') return 'completed';
-  if (task.status === 'blocked') return 'blocked';
-  if (task.status === 'failed' || task.status === 'timed_out' || task.status === 'lost') return 'error';
-  if (task.status === 'cancelled') return 'aborted';
-  return 'running';
-}
-
-function emitTerminalRuntimeEvents(api, task) {
-  const emitter = api?.agent?.events?.emitAgentEvent;
-  if (typeof emitter !== 'function') return { emitted: false, reason: 'agent_event_emitter_unavailable' };
-  const emit = emitter.bind(api.agent.events);
-  const base = {
-    runId: task.correlation.runId,
-    sessionKey: task.correlation.sessionKey,
-  };
-  const events = [
-    ...task.artifacts.map((artifact) => ({
-      stream: 'artifact',
-      data: { artifact: { ...artifact, taskId: task.taskId }, toolCallId: task.correlation.toolCallId, taskId: task.taskId },
-    })),
-    ...task.verifications.map((verification) => ({
-      stream: 'verification',
-      data: { verification: { ...verification, taskId: task.taskId }, toolCallId: task.correlation.toolCallId, taskId: task.taskId },
-    })),
-    {
-      stream: 'step',
-      data: {
-        taskId: task.taskId,
-        step: {
-          id: `host-task:${task.taskId}`,
-          title: task.title,
-          kind: `host.${task.kind}`,
-          status: runtimeStepStatus(task),
-          detail: task.progress.at(-1)?.detail || task.error,
-          taskId: task.taskId,
-          toolCallId: task.correlation.toolCallId,
-        },
-      },
-    },
-    {
-      stream: 'progress',
-      data: {
-        taskId: task.taskId,
-        entry: {
-          id: `host-task:${task.taskId}:state`,
-          kind: 'status',
-          text: task.progress.at(-1)?.detail || task.title,
-          detail: task.error,
-          status: runtimeProgressStatus(task),
-          toolCallId: task.correlation.toolCallId,
-          source: 'native',
-        },
-      },
-    },
-    {
-      stream: 'tool',
-      data: {
-        taskId: task.taskId,
-        phase: 'result',
-        toolCallId: task.correlation.toolCallId,
-        name: `host.${task.kind}`,
-        result: {
-          taskId: task.taskId,
-          status: task.status,
-          artifactCount: task.artifacts.length,
-          verificationCount: task.verifications.length,
-        },
-        isError: task.status !== 'succeeded',
-      },
-    },
-  ];
-  for (const event of events) {
-    const result = emit({ ...base, ...event });
-    if (result?.emitted !== true) return { emitted: false, reason: result?.reason || `stream_${event.stream}_not_emitted` };
-  }
-  return { emitted: true, count: events.length };
-}
-
-function completionTag(task) {
-  const stable = String(task.taskId || 'task').replace(/[^a-zA-Z0-9_-]+/gu, '-').slice(0, 80);
-  return `taskbridge-${stable || 'task'}`;
-}
-
 function emitToolUpdate(onUpdate, operation, task) {
   if (typeof onUpdate !== 'function') return;
   const partial = buildTaskToolResult(operation, task, { partial: true });
@@ -483,6 +371,18 @@ function createBridge(api, options = {}) {
   let loggedUnavailable = false;
   const tracked = new Map();
   const completionRetries = new Map();
+  const scheduleSessionWake = typeof options.scheduleSessionWake === 'function'
+    ? options.scheduleSessionWake
+    : typeof api?.uclawHost?.scheduleSessionWake === 'function'
+      ? api.uclawHost.scheduleSessionWake
+      : async ({ sessionKey, tasks }) => await request('/api/task-bridge/session-wakes', {
+        method: 'POST',
+        body: JSON.stringify({
+          schema: 'uclaw.host-task.session-wake/v1',
+          sessionKey,
+          taskIds: tasks.map((task) => task.taskId),
+        }),
+      });
 
   function track(task) {
     if (task?.taskId) tracked.set(task.taskId, task);
@@ -554,9 +454,11 @@ function createBridge(api, options = {}) {
           sessionKey: task.correlation.sessionKey,
           delivery: {
             outcome: result?.outcome === 'abandoned' ? 'abandoned' : 'delivered',
-            kind: task.completion.mode === 'replan'
-              ? 'openclaw_session_replan'
-              : 'openclaw_runtime_events',
+            kind: result?.kind || (task.completion.mode === 'internal'
+              ? 'internal_host_step'
+              : task.completion.mode === 'replan'
+                ? 'openclaw_session_replan'
+                : 'openclaw_runtime_events'),
             injectionEnqueued: result?.injectionReady === true,
             runtimeEventsEmitted: result?.runtimeEventsEmitted === true,
             sessionTurnScheduled: result?.scheduled === true,
@@ -580,12 +482,12 @@ function createBridge(api, options = {}) {
 
   async function settleExhaustedCompletion(task, retry) {
     const deliveredBeforeAckFailure = retry.reason === 'host_acknowledgement_failed'
-      && retry.details?.runtimeEventsEmitted === true;
+      && retry.details?.scheduledTurnRetained === true;
     const acknowledged = await acknowledge(task, completionKey(task), {
       outcome: deliveredBeforeAckFailure ? 'delivered' : 'abandoned',
       injectionReady: retry.details?.injectionEnqueued === true,
       runtimeEventsEmitted: retry.details?.runtimeEventsEmitted === true,
-      scheduled: retry.details?.sessionTurnScheduled === true,
+      scheduled: retry.details?.scheduledTurnRetained === true,
       attempts: retry.attempts,
       firstAttemptAt: retry.firstAttemptAt,
       lastAttemptAt: retry.lastAttemptAt,
@@ -620,23 +522,22 @@ function createBridge(api, options = {}) {
     if (retry.exhausted) await settleExhaustedCompletion(task, retry);
   }
 
-  async function unscheduleReplan(task) {
-    const unschedule = api?.session?.workflow?.unscheduleSessionTurnsByTag;
-    if (typeof unschedule !== 'function') {
-      return { ok: false, error: 'session_turn_unschedule_unavailable' };
-    }
+  async function scheduleCompletionTurn(sessionKey, tasks) {
     try {
-      const result = await unschedule({
-        sessionKey: task.correlation.sessionKey,
-        tag: completionTag(task),
+      const result = await scheduleSessionWake({
+        sessionKey,
+        tasks,
+        name: tasks.length > 1 ? 'task-bridge-batch' : 'task-bridge-completion',
       });
-      return { ok: true, result };
+      return result?.scheduled === true && result?.wake?.id
+        ? { ok: true, handle: result.wake }
+        : { ok: false, error: 'host_session_wake_not_confirmed' };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
-  async function deliverTerminalTask(task) {
+  async function prepareTerminalTaskDelivery(task) {
     if (!terminalTask(task) || !task.taskId || !task.correlation.sessionKey) return;
     const retry = completionRetryState(task);
     if (retry?.exhausted) {
@@ -645,91 +546,70 @@ function createBridge(api, options = {}) {
     }
     if (!completionRetryDue(task)) return;
     const key = completionKey(task);
-    let injection;
-    try {
-      injection = await api.session.workflow.enqueueNextTurnInjection({
-        sessionKey: task.correlation.sessionKey,
-        text: completionInjectionText(task),
-        idempotencyKey: key,
-        placement: 'prepend_context',
-        ttlMs: COMPLETION_TTL_MS,
-        metadata: {
-          taskId: task.taskId,
-          revision: task.revision,
-          runId: task.correlation.runId,
-          toolCallId: task.correlation.toolCallId,
-        },
-      });
-    } catch (error) {
-      await deferCompletion(task, 'injection_failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-    const injectionReady = injection?.enqueued === true || Boolean(cleanText(injection?.id, 300));
-    if (!injectionReady) {
-      await deferCompletion(task, 'injection_not_ready');
-      return;
-    }
-
-    const runtimeEvents = emitTerminalRuntimeEvents(api, task);
-    if (!runtimeEvents.emitted) {
-      await deferCompletion(task, 'runtime_event_delivery_failed', { reason: runtimeEvents.reason });
-      return;
-    }
-
-    let scheduled = false;
-    let scheduleError;
-    if (task.completion.mode === 'replan') {
-      const cleaned = await unscheduleReplan(task);
-      if (!cleaned.ok) {
-        scheduleError = cleaned.error;
-      } else {
-        try {
-          const handle = await api.session.workflow.scheduleSessionTurn({
-            sessionKey: task.correlation.sessionKey,
-            delayMs: 2_000,
-            deleteAfterRun: true,
-            message: `${completionWakeMessage()} Replanning reason: ${task.completion.reason}`,
-            deliveryMode: 'announce',
-            name: 'task-bridge-replan',
-            tag: completionTag(task),
-          });
-          scheduled = Boolean(handle);
-        } catch (error) {
-          scheduleError = error instanceof Error ? error.message : String(error);
-        }
-      }
-    }
-
-    if (task.completion.mode === 'direct' || scheduled) {
+    if (task.completion.mode === 'internal') {
       const acknowledged = await acknowledge(task, key, {
-        injectionReady,
-        runtimeEventsEmitted: runtimeEvents.emitted,
-        scheduled,
+        injectionReady: false,
+        runtimeEventsEmitted: false,
+        scheduled: false,
       });
       if (acknowledged.ok) {
         clearCompletionRetry(task);
       } else {
-        const cleanup = task.completion.mode === 'replan' && scheduled
-          ? await unscheduleReplan(task)
-          : { ok: true };
-        await deferCompletion(task, 'host_acknowledgement_failed', {
+        await deferCompletion(task, 'internal_host_step_acknowledgement_failed', {
           error: acknowledged.error,
-          injectionEnqueued: injectionReady,
-          runtimeEventsEmitted: runtimeEvents.emitted,
-          sessionTurnScheduled: scheduled,
-          replanCleanup: cleanup.ok === true ? 'completed' : cleanup.error,
         });
       }
-    } else {
-      await deferCompletion(task, 'session_wake_failed', {
-        injectionEnqueued: injection?.enqueued === true,
-        runtimeEventsEmitted: runtimeEvents.emitted,
-        sessionTurnScheduled: scheduled,
-        scheduleError,
-      });
+      return undefined;
     }
+    return { task, key, injectionReady: false };
+  }
+
+  async function deliverTerminalTasks(tasks) {
+    const readyBySession = new Map();
+    for (const task of tasks) {
+      const ready = await prepareTerminalTaskDelivery(task);
+      if (!ready) continue;
+      const sessionKey = task.correlation.sessionKey;
+      const entries = readyBySession.get(sessionKey) || [];
+      entries.push(ready);
+      readyBySession.set(sessionKey, entries);
+    }
+
+    for (const [sessionKey, entries] of readyBySession) {
+      // The Host wake contains validated, persisted task evidence. The bridge
+      // does not depend on plugin prompt injection or the plugin SDK's
+      // bundled-only session scheduler.
+      const scheduledTurn = await scheduleCompletionTurn(sessionKey, entries.map((entry) => entry.task));
+      if (scheduledTurn.ok) {
+        for (const entry of entries) {
+          const acknowledged = await acknowledge(entry.task, entry.key, {
+            kind: 'host_durable_session_wake',
+            injectionReady: entry.injectionReady,
+            runtimeEventsEmitted: false,
+            scheduled: true,
+          });
+          if (acknowledged.ok) {
+            clearCompletionRetry(entry.task);
+          } else {
+            await deferCompletion(entry.task, 'host_acknowledgement_failed', {
+              error: acknowledged.error,
+              scheduledTurnRetained: true,
+            });
+          }
+        }
+      } else {
+        for (const entry of entries) {
+          await deferCompletion(entry.task, 'session_wake_failed', {
+            injectionEnqueued: entry.injectionReady,
+            scheduleError: scheduledTurn.error,
+          });
+        }
+      }
+    }
+  }
+
+  async function deliverTerminalTask(task) {
+    await deliverTerminalTasks([task]);
   }
 
   async function poll() {
@@ -741,8 +621,8 @@ function createBridge(api, options = {}) {
       const tasks = extractTasks(payload);
       for (const task of tasks) {
         track(task);
-        if (terminalTask(task)) await deliverTerminalTask(task);
       }
+      await deliverTerminalTasks(tasks.filter(terminalTask));
     } catch (error) {
       if (!loggedUnavailable) {
         loggedUnavailable = true;
@@ -794,7 +674,7 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_get_task_bridge_capabilities',
         label: 'UClaw task bridge capabilities',
-        description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task. For long-form generated video, first use video_generate with one shared parentTaskId and distinct segmentId values, then compose verified video scenes. local.video.timeline.render may combine managed video scenes, narration, captions, and music; an image-only timeline is a disclosed fallback after provider generation is unavailable or fails, not an equivalent replacement for generated motion.',
+        description: 'Read the local UClaw Host task bridge capabilities before requesting a long-running local task. For long-form generated video, first use video_generate with one shared parentTaskId and distinct segmentId values, then compose verified video scenes. Preserve generated source audio by default; add narration only when the user requests it or the source has no usable speech. local.video.timeline.render may combine managed video scenes, optional narration, captions, and music; an image-only timeline is a disclosed fallback after provider generation is unavailable or fails, not an equivalent replacement for generated motion.',
         parameters: Type.Object({}, { additionalProperties: false }),
         async execute() {
           try {
@@ -807,8 +687,8 @@ function createBridge(api, options = {}) {
       {
         name: 'uclaw_start_host_task',
         label: 'Start UClaw Host task',
-        description: 'Start a recoverable local Host task after selecting a confirmed Host capability. For long-form generated video, compose verified video_generate segments; use one shared parentTaskId and distinct segmentId values while generating them. local.video.timeline.render accepts managed image/video scenes and produces a verified local MP4, while local.video.compose only concatenates existing video segments. An image-only timeline must be disclosed as fallback and must not be presented as provider-generated motion. This returns a task receipt, not final delivery; query status or wait for the Host completion event. Do not supply session/run identity yourself.',
-        promptSnippet: 'uclaw_start_host_task: starts a Host-owned recoverable task only after selecting a supported Host capability. For long-form generated video, generate distinct shots with video_generate using a shared parentTaskId and unique segmentId values, verify them, then pass the managed video paths to local.video.timeline.render or local.video.compose. Use still-image scenes only as an explicit fallback after provider generation is unavailable or fails, and disclose that fallback. The Host task returns a receipt; do not claim completion until verified artifacts arrive in a later task event.',
+        description: 'Start a recoverable local Host task after selecting a confirmed Host capability. For long-form generated video, compose verified video_generate segments; use one shared parentTaskId and distinct segmentId values while generating them. Preserve generated source audio by default and request narration only for explicit narration intent or missing/unusable source speech. local.video.timeline.render accepts managed image/video scenes and produces a verified local MP4, while local.video.compose only concatenates existing video segments. An image-only timeline must be disclosed as fallback and must not be presented as provider-generated motion. This returns a task receipt, not final delivery; query status or wait for the Host completion event. Do not supply session/run identity yourself.',
+        promptSnippet: 'uclaw_start_host_task: starts a Host-owned recoverable task only after selecting a supported Host capability. For long-form generated video, generate distinct shots with video_generate using a shared parentTaskId and unique segmentId values, verify them, then pass the managed video paths to local.video.timeline.render or local.video.compose. Keep generated source audio unless the user explicitly asks to replace it; narrationText is an optional overlay, not the default video path. Use still-image scenes only as an explicit fallback after provider generation is unavailable or fails, and disclose that fallback. The Host task returns a receipt; do not claim completion until verified artifacts arrive in a later task event.',
         parameters: Type.Object({
           kind: Type.String({ minLength: 1, maxLength: 240, pattern: '^[a-zA-Z0-9._-]+$' }),
           title: Type.String({ minLength: 1, maxLength: 500 }),
@@ -946,7 +826,7 @@ function createBridge(api, options = {}) {
     ];
   }
 
-  return { createTools, track, poll, startMonitor, stopMonitor, deliverTerminalTask };
+  return { createTools, track, poll, startMonitor, stopMonitor, deliverTerminalTask, deliverTerminalTasks };
 }
 
 export const pluginEntry = definePluginEntry({

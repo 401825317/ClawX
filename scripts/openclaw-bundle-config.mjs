@@ -60,3 +60,24 @@ export const OPENCLAW_REQUIRED_RUNTIME_FILES = [
   '@silvia-odwyer/photon-node/photon_rs.js',
   '@silvia-odwyer/photon-node/photon_rs_bg.wasm',
 ];
+
+/** Third-party channel/provider plugins copied into every packaged runtime. */
+export const BUNDLED_OPENCLAW_PLUGINS = [
+  { npmName: '@soimy/dingtalk', pluginId: 'dingtalk', manifestId: 'dingtalk' },
+  { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom', manifestId: 'wecom-openclaw-plugin' },
+  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin', manifestId: 'openclaw-lark' },
+  { npmName: '@openclaw/qqbot', pluginId: 'qqbot', manifestId: 'qqbot' },
+  { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin', manifestId: 'openclaw-weixin' },
+  { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel', manifestId: 'parallel' },
+];
+
+/** Local UClaw plugins that must be mirrored and copied into every packaged runtime. */
+export const LOCAL_OPENCLAW_PLUGIN_IDS = [
+  'clawx-openai-image',
+  'uclaw-artifact-guard',
+  'uclaw-local-artifacts',
+  'uclaw-desktop-control',
+  'uclaw-blender',
+  'uclaw-task-bridge',
+  'uclaw-video-project',
+];

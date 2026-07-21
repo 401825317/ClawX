@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 
 type LaunchElectronOptions = {
   skipSetup?: boolean;
+  managedProvider?: boolean;
 };
 
 type IpcMockConfig = {
@@ -139,6 +140,7 @@ async function launchClawXElectron(
       LOCALAPPDATA: join(homeDir, 'AppData', 'Local'),
       XDG_CONFIG_HOME: join(homeDir, '.config'),
       CLAWX_E2E: '1',
+      ...(options.managedProvider ? { CLAWX_MANAGED_PROVIDER: '1' } : {}),
       CLAWX_USER_DATA_DIR: userDataDir,
       ...(options.skipSetup ? { CLAWX_E2E_SKIP_SETUP: '1' } : {}),
       CLAWX_PORT_CLAWX_HOST_API: String(hostApiPort),
@@ -197,7 +199,13 @@ export const test = base.extend<ElectronFixtures>({
 
 export async function completeSetup(page: Page): Promise<void> {
   await expect(page.getByTestId('setup-page')).toBeVisible();
-  await page.getByTestId('setup-skip-button').click();
+  await page.evaluate(async () => {
+    await window.electron.ipcRenderer.invoke('settings:set', 'setupComplete', true);
+  });
+  const mainUrl = new URL(page.url());
+  mainUrl.searchParams.set('e2eSkipSetup', '1');
+  mainUrl.hash = '#/';
+  await page.goto(mainUrl.toString());
   await expect(page.getByTestId('main-layout')).toBeVisible();
 }
 
@@ -259,6 +267,7 @@ export async function installIpcMocks(
         ipcMain.removeHandler('gateway:status');
         ipcMain.handle('gateway:status', async () => mockConfig.gatewayStatus);
       }
+
     },
     config,
   );

@@ -4,8 +4,7 @@ on:
   push:
     branches:
       - feature/uclaw-agent-runtime-contract
-    paths:
-      - .github/workflows/package-win-manual.yml
+      - feature/uclaw-general-agent-orchestration
   workflow_dispatch:
     inputs:
       ref:
@@ -20,6 +19,12 @@ on:
         options:
           - usb_zip
           - installer
+          - upgrade_matrix
+      require_private_installer:
+        description: 'Require a privately distributed v1.0.1 NSIS installer in the upgrade matrix'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -38,10 +43,16 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: '22.22.3'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: false
 
       - name: Get pnpm store directory
         shell: bash
@@ -62,35 +73,59 @@ jobs:
           git config --global --add "url.https://github.com/.insteadOf" "ssh://git@github.com/"
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Read app version
-        shell: bash
-        run: echo "APP_VERSION=$(node -p \"require('./package.json').version\")" >> "$GITHUB_ENV"
+        shell: pwsh
+        run: |
+          $appVersion = node -p "require('./package.json').version"
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build Windows USB ZIP
-        if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' }}
+        if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' || inputs.package_type == 'upgrade_matrix' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm run package:win:usb
 
       - name: Build Windows installer
-        if: ${{ inputs.package_type == 'installer' }}
+        if: ${{ inputs.package_type == 'installer' || inputs.package_type == 'upgrade_matrix' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm run package:win
 
+      - name: Run Windows cross-version upgrade matrix
+        if: ${{ inputs.package_type == 'upgrade_matrix' }}
+        shell: pwsh
+        env:
+          UCLAW_UPGRADE_INSTALLER_101_URL: ${{ secrets.UCLAW_UPGRADE_INSTALLER_101_URL }}
+          UCLAW_UPGRADE_INSTALLER_101_SHA512: ${{ secrets.UCLAW_UPGRADE_INSTALLER_101_SHA512 }}
+        run: |
+          if ('${{ inputs.require_private_installer }}' -eq 'true') {
+            pnpm run test:upgrade:win -- --require-complete-installers
+          } else {
+            pnpm run test:upgrade:win
+          }
+
       - name: Upload Windows USB ZIP
-        if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' }}
-        uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' || inputs.package_type == 'upgrade_matrix' }}
+        uses: actions/upload-artifact@v7
         with:
-          name: UClaw-${{ env.APP_VERSION }}-win-x64-usb
           path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Windows USB metadata
+        if: ${{ github.event_name == 'push' || inputs.package_type == 'usb_zip' || inputs.package_type == 'upgrade_matrix' }}
+        uses: actions/upload-artifact@v7
+        with:
+          path: release/UClaw-${{ env.APP_VERSION }}-win-x64-usb.json
+          archive: false
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload Windows Installer (x64)
-        if: ${{ inputs.package_type == 'installer' }}
+        if: ${{ inputs.package_type == 'installer' || inputs.package_type == 'upgrade_matrix' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-x64
@@ -98,17 +133,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload Windows Installer (arm64)
-        if: ${{ inputs.package_type == 'installer' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer-arm64
-          path: release/*-win-arm64.exe
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Upload Windows Blockmap Files
-        if: ${{ inputs.package_type == 'installer' }}
+        if: ${{ inputs.package_type == 'installer' || inputs.package_type == 'upgrade_matrix' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-blockmap
@@ -117,7 +143,7 @@ jobs:
           retention-days: 7
 
       - name: Upload Windows Update Manifests
-        if: ${{ inputs.package_type == 'installer' }}
+        if: ${{ inputs.package_type == 'installer' || inputs.package_type == 'upgrade_matrix' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-update-manifests
@@ -126,3 +152,12 @@ jobs:
             !release/builder-debug.yml
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Upload Windows upgrade matrix report
+        if: ${{ always() && inputs.package_type == 'upgrade_matrix' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-upgrade-matrix
+          path: release/regression/windows-upgrade-matrix-*
+          if-no-files-found: error
+          retention-days: 14

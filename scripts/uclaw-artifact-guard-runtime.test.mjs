@@ -83,7 +83,10 @@ const ordinaryPromptContext = await beforePromptBuild({
   userMessage: '解释一下 PPT 是什么，不要生成文件。',
   messages: [{ role: 'user', content: '解释一下 PPT 是什么，不要生成文件。' }],
 }, { runId: 'prompt:ordinary' });
-assert.equal(ordinaryPromptContext, undefined);
+assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /select the provider model explicitly/iu);
+assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /grok-video-1\.5 only with exactly one managed reference image/iu);
+assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /create a uclaw_video_project before generation/iu);
+assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /uclaw_video_project action:compose exactly once/iu);
 
 const mediaDefaultsEvent = {
   runId: 'prompt:media',
@@ -98,6 +101,21 @@ const mediaDefaults = __test.applyTurnMediaDefaults(mediaDefaultsEvent, { runId:
 assert.deepEqual(mediaDefaults, {
   params: { prompt: 'test', model: 'gpt-image-2', size: '1024x1024', quality: 'high' },
   appliedKeys: ['model', 'size', 'quality'],
+});
+
+const videoDefaultsEvent = {
+  runId: 'prompt:video-media',
+  toolName: 'video_generate',
+  params: { prompt: 'test' },
+};
+__test.cacheTurnPreferences(videoDefaultsEvent, { runId: 'prompt:video-media' }, {
+  mode: 'video',
+  video: { model: 'grok-video-1.5', size: '1280x720', durationSeconds: 6 },
+});
+const videoDefaults = __test.applyTurnMediaDefaults(videoDefaultsEvent, { runId: 'prompt:video-media' });
+assert.deepEqual(videoDefaults, {
+  params: { prompt: 'test', size: '1280x720', durationSeconds: 6 },
+  appliedKeys: ['size', 'durationSeconds'],
 });
 
 const beforeToolCall = lifecycleHooks.get('before_tool_call');
@@ -115,7 +133,8 @@ const longMediaPromptResult = await beforeToolCall({
   toolName: 'image_generate',
   args: { prompt: 'a'.repeat(5_000) },
 }, { runId: 'native-tool:long-image-prompt' });
-assert.notEqual(longMediaPromptResult?.block, true);
+assert.equal(longMediaPromptResult?.block, true);
+assert.match(longMediaPromptResult?.blockReason ?? '', /4096-character limit/iu);
 
 __test.emitToolArtifactRuntimeEvents({
   emitAgentEvent(event) {

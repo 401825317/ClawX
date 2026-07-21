@@ -22,6 +22,8 @@ touchedAreas:
   - electron/gateway/reload-policy.ts
   - shared/junfeiai-endpoints.json
   - shared/junfeiai-endpoints.ts
+  - scripts/openclaw-image-model-policy-patch.mjs
+  - scripts/openclaw-image-model-policy-patch.test.mjs
   - scripts/openclaw-text-provider-failover-patch.mjs
   - scripts/junfeiai-distribution-defaults.test.ts
   - scripts/junfeiai-reasoning-defaults.test.ts
@@ -52,6 +54,9 @@ requiredRules:
   - api-client-transport-policy
   - active-config-guards
   - comms-regression
+requiredTests:
+  - node scripts/openclaw-image-model-policy-patch.test.mjs
+  - pnpm exec tsx --test scripts/junfeiai-distribution-defaults.test.ts
 expectedUserBehavior:
   - Existing managed users are migrated automatically during startup before Gateway reads the runtime config; the managed distribution reserves `openai` for the signed-in Relay account and takes over stale personal account or runtime entries.
   - After migration, normal chat uses `openai/smart-latest` with `api: openai-responses`, the embedded `pi` Agent runtime, the configured thinking default, and `reasoningDefault: on`.
@@ -59,6 +64,7 @@ expectedUserBehavior:
   - Normal chat uses `api: openai-responses`, the embedded `pi` Agent runtime, a 372000-token managed context window, the configured thinking default, and `reasoningDefault: on`.
   - Taking over `openai` replaces its account metadata, secret, runtime endpoint, headers, and model registry with the signed-in Relay configuration; malformed JSON, model-reference key collisions, and failed writes still stop the migration.
   - Managed image and video providers, plugins, authentication, and default models are ready before the first native Agent turn instead of depending on a prior settings-page save or media request.
+  - Managed image generation and editing keep using the configured `gpt-image-2` profile even when the model supplies an unavailable `openai/gpt-image-1.5` override or requests a transparent background.
   - Image, video, PPT, desktop, and long-task execution continue through the current unified OpenClaw Agent and Host Task paths; the migration does not restore renderer-owned media planners.
   - If managed OpenAI fails before visible output or tool side effects, only the current model call retries through the configured fallback Provider. The next call starts from OpenAI again.
 acceptance:
@@ -74,6 +80,7 @@ acceptance:
   - Legacy `lingzhiwuxian` remains available for migration compatibility, while managed `openai` remains the primary Responses provider and uses the centrally configured cross-Provider fallback.
   - The managed runtime contract version changes when the shipped protocol or context defaults change, forcing existing persisted accounts to resync.
   - A clean state receives `clawx-openai-image/gpt-image-2`, the managed OpenAI video models, disabled automatic media-provider fallback, and the required plugin registrations without a manual settings action.
+  - The canonical managed image model is declared once as `openai/gpt-image-2` in `shared/junfeiai-endpoints.json`; development and packaged OpenClaw runtimes reject model overrides that escape the configured managed image profile.
   - Automatic bootstrap repairs missing or UClaw-managed media defaults but does not replace an explicitly selected third-party image or video provider, and relay credential rotation refreshes the managed image provider key.
   - The fallback patch is version-gated to the bundled OpenClaw runtime and fails packaging validation if its anchors no longer match.
   - Renderer uses `hostApiFetch` for migration and introduces no direct Gateway or IPC transport.

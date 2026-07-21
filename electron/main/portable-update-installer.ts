@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, copyFile, mkdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { logger } from '../utils/logger';
 import { getPortableModeInfo } from '../utils/portable-mode';
@@ -110,12 +110,14 @@ export async function preparePortableUpdateInstaller(
   }
 
   const sha512 = info.sha512?.trim().toLowerCase();
-  if (!info.version || !sha512) {
-    throw new Error('Portable update metadata is missing version or sha512');
+  if (!info.version || !sha512 || !/^[a-f0-9]{128}$/.test(sha512)) {
+    throw new Error('Portable update metadata is missing a valid version or sha512');
+  }
+  if (!Number.isSafeInteger(info.size) || (info.size ?? 0) <= 0) {
+    throw new Error('Portable update metadata is missing a valid size');
   }
 
-  const zipStat = await stat(zipPath);
-  const size = info.size && info.size > 0 ? info.size : zipStat.size;
+  const size = info.size as number;
   await verifyPortableUpdatePackage(zipPath, { sha512, size });
 
   const target = portableUpdaterTargetForPlatform();

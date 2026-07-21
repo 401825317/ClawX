@@ -65,7 +65,7 @@ test.describe('ClawX chat code block wrapping', () => {
             success: true,
             result: { sessions },
           },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: historyResult,
           },

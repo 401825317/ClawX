@@ -21,6 +21,7 @@ import 'zx/globals';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BUNDLED_OPENCLAW_PLUGINS, LOCAL_OPENCLAW_PLUGIN_IDS } from './openclaw-bundle-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -38,23 +39,10 @@ function normWin(p) {
   return '\\\\?\\' + p.replace(/\//g, '\\');
 }
 
-const PLUGINS = [
-  { npmName: '@soimy/dingtalk', pluginId: 'dingtalk' },
-  { npmName: '@wecom/wecom-openclaw-plugin', pluginId: 'wecom' },
-  { npmName: '@larksuite/openclaw-lark', pluginId: 'feishu-openclaw-plugin' },
-  { npmName: '@openclaw/qqbot', pluginId: 'qqbot' },
-  { npmName: '@tencent-weixin/openclaw-weixin', pluginId: 'openclaw-weixin' },
-  { npmName: '@openclaw/parallel-plugin', pluginId: 'parallel' },
-];
-
-const LOCAL_PLUGINS = [
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'clawx-openai-image'), pluginId: 'clawx-openai-image' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-artifact-guard'), pluginId: 'uclaw-artifact-guard' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-local-artifacts'), pluginId: 'uclaw-local-artifacts' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-desktop-control'), pluginId: 'uclaw-desktop-control' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-blender'), pluginId: 'uclaw-blender' },
-  { sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', 'uclaw-task-bridge'), pluginId: 'uclaw-task-bridge' },
-];
+const LOCAL_PLUGINS = LOCAL_OPENCLAW_PLUGIN_IDS.map((pluginId) => ({
+  sourceDir: path.join(ROOT, 'resources', 'openclaw-plugins', pluginId),
+  pluginId,
+}));
 
 function getVirtualStoreNodeModules(realPkgPath) {
   let dir = realPkgPath;
@@ -114,7 +102,76 @@ function assertRuntimeDependencies(pluginDir, pluginId) {
   }
 }
 
-function bundleOnePlugin({ npmName, pluginId }) {
+function getDeclaredPluginEntries(pkg, manifest) {
+  return [...new Set([
+    manifest.entry,
+    pkg.main,
+    pkg.module,
+    ...(Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : []),
+    ...(Array.isArray(pkg.openclaw?.runtimeExtensions) ? pkg.openclaw.runtimeExtensions : []),
+  ].filter((entry) => typeof entry === 'string' && entry.trim()))];
+}
+
+function assertBundledPluginMetadata(pluginDir, plugin) {
+  const pkg = readJson(path.join(pluginDir, 'package.json'), `Bundled plugin ${plugin.pluginId} package.json`);
+  const manifest = readJson(path.join(pluginDir, 'openclaw.plugin.json'), `Bundled plugin ${plugin.pluginId} manifest`);
+  if (pkg.name !== plugin.npmName) {
+    throw new Error(`Bundled plugin ${plugin.pluginId} package name mismatch: ${String(pkg.name)}`);
+  }
+  if (manifest.id !== plugin.manifestId) {
+    throw new Error(`Bundled plugin ${plugin.pluginId} manifest id mismatch: ${String(manifest.id)}`);
+  }
+  if (!pkg.version) throw new Error(`Bundled plugin ${plugin.pluginId} package version is missing`);
+  if (manifest.version !== undefined && manifest.version !== pkg.version) {
+    throw new Error(
+      `Bundled plugin ${plugin.pluginId} version mismatch: package=${String(pkg.version)} manifest=${String(manifest.version)}`,
+    );
+  }
+  const entries = getDeclaredPluginEntries(pkg, manifest);
+  if (entries.length === 0 || !entries.some((entry) => fs.existsSync(path.join(pluginDir, entry)))) {
+    throw new Error(`Bundled plugin ${plugin.pluginId} has no existing declared entrypoint: ${entries.join(', ') || 'none'}`);
+  }
+}
+
+function readJson(filePath, label) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw new Error(`${label} is missing or invalid: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
+  }
+}
+
+function assertLocalPluginMetadata(pluginDir, expectedId) {
+  const pkg = readJson(path.join(pluginDir, 'package.json'), `Local plugin ${expectedId} package.json`);
+  const manifest = readJson(path.join(pluginDir, 'openclaw.plugin.json'), `Local plugin ${expectedId} manifest`);
+  if (manifest.id !== expectedId) {
+    throw new Error(`Local plugin directory/id mismatch: expected "${expectedId}", manifest has "${String(manifest.id)}"`);
+  }
+  if (pkg.name !== expectedId && pkg.name !== `${expectedId}-plugin`) {
+    throw new Error(`Local plugin ${expectedId} package name mismatch: "${String(pkg.name)}"`);
+  }
+  if (!pkg.version || pkg.version !== manifest.version) {
+    throw new Error(
+      `Local plugin ${expectedId} version mismatch: package=${String(pkg.version)} manifest=${String(manifest.version)}`,
+    );
+  }
+  if (!pkg.main || pkg.main !== manifest.entry) {
+    throw new Error(
+      `Local plugin ${expectedId} entry mismatch: package.main=${String(pkg.main)} manifest.entry=${String(manifest.entry)}`,
+    );
+  }
+  if (!fs.existsSync(path.join(pluginDir, manifest.entry))) {
+    throw new Error(`Local plugin ${expectedId} entry file is missing: ${String(manifest.entry)}`);
+  }
+  if (pkg.openclaw?.extensions !== undefined
+    && (!Array.isArray(pkg.openclaw.extensions) || !pkg.openclaw.extensions.includes(`./${manifest.entry}`))) {
+    throw new Error(`Local plugin ${expectedId} package.json declares an inconsistent OpenClaw entry`);
+  }
+  return { packageName: pkg.name, id: manifest.id, version: pkg.version, entry: manifest.entry };
+}
+
+function bundleOnePlugin(plugin) {
+  const { npmName, pluginId } = plugin;
   const pkgPath = path.join(NODE_MODULES, ...npmName.split('/'));
   if (!fs.existsSync(pkgPath)) {
     throw new Error(`Missing dependency "${npmName}". Run pnpm install first.`);
@@ -209,6 +266,9 @@ function bundleOnePlugin({ npmName, pluginId }) {
   //    validates that these match, so we fix it post-copy.
   patchPluginId(outputDir, pluginId);
 
+  assertRuntimeDependencies(outputDir, pluginId);
+  assertBundledPluginMetadata(outputDir, plugin);
+
   echo`   ✅ ${pluginId}: copied ${copiedCount} deps (skipped dupes: ${skippedDupes})`;
 }
 
@@ -216,6 +276,7 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
   if (!fs.existsSync(sourceDir)) {
     throw new Error(`Missing local plugin source: ${sourceDir}`);
   }
+  assertLocalPluginMetadata(sourceDir, pluginId);
 
   const outputDir = path.join(OUTPUT_ROOT, pluginId);
   echo`Bundling local plugin ${pluginId} -> ${outputDir}`;
@@ -226,34 +287,9 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
   fs.mkdirSync(outputDir, { recursive: true });
   fs.cpSync(normWin(sourceDir), normWin(outputDir), { recursive: true, dereference: true });
 
-  const manifestPath = path.join(outputDir, 'openclaw.plugin.json');
-  if (!fs.existsSync(manifestPath)) {
-    throw new Error(`Missing openclaw.plugin.json in local plugin output: ${pluginId}`);
-  }
-
   const pkgJsonPath = path.join(outputDir, 'package.json');
-  if (!fs.existsSync(pkgJsonPath)) {
-    throw new Error(`Missing package.json in local plugin output: ${pluginId}`);
-  }
   const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  const expectedEntry = typeof manifest.entry === 'string' && manifest.entry.trim()
-    ? `./${manifest.entry.trim().replace(/^\.\//u, '')}`
-    : null;
-  const extensions = Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : [];
-  if (!pkg.version || pkg.version !== manifest.version) {
-    throw new Error(
-      `Local plugin "${pluginId}" package/manifest versions must match; found ${String(pkg.version)} / ${String(manifest.version)}`,
-    );
-  }
-  if (!expectedEntry || !extensions.includes(expectedEntry)) {
-    throw new Error(
-      `Local plugin "${pluginId}" must declare openclaw.extensions entry ${String(expectedEntry)} in package.json`,
-    );
-  }
-
   const dependencies = Object.keys(pkg.dependencies || {});
-  if (dependencies.length === 0) return;
 
   const SKIP_PACKAGES = new Set(['typescript', '@playwright/test']);
   const SKIP_SCOPES = ['@types/'];
@@ -316,6 +352,7 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
   }
 
   assertRuntimeDependencies(outputDir, pluginId);
+  assertLocalPluginMetadata(outputDir, pluginId);
 
   echo`   ✅ ${pluginId}: copied ${copiedCount} local deps (skipped dupes: ${skippedDupes})`;
 }
@@ -380,7 +417,7 @@ if (fs.existsSync(OUTPUT_ROOT)) {
 }
 fs.mkdirSync(OUTPUT_ROOT, { recursive: true });
 
-for (const plugin of PLUGINS) {
+for (const plugin of BUNDLED_OPENCLAW_PLUGINS) {
   bundleOnePlugin(plugin);
 }
 

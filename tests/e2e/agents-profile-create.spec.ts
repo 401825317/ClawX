@@ -316,13 +316,18 @@ test.describe('Agent persona creation', () => {
       await installAgentStatusMocks(electronApp);
       const page = await getStableWindow(electronApp);
       await expect(page.getByTestId('main-layout')).toBeVisible();
+      await page.evaluate(async () => {
+        await window.electron.ipcRenderer.invoke('settings:set', 'language', 'en');
+      });
+      await page.reload();
+      await expect(page.getByTestId('main-layout')).toBeVisible();
 
       await page.getByTestId('sidebar-nav-agents').click();
       await expect(page.getByTestId('agents-page')).toBeVisible();
 
       await expect(page.getByTestId('agent-card-research')).toContainText('Research Agent');
-      await expect(page.getByTestId('agent-card-research').getByTestId('agent-work-status')).toContainText('正在执行任务…');
-      await expect(page.getByTestId('agent-card-main').getByTestId('agent-work-status')).toContainText('任务已完成');
+      await expect(page.getByTestId('agent-card-research').getByTestId('agent-work-status')).toContainText('Running task...');
+      await expect(page.getByTestId('agent-card-main').getByTestId('agent-work-status')).toContainText('Task complete');
 
       await page.getByTestId('agent-card-research').click();
 

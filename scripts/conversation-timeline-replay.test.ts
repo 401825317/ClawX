@@ -1425,6 +1425,66 @@ test('assistant-only media history preserves canonical preview availability evid
   );
 });
 
+test('history replay refines one artifact placeholder without duplicating its canonical entity', () => {
+  const sessionKey = `${SESSION_KEY}:history-artifact-hydration`;
+  const filePath = '/tmp/history-artifact-hydration.png';
+  const initialMessages: RawMessage[] = [{
+    role: 'user',
+    id: 'history-artifact-hydration-user',
+    idempotencyKey: 'history-artifact-hydration-request',
+    timestamp: 3_250,
+    content: 'Restore the generated image.',
+  }, {
+    role: 'assistant',
+    id: 'history-artifact-hydration-assistant',
+    timestamp: 3_251,
+    content: '',
+    _attachedFiles: [{
+      fileName: 'history-artifact-hydration.png',
+      filePath,
+      mimeType: 'image/png',
+      fileSize: 0,
+      preview: null,
+      source: 'gateway-media',
+      disposition: 'output-delivery',
+    }],
+  }];
+  const hydratedMessages: RawMessage[] = [{
+    ...initialMessages[0],
+  }, {
+    ...initialMessages[1],
+    _attachedFiles: [{
+      ...initialMessages[1]._attachedFiles![0],
+      fileName: 'history-artifact-renamed.png',
+      fileSize: 68,
+      preview: 'data:image/png;base64,aHlkcmF0ZWQ=',
+    }],
+  }];
+  const initialEvents = historyMessagesToConversationEvents(sessionKey, initialMessages);
+  const hydratedEvents = historyMessagesToConversationEvents(sessionKey, hydratedMessages, {
+    reason: 'manual-refresh',
+  });
+  const initialArtifactEvent = initialEvents.find((event) => event.type === 'artifact.updated');
+  const hydratedArtifactEvent = hydratedEvents.find((event) => event.type === 'artifact.updated');
+  assert.ok(initialArtifactEvent && hydratedArtifactEvent);
+  assert.equal(hydratedArtifactEvent.eventId, initialArtifactEvent.eventId);
+
+  const initialState = replaceSessionTurns(createEmptyConversationState(), sessionKey, initialEvents);
+  const hydratedState = replaceSessionTurns(initialState, sessionKey, hydratedEvents);
+  const turn = hydratedState.turnsById[hydratedState.turnOrderBySession[sessionKey][0]];
+  const artifactGroups = turn.items.filter((item) => item.kind === 'artifact-group');
+  const artifacts = artifactGroups.flatMap((item) => item.artifacts);
+
+  assert.equal(artifactGroups.length, 1);
+  assert.equal(artifacts.length, 1);
+  assert.equal(artifacts[0].filePath, filePath);
+  assert.equal(artifacts[0].title, 'history-artifact-hydration.png');
+  assert.equal(artifacts[0].preview, 'data:image/png;base64,aHlkcmF0ZWQ=');
+  assert.equal(artifacts[0].sizeBytes, 68);
+  assert.equal(artifacts[0].availability, 'available');
+  assert.equal(Object.keys(turn.artifactItemByEntity).length, 1);
+});
+
 test('path-like assistant prose and tool stdout never become canonical artifacts', () => {
   const messages: RawMessage[] = [{
     role: 'user',
@@ -1716,14 +1776,17 @@ test('live Tool Search targets dedupe and desktop approval resolves by child too
     { type: 'tool.started', runId, sessionKey, seq: 2, ts: 3_001, producer: 'openclaw', toolCallId: stateParent, name: 'tool_call', args: { id: 'desktop_get_app_state', args: {} } },
     { type: 'tool.started', runId, sessionKey, seq: 3, ts: 3_002, producer: 'openclaw', toolCallId: stateChild, name: 'desktop_get_app_state', args: {} },
     { type: 'tool.completed', runId, sessionKey, seq: 4, ts: 3_003, producer: 'openclaw', toolCallId: stateChild, name: 'desktop_get_app_state', result: {} },
-    { type: 'tool.started', runId, sessionKey, seq: 5, ts: 3_004, producer: 'openclaw', toolCallId: actionParent, name: 'tool_call', args: { id: 'desktop_request_action', args: {} } },
-    { type: 'tool.started', runId, sessionKey, seq: 6, ts: 3_005, producer: 'openclaw', toolCallId: actionChild, name: 'desktop_request_action', args: {} },
-    { type: 'tool.completed', runId, sessionKey, seq: 7, ts: 3_006, producer: 'openclaw', toolCallId: actionChild, name: 'desktop_request_action', result: { status: 'approval_required' } },
+    { type: 'tool.completed', runId, sessionKey, seq: 5, ts: 3_004, producer: 'openclaw', toolCallId: stateParent, name: 'tool_call', result: { tool: { name: 'desktop_get_app_state' } } },
+    { type: 'tool.started', runId, sessionKey, seq: 6, ts: 3_005, producer: 'openclaw', toolCallId: actionParent, name: 'tool_call', args: { id: 'desktop_request_action', args: {} } },
+    { type: 'tool.started', runId, sessionKey, seq: 7, ts: 3_006, producer: 'openclaw', toolCallId: actionChild, name: 'desktop_request_action', args: {} },
+    { type: 'tool.completed', runId, sessionKey, seq: 8, ts: 3_007, producer: 'openclaw', toolCallId: actionChild, name: 'desktop_request_action', result: { status: 'approval_required' } },
+    { type: 'tool.completed', runId, sessionKey, seq: 9, ts: 3_008, producer: 'openclaw', toolCallId: actionParent, name: 'tool_call', result: { tool: { name: 'desktop_request_action' } } },
     {
       type: 'approval.updated',
       runId: wrongLegacyRunId,
       sessionKey,
-      ts: 3_007,
+      seq: 10,
+      ts: 3_009,
       producer: 'uclaw-desktop-approval',
       toolCallId: actionChild,
       approvalId: 'tool-search-desktop-approval',

@@ -131,6 +131,7 @@ export interface ChatSession {
   sessionId?: string;
   sessionFile?: string;
   fileName?: string;
+  heartbeatIsolatedBaseSessionKey?: string;
   label?: string;
   displayName?: string;
   derivedTitle?: string;

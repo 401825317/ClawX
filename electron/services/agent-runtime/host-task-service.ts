@@ -26,7 +26,10 @@ export type HostTaskAcceptance = {
 };
 
 export type HostTaskCompletion = {
-  mode: 'direct' | 'replan';
+  // Internal tasks are durable Host steps that must finish before a later
+  // task can produce a user-visible artifact. They are acknowledged by the
+  // bridge without injecting a completion turn.
+  mode: 'direct' | 'replan' | 'internal';
   reason?: string;
 };
 
@@ -181,6 +184,9 @@ function normalizeTaskData(value: unknown, label: string, allowUndefined = false
     const result: Record<string, HostTaskData> = {};
     for (const [key, item] of entries) {
       if (!key || key.length > 256 || FORBIDDEN_KEYS.has(key)) throw new Error(`${label} contains an invalid object field`);
+      // Optional fields in internal checkpoints follow JSON object semantics:
+      // an undefined value is absent rather than an invalid persisted value.
+      if (item === undefined) continue;
       result[key] = visit(item, depth + 1);
     }
     seen.delete(current);
@@ -223,7 +229,11 @@ function normalizeAcceptance(value: HostTaskAcceptance): HostTaskAcceptance {
 }
 
 function normalizeCompletion(value: HostTaskCompletion | undefined): HostTaskCompletion {
-  const mode = value?.mode === 'replan' ? 'replan' : 'direct';
+  const mode = value?.mode === 'replan'
+    ? 'replan'
+    : value?.mode === 'internal'
+      ? 'internal'
+      : 'direct';
   const reason = shortText(value?.reason, 1_000);
   if (mode === 'replan' && !reason) throw new Error('Host task replan completion requires a reason');
   return { mode, ...(reason ? { reason } : {}) };
@@ -316,6 +326,7 @@ export class HostTaskService {
   private readonly locks = new Map<string, Promise<void>>();
   private readonly ownerId = randomUUID();
   private readonly configuredRootDir?: string;
+  private resolvedRootDir?: string;
   private initialized?: Promise<void>;
   private publisher?: RuntimePublisher;
 
@@ -324,7 +335,11 @@ export class HostTaskService {
   }
 
   private getRootDir(): string {
-    return this.configuredRootDir ?? taskRoot();
+    // A service owns one durable store. Pin the environment-derived path on
+    // first use so late async persistence cannot follow a restored test env or
+    // a later process-level configuration change into another user profile.
+    this.resolvedRootDir ??= this.configuredRootDir ?? taskRoot();
+    return this.resolvedRootDir;
   }
 
   setPublisher(publisher: RuntimePublisher): void {

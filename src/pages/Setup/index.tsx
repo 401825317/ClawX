@@ -138,9 +138,13 @@ export function Setup() {
   const handleNext = async () => {
     if (isLastStep) {
       // Complete setup
-      markSetupComplete();
-      toast.success(t('complete.title'));
-      navigate('/');
+      try {
+        await markSetupComplete();
+        toast.success(t('complete.title'));
+        navigate('/');
+      } catch {
+        toast.error(t('complete.persistError'));
+      }
     } else {
       setCurrentStep((i) => i + 1);
     }
@@ -150,9 +154,13 @@ export function Setup() {
     setCurrentStep((i) => Math.max(i - 1, 0));
   };
 
-  const handleSkip = () => {
-    markSetupComplete();
-    navigate('/');
+  const handleSkip = async () => {
+    try {
+      await markSetupComplete();
+      navigate('/');
+    } catch {
+      toast.error(t('complete.persistError'));
+    }
   };
 
   // Auto-proceed when installation is complete

@@ -48,7 +48,7 @@ async function installChatMocks(app: ElectronApplication, historyMessages: RawMe
         success: true,
         result: { sessions: [{ key: SESSION_KEY, displayName: 'main' }] },
       },
-      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
         success: true,
         result: { messages: historyMessages },
       },
@@ -663,6 +663,25 @@ test.describe('structured OpenClaw task projection', () => {
       await expect(dialog).toHaveCount(0);
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('chat-generated-file')).toHaveCount(0);
+
+      await emitRuntimeEvents(app, [{
+        type: 'run.ended',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        status: 'completed',
+        endedAt: now + 40,
+        ts: now + 40,
+      }]);
+
+      await expect(subtasks).toHaveAttribute('data-status', 'error');
+      await expect(subtasks).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
+      await expect(page.getByText('HTTP 503', { exact: false })).toHaveCount(0);
+      await page.getByTestId('timeline-execution-details').click();
+      await expect(dialog).toBeVisible();
+      await expect(graph).toHaveAttribute('data-compact-status', 'completed');
+      await expect(taskRow).toHaveAttribute('data-step-status', 'error');
+      await expect(taskRow).toContainText('HTTP 503');
+      await page.keyboard.press('Escape');
     } finally {
       await closeElectronApp(app);
     }
@@ -1049,7 +1068,7 @@ test.describe('structured OpenClaw task projection', () => {
       if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
 
       const flowRow = dialog.locator('[data-testid="chat-execution-step"]')
-        .filter({ hasText: /Task Flow|任务流/u });
+        .filter({ hasText: /Task flow|任务流/iu });
       const artifactRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-child"][data-parent-id="plan-step:task:task-child"]')
         .filter({ hasText: 'Release evidence' });
       const artifactVerificationRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-child"][data-parent-id="artifact:release-evidence"]')
@@ -1130,7 +1149,7 @@ test.describe('structured OpenClaw task projection', () => {
       const subtaskDetails = page.getByTestId('timeline-subtask-details');
       await expect(subtaskDetails.locator(':scope > div')).toHaveCount(1);
       await expect(subtaskDetails).toContainText('Cancelled delegated work');
-      await expect(subtaskDetails).toContainText(/aborted|cancelled|canceled|stopped|已中止|已取消|已停止/u);
+      await expect(subtaskDetails).toContainText(/aborted|cancelled|canceled|stopped|已中止|已取消|已停止/iu);
 
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
@@ -1142,7 +1161,7 @@ test.describe('structured OpenClaw task projection', () => {
       if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
 
       const flowRow = dialog.locator('[data-testid="chat-execution-step"]')
-        .filter({ hasText: /Task Flow|任务流/u });
+        .filter({ hasText: /Task flow|任务流/iu });
       const taskRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-cancelled"]')
         .filter({ hasText: 'Cancelled delegated work' });
       await expect(flowRow).toHaveCount(1);

@@ -25,9 +25,10 @@ export type PortableModeInfo = {
   openclawHomeDir: string | null;
   openclawConfigDir: string | null;
   updatesDir: string | null;
+  sessionDataDir: string | null;
   runtimeRootDir: string | null;
   runtimeUpdatesDir: string | null;
-  runtimeSessionDataDir: string | null;
+  runtimeElectronCacheDir: string | null;
   runtimeLogsDir: string | null;
   runtimeCrashDumpsDir: string | null;
   runtimePythonDir: string | null;
@@ -132,9 +133,10 @@ export function getPortableModeInfo(): PortableModeInfo {
         openclawHomeDir: path.join(dataDir, 'openclaw-home'),
         openclawConfigDir: path.join(dataDir, 'openclaw-home', '.openclaw'),
         updatesDir: path.join(dataDir, 'updates'),
+        sessionDataDir: path.join(dataDir, 'clawx', 'electron-session'),
         runtimeRootDir,
         runtimeUpdatesDir: path.join(runtimeRootDir, 'updates'),
-        runtimeSessionDataDir: path.join(runtimeRootDir, 'electron-session'),
+        runtimeElectronCacheDir: path.join(runtimeRootDir, 'electron-cache'),
         runtimeLogsDir: path.join(runtimeRootDir, 'logs'),
         runtimeCrashDumpsDir: path.join(runtimeRootDir, 'crash-dumps'),
         runtimePythonDir: path.join(runtimeRootDir, 'python'),
@@ -155,9 +157,10 @@ export function getPortableModeInfo(): PortableModeInfo {
         openclawHomeDir: null,
         openclawConfigDir: null,
         updatesDir: null,
+        sessionDataDir: null,
         runtimeRootDir: null,
         runtimeUpdatesDir: null,
-        runtimeSessionDataDir: null,
+        runtimeElectronCacheDir: null,
         runtimeLogsDir: null,
         runtimeCrashDumpsDir: null,
         runtimePythonDir: null,
@@ -196,7 +199,23 @@ export function acknowledgePortableUpdateStartup(): boolean {
   const pendingPath = pathApi().join(info.runtimeUpdatesDir, 'pending-startup.json');
   if (!existsSync(pendingPath)) return false;
 
-  const pending = JSON.parse(readFileSync(pendingPath, 'utf8')) as PendingPortableStartup;
+  let pending: PendingPortableStartup;
+  try {
+    const parsed = JSON.parse(readFileSync(pendingPath, 'utf8')) as Partial<PendingPortableStartup> | null;
+    if (
+      !parsed
+      || parsed.version !== 1
+      || typeof parsed.targetVersion !== 'string'
+      || typeof parsed.rootDir !== 'string'
+      || typeof parsed.ackPath !== 'string'
+    ) {
+      return false;
+    }
+    pending = parsed as PendingPortableStartup;
+  } catch {
+    // A malformed or partially recovered marker must not brick portable startup.
+    return false;
+  }
   if (pending.version !== 1 || pending.targetVersion !== app.getVersion()) return false;
   if (normalizedPath(pending.rootDir) !== normalizedPath(info.rootDir)) return false;
   if (!isPathInside(info.runtimeUpdatesDir, pending.ackPath)) {
@@ -206,6 +225,7 @@ export function acknowledgePortableUpdateStartup(): boolean {
   // Write atomically so the helper never observes a partial startup acknowledgement.
   mkdirSync(pathApi().dirname(pending.ackPath), { recursive: true });
   const temporaryPath = `${pending.ackPath}.tmp-${process.pid}`;
+  rmSync(temporaryPath, { force: true });
   writeFileSync(temporaryPath, `${JSON.stringify({
     version: 1,
     ready: true,
@@ -214,6 +234,8 @@ export function acknowledgePortableUpdateStartup(): boolean {
     pid: process.pid,
     acknowledgedAt: new Date().toISOString(),
   }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  // Node's rename cannot replace an existing destination on Windows.
+  rmSync(pending.ackPath, { force: true });
   renameSync(temporaryPath, pending.ackPath);
   rmSync(pendingPath, { force: true });
   return true;
@@ -231,9 +253,10 @@ export function ensurePortableDataDirs(): PortableModeInfo {
     info.openclawHomeDir,
     info.openclawConfigDir,
     info.updatesDir,
+    info.sessionDataDir,
     info.runtimeRootDir,
     info.runtimeUpdatesDir,
-    info.runtimeSessionDataDir,
+    info.runtimeElectronCacheDir,
     info.runtimeLogsDir,
     info.runtimeCrashDumpsDir,
     info.runtimePythonDir,

@@ -146,6 +146,21 @@ export function clearPendingOptimisticUserMessages(sessionKey: string): void {
   pendingOptimisticUserMessages.delete(sessionKey);
 }
 
+/** Drop only the failed local send while retaining other queued optimistic turns. */
+export function discardPendingOptimisticUserMessage(
+  sessionKey: string,
+  message: RawMessage,
+): void {
+  const pending = pendingOptimisticUserMessages.get(sessionKey);
+  if (!pending?.length) return;
+  const remaining = pending.filter((entry) => (
+    entry.message !== message
+    && (!message.id || entry.message.id !== message.id)
+  ));
+  if (remaining.length > 0) pendingOptimisticUserMessages.set(sessionKey, remaining);
+  else pendingOptimisticUserMessages.delete(sessionKey);
+}
+
 /** Reinsert unconfirmed optimistic messages into their timestamp position. */
 export function mergePendingOptimisticUserMessages(
   sessionKey: string,

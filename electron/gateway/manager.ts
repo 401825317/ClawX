@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import { PORTS } from '../utils/config';
+import { getPort } from '../utils/config';
 import { JsonRpcNotification, isNotification, isResponse } from './protocol';
 import { logger } from '../utils/logger';
 import { captureTelemetryEvent, trackMetric } from '../utils/telemetry';
@@ -191,7 +191,7 @@ export class GatewayManager extends EventEmitter {
   private processExitCode: number | null = null; // set by exit event, replaces exitCode/signalCode
   private ownsProcess = false;
   private ws: WebSocket | null = null;
-  private status: GatewayStatus = { state: 'stopped', port: PORTS.OPENCLAW_GATEWAY };
+  private status: GatewayStatus = { state: 'stopped', port: getPort('OPENCLAW_GATEWAY') };
   private readonly stateController: GatewayStateController;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
@@ -202,6 +202,10 @@ export class GatewayManager extends EventEmitter {
   private recentStartupStderrLines: string[] = [];
   private pendingRequests: Map<string, PendingGatewayRequest> = new Map();
   private readonly blockingRpcRequestIds = new Set<string>();
+  private readonly acceptedChatRuns = new Map<string, {
+    sessionKey?: string;
+    timeout: NodeJS.Timeout;
+  }>();
   private readonly activeRuntimeRuns = new Map<string, {
     startedAt: number;
     lastEventAt: number;
@@ -234,6 +238,7 @@ export class GatewayManager extends EventEmitter {
   private static readonly HEARTBEAT_INTERVAL_MS = 60_000;
   private static readonly HEARTBEAT_TIMEOUT_MS = 30_000;
   private static readonly HEARTBEAT_MAX_MISSES = 4;
+  private static readonly ACCEPTED_CHAT_RUN_EVENT_GRACE_MS = 30_000;
   public static readonly RESTART_COOLDOWN_MS = 5_000;
   private static readonly GATEWAY_READY_FALLBACK_PROBE_DELAYS_MS = [1_500, 3_000, 5_000, 8_000, 12_000, 30_000] as const;
   private static readonly INITIAL_READY_HEARTBEAT_RECOVERY_GRACE_MS = 5 * 60_000;
@@ -415,6 +420,7 @@ export class GatewayManager extends EventEmitter {
 
   private hasInFlightGatewayWork(): boolean {
     return this.blockingRpcRequestIds.size > 0
+      || this.acceptedChatRuns.size > 0
       || this.activeRuntimeRuns.size > 0
       || this.activeRuntimeTasks.size > 0;
   }
@@ -432,10 +438,50 @@ export class GatewayManager extends EventEmitter {
       state: this.status.state,
       startLock: this.startLock,
       hasInFlightWork,
-      activeRunCount: this.activeRuntimeRuns.size,
+      activeRunCount: this.activeRuntimeRuns.size + this.acceptedChatRuns.size,
       activeTaskCount: this.activeRuntimeTasks.size,
       blockingRpcCount: this.blockingRpcRequestIds.size,
     };
+  }
+
+  private clearAcceptedChatRun(runId: string): boolean {
+    const accepted = this.acceptedChatRuns.get(runId);
+    if (!accepted) return false;
+    clearTimeout(accepted.timeout);
+    this.acceptedChatRuns.delete(runId);
+    return true;
+  }
+
+  private clearAcceptedChatRuns(): void {
+    for (const accepted of this.acceptedChatRuns.values()) {
+      clearTimeout(accepted.timeout);
+    }
+    this.acceptedChatRuns.clear();
+  }
+
+  private trackAcceptedChatRun(result: unknown, params: unknown): void {
+    if (typeof result !== 'object' || result === null) return;
+    const runId = (result as { runId?: unknown }).runId;
+    if (typeof runId !== 'string' || !runId.trim()) return;
+    if (this.activeRuntimeRunKeysByRunId.has(runId)) return;
+
+    this.clearAcceptedChatRun(runId);
+    const sessionKey = typeof params === 'object' && params !== null
+      && typeof (params as { sessionKey?: unknown }).sessionKey === 'string'
+      ? (params as { sessionKey: string }).sessionKey
+      : undefined;
+    const timeout = setTimeout(() => {
+      const accepted = this.acceptedChatRuns.get(runId);
+      if (!accepted || accepted.timeout !== timeout) return;
+      this.acceptedChatRuns.delete(runId);
+      logger.warn(
+        `[gateway-refresh] accepted chat run event grace expired runId=${runId} `
+        + `sessionKey=${accepted.sessionKey ?? 'n/a'}`,
+      );
+      this.flushDeferredRestartIfIdle(`chat.accepted:${runId}:expired`);
+    }, GatewayManager.ACCEPTED_CHAT_RUN_EVENT_GRACE_MS);
+    timeout.unref?.();
+    this.acceptedChatRuns.set(runId, { sessionKey, timeout });
   }
 
   private flushDeferredRestartIfIdle(trigger: string): void {
@@ -468,6 +514,8 @@ export class GatewayManager extends EventEmitter {
     if (event.producer === 'history') {
       return;
     }
+
+    const acceptedRunCleared = this.clearAcceptedChatRun(event.runId);
 
     if (event.type === 'task.updated') {
       const taskEvent = event as Partial<Extract<ChatRuntimeEvent, { type: 'task.updated' }>>;
@@ -538,7 +586,7 @@ export class GatewayManager extends EventEmitter {
           if (runKeys.size === 0) this.activeRuntimeRunKeysByRunId.delete(event.runId);
         }
       }
-      if (deleted) {
+      if (deleted || acceptedRunCleared) {
         this.flushDeferredRestartIfIdle(`runtime:${event.type}`);
       }
       return;
@@ -882,6 +930,7 @@ export class GatewayManager extends EventEmitter {
 
     clearPendingGatewayRequests(this.pendingRequests, new Error('Gateway stopped'));
     this.blockingRpcRequestIds.clear();
+    this.clearAcceptedChatRuns();
     this.activeRuntimeRuns.clear();
     this.activeRuntimeRunKeysByRunId.clear();
     this.activeRuntimeTasks.clear();
@@ -1073,6 +1122,7 @@ export class GatewayManager extends EventEmitter {
       reason: context?.reason ?? 'debounced-restart',
       source: context?.source ?? 'gateway-manager',
       details: {
+        ...context?.details,
         delayMs,
       },
     });
@@ -1080,6 +1130,7 @@ export class GatewayManager extends EventEmitter {
       void this.restart({
         reason: context?.reason ?? 'debounced-restart',
         source: context?.source ?? 'gateway-manager',
+        details: context?.details,
       }).catch((err) => {
         logger.warn('Debounced Gateway restart failed:', err);
       });
@@ -1100,6 +1151,7 @@ export class GatewayManager extends EventEmitter {
       await this.restart({
         reason: context?.reason ?? `reload-policy-${this.reloadPolicy.mode}`,
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1130,6 +1182,7 @@ export class GatewayManager extends EventEmitter {
       await this.restart({
         reason: 'reload-fallback-not-running',
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1137,11 +1190,20 @@ export class GatewayManager extends EventEmitter {
     const connectedForMs = this.status.connectedAt
       ? Date.now() - this.status.connectedAt
       : Number.POSITIVE_INFINITY;
+    const configUpdatedAt = typeof context?.details?.configUpdatedAt === 'number'
+      ? context.details.configUpdatedAt
+      : undefined;
+    const connectedAfterConfigUpdate = Boolean(
+      configUpdatedAt
+      && this.status.connectedAt
+      && this.status.connectedAt >= configUpdatedAt,
+    );
 
-    // Avoid signaling a process that just came up; it will already read latest config.
-    if (connectedForMs < 8000) {
+    // A process connected after the write already loaded the latest config. A
+    // provider changed after connection must still refresh, even during startup.
+    if (connectedForMs < 8000 && (!configUpdatedAt || connectedAfterConfigUpdate)) {
       logger.info(
-        `[gateway-refresh] mode=reload result=skipped_recent_connect connectedForMs=${connectedForMs} pid=${this.process.pid}`,
+        `[gateway-refresh] mode=reload result=skipped_recent_connect connectedForMs=${connectedForMs} connectedAfterConfigUpdate=${connectedAfterConfigUpdate} pid=${this.process.pid}`,
       );
       logger.info(`Gateway connected ${connectedForMs}ms ago, skipping reload signal`);
       return;
@@ -1155,6 +1217,7 @@ export class GatewayManager extends EventEmitter {
       await this.restart({
         reason: 'reload-fallback-windows',
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1171,6 +1234,7 @@ export class GatewayManager extends EventEmitter {
         await this.restart({
           reason: 'reload-fallback-post-signal-unhealthy',
           source: context?.source ?? 'gateway-reload',
+          details: context?.details,
         });
       } else {
         const pidAfter = this.process.pid;
@@ -1185,6 +1249,7 @@ export class GatewayManager extends EventEmitter {
         reason: 'reload-fallback-signal-error',
         source: context?.source ?? 'gateway-reload',
         details: {
+          ...context?.details,
           error: error instanceof Error ? error.message : String(error),
         },
       });
@@ -1205,6 +1270,7 @@ export class GatewayManager extends EventEmitter {
       this.debouncedRestart(effectiveDelay, {
         reason: context?.reason ?? `debounced-reload-policy-${this.reloadPolicy.mode}`,
         source: context?.source ?? 'gateway-reload',
+        details: context?.details,
       });
       return;
     }
@@ -1216,6 +1282,7 @@ export class GatewayManager extends EventEmitter {
       reason: context?.reason ?? 'debounced-reload',
       source: context?.source ?? 'gateway-manager',
       details: {
+        ...context?.details,
         delayMs: effectiveDelay,
         policy: this.reloadPolicy.mode,
       },
@@ -1226,6 +1293,7 @@ export class GatewayManager extends EventEmitter {
       void this.reload({
         reason: context?.reason ?? 'debounced-reload',
         source: context?.source ?? 'gateway-manager',
+        details: context?.details,
       }).catch((err) => {
         logger.warn('Debounced Gateway reload failed:', err);
       });
@@ -1395,6 +1463,9 @@ export class GatewayManager extends EventEmitter {
       const capability = classifyCapabilityMethod(method);
       if (capability) {
         this.capabilityMonitor.recordCapabilitySuccess(capability, result, Date.now() - startedAt);
+      }
+      if (trackBlockingRequest) {
+        this.trackAcceptedChatRun(result, params);
       }
       return result;
     }).catch((error) => {

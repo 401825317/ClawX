@@ -74,6 +74,39 @@ function readNonEmptyString(value: unknown, key: string): string {
   return value.trim();
 }
 
+function readAbsolutePath(value: unknown, key: string): string {
+  const path = readNonEmptyString(value, key);
+  if (!path.startsWith('/')) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must start with /`);
+  }
+  return path.replace(/\/+$/, '');
+}
+
+const appUpdates = endpoints.appUpdates;
+const legacyInstalledFeedBaseUrl = readNonEmptyString(
+  appUpdates.legacyInstalledFeedBaseUrl,
+  'appUpdates.legacyInstalledFeedBaseUrl',
+).replace(/\/+$/, '');
+const legacyInstalledFeedUrl = new URL(legacyInstalledFeedBaseUrl);
+if (legacyInstalledFeedUrl.protocol !== 'https:') {
+  throw new Error('appUpdates.legacyInstalledFeedBaseUrl must use https');
+}
+
+/** Managed electron-updater feed path, relative to the active JunFeiAI origin. */
+export const JUNFEIAI_APP_UPDATE_MANAGED_FEED_PATH = readAbsolutePath(
+  appUpdates.managedFeedPath,
+  'appUpdates.managedFeedPath',
+);
+
+/** Managed portable-update API path, relative to the active JunFeiAI origin. */
+export const JUNFEIAI_APP_UPDATE_MANAGED_API_PATH = readAbsolutePath(
+  appUpdates.managedApiPath,
+  'appUpdates.managedApiPath',
+);
+
+/** Legacy installed-build feed used only as a request-scoped fallback. */
+export const JUNFEIAI_APP_UPDATE_LEGACY_INSTALLED_FEED_BASE_URL = legacyInstalledFeedBaseUrl;
+
 const textFailover = endpoints.openClawTextFailover;
 if (typeof textFailover.enabled !== 'boolean') {
   throw new Error('openClawTextFailover.enabled in shared/junfeiai-endpoints.json must be boolean');
@@ -137,6 +170,33 @@ export const JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION = endpoints.openClawCom
 
 /** Preflight transcript-size threshold that triggers local compaction. */
 export const JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES = transcriptLimit as JunFeiAIOpenClawTranscriptLimit;
+
+function readProviderModelRef(value: unknown, key: string): { ref: string; provider: string; model: string } {
+  const ref = readNonEmptyString(value, key);
+  const separator = ref.indexOf('/');
+  if (separator <= 0 || separator >= ref.length - 1) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must use provider/model format`);
+  }
+  return {
+    ref,
+    provider: ref.slice(0, separator).trim().toLowerCase(),
+    model: ref.slice(separator + 1).trim(),
+  };
+}
+
+const imageGenerationDefaultModel = readProviderModelRef(
+  endpoints.imageGenerationDefaults.modelRef,
+  'imageGenerationDefaults.modelRef',
+);
+if (imageGenerationDefaultModel.provider !== 'openai') {
+  throw new Error('imageGenerationDefaults.modelRef must use the openai provider');
+}
+
+/** Canonical OpenAI image model ref exposed to the managed OpenClaw runtime. */
+export const JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL_REF = imageGenerationDefaultModel.ref;
+
+/** Model id derived from the canonical managed OpenAI image model ref. */
+export const JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL = imageGenerationDefaultModel.model;
 
 function readVideoGenerationSize(
   value: unknown,

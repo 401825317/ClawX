@@ -1528,7 +1528,7 @@ function AddProviderDialog({
                       </button>
                     </div>
                     {validationError && (
-                      <p className="text-meta text-red-500 font-medium">{validationError}</p>
+                      <p data-testid="add-provider-validation-error" className="text-meta text-red-500 font-medium">{validationError}</p>
                     )}
                     <p className="text-xs text-muted-foreground">
                       {t('aiProviders.dialog.apiKeyStored')}

@@ -56,26 +56,32 @@ request can delegate the stored input and checkpoint to a capability's
 
 ## Completion boundary
 
-The bridge emits terminal `step`, `progress`, `artifact`, `verification`, and
-`tool` events directly into the originating OpenClaw run. It also persists the
-same structured completion with `enqueueNextTurnInjection`, keyed by
-`taskId + revision`, so a later user turn has exact task evidence without
-reconstructing it from assistant prose. The default `completion.mode=direct`
-does not schedule a model turn. A task may explicitly request
-`completion.mode=replan` with a concrete reason; only that path schedules one
-same-session `announce` turn.
+The Host projects terminal `step`, `progress`, `artifact`, `verification`, and
+`tool` events directly into the Renderer. The bridge persists the corresponding
+structured completion with `enqueueNextTurnInjection`, keyed by
+`taskId + revision`, then schedules one tagged same-session `announce` turn.
+This wake is required for both `completion.mode=direct` and `replan`, because a
+session waiting after `sessions_yield` has no later user turn to consume the
+injection. `replan` includes its concrete reason in the wake message. Installed
+plugins do not repeat the Host events because OpenClaw reserves those streams
+for the Host itself.
 
 The Host and OpenClaw stores cannot share one transaction. A Host acknowledgement
-prevents duplicate terminal replay after restart; runtime events are idempotent
-by stable task/artifact/verification ids, while the injected completion context
-is exactly-once. Failed event emission, injection, explicit replan wake, or
-acknowledgement attempts use bounded exponential backoff instead of polling the
-same terminal task every monitor tick. The retry policy has both attempt and
-elapsed-time budgets. After exhaustion it persists either the already-delivered
-acknowledgement or an `abandoned` delivery result with concrete failure evidence,
-so the Host no longer returns that terminal revision forever. The task and its
-artifacts remain durable; an explicit redelivery request creates a new revision
-and clears the prior delivery settlement.
+prevents duplicate terminal replay after restart; Host events are idempotent by
+stable task/artifact/verification ids, while the tagged session wake is
+revision-scoped. The bridge acknowledges only after the Host confirms that wake.
+Failed wake or acknowledgement attempts use bounded exponential backoff instead
+of polling the same terminal task every monitor tick. The retry policy has both
+attempt and elapsed-time budgets. After exhaustion it persists either the
+already-delivered acknowledgement or an `abandoned` delivery result with
+concrete failure evidence, so the Host no longer returns that terminal revision
+forever. The task and its artifacts remain durable; an explicit redelivery
+request creates a new revision and clears the prior delivery settlement.
+
+`completion.mode=internal` is reserved for durable Host substeps such as a
+VideoProject composition render. The bridge acknowledges that terminal task
+without injecting a session turn or emitting artifacts, so a later verified
+task can become the single user-facing delivery boundary.
 
 When the Renderer loads a conversation, it also reads the session's persisted
 Host tasks and projects their stable task, artifact, verification, and progress

@@ -21,7 +21,7 @@ async function installHistoryMocks(app: ElectronApplication, history: unknown[])
         success: true,
         result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
       },
-      [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+      [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
         success: true,
         result: { messages: history },
       },
@@ -758,7 +758,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: [] },
           },
@@ -950,6 +950,213 @@ test.describe('ClawX chat run state events', () => {
       });
 
       await expect(sendButton).toHaveAttribute('title', /Send|发送/);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('dedupes sanitized nested tool progress and hides internal plan updates', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const runId = 'run-sanitized-nested-progress';
+    const parentToolCallId = 'call-inspect-workspace|fc_4f13f53d';
+    const nestedToolCallId = `tool_search_code:${parentToolCallId.replaceAll('|', '_')}:exec:1`;
+
+    try {
+      await installIpcMocks(app, {
+        gatewayStatus: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+        gatewayRpc: {
+          [stableStringify(['sessions.list', { includeDerivedTitles: true, includeLastMessage: true }])]: {
+            success: true,
+            result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
+          },
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
+            success: true,
+            result: { messages: [] },
+          },
+          [stableStringify(['chat.send', null])]: {
+            success: true,
+            result: { runId },
+          },
+        },
+        hostApi: {
+          [stableStringify(['/api/gateway/status', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
+              },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { messages: [] } },
+            },
+          },
+          [stableStringify(['/api/chat/send', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { runId } },
+            },
+          },
+          [stableStringify(['/api/agents', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, agents: [{ id: 'main', name: 'Main' }] },
+            },
+          },
+        },
+      });
+
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-input').fill('检查工作区并继续生成应用');
+      await page.getByTestId('chat-composer-send').click();
+
+      await app.evaluate(({ BrowserWindow }, payload) => {
+        const now = Date.now();
+        const events = [{
+          type: 'run.started',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          startedAt: now,
+          ts: now,
+        }, {
+          type: 'tool.started',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: 'call-update-plan',
+          name: 'update_plan',
+          args: {
+            plan: [
+              { step: 'Inspect the workspace', status: 'in_progress' },
+              { step: 'Build the application', status: 'pending' },
+            ],
+          },
+          ts: now + 1,
+        }, {
+          type: 'tool.completed',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: 'call-update-plan',
+          name: 'update_plan',
+          result: { message: 'Plan updated' },
+          ts: now + 2,
+        }, {
+          type: 'tool.started',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: payload.parentToolCallId,
+          name: 'tool_call',
+          args: { id: 'exec', args: { command: 'pwd' } },
+          ts: now + 3,
+        }, {
+          type: 'tool.started',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: payload.nestedToolCallId,
+          name: 'exec',
+          args: { command: 'pwd' },
+          ts: now + 4,
+        }, {
+          type: 'tool.completed',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: payload.nestedToolCallId,
+          name: 'exec',
+          result: { stdout: '/tmp/uclaw-workspace', exitCode: 0 },
+          isError: false,
+          ts: now + 5,
+        }, {
+          type: 'tool.completed',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: payload.parentToolCallId,
+          name: 'tool_call',
+          result: {
+            tool: { name: 'exec', label: 'Command' },
+            result: { details: { status: 'completed', exitCode: 0 } },
+          },
+          isError: false,
+          ts: now + 6,
+        }, {
+          type: 'tool.started',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: 'call-check-package',
+          name: 'exec',
+          args: { command: 'node --check package.json' },
+          ts: now + 7,
+        }, {
+          type: 'tool.completed',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: 'call-check-package',
+          name: 'exec',
+          result: { stdout: '', exitCode: 0 },
+          isError: false,
+          ts: now + 8,
+        }, {
+          type: 'tool.started',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: 'call-list-files',
+          name: 'exec',
+          args: { command: 'find . -maxdepth 1 -type f' },
+          ts: now + 9,
+        }, {
+          type: 'tool.completed',
+          runId: payload.runId,
+          sessionKey: 'agent:main:main',
+          toolCallId: 'call-list-files',
+          name: 'exec',
+          result: { stdout: './package.json', exitCode: 0 },
+          isError: false,
+          ts: now + 10,
+        }];
+        for (const win of BrowserWindow.getAllWindows()) {
+          for (const event of events) win.webContents.send('chat:runtime-event', event);
+        }
+      }, { runId, parentToolCallId, nestedToolCallId });
+
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toHaveCount(1);
+      await expect(toolGroup).toContainText(/command|命令/u);
+      await toolGroup.getByTestId('timeline-tool-group-toggle').click();
+      const toolDetails = toolGroup.getByTestId('timeline-tool-details');
+      await expect(toolDetails).toBeVisible();
+      await expect(toolDetails.locator(':scope > div')).toHaveCount(3);
+      await expect(page.getByText(/Update Plan|update plan/u)).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByTestId('chat-execution-step')).toHaveCount(3);
+      await expect(dialog).not.toContainText(/Update Plan|update plan/u);
+      await expect(page.getByTestId('chat-typing-indicator')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -1417,7 +1624,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },
@@ -1773,7 +1980,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [activeSession],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: activeHistory,
           },
@@ -1872,7 +2079,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },
@@ -1961,7 +2168,7 @@ MEDIA:C:\Users\Administrator\.openclaw\workspace\japan-kansai-4d3n-plan.svg`,
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },

@@ -109,16 +109,17 @@ ClawX 直接基于官方 **OpenClaw** 核心构建。无需单独安装，我们
 当你使用 `@agent` 选择其他智能体时，ClawX 会直接切换到该智能体自己的对话上下文，而不是经过默认智能体转发。各 Agent 工作区默认彼此分离，但更强的运行时隔离仍取决于 OpenClaw 的 sandbox 配置。
 每个会话都可以在聊天工具栏中选择独立的项目目录。ClawX 会随会话恢复该目录，将其用于 Agent 和工具执行，并把工具返回的本地文件产物写入其中的 `outputs/`；未设置时继续使用 Agent 工作空间，且该会话运行期间不能切换目录。
 
-会话渲染器现在只把 OpenClaw 和 Gateway 事实投影为一套事件驱动的线性 Timeline。时间相邻且兼容的工具调用会聚合展示，详情按需加载；可向用户展示的 thinking 默认折叠；产物、审批和需要用户行动的任务状态仍作为独立信息项呈现。已经恢复的内部失败和通过验证不进入主信息流；真正的终态失败最多显示一条通俗结果，原始工具错误、输出和验证证据仍保留在**执行详情**中。执行图不再常驻主信息流，原始 canonical event 只在开发者诊断中可见。长历史采用虚拟化渲染，用户上滚后会脱离自动跟随，流式新内容不会把视口强行拉回底部。Phase 5 已删除 legacy/shadow 渲染器及运行时 rollout 开关；回滚通过回退代码或版本完成，不需要迁移 transcript 或已保存会话。
-
 本地产物执行采用“审查、修复、验证”闭环：由当前文本模型完成语义规划，主题、长度、媒体和交互等明确要求随实际选中的能力或持久任务一起保存。完成状态只由真实工具/任务终态、能力专属验证和规范会话交付共同决定；模型不再先调用元数据工具给自己的执行授权，也不能用声明证明已经完成。
 独立 PPT 请求现在走 `presentation-maker` 视觉工作室：agent 先做叙事、素材和逐页构图，再由 `create_designed_pptx_file` 用 PptxGenJS 自由画布写入图片、图表、表格、形状和文本。五套内置语义主题只保留给 `create_pptx_file` 与迁移前任务恢复做基础兜底，不再冒充高设计主链路。
 每个 Agent 还可以单独覆盖自己的 `provider/model` 运行时设置；未覆盖的 Agent 会继续继承全局默认模型。
-零至无限托管安装将 `openai` 保留给登录账户的 Relay。启动时会把旧 `lingzhiwuxian/*` 引用，以及此前个人 OpenAI 的账户或端点一并迁移为托管的原生 Responses 配置。JSON 损坏、模型引用键冲突和写入失败仍会中止迁移。
-Gateway 启动前，同一套幂等流程会把聊天收敛为使用托管 372K 上下文和配置推理默认等级的 `openai/smart-latest`，并在首个 Agent 回合前准备好图片和视频 Provider。每次文本模型调用都先使用 OpenAI Responses；若 Provider 在产生可见输出或工具副作用前失败，仅当前调用会降级到 `shared/junfeiai-endpoints.json` 配置的备用 Provider。默认备用模型为 `deepseek/deepseek-v4-pro`，复用 OpenAI Relay 的 Base URL 和 API Key，但通过 Chat Completions（`/chat/completions`）请求；后续调用仍从 OpenAI 开始。
+零至无限托管安装将 `openai` 保留给登录账户的 Relay。启动时会把旧 `lingzhiwuxian/*` 引用，以及此前个人 OpenAI 的账户或端点一并迁移为托管的原生 Responses 配置。旧 provider 仍保留为 Chat Completions 兼容路径；JSON 损坏、模型引用键冲突和写入失败仍会中止迁移。
+Gateway 启动前，同一套幂等流程会把聊天收敛为使用托管 372K 上下文和配置推理默认等级的 `openai/smart-latest`，并在首个 Agent 回合前准备好图片和视频 Provider。只有 `/responses` 在尚未开始输出时返回 404，才会回退一次 Chat Completions。
 在 Agents 页面，你可以输入粗略的角色名称和职责、选择内置头像，让模型生成更专业的 Agent 画像和开场消息，并在创建后直接进入该 Agent 的独立对话。
 
-聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮模型、尺寸、质量、时长与已选产物的结构化媒体默认值；只有 Agent 已选择原生媒体工具时才会补到工具参数中，绝不会拼接进模型提示词。托管视频生成默认使用 480P，并按方向从 `shared/junfeiai-endpoints.json` 读取 `854x480`、`480x854` 或 `480x480`；720P 仍可显式选择。模式不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决，也不无条件唤醒模型生成“完成播报”。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。
+聊天、图片和视频的新请求共用同一个 OpenClaw Agent loop。模式只提供本轮结构化媒体约束和已选产物；Agent 根据当前请求、参考输入和已公布的 provider 能力决定是否调用原生媒体工具，并显式选择视频模型。视频模式中的尺寸和时长只会在该工具已被选中后补到参数中，配置里的默认视频模型不会再被悄悄注入成 provider 覆盖。聊天和视频即使共用 `openai` provider 命名空间，聊天模型也不会因此进入视频候选；`video_generate` 会在请求 provider 前拒绝未公布的模型，而不是偷偷替换。上述值绝不会拼接进模型提示词。模式不在 Renderer 侧运行意图 planner 或媒体队列。原生任务与内置 Host Task Bridge 持久化 `session/run/tool-call/idempotency` 身份和由实际能力生成的验收要求；任务终态、产物、验证、审批和部分失败直接回到原会话，Renderer 只投影这些事实，不再自行做一次语义完成裁决。会话在 `yield` 后需要消费持久完成注入时，最多只会安排一次带稳定标签的同会话完成播报。旧 direct planner POST 端点统一返回 `410`，新请求全部进入 Agent loop。
+
+`VideoProject` 是每个最终视频请求的持久项目壳，无论它是单段还是多镜头：它记录创作约束、参考图血缘、稳定镜头身份、provider 尝试、QA 决策、合成和交付。实际生成仍复用现有 `video_generate`；UClaw Host 对每段做可确定的媒体事实校验，并输出联系表供 Agent 做语义复核，不会谎称本地 OCR 或主观画面、音频判断已经完成。
+本地视频合成默认保留视频模型生成的原始音轨。神经网络或系统 TTS 只在用户明确要求旁白，或源视频确实缺少可用语音时作为可选叠加层，并以背景混音方式保留原声，不再无条件替换每段模型音轨。
 图片格式、背景和兼容的压缩参数会真实透传给图片 provider；用户未自定义时，托管安装的生成媒体交付上限默认为 16 MiB。若生成结果仍超过上限，UClaw 会在保存前自动转码并逐级压缩，不再丢弃 provider 已成功生成的图片。即使内部完成消息被隔离，任务账本中的成功、失败、部分完成或取消终态也会立即关闭等待状态和计时。
 
 桌面观察当前只支持截图；原生桌面动作驱动尚未实现，本版本也不宣称 Computer Use 可以操作 UClaw 窗口。内置 Blender runtime 接收声明式 SceneSpec，在不加载启动扩展的本地 Blender 中渲染，并校验 `.blend`、`.glb`、预览图和 manifest 后再投递到会话。Blender 是可选的本地依赖，平台或可执行文件不可用时会明确返回能力状态，不会把未产出当作完成；三维预览只会在打开兼容模型文件时按需加载，不增加普通聊天路径的负担。
@@ -143,6 +144,7 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 在开发者模式下，独立的“图像生成”页面支持配置 OpenAI 兼容生图端点（Base URL、API Key 和模型名，例如 `gpt-image-2`），生图请求会走专用的 `/v1/images/generations` 服务，聊天仍继续使用正常的 OpenAI Provider。
 如果你通过 **自定义（Custom）Provider** 对接 OpenAI-compatible 网关，可以在 **设置 → AI Providers → 编辑 Provider** 中配置自定义 `User-Agent`，以提高兼容性。
 如果兼容网关的 `/models` 因非鉴权原因不可用，ClawX 会在校验 API Key 时自动降级为轻量的 `/chat/completions` 或 `/responses` 探测。
+替换 API Key 并成功通过校验后，UClaw 会在刷新 Gateway 前清除该账号持久化的认证失败状态，让已经修正的 Provider 立即恢复可选，同时保留正常的 401 防护。
 
 ### 🌙 自适应主题
 支持浅色模式、深色模式或跟随系统主题。ClawX 自动适应你的偏好设置。
@@ -151,10 +153,14 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 在 **设置 → 通用** 中，你可以开启 **开机自动启动**，让 ClawX 在系统登录后自动启动。
 
 ### 🔔 更新提示
-ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。
+ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。Windows 安装版升级会保留旧安装目录直到新文件解压成功；解压失败时会先恢复旧目录再退出安装器。
 
 ### 💾 高性能便携模式
-macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、OpenClaw 配置、Agent、会话、技能、通道凭据和更新包保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；Python、uv、临时文件、浏览器和编译缓存会放到当前电脑的本机缓存目录 `UClawRuntime/`，这些缓存可重建，避免 U 盘被频繁读写拖慢或快速占满。更新时，portable helper 会保留旧版应用文件，直到新版确认完成关键 Main 进程初始化；如果新版启动失败或 90 秒内未确认，会自动恢复并重启旧版，且不会替换或删除 `UClawData/`。
+macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、Chromium 会话状态、OpenClaw 配置、Agent、会话、技能和通道凭据保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；更新下载、Python、uv、临时文件、日志、崩溃转储、浏览器磁盘缓存和编译缓存会放到当前电脑的本机目录 `UClawRuntime/`，避免 U 盘被频繁读写拖慢或快速占满。新生成的包一定从空白 `UClawData/` 开始，不会带入打包电脑上的账号或运行状态。更新时，portable helper 会先确认当前进程已经退出，再保留旧版应用文件，直到新版确认完成关键 Main 进程初始化；如果无法确认旧版退出，不会替换任何文件。如果更新包校验、解压、替换、新版启动或 90 秒启动确认失败，会自动恢复并重启旧版，且不会替换或删除 `UClawData/`。
+
+Windows 打包必须从已经提交且 worktree 干净的源码开始，并会先清理旧的解包目录和历史 USB 产物。封装阶段会核对源码版本、Git commit 与 `app.asar`，把随包的 4 个 Windows 可执行文件全部校验为 x64 PE，并检查 12 个 UClaw 内置及渠道/搜索插件和它们的运行依赖，随后生成 `uclaw-usb-build.json` 和配套发布 JSON；任何身份或内容不一致都会直接让构建失败，不再发布看似成功的旧包。
+
+Windows USB ZIP 根目录内置 `UClaw-SelfCheck.cmd`。用户无需安装 Node.js、Python 或 Git，双击即可检查构建身份、包内和已安装插件副本、随包运行时、目录读写与原子 rename、本地端口、zz-cn 连通性和 OpenClaw Doctor 状态。动态检查只扫描最近 24 小时且不早于当前构建的日志。脱敏后的支持报告默认保存在 `UClawData/diagnostics/`；U 盘不可写时会回退到本机临时目录。
 
 ---
 
@@ -292,12 +298,13 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 
 - ClawX 基于 Electron，**单个应用实例出现多个系统进程是正常现象**（main/renderer/zygote/utility）。
 - 单实例保护同时使用 Electron 自带锁与本地进程文件锁回退机制，可在桌面会话总线异常时避免重复启动。
-- 滚动升级期间若新旧版本混跑，单实例保护仍可能出现不对称行为。为保证稳定性，建议桌面客户端尽量统一升级到同一版本。
-- 但 OpenClaw Gateway 监听应始终保持**单实例**：`127.0.0.1:18789` 只能有一个监听者。
+- 核心运行时监听必须保持**单一所有者**：Host API `127.0.0.1:13210` 与 OpenClaw Gateway `127.0.0.1:18789` 必须归属于同一个 UClaw 桌面实例。
+- 安装版与便携版升级混跑时，UClaw 会在创建桌面窗口前检查共享实例锁和两个端口的进程树。只有确认属于旧版 UClaw/ClawX 时才会提供退出旧版的选项；无法确认身份的进程绝不会被自动结束。
+- 临时 OAuth 回调、系统动态分配的回环端口、开发服务器和外部供应商端口不由该启动守卫接管。
 - Gateway readiness 以 OpenClaw 的 `system-presence`、`health`、`status` 等核心信号为准；memory、Dreams 或频道失败会显示为能力降级，而不是全局 Gateway 故障。
 - 可用以下命令确认监听进程：
-  - macOS/Linux：`lsof -nP -iTCP:18789 -sTCP:LISTEN`
-  - Windows（PowerShell）：`Get-NetTCPConnection -LocalPort 18789 -State Listen`
+  - macOS/Linux：`lsof -nP -iTCP:13210 -sTCP:LISTEN` 和 `lsof -nP -iTCP:18789 -sTCP:LISTEN`
+  - Windows（PowerShell）：`Get-NetTCPConnection -LocalPort 13210,18789 -State Listen`
 - 点击窗口关闭按钮（`X`）默认只是最小化到托盘，并不会完全退出应用。请在托盘菜单中选择 **Quit ClawX** 执行完整退出。
 
 ---
@@ -371,6 +378,8 @@ pnpm typecheck            # TypeScript 类型检查
 # 测试
 pnpm run test:e2e         # 运行 Electron E2E 冒烟测试
 pnpm run test:e2e:headed  # 以可见窗口运行 Electron E2E 测试
+pnpm run test:packaged:win       # 对最新 Windows USB ZIP 执行核心真实回归
+pnpm run test:packaged:win:full  # 执行打包版聊天、工具、浏览器、Cron、Agent 和媒体完整回归
 pnpm run comms:replay     # 计算通信回放指标
 pnpm run comms:baseline   # 刷新通信基线快照
 pnpm run comms:compare    # 将回放指标与基线阈值对比
@@ -385,7 +394,7 @@ pnpm package              # 为当前平台打包（包含预装技能资源）
 pnpm package:mac          # 为 macOS 打包
 pnpm package:mac:usb      # 为 macOS 生成免安装高性能便携包
 pnpm package:win          # 为 Windows 打包
-pnpm package:win:usb      # 为 Windows 生成免安装高性能便携包
+pnpm package:win:usb      # 生成 Windows USB ZIP，并自动通过打包版完整回归门禁
 pnpm package:linux        # 为 Linux 打包
 ```
 

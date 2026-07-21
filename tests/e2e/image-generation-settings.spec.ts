@@ -1,4 +1,11 @@
-import { expect, installIpcMocks, test } from './fixtures/electron';
+import {
+  closeElectronApp,
+  completeSetup,
+  expect,
+  getStableWindow,
+  installIpcMocks,
+  test,
+} from './fixtures/electron';
 
 test.describe('Image generation settings page', () => {
   async function unlockDeveloperMode(page: import('@playwright/test').Page) {
@@ -8,11 +15,9 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('sidebar-nav-image-generation')).toBeVisible();
   }
 
-  test('shows image generation only as a developer-mode page after skipping setup', async ({ page }) => {
-    await expect(page.getByTestId('setup-page')).toBeVisible();
-    await page.getByTestId('setup-skip-button').click();
+  test('shows image generation only as a developer-mode page after setup', async ({ page }) => {
+    await completeSetup(page);
 
-    await expect(page.getByTestId('main-layout')).toBeVisible();
     await page.getByTestId('sidebar-nav-models').click();
 
     await expect(page.getByTestId('models-page')).toBeVisible();
@@ -34,79 +39,80 @@ test.describe('Image generation settings page', () => {
     await expect(page.getByTestId('image-generation-fallbacks')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-timeout')).toHaveCount(0);
     await expect(page.getByTestId('image-generation-save')).toBeVisible();
-    await expect(page.getByTestId('image-generation-clear')).toBeDisabled();
+    await expect(page.getByTestId('image-generation-clear')).toBeVisible();
   });
 
-  test('configures an independent OpenAI-compatible image endpoint', async ({ page }) => {
-    await expect(page.getByTestId('setup-page')).toBeVisible();
-    await page.getByTestId('setup-skip-button').click();
+  test('inherits the image endpoint and credentials while allowing model selection', async ({ page }) => {
+    await completeSetup(page);
 
-    await expect(page.getByTestId('main-layout')).toBeVisible();
     await unlockDeveloperMode(page);
     await page.getByTestId('sidebar-nav-image-generation').click();
 
     await expect(page.getByTestId('image-generation-settings')).toBeVisible();
-    await expect(page.getByTestId('image-generation-relay-base-url')).toBeVisible();
-    await page.getByTestId('image-generation-relay-base-url').fill('https://api.example.com/v1');
-    await page.getByTestId('image-generation-relay-model').fill('gpt-image-2');
-    await page.getByTestId('image-generation-relay-api-key').fill('sk-test-image');
+    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveAttribute('readonly', '');
+    await expect(page.getByTestId('image-generation-relay-base-url')).not.toHaveValue('');
+    await expect(page.getByTestId('image-generation-relay-api-key')).toHaveAttribute('readonly', '');
+    await page.getByTestId('image-generation-relay-model').fill('gpt-image-1');
 
-    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-2');
+    await expect(page.getByTestId('image-generation-relay-model')).toHaveValue('gpt-image-1');
     await expect(page.getByTestId('image-generation-save')).toBeEnabled();
   });
 
-  test('shows configured image API key like custom language model keys', async ({ electronApp, page }) => {
-    await installIpcMocks(electronApp, {
-      hostApi: {
-        '["/api/media/image-generation","GET"]': {
-          ok: true,
-          data: {
-            status: 200,
+  test('shows configured image API key like custom language model keys', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    try {
+      await installIpcMocks(app, {
+        hostApi: {
+          '["/api/media/image-generation","GET"]': {
             ok: true,
-            json: {
-              success: true,
-              config: {
-                primary: 'clawx-openai-image/gpt-image-2',
-                fallbacks: [],
-                timeoutMs: 900000,
-              },
-              autoProviderFallback: false,
-              defaultAgentId: 'default',
-              agents: [
-                {
-                  id: 'default',
-                  name: 'Default',
-                  isDefault: true,
-                  provider: 'clawx-openai-image',
-                  configured: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: {
+                success: true,
+                config: {
+                  primary: 'clawx-openai-image/gpt-image-2',
+                  fallbacks: [],
+                  timeoutMs: 900000,
                 },
-              ],
-              openAiRelay: {
-                enabled: true,
-                baseUrl: 'https://api.example.com/v1',
-                model: 'gpt-image-2',
-                providerKey: 'clawx-openai-image',
-                apiKeyConfigured: true,
+                autoProviderFallback: false,
+                defaultAgentId: 'default',
+                agents: [
+                  {
+                    id: 'default',
+                    name: 'Default',
+                    isDefault: true,
+                    provider: 'clawx-openai-image',
+                    configured: true,
+                  },
+                ],
+                openAiRelay: {
+                  enabled: true,
+                  baseUrl: 'https://api.example.com/v1',
+                  model: 'gpt-image-2',
+                  providerKey: 'clawx-openai-image',
+                  apiKeyConfigured: true,
+                },
               },
             },
           },
         },
-      },
-    });
+      });
+      const page = await getStableWindow(app);
 
-    await expect(page.getByTestId('setup-page')).toBeVisible();
-    await page.getByTestId('setup-skip-button').click();
+      await unlockDeveloperMode(page);
+      await page.getByTestId('sidebar-nav-image-generation').click();
 
-    await expect(page.getByTestId('main-layout')).toBeVisible();
-    await unlockDeveloperMode(page);
-    await page.getByTestId('sidebar-nav-image-generation').click();
-
-    await expect(page.getByTestId('image-generation-relay-api-key')).toHaveValue('');
-    await expect(page.getByTestId('image-generation-api-key-status')).not.toBeEmpty();
-    await expect(page.getByTestId('image-generation-relay-api-key')).toHaveAttribute('placeholder', /.+/);
+      await expect(page.getByTestId('image-generation-relay-api-key')).toHaveValue('');
+      await expect(page.getByTestId('image-generation-api-key-status')).not.toBeEmpty();
+      await expect(page.getByTestId('image-generation-relay-api-key')).toHaveAttribute('placeholder', /.+/);
+    } finally {
+      await closeElectronApp(app);
+    }
   });
 
-  test('clears configured image generation settings after confirmation', async ({ electronApp, page }) => {
+  test('clears configured image generation settings after confirmation', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
     const configuredResponse = {
       success: true,
       config: {
@@ -149,35 +155,36 @@ test.describe('Image generation settings page', () => {
       },
     };
 
-    await installIpcMocks(electronApp, {
-      hostApi: {
-        '["/api/media/image-generation","GET"]': {
-          ok: true,
-          data: { status: 200, ok: true, json: configuredResponse },
+    try {
+      await installIpcMocks(app, {
+        hostApi: {
+          '["/api/media/image-generation","GET"]': {
+            ok: true,
+            data: { status: 200, ok: true, json: configuredResponse },
+          },
+          '["/api/media/image-generation","PUT"]': {
+            ok: true,
+            data: { status: 200, ok: true, json: { success: true, ...clearedResponse } },
+          },
         },
-        '["/api/media/image-generation","PUT"]': {
-          ok: true,
-          data: { status: 200, ok: true, json: { success: true, ...clearedResponse } },
-        },
-      },
-    });
+      });
+      const page = await getStableWindow(app);
 
-    await expect(page.getByTestId('setup-page')).toBeVisible();
-    await page.getByTestId('setup-skip-button').click();
+      await unlockDeveloperMode(page);
+      await page.getByTestId('sidebar-nav-image-generation').click();
 
-    await expect(page.getByTestId('main-layout')).toBeVisible();
-    await unlockDeveloperMode(page);
-    await page.getByTestId('sidebar-nav-image-generation').click();
+      await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('https://api.example.com/v1');
+      await expect(page.getByTestId('image-generation-clear')).toBeEnabled();
 
-    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('https://api.example.com/v1');
-    await expect(page.getByTestId('image-generation-clear')).toBeEnabled();
+      await page.getByTestId('image-generation-clear').click();
+      const confirmDialog = page.getByRole('dialog');
+      await expect(confirmDialog).toBeVisible();
+      await confirmDialog.getByRole('button', { name: 'Clear', exact: true }).click();
 
-    await page.getByTestId('image-generation-clear').click();
-    const confirmDialog = page.getByRole('dialog');
-    await expect(confirmDialog).toBeVisible();
-    await confirmDialog.getByRole('button', { name: 'Clear', exact: true }).click();
-
-    await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('');
-    await expect(page.getByTestId('image-generation-clear')).toBeDisabled();
+      await expect(page.getByTestId('image-generation-relay-base-url')).toHaveValue('');
+      await expect(page.getByTestId('image-generation-clear')).toBeDisabled();
+    } finally {
+      await closeElectronApp(app);
+    }
   });
 });

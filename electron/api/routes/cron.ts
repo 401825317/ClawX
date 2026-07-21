@@ -20,7 +20,13 @@ interface GatewayCronJob {
   createdAtMs: number;
   updatedAtMs: number;
   schedule: { kind: string; expr?: string; everyMs?: number; at?: string; tz?: string };
-  payload: { kind: string; message?: string; text?: string };
+  payload: {
+    kind: string;
+    message?: string;
+    text?: string;
+    timeoutSeconds?: number;
+    [key: string]: unknown;
+  };
   delivery?: { mode: string; channel?: string; to?: string; accountId?: string };
   sessionTarget?: string;
   state: {
@@ -30,22 +36,32 @@ interface GatewayCronJob {
     lastStatus?: string;
     lastError?: string;
     lastDurationMs?: number;
+    lastDelivered?: boolean;
+    lastDeliveryStatus?: string;
+    lastDeliveryError?: string;
   };
 }
 
 interface CronRunLogEntry {
   jobId?: string;
+  jobName?: string;
   action?: string;
   status?: string;
   error?: string;
+  errorReason?: string;
   summary?: string;
   sessionId?: string;
   sessionKey?: string;
+  runId?: string;
   ts?: number;
   runAtMs?: number;
   durationMs?: number;
   model?: string;
   provider?: string;
+  delivered?: boolean;
+  deliveryStatus?: string;
+  deliveryError?: string;
+  usage?: Record<string, unknown>;
 }
 
 interface CronSessionKeyParts {
@@ -111,6 +127,43 @@ function formatDuration(durationMs: number | undefined): string | null {
   return `${Math.round(durationMs / 1000)}s`;
 }
 
+function readUsageNumber(usage: Record<string, unknown> | undefined, keys: string[]): number | undefined {
+  if (!usage) return undefined;
+  for (const key of keys) {
+    const value = usage[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
+  }
+  return undefined;
+}
+
+function formatUsageSummary(usage: Record<string, unknown> | undefined): string | null {
+  if (!usage) return null;
+  const input = readUsageNumber(usage, ['inputTokens', 'input_tokens', 'promptTokens', 'prompt_tokens']);
+  const output = readUsageNumber(usage, ['outputTokens', 'output_tokens', 'completionTokens', 'completion_tokens']);
+  const cache = readUsageNumber(usage, ['cacheReadTokens', 'cache_read_tokens', 'cachedTokens', 'cached_tokens']);
+  const total = readUsageNumber(usage, ['totalTokens', 'total_tokens', 'tokens']);
+  const fields = [
+    input === undefined ? null : `input ${input}`,
+    output === undefined ? null : `output ${output}`,
+    cache === undefined ? null : `cache ${cache}`,
+    total === undefined ? null : `total ${total}`,
+  ].filter((value): value is string => value !== null);
+  return fields.length > 0 ? fields.join(', ') : null;
+}
+
+function formatDeliverySummary(entry: CronRunLogEntry): string | null {
+  const status = typeof entry.deliveryStatus === 'string' ? entry.deliveryStatus.trim().toLowerCase() : '';
+  if (status === 'delivered' || entry.delivered === true) return 'Delivery: delivered';
+  if (status === 'not_requested' || status === 'not-requested') return 'Delivery: not requested';
+  if (status) {
+    const error = typeof entry.deliveryError === 'string' && entry.deliveryError.trim()
+      ? ` (${entry.deliveryError.trim()})`
+      : '';
+    return `Delivery: ${status}${error}`;
+  }
+  return null;
+}
+
 function buildCronRunMessage(entry: CronRunLogEntry, index: number): CronSessionFallbackMessage | null {
   const timestamp = normalizeTimestampMs(entry.ts) ?? normalizeTimestampMs(entry.runAtMs);
   if (!timestamp) return null;
@@ -126,7 +179,8 @@ function buildCronRunMessage(entry: CronRunLogEntry, index: number): CronSession
       : 'Scheduled task completed.';
   }
 
-  if (status === 'error' && !content.toLowerCase().startsWith('run failed:')) {
+  const failed = status === 'error' || status === 'timed_out' || status === 'timeout';
+  if (failed && !content.toLowerCase().startsWith('run failed:')) {
     content = `Run failed: ${content}`;
   }
 
@@ -138,16 +192,20 @@ function buildCronRunMessage(entry: CronRunLogEntry, index: number): CronSession
   } else if (entry.model) {
     meta.push(`Model: ${entry.model}`);
   }
+  const delivery = formatDeliverySummary(entry);
+  if (delivery) meta.push(delivery);
+  const usage = formatUsageSummary(entry.usage);
+  if (usage) meta.push(`Usage: ${usage}`);
   if (meta.length > 0) {
     content = `${content}\n\n${meta.join(' | ')}`;
   }
 
   return {
     id: `cron-run-${entry.sessionId ?? entry.ts ?? index}`,
-    role: status === 'error' ? 'system' : 'assistant',
+    role: failed ? 'system' : 'assistant',
     content,
     timestamp,
-    ...(status === 'error' ? { isError: true } : {}),
+    ...(failed ? { isError: true } : {}),
   };
 }
 
@@ -170,6 +228,24 @@ async function readCronRunLog(jobId: string): Promise<CronRunLogEntry[]> {
     }
   }
   return entries;
+}
+
+async function readCronRunsFromGateway(
+  ctx: HostApiContext,
+  jobId: string,
+  limit: number,
+): Promise<CronRunLogEntry[]> {
+  const result = await ctx.gatewayManager.rpc('cron.runs', {
+    id: jobId,
+    limit,
+    sortDir: 'asc',
+  }, 8_000) as { entries?: unknown } | unknown[];
+  const entries = Array.isArray(result)
+    ? result
+    : Array.isArray((result as { entries?: unknown })?.entries)
+      ? (result as { entries: unknown[] }).entries
+      : [];
+  return entries.filter((entry): entry is CronRunLogEntry => Boolean(entry) && typeof entry === 'object');
 }
 
 async function readSessionStoreEntry(
@@ -375,6 +451,10 @@ function buildCronUpdatePatch(input: Record<string, unknown>): Record<string, un
 
 function transformCronJob(job: GatewayCronJob) {
   const message = job.payload?.message || job.payload?.text || '';
+  const timeoutSeconds = typeof job.payload?.timeoutSeconds === 'number'
+    && Number.isFinite(job.payload.timeoutSeconds)
+    ? job.payload.timeoutSeconds
+    : undefined;
   const gatewayDelivery = normalizeCronDelivery(job.delivery);
   const channelType = gatewayDelivery.channel ? toUiChannelType(gatewayDelivery.channel) : undefined;
   const delivery = channelType
@@ -394,6 +474,9 @@ function transformCronJob(job: GatewayCronJob) {
       success: job.state.lastStatus === 'ok',
       error: job.state.lastError,
       duration: job.state.lastDurationMs,
+      delivered: job.state.lastDelivered,
+      deliveryStatus: job.state.lastDeliveryStatus,
+      deliveryError: job.state.lastDeliveryError,
     }
     : undefined;
   const nextRun = job.state?.nextRunAtMs
@@ -416,6 +499,7 @@ function transformCronJob(job: GatewayCronJob) {
     lastRun,
     nextRun,
     agentId,
+    ...(timeoutSeconds !== undefined ? { timeoutSeconds } : {}),
   };
 }
 
@@ -442,7 +526,10 @@ export async function handleCronRoutes(
       const [jobsResult, runs, sessionEntry] = await Promise.all([
         ctx.gatewayManager.rpc('cron.list', { includeDisabled: true }, 8000)
           .catch(() => ({ jobs: [] as GatewayCronJob[] })),
-        readCronRunLog(parsedSession.jobId),
+        readCronRunsFromGateway(ctx, parsedSession.jobId, limit)
+          // Old bundled OpenClaw versions used JSONL. Preserve that fallback
+          // only when the current Gateway does not expose the SQLite run log.
+          .catch(() => readCronRunLog(parsedSession.jobId)),
         readSessionStoreEntry(parsedSession.agentId, sessionKey),
       ]);
 
@@ -460,6 +547,29 @@ export async function handleCronRoutes(
       });
 
       sendJson(res, 200, { messages });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
+  if (url.pathname === '/api/cron/runs' && req.method === 'GET') {
+    const jobId = url.searchParams.get('jobId')?.trim() || '';
+    if (!jobId) {
+      sendJson(res, 400, { success: false, error: 'jobId is required' });
+      return true;
+    }
+    const rawLimit = Number(url.searchParams.get('limit') || '50');
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(Math.floor(rawLimit), 1), 200)
+      : 50;
+    try {
+      const result = await ctx.gatewayManager.rpc('cron.runs', {
+        id: jobId,
+        limit,
+        sortDir: 'desc',
+      }, 8_000);
+      sendJson(res, 200, { success: true, result });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }
@@ -655,11 +765,64 @@ export async function handleCronRoutes(
     return true;
   }
 
+  if (url.pathname.startsWith('/api/cron/jobs/') && url.pathname.endsWith('/clear-timeout') && req.method === 'POST') {
+    try {
+      const routePrefix = '/api/cron/jobs/';
+      const routeSuffix = '/clear-timeout';
+      const encodedId = url.pathname.slice(routePrefix.length, -routeSuffix.length);
+      const id = decodeURIComponent(encodedId);
+      if (!id) {
+        sendJson(res, 400, { success: false, error: 'cron job id is required' });
+        return true;
+      }
+
+      const currentResult = await ctx.gatewayManager.rpc('cron.get', { id }, 8_000) as GatewayCronJob | { job?: GatewayCronJob };
+      const current = 'job' in currentResult && currentResult.job ? currentResult.job : currentResult;
+      const currentPayload = current?.payload && typeof current.payload === 'object'
+        ? current.payload as Record<string, unknown>
+        : undefined;
+      if (!currentPayload) {
+        sendJson(res, 404, { success: false, error: 'cron job payload was not found' });
+        return true;
+      }
+
+      const payload = { ...currentPayload };
+      delete payload.timeoutSeconds;
+      await ctx.gatewayManager.rpc('cron.update', { id, patch: { payload } }, 8_000);
+      invalidateCronJobsRouteCache();
+      sendJson(res, 200, { success: true });
+    } catch (error) {
+      sendJson(res, 500, { success: false, error: String(error) });
+    }
+    return true;
+  }
+
   if (url.pathname.startsWith('/api/cron/jobs/') && req.method === 'PUT') {
     try {
       const id = decodeURIComponent(url.pathname.slice('/api/cron/jobs/'.length));
       const input = await parseJsonBody<Record<string, unknown>>(req);
       const patch = buildCronUpdatePatch(input);
+      if (patch.payload && typeof patch.payload === 'object' && !Array.isArray(patch.payload)) {
+        // The UI edits only the prompt. Preserve model/thinking/tools and any
+        // explicitly user-configured execution policy instead of rebuilding
+        // the entire agentTurn payload with just { kind, message }.
+        try {
+          const currentResult = await ctx.gatewayManager.rpc('cron.get', { id }, 8_000) as GatewayCronJob | { job?: GatewayCronJob };
+          const current = 'job' in currentResult && currentResult.job ? currentResult.job : currentResult;
+          const currentPayload = current?.payload && typeof current.payload === 'object'
+            ? current.payload as unknown as Record<string, unknown>
+            : undefined;
+          if (currentPayload) {
+            patch.payload = {
+              ...currentPayload,
+              ...(patch.payload as Record<string, unknown>),
+            };
+          }
+        } catch {
+          // Preserve the previous behavior when an older Gateway cannot
+          // resolve cron.get; cron.update will still validate the patch.
+        }
+      }
       const deliveryPatch = patch.delivery && typeof patch.delivery === 'object'
         ? patch.delivery as Record<string, unknown>
         : undefined;

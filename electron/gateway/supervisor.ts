@@ -6,6 +6,11 @@ import { getUvMirrorEnv } from '../utils/uv-env';
 import { isPythonReady, setupManagedPython } from '../utils/uv-setup';
 import { logger } from '../utils/logger';
 import { prependPathEntry } from '../utils/env-path';
+import {
+  getListeningProcessIds,
+  isProcessDescendantByParentResolver,
+  isProcessDescendantOf,
+} from '../utils/process-inspection';
 import { probeGatewayReady } from './ws-client';
 
 const PYTHON_STARTUP_READINESS_DELAY_MS = 45_000;
@@ -187,38 +192,25 @@ export async function waitForPortFree(port: number, timeoutMs = 30000): Promise<
   throw new Error(`Port ${port} still occupied after ${timeoutMs}ms`);
 }
 
-async function getListeningProcessIds(port: number): Promise<string[]> {
-  const cmd = process.platform === 'win32'
-    ? `netstat -ano | findstr :${port}`
-    : `lsof -i :${port} -sTCP:LISTEN -t`;
-
-  const cp = await import('child_process');
-  const { stdout } = await new Promise<{ stdout: string }>((resolve) => {
-    cp.exec(cmd, { timeout: 5000, windowsHide: true }, (err, stdout) => {
-      if (err) {
-        resolve({ stdout: '' });
-      } else {
-        resolve({ stdout });
-      }
-    });
-  });
-
-  if (!stdout.trim()) {
-    return [];
+/**
+ * Gateway is forked through Electron UtilityProcess, while the HTTP listener
+ * can live in a child Node process. Treat descendants as owned so a healthy
+ * in-process restart is not mistaken for another UClaw installation.
+ */
+export async function isGatewayListenerOwnedByProcess(
+  listenerPid: string | number,
+  ownedPid: string | number | undefined,
+  resolveParentPid?: (pid: string) => Promise<string | undefined>,
+): Promise<boolean> {
+  if (!resolveParentPid) {
+    return await isProcessDescendantOf(listenerPid, ownedPid);
   }
 
-  if (process.platform === 'win32') {
-    const pids: string[] = [];
-    for (const line of stdout.trim().split(/\r?\n/)) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length >= 5 && parts[3] === 'LISTENING') {
-        pids.push(parts[4]);
-      }
-    }
-    return [...new Set(pids)];
-  }
-
-  return [...new Set(stdout.trim().split(/\r?\n/).map((value) => value.trim()).filter(Boolean))];
+  return await isProcessDescendantByParentResolver(
+    listenerPid,
+    ownedPid,
+    async (pid) => await resolveParentPid(String(pid)),
+  );
 }
 
 export const GATEWAY_PORT_OWNERSHIP_CONFLICT = 'GATEWAY_PORT_OWNERSHIP_CONFLICT' as const;
@@ -266,12 +258,26 @@ export async function findExistingGatewayProcess(options: {
 
   let pids: string[] = [];
   try {
-    pids = await getListeningProcessIds(port);
+    pids = (await getListeningProcessIds(port)).map(String);
   } catch (error) {
     logger.warn('Error checking for existing process on port:', error);
   }
 
-  const externalPids = pids.filter((pid) => !ownedPid || pid !== String(ownedPid));
+  const ownedListenerPids = ownedPid
+    ? await Promise.all(pids.map(async (pid) => ({
+      pid,
+      owned: await isGatewayListenerOwnedByProcess(pid, ownedPid),
+    })))
+    : [];
+  const externalPids = ownedPid
+    ? ownedListenerPids.filter(({ owned }) => !owned).map(({ pid }) => pid)
+    : pids;
+  const adoptedPids = ownedListenerPids.filter(({ owned }) => owned).map(({ pid }) => pid);
+  if (adoptedPids.length > 0) {
+    logger.info(
+      `Gateway port ${port} is owned by this UClaw process tree (listener PIDs: ${adoptedPids.join(', ')}); reusing it`,
+    );
+  }
   if (externalPids.length > 0) {
     const ready = await probeGatewayReady(port, 5000).catch(() => false);
     logger.warn(

@@ -2,7 +2,7 @@
   "id": "uclaw-artifact-guard",
   "name": "UClaw Artifact Guard",
   "description": "Stages media inputs, projects runtime events, and deterministically verifies concrete artifact references.",
-  "version": "0.2.5",
+  "version": "0.2.8",
   "entry": "index.mjs",
   "enabledByDefault": false,
   "contracts": {

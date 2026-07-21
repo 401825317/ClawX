@@ -19,6 +19,7 @@ import {
 import {
   reduceConversationEvents,
   removeConversationSession,
+  removeConversationTurn,
   replaceSessionTurns,
 } from './reducer';
 import { runtimeEventToConversationEvents } from './runtime-adapter';
@@ -60,6 +61,7 @@ type ConversationActions = {
   }) => string;
   bindRun: (turnId: string, sessionKey: string, runId: string, objective?: string) => void;
   markSessionActivity: (sessionKey: string, active: boolean, runId?: string) => void;
+  discardLocalTurn: (sessionKey: string, turnId: string) => void;
   removeSession: (sessionKey: string) => void;
   reset: () => void;
 };
@@ -327,6 +329,29 @@ export const useConversationStore = create<ConversationStore>((set) => {
         replayed: false,
         data: { active },
       }], { buffered: false });
+    },
+    discardLocalTurn: (sessionKey, turnId) => {
+      flushConversationEvents(apply);
+      set((state) => {
+        const turn = state.turnsById[turnId];
+        const isUnacceptedLocalTurn = turn?.sessionKey === sessionKey
+          && turn.status === 'queued'
+          && turn.rootRunId == null
+          && turn.runAliases.length === 0
+          && turn.taskIds.length === 0
+          && turn.items.every((item) => item.kind === 'user-message');
+        if (!isUnacceptedLocalTurn) return state;
+
+        const canonical = removeConversationTurn(stateSlice(state), sessionKey, turnId);
+        const removedItemIds = new Set(turn.items.map((item) => item.id));
+        return {
+          ...state,
+          ...canonical,
+          expandedItemIds: Object.fromEntries(
+            Object.entries(state.expandedItemIds).filter(([itemId]) => !removedItemIds.has(itemId)),
+          ),
+        };
+      });
     },
     removeSession: (sessionKey) => {
       set((state) => removeSessionFromStore(state, sessionKey));

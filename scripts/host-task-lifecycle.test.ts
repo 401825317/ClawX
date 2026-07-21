@@ -39,6 +39,60 @@ function createRequest(idempotencyKey: string, input: unknown = {}) {
   };
 }
 
+test('Host task persistence preserves an internal composition-step completion mode', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-internal-step-'));
+  const serviceOptions = { rootDir: path.join(root, 'host-tasks') };
+  try {
+    const service = new HostTaskService(serviceOptions);
+    const created = await service.create({
+      ...createRequest('internal-compose-step'),
+      completion: { mode: 'internal' },
+    });
+    assert.equal(created.task.completion.mode, 'internal');
+
+    const restarted = new HostTaskService(serviceOptions);
+    const restored = await restarted.get(created.task.taskId);
+    assert.equal(restored?.completion.mode, 'internal');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host task persistence pins the default state root after initialization', async () => {
+  const initialStateDir = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-root-initial-'));
+  const redirectedStateDir = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-root-redirected-'));
+  const previousStateDir = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = initialStateDir;
+  try {
+    const service = new HostTaskService();
+    const created = await service.create(createRequest('root-pinning'));
+
+    process.env.OPENCLAW_STATE_DIR = redirectedStateDir;
+    await service.update(created.task.taskId, {
+      status: 'running',
+      progress: { detail: 'persist after environment restoration' },
+    });
+
+    const persisted = JSON.parse(await readFile(path.join(
+      initialStateDir,
+      'uclaw-runtime',
+      'host-tasks',
+      'jobs',
+      created.task.taskId,
+      'task.json',
+    ), 'utf8')) as { status?: string; progress?: { detail?: string } };
+    assert.equal(persisted.status, 'running');
+    assert.equal(persisted.progress?.detail, 'persist after environment restoration');
+  } finally {
+    if (previousStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
+    else process.env.OPENCLAW_STATE_DIR = previousStateDir;
+    await Promise.all([
+      rm(initialStateDir, { recursive: true, force: true }),
+      rm(redirectedStateDir, { recursive: true, force: true }),
+    ]);
+  }
+});
+
 test('Host task lifecycle persists bounded input/checkpoint and delegates start, cancel, and safe resume once', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-'));
   const serviceOptions = { rootDir: path.join(root, 'host-tasks') };
