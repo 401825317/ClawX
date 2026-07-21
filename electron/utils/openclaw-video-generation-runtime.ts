@@ -4,7 +4,10 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS } from '../../shared/junfeiai-endpoints';
+import {
+  JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
+  JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS,
+} from '../../shared/junfeiai-endpoints';
 import { proxyAwareFetch } from './proxy-fetch';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 import {
@@ -593,7 +596,7 @@ export async function generateVideoInProcess(params: {
   );
   const inputImages = await loadInputImages(params.inputImages);
   const imageCount = inputImages?.filter((image) => image.buffer && image.buffer.length > 0).length ?? 0;
-  const requestedSize = params.size?.trim() || '1280x720';
+  const requestedSize = params.size?.trim() || JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE;
   const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds);
   const requestedDimensions = parseVideoSize(requestedSize);
 

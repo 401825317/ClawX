@@ -178,36 +178,18 @@ function preferredOptionValue<T>(value: T | undefined, options: T[], fallback: T
   return options[0] ?? fallback;
 }
 
-function dimensionArea(value: string): number {
-  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
-  if (!match) return 0;
-  return Number(match[1]) * Number(match[2]);
-}
-
-function strongestSizeOption(options: string[] | undefined, fallback: string): string {
-  const candidates = (options ?? []).filter(Boolean);
-  if (candidates.length === 0) return fallback;
-  return candidates.reduce((best, current) => (
-    dimensionArea(current) > dimensionArea(best) ? current : best
-  ), candidates[0]!);
-}
-
 function strongestDurationOption(options: number[] | undefined, fallback: number): number {
   const candidates = (options ?? []).filter((value) => Number.isFinite(value) && value > 0);
   return candidates.length > 0 ? Math.max(...candidates) : fallback;
 }
 
 function formatVideoSizeLabel(value: string): string {
-  switch (value) {
-    case '1280x720':
-      return '16:9';
-    case '720x1280':
-      return '9:16';
-    case '1024x1024':
-      return '1:1';
-    default:
-      return value;
-  }
+  const match = value.match(/^(\d+)x(\d+)$/u);
+  if (!match) return value;
+  const width = Number.parseInt(match[1], 10);
+  const height = Number.parseInt(match[2], 10);
+  const aspectRatio = width === height ? '1:1' : width > height ? '16:9' : '9:16';
+  return `${aspectRatio} · ${Math.min(width, height)}p`;
 }
 
 function formatImageQualityLabel(value: string, t: ReturnType<typeof useTranslation>['t']): string {
@@ -476,7 +458,11 @@ export function ChatInput({
     const configuredFallbackDuration = model?.defaultDurationSeconds
       ?? clientModelOptions.video.defaultDurationSeconds
       ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultDurationSeconds;
-    const fallbackSize = strongestSizeOption(model?.sizes, configuredFallbackSize);
+    const fallbackSize = preferredOptionValue(
+      configuredFallbackSize,
+      model?.sizes ?? [],
+      DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultSize,
+    );
     const fallbackDuration = strongestDurationOption(model?.durations, configuredFallbackDuration);
     return {
       model: model?.id ?? clientModelOptions.video.defaultModel,
@@ -917,7 +903,7 @@ export function ChatInput({
     }
 
     try {
-      console.log('[stagePathFiles] Staging files:', filePaths);
+      console.info('[stagePathFiles] Staging selected files', { count: filePaths.length });
       const staged = await hostApiFetch<Array<{
         id: string;
         fileName: string;
@@ -929,7 +915,10 @@ export function ChatInput({
         method: 'POST',
         body: JSON.stringify({ filePaths }),
       });
-      console.log('[stagePathFiles] Stage result:', staged?.map(s => ({ id: s?.id, fileName: s?.fileName, mimeType: s?.mimeType, fileSize: s?.fileSize, stagedPath: s?.stagedPath, hasPreview: !!s?.preview })));
+      console.info('[stagePathFiles] Files staged', {
+        count: staged?.length ?? 0,
+        totalBytes: staged?.reduce((sum, entry) => sum + (entry?.fileSize ?? 0), 0) ?? 0,
+      });
       showUnsupportedImageEditReferenceToast(staged, t);
 
       setAttachments(prev => {
@@ -1011,7 +1000,7 @@ export function ChatInput({
             mimeType: file.type || 'application/octet-stream',
           }),
         });
-        console.log(`[stageBuffer] Staged: id=${staged?.id}, path=${staged?.stagedPath}, size=${staged?.fileSize}`);
+        console.info('[stageBuffer] Clipboard file staged', { bytes: staged?.fileSize ?? 0 });
         setAttachments(prev => prev.map(a =>
           a.id === tempId ? { ...staged, status: 'ready' as const } : a,
         ));
@@ -1091,13 +1080,12 @@ export function ChatInput({
 
     // Capture values before clearing — clear input immediately for snappy UX,
     // but keep attachments available for the async send
-    console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
-    if (attachmentsToSend) {
-      console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
-        id: a.id, fileName: a.fileName, mimeType: a.mimeType, fileSize: a.fileSize,
-        stagedPath: a.stagedPath, status: a.status, hasPreview: !!a.preview,
-      })));
-    }
+    console.info('[handleSend] Dispatching composer intent', {
+      textChars: Array.from(textToSend).length,
+      attachmentCount: attachmentsToSend?.length ?? 0,
+      attachmentBytes: attachmentsToSend?.reduce((sum, attachment) => sum + attachment.fileSize, 0) ?? 0,
+      mode: sendMode,
+    });
     setInput('');
     setAttachments([]);
     setSelectedSkill(null);
@@ -1619,6 +1607,7 @@ export function ChatInput({
                 >
                   <button
                     type="button"
+                    data-testid="chat-thinking-option-inherit"
                     onClick={() => void handleSelectThinking('')}
                     className={cn(
                       'flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left text-xs font-medium transition-colors',

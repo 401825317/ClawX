@@ -10,10 +10,26 @@ export type ChatRuntimeEventProducer =
   | 'history'
   | string;
 
+export type ChatRuntimeTimelineVisibility = 'default' | 'diagnostics';
+export type ChatRuntimeApprovalDecision = 'allow-once' | 'allow-always' | 'deny';
+export type ChatRuntimeApprovalKind = 'exec' | 'plugin' | 'desktop' | 'task';
+export type ChatRuntimeApprovalResolutionSource =
+  | 'gateway'
+  | 'desktop-broker'
+  | 'history-checkpoint'
+  | 'task-state-transition'
+  | 'run-terminal'
+  | 'ui-rpc-confirmed';
+
+/** Structured delivery state; a path-like reference alone is not availability evidence. */
+export type ChatRuntimeArtifactAvailability = 'registered' | 'available' | 'unavailable' | 'error';
+
 export type ChatRuntimeEventBase = {
   contractVersion?: typeof CHAT_RUNTIME_CONTRACT_VERSION;
   producer?: ChatRuntimeEventProducer;
   runId: string;
+  /** Owning conversation run when `runId` belongs to a child/background runtime. */
+  rootRunId?: string;
   sessionKey?: string;
   /** Stable OpenClaw background-task identity when this event belongs to a detached task. */
   taskId?: string;
@@ -21,6 +37,12 @@ export type ChatRuntimeEventBase = {
   parentTaskId?: string;
   /** Native task lifecycle state when OpenClaw emits a detached-task projection. */
   taskStatus?: ChatRuntimeTaskStatus;
+  /** Stable OpenClaw item identity for streamed assistant/reasoning segments. */
+  itemId?: string;
+  /** Stable tool identity when another structured fact takes over its default Timeline ownership. */
+  toolCallId?: string;
+  /** Diagnostics-only events stay canonical but do not create a default Timeline row. */
+  timelineVisibility?: ChatRuntimeTimelineVisibility;
   seq?: number;
   ts?: number;
 };
@@ -34,6 +56,7 @@ export type ChatRuntimeTaskStatus =
   | 'pending'
   | 'running'
   | 'completed'
+  | 'aborted'
   | 'error'
   | 'waiting_approval'
   | 'partial';
@@ -59,7 +82,7 @@ export type ChatRuntimeTaskProjection = {
   endedAt?: number;
 };
 
-export type ChatRuntimeStepStatus = 'pending' | 'running' | 'completed' | 'error' | 'blocked' | 'skipped';
+export type ChatRuntimeStepStatus = 'pending' | 'running' | 'completed' | 'aborted' | 'error' | 'blocked' | 'skipped';
 
 export type ChatRuntimePlanStep = {
   id: string;
@@ -86,6 +109,14 @@ export type ChatRuntimeArtifact = {
   url?: string;
   mimeType?: string;
   sizeBytes?: number;
+  availability?: ChatRuntimeArtifactAvailability;
+  error?: string;
+  preview?: string | null;
+  previewStatus?: 'unavailable';
+  width?: number;
+  height?: number;
+  durationSeconds?: number;
+  hasAudio?: boolean;
   stepId?: string;
   taskId?: string;
   sourceToolCallId?: string;
@@ -168,6 +199,7 @@ export type ChatRuntimeEvent =
       status: 'completed' | 'error' | 'aborted';
       endedAt?: number;
       error?: string;
+      recoverable?: boolean;
       livenessState?: string;
       replayInvalid?: boolean;
       stopReason?: string;
@@ -248,6 +280,15 @@ export type ChatRuntimeEvent =
     })
   | (ChatRuntimeEventBase & {
       type: 'approval.updated';
+      approvalId?: string;
+      approvalKind?: ChatRuntimeApprovalKind;
+      allowedDecisions?: ChatRuntimeApprovalDecision[];
+      decision?: ChatRuntimeApprovalDecision;
+      requestedAt?: number;
+      expiresAt?: number;
+      request?: unknown;
+      actionable?: boolean;
+      resolutionSource?: ChatRuntimeApprovalResolutionSource;
       itemId?: string;
       toolCallId?: string;
       title?: string;

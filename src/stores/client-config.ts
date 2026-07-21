@@ -2,6 +2,10 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { toast } from 'sonner';
 import { hostApiFetch } from '@/lib/host-api';
+import {
+  JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
+  JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZES,
+} from '../../shared/junfeiai-endpoints';
 
 export type ClientAnnouncementLevel = 'normal' | 'important' | 'urgent';
 
@@ -89,6 +93,14 @@ export interface ClientModelOptionsConfig {
   };
 }
 
+const MANAGED_VIDEO_MODEL_IDS = new Set(['grok-image-video', 'grok-video-1.5']);
+const MANAGED_VIDEO_SIZE_OPTIONS = Array.from(new Set([
+  ...JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZES,
+  '1280x720',
+  '720x1280',
+  '1024x1024',
+]));
+
 interface ClientConfigResponse {
   announcements?: {
     enabled?: boolean;
@@ -156,7 +168,7 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
   },
   video: {
     defaultModel: 'grok-image-video',
-    defaultSize: '1280x720',
+    defaultSize: JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
     defaultDurationSeconds: 15,
     models: [
       {
@@ -164,9 +176,9 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
         label: 'Grok Video',
         description: 'Supports text-to-video and image-to-video.',
         modes: ['text-to-video', 'image-to-video'],
-        sizes: ['1280x720', '720x1280', '1024x1024'],
+        sizes: [...MANAGED_VIDEO_SIZE_OPTIONS],
         durations: [4, 6, 8, 10, 12, 15],
-        defaultSize: '1280x720',
+        defaultSize: JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
         defaultDurationSeconds: 15,
         requiresImage: false,
         enabled: true,
@@ -176,9 +188,9 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
         label: 'Grok Video 1.5',
         description: 'Image-to-video model that requires one reference image.',
         modes: ['image-to-video'],
-        sizes: ['1280x720', '720x1280', '1024x1024'],
+        sizes: [...MANAGED_VIDEO_SIZE_OPTIONS],
         durations: [4, 6, 8, 10, 12, 15],
-        defaultSize: '1280x720',
+        defaultSize: JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
         defaultDurationSeconds: 15,
         requiresImage: true,
         enabled: true,
@@ -411,11 +423,17 @@ function normalizeVideoModels(
       if (!id || seen.has(id)) return null;
       seen.add(id);
       const modes = normalizeStringList(record.modes, defaultFallback.modes);
-      const sizes = normalizeStringList(record.sizes, defaultFallback.sizes);
+      const configuredSizes = normalizeStringList(record.sizes, defaultFallback.sizes);
+      const managedModel = MANAGED_VIDEO_MODEL_IDS.has(id);
+      const sizes = managedModel
+        ? Array.from(new Set([...JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZES, ...configuredSizes]))
+        : configuredSizes;
       const durations = normalizeDurationList(record.durations, defaultFallback.durations);
-      const defaultSize = typeof record.defaultSize === 'string' && sizes.includes(record.defaultSize.trim())
-        ? record.defaultSize.trim()
-        : sizes[0];
+      const defaultSize = managedModel
+        ? JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE
+        : typeof record.defaultSize === 'string' && sizes.includes(record.defaultSize.trim())
+          ? record.defaultSize.trim()
+          : sizes[0];
       const rawDuration = Number(record.defaultDurationSeconds);
       const defaultDurationSeconds = Number.isFinite(rawDuration) && durations.includes(Math.floor(rawDuration))
         ? Math.floor(rawDuration)

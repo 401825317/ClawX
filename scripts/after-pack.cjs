@@ -22,10 +22,6 @@
 const { cpSync, existsSync, readdirSync, rmSync, statSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename, relative } = require('path');
 const { execFileSync } = require('child_process');
-const { BUNDLED_OPENCLAW_PLUGINS, ELECTRON_MAIN_RUNTIME_PACKAGES, LOCAL_OPENCLAW_PLUGIN_IDS } = require('./openclaw-bundle-config.mjs');
-const { patchNsisExtractTemplate } = require('./patch-nsis-extract.mjs');
-const { patchNsisInstallSectionTemplate } = require('./patch-nsis-install-section.mjs');
-const { patchNsisUninstallTemplate } = require('./patch-nsis-uninstall.mjs');
 
 // On Windows, paths in pnpm's virtual store can exceed the default MAX_PATH
 // limit (260 chars). Node.js 18.17+ respects the system LongPathsEnabled
@@ -63,6 +59,23 @@ function listPackageDeps(pkgJson) {
 function readInstalledPackageVersion(packageDir) {
   const pkg = readJsonSafe(join(packageDir, 'package.json'));
   return typeof pkg?.version === 'string' ? pkg.version.trim() : null;
+}
+
+/** Fail packaging when a required OpenClaw runtime entry was removed or omitted. */
+function assertOpenClawRuntimeIntegrity(nodeModulesDir, requiredPackages, requiredFiles) {
+  const missingPackages = requiredPackages.filter((pkgName) => (
+    !existsSync(join(nodeModulesDir, ...pkgName.split('/'), 'package.json'))
+  ));
+  const missingFiles = requiredFiles.filter((relativePath) => (
+    !existsSync(join(nodeModulesDir, ...relativePath.split('/')))
+  ));
+  if (missingPackages.length === 0 && missingFiles.length === 0) return;
+
+  const details = [
+    ...missingPackages.map((pkgName) => `package ${pkgName}`),
+    ...missingFiles.map((relativePath) => `file ${relativePath}`),
+  ];
+  throw new Error(`[after-pack] Incomplete OpenClaw 2026.7.1-2 runtime after cleanup: ${details.join(', ')}`);
 }
 
 function assertLocalPluginMetadata(pluginDir, expectedId) {
@@ -288,7 +301,7 @@ const PLATFORM_ALIASES = {
 // we strip the suffix after the first dash to get the base arch.
 const PLATFORM_NATIVE_SCOPES = {
   '@napi-rs': /^canvas-(darwin|linux|win32)-(x64|arm64)/,
-  '@img': /^sharp(?:-libvips)?-(darwin|linux(?:musl)?|win32)-(x64|arm64|arm|ppc64|riscv64|s390x)/,
+  '@img': /^sharp(?:-libvips)?-(darwin|linux(?:musl)?|win32)-(x64|arm64|arm|ia32|ppc64|riscv64|s390x)/,
   '@mariozechner': /^clipboard-(darwin|linux|win32)-(x64|arm64|universal)/,
   '@snazzah': /^davey-(darwin|linux|android|freebsd|win32|wasm32)-(x64|arm64|arm|ia32|arm64-gnu|arm64-musl|x64-gnu|x64-musl|x64-msvc|arm64-msvc|ia32-msvc|arm-eabi|arm-gnueabihf|wasi)/,
   '@lydell': /^node-pty-(darwin|linux|win32)-(x64|arm64)/,
@@ -321,6 +334,12 @@ function matchesTargetArch(pkgArch, targetArch) {
   return pkgArch === targetArch || pkgArch === 'universal';
 }
 
+function nativePackageMatchesTarget(match, platform, arch) {
+  const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
+  const pkgArch = baseArch(match[2]);
+  return pkgPlatform === platform && matchesTargetArch(pkgArch, arch);
+}
+
 function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
   let removed = 0;
 
@@ -333,14 +352,7 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
       const match = entry.match(pattern);
       if (!match) continue; // not a platform-specific package, leave it
 
-      const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
-      const pkgArch = baseArch(match[2]);
-
-      const isMatch =
-        pkgPlatform === platform &&
-        matchesTargetArch(pkgArch, arch);
-
-      if (!isMatch) {
+      if (!nativePackageMatchesTarget(match, platform, arch)) {
         try {
           rmSync(join(scopeDir, entry), { recursive: true, force: true });
           removed++;
@@ -358,14 +370,7 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
       const match = entry.match(pattern);
       if (!match) continue;
 
-      const pkgPlatform = PLATFORM_ALIASES[match[1]] || match[1];
-      const pkgArch = baseArch(match[2]);
-
-      const isMatch =
-        pkgPlatform === platform &&
-        matchesTargetArch(pkgArch, arch);
-
-      if (!isMatch) {
+      if (!nativePackageMatchesTarget(match, platform, arch)) {
         try {
           rmSync(join(nodeModulesDir, entry), { recursive: true, force: true });
           removed++;
@@ -375,6 +380,51 @@ function cleanupNativePlatformPackages(nodeModulesDir, platform, arch) {
   }
 
   return removed;
+}
+
+function findNonTargetNativePlatformPackages(nodeModulesDir, platform, arch) {
+  const unexpected = [];
+  for (const [scope, pattern] of Object.entries(PLATFORM_NATIVE_SCOPES)) {
+    const scopeDir = join(nodeModulesDir, scope);
+    if (!existsSync(scopeDir)) continue;
+    for (const entry of readdirSync(scopeDir)) {
+      const match = entry.match(pattern);
+      if (match && !nativePackageMatchesTarget(match, platform, arch)) {
+        unexpected.push(`${scope}/${entry}`);
+      }
+    }
+  }
+  for (const { pattern } of UNSCOPED_NATIVE_PACKAGES) {
+    let entries;
+    try { entries = readdirSync(nodeModulesDir); } catch { continue; }
+    for (const entry of entries) {
+      const match = entry.match(pattern);
+      if (match && !nativePackageMatchesTarget(match, platform, arch)) unexpected.push(entry);
+    }
+  }
+  return unexpected.sort();
+}
+
+function assertNoNonTargetNativePlatformPackages(nodeModulesDir, platform, arch, label) {
+  const unexpected = findNonTargetNativePlatformPackages(nodeModulesDir, platform, arch);
+  if (unexpected.length > 0) {
+    throw new Error(`[after-pack] ${label} still contains non-target native packages: ${unexpected.join(', ')}`);
+  }
+}
+
+function assertTargetSharpRuntimePresent(nodeModulesDir, platform, arch, label) {
+  if (!existsSync(join(nodeModulesDir, 'sharp', 'package.json'))) return;
+  const imgDir = join(nodeModulesDir, '@img');
+  const pattern = PLATFORM_NATIVE_SCOPES['@img'];
+  const matches = existsSync(imgDir)
+    ? readdirSync(imgDir).filter((entry) => {
+      const match = entry.match(pattern);
+      return match && nativePackageMatchesTarget(match, platform, arch);
+    })
+    : [];
+  if (matches.length === 0) {
+    throw new Error(`[after-pack] ${label} is missing a Sharp runtime for ${platform}/${arch}`);
+  }
 }
 
 function cleanupNodeModulesRuntimeJunk(nodeModulesDir, platform, arch) {
@@ -444,6 +494,8 @@ function cleanupKnownRuntimeJunk(rootDir, platform, arch) {
 exports.__test = {
   cleanupNativePlatformPackages,
   cleanupNodeModulesRuntimeJunk,
+  assertNoNonTargetNativePlatformPackages,
+  assertTargetSharpRuntimePresent,
 };
 
 // ── Broken module patcher ─────────────────────────────────────────────────────
@@ -775,6 +827,13 @@ function bundlePlugin(nodeModulesRoot, npmName, destDir) {
 // ── Main hook ────────────────────────────────────────────────────────────────
 
 exports.default = async function afterPack(context) {
+  const {
+    BUNDLED_OPENCLAW_PLUGINS,
+    ELECTRON_MAIN_RUNTIME_PACKAGES,
+    LOCAL_OPENCLAW_PLUGIN_IDS,
+    OPENCLAW_REQUIRED_RUNTIME_FILES,
+    OPENCLAW_REQUIRED_RUNTIME_PACKAGES,
+  } = await import('./openclaw-bundle-config.mjs');
   const appOutDir = context.appOutDir;
   const platform = context.electronPlatformName; // 'win32' | 'darwin' | 'linux'
   const arch = resolveArch(context.arch);
@@ -1022,6 +1081,14 @@ exports.default = async function afterPack(context) {
   if (nativeRemoved > 0) {
     console.log(`[after-pack] ✅ Removed ${nativeRemoved} non-target native platform packages.`);
   }
+  assertNoNonTargetNativePlatformPackages(dest, platform, arch, 'OpenClaw node_modules');
+
+  assertOpenClawRuntimeIntegrity(
+    dest,
+    OPENCLAW_REQUIRED_RUNTIME_PACKAGES,
+    OPENCLAW_REQUIRED_RUNTIME_FILES,
+  );
+  console.log('[after-pack] ✅ OpenClaw 2026.7.1-2 runtime dependencies verified.');
 
   // 5. Patch lru-cache in app.asar.unpacked
   //
@@ -1035,6 +1102,25 @@ exports.default = async function afterPack(context) {
   // Electron's transparent asar fs layer serves the fixed version at runtime.
   const asarUnpackedDir = join(resourcesDir, 'app.asar.unpacked');
   if (existsSync(asarUnpackedDir)) {
+    const asarNodeModulesDir = join(asarUnpackedDir, 'node_modules');
+    if (existsSync(asarNodeModulesDir)) {
+      const asarNativeRemoved = cleanupNativePlatformPackages(asarNodeModulesDir, platform, arch);
+      if (asarNativeRemoved > 0) {
+        console.log(`[after-pack] ✅ app.asar.unpacked: removed ${asarNativeRemoved} non-target native platform packages.`);
+      }
+      assertNoNonTargetNativePlatformPackages(
+        asarNodeModulesDir,
+        platform,
+        arch,
+        'app.asar.unpacked/node_modules',
+      );
+      assertTargetSharpRuntimePresent(
+        asarNodeModulesDir,
+        platform,
+        arch,
+        'app.asar.unpacked/node_modules',
+      );
+    }
     const { readFileSync: readFS, writeFileSync: writeFS } = require('fs');
     let asarLruCount = 0;
     const lruStack = [asarUnpackedDir];
@@ -1106,9 +1192,31 @@ exports.default = async function afterPack(context) {
   }
   // 6. [Windows only] Ensure NSIS templates are patched (also done pre-build in package:win).
   if (platform === 'win32') {
+    const portableUpdaterPath = join(
+      resourcesDir,
+      'resources',
+      'updater',
+      'win32-x64',
+      'uclaw-portable-updater.exe',
+    );
+    if (arch === 'x64' && !existsSync(portableUpdaterPath)) {
+      throw new Error(
+        '[after-pack] Windows x64 portable updater helper is missing. Run `pnpm run updater:build:win` before electron-builder.',
+      );
+    }
+
     if (process.env.CLAWX_SKIP_NSIS_PATCH === '1') {
       console.log('[after-pack] Skipping NSIS install template patches for this Windows target.');
     } else {
+      const [
+        { patchNsisExtractTemplate },
+        { patchNsisInstallSectionTemplate },
+        { patchNsisUninstallTemplate },
+      ] = await Promise.all([
+        import('./patch-nsis-extract.mjs'),
+        import('./patch-nsis-install-section.mjs'),
+        import('./patch-nsis-uninstall.mjs'),
+      ]);
       const extractOk = patchNsisExtractTemplate();
       const installSectionOk = patchNsisInstallSectionTemplate();
       const uninstallOk = patchNsisUninstallTemplate();

@@ -36,7 +36,6 @@ touchedAreas:
   - scripts/openclaw-contract-tool-cleanup.mjs
   - scripts/openclaw-contract-tool-cleanup.test.mjs
   - scripts/uclaw-artifact-guard-runtime.test.mjs
-  - scripts/uclaw-tool-progress.test.mjs
   - scripts/runtime-native-evidence.test.ts
   - scripts/runtime-task-graph.test.ts
   - scripts/runtime-progress-semantics.test.ts
@@ -83,7 +82,6 @@ requiredTests:
   - node --check resources/openclaw-plugins/uclaw-artifact-guard/index.mjs
   - node scripts/openclaw-contract-tool-cleanup.test.mjs
   - node scripts/uclaw-artifact-guard-runtime.test.mjs
-  - node scripts/uclaw-tool-progress.test.mjs
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
   - pnpm exec tsx --test scripts/runtime-native-evidence.test.ts
   - pnpm exec tsx --test scripts/runtime-task-graph.test.ts

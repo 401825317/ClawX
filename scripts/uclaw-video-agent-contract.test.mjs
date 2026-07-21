@@ -11,7 +11,7 @@ try {
   const artifactGuard = await import('../resources/openclaw-plugins/uclaw-artifact-guard/index.mjs');
   const videoProject = await import('../resources/openclaw-plugins/uclaw-video-project/index.mjs');
 
-  assert.equal(artifactGuard.default.version, '0.2.7');
+  assert.equal(artifactGuard.default.version, '0.2.8');
 
   const lifecycleHooks = new Map();
   artifactGuard.__test.registerArtifactGuard({

@@ -4,54 +4,65 @@ import test from 'node:test';
 
 import { HostEventBus } from '../electron/api/event-bus.ts';
 import { handleGatewayRoutes } from '../electron/api/routes/gateway.ts';
-import {
-  applyAsyncTaskEvidenceToRuns,
-  collectRunDetachedTaskIdsForAbort,
-  collectRunHostTaskIdsForAbort,
-  extractAsyncTaskEvidence,
-} from '../src/stores/chat/helpers.ts';
+import { collectCancellableTasks } from '../src/stores/conversation/control-selectors.ts';
+import { reduceConversationEvents } from '../src/stores/conversation/reducer.ts';
+import { runtimeEventToConversationEvents } from '../src/stores/conversation/runtime-adapter.ts';
+import { createEmptyConversationState } from '../src/stores/conversation/types.ts';
 
-test('structured async task evidence exposes taskId before completion', () => {
+test('canonical task evidence exposes cancellable task ids before completion', () => {
   const taskId = '11111111-2222-4333-8444-555555555555';
   const activeRunId = 'run-current';
-  const evidence = extractAsyncTaskEvidence({
-    type: 'task.updated',
-    taskId,
+  const sessionKey = 'agent:main:session-1';
+  const now = Date.now();
+  const runtimeEvents = [{
+    type: 'run.started' as const,
     runId: activeRunId,
-    status: 'running',
-  });
-  assert.equal(evidence.length, 1);
-  assert.equal(evidence[0]?.taskId, taskId);
-  assert.equal(evidence[0]?.status, 'pending');
+    sessionKey,
+    seq: 1,
+    ts: now,
+  }, {
+    type: 'task.updated' as const,
+    runId: activeRunId,
+    sessionKey,
+    taskId,
+    seq: 2,
+    ts: now + 1,
+    task: {
+      taskId,
+      runtime: 'video_generate',
+      title: 'Generate video',
+      status: 'running' as const,
+      updatedAt: now + 1,
+    },
+  }, {
+    type: 'task.updated' as const,
+    runId: activeRunId,
+    sessionKey,
+    taskId: 'host-task-1',
+    seq: 3,
+    ts: now + 2,
+    producer: 'uclaw-host-task',
+    task: {
+      taskId: 'host-task-1',
+      runtime: 'uclaw-host-task',
+      title: 'Render locally',
+      status: 'running' as const,
+      updatedAt: now + 2,
+    },
+  }];
 
-  const runtimeRuns = applyAsyncTaskEvidenceToRuns(
-    {
-      [activeRunId]: {
-        runId: activeRunId,
-        sessionKey: 'agent:main:session-1',
-        status: 'running',
-        lastEventAt: Date.now(),
-        assistantText: '',
-        thinkingText: '',
-        events: [],
-      },
-    },
-    activeRunId,
-    evidence,
-    'agent:main:session-1',
+  // Reduce the same canonical task facts consumed by the Timeline and abort flow.
+  const state = reduceConversationEvents(
+    createEmptyConversationState(),
+    runtimeEvents.flatMap(runtimeEventToConversationEvents),
   );
-  assert.deepEqual(collectRunDetachedTaskIdsForAbort(runtimeRuns, activeRunId), [taskId]);
-  assert.deepEqual(collectRunHostTaskIdsForAbort({
-    [activeRunId]: {
-      ...runtimeRuns[activeRunId]!,
-      tasks: [{
-        taskId: 'host-task-1',
-        runtime: 'uclaw-host-task',
-        title: 'Render locally',
-        status: 'running',
-      }],
-    },
-  }, activeRunId), ['host-task-1']);
+  const turnId = state.turnOrderBySession[sessionKey]?.[0];
+  assert.ok(turnId);
+  const selection = collectCancellableTasks(state.turnsById[turnId]);
+
+  assert.deepEqual(selection.taskIds, [taskId, 'host-task-1']);
+  assert.deepEqual(selection.nativeTaskIds, [taskId]);
+  assert.deepEqual(selection.hostTaskIds, ['host-task-1']);
 });
 
 test('chat abort cancels the current run detached tasks before aborting the chat controller', async () => {

@@ -7,10 +7,14 @@ import { hostApiFetch } from '@/lib/host-api';
 import { invokeIpc } from '@/lib/api-client';
 import { subscribeHostEvent } from '@/lib/host-events';
 import type { GatewayHealth, GatewayStatus } from '../types/gateway';
+import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import { createChatEventContext, normalizeGatewayChatEnvelope } from './conversation/chat-adapter';
 import {
-  CHAT_SYNTHETIC_TERMINAL_PRODUCER,
-  type ChatRuntimeEvent,
-} from '../../shared/chat-runtime-events';
+  completionWakeTaskIdFromRunId,
+  resolveCanonicalEventSession,
+  resolveCompletionWakeCorrelation,
+} from './conversation/control-selectors';
+import { useConversationStore } from './conversation/store';
 
 let gatewayInitPromise: Promise<void> | null = null;
 let gatewayEventUnsubscribers: Array<() => void> | null = null;
@@ -18,9 +22,7 @@ let gatewayReconcileTimer: ReturnType<typeof setInterval> | null = null;
 const gatewayEventDedupe = new Map<string, number>();
 const GATEWAY_EVENT_DEDUPE_TTL_MS = 30_000;
 const LOAD_SESSIONS_MIN_INTERVAL_MS = 1_200;
-const LOAD_HISTORY_MIN_INTERVAL_MS = 800;
 let lastLoadSessionsAt = 0;
-let lastLoadHistoryAt = 0;
 let cronRepairTriggeredThisSession = false;
 
 interface GatewayState {
@@ -183,16 +185,6 @@ function maybeLoadSessions(
   void state.loadSessions();
 }
 
-function maybeLoadHistory(
-  state: { loadHistory: (quiet?: boolean) => Promise<void> },
-  force = false,
-): void {
-  const now = Date.now();
-  if (!force && now - lastLoadHistoryAt < LOAD_HISTORY_MIN_INTERVAL_MS) return;
-  lastLoadHistoryAt = now;
-  void state.loadHistory(true);
-}
-
 /** Bump sidebar ordering when any session receives gateway traffic (e.g. Feishu DM). */
 function touchSessionActivity(sessionKey: string | null | undefined, activityMs = Date.now()): void {
   if (!sessionKey) return;
@@ -216,14 +208,63 @@ function handleGatewayNotification(notification: { method?: string; params?: Rec
 }
 
 function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
-  const resolvedSessionKey = event.sessionKey ?? null;
-  if (resolvedSessionKey) {
-    touchSessionActivity(resolvedSessionKey, typeof event.ts === 'number' ? event.ts : Date.now());
-  }
-
   import('./chat')
-    .then(({ useChatStore }) => {
+    .then(({ inferSessionKeyForRun, useChatStore }) => {
       const state = useChatStore.getState();
+      const inferredSessionKey = inferSessionKeyForRun(
+        state,
+        event.runId,
+        event.sessionKey ?? null,
+      );
+      const completionTaskId = completionWakeTaskIdFromRunId(event.runId);
+      const completionWake = completionTaskId
+        ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
+            runId: event.runId,
+            rootRunId: event.rootRunId,
+            sessionKey: event.sessionKey,
+            taskId: event.taskId,
+          })
+        : null;
+      const canonicalRouting = completionTaskId
+        ? null
+        : resolveCanonicalEventSession(useConversationStore.getState(), {
+            sessionKey: event.sessionKey,
+            rootRunId: event.rootRunId,
+            runId: event.runId,
+            taskId: event.taskId,
+          }, { allowPendingLocal: event.type === 'run.started' });
+      const canonicalEvent = completionWake
+        ? {
+            ...event,
+            rootRunId: event.rootRunId ?? completionWake.rootRunId,
+            sessionKey: event.sessionKey ?? completionWake.sessionKey,
+            taskId: event.taskId ?? completionWake.taskId,
+          }
+        : canonicalRouting && event.sessionKey !== canonicalRouting.sessionKey
+          ? {
+              ...event,
+              sessionKey: canonicalRouting.sessionKey,
+              rootRunId: event.rootRunId ?? canonicalRouting.rootRunId,
+            }
+          : event;
+      const resolvedSessionKey = completionTaskId
+        ? completionWake?.sessionKey ?? null
+        : canonicalRouting?.sessionKey ?? inferredSessionKey;
+
+      if (resolvedSessionKey) {
+        touchSessionActivity(resolvedSessionKey, typeof event.ts === 'number' ? event.ts : Date.now());
+      }
+
+      // Correlate session-less completion wakes from the canonical task owner
+      // before ingestion; ambiguous ownership remains intentionally unscoped.
+      if (completionWake || canonicalRouting) {
+        try {
+          useConversationStore.getState().ingestRuntimeEvent(canonicalEvent);
+        } catch (error) {
+          console.warn('[conversation-timeline] Failed to ingest runtime event:', error);
+        }
+      }
+
       state.handleRuntimeEvent(event);
       const nextState = useChatStore.getState();
 
@@ -246,49 +287,54 @@ function handleChatRuntimeEvent(event: ChatRuntimeEvent): void {
       if (shouldRefreshSessions) {
         maybeLoadSessions(nextState, true);
       }
-
-      // The matching legacy final is dispatched immediately after this
-      // synthesized terminal event and owns backend-idle history settlement.
-      if (event.producer === CHAT_SYNTHETIC_TERMINAL_PRODUCER) return;
-
-      const matchesCurrentSession = resolvedSessionKey != null && resolvedSessionKey === nextState.currentSessionKey;
-      const matchesActiveRun = nextState.activeRunId != null && event.runId === nextState.activeRunId;
-      if (matchesCurrentSession || matchesActiveRun) {
-        maybeLoadHistory(nextState, true);
-      }
     })
     .catch(() => {});
 }
 
 function handleGatewayChatMessage(data: unknown): void {
   import('./chat').then(({ useChatStore }) => {
-    const chatData = data as Record<string, unknown>;
-    const payload = ('message' in chatData && typeof chatData.message === 'object')
-      ? chatData.message as Record<string, unknown>
-      : chatData;
-    const normalizedPayload: Record<string, unknown> = {
-      ...payload,
-      ...(payload.sessionKey == null && chatData.sessionKey != null
-        ? { sessionKey: chatData.sessionKey }
-        : {}),
-      ...(payload.runId == null && chatData.runId != null
-        ? { runId: chatData.runId }
-        : {}),
-    };
-
-    if (normalizedPayload.state) {
-      if (!shouldProcessGatewayEvent(normalizedPayload)) return;
-      useChatStore.getState().handleChatEvent(normalizedPayload);
-      return;
-    }
-
-    const normalized = {
-      state: 'final',
-      message: normalizedPayload,
-      runId: normalizedPayload.runId,
-      sessionKey: normalizedPayload.sessionKey,
-    };
+    const normalized = normalizeGatewayChatEnvelope(data);
+    if (!normalized) return;
     if (!shouldProcessGatewayEvent(normalized)) return;
+    const chatState = useChatStore.getState();
+    const explicitSessionKey = typeof normalized.sessionKey === 'string'
+      ? normalized.sessionKey
+      : null;
+    const eventRunId = typeof normalized.runId === 'string' ? normalized.runId : null;
+    // Completion wakes use a short-lived media run ID. Preserve that event ID,
+    // but attach its canonical root owner before the reducer assigns a Turn.
+    const completionTaskId = eventRunId ? completionWakeTaskIdFromRunId(eventRunId) : null;
+    const owner = eventRunId && completionTaskId
+      ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
+          runId: eventRunId,
+          rootRunId: typeof normalized.rootRunId === 'string' ? normalized.rootRunId : undefined,
+          sessionKey: explicitSessionKey,
+          taskId: typeof normalized.taskId === 'string' ? normalized.taskId : undefined,
+        })
+      : null;
+    const canonicalRouting = completionTaskId
+      ? null
+      : resolveCanonicalEventSession(useConversationStore.getState(), {
+          sessionKey: explicitSessionKey,
+          rootRunId: typeof normalized.rootRunId === 'string' ? normalized.rootRunId : undefined,
+          runId: eventRunId,
+          taskId: typeof normalized.taskId === 'string' ? normalized.taskId : undefined,
+        }, { allowPendingLocal: true });
+    const sessionKey = completionTaskId
+      ? owner?.sessionKey ?? null
+      : canonicalRouting?.sessionKey ?? null;
+    if (sessionKey) {
+      try {
+        useConversationStore.getState().ingestChatEvent(normalized, createChatEventContext({
+          sessionKey,
+          currentSessionKey: chatState.currentSessionKey,
+          activeRunId: chatState.activeRunId,
+          ownerRunId: owner?.rootRunId,
+        }));
+      } catch (error) {
+        console.warn('[conversation-timeline] Failed to ingest chat event:', error);
+      }
+    }
     useChatStore.getState().handleChatEvent(normalized);
   }).catch(() => {});
 }
@@ -307,6 +353,47 @@ function mapChannelStatus(status: string): 'connected' | 'connecting' | 'disconn
     default:
       return 'disconnected';
   }
+}
+
+/** Detect status changes that affect the renderer's connection generation. */
+function gatewayRuntimeStatusChanged(previous: GatewayStatus, next: GatewayStatus): boolean {
+  return previous.state !== next.state
+    || previous.pid !== next.pid
+    || previous.connectedAt !== next.connectedAt
+    || previous.gatewayReady !== next.gatewayReady;
+}
+
+/** Reconcile the selected chat from OpenClaw after transport becomes ready again. */
+function reconcileChatAfterGatewayRecovery(previous: GatewayStatus, next: GatewayStatus): void {
+  const runtimeGenerationChanged = previous.state === 'running'
+    && next.state === 'running'
+    && (
+      (previous.pid != null && next.pid != null && previous.pid !== next.pid)
+      || (
+        previous.connectedAt != null
+        && next.connectedAt != null
+        && previous.connectedAt !== next.connectedAt
+      )
+    );
+  const becameReady = next.state === 'running'
+    && next.gatewayReady !== false
+    && (
+      previous.state !== 'running'
+      || previous.gatewayReady === false
+      || runtimeGenerationChanged
+    );
+  if (!becameReady) return;
+
+  void import('./chat')
+    .then(async ({ useChatStore }) => {
+      const before = useChatStore.getState();
+      // Session liveness is authoritative; connection recovery alone does not
+      // determine whether the interrupted Turn completed, failed, or went idle.
+      await before.reconcileGatewayRecovery();
+    })
+    .catch((error) => {
+      console.warn('[gateway-store] chat recovery reconciliation failed', error);
+    });
 }
 
 export const useGatewayStore = create<GatewayState>((set, get) => ({
@@ -373,7 +460,9 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         if (!gatewayEventUnsubscribers) {
           const unsubscribers: Array<() => void> = [];
           unsubscribers.push(subscribeHostEvent<GatewayStatus>('gateway:status', (payload) => {
+            const previous = get().status;
             set({ status: payload });
+            reconcileChatAfterGatewayRecovery(previous, payload);
 
             // Trigger cron repair when gateway becomes ready
             if (!cronRepairTriggeredThisSession && payload.state === 'running') {
@@ -442,17 +531,17 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
             clearInterval(gatewayReconcileTimer);
           }
           gatewayReconcileTimer = setInterval(() => {
-            const ipc = window.electron?.ipcRenderer;
-            if (!ipc) return;
-            ipc.invoke('gateway:status')
-              .then((result: unknown) => {
-                const latest = result as GatewayStatus;
+            void invokeIpc<GatewayStatus>('gateway:status')
+              .then((latest) => {
                 const current = get().status;
-              if (!gatewayStatusesMatch(latest, current)) {
-                console.info(
+                if (!gatewayStatusesMatch(latest, current)) {
+                  console.info(
                     `[gateway-store] reconciled stale status: ${current.state}/${String(current.gatewayReady)} → ${latest.state}/${String(latest.gatewayReady)}`,
                   );
                   set({ status: latest });
+                  if (gatewayRuntimeStatusChanged(current, latest)) {
+                    reconcileChatAfterGatewayRecovery(current, latest);
+                  }
                 }
               })
               .catch(() => { /* ignore */ });
@@ -464,7 +553,11 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         // the initial fetch and the IPC listener setup, that event was lost.
         // A second fetch guarantees we pick up the latest state.
         try {
-          await get().refreshStatus();
+          const current = get().status;
+          const refreshed = await get().refreshStatus();
+          if (gatewayRuntimeStatusChanged(current, refreshed)) {
+            reconcileChatAfterGatewayRecovery(current, refreshed);
+          }
         } catch {
           // Best-effort; the IPC listener will eventually reconcile.
         }

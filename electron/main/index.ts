@@ -33,7 +33,11 @@ import { getMacTrafficLightPosition, syncMacTrafficLightPosition } from './traff
 import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
-import { applyPortableEnvironment, isPortableMode } from '../utils/portable-mode';
+import {
+  acknowledgePortableUpdateStartup,
+  applyPortableEnvironment,
+  isPortableMode,
+} from '../utils/portable-mode';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
@@ -66,6 +70,16 @@ import { autoMigrateManagedChatToOpenAiOnStartup } from '../services/providers/o
 import { ensureJunFeiAIManagedRuntimeBootstrap } from '../services/junfeiai/managed-runtime-bootstrap';
 import { isJunFeiAIManagedDistribution } from '../utils/junfeiai-distribution';
 import { getPort } from '../utils/config';
+import {
+  CHAT_RUNTIME_CONTRACT_VERSION,
+  type ChatRuntimeEvent,
+} from '../../shared/chat-runtime-events';
+import { desktopRunCoordinator, type DesktopApprovalView } from '../services/computer';
+import {
+  GatewayApprovalRecoveryCoordinator,
+  replayPendingGatewayApprovalRuntimeEvents,
+} from '../gateway/chat-runtime-events';
+import { dispatchCanonicalApprovalRuntimeEvent } from '../gateway/event-dispatch';
 
 const WINDOWS_APP_USER_MODEL_ID = 'app.clawx.desktop';
 const DISPLAY_APP_NAME = 'UClaw';
@@ -214,8 +228,72 @@ let gatewayManager!: GatewayManager;
 let clawHubService!: ClawHubService;
 let hostEventBus!: HostEventBus;
 let hostApiServer: Server | null = null;
+let unsubscribeDesktopApprovals: (() => void) | null = null;
+let gatewayApprovalRecovery!: GatewayApprovalRecoveryCoordinator;
 const mainWindowFocusState = createMainWindowFocusState();
 const quitLifecycleState = createQuitLifecycleState();
+
+function desktopApprovalRuntimeEvent(
+  approval: DesktopApprovalView,
+): Extract<ChatRuntimeEvent, { type: 'approval.updated' }> {
+  const observedAt = Date.now();
+  const requestedAt = Date.parse(approval.createdAt);
+  const expiresAt = Date.parse(approval.expiresAt);
+  const decision = approval.status === 'approved' || approval.status === 'consumed'
+    ? 'allow-once'
+    : approval.status === 'denied'
+      ? 'deny'
+      : undefined;
+  const pending = approval.status === 'pending';
+
+  return {
+    contractVersion: CHAT_RUNTIME_CONTRACT_VERSION,
+    producer: 'uclaw-desktop-approval',
+    type: 'approval.updated',
+    runId: approval.runId,
+    sessionKey: approval.sessionKey,
+    toolCallId: approval.toolCallId,
+    ts: pending && Number.isFinite(requestedAt) ? requestedAt : observedAt,
+    approvalId: approval.id,
+    approvalKind: 'desktop',
+    allowedDecisions: ['allow-once', 'deny'],
+    decision,
+    requestedAt: Number.isFinite(requestedAt) ? requestedAt : undefined,
+    expiresAt: Number.isFinite(expiresAt) ? expiresAt : undefined,
+    request: {
+      actionKind: approval.action.kind,
+      appId: approval.action.appId,
+    },
+    actionable: pending,
+    resolutionSource: 'desktop-broker',
+    itemId: approval.id,
+    kind: 'desktop',
+    phase: pending ? 'requested' : 'resolved',
+    status: approval.status,
+    title: approval.action.appId,
+    message: approval.reason,
+  };
+}
+
+function sendDesktopApprovalReplay(win: BrowserWindow): void {
+  for (const approval of desktopRunCoordinator.approvals.listForReplay()) {
+    win.webContents.send('chat:runtime-event', desktopApprovalRuntimeEvent(approval));
+  }
+}
+
+function scheduleDesktopApprovalReplay(win: BrowserWindow): void {
+  for (const delayMs of [0, 1_000, 4_000]) {
+    const timer = setTimeout(() => {
+      if (!win.isDestroyed()) sendDesktopApprovalReplay(win);
+    }, delayMs);
+    timer.unref();
+  }
+}
+
+/** Replay pending native approvals after reconnect or renderer reload. */
+async function replayPendingGatewayApprovals(options?: { queueAfterActive?: boolean }): Promise<void> {
+  await gatewayApprovalRecovery.replay(options);
+}
 
 /**
  * Resolve the icons directory path (works in both dev and packaged mode)
@@ -337,6 +415,15 @@ function focusMainWindow(): void {
 
 function createMainWindow(): BrowserWindow {
   const win = createWindow();
+
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed()) {
+      scheduleDesktopApprovalReplay(win);
+      // If connection recovery is already listing approvals, run once more
+      // after it finishes so this newly loaded renderer cannot miss delivery.
+      void replayPendingGatewayApprovals({ queueAfterActive: true });
+    }
+  });
 
   win.once('ready-to-show', () => {
     if (mainWindow !== win) {
@@ -478,6 +565,14 @@ async function initialize(): Promise<void> {
   // Register IPC handlers
   registerIpcHandlers(gatewayManager, clawHubService, window);
 
+  unsubscribeDesktopApprovals?.();
+  unsubscribeDesktopApprovals = desktopRunCoordinator.approvals.subscribe((approval) => {
+    const event = desktopApprovalRuntimeEvent(approval);
+    hostEventBus.emit('chat:runtime-event', event);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('chat:runtime-event', event);
+    }
+  });
   if (extensionsLoadPromise) {
     await extensionsLoadPromise;
   }
@@ -612,8 +707,13 @@ async function initialize(): Promise<void> {
 
   // Bridge gateway and host-side events before any auto-start logic runs, so
   // renderer subscribers observe the full startup lifecycle.
-  gatewayManager.on('status', (status: { state: string }) => {
+  gatewayManager.on('status', (status: { state: string; gatewayReady?: boolean }) => {
     hostEventBus.emit('gateway:status', status);
+    if (status.state === 'running') {
+      // The handshake makes RPC available. A later ready=true transition is
+      // allowed to queue one retry if the first lookup is still in flight.
+      void replayPendingGatewayApprovals({ queueAfterActive: status.gatewayReady === true });
+    }
     if (status.state === 'running' && !isE2EMode) {
       void ensureClawXContext().catch((error) => {
         logger.warn('Failed to re-merge ClawX context after gateway reconnect:', error);
@@ -790,6 +890,18 @@ async function initialize(): Promise<void> {
   } else if (isPortableMode()) {
     logger.info('Portable mode enabled: OpenClaw CLI shell integration is skipped');
   }
+
+  if (!isE2EMode) {
+    try {
+      if (acknowledgePortableUpdateStartup()) {
+        logger.info('Portable update startup acknowledged after Main-process initialization');
+      }
+    } catch (error) {
+      // Do not acknowledge an invalid marker. The updater helper will restore
+      // the previous build, while a stale marker cannot block normal startup.
+      logger.error('Portable update startup acknowledgement failed:', error);
+    }
+  }
 }
 
 if (gotTheLock) {
@@ -814,6 +926,16 @@ if (gotTheLock) {
   }
 
   gatewayManager = new GatewayManager();
+  gatewayApprovalRecovery = new GatewayApprovalRecoveryCoordinator({
+    isConnected: () => gatewayManager.getStatus().state === 'running',
+    replayOnce: async () => {
+      await replayPendingGatewayApprovalRuntimeEvents({
+        rpc: async (method, params, timeoutMs) => await gatewayManager.rpc(method, params, timeoutMs),
+        emit: (event) => dispatchCanonicalApprovalRuntimeEvent(gatewayManager, event),
+        warn: (message, error) => logger.warn(`${message}:`, error),
+      });
+    },
+  });
   clawHubService = new ClawHubService();
   hostEventBus = new HostEventBus();
 
@@ -879,6 +1001,8 @@ if (gotTheLock) {
       return;
     }
 
+    unsubscribeDesktopApprovals?.();
+    unsubscribeDesktopApprovals = null;
     hostEventBus.closeAll();
     hostApiServer?.close();
     void extensionRegistry.teardownAll();

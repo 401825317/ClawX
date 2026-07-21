@@ -11,6 +11,7 @@ import { patchInstalledOpenClawBrowserLifecycleRuntime } from './openclaw-browse
 import { patchInstalledOpenClawCronRuntimePolicy } from './openclaw-cron-runtime-policy-patch.mjs';
 import { cleanupInstalledOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchInstalledOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
+import { patchInstalledOpenClawImageModelPolicyRuntime } from './openclaw-image-model-policy-patch.mjs';
 import { patchInstalledOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchInstalledOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchInstalledOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
@@ -27,7 +28,7 @@ import { patchInstalledOpenClawProcessControlSemanticsRuntime } from './openclaw
 import { patchInstalledOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchInstalledOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchInstalledOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
-import { patchInstalledOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
+import { patchInstalledOpenClawTextProviderFailoverRuntime } from './openclaw-text-provider-failover-patch.mjs';
 import { patchInstalledOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
@@ -48,7 +49,7 @@ try {
   patchInstalledOpenClawCompactionSessionStateRuntime();
   patchInstalledOpenClawSessionCwdRuntime();
   patchInstalledOpenClawPromptCacheKeyRuntime();
-  patchInstalledOpenClawResponsesCompatibleFallbackRuntime();
+  patchInstalledOpenClawTextProviderFailoverRuntime();
   patchInstalledOpenClawSystemPromptReasoningLabelRuntime();
   patchInstalledOpenClawToolDirectoryI18nRuntime();
   cleanupInstalledOpenClawRequiredContractToolRuntime();
@@ -60,6 +61,7 @@ try {
   patchInstalledOpenClawNativeMediaCancellationRuntime();
   patchInstalledOpenClawNativeMediaCompletionQueueRuntime();
   patchInstalledOpenClawManagedMediaTimeoutRuntime();
+  patchInstalledOpenClawImageModelPolicyRuntime();
   patchInstalledOpenClawNativeImageDeliveryRuntime();
   cleanupInstalledOpenClawNativeMediaAcceptanceRuntime();
   patchInstalledOpenClawVideoSegmentDedupeRuntime();

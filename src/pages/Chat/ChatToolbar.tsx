@@ -5,7 +5,7 @@
  */
 import { useMemo, useRef, useState } from 'react';
 import { RefreshCw, FolderTree, FolderOpen, ListTree, ChevronDown, Check, Loader2, RotateCcw } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useChatStore } from '@/stores/chat';
 import { useAgentsStore } from '@/stores/agents';
@@ -23,19 +23,20 @@ function workspaceName(workspace: string): string {
 }
 
 type ChatToolbarProps = {
+  runActive: boolean;
   questionDirectoryOpen?: boolean;
   questionDirectoryCount?: number;
   onToggleQuestionDirectory?: () => void;
 };
 
 export function ChatToolbar({
+  runActive,
   questionDirectoryOpen = false,
   questionDirectoryCount = 0,
   onToggleQuestionDirectory,
-}: ChatToolbarProps = {}) {
+}: ChatToolbarProps) {
   const refresh = useChatStore((s) => s.refresh);
   const loading = useChatStore((s) => s.loading);
-  const sending = useChatStore((s) => s.sending);
   const sessions = useChatStore((s) => s.sessions);
   const switchSession = useChatStore((s) => s.switchSession);
   const currentSessionKey = useChatStore((s) => s.currentSessionKey);
@@ -58,7 +59,7 @@ export function ChatToolbar({
   const currentAgentName = currentAgent?.profile?.personaName ?? currentAgent?.name ?? currentAgentId;
   const currentSession = sessions.find((session) => session.key === currentSessionKey);
   const currentWorkspace = currentSession?.cwd || currentAgent?.workspace || '';
-  const workspaceLocked = sending
+  const workspaceLocked = runActive
     || currentSession?.hasActiveRun === true
     || currentSession?.status === 'running'
     || currentSession?.status === 'active';
@@ -72,9 +73,9 @@ export function ChatToolbar({
         ids.add(agentId);
       }
     }
-    if (sending) ids.add(currentAgentId);
+    if (runActive) ids.add(currentAgentId);
     return ids;
-  }, [currentAgentId, sending, sessions]);
+  }, [currentAgentId, runActive, sessions]);
 
   const browserActive = WORKSPACE_BROWSER_ENABLED && panelOpen && panelTab === 'browser';
   const questionDirectoryAvailable = questionDirectoryCount > 1 && !!onToggleQuestionDirectory;
@@ -250,21 +251,21 @@ export function ChatToolbar({
         </div>
       )}
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            data-testid="chat-question-directory-toggle"
-            variant="ghost"
-            size="icon"
-            className={cn(
-              'h-8 w-8 hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
-              questionDirectoryOpen && 'bg-foreground/10 text-foreground',
-            )}
-            onClick={onToggleQuestionDirectory}
-            disabled={!questionDirectoryAvailable}
-            aria-label={t('questionDirectory.title')}
-          >
-            <ListTree className="h-4 w-4" />
-          </Button>
+        <TooltipTrigger
+          data-testid="chat-question-directory-toggle"
+          type="button"
+          className={cn(
+            buttonVariants({ variant: 'ghost', size: 'icon' }),
+            'h-8 w-8 hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
+            questionDirectoryOpen && 'bg-foreground/10 text-foreground',
+          )}
+          onClick={onToggleQuestionDirectory}
+          disabled={!questionDirectoryAvailable}
+          aria-label={t('questionDirectory.title')}
+          aria-expanded={questionDirectoryOpen}
+          aria-controls={questionDirectoryAvailable ? 'chat-question-directory' : undefined}
+        >
+          <ListTree className="h-4 w-4" />
         </TooltipTrigger>
         <TooltipContent>
           <p>{t('questionDirectory.title')}</p>

@@ -4,7 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useGatewayStore } from '@/stores/gateway';
-import { hasActiveChatWork, useChatStore } from '@/stores/chat';
+import { useChatStore } from '@/stores/chat';
+import { selectRunningAgentIds } from '@/stores/conversation/control-selectors';
+import { useConversationStore } from '@/stores/conversation/store';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { hostApiFetch } from '@/lib/host-api';
 import { scheduleAfterNavigationFrame } from '@/lib/deferred-work';
@@ -155,7 +157,10 @@ function isStaleNotRunningHealthForRunningGateway(
 export function Channels() {
   const { t } = useTranslation('channels');
   const gatewayStatus = useGatewayStore((state) => state.status);
-  const hasActiveRun = useChatStore(hasActiveChatWork);
+  const backendSessions = useChatStore((state) => state.sessions);
+  const hasActiveRun = useConversationStore((state) => (
+    selectRunningAgentIds(state, backendSessions).length > 0
+  ));
   const lastGatewayStateRef = useRef(gatewayStatus.state);
 
   const [loading, setLoading] = useState(true);

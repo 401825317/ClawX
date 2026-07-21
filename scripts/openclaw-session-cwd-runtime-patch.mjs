@@ -22,11 +22,13 @@ const PATCH_RULES = [
     id: 'sessions-patch-projection',
     search: `\tif (existing && !existing.sessionId) {
 \t\tdelete next.label;
+\t\tdelete next.category;
 \t\tdelete next.displayName;
 \t}
 \tconst checkSpawnLineage = (field) => supportsSpawnLineage(storeKey) ? null : invalid(\`\${field} is only supported for subagent:* or acp:* sessions\`);`,
     replace: `\tif (existing && !existing.sessionId) {
 \t\tdelete next.label;
+\t\tdelete next.category;
 \t\tdelete next.displayName;
 \t}
 \tif ("cwd" in patch) {
@@ -41,17 +43,29 @@ const PATCH_RULES = [
 \tconst checkSpawnLineage = (field) => supportsSpawnLineage(storeKey) ? null : invalid(\`\${field} is only supported for subagent:* or acp:* sessions\`);`,
   },
   {
+    id: 'sessions-create-handler-cwd',
+    search: `\t\t\tlabel: p.label,
+\t\t\tmodel: p.model,
+\t\t\tparentSessionKey: p.parentSessionKey,
+\t\t\tspawnedCwd: sessionCwd,`,
+    replace: `\t\t\tlabel: p.label,
+\t\t\tmodel: p.model,
+\t\t\tcwd: p.cwd,
+\t\t\tparentSessionKey: p.parentSessionKey,
+\t\t\tspawnedCwd: sessionCwd,`,
+  },
+  {
     id: 'sessions-create-cwd-projection',
     search: `\t\t\t\tpatch: {
 \t\t\t\t\tkey: target.canonicalKey,
-\t\t\t\t\tlabel: normalizeOptionalString(p.label),
-\t\t\t\t\tmodel: normalizeOptionalString(p.model)
+\t\t\t\t\tlabel: normalizeOptionalString(params.label),
+\t\t\t\t\tmodel: normalizeOptionalString(params.model)
 \t\t\t\t},`,
     replace: `\t\t\t\tpatch: {
 \t\t\t\t\tkey: target.canonicalKey,
-\t\t\t\t\tlabel: normalizeOptionalString(p.label),
-\t\t\t\t\tmodel: normalizeOptionalString(p.model),
-\t\t\t\t\tcwd: p.cwd
+\t\t\t\t\tlabel: normalizeOptionalString(params.label),
+\t\t\t\t\tmodel: normalizeOptionalString(params.model),
+\t\t\t\t\tcwd: params.cwd
 \t\t\t\t},`,
   },
   {
@@ -67,10 +81,10 @@ const PATCH_RULES = [
   {
     id: 'gateway-agent-runtime-cwd',
     search: `function resolveSessionRuntimeCwd(params) {
-\treturn normalizeOptionalString(params.sessionEntry?.spawnedCwd);
+\treturn normalizeOptionalString(params.requestedCwd ?? params.sessionEntry?.spawnedCwd);
 }`,
     replace: `function resolveSessionRuntimeCwd(params) {
-\treturn normalizeOptionalString(params.sessionEntry?.cwd) ?? normalizeOptionalString(params.sessionEntry?.spawnedCwd);
+\treturn normalizeOptionalString(params.requestedCwd) ?? normalizeOptionalString(params.sessionEntry?.cwd) ?? normalizeOptionalString(params.sessionEntry?.spawnedCwd);
 }`,
   },
   {
@@ -95,10 +109,10 @@ const PATCH_RULES = [
     id: 'agent-tools-current-cwd-workspace',
     search: `\t\t\tfsPolicy,
 \t\t\tworkspaceDir: workspaceRoot,
-\t\t\tspawnWorkspaceDir: options?.spawnWorkspaceDir ? resolveWorkspaceRoot(options.spawnWorkspaceDir) : void 0,`,
+\t\t\tspawnWorkspaceDir: capabilityProfile.workspace.spawnWorkspaceRoot,`,
     replace: `\t\t\tfsPolicy,
 \t\t\tworkspaceDir: codingRoot,
-\t\t\tspawnWorkspaceDir: options?.spawnWorkspaceDir ? resolveWorkspaceRoot(options.spawnWorkspaceDir) : void 0,`,
+\t\t\tspawnWorkspaceDir: capabilityProfile.workspace.spawnWorkspaceRoot,`,
   },
   {
     id: 'embedded-system-prompt-runtime-cwd',
@@ -126,8 +140,8 @@ const PATCH_RULES = [
   },
   {
     id: 'session-compact-runtime-cwd',
-    search: `\t\t\tconst cwd = normalizeOptionalString(entry?.spawnedCwd);`,
-    replace: `\t\t\tconst cwd = normalizeOptionalString(entry?.cwd) ?? normalizeOptionalString(entry?.spawnedCwd);`,
+    search: `\t\t\t\t\t\t\tcwd: normalizeOptionalString(latestEntry.spawnedCwd),`,
+    replace: `\t\t\t\t\t\t\tcwd: normalizeOptionalString(latestEntry.cwd) ?? normalizeOptionalString(latestEntry.spawnedCwd),`,
   },
   {
     id: 'session-entry-reserved-cwd',

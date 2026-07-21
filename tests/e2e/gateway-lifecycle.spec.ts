@@ -130,6 +130,35 @@ test.describe('ClawX gateway lifecycle resilience', () => {
             json: { state: 'running', port: 18789, pid: 100, connectedAt: 1, gatewayReady: false },
           },
         },
+        [stableStringify(['/api/chat/sessions', 'GET'])]: {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              success: true,
+              result: {
+                sessions: [{ key: 'agent:main:main', displayName: 'main' }],
+              },
+            },
+          },
+        },
+        [stableStringify(['/api/chat/history', 'POST'])]: {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: {
+              success: true,
+              result: {
+                messages: [
+                  { role: 'user', content: 'hello', timestamp: 1000 },
+                  { role: 'assistant', content: 'history after ready', timestamp: 1001 },
+                ],
+              },
+            },
+          },
+        },
         [stableStringify(['/api/agents', 'GET'])]: {
           ok: true,
           data: {
@@ -146,7 +175,7 @@ test.describe('ClawX gateway lifecycle resilience', () => {
             sessions: [{ key: 'agent:main:main', displayName: 'main' }],
           },
         },
-        [stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 200, maxChars: 500000 }])]: {
+        [stableStringify(['chat.history', { sessionKey: 'agent:main:main', limit: 100, maxChars: 500000 }])]: {
           success: true,
           result: {
             messages: [
@@ -160,7 +189,7 @@ test.describe('ClawX gateway lifecycle resilience', () => {
 
     await completeSetup(page);
     await page.getByTestId('sidebar-new-chat').click();
-    await expect(page.getByText(/gateway starting \| port: 18789/i)).toBeVisible();
+    await expect(page.getByTestId('chat-composer-input')).toBeDisabled();
     await expect(page.getByText('history after ready')).toHaveCount(0);
 
     await electronApp.evaluate(({ BrowserWindow }) => {
@@ -175,7 +204,7 @@ test.describe('ClawX gateway lifecycle resilience', () => {
     });
 
     await expect(page.getByText('history after ready')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByText(/gateway connected \| port: 18789/i)).toBeVisible();
+    await expect(page.getByTestId('chat-composer-input')).toBeEnabled();
   });
 
   test('does not show a sent chat bubble when fresh Gateway status is disconnected', async ({ electronApp, page }) => {
@@ -265,7 +294,9 @@ test.describe('ClawX gateway lifecycle resilience', () => {
     await page.getByTestId('chat-composer-input').fill('this message must stay local');
     await page.getByTestId('chat-composer-send').click();
 
-    await expect(page.getByText(/message was not sent/i)).toBeVisible();
+    await expect(page.getByTestId('timeline-error')).toContainText(
+      /This request could not be completed|暂时无法完成这项请求/u,
+    );
     await expect(page.getByText('this message must stay local')).toHaveCount(0);
 
     const chatSendCalls = await electronApp.evaluate(() => {

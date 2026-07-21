@@ -1,4 +1,4 @@
-import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
+import { closeElectronApp, completeSetup, expect, getStableWindow, test } from './fixtures/electron';
 
 test.describe('Russian language localization', () => {
   test('shows Russian language option in setup wizard', async ({ launchElectronApp }) => {
@@ -38,7 +38,7 @@ test.describe('Russian language localization', () => {
     }
   });
 
-  test('Russian language persists after skipping setup', async ({ launchElectronApp }) => {
+  test('Russian language persists after setup completion', async ({ launchElectronApp }) => {
     const app = await launchElectronApp();
     
     try {
@@ -50,9 +50,7 @@ test.describe('Russian language localization', () => {
       const russianButton = page.locator('button', { hasText: 'Русский' });
       await russianButton.click();
       
-      // Skip setup
-      await page.getByTestId('setup-skip-button').click();
-      await expect(page.getByTestId('main-layout')).toBeVisible();
+      await completeSetup(page);
       
       // Navigate to Settings to verify language persistence
       await page.getByTestId('sidebar-nav-settings').click();

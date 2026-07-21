@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const PLUGIN_ID = 'uclaw-artifact-guard';
-const REVISION_ID = `${PLUGIN_ID}:artifact-delivery`;
+const TERMINAL_OBSERVER_HOOK_ID = `${PLUGIN_ID}:terminal-artifact-observer`;
 const PROMPT_CONTEXT_HOOK_ID = `${PLUGIN_ID}:prompt-history-maintenance`;
 const MEDIA_TOOL_PREPARATION_HOOK_ID = `${PLUGIN_ID}:media-tool-preparation`;
 const RUNTIME_EVENT_SOURCE = PLUGIN_ID;
@@ -22,23 +22,6 @@ const VIDEO_MODEL_PLANNING_CONTEXT = [
   'For configured UClaw Grok candidates, use grok-image-video for text-only video and use grok-video-1.5 only with exactly one managed reference image. Never send grok-video-1.5 without that image.',
   'For a requested final video, create a uclaw_video_project before generation. Use one shot when one generated clip satisfies the brief; plan multiple shots only when the requested duration or creative structure requires them. Record every video_generate result, run deterministic shot QA plus semantic review before accepting a shot. When every required multi-shot clip is accepted, call uclaw_video_project action:compose exactly once; do not manually start a separate final Host task or deliver an intermediate clip.',
 ].join(' ');
-const HIDDEN_PROGRESS_TOOLS = new Set([
-  'tool_describe',
-  'tool_search',
-  'update_plan',
-  'uclaw_get_runtime_capabilities',
-  'uclaw_get_task_bridge_capabilities',
-  'uclaw_get_host_task',
-  'uclaw_list_host_tasks',
-]);
-const ASYNC_PROGRESS_STARTED_STATUSES = new Set([
-  'accepted',
-  'pending',
-  'queued',
-  'running',
-  'started',
-  'submitted',
-]);
 const SAFE_MEDIA_TOOL_ACTIONS = new Set(['list', 'status', 'get', 'inspect', 'describe', 'models', 'model', 'info', 'help']);
 const MEDIA_INPUT_PARAM_KEYS = new Set(['image', 'images', 'mask', 'video', 'videos']);
 const IMAGE_INPUT_EXT_RE = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif)$/iu;
@@ -46,12 +29,8 @@ const VIDEO_INPUT_EXT_RE = /\.(?:mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)$/iu;
 const RUN_TOOL_EVIDENCE_TTL_MS = 30 * 60 * 1000;
 const RUN_TOOL_EVIDENCE_MAX_ENTRIES = 256;
 const toolEvidenceByRunId = new Map();
-const PROGRESS_WRAPPER_TTL_MS = 30 * 60 * 1000;
-const PROGRESS_WRAPPER_MAX_ENTRIES = 512;
-const progressWrappersByParentToolCallId = new Map();
 
 const HEARTBEAT_POLL_RE = /^\s*\[OpenClaw heartbeat poll\]\s*$/iu;
-const HEARTBEAT_OK_RE = /^\s*HEARTBEAT_OK\s*$/iu;
 const INTERNAL_SENTINEL_RE = /^\s*(?:HEARTBEAT_OK|NO_REPLY)\s*$/iu;
 const GATEWAY_RESTART_CONTINUATION_RE = /\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\./iu;
 const GATEWAY_RESTART_CONTINUATION_BLOCK_RE = /\n{0,2}\[System\]\s+Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool\/model work\. Continue from the existing transcript and finish the interrupted response\.(?:\n\nNote:\s+The interrupted final reply was captured:\s+"[^"]*")?/giu;
@@ -140,14 +119,31 @@ function extractAssistantVisibleText(message) {
   return parts.filter(Boolean).join('\n');
 }
 
+const MESSAGE_LIST_KEYS = [
+  'messages',
+  'messagesSnapshot',
+  'finalMessages',
+  'transcript',
+  'conversation',
+];
+
 function extractMessageLists(event) {
-  return [
-    event?.messages,
-    event?.messagesSnapshot,
-    event?.finalMessages,
-    event?.transcript,
-    event?.conversation,
-  ].filter(Array.isArray);
+  return MESSAGE_LIST_KEYS.map((key) => event?.[key]).filter(Array.isArray);
+}
+
+function replaceEventMessageList(event, original, replacement) {
+  let replaced = false;
+  for (const key of MESSAGE_LIST_KEYS) {
+    if (event?.[key] !== original) continue;
+    try {
+      event[key] = replacement;
+      replaced = true;
+    } catch {
+      // OpenClaw currently freezes message payloads, not the hook event. If a
+      // future runtime freezes the event too, skip this maintenance pass.
+    }
+  }
+  return replaced;
 }
 
 function latestUserMessageIndex(messages) {
@@ -305,7 +301,7 @@ function normalizeToolName(event) {
       .find((value) => typeof value === 'string' && value.trim())?.trim()
       ?? direct;
     if (resolved === direct) {
-      const envelope = parseProgressRecord(event?.result);
+      const envelope = parseToolResultRecord(event?.result);
       const delegated = isPlainRecord(envelope?.result) ? envelope.result : envelope;
       const tool = isPlainRecord(envelope?.tool)
         ? envelope.tool
@@ -318,15 +314,6 @@ function normalizeToolName(event) {
     }
   }
   return resolved.includes(':') ? resolved.split(':').at(-1) ?? resolved : resolved;
-}
-
-function normalizeDirectToolName(event) {
-  const direct = normalizeOptionalString(event?.toolName)
-    ?? normalizeOptionalString(event?.name)
-    ?? normalizeOptionalString(event?.tool?.name)
-    ?? '';
-  const normalized = direct.includes(':') ? direct.split(':').at(-1) ?? direct : direct;
-  return normalized.trim().toLowerCase();
 }
 
 function normalizeToolParams(event) {
@@ -556,11 +543,6 @@ function isHeartbeatPoll(text) {
   return HEARTBEAT_POLL_RE.test(String(text ?? ''));
 }
 
-function isHeartbeatOk(text) {
-  resetRegex(HEARTBEAT_OK_RE);
-  return HEARTBEAT_OK_RE.test(String(text ?? ''));
-}
-
 function isOpenClawRuntimeEventPromptText(text) {
   const normalized = String(text ?? '').trim();
   if (!normalized) return false;
@@ -712,18 +694,30 @@ function sanitizePromptHistoryMessages(event) {
   for (const messages of extractMessageLists(event)) {
     if (visited.has(messages)) continue;
     visited.add(messages);
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const decision = sanitizeInternalTranscriptMessage(messages[index]);
-      if (decision.action === 'keep') continue;
-      const reason = decision.reason ?? 'internal_runtime_message';
-      result.reasons[reason] = (result.reasons[reason] ?? 0) + 1;
-      if (decision.action === 'block') {
-        messages.splice(index, 1);
-        result.blocked += 1;
-      } else {
-        messages[index] = decision.message;
-        result.rewritten += 1;
+    const listResult = { blocked: 0, rewritten: 0, reasons: {} };
+    let changed = false;
+    const nextMessages = [];
+    for (const message of messages) {
+      const decision = sanitizeInternalTranscriptMessage(message);
+      if (decision.action === 'keep') {
+        nextMessages.push(message);
+        continue;
       }
+      const reason = decision.reason ?? 'internal_runtime_message';
+      listResult.reasons[reason] = (listResult.reasons[reason] ?? 0) + 1;
+      changed = true;
+      if (decision.action === 'block') {
+        listResult.blocked += 1;
+      } else {
+        nextMessages.push(decision.message);
+        listResult.rewritten += 1;
+      }
+    }
+    if (!changed || !replaceEventMessageList(event, messages, nextMessages)) continue;
+    result.blocked += listResult.blocked;
+    result.rewritten += listResult.rewritten;
+    for (const [reason, count] of Object.entries(listResult.reasons)) {
+      result.reasons[reason] = (result.reasons[reason] ?? 0) + count;
     }
   }
   return result;
@@ -776,6 +770,74 @@ function compactPresentationInvocationArgs(toolName, rawArgs) {
   return { value: wasString ? serialized : compactArgs, omittedChars };
 }
 
+// Clone only the tool-call branch that actually loses large presentation data.
+function compactPresentationToolCallContainer(container) {
+  const originalFunction = isPlainRecord(container.function) ? container.function : container;
+  const toolName = String(originalFunction.name ?? container.name ?? '');
+  let nextFunction = originalFunction;
+  let compacted = 0;
+  let omittedChars = 0;
+
+  for (const key of ['arguments', 'input']) {
+    if (!(key in originalFunction)) continue;
+    const compactResult = compactPresentationInvocationArgs(toolName, originalFunction[key]);
+    if (compactResult.omittedChars <= 0) continue;
+    if (nextFunction === originalFunction) nextFunction = { ...originalFunction };
+    nextFunction[key] = compactResult.value;
+    compacted += 1;
+    omittedChars += compactResult.omittedChars;
+  }
+
+  if (nextFunction === originalFunction) return { value: container, compacted, omittedChars };
+  return {
+    value: originalFunction === container
+      ? nextFunction
+      : { ...container, function: nextFunction },
+    compacted,
+    omittedChars,
+  };
+}
+
+// Keep untouched history entries referentially stable for long-session performance.
+function compactPresentationAssistantMessage(message) {
+  let nextMessage = message;
+  let compacted = 0;
+  let omittedChars = 0;
+
+  if (Array.isArray(message.content)) {
+    let contentChanged = false;
+    const nextContent = message.content.map((part) => {
+      if (!isPlainRecord(part)) return part;
+      const compactResult = compactPresentationToolCallContainer(part);
+      if (compactResult.value !== part) contentChanged = true;
+      compacted += compactResult.compacted;
+      omittedChars += compactResult.omittedChars;
+      return compactResult.value;
+    });
+    if (contentChanged) nextMessage = { ...nextMessage, content: nextContent };
+  }
+
+  const toolCallsKey = Array.isArray(message.tool_calls)
+    ? 'tool_calls'
+    : Array.isArray(message.toolCalls)
+      ? 'toolCalls'
+      : undefined;
+  if (toolCallsKey) {
+    let callsChanged = false;
+    const nextCalls = message[toolCallsKey].map((call) => {
+      if (!isPlainRecord(call)) return call;
+      const compactResult = compactPresentationToolCallContainer(call);
+      if (compactResult.value !== call) callsChanged = true;
+      compacted += compactResult.compacted;
+      omittedChars += compactResult.omittedChars;
+      return compactResult.value;
+    });
+    if (callsChanged) nextMessage = { ...nextMessage, [toolCallsKey]: nextCalls };
+  }
+
+  return { value: nextMessage, compacted, omittedChars };
+}
+
 function compactHistoricalPresentationToolCalls(event) {
   const result = { compacted: 0, omittedChars: 0 };
   const visited = new Set();
@@ -794,26 +856,22 @@ function compactHistoricalPresentationToolCalls(event) {
     const historyEnd = latestUserIndex < 0
       ? messages.length
       : (currentPromptAlreadyInMessages || isFinalizeRevision ? latestUserIndex : messages.length);
+    let nextMessages = messages;
+    let listCompacted = 0;
+    let listOmittedChars = 0;
     for (let index = 0; index < historyEnd; index += 1) {
       const message = messages[index];
       if (!isPlainRecord(message) || String(message.role ?? '').toLowerCase() !== 'assistant') continue;
-      const containers = [];
-      if (Array.isArray(message.content)) containers.push(...message.content.filter(isPlainRecord));
-      const topLevelCalls = Array.isArray(message.tool_calls) ? message.tool_calls : message.toolCalls;
-      if (Array.isArray(topLevelCalls)) containers.push(...topLevelCalls.filter(isPlainRecord));
-      for (const container of containers) {
-        const fn = isPlainRecord(container.function) ? container.function : container;
-        const toolName = String(fn.name ?? container.name ?? '');
-        for (const key of ['arguments', 'input']) {
-          if (!(key in fn)) continue;
-          const compacted = compactPresentationInvocationArgs(toolName, fn[key]);
-          if (compacted.omittedChars <= 0) continue;
-          fn[key] = compacted.value;
-          result.compacted += 1;
-          result.omittedChars += compacted.omittedChars;
-        }
-      }
+      const compactResult = compactPresentationAssistantMessage(message);
+      if (compactResult.value === message) continue;
+      if (nextMessages === messages) nextMessages = messages.slice();
+      nextMessages[index] = compactResult.value;
+      listCompacted += compactResult.compacted;
+      listOmittedChars += compactResult.omittedChars;
     }
+    if (nextMessages === messages || !replaceEventMessageList(event, messages, nextMessages)) continue;
+    result.compacted += listCompacted;
+    result.omittedChars += listOmittedChars;
   }
   return result;
 }
@@ -1533,7 +1591,7 @@ function summarizeToolFailure(event) {
     details.reason,
     readToolStatus(event?.result),
   ].find((value) => typeof value === 'string' && value.trim());
-  return candidate ? truncateText(redactProgressPreview(candidate), 180) : undefined;
+  return candidate ? truncateText(redactDiagnosticText(candidate), 180) : undefined;
 }
 
 function pruneToolEvidence(now = Date.now()) {
@@ -1703,9 +1761,9 @@ function applyTurnMediaDefaults(event, ctx) {
   const appliedKeys = [];
   for (const key of toolName === 'image_generate'
     ? ['model', 'size', 'quality']
-    // A video model is a semantic/provider decision. The Agent must select it
-    // from the current attachments and advertised capability profile; the UI
-    // supplies only explicit geometry and timing constraints for this turn.
+    // Video model selection remains owned by the Agent and the configured
+    // provider primary. Renderer preferences only carry explicit geometry and
+    // timing constraints for the current turn.
     : ['size', 'durationSeconds']) {
     const value = defaults[key];
     if (nextParams[key] !== undefined || value === undefined || value === null || value === '') continue;
@@ -1716,11 +1774,7 @@ function applyTurnMediaDefaults(event, ctx) {
 }
 
 function analyzeArtifactFinal(event, ctx) {
-  const activeUserText = extractLatestUserRequestText(event);
   const finalText = extractFinalAssistantText(event);
-  const emptyFinal = !finalText.trim();
-  const heartbeatPoll = isHeartbeatPoll(activeUserText);
-  const heartbeatOk = isHeartbeatOk(finalText);
   const currentRunId = getRunId(event, ctx);
   const runToolEvidence = getToolEvidenceForRun(currentRunId);
   const artifacts = bindArtifactsToCurrentRunToolEvidence(
@@ -1734,25 +1788,8 @@ function analyzeArtifactFinal(event, ctx) {
   const verificationPassed = artifacts.some(({ verification }) => verification.status === 'passed');
   const verificationBlocked = failedArtifacts.length > 0;
   const passedArtifactCount = artifacts.filter(({ verification }) => verification.status === 'passed').length;
-  const shouldReviseArtifact = failedArtifacts.length > 0;
-  const shouldReviseHeartbeat = Boolean(
-    heartbeatPoll
-    && !heartbeatOk,
-  );
-  const shouldReviseEmptyFinal = Boolean(
-    activeUserText.trim()
-    && !heartbeatPoll
-    && emptyFinal,
-  );
-  const shouldRevise = shouldReviseHeartbeat
-    || shouldReviseEmptyFinal
-    || shouldReviseArtifact;
   return {
-    activeUserText,
     finalText,
-    emptyFinal,
-    heartbeatPoll,
-    heartbeatOk,
     currentRunId,
     currentRunToolAttemptCount: runToolEvidence.attempts.length,
     currentRunFailedToolCount: runToolEvidence.attempts.filter((attempt) => attempt.failed).length,
@@ -1764,62 +1801,7 @@ function analyzeArtifactFinal(event, ctx) {
     artifacts,
     verificationPassed,
     verificationBlocked,
-    shouldReviseHeartbeat,
-    shouldReviseEmptyFinal,
-    shouldReviseArtifact,
-    shouldRevise,
   };
-}
-
-function buildRevision(analysis) {
-  if (analysis?.shouldReviseHeartbeat) {
-    return {
-      action: 'revise',
-      reason: 'UClaw heartbeat poll produced user-visible non-heartbeat content.',
-      retry: {
-        idempotencyKey: `${REVISION_ID}:heartbeat`,
-        maxAttempts: 1,
-        instruction: [
-          '最新用户消息是内部心跳 `[OpenClaw heartbeat poll]`，不是用户的新任务。',
-          '不要继续历史任务、不要评价上一轮、不要承诺补做，也不要输出任何产物说明。',
-          '本轮最终回复必须只包含：HEARTBEAT_OK',
-        ].join('\n'),
-      },
-    };
-  }
-  if (analysis?.shouldReviseEmptyFinal) {
-    return {
-      action: 'revise',
-      reason: 'UClaw run ended without a user-visible final response.',
-      retry: {
-        idempotencyKey: `${REVISION_ID}:empty-final`,
-        maxAttempts: 1,
-        instruction: [
-          '上一轮已经结束，但没有生成任何用户可见的最终回复。现在只补写最终交付，不要沉默。',
-          '优先依据本轮已有工具结果、产物和验证事实作答；不要重复执行已经成功的外部动作、文件生成、图片生成或视频生成。',
-          '如果已有证据足够，直接用简体中文给出结论、完成项和必要限制。',
-          '如果已有工具结果不足或失败，明确说明实际尝试、失败点和下一步，不要假装完成。',
-        ].join('\n'),
-      },
-    };
-  }
-  if (analysis?.shouldReviseArtifact) {
-    return {
-      action: 'revise',
-      reason: 'UClaw final reply referenced a local artifact that failed deterministic availability verification.',
-      retry: {
-        idempotencyKey: `${REVISION_ID}:artifact-verification`,
-        maxAttempts: 1,
-        instruction: [
-          '上一回复引用的本地产物没有通过确定性验证：路径必须指向可读、非空的普通文件。',
-          '只根据已经发生的真实工具结果修正交付：如果已有正确文件，返回其 MEDIA:<absolute-path> 或绝对路径；如果生成失败，明确报告真实失败。',
-          '不要根据用户措辞猜测任务类型，也不要伪造产物、审批或完成状态。',
-        ].join('\n'),
-      },
-    };
-  }
-  return undefined;
-
 }
 
 function getRunId(event, ctx) {
@@ -1887,30 +1869,7 @@ function buildMiddlewareRunEvent(event, ctx) {
   };
 }
 
-function buildToolStep(event) {
-  const failed = isToolError(event);
-  const status = failed ? 'error' : 'completed';
-  const statusDetail = readToolStatus(event?.result);
-  const toolName = normalizeToolName(event);
-  return {
-    id: event?.toolCallId ? `tool:${event.toolCallId}` : `tool:${hashString(toolName || 'unknown')}`,
-    title: toolName ? `工具 ${toolName}` : '工具执行',
-    status,
-    kind: 'tool',
-    detail: statusDetail ? `status=${statusDetail}` : undefined,
-  };
-}
-
-function summarizeProgressCommand(command) {
-  const candidate = String(command ?? '')
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .find((line) => !/^(?:set\s+-[A-Za-z]+|printf\b|echo\b|#|true$|false$)/u.test(line));
-  return truncateText(redactProgressPreview(candidate || String(command ?? '')), 160);
-}
-
-function redactProgressPreview(value) {
+function redactDiagnosticText(value) {
   return String(value ?? '')
     .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu, '[REDACTED]')
     .replace(/\b(?:eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|sk-(?:proj-)?[A-Za-z0-9_-]{8,}|sess-[A-Za-z0-9_-]{8,})\b/gu, '[REDACTED]')
@@ -1923,25 +1882,16 @@ function redactProgressPreview(value) {
     .replace(/(--(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|private[_-]?key|cookie)(?:=|\s+))["']?[^\s"']+["']?/giu, '$1[REDACTED]');
 }
 
-function extractProgressPathLike(params) {
-  for (const key of ['path', 'filePath', 'url']) {
-    if (typeof params?.[key] === 'string' && params[key].trim()) {
-      return truncateText(redactProgressPreview(params[key].trim()), 160);
-    }
-  }
-  return undefined;
-}
-
-function parseProgressRecord(value) {
+function parseToolResultRecord(value) {
   if (isPlainRecord(value)) {
     if (typeof value.summary === 'string') {
-      const parsed = parseProgressRecord(value.summary);
+      const parsed = parseToolResultRecord(value.summary);
       if (parsed) return parsed;
     }
     if (Array.isArray(value.content)) {
       for (const part of value.content) {
         if (!isPlainRecord(part) || typeof part.text !== 'string') continue;
-        const parsed = parseProgressRecord(part.text);
+        const parsed = parseToolResultRecord(part.text);
         if (parsed) return parsed;
       }
     }
@@ -1956,306 +1906,9 @@ function parseProgressRecord(value) {
   }
 }
 
-function progressResultEnvelope(event) {
-  return parseProgressRecord(event?.result) ?? parseProgressRecord(event?.meta);
-}
-
-function progressDelegatedResult(event) {
-  const envelope = progressResultEnvelope(event);
-  return isPlainRecord(envelope?.result) ? envelope.result : envelope;
-}
-
-function progressResultDetails(event) {
-  const envelope = progressResultEnvelope(event);
-  const delegated = progressDelegatedResult(event);
-  return isPlainRecord(delegated?.details)
-    ? delegated.details
-    : isPlainRecord(envelope?.details)
-      ? envelope.details
-      : {};
-}
-
-function progressToolLabel(event, toolName) {
-  const envelope = progressResultEnvelope(event);
-  const delegated = progressDelegatedResult(event);
-  const tool = isPlainRecord(envelope?.tool)
-    ? envelope.tool
-    : isPlainRecord(delegated?.tool)
-      ? delegated.tool
-      : undefined;
-  const structuredLabel = normalizeOptionalString(tool?.label)
-    ?? normalizeOptionalString(tool?.title)
-    ?? String(toolName ?? '').replace(/[_-]+/gu, ' ').trim();
-  return truncateText(redactProgressPreview(structuredLabel || 'tool'), 120);
-}
-
-function mediaProgressSummary(params, details = {}) {
-  const values = { ...params, ...details };
-  const parts = [];
-  if (Number.isFinite(values.durationSeconds)) parts.push(`${Math.max(1, Math.round(values.durationSeconds))}s`);
-  const size = normalizeOptionalString(values.size);
-  const resolution = normalizeOptionalString(values.resolution);
-  const aspectRatio = normalizeOptionalString(values.aspectRatio) ?? normalizeOptionalString(values.aspect_ratio);
-  if (size) parts.push(size);
-  if (resolution && resolution.toLowerCase() !== size?.toLowerCase()) parts.push(resolution);
-  if (aspectRatio) parts.push(aspectRatio);
-  if (values.audio === true) parts.push('audio');
-  if (values.audio === false) parts.push('no audio');
-  return parts.length > 0 ? truncateText(parts.join(' · '), 140) : undefined;
-}
-
-function extractToolProgressCommand(event) {
-  const params = normalizeEffectiveToolParams(event);
-  const commandKey = commandParamKey(params);
-  if (commandKey) {
-    return summarizeProgressCommand(params[commandKey]);
-  }
-  const pathLike = extractProgressPathLike(params);
-  if (pathLike) return pathLike;
-  const query = normalizeOptionalString(params.query)
-    ?? normalizeOptionalString(params.searchQuery)
-    ?? normalizeOptionalString(params.search_query);
-  if (query) return truncateText(redactProgressPreview(query), 160);
-  const toolName = normalizeToolName(event);
-  if (NATIVE_MEDIA_GENERATION_TOOLS.has(toolName) || toolName === 'image_edit') {
-    return mediaProgressSummary(params, progressResultDetails(event));
-  }
-  return undefined;
-}
-
-function extractOpenAppName(command) {
-  const byApp = command.match(/\bopen\s+-a\s+["']?([^"'\n]+)["']?/iu);
-  if (byApp?.[1]) return byApp[1].trim();
-  const byPath = command.match(/\bopen\s+((?:\/|~\/)[^\n]+)/u);
-  if (!byPath?.[1]) return undefined;
-  const normalized = byPath[1].trim();
-  return normalized.split(/[\\/]/u).pop()?.replace(/\.app$/iu, '') || normalized;
-}
-
-function buildNativeToolCommentary(toolName, command) {
-  const label = String(toolName ?? '').trim().toLowerCase();
-  if (label === 'exec') {
-    if (!command) return '我先继续执行当前步骤。';
-    if (/\b(?:mdfind|find|lsregister|locate|rg|ls)\b/iu.test(command) && /(?:\/Applications\b|\.app\b|kMDItemContentType\s*={1,2}\s*["']?com\.apple\.application)/iu.test(command)) {
-      return '我先在本机查找相关应用和快捷方式。';
-    }
-    if (/\bopen\b/iu.test(command)) {
-      const appName = extractOpenAppName(command);
-      return appName ? `我先尝试打开 ${appName}。` : '我先尝试启动相关应用。';
-    }
-    if (/\bosascript\b/iu.test(command) && /\b(?:keystroke|key\s+code|activate)\b/iu.test(command)) {
-      return '我尝试继续执行应用里的下一步操作。';
-    }
-    if (/\b(?:pgrep|ps)\b/iu.test(command)) {
-      return '我再确认应用是否仍在运行。';
-    }
-    return undefined;
-  }
-  if (label === 'web_fetch' || label === 'browser') return '我先继续查看相关页面和内容。';
-  if (label === 'read') return '我先查看相关内容。';
-  if (label === 'edit' || label === 'apply_patch') return '我先修改相关内容。';
-  return undefined;
-}
-
-function nativeToolProgressState(event, failed = false) {
-  const details = progressResultDetails(event);
-  const status = normalizeOptionalString(details.status)?.toLowerCase();
-  if (status && /^(?:aborted|cancelled|canceled|stopped|terminated)$/u.test(status)) return 'aborted';
-  if (status && /^(?:blocked|waiting_approval|approval_required|pending_approval)$/u.test(status)) return 'blocked';
-  if (status && /^(?:partial|partially_completed|partial_failure)$/u.test(status)) return 'partial';
-  if (failed) return 'error';
-  if (details.async === true && status && ASYNC_PROGRESS_STARTED_STATUSES.has(status)) return 'submitted';
-  return event?.result === undefined ? 'running' : 'completed';
-}
-
-function nativeToolProgressStatus(state) {
-  if (state === 'error') return 'error';
-  if (state === 'aborted') return 'aborted';
-  if (state === 'blocked' || state === 'partial') return 'blocked';
-  if (state === 'running' || state === 'submitted') return 'running';
-  return 'completed';
-}
-
-function nativeToolProgressTranslationKey(state) {
-  if (state === 'error') return 'runtimeProgress.toolFailed';
-  if (state === 'blocked') return 'runtimeProgress.toolBlocked';
-  if (state === 'aborted') return 'runtimeProgress.toolAborted';
-  if (state === 'partial') return 'runtimeProgress.toolPartial';
-  if (state === 'submitted') return 'runtimeProgress.toolSubmitted';
-  if (state === 'running') return 'runtimeProgress.toolRunning';
-  return 'runtimeProgress.toolCompleted';
-}
-
-function buildNativeToolActionText(toolLabel, state) {
-  if (state === 'error') return `执行失败：${toolLabel}`;
-  if (state === 'blocked') return `需要处理：${toolLabel}`;
-  if (state === 'aborted') return `已停止：${toolLabel}`;
-  if (state === 'partial') return `部分完成：${toolLabel}`;
-  if (state === 'submitted') return `已提交：${toolLabel}`;
-  if (state === 'running') return `正在执行：${toolLabel}`;
-  return `已完成：${toolLabel}`;
-}
-
-function pruneProgressWrappers(now = Date.now()) {
-  for (const [parentToolCallId, wrapper] of progressWrappersByParentToolCallId.entries()) {
-    if (now - wrapper.updatedAt > PROGRESS_WRAPPER_TTL_MS) {
-      progressWrappersByParentToolCallId.delete(parentToolCallId);
-    }
-  }
-  while (progressWrappersByParentToolCallId.size > PROGRESS_WRAPPER_MAX_ENTRIES) {
-    const oldestParentToolCallId = progressWrappersByParentToolCallId.keys().next().value;
-    if (!oldestParentToolCallId) break;
-    progressWrappersByParentToolCallId.delete(oldestParentToolCallId);
-  }
-}
-
-function rememberStructuredProgressWrapper(event, ctx) {
-  if (normalizeDirectToolName(event) !== 'tool_call') return;
-  const parentToolCallId = normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id);
-  const targetToolName = normalizeToolName(event).trim().toLowerCase();
-  if (!parentToolCallId || !targetToolName || targetToolName === 'tool_call') return;
-  const now = Date.now();
-  pruneProgressWrappers(now);
-  progressWrappersByParentToolCallId.delete(parentToolCallId);
-  progressWrappersByParentToolCallId.set(parentToolCallId, {
-    runId: getRunId(event, ctx),
-    targetToolName,
-    updatedAt: now,
-  });
-}
-
-function canonicalProgressToolCallId(event, ctx) {
-  const toolCallId = normalizeOptionalString(event?.toolCallId) ?? normalizeOptionalString(event?.id);
-  if (!toolCallId) return undefined;
-  const nested = /^tool_search_code:(.+):([^:]+):\d+$/u.exec(toolCallId);
-  if (!nested) return toolCallId;
-  pruneProgressWrappers();
-  const exactWrapper = progressWrappersByParentToolCallId.get(nested[1]);
-  const resolvedWrapper = exactWrapper
-    ? { parentToolCallId: nested[1], wrapper: exactWrapper }
-    : Array.from(progressWrappersByParentToolCallId.entries())
-        .reverse()
-        .map(([parentToolCallId, wrapper]) => ({ parentToolCallId, wrapper }))
-        .find(({ parentToolCallId }) => parentToolCallId.replaceAll('|', '_') === nested[1]);
-  if (!resolvedWrapper) return toolCallId;
-  const { parentToolCallId, wrapper } = resolvedWrapper;
-  const runId = getRunId(event, ctx);
-  if (wrapper.runId && runId && wrapper.runId !== runId) return toolCallId;
-  const childToolName = String(nested[2] ?? '').trim().toLowerCase();
-  return childToolName === wrapper.targetToolName ? parentToolCallId : toolCallId;
-}
-
-function buildNativeToolProgressId(event, ctx, suffix = '') {
-  const toolCallId = canonicalProgressToolCallId(event, ctx);
-  const base = toolCallId
-    ? `progress:tool:${toolCallId}`
-    : `progress:tool:${hashString(normalizeToolName(event) || 'tool')}`;
-  return suffix ? `${base}:${suffix}` : base;
-}
-
-function emitNativeToolProgress(api, event, ctx, entry) {
-  const runEvent = {
-    runId: getRunId(event, ctx),
-    sessionKey: getSessionKey(event, ctx),
-    cwd: event?.cwd ?? ctx?.cwd,
-  };
-  if (!getRunId(runEvent)) return;
-  emitRuntimeEvent(api, runEvent, 'progress', {
-    entry: {
-      ...entry,
-      text: redactProgressPreview(entry?.text),
-      detail: typeof entry?.detail === 'string' ? redactProgressPreview(entry.detail) : entry?.detail,
-      command: typeof entry?.command === 'string' ? redactProgressPreview(entry.command) : entry?.command,
-      toolLabel: typeof entry?.toolLabel === 'string' ? redactProgressPreview(entry.toolLabel) : entry?.toolLabel,
-      translationParams: entry?.translationParams && typeof entry.translationParams === 'object'
-        ? {
-            ...entry.translationParams,
-            tool: typeof entry.translationParams.tool === 'string'
-              ? redactProgressPreview(entry.translationParams.tool)
-              : entry.translationParams.tool,
-          }
-        : entry?.translationParams,
-      source: 'native',
-      toolCallId: canonicalProgressToolCallId(event, ctx),
-    },
-  });
-}
-
-function emitToolCallProgress(api, event, ctx) {
-  rememberStructuredProgressWrapper(event, ctx);
-  const toolName = normalizeToolName(event);
-  if (!toolName || HIDDEN_PROGRESS_TOOLS.has(toolName)) return;
-  const command = extractToolProgressCommand(event);
-  const commentary = buildNativeToolCommentary(toolName, command);
-  if (commentary) {
-    emitNativeToolProgress(api, event, ctx, {
-      id: buildNativeToolProgressId(event, ctx, 'commentary'),
-      kind: 'commentary',
-      text: commentary,
-      command,
-      stepId: normalizeOptionalString(event?.toolCallId),
-    });
-  }
-  const toolLabel = progressToolLabel(event, toolName);
-  const state = nativeToolProgressState(event);
-  emitNativeToolProgress(api, event, ctx, {
-    id: buildNativeToolProgressId(event, ctx),
-    kind: 'action',
-    text: buildNativeToolActionText(toolLabel, state),
-    status: nativeToolProgressStatus(state),
-    translationKey: nativeToolProgressTranslationKey(state),
-    translationParams: { tool: toolLabel },
-    toolName,
-    toolLabel,
-    command,
-    stepId: normalizeOptionalString(event?.toolCallId),
-  });
-}
-
-function emitToolResultProgress(api, event, ctx) {
-  rememberStructuredProgressWrapper(event, ctx);
-  const toolName = normalizeToolName(event);
-  if (!toolName || HIDDEN_PROGRESS_TOOLS.has(toolName)) return;
-  const failed = isToolError(event);
-  const toolLabel = progressToolLabel(event, toolName);
-  const state = nativeToolProgressState(event, failed);
-  const details = progressResultDetails(event);
-  emitNativeToolProgress(api, event, ctx, {
-    id: buildNativeToolProgressId(event, ctx),
-    kind: 'action',
-    text: buildNativeToolActionText(toolLabel, state),
-    status: nativeToolProgressStatus(state),
-    translationKey: nativeToolProgressTranslationKey(state),
-    translationParams: { tool: toolLabel },
-    toolName,
-    toolLabel,
-    command: extractToolProgressCommand(event),
-    taskId: normalizeOptionalString(details.taskId) ?? normalizeOptionalString(details.task_id),
-    stepId: normalizeOptionalString(event?.toolCallId),
-  });
-  if (!failed) return;
-  const detail = summarizeToolFailure(event);
-  if (!detail) return;
-  emitNativeToolProgress(api, event, ctx, {
-    id: buildNativeToolProgressId(event, ctx, 'status'),
-    kind: 'status',
-    text: detail,
-    status: 'error',
-    detail,
-    stepId: normalizeOptionalString(event?.toolCallId),
-  });
-}
-
-function emitToolResultRuntimeEvents(api, event, ctx) {
+function emitToolArtifactRuntimeEvents(api, event, ctx) {
   const runEvent = buildMiddlewareRunEvent(event, ctx);
   if (!getRunId(runEvent)) return;
-
-  emitToolResultProgress(api, event, ctx);
-  emitRuntimeEvent(api, runEvent, 'step', {
-    step: buildToolStep(event),
-    toolCallId: event?.toolCallId,
-    source: RUNTIME_EVENT_SOURCE,
-  });
 
   const failed = isToolError(event);
   if (failed) return;
@@ -2290,7 +1943,7 @@ function registerToolResultMiddleware(api) {
   if (typeof api.registerAgentToolResultMiddleware !== 'function') return;
   api.registerAgentToolResultMiddleware((event, ctx) => {
     recordToolEvidence(event, ctx);
-    emitToolResultRuntimeEvents(api, event, ctx);
+    emitToolArtifactRuntimeEvents(api, event, ctx);
     const summarized = summarizeToolResultForTranscript(event);
     if (!summarized) return undefined;
     if (isRecord(event)) event.result = summarized.result;
@@ -2361,7 +2014,7 @@ function registerArtifactGuard(api) {
       return { appendSystemContext: VIDEO_MODEL_PLANNING_CONTEXT };
     }, {
       name: PROMPT_CONTEXT_HOOK_ID,
-      description: 'Sanitize prompt history and retain per-turn media defaults without adding UClaw context to the model prompt.',
+      description: 'Sanitize prompt history, retain per-turn media defaults, and expose the stable video planning contract.',
       timeoutMs: TURN_PREFERENCES_TIMEOUT_MS + 2_000,
     });
     registerLifecycleHook(api, 'before_tool_call', async (event, ctx) => {
@@ -2403,7 +2056,6 @@ function registerArtifactGuard(api) {
           authorization: 'native_agent_tool_selection',
         });
       }
-
       const staging = await stageMediaToolInputs(effectiveEvent, ctx);
       if (staging.blockReason) {
         logDiagnostic('media-input-staging-failed', {
@@ -2437,7 +2089,6 @@ function registerArtifactGuard(api) {
         });
       }
 
-      emitToolCallProgress(api, effectiveEvent, ctx);
       if (screenshotRewrite || staging.stagedCount > 0 || mediaDefaults.appliedKeys.length > 0) {
         return {
           params: effectiveEvent.params,
@@ -2446,17 +2097,17 @@ function registerArtifactGuard(api) {
       return undefined;
     }, {
       name: MEDIA_TOOL_PREPARATION_HOOK_ID,
-      description: 'Stage media inputs, rewrite managed screenshot paths, and project native media tool progress.',
+      description: 'Validate and stage media inputs, rewrite managed screenshot paths, and apply per-turn media defaults.',
       priority: 100,
     });
-    registerLifecycleHook(api, 'before_agent_finalize', (event, ctx) => {
+    // OpenClaw buffers every assistant frame until terminal delivery whenever
+    // any before_agent_finalize hook is registered. Keep this observation on
+    // agent_end so ordinary commentary and final-answer deltas remain live.
+    registerLifecycleHook(api, 'agent_end', (event, ctx) => {
       const analysis = analyzeArtifactFinal(event, ctx);
-      logDiagnostic('finalize-check', {
+      logDiagnostic('terminal-observation', {
         eventId: eventId(event, ctx),
         finalTextChars: analysis.finalText.length,
-        emptyFinal: analysis.emptyFinal,
-        heartbeatPoll: analysis.heartbeatPoll,
-        heartbeatOk: analysis.heartbeatOk,
         currentRunToolAttemptCount: analysis.currentRunToolAttemptCount,
         currentRunFailedToolCount: analysis.currentRunFailedToolCount,
         currentRunSuccessfulArtifactCount: analysis.currentRunSuccessfulArtifactCount,
@@ -2464,17 +2115,11 @@ function registerArtifactGuard(api) {
         artifactCount: analysis.artifacts.length,
         verificationPassed: analysis.verificationPassed,
         verificationBlocked: analysis.verificationBlocked,
-        shouldReviseHeartbeat: analysis.shouldReviseHeartbeat,
-        shouldReviseEmptyFinal: analysis.shouldReviseEmptyFinal,
-        shouldReviseArtifact: analysis.shouldReviseArtifact,
-        shouldRevise: analysis.shouldRevise,
       });
       emitFinalArtifactEvents(api, event, analysis);
-      if (!analysis.shouldRevise) return;
-      return buildRevision(analysis);
     }, {
-      name: REVISION_ID,
-      description: 'Verify concrete artifact references and recover empty internal final responses.',
+      name: TERMINAL_OBSERVER_HOOK_ID,
+      description: 'Observe final artifact availability without delaying assistant stream delivery.',
     });
   }
 }
@@ -2482,7 +2127,7 @@ function registerArtifactGuard(api) {
 export default {
   id: PLUGIN_ID,
   name: 'UClaw Artifact Guard',
-  version: '0.2.7',
+  version: '0.2.8',
   register(api) {
     registerArtifactGuard(api);
   },
@@ -2490,18 +2135,15 @@ export default {
 
 export const __test = {
   analyzeArtifactFinal,
-  buildRevision,
-  nativeMediaPromptLengthBlock,
   buildToolArtifactEvidence,
-  emitToolCallProgress,
-  emitToolResultProgress,
-  emitToolResultRuntimeEvents,
+  emitToolArtifactRuntimeEvents,
   rewriteTmpScreenshotMediaPaths,
   stageMediaToolInputs,
   sanitizeInternalTranscriptMessage,
   compactHistoricalPresentationToolCalls,
   cacheTurnPreferences,
   applyTurnMediaDefaults,
-  VIDEO_MODEL_PLANNING_CONTEXT,
+  nativeMediaPromptLengthBlock,
   registerArtifactGuard,
+  VIDEO_MODEL_PLANNING_CONTEXT,
 };

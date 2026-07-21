@@ -25,6 +25,7 @@ const electronAPI = {
         'hostapi:fetch',
         'hostapi:token',
         'desktop:approve',
+        'approval:resolve',
         'gateway:health',
         'gateway:getControlUiUrl',
         // OpenClaw
@@ -286,6 +287,7 @@ const electronAPI = {
    * Check if running in development
    */
   isDev: process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL,
+
 };
 
 // Expose the API to the renderer process

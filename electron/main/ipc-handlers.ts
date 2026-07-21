@@ -12,6 +12,9 @@ import crypto from 'node:crypto';
 import { syncMacTrafficLightPosition } from './traffic-light-layout';
 import { GatewayManager } from '../gateway/manager';
 import { CHAT_SEND_RPC_TIMEOUT_MS } from '../../shared/chat-timeouts';
+import type {
+  ChatRuntimeApprovalDecision,
+} from '../../shared/chat-runtime-events';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
 import {
   type ProviderConfig,
@@ -104,6 +107,12 @@ import {
 } from './ipc/request-helpers';
 
 const gatewayRpcBackpressure = new GatewayRpcBackpressure();
+const APPROVAL_DECISIONS = new Set<ChatRuntimeApprovalDecision>(['allow-once', 'allow-always', 'deny']);
+const gatewayApprovalResolutions = new Map<string, {
+  decision: ChatRuntimeApprovalDecision;
+  promise: Promise<{ success: boolean; result?: unknown; error?: string }>;
+}>();
+const MAX_GATEWAY_APPROVAL_RESOLUTIONS = 1_024;
 const OFFICE_ARTIFACT_TOOL_NAMES = [
   'create_designed_pptx_file',
   'create_pptx_file',
@@ -293,16 +302,53 @@ export function registerIpcHandlers(
 
   // The renderer is the only approval surface allowed to execute a pending
   // desktop action. OpenClaw tools can create/read requests but cannot resolve them.
-  registerDesktopApprovalHandlers();
+  registerDesktopApprovalHandlers(gatewayManager);
 }
 
-function registerDesktopApprovalHandlers(): void {
+function registerDesktopApprovalHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('desktop:approve', async (_, approvalId: unknown) => {
     if (typeof approvalId !== 'string' || !/^[a-zA-Z0-9-]{16,128}$/u.test(approvalId)) {
       return { success: false, error: 'Invalid desktop approval id' };
     }
     const result = await desktopRunCoordinator.approveAndExecuteFromUserInterface(approvalId);
     return { success: result.status === 'completed', result };
+  });
+
+  ipcMain.handle('approval:resolve', async (_, input: unknown) => {
+    const request = input && typeof input === 'object' ? input as Record<string, unknown> : null;
+    const approvalId = typeof request?.approvalId === 'string' ? request.approvalId.trim() : '';
+    const approvalKind = request?.approvalKind;
+    const decision = request?.decision as ChatRuntimeApprovalDecision | undefined;
+    if (!approvalId || approvalId.length > 300) return { success: false, error: 'Invalid approval id' };
+    if (approvalKind !== 'exec' && approvalKind !== 'plugin') {
+      return { success: false, error: 'Unsupported approval kind' };
+    }
+    if (!decision || !APPROVAL_DECISIONS.has(decision)) {
+      return { success: false, error: 'Unsupported approval decision' };
+    }
+
+    const key = `${approvalKind}:${approvalId}`;
+    const existing = gatewayApprovalResolutions.get(key);
+    if (existing) {
+      if (existing.decision !== decision) {
+        return { success: false, error: 'Approval decision was already submitted' };
+      }
+      return await existing.promise;
+    }
+
+    const method: 'exec.approval.resolve' | 'plugin.approval.resolve' = `${approvalKind}.approval.resolve`;
+    const promise = gatewayManager.rpc(method, { id: approvalId, decision }, 15_000)
+      .then((result) => ({ success: true, result }))
+      .catch((error) => {
+        gatewayApprovalResolutions.delete(key);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      });
+    gatewayApprovalResolutions.set(key, { decision, promise });
+    while (gatewayApprovalResolutions.size > MAX_GATEWAY_APPROVAL_RESOLUTIONS) {
+      const oldest = gatewayApprovalResolutions.keys().next().value;
+      if (oldest) gatewayApprovalResolutions.delete(oldest);
+    }
+    return await promise;
   });
 }
 
@@ -1528,7 +1574,12 @@ function registerGatewayHandlers(
         const fsP = await import('fs/promises');
         for (const m of params.media) {
           const exists = await fsP.access(m.filePath).then(() => true, () => false);
-          logger.info(`[chat:sendWithMedia] Processing file: ${m.fileName} (${m.mimeType}), path: ${m.filePath}, exists: ${exists}, isVision: ${OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)}`);
+          logger.info('[chat:sendWithMedia] Processing staged attachment', {
+            sessionKey: params.sessionKey,
+            mimeType: m.mimeType,
+            exists,
+            isVision: OPENCLAW_VISION_MIME_TYPES.has(m.mimeType),
+          });
 
           // Always add file path reference so the model can access it via tools
           fileReferences.push(
@@ -1543,7 +1594,6 @@ function registerGatewayHandlers(
             if (!inlineImage.attachment) {
               logger.warn('[chat:sendWithMedia] Skipping inline image attachment above OpenClaw safe inline cap', {
                 sessionKey: params.sessionKey,
-                fileName: m.fileName,
                 bytes: inlineImage.inputBytes,
                 limitBytes: OPENCLAW_INLINE_IMAGE_SAFE_MAX_BYTES,
                 reason: inlineImage.skippedReason,
@@ -1553,7 +1603,6 @@ function registerGatewayHandlers(
             if (inlineImage.resized) {
               logger.info('[chat:sendWithMedia] Resized inline image attachment for OpenClaw parser safety', {
                 sessionKey: params.sessionKey,
-                fileName: m.fileName,
                 inputBytes: inlineImage.inputBytes,
                 outputBytes: inlineImage.outputBytes,
                 outputMimeType: inlineImage.outputMimeType,
@@ -1565,7 +1614,6 @@ function registerGatewayHandlers(
           } else if (!shouldInlineAttachments && OPENCLAW_VISION_MIME_TYPES.has(m.mimeType)) {
             logger.info('[chat:sendWithMedia] Using media path reference without inline attachment', {
               sessionKey: params.sessionKey,
-              fileName: m.fileName,
               mimeType: m.mimeType,
             });
           }

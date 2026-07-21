@@ -22,7 +22,7 @@ function sanitizeInlineSecrets(value: string): string {
   return value
     .replace(/-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu, REDACTED)
     .replace(/\b(?:eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|sk-(?:proj-)?[A-Za-z0-9_-]{8,}|sess-[A-Za-z0-9_-]{8,})\b/gu, REDACTED)
-    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s\/:@]+:)[^\s\/@]+(@)/gu, `$1${REDACTED}$2`)
+    .replace(/([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+(@)/gu, `$1${REDACTED}$2`)
     .replace(
       /((?:authorization|proxy[_-]?authorization)\s*[:=]\s*(?:bearer|basic)\s+)[^\s"',;]+/giu,
       `$1${REDACTED}`,

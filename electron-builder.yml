@@ -52,8 +52,9 @@ asarUnpack:
 npmRebuild: false
 
 # Auto-update configuration
-# Primary: new-api UClaw update feed, which redirects to the actual release files.
-# Fallback: GitHub Releases (backup, used when feed is unavailable)
+# Packaged defaults point at the managed new-api feed. electron/main/updater.ts
+# reapplies the channel-specific managed URL at runtime and performs the
+# request-scoped legacy OSS fallback used by installed builds.
 publish:
   - provider: generic
     url: https://zz-cn.lingzhiwuxian.com/api/clawx/updates/feed/latest

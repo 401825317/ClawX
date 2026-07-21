@@ -4,6 +4,10 @@ import path from 'node:path';
 import type {
   ChatRuntimeArtifact,
   ChatRuntimeEvent,
+  ChatRuntimeProgressEntryStatus,
+  ChatRuntimeStepStatus,
+  ChatRuntimeTaskProjection,
+  ChatRuntimeTaskStatus,
   ChatRuntimeVerification,
 } from '../../../shared/chat-runtime-events';
 import { getOpenClawConfigDir } from '../../utils/paths';
@@ -27,6 +31,21 @@ export type HostTaskCompletion = {
   // bridge without injecting a completion turn.
   mode: 'direct' | 'replan' | 'internal';
   reason?: string;
+};
+
+export type HostTaskCompletionDelivery = {
+  deliveryKey: string;
+  outcome: 'delivered' | 'abandoned';
+  at: number;
+  kind?: string;
+  injectionEnqueued?: boolean;
+  runtimeEventsEmitted?: boolean;
+  sessionTurnScheduled?: boolean;
+  attempts?: number;
+  firstAttemptAt?: number;
+  lastAttemptAt?: number;
+  reason?: string;
+  details?: HostTaskData;
 };
 
 export type HostTaskOperation = {
@@ -62,6 +81,7 @@ export type HostTaskSnapshot = {
   artifacts: ChatRuntimeArtifact[];
   verifications: ChatRuntimeVerification[];
   completionAcks: string[];
+  completionDeliveries: HostTaskCompletionDelivery[];
   lifecycle: { operations: HostTaskOperation[] };
 };
 
@@ -244,19 +264,50 @@ function normalizeLifecycle(value: unknown): HostTaskSnapshot['lifecycle'] {
   };
 }
 
-function runtimeStatus(status: HostTaskStatus): 'pending' | 'running' | 'completed' | 'error' | 'blocked' {
+function runtimeTaskStatus(status: HostTaskStatus): ChatRuntimeTaskStatus {
+  if (status === 'queued') return 'pending';
+  if (status === 'running') return 'running';
+  if (status === 'waiting') return 'waiting_approval';
+  if (status === 'succeeded') return 'completed';
+  if (status === 'cancelled') return 'aborted';
+  return 'error';
+}
+
+function runtimeStatus(status: HostTaskStatus): ChatRuntimeStepStatus {
   if (status === 'queued') return 'pending';
   if (status === 'running') return 'running';
   if (status === 'succeeded') return 'completed';
   if (status === 'waiting' || status === 'blocked') return 'blocked';
+  if (status === 'cancelled') return 'aborted';
   return 'error';
 }
 
-function runtimeProgressStatus(status: HostTaskStatus): 'running' | 'completed' | 'blocked' | 'error' {
+function runtimeProgressStatus(status: HostTaskStatus): ChatRuntimeProgressEntryStatus {
   if (status === 'succeeded') return 'completed';
   if (status === 'waiting' || status === 'blocked') return 'blocked';
-  if (status === 'failed' || status === 'cancelled' || status === 'timed_out' || status === 'lost') return 'error';
+  if (status === 'cancelled') return 'aborted';
+  if (status === 'failed' || status === 'timed_out' || status === 'lost') return 'error';
   return 'running';
+}
+
+function runtimeTask(task: HostTaskSnapshot): ChatRuntimeTaskProjection {
+  const terminal = TERMINAL.has(task.status);
+  return {
+    taskId: task.taskId,
+    kind: task.capability,
+    runtime: 'uclaw-host-task',
+    title: task.title,
+    detail: task.error ?? task.progress?.detail,
+    sessionKey: task.sessionKey,
+    status: runtimeTaskStatus(task.status),
+    sourceStatus: task.status,
+    ...(terminal ? { terminalOutcome: task.status } : {}),
+    ...(task.status === 'succeeded' ? { deliveryStatus: 'delivered' } : {}),
+    createdAt: task.createdAt,
+    startedAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    ...(terminal ? { endedAt: task.updatedAt } : {}),
+  };
 }
 
 function taskRoot(): string {
@@ -275,6 +326,7 @@ export class HostTaskService {
   private readonly locks = new Map<string, Promise<void>>();
   private readonly ownerId = randomUUID();
   private readonly configuredRootDir?: string;
+  private resolvedRootDir?: string;
   private initialized?: Promise<void>;
   private publisher?: RuntimePublisher;
 
@@ -283,7 +335,11 @@ export class HostTaskService {
   }
 
   private getRootDir(): string {
-    return this.configuredRootDir ?? taskRoot();
+    // A service owns one durable store. Pin the environment-derived path on
+    // first use so late async persistence cannot follow a restored test env or
+    // a later process-level configuration change into another user profile.
+    this.resolvedRootDir ??= this.configuredRootDir ?? taskRoot();
+    return this.resolvedRootDir;
   }
 
   setPublisher(publisher: RuntimePublisher): void {
@@ -324,6 +380,7 @@ export class HostTaskService {
       artifacts: [],
       verifications: [],
       completionAcks: [],
+      completionDeliveries: [],
       lifecycle: { operations: [] },
     };
     this.tasks.set(task.taskId, task);
@@ -331,8 +388,20 @@ export class HostTaskService {
     await this.persist(task, 'task.created');
     this.publish(task, [
       {
+        type: 'task.updated',
+        toolCallId: task.toolCallId,
+        task: runtimeTask(task),
+      },
+      {
         type: 'run.step.updated',
-        step: { id: `host-task:${task.taskId}`, title: task.title, kind: `host.${task.capability}`, status: runtimeStatus(task.status) },
+        step: {
+          id: `host-task:${task.taskId}`,
+          title: task.title,
+          kind: `host.${task.capability}`,
+          status: runtimeStatus(task.status),
+          taskId: task.taskId,
+          toolCallId: task.toolCallId,
+        },
       },
       {
         type: 'progress.update',
@@ -342,6 +411,7 @@ export class HostTaskService {
           text: task.title,
           status: runtimeProgressStatus(task.status),
           toolCallId: task.toolCallId,
+          taskId: task.taskId,
           source: 'native',
         },
       },
@@ -494,15 +564,38 @@ export class HostTaskService {
     return undefined;
   }
 
-  async acknowledgeCompletion(taskId: string, deliveryKey: string): Promise<HostTaskSnapshot | undefined> {
+  async acknowledgeCompletion(
+    taskId: string,
+    deliveryKey: string,
+    delivery?: Omit<HostTaskCompletionDelivery, 'deliveryKey' | 'at'> & { at?: number },
+  ): Promise<HostTaskSnapshot | undefined> {
     const normalizedKey = shortText(deliveryKey, 512);
     if (!normalizedKey) throw new Error('deliveryKey is required');
     await this.ensureInitialized();
     return this.withTaskLock(taskId, async (task) => {
       if (!task.completionAcks.includes(normalizedKey)) {
         task.completionAcks.push(normalizedKey);
-        task.updatedAt = Date.now();
-        await this.persist(task, 'task.completion_ack');
+        const at = delivery?.at ?? Date.now();
+        task.completionDeliveries.push({
+          deliveryKey: normalizedKey,
+          outcome: delivery?.outcome === 'abandoned' ? 'abandoned' : 'delivered',
+          at,
+          kind: shortText(delivery?.kind, 160),
+          injectionEnqueued: delivery?.injectionEnqueued === true,
+          runtimeEventsEmitted: delivery?.runtimeEventsEmitted === true,
+          sessionTurnScheduled: delivery?.sessionTurnScheduled === true,
+          attempts: Number.isFinite(delivery?.attempts) ? Math.max(1, Math.floor(delivery.attempts!)) : undefined,
+          firstAttemptAt: Number.isFinite(delivery?.firstAttemptAt) ? delivery.firstAttemptAt : undefined,
+          lastAttemptAt: Number.isFinite(delivery?.lastAttemptAt) ? delivery.lastAttemptAt : undefined,
+          reason: shortText(delivery?.reason, 500),
+          details: normalizeTaskData(delivery?.details, 'Host task completion delivery details', true),
+        });
+        task.completionDeliveries = task.completionDeliveries.slice(-32);
+        task.updatedAt = at;
+        await this.persist(
+          task,
+          delivery?.outcome === 'abandoned' ? 'task.completion_abandoned' : 'task.completion_ack',
+        );
       }
       return clone(task);
     });
@@ -525,6 +618,7 @@ export class HostTaskService {
       if (strategy === 'redeliver_existing_artifacts') {
         if (current.artifacts.length === 0) throw new Error('Host task has no existing artifacts to redeliver');
         current.completionAcks = [];
+        current.completionDeliveries = [];
         current.updatedAt = Date.now();
         current.revision += 1;
         await this.persist(current, 'task.redelivery_requested');
@@ -618,6 +712,7 @@ export class HostTaskService {
           artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : [],
           verifications: Array.isArray(raw.verifications) ? raw.verifications : [],
           completionAcks: Array.isArray(raw.completionAcks) ? raw.completionAcks : [],
+          completionDeliveries: Array.isArray(raw.completionDeliveries) ? raw.completionDeliveries : [],
           lifecycle: normalizeLifecycle(raw.lifecycle),
         };
         const now = Date.now();
@@ -690,6 +785,7 @@ export class HostTaskService {
         task.status = 'queued';
         task.error = undefined;
         task.completionAcks = [];
+        task.completionDeliveries = [];
         task.progress = { ...task.progress, detail: detail ?? 'Safe resume was delegated to the registered Host executor.' };
       } else if (kind === 'cancel') {
         task.progress = { ...task.progress, detail: detail ?? 'Cancellation was delegated to the registered Host executor.' };
@@ -794,6 +890,9 @@ export class HostTaskService {
       type,
       revision: task.revision,
       status: task.status,
+      ...(type.startsWith('task.completion_') && task.completionDeliveries.at(-1)
+        ? { completionDelivery: task.completionDeliveries.at(-1) }
+        : {}),
       ...(operation ? { operation: { kind: operation.kind, status: operation.status, attempt: operation.attempt } } : {}),
     })}\n`, { mode: PRIVATE_FILE_MODE });
   }
@@ -806,6 +905,11 @@ export class HostTaskService {
   ): void {
     const events: Array<Omit<ChatRuntimeEvent, 'contractVersion' | 'producer' | 'runId' | 'sessionKey' | 'seq' | 'ts'>> = [
       {
+        type: 'task.updated',
+        toolCallId: task.toolCallId,
+        task: runtimeTask(task),
+      },
+      {
         type: 'run.step.updated',
         step: {
           id: `host-task:${task.taskId}`,
@@ -813,6 +917,8 @@ export class HostTaskService {
           kind: `host.${task.capability}`,
           status: runtimeStatus(task.status),
           detail: task.progress?.detail ?? task.error,
+          taskId: task.taskId,
+          toolCallId: task.toolCallId,
         },
       },
       {
@@ -824,6 +930,7 @@ export class HostTaskService {
           status: runtimeProgressStatus(task.status),
           detail: task.error,
           toolCallId: task.toolCallId,
+          taskId: task.taskId,
           source: 'native',
         },
       },
@@ -834,7 +941,7 @@ export class HostTaskService {
     for (const verification of task.verifications) {
       if (!verificationIdsBefore.has(verification.id)) events.push({ type: 'verification.completed', verification, toolCallId: task.toolCallId });
     }
-    if (update.status && TERMINAL.has(task.status)) {
+    if (update.status && TERMINAL.has(task.status) && task.status !== 'cancelled') {
       events.push({
         type: 'tool.completed',
         toolCallId: task.toolCallId,
@@ -857,6 +964,8 @@ export class HostTaskService {
         producer: 'uclaw-host-task',
         runId: task.runId,
         sessionKey: task.sessionKey,
+        taskId: task.taskId,
+        taskStatus: runtimeTaskStatus(task.status),
         ts: Date.now(),
       } as ChatRuntimeEvent);
     }

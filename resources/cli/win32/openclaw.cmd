@@ -23,7 +23,7 @@ if not exist "%ELECTRON_EXE%" set "ELECTRON_EXE=%~dp0..\..\ClawX.exe"
 
 set "_USE_BUNDLED_NODE=0"
 if exist "%NODE_EXE%" (
-    "%NODE_EXE%" -e "const [maj,min]=process.versions.node.split('.').map(Number);process.exit((maj>22||maj===22&&min>=16)?0:1)" >nul 2>&1
+    "%NODE_EXE%" -e "const [maj,min,patch]=process.versions.node.split('.').map(Number);const ok=(maj===22&&(min>22||min===22&&patch>=3))||(maj===24&&(min>15||min===15&&patch>=0))||(maj===25&&(min>9||min===9&&patch>=0));process.exit(ok?0:1)" >nul 2>&1
     if not errorlevel 1 set "_USE_BUNDLED_NODE=1"
 )
 

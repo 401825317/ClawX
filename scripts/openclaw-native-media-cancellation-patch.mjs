@@ -185,7 +185,18 @@ function patchMediaToolContent(content, filePath) {
   patched = replaceUnique(patched, MEDIA_FAIL_FINALLY_ANCHOR, MEDIA_FAIL_FINALLY_PATCH, 'media failure cleanup', filePath);
   patched = replaceUnique(patched, MEDIA_WAKE_ANCHOR, MEDIA_WAKE_PATCH, 'media completion wake guard', filePath);
   patched = replaceUnique(patched, MEDIA_DIRECT_DELIVERY_ANCHOR, MEDIA_DIRECT_DELIVERY_PATCH, 'media direct delivery guard', filePath);
-  patched = replaceUnique(patched, MEDIA_DIRECT_SEND_ANCHOR, MEDIA_DIRECT_SEND_PATCH, 'media direct send guard', filePath);
+  const directSendMatches = [...patched.matchAll(
+    /(\t\tconst \{ sendMessage \} = await import\("\.\/task-registry-delivery-runtime-[^"]+\.js"\);\n)(\t\tawait sendMessage\(\{)/gu,
+  )];
+  if (directSendMatches.length !== 1) {
+    throw new Error(
+      `[openclaw-native-media-cancellation-patch] Expected exactly one media direct send guard anchor in ${filePath}; found ${directSendMatches.length}.`,
+    );
+  }
+  patched = patched.replace(
+    directSendMatches[0][0],
+    `${directSendMatches[0][1]}\t\tif (isUClawNativeMediaTaskCancelled(params.handle)) return false;\n${directSendMatches[0][2]}`,
+  );
   patched = replaceUnique(patched, IMAGE_RUNTIME_CALL_ANCHOR, IMAGE_RUNTIME_CALL_PATCH, 'image task signal', filePath);
   patched = replaceUnique(patched, IMAGE_RUNTIME_RESULT_ANCHOR, IMAGE_RUNTIME_RESULT_PATCH, 'image post-provider cancellation guard', filePath);
   patched = replaceUnique(patched, VIDEO_RUNTIME_CALL_ANCHOR, VIDEO_RUNTIME_CALL_PATCH, 'video task signal', filePath);

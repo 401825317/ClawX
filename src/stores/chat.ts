@@ -13,6 +13,19 @@ import { normalizeManagedTextModelRef } from '@/lib/managed-model-options';
 import { useClientConfigStore } from './client-config';
 import { useManagedAuthStore } from './managed-auth';
 import { useProviderStore } from './providers';
+import { conversationMessageSnapshot } from './conversation/chat-adapter';
+import { projectRuntimeArtifactVerificationEvents } from './conversation/artifact-verification-adapter';
+import { hostTasksToConversationEvents } from './conversation/host-task-adapter';
+import { useConversationStore } from './conversation/store';
+import { isActiveTurnStatus } from './conversation/types';
+import {
+  collectCancellableTasks,
+  completionWakeTaskIdFromRunId,
+  resolveCompletionWakeCorrelation,
+  selectActiveTurn,
+  selectLastRetryableUserTrigger,
+  selectLatestUsableImage,
+} from './conversation/control-selectors';
 import {
   CHAT_SYNTHETIC_TERMINAL_PRODUCER,
   type ChatRuntimeArtifact,
@@ -20,7 +33,12 @@ import {
 } from '../../shared/chat-runtime-events';
 import type { VideoAttachmentMetadata } from '../../shared/video-attachment-metadata';
 import type { GatewayStatus } from '../types/gateway';
-import { buildBaselineRunKey, captureBaseline, clearBaselines } from './baseline-cache';
+import {
+  CHAT_SEND_OUTBOX_SCHEMA_VERSION,
+  type ChatSendOutboxItem,
+  type ChatSendOutboxListResult,
+} from '../../shared/chat-send-outbox';
+import { clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
   isInternalHeartbeatSession,
@@ -59,26 +77,23 @@ import {
   type AsyncTaskEvidence,
   type AttachedFileMeta,
   type ChatImageSendOptions,
+  type ChatQueuedTurnOwnership,
   type ChatSendAttachment,
   type ChatSendMode,
+  type ChatSendReplayIntent,
   type ChatSession,
   type ChatState,
   type ChatVideoSendOptions,
   type ContentBlock,
+  type GatewayTurnPreferences,
   type RawMessage,
   type ToolStatus,
 } from './chat/types';
 import {
-  applyCompletionWakeEvidenceEventToOwners,
-  applyRuntimeEventToRuns,
-  applyRuntimeTaskEventToOwners,
   buildCompletionWakeTerminalTaskEvent,
-  completionWakeTaskIdFromRunId,
   extractToolCompletedFiles,
-  resolveCompletionWakeOwnerRunId,
   shouldFilterRuntimeExecutionGraphEvent,
 } from './chat/runtime-graph';
-import { buildRuntimeProgressEvents } from './chat/runtime-progress';
 import {
   buildHostTaskRehydrationEvents,
   parseHostTaskBridgeTasks,
@@ -92,8 +107,6 @@ import {
 import {
   applyAsyncTaskEvidenceToRuns,
   buildStreamingAssistantMessageFromRuntimeRun,
-  collectRunDetachedTaskIdsForAbort,
-  collectRunHostTaskIdsForAbort,
   enrichWithToolCallAttachments,
   extractAsyncTaskEvidence,
   isInternalMessage as isHistoryInternalMessage,
@@ -101,6 +114,109 @@ import {
   runtimeRunHasPendingAsyncTasks,
   shouldDropMessageFromHistory,
 } from './chat/helpers';
+import {
+  cloneChatSendIntent,
+  cloneChatSendReplayIntent,
+  cloneGatewayTurnPreferences,
+  createChatSendIntent,
+  type ChatSendIntent,
+} from './chat/send-intent';
+import {
+  buildGatewayTurnPreferences,
+  isImageEditRequest,
+  resolveChatImageOptions,
+  resolveChatVideoOptions,
+} from './chat/media-send-preferences';
+import {
+  applySessionBackendLabels,
+  applySessionLabelSummaries,
+  fetchSessionLabelSummaries,
+  getSessionLabelHydrationActivityMs,
+  persistSessionRenameOnce,
+  refreshVisibleSessionSummaries,
+  toSessionLabel,
+} from './chat/session-label-controller';
+import {
+  captureBaselinesFromMessage,
+  collectToolUpdates,
+  getBaselineRunKeyForMessages,
+  isRecoverableChatSendTimeout,
+  isToolResultRole,
+  upsertToolStatuses,
+} from './chat/tool-status';
+import {
+  OPTIMISTIC_USER_TIMESTAMP_MATCH_MS,
+  clearPendingOptimisticUserMessages,
+  discardPendingOptimisticUserMessage,
+  dropRedundantOptimisticUserMessages,
+  getLatestOptimisticUserMessage,
+  getMessageText,
+  hasOptimisticServerEcho,
+  mergePendingOptimisticUserMessages,
+  normalizeStreamingMessage,
+  rememberPendingOptimisticUserMessage,
+  snapshotStreamingAssistantMessage,
+} from './chat/optimistic-message-reconciliation';
+import {
+  attachedFileKey,
+  cacheAttachedFiles,
+  collectToolCallPaths,
+  dedupeAttachedFiles,
+  extractImagesAsAttachedFiles,
+  extractMediaRefs,
+  extractRawFilePaths,
+  getAttachedFileNormalizedIdentityKeys,
+  getToolCallFilePath,
+  hasExplicitMediaDeliveryDirective,
+  looksLikeRemoteMediaUrl,
+  makeAttachedFile,
+} from './chat/media-evidence';
+import {
+  DEFAULT_SESSION_RUN_STATE,
+  alignRuntimeRunsWithBackendSessionTerminalState as alignRuntimeRunsWithBackendTerminal,
+  backendSessionReportsActive,
+  buildSessionSwitchPatch as buildSessionSwitchStatePatch,
+  captureSessionRunState,
+  clearCachedSessionRunState as clearSessionRunStateCache,
+  gatewaySessionIsIdle,
+  getAgentIdFromSessionKey,
+  getCachedSessionRunState,
+  getCanonicalPrefixFromSessionKey,
+  getCanonicalPrefixFromSessions,
+  mergeBackendSessionProbe as mergeBackendSessionProbeWithModel,
+  mergeSessionRowWithLocalState as mergeSessionRowWithLocalModel,
+  mergeSessionRunStatePatch,
+  parseGatewayHistorySessionAuthority,
+  parseGatewaySessionProbe,
+  parseSessionStatus,
+  parseSessionUpdatedAtMs,
+  peekCachedSessionRunState,
+  shouldTrustBackendSessionIdle,
+  type GatewayHistorySessionAuthority,
+  type SessionRunState,
+  type SessionSwitchState,
+} from './chat/session-controller';
+import {
+  LLM_IDLE_HINT_MS,
+  NO_RESPONSE_SAFETY_TIMEOUT_MS,
+  applyRuntimeContractEvents,
+  buildNoResponseSafetyMessage,
+  buildRuntimeStartEventsForRun,
+  clearPendingRuntimeIntent,
+  hasRecentRuntimeActivityForSend,
+  inferSessionKeyForRun,
+  isDuplicateChatEvent,
+  isRecoverableRuntimeError,
+  isReplySessionInitializationConflictError,
+  normalizeChatRunErrorMessage,
+  optionalToMs,
+  rememberPendingRuntimeIntent,
+  runtimeEventBelongsToActiveTurn,
+  runtimeRunStartedBeforeActiveTurn,
+  shouldTrackInboundRunLifecycle,
+  toMs,
+  updateCachedSessionRunStateFromRuntimeEvent,
+} from './chat/runtime-control';
 import {
   extractTextSegments,
   extractToolUse,
@@ -117,6 +233,8 @@ export type {
   ToolStatus,
   ChatRuntimeRunState,
 } from './chat/types';
+
+export { inferSessionKeyForRun };
 
 type ChatSet = (
   partial: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>),
@@ -207,266 +325,19 @@ function ensureManagedAuthReadyForSend(): Promise<void> | null {
   })();
 }
 
-type PendingImageInput = {
-  fileName: string;
-  mimeType: string;
-  fileSize: number;
-  stagedPath: string;
-  preview: string | null;
-};
+type PendingImageInput = ChatSendAttachment;
 
-function toPendingImageInput(file: NonNullable<RawMessage['_attachedFiles']>[number]): PendingImageInput | null {
-  const stagedPath = file.filePath?.trim();
-  if (!file.mimeType.startsWith('image/') || !stagedPath) return null;
+/** Resolve reusable image evidence from the canonical session timeline. */
+function findLatestCanonicalSessionImage(sessionKey: string): PendingImageInput | null {
+  const image = selectLatestUsableImage(useConversationStore.getState(), sessionKey);
+  if (!image) return null;
   return {
-    fileName: file.fileName || stagedPath.split(/[\\/]/).pop() || 'image',
-    mimeType: file.mimeType,
-    fileSize: file.fileSize,
-    stagedPath,
-    preview: file.preview,
+    fileName: image.fileName,
+    mimeType: image.mimeType,
+    fileSize: image.fileSize,
+    stagedPath: image.filePath,
+    preview: image.preview,
   };
-}
-
-/** Resolve the chronologically latest usable image in the current session. */
-function findLatestSessionImage(messages: RawMessage[]): PendingImageInput | null {
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const files = messages[messageIndex]?._attachedFiles ?? [];
-    for (let fileIndex = files.length - 1; fileIndex >= 0; fileIndex -= 1) {
-      const image = toPendingImageInput(files[fileIndex]!);
-      if (image) return image;
-    }
-  }
-  return null;
-}
-
-/** Restrict implicit media reuse to clear requests that edit an existing image. */
-function isImageEditRequest(prompt: string): boolean {
-  const normalized = prompt.trim();
-  if (!normalized) return false;
-  const editAction = /(?:修改|编辑|修图|美化|重绘|去掉|删除|移除|替换|改成|调整|换成|变成|edit|modify|retouch|remove|replace|change|adjust)/i;
-  const addAction = /(?:添加|加上|add)/i;
-  const imageTarget = /(?:图片|图像|照片|画面|这张图|这幅图|上一张图|刚才的图|这张照片|上一张照片|image|picture|photo|this image|this picture|this photo|previous image|last image)/i;
-  const chinesePriorReference = /(?:这张|这幅|上一张|刚才那张|它)/;
-  const englishPriorReference = /\b(?:this|that|previous|last|it)\b/i;
-  const refersToExistingImage = chinesePriorReference.test(normalized) || englishPriorReference.test(normalized);
-  return (editAction.test(normalized) && (imageTarget.test(normalized) || refersToExistingImage))
-    || (addAction.test(normalized) && imageTarget.test(normalized) && refersToExistingImage);
-}
-
-type GatewayTurnPreferences = {
-  mode: ChatSendMode;
-  image?: {
-    model?: string;
-    size?: string;
-    quality?: 'low' | 'medium' | 'high';
-  };
-  video?: ChatVideoSendOptions;
-  selectedArtifacts?: Array<{
-    filePath: string;
-    mimeType: string;
-    title: string;
-  }>;
-};
-
-function dimensionArea(value: string): number {
-  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
-  if (!match) return 0;
-  return Number(match[1]) * Number(match[2]);
-}
-
-function strongestSize(sizes: string[] | undefined, fallback: string): string {
-  const candidates = (sizes ?? []).filter(Boolean);
-  if (candidates.length === 0) return fallback;
-  return candidates.reduce((best, current) => (
-    dimensionArea(current) > dimensionArea(best) ? current : best
-  ), candidates[0]!);
-}
-
-function strongestDuration(durations: number[] | undefined, fallback: number): number {
-  const candidates = (durations ?? []).filter((value) => Number.isFinite(value) && value > 0);
-  if (candidates.length === 0) return fallback;
-  return Math.max(...candidates);
-}
-
-function normalizeOptionValue<T extends string | number>(
-  requested: T | undefined,
-  allowed: T[] | undefined,
-  fallback: T,
-): T {
-  return requested !== undefined && (allowed ?? []).includes(requested) ? requested : fallback;
-}
-
-function preferredOptionValue<T extends string | number>(
-  requested: T | undefined,
-  allowed: T[] | undefined,
-  fallback: T,
-): T {
-  const options = allowed ?? [];
-  if (requested !== undefined && options.includes(requested)) return requested;
-  if (options.includes(fallback)) return fallback;
-  return options[0] ?? fallback;
-}
-
-function parseExplicitDimension(prompt: string): string | undefined {
-  const match = prompt.match(/(\d{3,4})\s*[xX×]\s*(\d{3,4})/);
-  return match ? `${match[1]}x${match[2]}` : undefined;
-}
-
-function parseImageSizeHint(prompt: string, allowedSizes: string[], fallback: string): string | undefined {
-  const explicit = parseExplicitDimension(prompt);
-  if (explicit && allowedSizes.includes(explicit)) return explicit;
-  if (/(?:4k|超清|最高|最大|最强)/i.test(prompt)) {
-    return strongestSize(allowedSizes, fallback);
-  }
-  if (/(?:2k|高清)/i.test(prompt)) {
-    return allowedSizes.includes('2048x2048') ? '2048x2048' : undefined;
-  }
-  if (/(?:1k|普通)/i.test(prompt)) {
-    return allowedSizes.includes('1024x1024') ? '1024x1024' : undefined;
-  }
-  return undefined;
-}
-
-function parseImageQualityHint(prompt: string, allowedQualities: string[], fallback: string): string | undefined {
-  if (/(?:high|高清|高质量|最高|最强|精细)/i.test(prompt)) return normalizeOptionValue('high', allowedQualities, fallback);
-  if (/(?:medium|标准|中等)/i.test(prompt)) return normalizeOptionValue('medium', allowedQualities, fallback);
-  if (/(?:low|草稿|低)/i.test(prompt)) return normalizeOptionValue('low', allowedQualities, fallback);
-  return undefined;
-}
-
-function parseVideoSizeHint(prompt: string, allowedSizes: string[], fallback: string): string | undefined {
-  const explicit = parseExplicitDimension(prompt);
-  if (explicit && allowedSizes.includes(explicit)) return explicit;
-  if (/(?:9\s*:\s*16|竖屏|竖版|portrait|vertical)/i.test(prompt)) {
-    return allowedSizes.find((size) => {
-      const match = size.match(/^(\d+)x(\d+)$/);
-      return match ? Number(match[2]) > Number(match[1]) : false;
-    });
-  }
-  if (/(?:16\s*:\s*9|横屏|横版|landscape|wide)/i.test(prompt)) {
-    return allowedSizes.find((size) => {
-      const match = size.match(/^(\d+)x(\d+)$/);
-      return match ? Number(match[1]) > Number(match[2]) : false;
-    });
-  }
-  if (/(?:1\s*:\s*1|方形|正方形|square)/i.test(prompt)) {
-    return allowedSizes.find((size) => {
-      const match = size.match(/^(\d+)x(\d+)$/);
-      return match ? Number(match[1]) === Number(match[2]) : false;
-    });
-  }
-  if (/(?:最高|最大|最强)/i.test(prompt)) {
-    return strongestSize(allowedSizes, fallback);
-  }
-  return undefined;
-}
-
-function parseVideoDurationHint(prompt: string, allowedDurations: number[], fallback: number): number | undefined {
-  const match = prompt.match(/(\d{1,2})\s*(?:秒|s|sec|secs|second|seconds)/i);
-  if (!match) return undefined;
-  const requested = Number(match[1]);
-  return normalizeOptionValue(requested, allowedDurations, fallback);
-}
-
-function resolveDefaultChatImageOptions(): ChatImageSendOptions {
-  const options = useClientConfigStore.getState().modelOptions.image;
-  const model = options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const size = preferredOptionValue(model?.defaultSize ?? options.defaultSize, model?.sizes, options.defaultSize);
-  const quality = preferredOptionValue(model?.defaultQuality ?? options.defaultQuality, model?.qualities, options.defaultQuality);
-  return {
-    model: model?.id ?? options.defaultModel,
-    size,
-    quality,
-  };
-}
-
-function resolveDefaultChatVideoOptions(hasSourceImage = false): ChatVideoSendOptions {
-  const options = useClientConfigStore.getState().modelOptions.video;
-  const model = hasSourceImage
-    ? options.models.find((entry) => entry.requiresImage) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0]
-    : options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const size = strongestSize(model?.sizes, model?.defaultSize ?? options.defaultSize);
-  const durationSeconds = strongestDuration(model?.durations, model?.defaultDurationSeconds ?? options.defaultDurationSeconds);
-  return {
-    model: model?.id ?? options.defaultModel,
-    size: model?.sizes.includes(size) ? size : options.defaultSize,
-    durationSeconds: model?.durations.includes(durationSeconds) ? durationSeconds : options.defaultDurationSeconds,
-  };
-}
-
-function resolveChatImageOptions(prompt: string, overrides?: ChatImageSendOptions): ChatImageSendOptions {
-  const base = { ...resolveDefaultChatImageOptions(), ...overrides };
-  const options = useClientConfigStore.getState().modelOptions.image;
-  const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const sizes = model?.sizes ?? [];
-  const qualities = model?.qualities ?? [];
-  const strongest = resolveDefaultChatImageOptions();
-  const requestedSize = parseImageSizeHint(prompt, sizes, strongest.size);
-  const requestedQuality = parseImageQualityHint(prompt, qualities, strongest.quality);
-  return {
-    model: model?.id ?? base.model,
-    size: normalizeOptionValue(requestedSize, sizes, base.size),
-    quality: normalizeOptionValue(requestedQuality, qualities, base.quality) as ChatImageSendOptions['quality'],
-  };
-}
-
-function resolveChatVideoOptions(
-  prompt: string,
-  hasSourceImage: boolean,
-  overrides?: ChatVideoSendOptions,
-): ChatVideoSendOptions {
-  const base = { ...resolveDefaultChatVideoOptions(hasSourceImage), ...overrides };
-  const options = useClientConfigStore.getState().modelOptions.video;
-  const model = options.models.find((entry) => entry.id === base.model) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const sizes = model?.sizes ?? [];
-  const durations = model?.durations ?? [];
-  const strongest = resolveDefaultChatVideoOptions(hasSourceImage);
-  const requestedSize = parseVideoSizeHint(prompt, sizes, strongest.size);
-  const requestedDuration = parseVideoDurationHint(prompt, durations, strongest.durationSeconds);
-  return {
-    model: model?.id ?? base.model,
-    size: normalizeOptionValue(requestedSize, sizes, base.size),
-    durationSeconds: normalizeOptionValue(requestedDuration, durations, base.durationSeconds),
-  };
-}
-
-function buildGatewayTurnPreferences(params: {
-  mode: ChatSendMode;
-  prompt: string;
-  hasSourceImage: boolean;
-  imageOptions?: ChatImageSendOptions;
-  videoOptions?: ChatVideoSendOptions;
-  selectedArtifacts?: PendingImageInput[];
-}): GatewayTurnPreferences {
-  const selectedArtifacts = (params.selectedArtifacts ?? []).map((artifact) => ({
-    filePath: artifact.stagedPath,
-    mimeType: artifact.mimeType,
-    title: artifact.fileName,
-  }));
-  if (params.mode === 'image') {
-    const image = resolveChatImageOptions(params.prompt, params.imageOptions);
-    return {
-      mode: 'image',
-      image: {
-        model: image.model,
-        size: image.size,
-        quality: image.quality === 'low' || image.quality === 'medium' || image.quality === 'high'
-          ? image.quality
-          : undefined,
-      },
-      ...(selectedArtifacts.length > 0 ? { selectedArtifacts } : {}),
-    };
-  }
-  if (params.mode === 'video') {
-    return {
-      mode: 'video',
-      video: resolveChatVideoOptions(params.prompt, params.hasSourceImage, params.videoOptions),
-      ...(selectedArtifacts.length > 0 ? { selectedArtifacts } : {}),
-    };
-  }
-  return selectedArtifacts.length > 0
-    ? { mode: 'chat', selectedArtifacts }
-    : { mode: 'chat' };
 }
 
 function historicalRunIdFromKey(sessionKey: string, key: string | number): string {
@@ -931,12 +802,21 @@ function collectTerminalAsyncTaskEvidence(
       if (evidence.status !== 'pending') remember(evidence);
     }
     for (const task of run.tasks ?? []) {
-      if (task.status !== 'completed' && task.status !== 'error' && task.status !== 'partial') continue;
+      if (
+        task.status !== 'completed'
+        && task.status !== 'aborted'
+        && task.status !== 'error'
+        && task.status !== 'partial'
+      ) continue;
       remember({
         id: `task:${task.taskId}`,
         taskId: task.taskId,
         childSessionKey: task.childSessionKey,
-        status: task.status === 'completed' ? 'completed' : 'error',
+        status: task.status === 'completed'
+          ? 'completed'
+          : task.status === 'aborted'
+            ? 'aborted'
+            : 'error',
         source: 'task-completion',
         updatedAt: task.updatedAt ?? task.endedAt ?? run.lastEventAt ?? Date.now(),
       });
@@ -1083,77 +963,6 @@ function applyActiveRunArtifactEvidenceFromHistory(
   return applyRuntimeContractEvents(runtimeRuns, [...artifactEvents, ...verificationEvents]);
 }
 
-/** Normalize a timestamp to milliseconds. Handles both seconds and ms. */
-function toMs(ts: number): number {
-  // Timestamps < 1e12 are in seconds (before ~2033); >= 1e12 are milliseconds
-  return ts < 1e12 ? ts * 1000 : ts;
-}
-
-function optionalToMs(ts: number | undefined | null): number | null {
-  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
-  return toMs(ts);
-}
-
-function getRuntimeEventTimestampMs(event: ChatRuntimeEvent): number | null {
-  const direct = optionalToMs(event.ts);
-  if (direct != null) return direct;
-  if (event.type === 'run.started') return optionalToMs(event.startedAt);
-  if (event.type === 'run.ended') return optionalToMs(event.endedAt);
-  return null;
-}
-
-function getRuntimeRunFirstEventMs(run: ChatState['runtimeRuns'][string] | undefined): number | null {
-  if (!run) return null;
-  const startedAt = optionalToMs(run.startedAt);
-  const eventTimes = run.events
-    .map(getRuntimeEventTimestampMs)
-    .filter((value): value is number => value != null);
-  const firstEventAt = eventTimes.length > 0 ? Math.min(...eventTimes) : null;
-  if (startedAt == null) return firstEventAt;
-  if (firstEventAt == null) return startedAt;
-  return Math.min(startedAt, firstEventAt);
-}
-
-const ACTIVE_TURN_BOUNDARY_SKEW_MS = 5_000;
-
-function runtimeRunStartedBeforeActiveTurn(
-  state: Pick<ChatState, 'activeRunId' | 'lastUserMessageAt' | 'runtimeRuns'>,
-  runId: string,
-): boolean {
-  if (state.activeRunId === runId) return false;
-  const activeRunStartMs = state.activeRunId
-    ? getRuntimeRunFirstEventMs(state.runtimeRuns[state.activeRunId])
-    : null;
-  const boundaryMs = activeRunStartMs ?? optionalToMs(state.lastUserMessageAt);
-  const candidateRunStartMs = getRuntimeRunFirstEventMs(state.runtimeRuns[runId]);
-  return boundaryMs != null
-    && candidateRunStartMs != null
-    && candidateRunStartMs < boundaryMs - ACTIVE_TURN_BOUNDARY_SKEW_MS;
-}
-
-function runtimeEventBelongsToActiveTurn(
-  state: Pick<ChatState, 'currentSessionKey' | 'sending' | 'activeRunId' | 'pendingFinal' | 'lastUserMessageAt' | 'runtimeRuns'>,
-  event: ChatRuntimeEvent,
-  eventSessionKey: string | null,
-): boolean {
-  if (!eventSessionKey || eventSessionKey !== state.currentSessionKey) return false;
-  if (!state.sending && state.activeRunId == null && !state.pendingFinal) return false;
-  if (state.activeRunId && event.runId === state.activeRunId) return true;
-  if (runtimeRunStartedBeforeActiveTurn(state, event.runId)) return false;
-
-  const activeRunStartMs = state.activeRunId
-    ? getRuntimeRunFirstEventMs(state.runtimeRuns[state.activeRunId])
-    : null;
-  const userTurnStartMs = optionalToMs(state.lastUserMessageAt);
-  const boundaryMs = activeRunStartMs ?? userTurnStartMs;
-  if (boundaryMs == null) return false;
-
-  const eventMs = getRuntimeEventTimestampMs(event)
-    ?? getRuntimeRunFirstEventMs(state.runtimeRuns[event.runId]);
-  if (eventMs == null) return false;
-  return eventMs >= boundaryMs - ACTIVE_TURN_BOUNDARY_SKEW_MS;
-}
-
 // Timer for fallback history polling during active sends.
 // If no streaming events arrive within a few seconds, we periodically
 // poll chat.history to surface intermediate tool-call turns.
@@ -1177,34 +986,6 @@ const _sessionsNeedingTerminalHistoryRefresh = new Set<string>();
 const _pendingLocalSessionKeys = new Set<string>();
 const _sessionCwdMutations = new Map<string, Promise<void>>();
 
-type SessionRunState = Pick<
-  ChatState,
-  | 'sending'
-  | 'pendingImageGenerationLocal'
-  | 'pendingVideoGenerationLocal'
-  | 'activeRunId'
-  | 'pendingFinal'
-  | 'lastUserMessageAt'
-  | 'streamingText'
-  | 'streamingMessage'
-  | 'streamingTools'
-  | 'pendingToolImages'
->;
-
-const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
-  sending: false,
-  pendingImageGenerationLocal: false,
-  pendingVideoGenerationLocal: false,
-  activeRunId: null,
-  pendingFinal: false,
-  lastUserMessageAt: null,
-  streamingText: '',
-  streamingMessage: null,
-  streamingTools: [],
-  pendingToolImages: [],
-};
-
-const _sessionRunStateCache = new Map<string, SessionRunState>();
 let _sendGenerationCounter = 0;
 const _activeSendGenerationBySession = new Map<string, number>();
 
@@ -1212,12 +993,6 @@ function activeSendGenerationMatches(sessionKey: string, sendGeneration: number)
   return _activeSendGenerationBySession.get(sessionKey) === sendGeneration;
 }
 
-type PendingRuntimeIntent = {
-  objective?: string;
-  mode: ChatSendMode;
-  createdAt: number;
-};
-const _pendingRuntimeIntentBySession = new Map<string, PendingRuntimeIntent>();
 const _runtimeArtifactVerificationInFlight = new Set<string>();
 type WithheldFinalDelivery = {
   runId: string;
@@ -1232,16 +1007,22 @@ type QueuedChatSend = {
   mode: ChatSendMode;
   imageOptions?: ChatImageSendOptions;
   videoOptions?: ChatVideoSendOptions;
+  replayIntent?: ChatSendReplayIntent;
+  ownership: ChatQueuedTurnOwnership;
   enqueuedAt: number;
 };
 const MAX_QUEUED_SENDS_PER_SESSION = 20;
+const CHAT_SEND_OUTBOX_TTL_MS = 24 * 60 * 60 * 1_000;
 const _queuedChatSendsBySession = new Map<string, QueuedChatSend[]>();
 const _queuedChatSendFlushScheduled = new Set<string>();
+const _queuedChatSendDispatchLeaseBySession = new Map<string, string>();
 const _sessionsCancelling = new Set<string>();
 const _sessionsAwaitingBackendIdle = new Set<string>();
 const _sessionBackendIdleSettlementGeneration = new Map<string, number>();
 const _runtimeBackendIdleProbeGeneration = new Map<string, number>();
-const _lastAttemptedChatSendBySession = new Map<string, QueuedChatSend>();
+const _lastSendIntentBySession = new Map<string, ChatSendIntent>();
+let _chatSendOutboxRestoreInFlight: Promise<void> | null = null;
+let _chatSendOutboxRestoreCompleted = false;
 
 function shouldHoldActiveRunForPendingTasks(): boolean {
   const currentState = useChatStore.getState();
@@ -1253,224 +1034,20 @@ function shouldHoldActiveRunForPendingTasks(): boolean {
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const SESSION_LABEL_HYDRATION_BATCH_SIZE = 40;
 const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
-const CHAT_EVENT_DEDUPE_TTL_MS = 30_000;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_MAX_RENDERED_MESSAGES = 500;
 const SESSION_SWITCH_RESTORE_MESSAGE_LIMIT = 24;
 const PREVIEW_HYDRATION_MESSAGE_LIMIT = 80;
 const SESSION_HISTORY_CACHE_MAX_SESSIONS = 16;
 const SESSION_RUN_STATE_CACHE_MAX_SESSIONS = 32;
-const _chatEventDedupe = new Map<string, number>();
-const OPTIMISTIC_USER_MESSAGE_TTL_MS = 30 * 60 * 1000;
-/** Max skew between the renderer optimistic send time and Gateway transcript timestamps. */
-const OPTIMISTIC_USER_TIMESTAMP_MATCH_MS = 120_000;
 /** Grace period before surfacing mid-run Gateway errors that often self-recover. */
 const ERROR_RECOVERY_DELAY_MS = 12_000;
-/** OpenClaw LLM idle timeout before an internal retry. */
-const LLM_IDLE_HINT_MS = 120_000;
-/** Wait past one LLM idle window before declaring a hard no-response failure. */
-const NO_RESPONSE_SAFETY_TIMEOUT_MS = 130_000;
-const SESSION_RENAME_DEDUPE_TTL_MS = 60_000;
 const INTERNAL_TEMPORARY_SESSION_PATTERNS = [
   /^agent:main:uclaw-profile-[A-Za-z0-9_-]+/,
 ];
 
-type PendingOptimisticUserMessage = {
-  message: RawMessage;
-  timestampMs: number;
-  createdAtMs: number;
-};
-
 function isInternalTemporarySessionKey(sessionKey: string): boolean {
   return INTERNAL_TEMPORARY_SESSION_PATTERNS.some((pattern) => pattern.test(sessionKey));
-}
-
-const _pendingOptimisticUserMessages = new Map<string, PendingOptimisticUserMessage[]>();
-const _sessionRenameInFlight = new Map<string, Promise<void>>();
-const _sessionRenameLastPersisted = new Map<string, { label: string; at: number }>();
-
-type SessionLabelSummary = {
-  sessionKey: string;
-  firstUserText: string | null;
-  lastTimestamp: number | null;
-};
-
-function getSessionLabelHydrationActivityMs(
-  session: ChatSession,
-  sessionLastActivity: Record<string, number>,
-): number {
-  const localActivity = sessionLastActivity[session.key];
-  if (typeof localActivity === 'number' && Number.isFinite(localActivity)) {
-    return localActivity;
-  }
-  return typeof session.updatedAt === 'number' && Number.isFinite(session.updatedAt)
-    ? session.updatedAt
-    : 0;
-}
-
-function getSessionBackendLabel(session: ChatSession): string {
-  return toSessionLabel(session.label || session.derivedTitle || '');
-}
-
-function applySessionBackendLabels(set: ChatSet, sessions: ChatSession[]): void {
-  const labels = Object.fromEntries(
-    sessions
-      .filter((session) => !session.key.endsWith(':main'))
-      .map((session) => [session.key, getSessionBackendLabel(session)] as const)
-      .filter((entry): entry is [string, string] => Boolean(entry[1])),
-  );
-  if (Object.keys(labels).length === 0) return;
-  set((state) => ({
-    sessionLabels: {
-      ...state.sessionLabels,
-      ...Object.fromEntries(
-        Object.entries(labels).filter(([key]) => !state.sessionLabels[key]),
-      ),
-    },
-  }));
-}
-
-async function persistSessionRenameOnce(key: string, label: string): Promise<void> {
-  const cacheKey = `${key}\n${label}`;
-  const now = Date.now();
-  const recent = _sessionRenameLastPersisted.get(key);
-  if (recent?.label === label && now - recent.at < SESSION_RENAME_DEDUPE_TTL_MS) {
-    return;
-  }
-
-  const existing = _sessionRenameInFlight.get(cacheKey);
-  if (existing) {
-    await existing;
-    return;
-  }
-
-  const promise = (async () => {
-    const result = await hostApiFetch<{
-      success: boolean;
-      error?: string;
-    }>('/api/sessions/rename', {
-      method: 'POST',
-      body: JSON.stringify({ sessionKey: key, label }),
-    });
-    if (!result.success) {
-      throw new Error(result.error || 'Failed to rename session');
-    }
-    _sessionRenameLastPersisted.set(key, { label, at: Date.now() });
-  })().finally(() => {
-    _sessionRenameInFlight.delete(cacheKey);
-  });
-
-  _sessionRenameInFlight.set(cacheKey, promise);
-  await promise;
-}
-
-async function fetchSessionLabelSummaries(sessionKeys: string[]): Promise<SessionLabelSummary[]> {
-  if (sessionKeys.length === 0) return [];
-  const response = await hostApiFetch<{
-    success?: boolean;
-    summaries?: SessionLabelSummary[];
-  }>('/api/sessions/summaries', {
-    method: 'POST',
-    body: JSON.stringify({ sessionKeys }),
-  });
-  return Array.isArray(response?.summaries) ? response.summaries : [];
-}
-
-function applySessionLabelSummaries(
-  set: ChatSet,
-  summaries: SessionLabelSummary[],
-): void {
-  if (summaries.length === 0) return;
-  set((state) => {
-    let nextLabels = state.sessionLabels;
-    let nextActivity = state.sessionLastActivity;
-    let changed = false;
-
-    for (const summary of summaries) {
-      const labelText = toSessionLabel(summary.firstUserText || '');
-      // Only auto-hydrate missing labels. Existing entries include user renames
-      // and must not be overwritten by transcript-derived titles.
-      const existingLabel = nextLabels[summary.sessionKey]?.trim();
-      if (labelText && !existingLabel) {
-        if (nextLabels === state.sessionLabels) {
-          nextLabels = { ...state.sessionLabels };
-        }
-        nextLabels[summary.sessionKey] = labelText;
-        changed = true;
-      }
-
-      if (typeof summary.lastTimestamp === 'number' && Number.isFinite(summary.lastTimestamp)) {
-        if (nextActivity[summary.sessionKey] !== summary.lastTimestamp) {
-          if (nextActivity === state.sessionLastActivity) {
-            nextActivity = { ...state.sessionLastActivity };
-          }
-          nextActivity[summary.sessionKey] = summary.lastTimestamp;
-          changed = true;
-        }
-      }
-    }
-
-    return changed
-      ? {
-        sessionLabels: nextLabels,
-        sessionLastActivity: nextActivity,
-      }
-      : {};
-  });
-}
-
-async function refreshVisibleSessionSummaries(
-  set: ChatSet,
-  get: ChatGet,
-  sessionKeys?: string[],
-): Promise<void> {
-  const sessions = get().sessions;
-  const currentSessionKey = get().currentSessionKey;
-  const knownSessionKeys = new Set(sessions.map((session) => session.key));
-  const targetKeys = (sessionKeys && sessionKeys.length > 0
-    ? sessionKeys
-    : sessions.map((session) => session.key)
-  )
-    .filter((key) => key && !key.endsWith(':main') && key !== currentSessionKey);
-  if (targetKeys.length === 0) return;
-
-  try {
-    const summaries = await fetchSessionLabelSummaries(targetKeys);
-    const currentKnownSessionKeys = new Set(get().sessions.map((session) => session.key));
-    applySessionLabelSummaries(
-      set,
-      summaries.filter((summary) => (
-        knownSessionKeys.has(summary.sessionKey)
-        && currentKnownSessionKeys.has(summary.sessionKey)
-      )),
-    );
-  } catch (error) {
-    console.warn('[session summaries] refresh failed:', error);
-  }
-}
-
-function cleanSessionLabelText(text: string): string {
-  return text
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*[^\n]*(?:\n\s*)*/i, '')
-    .replace(/^Sender\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*:\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*:\s*[^\n]*(?:\n\s*)*/i, '')
-    .replace(/^```json\n[\s\S]*?```\s*/i, '')
-    .replace(/^\{[\s\S]*?\}\s*/i, '')
-    .replace(/\s*\[media attached:[^\]]*\]/g, '')
-    .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, '')
-    .trim();
-}
-
-function toSessionLabel(text: string, maxLength = 50): string {
-  const cleaned = cleanSessionLabelText(text).trim();
-  if (!cleaned) return '';
-  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength)}…` : cleaned;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -1512,53 +1089,6 @@ function clearErrorRecoveryTimer(): void {
     clearTimeout(_errorRecoveryTimer);
     _errorRecoveryTimer = null;
   }
-}
-
-function isRecoverableRuntimeError(errorMessage: string): boolean {
-  const normalized = errorMessage.trim().toLowerCase();
-  if (!normalized) return false;
-  return /\bterminated\b/.test(normalized)
-    || /\baborted\b/.test(normalized)
-    || normalized.includes('econnreset')
-    || normalized.includes('connection reset');
-}
-
-function isReplySessionInitializationConflictError(errorMessage: string): boolean {
-  const normalized = errorMessage.trim().toLowerCase();
-  return normalized.includes('reply session initialization conflicted')
-    || (
-      normalized.includes('reply session')
-      && normalized.includes('initialization')
-      && (normalized.includes('conflict') || normalized.includes('conflicted'))
-    );
-}
-
-function normalizeChatRunErrorMessage(errorMessage: string): string {
-  const normalized = errorMessage.trim();
-  const lower = normalized.toLowerCase();
-  if (!normalized) return 'The task ended without a model response. Please retry.';
-  if (isReplySessionInitializationConflictError(normalized)) {
-    return 'UClaw hit a reply session handoff conflict while the previous turn was still settling. The conversation was refreshed; retry this message.';
-  }
-  if (
-    lower.includes('context overflow')
-    || lower.includes('prompt too large')
-    || lower.includes('context size exceeds')
-    || lower.includes('context length')
-  ) {
-    return 'The task context became too large for the model. Start a new conversation or ask UClaw to summarize and continue.';
-  }
-  if (
-    lower.includes('non_deliverable_terminal_turn')
-    || lower.includes('non-deliverable terminal')
-  ) {
-    return 'The task reached a terminal state but the final reply was not delivered. Refreshing the conversation history may show the result.';
-  }
-  return normalized;
-}
-
-function buildNoResponseSafetyMessage(): string {
-  return 'The task has not produced new visible progress for a while. UClaw stopped waiting to keep the app responsive. Refresh the conversation or retry if the task did not finish.';
 }
 
 function scheduleRecoverableRuntimeError(commit: () => void): void {
@@ -1606,127 +1136,6 @@ function deferSessionSwitchHistoryLoad(get: ChatGet): void {
   }, 120);
 }
 
-function chatRunLooksRecentlyActive(run: ChatState['runtimeRuns'][string], now = Date.now()): boolean {
-  if (run.status !== 'running') return false;
-  if (typeof run.lastEventAt === 'number' && Number.isFinite(run.lastEventAt)) {
-    return now - toMs(run.lastEventAt) < LLM_IDLE_HINT_MS + NO_RESPONSE_SAFETY_TIMEOUT_MS;
-  }
-  const lastEventTs = run.events.reduce<number | null>((latest, event) => {
-    const ts = typeof event.ts === 'number' ? toMs(event.ts) : null;
-    if (ts == null || !Number.isFinite(ts)) return latest;
-    return latest == null ? ts : Math.max(latest, ts);
-  }, null);
-  const activityTs = lastEventTs
-    ?? (typeof run.startedAt === 'number' ? toMs(run.startedAt) : null);
-  if (activityTs == null) return true;
-  return now - activityTs < LLM_IDLE_HINT_MS + NO_RESPONSE_SAFETY_TIMEOUT_MS;
-}
-
-function hasRecentRuntimeActivityForSend(
-  state: ChatState,
-  sessionKey: string,
-  now = Date.now(),
-): boolean {
-  return Object.values(state.runtimeRuns).some((run) => {
-    if (!chatRunLooksRecentlyActive(run, now)) return false;
-    if (state.activeRunId && run.runId === state.activeRunId) return true;
-    return run.sessionKey === sessionKey;
-  });
-}
-
-function inferSessionKeyForRun(
-  state: Pick<ChatState, 'activeRunId' | 'currentSessionKey' | 'runtimeRuns'>,
-  runId: string | null,
-  explicitSessionKey: string | null,
-): string | null {
-  if (explicitSessionKey) return explicitSessionKey;
-  if (!runId) return null;
-
-  const runtimeSessionKey = state.runtimeRuns[runId]?.sessionKey;
-  if (runtimeSessionKey) return runtimeSessionKey;
-
-  if (state.activeRunId === runId) return state.currentSessionKey;
-
-  for (const [sessionKey, runState] of _sessionRunStateCache.entries()) {
-    if (runState.activeRunId === runId) return sessionKey;
-  }
-
-  return null;
-}
-
-function rememberPendingRuntimeIntent(sessionKey: string, intent: Omit<PendingRuntimeIntent, 'createdAt'>): void {
-  _pendingRuntimeIntentBySession.set(sessionKey, {
-    ...intent,
-    objective: intent.objective?.trim() || undefined,
-    createdAt: Date.now(),
-  });
-}
-
-function getPendingRuntimeIntent(sessionKey: string | undefined | null): PendingRuntimeIntent | undefined {
-  if (!sessionKey) return undefined;
-  const intent = _pendingRuntimeIntentBySession.get(sessionKey);
-  if (!intent) return undefined;
-  if (Date.now() - intent.createdAt > NO_RESPONSE_SAFETY_TIMEOUT_MS + LLM_IDLE_HINT_MS) {
-    _pendingRuntimeIntentBySession.delete(sessionKey);
-    return undefined;
-  }
-  return intent;
-}
-
-function clearPendingRuntimeIntent(sessionKey: string | undefined | null): void {
-  if (!sessionKey) return;
-  _pendingRuntimeIntentBySession.delete(sessionKey);
-}
-
-function applyRuntimeContractEvents(
-  currentRuns: ChatState['runtimeRuns'],
-  events: ChatRuntimeEvent[],
-): ChatState['runtimeRuns'] {
-  if (events.length === 0) return currentRuns;
-  let nextRuns = currentRuns;
-  for (const event of events) {
-    const appliedEvents: ChatRuntimeEvent[] = [];
-    if (event.type === 'task.updated') {
-      const applied = applyRuntimeTaskEventToOwners(nextRuns, event);
-      nextRuns = applied.runtimeRuns;
-      appliedEvents.push(...applied.appliedEvents);
-    } else if (event.type === 'artifact.produced' || event.type === 'verification.completed') {
-      const applied = applyCompletionWakeEvidenceEventToOwners(nextRuns, event);
-      nextRuns = applied.runtimeRuns;
-      appliedEvents.push(...applied.appliedEvents);
-    } else {
-      const previousRuns = nextRuns;
-      nextRuns = applyRuntimeEventToRuns(nextRuns, event);
-      if (nextRuns !== previousRuns) appliedEvents.push(event);
-    }
-    if (appliedEvents.length === 0) continue;
-    if (event.type === 'task.updated') {
-      const ledgerStatus = event.task.status === 'completed'
-        ? 'completed'
-        : event.task.status === 'error' || event.task.status === 'partial'
-          ? 'error'
-          : 'pending';
-      nextRuns = applyAsyncTaskEvidenceToRuns(nextRuns, event.runId, [{
-        id: `task:${event.task.taskId}`,
-        taskId: event.task.taskId,
-        runId: event.runId,
-        childSessionKey: event.task.childSessionKey,
-        status: ledgerStatus,
-        source: ledgerStatus === 'pending' ? 'tool-result' : 'task-completion',
-        updatedAt: event.task.updatedAt ?? event.ts ?? Date.now(),
-      }], event.sessionKey);
-    }
-    for (const appliedEvent of appliedEvents) {
-      if (appliedEvent.type === 'progress.update') continue;
-      const progressEvents = buildRuntimeProgressEvents(nextRuns[appliedEvent.runId], appliedEvent);
-      for (const progressEvent of progressEvents) {
-        nextRuns = applyRuntimeEventToRuns(nextRuns, progressEvent);
-      }
-    }
-  }
-  return nextRuns;
-}
-
 function reevaluateWithheldFinalDelivery(runId: string): void {
   const withheld = _withheldFinalDeliveryByRun.get(runId);
   if (!withheld) {
@@ -1761,10 +1170,7 @@ function reevaluateWithheldFinalDelivery(runId: string): void {
   if (!released) return;
   _withheldFinalDeliveryByRun.delete(runId);
   if (controlsActiveLifecycle) beginSessionBackendIdleSettlement(withheld.sessionKey, runId);
-  if (useChatStore.getState().currentSessionKey === withheld.sessionKey) {
-    forceNextHistoryLoad(withheld.sessionKey);
-    void useChatStore.getState().loadHistory(true);
-  } else {
+  if (useChatStore.getState().currentSessionKey !== withheld.sessionKey) {
     markSessionNeedsTerminalHistoryRefresh(withheld.sessionKey);
   }
 }
@@ -1778,30 +1184,6 @@ function scheduleWithheldFinalReevaluationForSession(sessionKey: string | null |
   });
 }
 
-function buildRuntimeStartEventsForRun(
-  runtimeRuns: ChatState['runtimeRuns'],
-  params: {
-    runId: string;
-    sessionKey?: string;
-    objective?: string;
-    mode?: ChatSendMode;
-    ts?: number;
-    includeStarted?: boolean;
-  },
-): ChatRuntimeEvent[] {
-  if (!params.runId) return [];
-  const intent = getPendingRuntimeIntent(params.sessionKey);
-  const objective = params.objective ?? intent?.objective;
-  return buildRuntimeStartEvents(runtimeRuns[params.runId], {
-    runId: params.runId,
-    sessionKey: params.sessionKey,
-    objective,
-    mode: params.mode ?? intent?.mode,
-    ts: params.ts,
-    includeStarted: params.includeStarted,
-  });
-}
-
 type ThumbnailVerificationResult = {
   preview: string | null;
   fileSize: number;
@@ -1810,9 +1192,47 @@ type ThumbnailVerificationResult = {
   height?: number;
 };
 
+type RuntimeArtifactVerificationContext = {
+  runId: string;
+  rootRunId?: string;
+  sessionKey?: string;
+  taskId?: string;
+  parentTaskId?: string;
+  toolCallId?: string;
+};
+
+type RuntimeArtifactVerificationEvent = Extract<ChatRuntimeEvent, {
+  type: 'artifact.produced' | 'verification.completed';
+}>;
+
+/** Mirror local availability evidence into the existing canonical Turn only. */
+function ingestCanonicalRuntimeArtifactVerificationEvents(
+  events: RuntimeArtifactVerificationEvent[],
+): void {
+  const store = useConversationStore.getState();
+  const projection = projectRuntimeArtifactVerificationEvents(store, events);
+  if (projection.rejected.length > 0) {
+    console.warn('[conversation-timeline] Rejected unowned artifact verification evidence', {
+      rejected: projection.rejected.map((event) => ({
+        type: event.type,
+        runId: event.runId,
+        rootRunId: event.rootRunId,
+        sessionKey: event.sessionKey,
+        taskId: event.taskId,
+        toolCallId: event.toolCallId,
+        artifactId: event.type === 'artifact.produced'
+          ? event.artifact.id
+          : event.verification.artifactId ?? event.verification.targetId,
+      })),
+    });
+  }
+  if (projection.events.length > 0) {
+    store.ingestEvents(projection.events, { buffered: false });
+  }
+}
+
 function scheduleRuntimeArtifactVerification(
-  runId: string,
-  sessionKey: string | undefined,
+  context: RuntimeArtifactVerificationContext,
   artifacts: ChatRuntimeArtifact[],
 ): void {
   const requests = artifacts
@@ -1820,12 +1240,25 @@ function scheduleRuntimeArtifactVerification(
       const filePath = artifact.filePath?.trim();
       const gatewayUrl = artifact.url?.startsWith('/api/chat/media/') ? artifact.url : undefined;
       if (!filePath && !gatewayUrl) return null;
-      const key = `${runId}|${artifact.id}|${filePath ?? gatewayUrl}`;
+      const identity = {
+        ...context,
+        taskId: artifact.taskId ?? context.taskId,
+        toolCallId: artifact.sourceToolCallId ?? context.toolCallId,
+      };
+      const key = [
+        identity.sessionKey ?? 'sessionless',
+        identity.rootRunId ?? context.runId,
+        context.runId,
+        identity.taskId ?? 'taskless',
+        artifact.id,
+        filePath ?? gatewayUrl,
+      ].join('|');
       if (_runtimeArtifactVerificationInFlight.has(key)) return null;
       _runtimeArtifactVerificationInFlight.add(key);
       return {
         key,
         artifact,
+        identity,
         request: {
           filePath,
           gatewayUrl,
@@ -1842,7 +1275,7 @@ function scheduleRuntimeArtifactVerification(
     body: JSON.stringify({ paths: requests.map((entry) => entry.request) }),
   })
     .then((results) => {
-      const events: ChatRuntimeEvent[] = [];
+      const events: RuntimeArtifactVerificationEvent[] = [];
       const ts = Date.now();
       for (const entry of requests) {
         const resultKey = entry.request.filePath ?? entry.request.gatewayUrl ?? '';
@@ -1853,18 +1286,28 @@ function scheduleRuntimeArtifactVerification(
               ...entry.artifact,
               filePath: verifiedPath,
               sizeBytes: result.fileSize,
+              taskId: entry.artifact.taskId ?? entry.identity.taskId,
+              sourceToolCallId: entry.artifact.sourceToolCallId ?? entry.identity.toolCallId,
             }
-          : entry.artifact;
-        if (result && result.fileSize > 0) {
-          events.push({
-            runId,
-            sessionKey,
-            ts,
-            type: 'artifact.produced',
-            artifact: verifiedArtifact,
-          });
-        }
-        events.push(buildRuntimeArtifactVerificationEvent({ runId, sessionKey, ts }, {
+          : {
+              ...entry.artifact,
+              taskId: entry.artifact.taskId ?? entry.identity.taskId,
+              sourceToolCallId: entry.artifact.sourceToolCallId ?? entry.identity.toolCallId,
+            };
+        // Re-emit the registered artifact on both outcomes so canonical
+        // availability never depends on a legacy-only registration path.
+        events.push({
+          ...entry.identity,
+          producer: 'uclaw-artifact-guard',
+          ts,
+          type: 'artifact.produced',
+          artifact: verifiedArtifact,
+        });
+        events.push(buildRuntimeArtifactVerificationEvent({
+          ...entry.identity,
+          producer: 'uclaw-artifact-guard',
+          ts,
+        }, {
           artifact: verifiedArtifact,
           status: result && result.fileSize > 0 ? 'passed' : 'blocked',
           detail: result && result.fileSize > 0
@@ -1880,20 +1323,38 @@ function scheduleRuntimeArtifactVerification(
         useChatStore.setState((state) => ({
           runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
         }));
-        reevaluateWithheldFinalDelivery(runId);
+        ingestCanonicalRuntimeArtifactVerificationEvents(events);
+        reevaluateWithheldFinalDelivery(context.runId);
       }
     })
     .catch((error) => {
       const ts = Date.now();
-      const events = requests.map((entry) => buildRuntimeArtifactVerificationEvent({ runId, sessionKey, ts }, {
-        artifact: entry.artifact,
-        status: 'blocked',
-        detail: '本地文件存在性验证请求失败。',
-        evidence: error instanceof Error ? error.message : String(error),
-      }));
+      const events = requests.flatMap((entry): RuntimeArtifactVerificationEvent[] => {
+        const artifact = {
+          ...entry.artifact,
+          taskId: entry.artifact.taskId ?? entry.identity.taskId,
+          sourceToolCallId: entry.artifact.sourceToolCallId ?? entry.identity.toolCallId,
+        };
+        const base = {
+          ...entry.identity,
+          producer: 'uclaw-artifact-guard',
+          ts,
+        };
+        return [{
+          ...base,
+          type: 'artifact.produced',
+          artifact,
+        }, buildRuntimeArtifactVerificationEvent(base, {
+          artifact,
+          status: 'blocked',
+          detail: '本地文件存在性验证请求失败。',
+          evidence: error instanceof Error ? error.message : String(error),
+        })];
+      });
       useChatStore.setState((state) => ({
         runtimeRuns: applyRuntimeContractEvents(state.runtimeRuns, events),
       }));
+      ingestCanonicalRuntimeArtifactVerificationEvents(events);
     })
     .finally(() => {
       for (const entry of requests) {
@@ -1911,50 +1372,6 @@ function markSessionRunIdle(sessionKey: string): void {
   clearActiveSendGeneration(sessionKey);
   captureSessionRunState(sessionKey, DEFAULT_SESSION_RUN_STATE);
   scheduleQueuedChatSendFlush(sessionKey);
-}
-
-function gatewaySessionIsIdle(data: Record<string, unknown>, sessionKey: string): boolean {
-  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
-  const session = sessions.find((candidate) => (
-    candidate != null
-    && typeof candidate === 'object'
-    && String((candidate as Record<string, unknown>).key ?? '') === sessionKey
-  ));
-  if (!session || typeof session !== 'object') return false;
-  const row = session as Record<string, unknown>;
-  if (row.hasActiveRun === true) return false;
-  if (row.hasActiveRun === false) return true;
-  return getSessionTerminalRuntimeStatus(parseSessionStatus(row.status)) != null;
-}
-
-function parseGatewaySessionProbe(data: Record<string, unknown>, sessionKey: string): ChatSession | undefined {
-  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
-  const row = sessions.find((candidate) => (
-    candidate != null
-    && typeof candidate === 'object'
-    && String((candidate as Record<string, unknown>).key ?? '') === sessionKey
-  ));
-  if (!row || typeof row !== 'object') return undefined;
-  const record = row as Record<string, unknown>;
-  return {
-    key: sessionKey,
-    updatedAt: parseSessionUpdatedAtMs(record.updatedAt),
-    status: parseSessionStatus(record.status),
-    hasActiveRun: typeof record.hasActiveRun === 'boolean' ? record.hasActiveRun : undefined,
-  };
-}
-
-function mergeBackendSessionProbe(
-  sessions: ChatSession[],
-  session: ChatSession,
-): ChatSession[] {
-  let matched = false;
-  const next = sessions.map((candidate) => {
-    if (candidate.key !== session.key) return candidate;
-    matched = true;
-    return mergeSessionRowWithLocalState({ ...candidate, ...session }, candidate);
-  });
-  return matched ? next : [...next, session];
 }
 
 function scheduleRuntimeBackendIdleReconciliation(
@@ -1986,7 +1403,11 @@ function scheduleRuntimeBackendIdleReconciliation(
         const data = await fetchChatSessionsList();
         const backendSession = parseGatewaySessionProbe(data, sessionKey);
         if (backendSession) {
-          const latestSessions = mergeBackendSessionProbe(get().sessions, backendSession);
+          const latestSessions = mergeBackendSessionProbeWithModel(
+            get().sessions,
+            backendSession,
+            normalizeChatManagedModelRef,
+          );
           set({ sessions: latestSessions });
           reconcileCurrentSessionLifecycleFromBackend(set, get, latestSessions);
           if (shouldTrustBackendSessionIdle(backendSession, get().lastUserMessageAt)) {
@@ -2030,7 +1451,11 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
         const data = await fetchChatSessionsList();
         const backendSession = parseGatewaySessionProbe(data, sessionKey);
         if (backendSession) {
-          const sessions = mergeBackendSessionProbe(useChatStore.getState().sessions, backendSession);
+          const sessions = mergeBackendSessionProbeWithModel(
+            useChatStore.getState().sessions,
+            backendSession,
+            normalizeChatManagedModelRef,
+          );
           useChatStore.setState({ sessions });
           reconcileCurrentSessionLifecycleFromBackend(
             useChatStore.setState,
@@ -2061,7 +1486,7 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
     const state = useChatStore.getState();
     const settledRunState = state.currentSessionKey === sessionKey
       ? state
-      : _sessionRunStateCache.get(sessionKey);
+      : peekCachedSessionRunState(sessionKey);
     if (
       expectedRunId
       && settledRunState?.activeRunId != null
@@ -2070,6 +1495,8 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
       return;
     }
     if (state.currentSessionKey !== sessionKey) {
+      // Settle the canonical Turn before a session switch can restore stale busy UI.
+      syncCanonicalSessionActivity(sessionKey, false);
       markSessionRunIdle(sessionKey);
       markSessionNeedsTerminalHistoryRefresh(sessionKey);
       clearPendingRuntimeIntent(sessionKey);
@@ -2080,47 +1507,228 @@ function beginSessionBackendIdleSettlement(sessionKey: string, expectedRunId?: s
       useChatStore.getState,
       confirmedSessions ?? useChatStore.getState().sessions,
     );
-    forceNextHistoryLoad(sessionKey);
-    void useChatStore.getState().loadHistory(true);
   })();
 }
 
-function sessionExecutionIsBusy(state: ChatState, sessionKey: string): boolean {
+function sessionExecutionIsBusy(
+  state: ChatState,
+  sessionKey: string,
+  ignoredTurnIds: ReadonlySet<string> = new Set(),
+): boolean {
   if (_sessionsCancelling.has(sessionKey) || _sessionsAwaitingBackendIdle.has(sessionKey)) return true;
-  const runState = sessionKey === state.currentSessionKey
-    ? state
-    : _sessionRunStateCache.get(sessionKey);
-  return Boolean(runState?.sending || runState?.activeRunId != null || runState?.pendingFinal);
+  const dispatchLeaseTurnId = _queuedChatSendDispatchLeaseBySession.get(sessionKey);
+  if (dispatchLeaseTurnId && !ignoredTurnIds.has(dispatchLeaseTurnId)) return true;
+  const conversation = useConversationStore.getState();
+  const activeTurn = selectActiveTurn(conversation, sessionKey);
+  if (activeTurn && !ignoredTurnIds.has(activeTurn.id)) return true;
+  return backendSessionReportsActive(state.sessions.find((session) => session.key === sessionKey));
 }
 
 function cloneQueuedAttachments(attachments: ChatSendAttachment[] | undefined): ChatSendAttachment[] | undefined {
   return attachments?.map((attachment) => ({ ...attachment }));
 }
 
-function enqueueChatSendForSession(
+function cloneQueuedTurnOwnership(
+  ownership: ChatQueuedTurnOwnership,
+  dequeuedFromQueue = false,
+): ChatQueuedTurnOwnership {
+  return {
+    ...ownership,
+    userMessage: {
+      ...ownership.userMessage,
+      _attachedFiles: ownership.userMessage._attachedFiles?.map((file) => ({ ...file })),
+    },
+    ...(dequeuedFromQueue ? { dequeuedFromQueue: true } : { dequeuedFromQueue: undefined }),
+  };
+}
+
+/** Create the stable canonical ownership that follows one accepted local send through the queue. */
+function beginChatSendTurn(
+  sessionKey: string,
+  text: string,
+  attachments: ChatSendAttachment[] | undefined,
+  mode: ChatSendMode,
+  activate: boolean,
+): ChatQueuedTurnOwnership {
+  const acceptedAt = Date.now();
+  const idempotencyKey = crypto.randomUUID();
+  const userMessage: RawMessage = {
+    role: 'user',
+    content: text || (attachments?.length ? '(file attached)' : ''),
+    timestamp: acceptedAt / 1000,
+    id: crypto.randomUUID(),
+    idempotencyKey,
+    _attachedFiles: attachments?.map((attachment) => ({
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      fileSize: attachment.fileSize,
+      preview: attachment.preview,
+      filePath: attachment.stagedPath,
+      source: 'user-upload',
+      disposition: 'input-reference',
+    })),
+  };
+  const turnId = useConversationStore.getState().beginLocalTurn({
+    sessionKey,
+    message: conversationMessageSnapshot(userMessage),
+    mode,
+    activate,
+  });
+  return { sessionKey, turnId, userMessage, idempotencyKey, acceptedAt };
+}
+
+/** Reserve a deferred queued Turn as the sole pending local owner before dispatch. */
+function activateQueuedChatSendTurn(
+  ownership: ChatQueuedTurnOwnership,
+  mode: ChatSendMode,
+): void {
+  const turnId = useConversationStore.getState().beginLocalTurn({
+    sessionKey: ownership.sessionKey,
+    message: conversationMessageSnapshot(ownership.userMessage),
+    mode,
+    activate: true,
+  });
+  if (turnId !== ownership.turnId) {
+    console.error('[chat.queue] queued Turn identity changed during activation', {
+      sessionKey: ownership.sessionKey,
+      queuedTurnId: ownership.turnId,
+      activatedTurnId: turnId,
+    });
+  }
+}
+
+function failQueuedChatSendTurn(ownership: ChatQueuedTurnOwnership, errorMessage: string): void {
+  useConversationStore.getState().ingestChatEvent({
+    state: 'error',
+    sessionKey: ownership.sessionKey,
+    errorMessage,
+  }, {
+    sessionKey: ownership.sessionKey,
+    turnId: ownership.turnId,
+  });
+}
+
+function locallyQueuedTurnIds(sessionKey: string, additionalTurnId?: string): Set<string> {
+  const turnIds = new Set(
+    (_queuedChatSendsBySession.get(sessionKey) ?? []).map((item) => item.ownership.turnId),
+  );
+  if (additionalTurnId) turnIds.add(additionalTurnId);
+  return turnIds;
+}
+
+function outboxAttachment(attachment: ChatSendAttachment) {
+  return {
+    fileName: attachment.fileName,
+    mimeType: attachment.mimeType,
+    fileSize: attachment.fileSize,
+    stagedPath: attachment.stagedPath,
+  };
+}
+
+function queuedChatSendToOutboxItem(item: QueuedChatSend): ChatSendOutboxItem {
+  const replayIntent = item.replayIntent;
+  return {
+    version: CHAT_SEND_OUTBOX_SCHEMA_VERSION,
+    id: item.ownership.idempotencyKey,
+    sessionKey: item.ownership.sessionKey,
+    turnId: item.ownership.turnId,
+    idempotencyKey: item.ownership.idempotencyKey,
+    userMessageId: item.ownership.userMessage.id ?? item.ownership.idempotencyKey,
+    acceptedAt: item.ownership.acceptedAt,
+    expiresAt: item.ownership.acceptedAt + CHAT_SEND_OUTBOX_TTL_MS,
+    text: item.text,
+    targetAgentId: item.targetAgentId ?? undefined,
+    mode: item.mode,
+    imageOptions: replayIntent?.imageOptions ?? item.imageOptions,
+    videoOptions: replayIntent?.videoOptions ?? item.videoOptions,
+    thinkingLevel: replayIntent?.thinkingLevel ?? undefined,
+    attachments: (item.attachments ?? []).map(outboxAttachment),
+    referenceImages: (replayIntent?.referenceImages ?? []).map(outboxAttachment),
+  };
+}
+
+async function persistQueuedChatSend(item: QueuedChatSend): Promise<void> {
+  const result = await hostApiFetch<{ success?: boolean; durable?: boolean; error?: string }>(
+    '/api/chat/outbox',
+    {
+      method: 'POST',
+      body: JSON.stringify({ item: queuedChatSendToOutboxItem(item) }),
+    },
+  );
+  if (result.success === false) throw new Error(result.error || 'Failed to persist queued send');
+  if (result.durable === false) {
+    console.warn('[chat.queue] safe storage unavailable; queued send is memory-only', {
+      sessionKey: item.ownership.sessionKey,
+      turnId: item.ownership.turnId,
+    });
+  }
+}
+
+async function acknowledgeQueuedChatSend(ownership: ChatQueuedTurnOwnership | undefined): Promise<void> {
+  if (!ownership?.dequeuedFromQueue) return;
+  await hostApiFetch(`/api/chat/outbox/${encodeURIComponent(ownership.idempotencyKey)}/ack`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+async function cancelSessionQueuedChatSends(sessionKey: string): Promise<void> {
+  await hostApiFetch('/api/chat/outbox/session/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ sessionKey }),
+  });
+}
+
+async function enqueueChatSendForSession(
   sessionKey: string,
   item: Omit<QueuedChatSend, 'enqueuedAt'>,
-): boolean {
-  const queue = _queuedChatSendsBySession.get(sessionKey) ?? [];
-  if (queue.length >= MAX_QUEUED_SENDS_PER_SESSION) {
+  options: { front?: boolean } = {},
+): Promise<boolean> {
+  const initialQueueLength = _queuedChatSendsBySession.get(sessionKey)?.length ?? 0;
+  if (initialQueueLength >= MAX_QUEUED_SENDS_PER_SESSION) {
     console.warn('[chat.queue] queue limit reached; preserving existing queued turns', {
       sessionKey,
-      queueLength: queue.length,
+      queueLength: initialQueueLength,
     });
     if (useChatStore.getState().currentSessionKey === sessionKey) {
-      useChatStore.setState({
-        error: i18n.t('chat:chatInput.queueLimitReached', { count: queue.length }),
-      });
+      useChatStore.setState({ error: i18n.t('chat:chatInput.queueLimitReached', { count: initialQueueLength }) });
     }
     return false;
   }
-  queue.push({
+  const queuedItem: QueuedChatSend = {
     ...item,
     attachments: cloneQueuedAttachments(item.attachments),
     imageOptions: item.imageOptions ? { ...item.imageOptions } : undefined,
     videoOptions: item.videoOptions ? { ...item.videoOptions } : undefined,
+    replayIntent: item.replayIntent ? cloneChatSendReplayIntent(item.replayIntent) : undefined,
+    ownership: cloneQueuedTurnOwnership(item.ownership),
     enqueuedAt: Date.now(),
-  });
+  };
+  try {
+    // Main owns durable acceptance; renderer memory remains the active dispatch cache.
+    await persistQueuedChatSend(queuedItem);
+  } catch (error) {
+    console.warn('[chat.queue] durable enqueue failed; preserving the in-process intent', {
+      sessionKey,
+      turnId: queuedItem.ownership.turnId,
+      error: String(error),
+    });
+  }
+  // Concurrent durable writes can settle out of order. Re-read the live queue
+  // after persistence, then restore acceptance order by the stable timestamp.
+  const queue = _queuedChatSendsBySession.get(sessionKey) ?? [];
+  if (queue.length >= MAX_QUEUED_SENDS_PER_SESSION) {
+    void hostApiFetch(`/api/chat/outbox/${encodeURIComponent(queuedItem.ownership.idempotencyKey)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'renderer-session-cap' }),
+    }).catch(() => undefined);
+    return false;
+  }
+  if (options.front) queue.unshift(queuedItem);
+  else {
+    queue.push(queuedItem);
+    queue.sort((left, right) => left.ownership.acceptedAt - right.ownership.acceptedAt);
+  }
   _queuedChatSendsBySession.set(sessionKey, queue);
   return true;
 }
@@ -2132,15 +1740,20 @@ function hasQueuedChatSends(sessionKey: string): boolean {
 function clearQueuedChatSends(sessionKey: string): void {
   _queuedChatSendsBySession.delete(sessionKey);
   _queuedChatSendFlushScheduled.delete(sessionKey);
+  _queuedChatSendDispatchLeaseBySession.delete(sessionKey);
+}
+
+function releaseQueuedChatSendDispatchLease(ownership: ChatQueuedTurnOwnership | undefined): void {
+  if (!ownership?.dequeuedFromQueue) return;
+  if (_queuedChatSendDispatchLeaseBySession.get(ownership.sessionKey) === ownership.turnId) {
+    _queuedChatSendDispatchLeaseBySession.delete(ownership.sessionKey);
+  }
 }
 
 function currentSessionCanFlushQueuedSend(sessionKey: string): boolean {
   const state = useChatStore.getState();
   return state.currentSessionKey === sessionKey
-    && !_sessionsAwaitingBackendIdle.has(sessionKey)
-    && !state.sending
-    && state.activeRunId == null
-    && !state.pendingFinal;
+    && !sessionExecutionIsBusy(state, sessionKey, locallyQueuedTurnIds(sessionKey));
 }
 
 function scheduleQueuedChatSendFlush(sessionKey: string): void {
@@ -2160,6 +1773,7 @@ function scheduleQueuedChatSendFlush(sessionKey: string): void {
     } else {
       _queuedChatSendsBySession.delete(sessionKey);
     }
+    _queuedChatSendDispatchLeaseBySession.set(sessionKey, next.ownership.turnId);
     void useChatStore.getState().sendMessage(
       next.text,
       cloneQueuedAttachments(next.attachments),
@@ -2167,28 +1781,152 @@ function scheduleQueuedChatSendFlush(sessionKey: string): void {
       next.mode,
       next.imageOptions ? { ...next.imageOptions } : undefined,
       next.videoOptions ? { ...next.videoOptions } : undefined,
+      next.replayIntent ? cloneChatSendReplayIntent(next.replayIntent) : undefined,
+      cloneQueuedTurnOwnership(next.ownership, true),
     );
   });
 }
 
-function mergeSessionRunStatePatch(
-  base: SessionRunState,
-  patch: Partial<SessionRunState>,
-): SessionRunState {
-  return {
-    sending: patch.sending ?? base.sending,
-    pendingImageGenerationLocal: patch.pendingImageGenerationLocal ?? base.pendingImageGenerationLocal,
-    pendingVideoGenerationLocal: patch.pendingVideoGenerationLocal ?? base.pendingVideoGenerationLocal,
-    activeRunId: patch.activeRunId !== undefined ? patch.activeRunId : base.activeRunId,
-    pendingFinal: patch.pendingFinal ?? base.pendingFinal,
-    lastUserMessageAt: patch.lastUserMessageAt !== undefined ? patch.lastUserMessageAt : base.lastUserMessageAt,
-    streamingText: patch.streamingText ?? base.streamingText,
-    streamingMessage: patch.streamingMessage !== undefined ? patch.streamingMessage : base.streamingMessage,
-    streamingTools: patch.streamingTools ? [...patch.streamingTools] : [...base.streamingTools],
-    pendingToolImages: patch.pendingToolImages
-      ? patch.pendingToolImages.map((file) => ({ ...file }))
-      : base.pendingToolImages.map((file) => ({ ...file })),
+function outboxItemToQueuedChatSend(item: ChatSendOutboxItem): QueuedChatSend {
+  const attachments = item.attachments.map((attachment): ChatSendAttachment => ({
+    ...attachment,
+    preview: null,
+  }));
+  const referenceImages = item.referenceImages.map((attachment): ChatSendAttachment => ({
+    ...attachment,
+    preview: null,
+  }));
+  const selectedArtifacts = [...attachments, ...referenceImages]
+    .filter((attachment) => attachment.mimeType.startsWith('image/'));
+  const replayIntent: ChatSendReplayIntent = {
+    imageOptions: item.imageOptions ? { ...item.imageOptions } : undefined,
+    videoOptions: item.videoOptions ? { ...item.videoOptions } : undefined,
+    thinkingLevel: item.thinkingLevel,
+    referenceImages,
+    clientPreferences: buildGatewayTurnPreferences({
+      mode: item.mode,
+      prompt: item.text.trim(),
+      hasSourceImage: selectedArtifacts.length > 0,
+      imageOptions: item.imageOptions,
+      videoOptions: item.videoOptions,
+      selectedArtifacts,
+    }),
   };
+  const userMessage: RawMessage = {
+    role: 'user',
+    id: item.userMessageId,
+    idempotencyKey: item.idempotencyKey,
+    timestamp: item.acceptedAt / 1_000,
+    content: item.text || (attachments.length > 0 ? '(file attached)' : ''),
+    _attachedFiles: attachments.map((attachment) => ({
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      fileSize: attachment.fileSize,
+      preview: null,
+      filePath: attachment.stagedPath,
+      source: 'user-upload',
+      disposition: 'input-reference',
+    })),
+  };
+  return {
+    text: item.text,
+    attachments,
+    targetAgentId: item.targetAgentId ?? null,
+    mode: item.mode,
+    imageOptions: item.imageOptions ? { ...item.imageOptions } : undefined,
+    videoOptions: item.videoOptions ? { ...item.videoOptions } : undefined,
+    replayIntent,
+    ownership: {
+      sessionKey: item.sessionKey,
+      turnId: item.turnId,
+      userMessage,
+      idempotencyKey: item.idempotencyKey,
+      acceptedAt: item.acceptedAt,
+    },
+    enqueuedAt: item.acceptedAt,
+  };
+}
+
+function transcriptContainsOutboxIntent(messages: RawMessage[], item: ChatSendOutboxItem): boolean {
+  return messages.some((message) => (
+    message.role === 'user'
+    && (
+      message.idempotencyKey === item.idempotencyKey
+      || message.id === item.idempotencyKey
+    )
+  ));
+}
+
+function restoreQueuedChatSendToMemory(item: ChatSendOutboxItem): void {
+  const queue = _queuedChatSendsBySession.get(item.sessionKey) ?? [];
+  if (queue.some((candidate) => candidate.ownership.idempotencyKey === item.idempotencyKey)) return;
+  if (queue.length >= MAX_QUEUED_SENDS_PER_SESSION) return;
+  const queuedItem = outboxItemToQueuedChatSend(item);
+  const restoredTurnId = useConversationStore.getState().beginLocalTurn({
+    sessionKey: item.sessionKey,
+    message: conversationMessageSnapshot(queuedItem.ownership.userMessage),
+    mode: item.mode,
+    activate: false,
+  });
+  if (restoredTurnId !== item.turnId) {
+    console.error('[chat.queue] restored outbox Turn identity changed', {
+      sessionKey: item.sessionKey,
+      persistedTurnId: item.turnId,
+      restoredTurnId,
+    });
+  }
+  queue.push(queuedItem);
+  queue.sort((left, right) => left.enqueuedAt - right.enqueuedAt);
+  _queuedChatSendsBySession.set(item.sessionKey, queue);
+}
+
+function rejectRestoredChatSend(item: ChatSendOutboxItem, errorMessage: string): void {
+  const queuedItem = outboxItemToQueuedChatSend(item);
+  useConversationStore.getState().beginLocalTurn({
+    sessionKey: item.sessionKey,
+    message: conversationMessageSnapshot(queuedItem.ownership.userMessage),
+    mode: item.mode,
+    activate: false,
+  });
+  failQueuedChatSendTurn(queuedItem.ownership, errorMessage);
+}
+
+/** Reconcile encrypted Main outbox records with local transcripts before retry. */
+async function restoreChatSendOutbox(): Promise<void> {
+  if (_chatSendOutboxRestoreCompleted) return;
+  if (_chatSendOutboxRestoreInFlight) return _chatSendOutboxRestoreInFlight;
+  _chatSendOutboxRestoreInFlight = (async () => {
+    const response = await hostApiFetch<Partial<ChatSendOutboxListResult> & { success?: boolean; error?: string }>(
+      '/api/chat/outbox',
+    );
+    if (response.success === false) throw new Error(response.error || 'Failed to restore queued sends');
+    const items = Array.isArray(response.items) ? response.items : [];
+    const rejected = Array.isArray(response.rejected) ? response.rejected : [];
+    rejected.forEach((item) => rejectRestoredChatSend(item, item.error));
+
+    const transcriptBySession = new Map<string, RawMessage[]>();
+    await Promise.all([...new Set(items.map((item) => item.sessionKey))].map(async (sessionKey) => {
+      transcriptBySession.set(sessionKey, await loadSessionTranscriptFallback(sessionKey, 200));
+    }));
+    for (const item of items) {
+      const transcript = transcriptBySession.get(item.sessionKey) ?? [];
+      if (transcriptContainsOutboxIntent(transcript, item)) {
+        await hostApiFetch(`/api/chat/outbox/${encodeURIComponent(item.id)}/ack`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: 'transcript-reconciled' }),
+        });
+        continue;
+      }
+      restoreQueuedChatSendToMemory(item);
+    }
+    _chatSendOutboxRestoreCompleted = true;
+    scheduleQueuedChatSendFlush(useChatStore.getState().currentSessionKey);
+  })();
+  try {
+    await _chatSendOutboxRestoreInFlight;
+  } finally {
+    _chatSendOutboxRestoreInFlight = null;
+  }
 }
 
 function commitSessionRunState(
@@ -2274,109 +2012,9 @@ function clearCachedSessionHistory(sessionKey: string): void {
   _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
 }
 
-function captureSessionRunState(sessionKey: string, state: SessionRunState): void {
-  setBoundedMapEntry(
-    _sessionRunStateCache,
-    sessionKey,
-    {
-      sending: state.sending,
-      pendingImageGenerationLocal: state.pendingImageGenerationLocal,
-      pendingVideoGenerationLocal: state.pendingVideoGenerationLocal,
-      activeRunId: state.activeRunId,
-      pendingFinal: state.pendingFinal,
-      lastUserMessageAt: state.lastUserMessageAt,
-      streamingText: state.streamingText,
-      streamingMessage: state.streamingMessage,
-      streamingTools: [...state.streamingTools],
-      pendingToolImages: state.pendingToolImages.map((file) => ({ ...file })),
-    },
-    SESSION_RUN_STATE_CACHE_MAX_SESSIONS,
-  );
-}
-
-function getCachedSessionRunState(sessionKey: string): SessionRunState {
-  const cached = getBoundedMapEntry(_sessionRunStateCache, sessionKey);
-  if (!cached) return DEFAULT_SESSION_RUN_STATE;
-  return {
-    sending: cached.sending,
-    pendingImageGenerationLocal: cached.pendingImageGenerationLocal,
-    pendingVideoGenerationLocal: cached.pendingVideoGenerationLocal,
-    activeRunId: cached.activeRunId,
-    pendingFinal: cached.pendingFinal,
-    lastUserMessageAt: cached.lastUserMessageAt,
-    streamingText: cached.streamingText,
-    streamingMessage: cached.streamingMessage,
-    streamingTools: [...cached.streamingTools],
-    pendingToolImages: cached.pendingToolImages.map((file) => ({ ...file })),
-  };
-}
-
 function clearCachedSessionRunState(sessionKey: string): void {
-  _sessionRunStateCache.delete(sessionKey);
+  clearSessionRunStateCache(sessionKey);
   _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
-}
-
-function cloneSessionRunState(state: SessionRunState): SessionRunState {
-  return {
-    sending: state.sending,
-    pendingImageGenerationLocal: state.pendingImageGenerationLocal,
-    pendingVideoGenerationLocal: state.pendingVideoGenerationLocal,
-    activeRunId: state.activeRunId,
-    pendingFinal: state.pendingFinal,
-    lastUserMessageAt: state.lastUserMessageAt,
-    streamingText: state.streamingText,
-    streamingMessage: state.streamingMessage,
-    streamingTools: [...state.streamingTools],
-    pendingToolImages: state.pendingToolImages.map((file) => ({ ...file })),
-  };
-}
-
-function updateCachedSessionRunStateFromRuntimeEvent(
-  event: ChatRuntimeEvent,
-  runtimeRuns: ChatState['runtimeRuns'],
-  holdForAsyncTask = false,
-): void {
-  const sessionKey = event.sessionKey;
-  if (!sessionKey) return;
-  const cached = _sessionRunStateCache.get(sessionKey);
-  if (!cached) return;
-
-  const next = cloneSessionRunState(cached);
-  const matchesCachedRun = next.activeRunId != null && event.runId === next.activeRunId;
-  const cachedTurnStartMs = optionalToMs(next.lastUserMessageAt);
-  const eventRunStartMs = getRuntimeRunFirstEventMs(runtimeRuns[event.runId]);
-  const eventRunPredatesCachedTurn = cachedTurnStartMs != null
-    && eventRunStartMs != null
-    && eventRunStartMs < cachedTurnStartMs - ACTIVE_TURN_BOUNDARY_SKEW_MS;
-  const isCurrentUntrackedSend = next.activeRunId == null
-    && next.sending
-    && !eventRunPredatesCachedTurn
-    && (
-      typeof event.ts !== 'number'
-      || next.lastUserMessageAt == null
-      || event.ts >= next.lastUserMessageAt - 1_000
-    );
-
-  if (event.type === 'run.started') {
-    if (next.activeRunId == null || matchesCachedRun) {
-      next.activeRunId = event.runId;
-      next.sending = true;
-    }
-    _sessionRunStateCache.set(sessionKey, next);
-    return;
-  }
-
-  if (event.type === 'run.ended' && (matchesCachedRun || isCurrentUntrackedSend)) {
-    if (holdForAsyncTask) {
-      next.sending = true;
-      next.activeRunId = event.runId;
-      next.pendingFinal = true;
-      _sessionRunStateCache.set(sessionKey, next);
-      return;
-    }
-    markSessionRunIdle(sessionKey);
-    markSessionNeedsTerminalHistoryRefresh(sessionKey);
-  }
 }
 
 function getHistoryForegroundLoadKey(sessionKey: string): string {
@@ -2384,434 +2022,6 @@ function getHistoryForegroundLoadKey(sessionKey: string): string {
   const gatewayStatus = gatewayState?.status;
   const gatewayRuntimeKey = `${gatewayStatus?.pid ?? 'none'}:${gatewayStatus?.connectedAt ?? 'none'}:${gatewayStatus?.port ?? 'none'}`;
   return `${gatewayRuntimeKey}|${sessionKey}`;
-}
-
-function pruneChatEventDedupe(now: number): void {
-  for (const [key, ts] of _chatEventDedupe.entries()) {
-    if (now - ts > CHAT_EVENT_DEDUPE_TTL_MS) {
-      _chatEventDedupe.delete(key);
-    }
-  }
-}
-
-function buildChatEventDedupeKey(eventState: string, event: Record<string, unknown>): string | null {
-  const runId = event.runId != null ? String(event.runId) : '';
-  const sessionKey = event.sessionKey != null ? String(event.sessionKey) : '';
-  const seq = event.seq != null ? String(event.seq) : '';
-  if (eventState === 'final' && !seq) {
-    const message = event.message && typeof event.message === 'object'
-      ? event.message as Record<string, unknown>
-      : null;
-    const messageId = message?.id != null ? String(message.id) : '';
-    const fingerprint = hashStringForLocalMessageId(JSON.stringify(message ?? event));
-    return ['final-nosq', runId, sessionKey, messageId || fingerprint].join('|');
-  }
-  // Some gateways emit multiple `delta` updates without a monotonically
-  // increasing `seq`. Deduping those by just `runId + sessionKey + state`
-  // collapses legitimate stream progression, so only seq-backed deltas are
-  // safe to dedupe generically.
-  if (eventState === 'delta' && !seq) {
-    return null;
-  }
-  if (runId || sessionKey || seq || eventState) {
-    return [runId, sessionKey, seq, eventState].join('|');
-  }
-  const msg = (event.message && typeof event.message === 'object')
-    ? event.message as Record<string, unknown>
-    : null;
-  if (msg) {
-    const messageId = msg.id != null ? String(msg.id) : '';
-    const stopReason = msg.stopReason ?? msg.stop_reason;
-    if (messageId || stopReason) {
-      return `msg|${messageId}|${String(stopReason ?? '')}|${eventState}`;
-    }
-  }
-  return null;
-}
-
-function getFinalMessageIdDedupeKey(eventState: string, event: Record<string, unknown>): string | null {
-  if (eventState !== 'final') return null;
-  const msg = (event.message && typeof event.message === 'object')
-    ? event.message as Record<string, unknown>
-    : null;
-  if (msg?.id != null) return `final-msgid|${String(msg.id)}`;
-  return null;
-}
-
-function isDuplicateChatEvent(eventState: string, event: Record<string, unknown>): boolean {
-  const key = buildChatEventDedupeKey(eventState, event);
-  const msgKey = getFinalMessageIdDedupeKey(eventState, event);
-  if (!key && !msgKey) return false;
-  const now = Date.now();
-  pruneChatEventDedupe(now);
-  if ((key && _chatEventDedupe.has(key)) || (msgKey && _chatEventDedupe.has(msgKey))) {
-    return true;
-  }
-  if (key) _chatEventDedupe.set(key, now);
-  if (msgKey) _chatEventDedupe.set(msgKey, now);
-  return false;
-}
-
-// ── Local image cache ─────────────────────────────────────────
-// The Gateway doesn't store image attachments in session content blocks,
-// so we cache them locally keyed by staged file path (which appears in the
-// [media attached: <path> ...] reference in the Gateway's user message text).
-// Keying by path avoids the race condition of keying by runId (which is only
-// available after the RPC returns, but history may load before that).
-const IMAGE_CACHE_KEY = 'clawx:image-cache';
-const IMAGE_CACHE_MAX = 100; // max entries to prevent unbounded growth
-
-function loadImageCache(): Map<string, AttachedFileMeta> {
-  try {
-    const raw = localStorage.getItem(IMAGE_CACHE_KEY);
-    if (raw) {
-      const entries = JSON.parse(raw) as Array<[string, AttachedFileMeta]>;
-      return new Map(entries);
-    }
-  } catch { /* ignore parse errors */ }
-  return new Map();
-}
-
-function saveImageCache(cache: Map<string, AttachedFileMeta>): void {
-  try {
-    // Evict oldest entries if over limit
-    const entries = Array.from(cache.entries());
-    const trimmed = entries.length > IMAGE_CACHE_MAX
-      ? entries.slice(entries.length - IMAGE_CACHE_MAX)
-      : entries;
-    localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(trimmed));
-  } catch { /* ignore quota errors */ }
-}
-
-const _imageCache = loadImageCache();
-
-function normalizeBlockText(text: string | undefined): string {
-  return typeof text === 'string' ? text.replace(/\r\n/g, '\n').trim() : '';
-}
-
-function compactProgressiveTextParts(parts: string[]): string[] {
-  const compacted: string[] = [];
-
-  for (const part of parts) {
-    const current = normalizeBlockText(part);
-    if (!current) continue;
-
-    const previous = compacted.at(-1);
-    if (!previous) {
-      compacted.push(part);
-      continue;
-    }
-
-    const normalizedPrevious = normalizeBlockText(previous);
-    if (!normalizedPrevious) {
-      compacted[compacted.length - 1] = part;
-      continue;
-    }
-
-    if (current === normalizedPrevious || normalizedPrevious.startsWith(current)) {
-      continue;
-    }
-
-    if (current.startsWith(normalizedPrevious)) {
-      compacted[compacted.length - 1] = part;
-      continue;
-    }
-
-    compacted.push(part);
-  }
-
-  return compacted;
-}
-
-function normalizeLiveContentBlocks(content: ContentBlock[]): ContentBlock[] {
-  return content.map((block) => ({ ...block }));
-}
-
-function normalizeStreamingMessage(message: unknown): unknown {
-  if (!message || typeof message !== 'object') return message;
-
-  const rawMessage = message as RawMessage;
-  const rawContent = rawMessage.content;
-  if (!Array.isArray(rawContent)) return rawMessage;
-
-  const normalizedContent = normalizeLiveContentBlocks(rawContent as ContentBlock[]);
-  const didChange = normalizedContent.some((block, index) => block !== rawContent[index])
-    || normalizedContent.length !== rawContent.length;
-
-  return didChange
-    ? { ...rawMessage, content: normalizedContent }
-    : rawMessage;
-}
-
-/**
- * Strip Gateway-injected metadata that does NOT exist on the renderer's
- * optimistic user message but is echoed back when the Gateway persists it:
- *   - leading sender metadata `Sender (untrusted metadata): ...`
- *   - leading timestamp `[Wed 2026-04-22 10:30 GMT+8] `
- *   - `[message_id: uuid]` tags sprinkled throughout the text
- *   - `[media attached: path (mime) | path]` references appended when the
- *     renderer sends attachments via `chat:sendWithMedia`
- *   - Gateway-injected "Conversation info (untrusted metadata): ..." blocks
- *
- * Keeping this aligned with `cleanUserText` in `pages/Chat/message-utils.ts`
- * is important: the user bubble renders the cleaned text, so the comparison
- * used to dedupe optimistic vs server echoes must operate on the same
- * cleaned form  - otherwise the same visible message renders twice.
- *
- * Order matters: the `[media attached: ...]` lines are commonly emitted
- * BETWEEN the Sender block and the `[Mon ... GMT+8]` timestamp prefix.
- * If we strip the timestamp before the media-attached lines, the timestamp
- * regex (`^\s*\[(?:Mon|...)]`) can never match because the leading `[` is
- * `[media attached:` instead  - leaving the timestamp in the normalized
- * comparison text and breaking optimistic-vs-echo dedupe.
- */
-function stripInboundMediaVisionEnvelope(text: string): string {
-  if (!/\[Image\]/i.test(text) && !/^User text:/im.test(text) && !/\nDescription:\s*\n/i.test(text)) {
-    return text;
-  }
-
-  let result = text.replace(/^\s*\[Image\]\s*\n?/i, '');
-
-  const userTextBlock = result.match(/^User text:\s*\n([\s\S]*?)(?:\n\s*Description:\s*\n[\s\S]*)?\s*$/i);
-  if (userTextBlock) {
-    const userText = userTextBlock[1].trim();
-    return /^Process the attached file\(s\)\.\s*$/i.test(userText) ? '' : userText;
-  }
-
-  return result.replace(/\n\s*Description:\s*\n[\s\S]*$/i, '').trim();
-}
-
-function stripGatewayUserMetadata(text: string): string {
-  return stripInboundMediaVisionEnvelope(
-    text
-    .replace(/\s*\[media attached:[^\]]*\]/g, '')
-    .replace(/\s*\[message_id:\s*[^\]]+\]/g, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*\([^)]*\)\s*:\s*[^\n]*(?:\n\s*)*/i, '')
-    .replace(/^Sender\s*:\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Sender\s*:\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^Sender\s*:\s*[^\n]*(?:\n\s*)*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*```[a-z]*\n[\s\S]*?```\s*/i, '')
-    .replace(/^Conversation info\s*\([^)]*\):\s*\{[\s\S]*?\}\s*/i, '')
-    .replace(/^\s*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+[^\]]+\]\s*/i, ''),
-  );
-}
-
-function normalizeComparableUserText(content: unknown): string {
-  const text = stripGatewayUserMetadata(getMessageText(content))
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (/^\(file attached\)$/i.test(text)) return '';
-  return text;
-}
-
-function getComparableAttachmentSignature(message: Pick<RawMessage, '_attachedFiles'>): string {
-  const files = (message._attachedFiles || [])
-    .map((file) => file.filePath || `${file.fileName}|${file.mimeType}|${file.fileSize}`)
-    .filter(Boolean)
-    .sort();
-  return files.join('::');
-}
-
-function matchesOptimisticUserMessage(
-  candidate: RawMessage,
-  optimistic: RawMessage,
-  optimisticTimestampMs: number,
-): boolean {
-  if (candidate.role !== 'user') return false;
-
-  const optimisticText = normalizeComparableUserText(optimistic.content);
-  const candidateText = normalizeComparableUserText(candidate.content);
-  const sameText = optimisticText.length > 0 && optimisticText === candidateText;
-
-  const optimisticAttachments = getComparableAttachmentSignature(optimistic);
-  const candidateAttachments = getComparableAttachmentSignature(candidate);
-  const sameAttachments = optimisticAttachments.length > 0 && optimisticAttachments === candidateAttachments;
-
-  const hasOptimisticTimestamp = Number.isFinite(optimisticTimestampMs) && optimisticTimestampMs > 0;
-  const hasCandidateTimestamp = candidate.timestamp != null;
-  const timestampMatches = hasOptimisticTimestamp && hasCandidateTimestamp
-    ? Math.abs(toMs(candidate.timestamp as number) - optimisticTimestampMs) < OPTIMISTIC_USER_TIMESTAMP_MATCH_MS
-    : false;
-
-  if (sameText && sameAttachments) return true;
-  if (sameText && (!optimisticAttachments || !candidateAttachments) && (timestampMatches || !hasCandidateTimestamp)) return true;
-  if (sameAttachments && (!optimisticText || !candidateText) && (timestampMatches || !hasCandidateTimestamp)) return true;
-
-  const optimisticHadAttachmentsOnly = optimisticAttachments.length > 0 && !optimisticText;
-  const candidateIsAttachmentEcho = !candidateText
-    && /\[(?:media attached:|\s*Image\s*\])/i.test(getMessageText(candidate.content));
-  if (optimisticHadAttachmentsOnly && candidateIsAttachmentEcho && (timestampMatches || !hasCandidateTimestamp)) {
-    return true;
-  }
-  return false;
-}
-
-function rememberPendingOptimisticUserMessage(sessionKey: string, message: RawMessage, timestampMs: number): void {
-  const now = Date.now();
-  const existing = (_pendingOptimisticUserMessages.get(sessionKey) || [])
-    .filter((entry) => now - entry.createdAtMs <= OPTIMISTIC_USER_MESSAGE_TTL_MS);
-  existing.push({ message, timestampMs, createdAtMs: now });
-  _pendingOptimisticUserMessages.set(sessionKey, existing);
-}
-
-function clearPendingOptimisticUserMessages(sessionKey: string): void {
-  _pendingOptimisticUserMessages.delete(sessionKey);
-}
-
-function discardPendingOptimisticUserMessage(sessionKey: string, messageId: string | undefined): void {
-  if (!messageId) return;
-
-  const remaining = (_pendingOptimisticUserMessages.get(sessionKey) || [])
-    .filter((entry) => entry.message.id !== messageId);
-  if (remaining.length > 0) {
-    _pendingOptimisticUserMessages.set(sessionKey, remaining);
-  } else {
-    _pendingOptimisticUserMessages.delete(sessionKey);
-  }
-
-  const cached = _sessionHistoryCache.get(sessionKey);
-  if (cached) {
-    cacheSessionHistory(
-      sessionKey,
-      cached.messages.filter((message) => message.id !== messageId),
-      cached.thinkingLevel,
-    );
-  }
-}
-
-function mergePendingOptimisticUserMessages(sessionKey: string, loadedMessages: RawMessage[]): RawMessage[] {
-  const pending = _pendingOptimisticUserMessages.get(sessionKey);
-  if (!pending || pending.length === 0) return loadedMessages;
-
-  const now = Date.now();
-  let merged = loadedMessages;
-  const stillPending: PendingOptimisticUserMessage[] = [];
-
-  for (const entry of pending) {
-    if (now - entry.createdAtMs > OPTIMISTIC_USER_MESSAGE_TTL_MS) {
-      continue;
-    }
-
-    const hasServerEcho = hasOptimisticServerEcho(loadedMessages, entry.message, entry.timestampMs);
-    if (hasServerEcho) {
-      continue;
-    }
-
-    const alreadyRendered = merged.some((message) =>
-      message.id === entry.message.id || matchesOptimisticUserMessage(message, entry.message, entry.timestampMs),
-    );
-    if (!alreadyRendered) {
-      const insertAt = merged.findIndex((message) =>
-        typeof message.timestamp === 'number' && toMs(message.timestamp) > entry.timestampMs,
-      );
-      merged = insertAt === -1
-        ? [...merged, entry.message]
-        : [...merged.slice(0, insertAt), entry.message, ...merged.slice(insertAt)];
-    }
-
-    stillPending.push(entry);
-  }
-
-  if (stillPending.length > 0) {
-    _pendingOptimisticUserMessages.set(sessionKey, stillPending);
-  } else {
-    _pendingOptimisticUserMessages.delete(sessionKey);
-  }
-
-  return merged;
-}
-
-function snapshotStreamingAssistantMessage(
-  currentStream: RawMessage | null,
-  existingMessages: RawMessage[],
-  runId: string,
-): RawMessage[] {
-  if (!currentStream) return [];
-
-  const normalizedStream = normalizeStreamingMessage(currentStream) as RawMessage;
-  const streamRole = normalizedStream.role;
-  if (streamRole !== 'assistant' && streamRole !== undefined) return [];
-
-  const snapId = normalizedStream.id || `${runId || 'run'}-turn-${existingMessages.length}`;
-  if (existingMessages.some((message) => message.id === snapId)) return [];
-
-  return [{
-    ...normalizedStream,
-    role: 'assistant',
-    id: snapId,
-  }];
-}
-
-function getLatestOptimisticUserMessage(messages: RawMessage[], userTimestampMs: number): RawMessage | undefined {
-  return [...messages].reverse().find(
-    (message) => message.role === 'user'
-      && (!message.timestamp || Math.abs(toMs(message.timestamp) - userTimestampMs) < OPTIMISTIC_USER_TIMESTAMP_MATCH_MS),
-  );
-}
-
-function hasOptimisticServerEcho(
-  loadedMessages: RawMessage[],
-  optimistic: RawMessage,
-  optimisticTimestampMs: number,
-): boolean {
-  if (loadedMessages.some((message) =>
-    matchesOptimisticUserMessage(message, optimistic, optimisticTimestampMs),
-  )) {
-    return true;
-  }
-
-  const optimisticText = normalizeComparableUserText(optimistic.content);
-  if (!optimisticText) return false;
-
-  const matchingUsers = loadedMessages.filter(
-    (message) => message.role === 'user'
-      && normalizeComparableUserText(message.content) === optimisticText,
-  );
-  if (matchingUsers.length !== 1) return false;
-
-  const candidate = matchingUsers[0]!;
-  if (candidate.timestamp == null) return true;
-
-  return Math.abs(toMs(candidate.timestamp as number) - optimisticTimestampMs) < OPTIMISTIC_USER_TIMESTAMP_MATCH_MS;
-}
-
-function dropRedundantOptimisticUserMessages(sessionKey: string, messages: RawMessage[]): RawMessage[] {
-  const pending = _pendingOptimisticUserMessages.get(sessionKey);
-  if (!pending?.length) return messages;
-
-  const pendingIds = new Set(
-    pending
-      .map((entry) => entry.message.id)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0),
-  );
-  if (pendingIds.size === 0) return messages;
-
-  return messages.filter((message) => {
-    if (message.role !== 'user' || !message.id || !pendingIds.has(message.id)) {
-      return true;
-    }
-    const entry = pending.find((candidate) => candidate.message.id === message.id);
-    if (!entry) return true;
-    return !hasOptimisticServerEcho(
-      messages.filter((candidate) => candidate !== message),
-      entry.message,
-      entry.timestampMs,
-    );
-  });
-}
-
-/** Extract plain text from message content (string or content blocks) */
-function getMessageText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    const parts = (content as Array<{ type?: string; text?: string }>)
-      .filter(b => b.type === 'text' && b.text)
-      .map(b => b.text!);
-    return compactProgressiveTextParts(parts).join('\n');
-  }
-  return '';
 }
 
 function getMessageStopReason(message: RawMessage | unknown): string | null {
@@ -2836,404 +2046,6 @@ function isTerminalAssistantErrorMessage(message: RawMessage | unknown): boolean
   if (!message || typeof message !== 'object') return false;
   const msg = message as Record<string, unknown>;
   return msg.role === 'assistant' && getMessageStopReason(message) === 'error';
-}
-
-/** Extract media file refs from [media attached: <path> (<mime>) | ...] patterns */
-function extractMediaRefs(text: string): Array<{ filePath: string; mimeType: string }> {
-  const refs: Array<{ filePath: string; mimeType: string }> = [];
-  const regex = /\[media attached:\s*([^\s(]+)\s*\(([^)]+)\)\s*\|[^\]]*\]/g;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    refs.push({ filePath: match[1], mimeType: match[2] });
-  }
-  return refs;
-}
-
-/** Map common file extensions to MIME types */
-function mimeFromExtension(filePath: string): string {
-  let pathForExtension = filePath.trim();
-  if (/^https?:\/\//i.test(pathForExtension)) {
-    try {
-      pathForExtension = new URL(pathForExtension).pathname;
-    } catch {
-      pathForExtension = pathForExtension.split(/[?#]/)[0] || pathForExtension;
-    }
-  } else {
-    pathForExtension = pathForExtension.split(/[?#]/)[0] || pathForExtension;
-  }
-  const ext = pathForExtension.split('.').pop()?.toLowerCase() || '';
-  const map: Record<string, string> = {
-    // Images
-    'png': 'image/png',
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg',
-    'gif': 'image/gif',
-    'webp': 'image/webp',
-    'bmp': 'image/bmp',
-    'avif': 'image/avif',
-    'svg': 'image/svg+xml',
-    // Documents
-    'pdf': 'application/pdf',
-    'doc': 'application/msword',
-    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'xls': 'application/vnd.ms-excel',
-    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'ppt': 'application/vnd.ms-powerpoint',
-    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    'txt': 'text/plain',
-    'csv': 'text/csv',
-    'md': 'text/markdown',
-    'rtf': 'application/rtf',
-    'epub': 'application/epub+zip',
-    // Archives
-    'zip': 'application/zip',
-    'tar': 'application/x-tar',
-    'gz': 'application/gzip',
-    'rar': 'application/vnd.rar',
-    '7z': 'application/x-7z-compressed',
-    // Audio
-    'mp3': 'audio/mpeg',
-    'wav': 'audio/wav',
-    'ogg': 'audio/ogg',
-    'aac': 'audio/aac',
-    'flac': 'audio/flac',
-    'm4a': 'audio/mp4',
-    // Video
-    'mp4': 'video/mp4',
-    'mov': 'video/quicktime',
-    'avi': 'video/x-msvideo',
-    'mkv': 'video/x-matroska',
-    'webm': 'video/webm',
-    'm4v': 'video/mp4',
-  };
-  return map[ext] || 'application/octet-stream';
-}
-
-function mimeFromTaggedMediaRef(filePath: string): string {
-  const mimeType = mimeFromExtension(filePath);
-  if (mimeType !== 'application/octet-stream') return mimeType;
-  return /^https?:\/\//i.test(filePath.trim()) ? 'video/mp4' : mimeType;
-}
-
-function extractFilePathsFromToolArgs(args: Record<string, unknown>): string[] {
-  const paths: string[] = [];
-  const direct = args.file_path ?? args.filePath ?? args.path ?? args.file;
-  if (typeof direct === 'string' && direct.trim()) paths.push(direct.trim());
-
-  const attachments = args.attachments;
-  if (Array.isArray(attachments)) {
-    for (const item of attachments) {
-      if (!item || typeof item !== 'object') continue;
-      const att = item as Record<string, unknown>;
-      const filePath = att.filePath ?? att.file_path ?? att.path ?? att.file;
-      if (typeof filePath === 'string' && filePath.trim()) {
-        paths.push(filePath.trim());
-      }
-    }
-  }
-
-  return paths;
-}
-
-const DIRECTORY_MIME_TYPE = 'application/x-directory';
-
-function looksLikeRemoteMediaUrl(filePath: string): boolean {
-  return /^https?:\/\//i.test(filePath.trim());
-}
-
-function fileNameFromMediaRef(filePath: string, mimeType: string): string {
-  if (looksLikeRemoteMediaUrl(filePath)) {
-    try {
-      const remoteName = decodeURIComponent(new URL(filePath).pathname.split('/').filter(Boolean).pop() || '');
-      if (remoteName.includes('.')) return remoteName;
-    } catch {
-      // Fall through to a stable MIME-based name.
-    }
-    if (mimeType.startsWith('video/')) return 'video.mp4';
-    if (mimeType.startsWith('audio/')) return 'audio.mp3';
-    if (mimeType.startsWith('image/')) return 'image';
-    return 'remote-file';
-  }
-  return filePath.split(/[\\/]/).pop()?.split(/[?#]/)[0] || 'file';
-}
-
-function trimPathTerminators(filePath: string): string {
-  return filePath.replace(/[，。；;,.!?]+$/u, '');
-}
-
-/**
- * Extract raw file paths from message text.
- * Detects absolute paths (Unix: / or ~/, Windows: C:\ etc.) ending with common file extensions.
- * Handles both image and non-image files, consistent with channel push message behavior.
- *
- * Also recognises the `MEDIA:` / `media:` prefix the OpenClaw runtime
- * emits for produced artifacts (e.g.
- * `MEDIA:/tmp/desktop_screenshot.png`, `MEDIA:C:\Users\me\out.svg`)  - without this the leading colon
- * trips the URL guard on the unix regex below and the artifact never
- * surfaces as an attachment. Mirrors `chat/helpers.ts::extractRawFilePaths`.
- */
-function extractRawFilePaths(text: string): Array<{ filePath: string; mimeType: string }> {
-  const refs: Array<{ filePath: string; mimeType: string }> = [];
-  const seen = new Set<string>();
-  const exts = 'png|jpe?g|gif|webp|bmp|avif|svg|pdf|docx?|xlsx?|pptx?|html?|txt|csv|md|rtf|epub|zip|tar|gz|rar|7z|mp3|wav|ogg|aac|flac|m4a|mp4|mov|avi|mkv|webm|m4v';
-  // Tagged media references (MEDIA:/path, media:~/path, MEDIA:C:\path, ...). The agent
-  // runtime uses this prefix as an explicit "this is an artifact" marker,
-  // so we want them recognised even though the leading colon would
-  // normally look like a URL scheme. After matching we punch the entire
-  // `MEDIA:<path>` span out of the working text so the generic unix
-  // regex below doesn't double-count the bare `/path` suffix.
-  // The character class deliberately allows ASCII spaces inside the path so
-  // that macOS' default screenshot filename ("截屏 2026-05-06 17.46.51.png")
-  // and other space-containing paths the agent emits with the explicit
-  // `MEDIA:` marker still resolve. Newline and quote characters remain
-  // path terminators so we don't accidentally swallow trailing prose.
-  const taggedRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):((?:\\/|~\\/|[A-Za-z]:\\\\)[^\\n"'()\\[\\],<>` + '`' + `]*?\\.(?:${exts}))(?=$|[\\s\\n"'()\\[\\],<>` + '`' + `]|[，。；;,.!?])`, 'g');
-  let workingText = text;
-  let taggedMatch: RegExpExecArray | null;
-  const taggedRemoteRegex = new RegExp(`(?:^|[\\s(\\[{>])(?:MEDIA|media):(https?:\\/\\/[^\\s\\n"'()\\[\\],<>` + '`' + `]+)`, 'g');
-  while ((taggedMatch = taggedRemoteRegex.exec(text)) !== null) {
-    const p = trimPathTerminators(taggedMatch[1] || '');
-    if (p && !seen.has(p)) {
-      seen.add(p);
-      refs.push({ filePath: p, mimeType: mimeFromTaggedMediaRef(p) });
-    }
-    const start = taggedMatch.index;
-    const end = start + taggedMatch[0].length;
-    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
-  }
-  while ((taggedMatch = taggedRegex.exec(text)) !== null) {
-    const p = taggedMatch[1];
-    if (p && !seen.has(p)) {
-      seen.add(p);
-      refs.push({ filePath: p, mimeType: mimeFromExtension(p) });
-    }
-    // Mask the matched span so subsequent regexes can't re-discover the
-    // same path (e.g. `/two.xlsx` from `MEDIA:~/two.xlsx`).
-    const start = taggedMatch.index;
-    const end = start + taggedMatch[0].length;
-    workingText = workingText.slice(0, start) + ' '.repeat(end - start) + workingText.slice(end);
-  }
-  // Unix absolute paths (/... or ~/...)  - lookbehind rejects mid-token slashes
-  // (e.g. "path/to/file.mp4", "https://example.com/file.mp4")
-  const unixRegex = new RegExp(`(?<![\\w./:])((?:\\/|~\\/)[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
-  // Windows absolute paths (C:\... D:\...)  - lookbehind rejects drive letter glued to a word
-  const winRegex = new RegExp(`(?<![\\w])([A-Za-z]:\\\\[^\\s\\n"'()\`\\[\\],<>]*?\\.(?:${exts}))`, 'gi');
-  const skillPathBoundary = '(?=$|\\s|[\\x5b\\x5d"\'`(),<>，。；;,.!?])';
-  const skillPathPart = '[^\\\\/\\s\\n"\'`()\\x5b\\x5d,<>]+';
-  const skillPathTail = '[^\\s\\n"\'`()\\x5b\\x5d,<>]*?';
-  const skillDirRegex = new RegExp(
-    `(?<![\\w./:])((?:~[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathPart})|(?:(?:\\/|[A-Za-z]:\\\\)${skillPathTail}[\\\\/]\\.openclaw[\\\\/]skills[\\\\/]${skillPathPart}))${skillPathBoundary}`,
-    'gi',
-  );
-  for (const regex of [unixRegex, winRegex, skillDirRegex]) {
-    let match;
-    while ((match = regex.exec(workingText)) !== null) {
-      const p = trimPathTerminators(match[1]);
-      if (p && !seen.has(p)) {
-        seen.add(p);
-        refs.push({
-          filePath: p,
-          mimeType: regex === skillDirRegex ? DIRECTORY_MIME_TYPE : mimeFromExtension(p),
-        });
-      }
-    }
-  }
-  return refs;
-}
-
-function hasExplicitMediaDeliveryDirective(text: string, filePath: string): boolean {
-  const normalizedText = text.toLowerCase();
-  const normalizedPath = filePath.trim().toLowerCase();
-  return normalizedText.includes(`media:${normalizedPath}`)
-    || normalizedText.includes(`media: ${normalizedPath}`);
-}
-
-/**
- * Extract images from a content array (including nested tool_result content).
- * Converts them to AttachedFileMeta entries with preview set to data URL or remote URL.
- */
-function extractImagesAsAttachedFiles(content: unknown): AttachedFileMeta[] {
-  if (!Array.isArray(content)) return [];
-  const files: AttachedFileMeta[] = [];
-
-  for (const block of content as ContentBlock[]) {
-    if (block.type === 'image') {
-      // Path 1: Anthropic source-wrapped format {source: {type, media_type, data}}
-      if (block.source) {
-        const src = block.source;
-        const mimeType = src.media_type || 'image/jpeg';
-
-        if (src.type === 'base64' && src.data) {
-          files.push({
-            fileName: 'image',
-            mimeType,
-            fileSize: 0,
-            preview: `data:${mimeType};base64,${src.data}`,
-          });
-        } else if (src.type === 'url' && src.url) {
-          files.push({
-            fileName: 'image',
-            mimeType,
-            fileSize: 0,
-            preview: src.url,
-          });
-        }
-      }
-      // Path 2: Flat format from Gateway tool results {data, mimeType}
-      else if (block.data) {
-        const mimeType = block.mimeType || 'image/jpeg';
-        files.push({
-          fileName: 'image',
-          mimeType,
-          fileSize: 0,
-          preview: `data:${mimeType};base64,${block.data}`,
-        });
-      }
-      // Path 3: Flat URL form from Gateway-injected assistant-media messages.
-      // See `src/stores/chat/helpers.ts` for the canonical implementation.
-      else if (block.url) {
-        const mimeType = block.mimeType || 'image/jpeg';
-        const fileName = typeof block.alt === 'string' && block.alt
-          ? block.alt
-          : 'image';
-        files.push({
-          fileName,
-          mimeType,
-          fileSize: 0,
-          preview: null,
-          gatewayUrl: block.url,
-          source: 'gateway-media',
-          disposition: 'output-delivery',
-        });
-      }
-    }
-    if (block.type === 'video' || block.type === 'audio' || block.type === 'file') {
-      const url = block.url || block.source?.url;
-      const filePath = block.filePath;
-      if (url || filePath) {
-        const defaultMime = block.type === 'video'
-          ? 'video/mp4'
-          : block.type === 'audio' ? 'audio/mpeg' : 'application/octet-stream';
-        const target = filePath || url || '';
-        files.push({
-          fileName: block.fileName || block.alt || target.split(/[\\/]/u).pop() || block.type,
-          mimeType: block.mimeType || block.source?.media_type || defaultMime,
-          fileSize: 0,
-          preview: null,
-          ...(filePath ? { filePath } : { gatewayUrl: url }),
-          source: url ? 'gateway-media' : 'message-ref',
-          disposition: 'output-delivery',
-        });
-      }
-    }
-    // Recurse into tool_result content blocks
-    if ((block.type === 'tool_result' || block.type === 'toolResult') && block.content) {
-      files.push(...extractImagesAsAttachedFiles(block.content));
-    }
-  }
-  return files;
-}
-
-/**
- * Build an AttachedFileMeta entry for a file ref, using cache if available.
- */
-function makeAttachedFile(
-  ref: { filePath: string; mimeType: string },
-  source: AttachedFileMeta['source'] = 'message-ref',
-  disposition: AttachedFileMeta['disposition'] = 'output-delivery',
-): AttachedFileMeta {
-  if (looksLikeRemoteMediaUrl(ref.filePath)) {
-    return {
-      fileName: fileNameFromMediaRef(ref.filePath, ref.mimeType),
-      mimeType: ref.mimeType,
-      fileSize: 0,
-      preview: null,
-      gatewayUrl: ref.filePath,
-      source,
-      disposition,
-    };
-  }
-  const cached = _imageCache.get(ref.filePath);
-  if (cached) return { ...cached, filePath: ref.filePath, source, disposition };
-  const fileName = fileNameFromMediaRef(ref.filePath, ref.mimeType);
-  return { fileName, mimeType: ref.mimeType, fileSize: 0, preview: null, filePath: ref.filePath, source, disposition };
-}
-
-/**
- * Extract file path from a tool call's arguments by toolCallId.
- * Searches common argument names: file_path, filePath, path, file.
- */
-function getToolCallFilePath(msg: RawMessage, toolCallId: string): string | undefined {
-  if (!toolCallId) return undefined;
-
-  // Anthropic/normalized format  - toolCall blocks in content array
-  const content = msg.content;
-  if (Array.isArray(content)) {
-    for (const block of content as ContentBlock[]) {
-      if ((block.type === 'tool_use' || block.type === 'toolCall') && block.id === toolCallId) {
-        const args = (block.input ?? block.arguments) as Record<string, unknown> | undefined;
-        if (args) {
-          const paths = extractFilePathsFromToolArgs(args);
-          if (paths[0]) return paths[0];
-        }
-      }
-    }
-  }
-
-  // OpenAI format  - tool_calls array on the message itself
-  const msgAny = msg as unknown as Record<string, unknown>;
-  const toolCalls = msgAny.tool_calls ?? msgAny.toolCalls;
-  if (Array.isArray(toolCalls)) {
-    for (const tc of toolCalls as Array<Record<string, unknown>>) {
-      if (tc.id !== toolCallId) continue;
-      const fn = (tc.function ?? tc) as Record<string, unknown>;
-      let args: Record<string, unknown> | undefined;
-      try {
-        args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : (fn.arguments ?? fn.input) as Record<string, unknown>;
-      } catch { /* ignore */ }
-      if (args) {
-        const paths = extractFilePathsFromToolArgs(args);
-        if (paths[0]) return paths[0];
-      }
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Collect all tool call file paths from a message into a Map<toolCallId, filePath>.
- */
-function collectToolCallPaths(msg: RawMessage, paths: Map<string, string>): void {
-  const content = msg.content;
-  if (Array.isArray(content)) {
-    for (const block of content as ContentBlock[]) {
-      if ((block.type === 'tool_use' || block.type === 'toolCall') && block.id) {
-        const args = (block.input ?? block.arguments) as Record<string, unknown> | undefined;
-        if (args) {
-          const filePaths = extractFilePathsFromToolArgs(args);
-          if (filePaths[0]) paths.set(block.id, filePaths[0]);
-        }
-      }
-    }
-  }
-  const msgAny = msg as unknown as Record<string, unknown>;
-  const toolCalls = msgAny.tool_calls ?? msgAny.toolCalls;
-  if (Array.isArray(toolCalls)) {
-    for (const tc of toolCalls as Array<Record<string, unknown>>) {
-      const id = typeof tc.id === 'string' ? tc.id : '';
-      if (!id) continue;
-      const fn = (tc.function ?? tc) as Record<string, unknown>;
-      let args: Record<string, unknown> | undefined;
-      try {
-        args = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : (fn.arguments ?? fn.input) as Record<string, unknown>;
-      } catch { /* ignore */ }
-      if (args) {
-        const filePaths = extractFilePathsFromToolArgs(args);
-        if (filePaths[0]) paths.set(id, filePaths[0]);
-      }
-    }
-  }
 }
 
 function selectExplicitlyDeliveredToolFiles(
@@ -3508,6 +2320,7 @@ function applyPreviewResults(
   thumbnails: Record<string, { preview: string | null; fileSize: number; filePath?: string } & VideoAttachmentMetadata>,
 ): boolean {
   let updated = false;
+  const cacheEntries: Array<[string, AttachedFileMeta]> = [];
   for (const msg of messages) {
     if (!msg._attachedFiles) continue;
 
@@ -3526,7 +2339,7 @@ function applyPreviewResults(
         if (typeof thumb.hasAudio === 'boolean') file.hasAudio = thumb.hasAudio;
         delete file.previewStatus;
         if (file.filePath) {
-          _imageCache.set(file.filePath, { ...file });
+          cacheEntries.push([file.filePath, { ...file }]);
         }
         updated = true;
       }
@@ -3550,14 +2363,14 @@ function applyPreviewResults(
           if (typeof thumb.durationSeconds === 'number') file.durationSeconds = thumb.durationSeconds;
           if (typeof thumb.hasAudio === 'boolean') file.hasAudio = thumb.hasAudio;
           delete file.previewStatus;
-          _imageCache.set(ref.filePath, { ...file });
+          cacheEntries.push([ref.filePath, { ...file }]);
           updated = true;
         }
       }
     }
   }
 
-  if (updated) saveImageCache(_imageCache);
+  if (updated) cacheAttachedFiles(cacheEntries);
   return updated;
 }
 
@@ -3622,187 +2435,6 @@ async function loadMissingPreviews(messages: RawMessage[]): Promise<boolean> {
   }
 }
 
-function getCanonicalPrefixFromSessions(sessions: ChatSession[]): string | null {
-  const canonical = sessions.find((s) => s.key.startsWith('agent:'))?.key;
-  if (!canonical) return null;
-  const parts = canonical.split(':');
-  if (parts.length < 2) return null;
-  return `${parts[0]}:${parts[1]}`;
-}
-
-function getAgentIdFromSessionKey(sessionKey: string): string {
-  if (!sessionKey.startsWith('agent:')) return 'main';
-  const parts = sessionKey.split(':');
-  return parts[1] || 'main';
-}
-
-function parseSessionUpdatedAtMs(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return toMs(value);
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return undefined;
-}
-
-function parseSessionStatus(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : undefined;
-}
-
-type GatewayHistorySessionAuthority = {
-  session: ChatSession;
-  inFlightRunId?: string;
-  requestStartedAt: number;
-  explicitlyActive: boolean;
-  explicitlyIdle: boolean;
-};
-
-function parseGatewayHistorySessionAuthority(
-  data: Record<string, unknown>,
-  sessionKey: string,
-  requestStartedAt: number,
-): GatewayHistorySessionAuthority | undefined {
-  const sessionInfo = data.sessionInfo && typeof data.sessionInfo === 'object' && !Array.isArray(data.sessionInfo)
-    ? data.sessionInfo as Record<string, unknown>
-    : undefined;
-  const inFlightRun = data.inFlightRun && typeof data.inFlightRun === 'object' && !Array.isArray(data.inFlightRun)
-    ? data.inFlightRun as Record<string, unknown>
-    : undefined;
-  const inFlightRunId = typeof inFlightRun?.runId === 'string' && inFlightRun.runId.trim()
-    ? inFlightRun.runId.trim()
-    : undefined;
-  const reportedActive = typeof sessionInfo?.hasActiveRun === 'boolean'
-    ? sessionInfo.hasActiveRun
-    : undefined;
-  const status = parseSessionStatus(sessionInfo?.status);
-  const statusReportsActive = reportedActive == null && (status === 'running' || status === 'active');
-  const terminalStatus = getSessionTerminalRuntimeStatus(status);
-  const explicitlyActive = Boolean(inFlightRunId || reportedActive === true || statusReportsActive);
-  const explicitlyIdle = !explicitlyActive
-    && (reportedActive === false || (reportedActive == null && terminalStatus != null));
-  if (!sessionInfo && !inFlightRunId) return undefined;
-
-  const updatedAt = parseSessionUpdatedAtMs(sessionInfo?.updatedAt);
-  return {
-    session: {
-      key: sessionKey,
-      ...(updatedAt != null ? { updatedAt } : {}),
-      ...(status ? { status } : {}),
-      ...(reportedActive != null || inFlightRunId
-        ? { hasActiveRun: explicitlyActive }
-        : {}),
-    },
-    inFlightRunId,
-    requestStartedAt,
-    explicitlyActive,
-    explicitlyIdle,
-  };
-}
-
-function getSessionTerminalRuntimeStatus(
-  status: string | undefined,
-): Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'] | undefined {
-  if (status === 'done' || status === 'completed' || status === 'finished') return 'completed';
-  if (status === 'failed' || status === 'error') return 'error';
-  if (status === 'aborted' || status === 'cancelled') return 'aborted';
-  return undefined;
-}
-
-function getBackendSessionLifecycle(session: ChatSession | undefined): {
-  idle: boolean;
-  terminalStatus?: Extract<ChatRuntimeEvent, { type: 'run.ended' }>['status'];
-} {
-  if (!session) return { idle: false };
-  const terminalStatus = getSessionTerminalRuntimeStatus(session.status);
-  if (session.hasActiveRun === true) {
-    return { idle: false };
-  }
-  if (session.hasActiveRun === false) {
-    return { idle: true, terminalStatus };
-  }
-  if (session.status === 'running' || session.status === 'active') {
-    return { idle: false };
-  }
-  if (terminalStatus) {
-    return { idle: true, terminalStatus };
-  }
-  return { idle: false };
-}
-
-function backendSessionReportsActive(session: ChatSession | undefined): boolean {
-  if (!session) return false;
-  if (session.hasActiveRun === true) return true;
-  if (session.hasActiveRun === false) return false;
-  return session.status === 'running' || session.status === 'active';
-}
-
-function shouldTrustBackendSessionIdle(
-  session: ChatSession | undefined,
-  lastUserMessageAt: number | null,
-): boolean {
-  const lifecycle = getBackendSessionLifecycle(session);
-  if (!lifecycle.idle) return false;
-  if (
-    lastUserMessageAt != null
-    && typeof session?.updatedAt === 'number'
-    && session.updatedAt < toMs(lastUserMessageAt)
-  ) {
-    return false;
-  }
-  return true;
-}
-
-function findRunningRuntimeRunForSession(
-  runtimeRuns: ChatState['runtimeRuns'],
-  sessionKey: string,
-  preferredRunId?: string | null,
-): ChatState['runtimeRuns'][string] | undefined {
-  const preferredRun = preferredRunId ? runtimeRuns[preferredRunId] : undefined;
-  if (preferredRun?.sessionKey === sessionKey && preferredRun.status === 'running') {
-    return preferredRun;
-  }
-
-  let latestRunningRun: ChatState['runtimeRuns'][string] | undefined;
-  let latestRunningRunActivity = -Infinity;
-  for (const run of Object.values(runtimeRuns)) {
-    if (run.sessionKey !== sessionKey || run.status !== 'running') continue;
-    const activityAt = optionalToMs(run.lastEventAt) ?? optionalToMs(run.startedAt) ?? 0;
-    if (!latestRunningRun || activityAt >= latestRunningRunActivity) {
-      latestRunningRun = run;
-      latestRunningRunActivity = activityAt;
-    }
-  }
-
-  return latestRunningRun;
-}
-
-function alignRuntimeRunsWithBackendSessionTerminalState(
-  runtimeRuns: ChatState['runtimeRuns'],
-  sessionKey: string,
-  session: ChatSession | undefined,
-  preferredRunId?: string | null,
-): ChatState['runtimeRuns'] {
-  const { terminalStatus } = getBackendSessionLifecycle(session);
-  if (!terminalStatus) return runtimeRuns;
-
-  const runningRun = findRunningRuntimeRunForSession(runtimeRuns, sessionKey, preferredRunId);
-  if (!runningRun) return runtimeRuns;
-  if (runtimeRunHasPendingAsyncTasks(runningRun)) return runtimeRuns;
-
-  const ts = session?.updatedAt ?? Date.now();
-  return applyRuntimeContractEvents(runtimeRuns, [{
-    runId: runningRun.runId,
-    sessionKey,
-    ts,
-    type: 'run.ended',
-    status: terminalStatus,
-  } satisfies ChatRuntimeEvent]);
-}
-
 function reconcileCurrentSessionIdleFromBackend(
   set: (partial: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>)) => void,
   get: () => ChatState,
@@ -3810,14 +2442,19 @@ function reconcileCurrentSessionIdleFromBackend(
 ): void {
   const state = get();
   if (!state.sending && state.activeRunId == null && !state.pendingFinal) return;
+  // A renderer-owned send remains authoritative for the current live slot
+  // until terminal evidence or explicit settlement clears its generation.
+  // A sessions.list snapshot from the preceding run must not close it.
+  if (_activeSendGenerationBySession.has(state.currentSessionKey)) return;
   const current = sessions.find((session) => session.key === state.currentSessionKey);
   if (!shouldTrustBackendSessionIdle(current, state.lastUserMessageAt)) return;
 
-  const runtimeRuns = alignRuntimeRunsWithBackendSessionTerminalState(
+  const runtimeRuns = alignRuntimeRunsWithBackendTerminal(
     state.runtimeRuns,
     state.currentSessionKey,
     current,
     state.activeRunId,
+    applyRuntimeContractEvents,
   );
 
   set({
@@ -3837,6 +2474,47 @@ function reconcileCurrentSessionIdleFromBackend(
   clearPendingRuntimeIntent(state.currentSessionKey);
 }
 
+/** Mirrors authoritative OpenClaw session liveness into the canonical Turn once per real transition. */
+function syncCanonicalSessionActivity(
+  sessionKey: string,
+  active: boolean,
+  runId?: string,
+): void {
+  const conversation = useConversationStore.getState();
+  const activeTurnId = conversation.aliases.activeBySession[sessionKey]
+    ?? conversation.aliases.pendingLocalBySession[sessionKey];
+  const sessionTurnIds = conversation.turnOrderBySession[sessionKey] ?? [];
+  const latestTurnId = sessionTurnIds[sessionTurnIds.length - 1];
+  const turn = conversation.turnsById[activeTurnId ?? latestTurnId];
+  if (!turn) return;
+
+  // A visible local outbox Turn has not claimed the interactive run slot yet.
+  // Session-wide idle from the preceding run must release the queue without
+  // completing this next Turn before it is dispatched.
+  const deferredQueuedTurn = turn.status === 'queued'
+    && turn.runAliases.length === 0;
+  if (!active && deferredQueuedTurn) return;
+  if (!active && _activeSendGenerationBySession.has(sessionKey)) return;
+
+  if (active) {
+    if (isActiveTurnStatus(turn.status) && !turn.evidence.backendIdle) return;
+    // Only history-checkpoint completion is intentionally correctable by later
+    // backend-active evidence. Native terminal evidence remains monotonic.
+    const canReopenHistoryTurn = turn.status === 'completed'
+      && turn.evidence.historyCheckpointed
+      && !turn.hasLiveEvidence
+      && turn.evidence.runTerminal == null;
+    if (!canReopenHistoryTurn) return;
+    conversation.markSessionActivity(sessionKey, true, runId);
+    return;
+  }
+
+  if (!isActiveTurnStatus(turn.status) || turn.evidence.backendIdle) return;
+  // Idle is session-scoped so an unavailable or stale run id cannot quarantine
+  // authoritative backend settlement.
+  conversation.markSessionActivity(sessionKey, false);
+}
+
 /** Reconciles the visible session lifecycle from OpenClaw's authoritative session row. */
 function reconcileCurrentSessionLifecycleFromBackend(
   set: (partial: Partial<ChatState> | ((state: ChatState) => Partial<ChatState>)) => void,
@@ -3846,6 +2524,7 @@ function reconcileCurrentSessionLifecycleFromBackend(
   const state = get();
   const current = sessions.find((session) => session.key === state.currentSessionKey);
   if (backendSessionReportsActive(current)) {
+    syncCanonicalSessionActivity(state.currentSessionKey, true);
     if (state.sending || state.activeRunId != null || state.pendingFinal) return;
     set({
       sending: true,
@@ -3857,6 +2536,9 @@ function reconcileCurrentSessionLifecycleFromBackend(
     return;
   }
 
+  if (shouldTrustBackendSessionIdle(current, state.lastUserMessageAt)) {
+    syncCanonicalSessionActivity(state.currentSessionKey, false);
+  }
   reconcileCurrentSessionIdleFromBackend(set, get, sessions);
 }
 
@@ -4086,41 +2768,6 @@ async function persistSessionThinkingSelection(
   return typeof resolved === 'string' && resolved.trim() ? resolved.trim() : normalizedThinkingLevel;
 }
 
-function mergeSessionRowWithLocalState(
-  nextSession: ChatSession,
-  localSession: ChatSession | undefined,
-): ChatSession {
-  const normalizedNextSession = {
-    ...nextSession,
-    model: normalizeChatManagedModelRef(nextSession.model) ?? undefined,
-    cwd: nextSession.cwd?.trim() || undefined,
-  };
-  if (!localSession) return normalizedNextSession;
-
-  const localUpdatedAt = typeof localSession.updatedAt === 'number' ? localSession.updatedAt : undefined;
-  const nextUpdatedAt = typeof normalizedNextSession.updatedAt === 'number' ? normalizedNextSession.updatedAt : undefined;
-  const normalizedLocalModel = normalizeChatManagedModelRef(localSession.model) ?? undefined;
-  const normalizedLocalCwd = localSession.cwd?.trim() || undefined;
-  const shouldPreserveLocalModel = Boolean(
-    normalizedLocalModel
-    && (
-      !normalizedNextSession.model
-      || (localUpdatedAt != null && nextUpdatedAt != null && localUpdatedAt > nextUpdatedAt)
-    ),
-  );
-  const shouldPreserveLocalCwd = Boolean(
-    (!normalizedNextSession.cwd && normalizedLocalCwd)
-    || (localUpdatedAt != null && nextUpdatedAt != null && localUpdatedAt > nextUpdatedAt),
-  );
-
-  return {
-    ...normalizedNextSession,
-    model: shouldPreserveLocalModel ? normalizedLocalModel : normalizedNextSession.model,
-    cwd: shouldPreserveLocalCwd ? normalizedLocalCwd : normalizedNextSession.cwd,
-    updatedAt: shouldPreserveLocalModel || shouldPreserveLocalCwd ? localUpdatedAt : nextUpdatedAt,
-  };
-}
-
 async function ensureSessionManagedTextModelAllowed(
   get: ChatGet,
   sessionKey: string,
@@ -4276,37 +2923,8 @@ function resolveMainSessionKeyForAgent(agentId: string | undefined | null): stri
   return summary?.mainSessionKey || buildFallbackMainSessionKey(normalizedAgentId);
 }
 
-function ensureSessionEntry(sessions: ChatSession[], sessionKey: string): ChatSession[] {
-  if (sessions.some((session) => session.key === sessionKey)) {
-    return sessions;
-  }
-  return [...sessions, { key: sessionKey, displayName: sessionKey }];
-}
-
-function clearSessionEntryFromMap<T extends Record<string, unknown>>(entries: T, sessionKey: string): T {
-  return Object.fromEntries(Object.entries(entries).filter(([key]) => key !== sessionKey)) as T;
-}
-
 function buildSessionSwitchPatch(
-  state: Pick<
-    ChatState,
-    | 'currentSessionKey'
-    | 'messages'
-    | 'sessions'
-    | 'sessionLabels'
-    | 'sessionLastActivity'
-    | 'thinkingLevel'
-    | 'sending'
-    | 'pendingImageGenerationLocal'
-    | 'pendingVideoGenerationLocal'
-    | 'activeRunId'
-    | 'pendingFinal'
-    | 'lastUserMessageAt'
-    | 'streamingText'
-    | 'streamingMessage'
-    | 'streamingTools'
-    | 'pendingToolImages'
-  >,
+  state: SessionSwitchState,
   nextSessionKey: string,
 ): Partial<ChatState> {
   captureSessionRunState(state.currentSessionKey, state);
@@ -4317,56 +2935,17 @@ function buildSessionSwitchPatch(
       state.thinkingLevel ?? null,
     );
   }
-  // Only treat sessions with no history records and no activity timestamp as empty.
-  // Relying solely on messages.length is unreliable because switchSession clears
-  // the current messages before loadHistory runs, creating a race condition that
-  // could cause sessions with real history to be incorrectly removed from the sidebar.
-  const leavingEmpty = !state.currentSessionKey.endsWith(':main')
-    && state.messages.length === 0
-    && !state.sessionLastActivity[state.currentSessionKey]
-    && !state.sessionLabels[state.currentSessionKey];
-  if (leavingEmpty) {
-    _pendingLocalSessionKeys.delete(state.currentSessionKey);
-  }
 
-  const nextSessions = leavingEmpty
-    ? state.sessions.filter((session) => session.key !== state.currentSessionKey)
-    : state.sessions;
-  const cachedNextSession = getCachedSessionHistory(nextSessionKey);
-  const cachedMessages = cachedNextSession?.messages ?? [];
-  const restoredCachedMessages = cachedMessages.length > SESSION_SWITCH_RESTORE_MESSAGE_LIMIT
-    ? cachedMessages.slice(-SESSION_SWITCH_RESTORE_MESSAGE_LIMIT)
-    : cachedMessages;
-  const cachedRunState = getCachedSessionRunState(nextSessionKey);
-
-  return {
-    currentSessionKey: nextSessionKey,
-    currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
-    sessions: ensureSessionEntry(nextSessions, nextSessionKey),
-    sessionLabels: leavingEmpty
-      ? clearSessionEntryFromMap(state.sessionLabels, state.currentSessionKey)
-      : state.sessionLabels,
-    sessionLastActivity: leavingEmpty
-      ? clearSessionEntryFromMap(state.sessionLastActivity, state.currentSessionKey)
-      : state.sessionLastActivity,
-    messages: restoredCachedMessages,
-    hasMoreHistory: cachedNextSession
-      ? cachedNextSession.messages.length >= HISTORY_PAGE_SIZE
-        || cachedNextSession.messages.length > restoredCachedMessages.length
-      : false,
-    loadingMoreHistory: false,
-    thinkingLevel: cachedNextSession?.thinkingLevel ?? state.thinkingLevel ?? null,
-    ...cachedRunState,
-    error: null,
-    runError: null,
-  };
-}
-
-function getCanonicalPrefixFromSessionKey(sessionKey: string): string | null {
-  if (!sessionKey.startsWith('agent:')) return null;
-  const parts = sessionKey.split(':');
-  if (parts.length < 2) return null;
-  return `${parts[0]}:${parts[1]}`;
+  const result = buildSessionSwitchStatePatch({
+    state,
+    nextSessionKey,
+    cachedNextSession: getCachedSessionHistory(nextSessionKey),
+    cachedRunState: getCachedSessionRunState(nextSessionKey),
+    restoreMessageLimit: SESSION_SWITCH_RESTORE_MESSAGE_LIMIT,
+    historyPageSize: HISTORY_PAGE_SIZE,
+  });
+  if (result.leavingEmpty) _pendingLocalSessionKeys.delete(state.currentSessionKey);
+  return result.patch;
 }
 
 function isUserVisibleMediaBlockType(type: ContentBlock['type']): boolean {
@@ -4419,267 +2998,9 @@ function isToolOnlyMessage(message: RawMessage | undefined): boolean {
   return hasTool && !hasText && !hasNonToolContent;
 }
 
-function isToolResultRole(role: unknown): boolean {
-  if (!role) return false;
-  const normalized = String(role).toLowerCase();
-  return normalized === 'toolresult' || normalized === 'tool_result';
-}
-
 /** True for internal plumbing messages that should never be shown in the UI. */
 function isInternalMessage(msg: { role?: unknown; content?: unknown; idempotencyKey?: unknown; model?: unknown; text?: unknown }): boolean {
   return isHistoryInternalMessage(msg);
-}
-
-// ── Write tool_use baseline capture ─────────────────────────────
-//
-// Tool name sets mirror generated-files.ts so we detect the same tools.
-const BASELINE_WRITE_TOOLS = new Set([
-  'Write', 'write_file', 'create_file', 'WriteFile', 'createFile', 'write',
-]);
-const BASELINE_EDIT_TOOLS = new Set([
-  'Edit', 'edit', 'edit_file', 'EditFile',
-  'StrReplace', 'str_replace', 'str_replace_editor',
-  'MultiEdit', 'multi_edit', 'multiEdit',
-]);
-const BASELINE_FILE_PATH_KEYS = ['file_path', 'filepath', 'path', 'fileName', 'file_name', 'target_path'];
-
-function pickFilePathFromInput(input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null;
-  const rec = input as Record<string, unknown>;
-  for (const key of BASELINE_FILE_PATH_KEYS) {
-    const value = rec[key];
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return null;
-}
-
-/**
- * Scan a streaming message for Write/Edit tool_use blocks and trigger
- * async baseline reads from disk for each target file.  Called on every
- * `delta` event; `captureBaseline` is idempotent  - duplicate calls for
- * the same path are no-ops.
- */
-function isBaselineRealUserMessage(message: RawMessage | undefined): boolean {
-  if (!message || message.role !== 'user') return false;
-  if (isInternalMessage(message)) return false;
-  const content = message.content;
-  if (!Array.isArray(content)) return true;
-  const blocks = content as Array<{ type?: string }>;
-  return blocks.length === 0 || !blocks.every((block) => block.type === 'tool_result' || block.type === 'toolResult');
-}
-
-function countBaselineRealUserMessages(messages: RawMessage[]): number {
-  let count = 0;
-  for (const message of messages) {
-    if (isBaselineRealUserMessage(message)) count += 1;
-  }
-  return count;
-}
-
-function getBaselineRunKeyForMessages(sessionKey: string, messages: RawMessage[]): string | null {
-  const userTurnOrdinal = countBaselineRealUserMessages(messages);
-  return buildBaselineRunKey(sessionKey, userTurnOrdinal);
-}
-
-function captureBaselinesFromMessage(message: unknown, runKey: string | null): void {
-  if (!runKey || !message || typeof message !== 'object') return;
-  const content = (message as Record<string, unknown>).content;
-  if (!Array.isArray(content)) return;
-  for (const block of content as ContentBlock[]) {
-    if (block.type !== 'tool_use' && block.type !== 'toolCall') continue;
-    const name = typeof block.name === 'string' ? block.name : '';
-    if (!name) continue;
-    if (!BASELINE_WRITE_TOOLS.has(name) && !BASELINE_EDIT_TOOLS.has(name)) continue;
-    const input = block.input ?? block.arguments;
-    const filePath = pickFilePathFromInput(input);
-    if (filePath) captureBaseline(runKey, filePath);
-  }
-}
-
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const block of content as ContentBlock[]) {
-    if (block.type === 'text' && block.text) {
-      parts.push(block.text);
-    }
-  }
-  return parts.join('\n');
-}
-
-function summarizeToolOutput(text: string): string | undefined {
-  const trimmed = text.trim();
-  if (!trimmed) return undefined;
-  const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (lines.length === 0) return undefined;
-  const summaryLines = lines.slice(0, 2);
-  let summary = summaryLines.join(' / ');
-  if (summary.length > 160) {
-    summary = `${summary.slice(0, 157)}...`;
-  }
-  return summary;
-}
-
-function normalizeToolStatus(rawStatus: unknown, fallback: 'running' | 'completed'): ToolStatus['status'] {
-  const status = typeof rawStatus === 'string' ? rawStatus.toLowerCase() : '';
-  if (status === 'error' || status === 'failed') return 'error';
-  if (status === 'completed' || status === 'success' || status === 'done') return 'completed';
-  return fallback;
-}
-
-function parseDurationMs(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  const parsed = typeof value === 'string' ? Number(value) : NaN;
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function extractToolUseUpdates(message: unknown): ToolStatus[] {
-  if (!message || typeof message !== 'object') return [];
-  const msg = message as Record<string, unknown>;
-  const updates: ToolStatus[] = [];
-
-  // Path 1: Anthropic/normalized format  - tool blocks inside content array
-  const content = msg.content;
-  if (Array.isArray(content)) {
-    for (const block of content as ContentBlock[]) {
-      if ((block.type !== 'tool_use' && block.type !== 'toolCall') || !block.name) continue;
-      updates.push({
-        id: block.id || block.name,
-        toolCallId: block.id,
-        name: block.name,
-        status: 'running',
-        updatedAt: Date.now(),
-      });
-    }
-  }
-
-  // Path 2: OpenAI format  - tool_calls array on the message itself
-  if (updates.length === 0) {
-    const toolCalls = msg.tool_calls ?? msg.toolCalls;
-    if (Array.isArray(toolCalls)) {
-      for (const tc of toolCalls as Array<Record<string, unknown>>) {
-        const fn = (tc.function ?? tc) as Record<string, unknown>;
-        const name = typeof fn.name === 'string' ? fn.name : '';
-        if (!name) continue;
-        const id = typeof tc.id === 'string' ? tc.id : name;
-        updates.push({
-          id,
-          toolCallId: typeof tc.id === 'string' ? tc.id : undefined,
-          name,
-          status: 'running',
-          updatedAt: Date.now(),
-        });
-      }
-    }
-  }
-
-  return updates;
-}
-
-function extractToolResultBlocks(message: unknown, eventState: string): ToolStatus[] {
-  if (!message || typeof message !== 'object') return [];
-  const msg = message as Record<string, unknown>;
-  const content = msg.content;
-  if (!Array.isArray(content)) return [];
-
-  const updates: ToolStatus[] = [];
-  for (const block of content as ContentBlock[]) {
-    if (block.type !== 'tool_result' && block.type !== 'toolResult') continue;
-    const outputText = extractTextFromContent(block.content ?? block.text ?? '');
-    const summary = summarizeToolOutput(outputText);
-    updates.push({
-      id: block.id || block.name || 'tool',
-      toolCallId: block.id,
-      name: block.name || block.id || 'tool',
-      status: normalizeToolStatus(undefined, eventState === 'delta' ? 'running' : 'completed'),
-      summary,
-      updatedAt: Date.now(),
-    });
-  }
-
-  return updates;
-}
-
-function extractToolResultUpdate(message: unknown, eventState: string): ToolStatus | null {
-  if (!message || typeof message !== 'object') return null;
-  const msg = message as Record<string, unknown>;
-  const role = typeof msg.role === 'string' ? msg.role.toLowerCase() : '';
-  if (!isToolResultRole(role)) return null;
-
-  const toolName = typeof msg.toolName === 'string' ? msg.toolName : (typeof msg.name === 'string' ? msg.name : '');
-  const toolCallId = typeof msg.toolCallId === 'string' ? msg.toolCallId : undefined;
-  const details = (msg.details && typeof msg.details === 'object') ? msg.details as Record<string, unknown> : undefined;
-  const rawStatus = (msg.status ?? details?.status);
-  const fallback = eventState === 'delta' ? 'running' : 'completed';
-  const status = normalizeToolStatus(rawStatus, fallback);
-  const durationMs = parseDurationMs(details?.durationMs ?? details?.duration ?? (msg as Record<string, unknown>).durationMs);
-
-  const outputText = (details && typeof details.aggregated === 'string')
-    ? details.aggregated
-    : extractTextFromContent(msg.content);
-  const summary = summarizeToolOutput(outputText) ?? summarizeToolOutput(String(details?.error ?? msg.error ?? ''));
-
-  const name = toolName || toolCallId || 'tool';
-  const id = toolCallId || name;
-
-  return {
-    id,
-    toolCallId,
-    name,
-    status,
-    durationMs,
-    summary,
-    updatedAt: Date.now(),
-  };
-}
-
-function mergeToolStatus(existing: ToolStatus['status'], incoming: ToolStatus['status']): ToolStatus['status'] {
-  const order: Record<ToolStatus['status'], number> = { running: 0, completed: 1, error: 2 };
-  return order[incoming] >= order[existing] ? incoming : existing;
-}
-
-function upsertToolStatuses(current: ToolStatus[], updates: ToolStatus[]): ToolStatus[] {
-  if (updates.length === 0) return current;
-  const next = [...current];
-  for (const update of updates) {
-    const key = update.toolCallId || update.id || update.name;
-    if (!key) continue;
-    const index = next.findIndex((tool) => (tool.toolCallId || tool.id || tool.name) === key);
-    if (index === -1) {
-      next.push(update);
-      continue;
-    }
-    const existing = next[index];
-    next[index] = {
-      ...existing,
-      ...update,
-      name: update.name || existing.name,
-      status: mergeToolStatus(existing.status, update.status),
-      durationMs: update.durationMs ?? existing.durationMs,
-      summary: update.summary ?? existing.summary,
-      updatedAt: update.updatedAt || existing.updatedAt,
-    };
-  }
-  return next;
-}
-
-/**
- * Only treat an explicit chat.send ack timeout as recoverable.
- * Gateway stopped / Gateway not connected are hard failures that
- * should still terminate the send immediately.
- */
-function isRecoverableChatSendTimeout(error: string): boolean {
-  return error.includes('RPC timeout: chat.send');
-}
-
-function collectToolUpdates(message: unknown, eventState: string): ToolStatus[] {
-  const updates: ToolStatus[] = [];
-  const toolResultUpdate = extractToolResultUpdate(message, eventState);
-  if (toolResultUpdate) updates.push(toolResultUpdate);
-  updates.push(...extractToolResultBlocks(message, eventState));
-  updates.push(...extractToolUseUpdates(message));
-  return updates;
 }
 
 /**
@@ -4987,24 +3308,6 @@ function getOpenRunSegmentFromHistory(
   return [];
 }
 
-/** Only treat inbound runs as user-visible for this long after the last user send. */
-const USER_INITIATED_RUN_MAX_AGE_MS = 10 * 60 * 1000;
-
-function hasCachedActiveUserRun(sessionKey: string): boolean {
-  const cached = getCachedSessionRunState(sessionKey);
-  return cached.sending || cached.activeRunId != null || cached.pendingFinal;
-}
-
-function shouldTrackInboundRunLifecycle(
-  state: Pick<ChatState, 'lastUserMessageAt' | 'sending' | 'activeRunId' | 'pendingFinal'>,
-  sessionKey?: string,
-): boolean {
-  if (state.sending || state.activeRunId != null || state.pendingFinal) return true;
-  if (sessionKey && hasCachedActiveUserRun(sessionKey)) return true;
-  if (!state.lastUserMessageAt) return false;
-  return Date.now() - toMs(state.lastUserMessageAt) <= USER_INITIATED_RUN_MAX_AGE_MS;
-}
-
 function isFailedAssistantTurnMessage(message: RawMessage | unknown): boolean {
   if (!message || typeof message !== 'object') return false;
   const msg = message as RawMessage;
@@ -5091,90 +3394,6 @@ function inferHistoricalOpenRunState(
   };
 }
 
-function normalizeLocalAttachmentPath(value: string): string {
-  let normalized = trimPathTerminators(value.trim()).normalize('NFC');
-  if (/^file:\/\//i.test(normalized)) {
-    try {
-      const parsed = new URL(normalized);
-      normalized = decodeURIComponent(parsed.pathname);
-      if (parsed.hostname) normalized = `//${parsed.hostname}${normalized}`;
-      if (/^\/[A-Za-z]:\//u.test(normalized)) normalized = normalized.slice(1);
-    } catch {
-      normalized = normalized.replace(/^file:\/\//i, '');
-    }
-  }
-
-  normalized = normalized.replace(/\\/gu, '/');
-  const isUncPath = normalized.startsWith('//');
-  const hasRoot = normalized.startsWith('/');
-  const segments = normalized.split('/');
-  const compacted: string[] = [];
-  for (const segment of segments) {
-    if (!segment || segment === '.') continue;
-    if (segment === '..' && compacted.length > 0 && compacted.at(-1) !== '..') {
-      compacted.pop();
-      continue;
-    }
-    compacted.push(segment);
-  }
-
-  normalized = `${isUncPath ? '//' : hasRoot ? '/' : ''}${compacted.join('/')}`;
-  if (/^[A-Za-z]:\//u.test(normalized)) normalized = normalized.toLowerCase();
-  return normalized;
-}
-
-function normalizeRemoteAttachmentUrl(value: string): string {
-  const trimmed = trimPathTerminators(value.trim()).normalize('NFC');
-  try {
-    const parsed = new URL(trimmed);
-    parsed.hash = '';
-    parsed.pathname = normalizeLocalAttachmentPath(parsed.pathname);
-    return parsed.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
-function normalizeAttachmentMetadataPart(value: string | number | null | undefined): string {
-  return String(value ?? '').trim().normalize('NFC').toLowerCase();
-}
-
-function getAttachedFileNormalizedIdentityKeys(file: AttachedFileMeta): string[] {
-  const keys: string[] = [];
-  const addLocation = (value: string | undefined) => {
-    const trimmed = value?.trim();
-    if (!trimmed) return;
-    keys.push(looksLikeRemoteMediaUrl(trimmed)
-      ? `url:${normalizeRemoteAttachmentUrl(trimmed)}`
-      : `path:${normalizeLocalAttachmentPath(trimmed)}`);
-  };
-
-  addLocation(file.filePath);
-  addLocation(file.gatewayUrl);
-  if (keys.length === 0) {
-    keys.push([
-      'meta',
-      normalizeAttachmentMetadataPart(file.fileName),
-      normalizeAttachmentMetadataPart(file.mimeType),
-      normalizeAttachmentMetadataPart(file.fileSize),
-      normalizeAttachmentMetadataPart(file.preview),
-    ].join(':'));
-  }
-  return [...new Set(keys)];
-}
-
-function dedupeAttachedFiles(files: AttachedFileMeta[]): AttachedFileMeta[] {
-  const seen = new Set<string>();
-  const next: AttachedFileMeta[] = [];
-  for (const file of files) {
-    const keys = getAttachedFileNormalizedIdentityKeys(file);
-    if (keys.some((key) => seen.has(key))) continue;
-    keys.forEach((key) => seen.add(key));
-    next.push(file);
-  }
-  return next;
-}
-
 function hashStringForLocalMessageId(value: string): string {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -5182,10 +3401,6 @@ function hashStringForLocalMessageId(value: string): string {
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return hash.toString(36);
-}
-
-function attachedFileKey(file: AttachedFileMeta): string {
-  return getAttachedFileNormalizedIdentityKeys(file)[0]!;
 }
 
 function collectAssistantArtifactsForFallback(segmentMessages: RawMessage[]): AttachedFileMeta[] {
@@ -5318,6 +3533,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   hasMoreHistory: false,
   error: null,
   runError: null,
+  historyError: null,
 
   sending: false,
   pendingImageGenerationLocal: false,
@@ -5341,13 +3557,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // ── Load sessions via sessions.list ──
 
-  loadSessions: async () => {
+  reconcileGatewayRecovery: async () => {
+    // The previous Gateway process can no longer own this local send. Backend
+    // liveness from the new process generation decides whether it remains open.
+    clearActiveSendGeneration(get().currentSessionKey);
+    await get().loadSessions(true);
+    forceNextHistoryLoad(get().currentSessionKey);
+    await get().loadHistory(true);
+  },
+
+  loadSessions: async (force = false) => {
     const now = Date.now();
     if (_loadSessionsInFlight) {
       await _loadSessionsInFlight;
-      return;
+      if (!force) return;
     }
-    if (now - _lastLoadSessionsAt < SESSION_LOAD_MIN_INTERVAL_MS) {
+    if (!force && now - _lastLoadSessionsAt < SESSION_LOAD_MIN_INTERVAL_MS) {
       return;
     }
 
@@ -5412,7 +3637,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               status: parseSessionStatus(s.status),
               hasActiveRun: typeof s.hasActiveRun === 'boolean' ? s.hasActiveRun : undefined,
             };
-            return mergeSessionRowWithLocalState(nextSession, localSessionByKey.get(nextSession.key));
+            return mergeSessionRowWithLocalModel(
+              nextSession,
+              localSessionByKey.get(nextSession.key),
+              normalizeChatManagedModelRef,
+            );
           }).filter((s: ChatSession) => (
             s.key
             && !isInternalTemporarySessionKey(s.key)
@@ -5571,6 +3800,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             deferHistoryLoad(get);
           }
         }
+        await restoreChatSendOutbox();
       } catch (err) {
         console.warn('Failed to load sessions:', err);
       } finally {
@@ -5596,6 +3826,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearHistoryPoll();
     clearBaselines();
     set((s) => buildSessionSwitchPatch(s, key));
+    forceNextHistoryLoad(key);
     deferSessionSwitchHistoryLoad(get);
     scheduleQueuedChatSendFlush(key);
   },
@@ -5614,8 +3845,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearCachedSessionRunState(key);
     clearActiveSendGeneration(key);
     clearQueuedChatSends(key);
+    _lastSendIntentBySession.delete(key);
     clearSessionLabelHydrationTracking(key);
     clearPendingOptimisticUserMessages(key);
+    useConversationStore.getState().removeSession(key);
+    try {
+      await cancelSessionQueuedChatSends(key);
+    } catch (error) {
+      console.warn('[deleteSession] Failed to clear durable queued sends:', {
+        sessionKey: key,
+        error: String(error),
+      });
+    }
     // Hard-delete the session's JSONL transcript on disk.
     // The main process unlinks <id>.jsonl plus any leftover
     // <id>.deleted.jsonl and <id>.jsonl.reset.* siblings, then removes the
@@ -5653,6 +3894,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pendingVideoGenerationLocal: false,
         error: null,
         runError: null,
+        historyError: null,
         pendingFinal: false,
         lastUserMessageAt: null,
         pendingToolImages: [],
@@ -5987,6 +4229,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             loading: false,
             error: shouldShowForegroundLoading && errorMessage ? errorMessage : state.error,
+            historyError: errorMessage,
             ...(mergedMessages.length > 0 ? { messages: mergedMessages } : { messages: [] as RawMessage[] }),
           };
         });
@@ -6009,6 +4252,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const filteredMessages = filterHistoryMessagesForUi(messagesWithToolAttachments);
       // Restore file attachments for user/assistant messages (from cache + text patterns)
       const enrichedMessages = dedupeAssistantRepliesForDisplay(enrichWithCachedImages(filteredMessages));
+      const canonicalHistoryMessages = enrichWithCachedImages(messagesWithToolAttachments);
       const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
 
       // Preserve optimistic user messages independently from sending state.
@@ -6106,12 +4350,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         lastUserMessageAt: stateBeforeHistoryCommit.lastUserMessageAt,
       });
       const hostTasks = parseHostTaskBridgeTasks(await hostTaskBridgePayloadPromise);
+      const hostTaskRehydrationOptions = {
+        existingRunIds: Object.keys(nextRuntimeRuns),
+      };
       nextRuntimeRuns = applyRuntimeContractEvents(
         nextRuntimeRuns,
-        buildHostTaskRehydrationEvents(hostTasks, {
-          existingRunIds: Object.keys(nextRuntimeRuns),
-        }),
+        buildHostTaskRehydrationEvents(hostTasks, hostTaskRehydrationOptions),
       );
+      const hostTaskConversationEvents = hostTasksToConversationEvents(hostTasks, hostTaskRehydrationOptions);
       const hasConclusiveAssistantReply = openRunSegment.some((message) => (
         message.role === 'assistant'
         && !hasPendingToolUse(message)
@@ -6140,11 +4386,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       if (backendSessionCanClose) {
-        nextRuntimeRuns = alignRuntimeRunsWithBackendSessionTerminalState(
+        nextRuntimeRuns = alignRuntimeRunsWithBackendTerminal(
           nextRuntimeRuns,
           currentSessionKey,
           currentSessionRow,
           get().activeRunId,
+          applyRuntimeContractEvents,
         );
       }
       const inferredHistoricalOpenRun = !backendSessionCanClose && !isSendingNow && !latestTerminalAssistantErrorMessage
@@ -6190,11 +4437,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
           )),
         } : {}),
         loading: false,
+        historyError: null,
         runError: historyErrorIsTransient || terminalArtifactFallbackMessage
           ? null
           : normalizedTerminalAssistantErrorMessage,
         runtimeRuns: nextRuntimeRuns,
       });
+      try {
+        useConversationStore.getState().replaceHistory(
+          currentSessionKey,
+          canonicalHistoryMessages,
+          {
+            reason: forcedByTerminalRefresh ? 'terminal-refresh' : 'initial-load',
+            additionalEvents: hostTaskConversationEvents,
+          },
+        );
+        if (backendSessionActive) {
+          syncCanonicalSessionActivity(currentSessionKey, true, authoritativeActiveRunId);
+        } else if (backendSessionCanClose) {
+          syncCanonicalSessionActivity(currentSessionKey, false);
+        }
+      } catch (error) {
+        console.warn('[conversation-timeline] Failed to replay chat history:', error);
+        if (isCurrentSession()) set({ historyError: String(error) });
+      }
       scheduleWithheldFinalReevaluationForSession(currentSessionKey);
       for (const run of Object.values(nextRuntimeRuns)) {
         const artifacts = run.artifacts ?? [];
@@ -6205,7 +4471,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           && verification.severity === 'warning'
         ));
         if (needsAvailabilityCheck) {
-          scheduleRuntimeArtifactVerification(run.runId, currentSessionKey, artifacts);
+          scheduleRuntimeArtifactVerification({
+            runId: run.runId,
+            sessionKey: currentSessionKey,
+          }, artifacts);
         }
       }
       cacheSessionHistory(currentSessionKey, finalMessages, thinkingLevel);
@@ -6253,11 +4522,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   runtimeHistoryMessages,
                 );
                 return backendSessionCanClose
-                  ? alignRuntimeRunsWithBackendSessionTerminalState(
+                  ? alignRuntimeRunsWithBackendTerminal(
                       nextRuntimeRuns,
                       currentSessionKey,
                       currentSessionRow,
                       state.activeRunId,
+                      applyRuntimeContractEvents,
                     )
                   : nextRuntimeRuns;
               })();
@@ -6267,6 +4537,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
               };
             })(),
           }));
+          // Preview hydration mutates attachment evidence after the first replay;
+          // refresh the canonical projection so media availability matches history.
+          try {
+            useConversationStore.getState().replaceHistory(
+              currentSessionKey,
+              mergeHydratedMessages(canonicalHistoryMessages, previewHydrationMessages),
+              {
+                reason: forcedByTerminalRefresh ? 'terminal-refresh' : 'initial-load',
+                additionalEvents: hostTaskConversationEvents,
+              },
+            );
+          } catch (error) {
+            console.warn('[conversation-timeline] Failed to replay hydrated chat history:', error);
+            if (isCurrentSession()) set({ historyError: String(error) });
+          }
         }
       });
 
@@ -6660,7 +4945,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { currentSessionKey, messages, loadingMoreHistory, hasMoreHistory } = get();
     if (loadingMoreHistory || !hasMoreHistory || messages.length === 0) return;
 
-    set({ loadingMoreHistory: true, error: null });
+    set({ loadingMoreHistory: true, error: null, historyError: null });
     try {
       const nextLimit = Math.min(messages.length + HISTORY_PAGE_SIZE, HISTORY_MAX_RENDERED_MESSAGES);
       const rawMessages = await loadLocalHistoryFallback(currentSessionKey, nextLimit);
@@ -6677,6 +4962,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messagesWithToolAttachments = enrichWithToolCallAttachments(messagesWithToolImages);
       const filteredMessages = filterHistoryMessagesForUi(messagesWithToolAttachments);
       const enrichedMessages = dedupeAssistantRepliesForDisplay(enrichWithCachedImages(filteredMessages));
+      const canonicalHistoryMessages = enrichWithCachedImages(messagesWithToolAttachments);
       const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
       set((state) => ({
         messages: enrichedMessages,
@@ -6684,6 +4970,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         hasMoreHistory: rawMessages.length >= nextLimit && nextLimit < HISTORY_MAX_RENDERED_MESSAGES,
         runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, runtimeHistoryMessages),
       }));
+      try {
+        useConversationStore.getState().replaceHistory(
+          currentSessionKey,
+          canonicalHistoryMessages,
+          { reason: 'manual-refresh', prependMissingTurns: true },
+        );
+      } catch (error) {
+        console.warn('[conversation-timeline] Failed to replay paged chat history:', error);
+        if (get().currentSessionKey === currentSessionKey) set({ historyError: String(error) });
+      }
       cacheSessionHistory(currentSessionKey, enrichedMessages, get().thinkingLevel);
       const previewHydrationMessages = enrichedMessages.slice(-PREVIEW_HYDRATION_MESSAGE_LIMIT);
       void loadMissingPreviews(previewHydrationMessages).then((updated) => {
@@ -6707,10 +5003,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
             };
           })(),
         }));
+        try {
+          const hydratedCanonicalMessages = canonicalHistoryMessages.map((message) => {
+            const match = previewHydrationMessages.find((candidate) => (
+              `${candidate.id ?? ''}|${candidate.role}|${candidate.timestamp ?? ''}|${getMessageText(candidate.content)}`
+              === `${message.id ?? ''}|${message.role}|${message.timestamp ?? ''}|${getMessageText(message.content)}`
+            ));
+            return match?._attachedFiles?.length
+              ? { ...message, _attachedFiles: match._attachedFiles.map((file) => ({ ...file })) }
+              : message;
+          });
+          useConversationStore.getState().replaceHistory(
+            currentSessionKey,
+            hydratedCanonicalMessages,
+            { reason: 'manual-refresh', prependMissingTurns: true },
+          );
+        } catch (error) {
+          console.warn('[conversation-timeline] Failed to replay hydrated paged history:', error);
+          if (get().currentSessionKey === currentSessionKey) set({ historyError: String(error) });
+        }
       });
     } catch (error) {
       console.warn('Failed to load more history:', error);
-      set({ loadingMoreHistory: false, error: String(error) });
+      set({ loadingMoreHistory: false, error: String(error), historyError: String(error) });
     } finally {
       if (get().currentSessionKey === currentSessionKey) {
         set({ loadingMoreHistory: false });
@@ -6727,6 +5042,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     mode: ChatSendMode = 'chat',
     imageOptions?: ChatImageSendOptions,
     videoOptions?: ChatVideoSendOptions,
+    replayIntent?: ChatSendReplayIntent,
+    queuedOwnership?: ChatQueuedTurnOwnership,
   ) => {
     const trimmed = text.trim();
     if (!trimmed && (!attachments || attachments.length === 0)) return;
@@ -6736,17 +5053,81 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!attachments?.length && isInternalMessage({ role: 'user', content: trimmed })) {
       console.info('[sendMessage] Dropping internal user message before gateway send', {
         sessionKey: targetSessionKey,
-        text: trimmed,
+        textChars: Array.from(trimmed).length,
       });
       return;
     }
+
+    let ownership = queuedOwnership
+      ? cloneQueuedTurnOwnership(queuedOwnership, queuedOwnership.dequeuedFromQueue === true)
+      : undefined;
+    if (ownership && ownership.sessionKey !== targetSessionKey) {
+      const errorMessage = 'Queued chat ownership no longer matches its target session.';
+      failQueuedChatSendTurn(ownership, errorMessage);
+      releaseQueuedChatSendDispatchLease(ownership);
+      set({ error: errorMessage });
+      return;
+    }
+    const enqueueForBusySession = async () => {
+      const acceptedOwnership = ownership ?? beginChatSendTurn(
+        targetSessionKey,
+        trimmed,
+        attachments,
+        mode,
+        false,
+      );
+      ownership = acceptedOwnership;
+      const queuedReferenceImages = (attachments ?? []).filter((attachment) => attachment.mimeType.startsWith('image/'));
+      const hasQueuedSourceImage = queuedReferenceImages.length > 0;
+      const queuedImageOptions = replayIntent?.imageOptions
+        ?? (mode === 'image' ? resolveChatImageOptions(trimmed, imageOptions) : undefined);
+      const queuedVideoOptions = replayIntent?.videoOptions
+        ?? (mode === 'video' ? resolveChatVideoOptions(trimmed, hasQueuedSourceImage, videoOptions) : undefined);
+      const durableReplayIntent = replayIntent ?? {
+        imageOptions: queuedImageOptions,
+        videoOptions: queuedVideoOptions,
+        thinkingLevel: get().thinkingLevel,
+        referenceImages: [],
+        clientPreferences: buildGatewayTurnPreferences({
+          mode,
+          prompt: trimmed,
+          hasSourceImage: hasQueuedSourceImage,
+          imageOptions: queuedImageOptions,
+          videoOptions: queuedVideoOptions,
+          selectedArtifacts: queuedReferenceImages,
+        }),
+      };
+      const enqueued = await enqueueChatSendForSession(targetSessionKey, {
+        text,
+        attachments,
+        targetAgentId,
+        mode,
+        imageOptions,
+        videoOptions,
+        replayIntent: durableReplayIntent,
+        ownership: acceptedOwnership,
+      }, { front: acceptedOwnership.dequeuedFromQueue === true });
+      if (!enqueued) {
+        failQueuedChatSendTurn(
+          acceptedOwnership,
+          i18n.t('chat:chatInput.queueLimitReached', { count: MAX_QUEUED_SENDS_PER_SESSION }),
+        );
+        releaseQueuedChatSendDispatchLease(acceptedOwnership);
+        return;
+      }
+      releaseQueuedChatSendDispatchLease(acceptedOwnership);
+      scheduleQueuedChatSendFlush(targetSessionKey);
+    };
 
     const pendingCwdMutation = _sessionCwdMutations.get(targetSessionKey);
     if (pendingCwdMutation) {
       try {
         await pendingCwdMutation;
       } catch (error) {
-        set({ error: error instanceof Error ? error.message : String(error) });
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (ownership) failQueuedChatSendTurn(ownership, errorMessage);
+        releaseQueuedChatSendDispatchLease(ownership);
+        set({ error: errorMessage });
         return;
       }
     }
@@ -6754,15 +5135,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Same-session sends must stay ordered. The renderer owns a single active
     // run slot, so queue follow-up turns instead of dropping them or racing the
     // current run state.
-    if (sessionExecutionIsBusy(get(), targetSessionKey)) {
-      enqueueChatSendForSession(targetSessionKey, {
-        text,
-        attachments,
-        targetAgentId,
-        mode,
-        imageOptions,
-        videoOptions,
-      });
+    if (
+      (!ownership && hasQueuedChatSends(targetSessionKey))
+      || sessionExecutionIsBusy(
+        get(),
+        targetSessionKey,
+        locallyQueuedTurnIds(targetSessionKey, ownership?.turnId),
+      )
+    ) {
+      await enqueueForBusySession();
       return;
     }
 
@@ -6771,8 +5152,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         await managedAuthReady;
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (ownership) failQueuedChatSendTurn(ownership, errorMessage);
+        releaseQueuedChatSendDispatchLease(ownership);
         set({
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
           sending: false,
         });
         return;
@@ -6781,42 +5165,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Auth/provider checks are asynchronous. Re-check the target session so a
     // run that started while they were pending cannot absorb this turn.
-    if (sessionExecutionIsBusy(get(), targetSessionKey)) {
-      enqueueChatSendForSession(targetSessionKey, {
-        text,
-        attachments,
-        targetAgentId,
-        mode,
-        imageOptions,
-        videoOptions,
-      });
+    if (
+      (!ownership && hasQueuedChatSends(targetSessionKey))
+      || sessionExecutionIsBusy(
+        get(),
+        targetSessionKey,
+        locallyQueuedTurnIds(targetSessionKey, ownership?.turnId),
+      )
+    ) {
+      await enqueueForBusySession();
       return;
     }
 
     if (targetSessionKey !== get().currentSessionKey) {
       set((s) => buildSessionSwitchPatch(s, targetSessionKey));
       deferHistoryLoad(get, true);
-    }
-
-    _lastAttemptedChatSendBySession.set(targetSessionKey, {
-      text,
-      attachments: cloneQueuedAttachments(attachments),
-      targetAgentId,
-      mode,
-      imageOptions: imageOptions ? { ...imageOptions } : undefined,
-      videoOptions: videoOptions ? { ...videoOptions } : undefined,
-      enqueuedAt: Date.now(),
-    });
-
-    try {
-      await assertGatewayReadyForChatSend();
-    } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : String(error),
-        runError: null,
-        sending: false,
-      });
-      return;
     }
 
     const currentSessionKey = targetSessionKey;
@@ -6830,28 +5193,83 @@ export const useChatStore = create<ChatState>((set, get) => ({
         preview: file.preview,
       }));
     const requestedImageEdit = isImageEditRequest(trimmed);
-    const latestSessionImage = requestedImageEdit && explicitPendingImages.length === 0
-      ? findLatestSessionImage(enrichWithCachedImages(get().messages))
+    const replayReferenceImages = replayIntent
+      ? cloneQueuedAttachments(replayIntent.referenceImages) ?? []
       : null;
+    const latestSessionImage = requestedImageEdit && explicitPendingImages.length === 0
+      ? (replayReferenceImages !== null
+          ? replayReferenceImages[0] ?? null
+          : findLatestCanonicalSessionImage(currentSessionKey))
+      : null;
+    const gatewayReferenceImages = explicitPendingImages.length > 0
+      ? explicitPendingImages
+      : (latestSessionImage ? [latestSessionImage] : []);
+    const effectiveMode: ChatSendMode = mode;
+    const hasSourceImage = [...(attachments ?? []), ...gatewayReferenceImages]
+      .some((attachment) => attachment.mimeType.startsWith('image/'));
+    const resolvedImageOptions = replayIntent?.imageOptions
+      ? { ...replayIntent.imageOptions }
+      : effectiveMode === 'image'
+        ? resolveChatImageOptions(trimmed, imageOptions)
+        : undefined;
+    const resolvedVideoOptions = replayIntent?.videoOptions
+      ? { ...replayIntent.videoOptions }
+      : effectiveMode === 'video'
+        ? resolveChatVideoOptions(trimmed, hasSourceImage, videoOptions)
+        : undefined;
+    const clientPreferences = replayIntent
+      ? cloneGatewayTurnPreferences(replayIntent.clientPreferences)
+      : buildGatewayTurnPreferences({
+          mode: effectiveMode,
+          prompt: trimmed,
+          hasSourceImage,
+          imageOptions: resolvedImageOptions,
+          videoOptions: resolvedVideoOptions,
+          selectedArtifacts: gatewayReferenceImages,
+        });
+    const thinkingLevel = replayIntent
+      ? replayIntent.thinkingLevel ?? undefined
+      : get().thinkingLevel ?? undefined;
 
-    // Add user message optimistically before planner/tool routing so the UI
-    // acknowledges the submitted intent immediately.
-    const nowMs = Date.now();
-    const userMsg: RawMessage = {
-      role: 'user',
-      content: trimmed || (attachments?.length ? '(file attached)' : ''),
-      timestamp: nowMs / 1000,
-      id: crypto.randomUUID(),
-      _attachedFiles: attachments?.map(a => ({
-        fileName: a.fileName,
-        mimeType: a.mimeType,
-        fileSize: a.fileSize,
-        preview: a.preview,
-        filePath: a.stagedPath,
-        source: 'user-upload',
-        disposition: 'input-reference',
-      })),
+    setBoundedMapEntry(
+      _lastSendIntentBySession,
+      currentSessionKey,
+      createChatSendIntent({
+        text,
+        attachments,
+        targetAgentId,
+        mode: effectiveMode,
+        imageOptions: resolvedImageOptions,
+        videoOptions: resolvedVideoOptions,
+        thinkingLevel,
+        referenceImages: gatewayReferenceImages,
+        clientPreferences,
+      }),
+      SESSION_RUN_STATE_CACHE_MAX_SESSIONS,
+    );
+
+    if (ownership) {
+      activateQueuedChatSendTurn(ownership, mode);
+      releaseQueuedChatSendDispatchLease(ownership);
+    }
+    else ownership = beginChatSendTurn(currentSessionKey, trimmed, attachments, mode, true);
+    const nowMs = ownership.acceptedAt;
+    const idempotencyKey = ownership.idempotencyKey;
+    const userMsg = ownership.userMessage;
+    const timelineTurnId = ownership.turnId;
+    const failTimelineTurn = (errorMessage: string) => {
+      useConversationStore.getState().ingestChatEvent({
+        state: 'error',
+        sessionKey: currentSessionKey,
+        errorMessage,
+      }, {
+        sessionKey: currentSessionKey,
+        activeRunId: get().activeRunId,
+        turnId: timelineTurnId,
+      });
     };
+    // Legacy rollback state is appended only when dispatch begins; canonical
+    // Timeline already owns the visible queued user request.
     rememberPendingOptimisticUserMessage(currentSessionKey, userMsg, nowMs);
     set((s) => ({
       messages: [...s.messages, userMsg],
@@ -6896,6 +5314,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         lastUserMessageAt: null,
         pendingToolImages: [],
       }));
+      useConversationStore.getState().ingestChatEvent({
+        state: 'final',
+        sessionKey: currentSessionKey,
+        message: assistantMsg,
+      }, {
+        sessionKey: currentSessionKey,
+        turnId: timelineTurnId,
+      });
+      // This local validation path never starts an OpenClaw run, so close the
+      // canonical Turn with the same authoritative idle evidence as the legacy state.
+      useConversationStore.getState().markSessionActivity(currentSessionKey, false);
       clearSendGenerationIfCurrent();
       markSessionRunIdle(currentSessionKey);
       return;
@@ -6918,11 +5347,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({ sessionLastActivity: { ...s.sessionLastActivity, [currentSessionKey]: nowMs } }));
 
     // Every new turn belongs to the native OpenClaw agent loop.
-    const gatewayReferenceImages = explicitPendingImages.length > 0
-      ? explicitPendingImages
-      : (latestSessionImage ? [latestSessionImage] : []);
     const runtimeMessage = trimmed;
-    const effectiveMode: ChatSendMode = mode;
     commitSessionRunState(set, get, currentSessionKey, {
       pendingImageGenerationLocal: false,
       pendingVideoGenerationLocal: false,
@@ -6936,6 +5361,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (get().currentSessionKey === currentSessionKey) {
         set({ error: errorMessage });
       }
+      failTimelineTurn(errorMessage);
       commitSessionRunState(set, get, currentSessionKey, {
         sending: false,
       });
@@ -7043,24 +5469,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clearSendGenerationIfCurrent();
         clearHistoryPoll();
         if (discardOptimisticMessage) {
-          discardPendingOptimisticUserMessage(currentSessionKey, userMsg.id);
+          discardPendingOptimisticUserMessage(currentSessionKey, userMsg);
+          useConversationStore.getState().discardLocalTurn(currentSessionKey, timelineTurnId);
           set((state) => ({
-            messages: state.messages.filter((message) => message.id !== userMsg.id),
+            messages: state.messages.filter((message) => (
+              message !== userMsg && (!userMsg.id || message.id !== userMsg.id)
+            )),
             error: errorMsg,
             sending: false,
           }));
         } else {
           set({ error: errorMsg, sending: false });
         }
+        failTimelineTurn(errorMsg);
         markSessionRunIdle(currentSessionKey);
         return;
       }
 
       if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
-        const cached = _sessionRunStateCache.get(currentSessionKey);
+        const cached = peekCachedSessionRunState(currentSessionKey);
         if (cached?.lastUserMessageAt === nowMs) {
           if (discardOptimisticMessage) {
-            discardPendingOptimisticUserMessage(currentSessionKey, userMsg.id);
+            discardPendingOptimisticUserMessage(currentSessionKey, userMsg);
+            useConversationStore.getState().discardLocalTurn(currentSessionKey, timelineTurnId);
           }
           markSessionRunIdle(currentSessionKey);
           return;
@@ -7085,8 +5516,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     try {
-      const idempotencyKey = crypto.randomUUID();
-      const thinkingLevel = get().thinkingLevel ?? undefined;
       const chatMediaAttachments = [
         ...(attachments ?? []),
         ...gatewayReferenceImages
@@ -7100,30 +5529,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
           })),
       ];
       const hasMedia = chatMediaAttachments.length > 0;
-      const clientPreferences = buildGatewayTurnPreferences({
-        mode: effectiveMode,
-        prompt: trimmed,
-        hasSourceImage: chatMediaAttachments.some((attachment) => attachment.mimeType.startsWith('image/')),
-        imageOptions,
-        videoOptions,
-        selectedArtifacts: gatewayReferenceImages,
-      });
-
       // Cache image attachments BEFORE the IPC call to avoid race condition:
       // history may reload (via Gateway event) before the RPC returns.
       // Keyed by staged file path which appears in [media attached: <path> ...].
       if (hasMedia) {
-        for (const a of chatMediaAttachments) {
-          _imageCache.set(a.stagedPath, {
-            fileName: a.fileName,
-            mimeType: a.mimeType,
-            fileSize: a.fileSize,
-            preview: a.preview,
+        cacheAttachedFiles(chatMediaAttachments.map((attachment): [string, AttachedFileMeta] => [
+          attachment.stagedPath,
+          {
+            fileName: attachment.fileName,
+            mimeType: attachment.mimeType,
+            fileSize: attachment.fileSize,
+            preview: attachment.preview,
             source: 'user-upload',
             disposition: 'input-reference',
-          });
-        }
-        saveImageCache(_imageCache);
+          },
+        ]));
       }
 
       let result: { success: boolean; result?: { runId?: string }; error?: string };
@@ -7161,6 +5581,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         result = { success: true, result: rpcResult };
       }
 
+      if (result.success) {
+        try {
+          await acknowledgeQueuedChatSend(ownership);
+        } catch (error) {
+          // Keep the durable record for transcript reconciliation on restart.
+          console.warn('[chat.queue] failed to acknowledge dispatched outbox intent', {
+            sessionKey: currentSessionKey,
+            turnId: timelineTurnId,
+            error: String(error),
+          });
+        }
+      }
+
       if (!result.success) {
         const errorMsg = result.error || 'Failed to send message';
         if (isRecoverableChatSendTimeout(errorMsg)) {
@@ -7181,8 +5614,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           && latest.lastUserMessageAt === nowMs
           && (latest.activeRunId == null || latest.activeRunId === returnedRunId);
 
+        if (sendStillCurrent) {
+          useConversationStore.getState().bindRun(
+            timelineTurnId,
+            currentSessionKey,
+            returnedRunId,
+            trimmed,
+          );
+        }
+
         if (sendStillCurrent && canAttachToCurrentSession) {
-          clearSendGenerationIfCurrent();
           set((state) => ({
             activeRunId: returnedRunId,
             runtimeRuns: applyRuntimeContractEvents(
@@ -7195,11 +5636,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ),
           }));
         } else if (sendStillCurrent && latest.currentSessionKey !== currentSessionKey) {
-          const cached = _sessionRunStateCache.get(currentSessionKey);
+          const cached = peekCachedSessionRunState(currentSessionKey);
           if (cached?.sending
             && cached.lastUserMessageAt === nowMs
             && (cached.activeRunId == null || cached.activeRunId === returnedRunId)) {
-            clearSendGenerationIfCurrent();
             captureSessionRunState(currentSessionKey, { ...cached, activeRunId: returnedRunId });
             set((state) => ({
               runtimeRuns: applyRuntimeContractEvents(
@@ -7242,14 +5682,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   abortRun: async () => {
     const stateAtAbort = get();
-    const { currentSessionKey, activeRunId } = stateAtAbort;
+    const { currentSessionKey } = stateAtAbort;
     if (_sessionsCancelling.has(currentSessionKey)) return;
 
     clearErrorRecoveryTimer();
-    const detachedTaskIds = collectRunDetachedTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
-    const hostTaskIds = collectRunHostTaskIdsForAbort(stateAtAbort.runtimeRuns, activeRunId);
-    const hostTaskIdSet = new Set(hostTaskIds);
-    const nativeDetachedTaskIds = detachedTaskIds.filter((taskId) => !hostTaskIdSet.has(taskId));
+    const activeTurn = selectActiveTurn(useConversationStore.getState(), currentSessionKey);
+    const activeRunId = activeTurn?.rootRunId ?? activeTurn?.runAliases[0] ?? null;
+    const cancellableTasks = collectCancellableTasks(activeTurn);
+    const hostTaskIds = cancellableTasks.hostTaskIds;
+    const nativeTaskIds = cancellableTasks.nativeTaskIds;
     _sessionsCancelling.add(currentSessionKey);
     _activeSendGenerationBySession.delete(currentSessionKey);
     // Cancellation is only a request. Keep the controls in the running state
@@ -7278,7 +5719,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     try {
-      await abortChatRunViaHostApi(currentSessionKey, activeRunId, nativeDetachedTaskIds);
+      await abortChatRunViaHostApi(currentSessionKey, activeRunId, nativeTaskIds);
     } catch (err) {
       set({ error: String(err) });
     } finally {
@@ -7289,11 +5730,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   retryLastRun: async () => {
     const sessionKey = get().currentSessionKey;
-    const previous: QueuedChatSend | undefined = _lastAttemptedChatSendBySession.get(sessionKey) ?? (() => {
-      const lastUserMessage = findLastRealUserMessage(get().messages);
-      if (!lastUserMessage) return undefined;
-      const text = getMessageText(lastUserMessage.content).trim();
-      const attachments = (lastUserMessage._attachedFiles ?? [])
+    const previous = getBoundedMapEntry(_lastSendIntentBySession, sessionKey);
+    if (previous) {
+      const intent = cloneChatSendIntent(previous);
+      set({ error: null, runError: null });
+      await get().sendMessage(
+        intent.text,
+        cloneQueuedAttachments(intent.attachments),
+        intent.targetAgentId,
+        intent.mode,
+        intent.imageOptions ? { ...intent.imageOptions } : undefined,
+        intent.videoOptions ? { ...intent.videoOptions } : undefined,
+        cloneChatSendReplayIntent(intent),
+      );
+      return;
+    }
+
+    const trigger = selectLastRetryableUserTrigger(useConversationStore.getState(), sessionKey);
+    const fallback = trigger ? (() => {
+      const text = getMessageText(trigger.message.content).trim();
+      const attachments = (trigger.message.attachments ?? [])
         .filter((file) => Boolean(file.filePath?.trim()))
         .map((file): ChatSendAttachment => ({
           fileName: file.fileName,
@@ -7303,28 +5759,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           preview: file.preview,
         }));
       if (!text && attachments.length === 0) return undefined;
-      return {
-        text,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        targetAgentId: get().currentAgentId,
-        mode: 'chat' as const,
-        imageOptions: undefined,
-        videoOptions: undefined,
-        enqueuedAt: Date.now(),
-      };
-    })();
-    if (!previous) {
+      return { text, attachments: attachments.length > 0 ? attachments : undefined };
+    })() : undefined;
+    if (!fallback) {
       set({ runError: i18n.t('chat:runError.retryUnavailable') });
       return;
     }
     set({ error: null, runError: null });
     await get().sendMessage(
-      previous.text,
-      cloneQueuedAttachments(previous.attachments),
-      previous.targetAgentId,
-      previous.mode,
-      previous.imageOptions ? { ...previous.imageOptions } : undefined,
-      previous.videoOptions ? { ...previous.videoOptions } : undefined,
+      fallback.text,
+      cloneQueuedAttachments(fallback.attachments),
+      get().currentAgentId,
+      'chat',
     );
   },
 
@@ -7335,21 +5781,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const eventState = String(event.state || '');
     const rawEventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
     const initialState = get();
-    const eventSessionKey = inferSessionKeyForRun(initialState, eventRunId || null, rawEventSessionKey);
+    const completionTaskId = completionWakeTaskIdFromRunId(eventRunId);
+    const completionWakeOwner = completionTaskId
+      ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
+          runId: eventRunId,
+          rootRunId: typeof event.rootRunId === 'string' ? event.rootRunId : undefined,
+          sessionKey: rawEventSessionKey,
+          taskId: typeof event.taskId === 'string' ? event.taskId : completionTaskId,
+        })
+      : null;
+    if (completionTaskId && !completionWakeOwner) {
+      console.warn('[handleChatEvent] Ignoring completion wake without a unique canonical owner', {
+        eventRunId,
+        sessionKey: rawEventSessionKey,
+        taskId: completionTaskId,
+      });
+      return;
+    }
+    const inferredEventSessionKey = inferSessionKeyForRun(initialState, eventRunId || null, rawEventSessionKey);
     const { activeRunId, currentSessionKey } = initialState;
     const terminalEvent = eventState === 'final'
       || eventState === 'error'
       || eventState === 'aborted'
       || (event.message && typeof event.message === 'object'
         && getMessageStopReason(event.message as Record<string, unknown>) != null);
-    const completionWakeOwnerRunId = resolveCompletionWakeOwnerRunId({
-      runtimeRuns: initialState.runtimeRuns,
-      activeRunId,
-      eventRunId,
-      currentSessionKey,
-      eventSessionKey,
-    });
-    const correlatedCompletionWake = completionWakeOwnerRunId != null;
+    const eventSessionKey = completionWakeOwner?.sessionKey ?? inferredEventSessionKey;
+    const completionWakeOwnerRunId = completionWakeOwner?.rootRunId;
     const runId = completionWakeOwnerRunId ?? eventRunId;
     const asyncTaskEvidence = extractAsyncTaskEvidence(event.message ?? event);
     if (asyncTaskEvidence.length > 0) {
@@ -7397,7 +5854,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Only process events for the current session (when sessionKey is present)
     if (eventSessionKey != null && eventSessionKey !== currentSessionKey) {
       if (terminalEvent) {
-        const ownerRunId = _sessionRunStateCache.get(eventSessionKey)?.activeRunId || runId;
+        const ownerRunId = peekCachedSessionRunState(eventSessionKey)?.activeRunId || runId;
         const ownerRun = ownerRunId ? get().runtimeRuns[ownerRunId] : undefined;
         if (!runtimeRunHasPendingAsyncTasks(ownerRun)) {
           markSessionRunIdle(eventSessionKey);
@@ -7415,13 +5872,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     // Only process events for the active run (or if no active run set).
-    // Inbound channel traffic (Feishu/Telegram/etc.) on the current session uses a
-    // different runId than a stale desktop activeRunId  - still refresh history on finals.
+    // Inbound channel traffic (Feishu/Telegram/etc.) on the current session can use
+    // a different runId than a stale desktop activeRunId. Its live events remain
+    // independent and must not trigger a transcript replay into the visible stream.
     if (activeRunId && runId && runId !== activeRunId) {
-      const isCurrentSession = eventSessionKey == null || eventSessionKey === currentSessionKey;
-      if (isCurrentSession && terminalEvent) {
-        void get().loadHistory(true);
-      }
       return;
     }
 
@@ -7526,9 +5980,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           const updates = collectToolUpdates(normalizedFinalMessage, resolvedState);
           // Filter out internal-only final responses (NO_REPLY, HEARTBEAT_OK, etc.)
-          // before adding to messages. Without this guard, the internal token appears
-          // briefly in the UI until loadHistory replaces the message list  - and if the
-          // quiet-mode reload is debounced away, the token can stay visible permanently.
+          // before they enter the visible message stream.
           if (isInternalMessage(normalizedFinalMessage)) {
             const sessionKeyForReload = get().currentSessionKey;
             set({
@@ -7539,8 +5991,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             });
             clearHistoryPoll();
             beginSessionBackendIdleSettlement(sessionKeyForReload, runId ?? get().activeRunId);
-            forceNextHistoryLoad(sessionKeyForReload);
-            void get().loadHistory(true);
             break;
           }
           if (isToolResultRole(normalizedFinalMessage.role)) {
@@ -7614,7 +6064,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               };
             });
             if (toolArtifacts.length > 0) {
-              scheduleRuntimeArtifactVerification(runId, eventSessionKey ?? currentSessionKey, toolArtifacts);
+              scheduleRuntimeArtifactVerification({
+                runId,
+                sessionKey: eventSessionKey ?? currentSessionKey,
+                toolCallId: normalizedFinalMessage.toolCallId,
+              }, toolArtifacts);
             }
             break;
           }
@@ -7776,31 +6230,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             _withheldFinalDeliveryByRun.delete(runId);
           }
           if (runId && finalArtifactsToVerify.length > 0) {
-            scheduleRuntimeArtifactVerification(runId, eventSessionKey ?? currentSessionKey, finalArtifactsToVerify);
+            scheduleRuntimeArtifactVerification({
+              runId,
+              sessionKey: eventSessionKey ?? currentSessionKey,
+            }, finalArtifactsToVerify);
           }
-          // Defer the transcript refresh until OpenClaw confirms the session is idle.
-          // A snapshot fetched while the final payload is still being persisted can
-          // otherwise erase the live final reply from the renderer.
+          // Keep controls active until OpenClaw confirms the session is idle. The
+          // visible Timeline remains owned by live events and is not replayed here.
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
           if (clearLifecycle && !toolOnly && !withheldFinalMessage) {
             clearHistoryPoll();
             beginSessionBackendIdleSettlement(sessionKeyAtFinal, runId ?? get().activeRunId);
-            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-
-          } else if (clearLifecycle && !toolOnly && correlatedCompletionWake) {
-            // Completion-wake finals have their MEDIA directives removed from
-            // the live chat payload. Keep the gate closed, but reload the
-            // authoritative transcript so the original run can recover the
-            // persisted artifact and verification evidence before reevaluation.
-            clearHistoryPoll();
-            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-            [0, 500, 1500].forEach((delayMs) => {
-              setTimeout(() => {
-                if (get().currentSessionKey !== sessionKeyAtFinal) return;
-                forceNextHistoryLoad(sessionKeyAtFinal);
-                void get().loadHistory(true);
-              }, delayMs);
-            });
           }
         } else {
           const sessionKeyAtFinal = eventSessionKey ?? currentSessionKey;
@@ -7808,14 +6248,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const terminalRunId = runId || latestState.activeRunId;
           set({ streamingText: '', streamingMessage: null, pendingFinal: true });
           beginSessionBackendIdleSettlement(sessionKeyAtFinal, terminalRunId);
-          markSessionNeedsTerminalHistoryRefresh(sessionKeyAtFinal);
-          [0, 500, 1500, 4000].forEach((delayMs) => {
-            setTimeout(() => {
-              if (get().currentSessionKey !== sessionKeyAtFinal) return;
-              forceNextHistoryLoad(sessionKeyAtFinal);
-              void get().loadHistory(true);
-            }, delayMs);
-          });
         }
         break;
       }
@@ -7884,10 +6316,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           clearErrorRecoveryTimer();
           markSessionRunIdle(sessionKeyAtError);
           clearPendingRuntimeIntent(sessionKeyAtError);
-          if (wasSending) {
-            markSessionNeedsTerminalHistoryRefresh(sessionKeyAtError);
-            void get().loadHistory(true);
-          }
         };
 
         if (recoverable) {
@@ -7956,20 +6384,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleRuntimeEvent: (event: ChatRuntimeEvent) => {
     const initialState = get();
     const { activeRunId, currentSessionKey } = initialState;
-    const eventSessionKey = inferSessionKeyForRun(initialState, event.runId, event.sessionKey ?? null);
-    const eventForSession: ChatRuntimeEvent = eventSessionKey && event.sessionKey !== eventSessionKey
-      ? { ...event, sessionKey: eventSessionKey }
-      : event;
+    const completionTaskId = completionWakeTaskIdFromRunId(event.runId);
+    const completionWakeOwner = completionTaskId
+      ? resolveCompletionWakeCorrelation(useConversationStore.getState(), {
+          runId: event.runId,
+          rootRunId: event.rootRunId,
+          sessionKey: event.sessionKey,
+          taskId: event.taskId ?? completionTaskId,
+        })
+      : null;
+    if (completionTaskId && !completionWakeOwner) {
+      console.warn('[handleRuntimeEvent] Ignoring completion wake without a unique canonical owner', {
+        runId: event.runId,
+        sessionKey: event.sessionKey,
+        taskId: completionTaskId,
+      });
+      return;
+    }
+    const inferredEventSessionKey = inferSessionKeyForRun(initialState, event.runId, event.sessionKey ?? null);
+    const eventSessionKey = completionWakeOwner?.sessionKey ?? inferredEventSessionKey;
+    const eventForSession: ChatRuntimeEvent = completionWakeOwner
+      ? {
+          ...event,
+          sessionKey: completionWakeOwner.sessionKey,
+          rootRunId: completionWakeOwner.rootRunId,
+          taskId: event.taskId ?? completionWakeOwner.taskId,
+        }
+      : eventSessionKey && event.sessionKey !== eventSessionKey
+        ? { ...event, sessionKey: eventSessionKey }
+        : event;
     const matchesCurrentSession = eventSessionKey != null && eventSessionKey === currentSessionKey;
     const matchesActiveRun = activeRunId != null && event.runId === activeRunId;
-    const isCompletionWake = completionWakeTaskIdFromRunId(eventForSession.runId) != null;
-    const completionWakeOwnerRunId = resolveCompletionWakeOwnerRunId({
-      runtimeRuns: initialState.runtimeRuns,
-      activeRunId,
-      eventRunId: eventForSession.runId,
-      currentSessionKey,
-      eventSessionKey,
-    });
+    const isCompletionWake = completionTaskId != null;
+    const completionWakeOwnerRunId = completionWakeOwner?.rootRunId;
     const matchesActiveTurn = !isCompletionWake
       && runtimeEventBelongsToActiveTurn(initialState, eventForSession, eventSessionKey);
 
@@ -8022,7 +6469,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
     const nextPatch: Partial<ChatState> = { runtimeRuns };
-    const appliesToActiveUi = completionWakeOwnerRunId != null
+    const appliesToActiveUi = (completionWakeOwnerRunId != null && matchesCurrentSession)
       || matchesActiveRun
       || matchesActiveTurn
       || (activeRunId == null && matchesCurrentSession && !isCompletionWake);
@@ -8034,8 +6481,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (eventForSession.type === 'artifact.produced') {
       scheduleRuntimeArtifactVerification(
-        eventForSession.runId,
-        eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+        {
+          runId: eventForSession.runId,
+          rootRunId: eventForSession.rootRunId,
+          sessionKey: eventForSession.sessionKey,
+          taskId: eventForSession.taskId,
+          parentTaskId: eventForSession.parentTaskId,
+          toolCallId: eventForSession.toolCallId,
+        },
         [eventForSession.artifact],
       );
     }
@@ -8045,7 +6498,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (completedToolFiles.length > 0) {
         const artifactEvents = buildRuntimeArtifactEventsFromAttachedFiles({
           runId: eventForSession.runId,
+          rootRunId: eventForSession.rootRunId,
           sessionKey: eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          taskId: eventForSession.taskId,
+          parentTaskId: eventForSession.parentTaskId,
           ts: eventForSession.ts ?? Date.now(),
           toolCallId: eventForSession.toolCallId,
           verificationDetail: '工具结果中的产物已进入 UClaw 产物跟踪。',
@@ -8053,8 +6509,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         runtimeRuns = applyRuntimeContractEvents(runtimeRuns, artifactEvents);
         nextPatch.runtimeRuns = runtimeRuns;
         scheduleRuntimeArtifactVerification(
-          eventForSession.runId,
-          eventSessionKey ?? (appliesToActiveUi ? currentSessionKey : undefined),
+          {
+            runId: eventForSession.runId,
+            rootRunId: eventForSession.rootRunId,
+            sessionKey: eventForSession.sessionKey,
+            taskId: eventForSession.taskId,
+            parentTaskId: eventForSession.parentTaskId,
+            toolCallId: eventForSession.toolCallId,
+          },
           artifactEvents
             .filter((runtimeEvent): runtimeEvent is Extract<ChatRuntimeEvent, { type: 'artifact.produced' }> =>
               runtimeEvent.type === 'artifact.produced')
@@ -8080,11 +6542,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // match the active run; otherwise they are stored but do not affect the
     // current composer/graph state.
     if (!matchesCurrentSession && !matchesActiveRun) {
-      updateCachedSessionRunStateFromRuntimeEvent(
+      const terminalSessionKey = updateCachedSessionRunStateFromRuntimeEvent(
         eventForSession,
         runtimeRuns,
         runtimeRunHasPendingAsyncTasks(runtimeRuns[eventForSession.runId]),
       );
+      if (terminalSessionKey) {
+        markSessionRunIdle(terminalSessionKey);
+        markSessionNeedsTerminalHistoryRefresh(terminalSessionKey);
+      }
       set(nextPatch);
       return;
     }
@@ -8148,20 +6614,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
 
     if (eventForSession.type === 'run.ended') {
-      const sessionKeyAtTerminal = eventSessionKey ?? currentSessionKey;
-      if (matchesCurrentSession && eventForSession.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER) {
-        // Gateway terminal events can arrive before, or instead of, the final
-        // assistant payload. Rehydrate the persisted transcript so normal
-        // replies and completion-wake replies share the same delivery path.
-        markSessionNeedsTerminalHistoryRefresh(sessionKeyAtTerminal);
-        [0, 500, 1500, 4000].forEach((delayMs) => {
-          setTimeout(() => {
-            if (get().currentSessionKey !== sessionKeyAtTerminal) return;
-            forceNextHistoryLoad(sessionKeyAtTerminal);
-            void get().loadHistory(true);
-          }, delayMs);
-        });
-      }
       if (isCompletionWake) {
         set(nextPatch);
         return;
@@ -8212,7 +6664,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         if (!shouldKeepLifecycle) {
           markSessionRunIdle(currentSessionKey);
-          markSessionNeedsTerminalHistoryRefresh(currentSessionKey);
           clearPendingRuntimeIntent(currentSessionKey);
         } else if (matchesCurrentSession && eventForSession.producer !== CHAT_SYNTHETIC_TERMINAL_PRODUCER) {
           scheduleRuntimeBackendIdleReconciliation(
@@ -8235,25 +6686,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await Promise.all([loadHistory(), loadSessions()]);
   },
 
-  clearError: () => set({ error: null, runError: null }),
+  clearError: () => set({ error: null, runError: null, historyError: null }),
+  clearHistoryError: () => set({ historyError: null }),
 }));
 
 useChatStore.subscribe((state, previousState) => {
   if (state.currentSessionKey !== previousState.currentSessionKey) {
     persistCurrentSessionKey(state.currentSessionKey);
+    useConversationStore.getState().setCurrentSession(state.currentSessionKey);
   }
 });
 
+useConversationStore.getState().setCurrentSession(useChatStore.getState().currentSessionKey);
+
 export function syncCachedSessionRunIdle(sessionKey: string): void {
   markSessionRunIdle(sessionKey);
-}
-
-export function hasActiveChatWork(state: Pick<
-  ChatState,
-  'sending' | 'activeRunId' | 'pendingFinal' | 'runtimeRuns'
->): boolean {
-  return state.sending
-    || state.activeRunId != null
-    || state.pendingFinal
-    || Object.values(state.runtimeRuns).some((run) => chatRunLooksRecentlyActive(run));
 }

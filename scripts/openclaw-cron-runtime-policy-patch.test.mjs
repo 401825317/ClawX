@@ -53,14 +53,6 @@ function resolveCronExecutionRetryHint(error, retryOn, classifiedReason) {
 function applyJobResult(state, job, result) {
 \tjob.state.lastErrorReason = result.status === "error" && typeof result.error === "string" ? resolveFailoverReasonFromError(result.error, result.provider) ?? void 0 : void 0;
 }
-function tryFinishCronTaskRun(state, result) {
-\tfailTaskRunByRunId({
-\t\trunId: result.taskRunId,
-\t\truntime: "cron",
-\t\t\tstatus: normalizeCronRunErrorText(result.error) === timeoutErrorMessage() ? "timed_out" : "failed",
-\t\tendedAt: result.endedAt
-\t});
-}
 function tryFinishManualTaskRun(state, params) {
 \tfailTaskRunByRunId({
 \t\trunId: params.taskRunId,
@@ -70,12 +62,23 @@ function tryFinishManualTaskRun(state, params) {
 \t});
 }`;
 
+const cronTaskRunsFixture = `
+/** Detached task-ledger integration for cron runs. */
+/** Completes or fails the detached task ledger row for a cron run when one exists. */
+function tryFinishCronTaskRun(state, result) {
+\tif (!result.taskRunId) return;
+\tfailTaskRunByRunId({
+\t\trunId: result.taskRunId,
+\t\truntime: "cron",
+\t\t\tstatus: normalizeCronRunErrorText(result.error) === timeoutErrorMessage() ? "timed_out" : "failed",
+\t\tendedAt: result.endedAt
+\t});
+}`;
+
 function loadSanitizer(content) {
-  const match = content.match(/function stripUclawCronToolTimeoutSeconds\(value\) \{[\s\S]*?\n\}/u);
+  const match = content.match(/function isUclawCronToolRecord\(value\) \{[\s\S]*?function stripUclawCronToolTimeoutSeconds\(value\) \{[\s\S]*?\n\}/u);
   assert.ok(match, 'cron timeout sanitizer helper must be present');
-  return Function('isRecord$1', `${match[0]}\nreturn stripUclawCronToolTimeoutSeconds;`)(
-    (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value)),
-  );
+  return Function(`${match[0]}\nreturn stripUclawCronToolTimeoutSeconds;`)();
 }
 
 test('model cron add/update calls strip only payload.timeoutSeconds', () => {
@@ -103,7 +106,7 @@ test('deadline errors with phase text are non-transient and retain timeout class
   assert.match(result.content, /UCLAW_CRON_DEADLINE_CLASSIFIER_V1/u);
   assert.match(result.content, /UCLAW_CRON_DEADLINE_NO_RETRY_V1/u);
   assert.match(result.content, /UCLAW_CRON_DEADLINE_FAILURE_KIND_V1/u);
-  assert.equal((result.content.match(/isUclawCronJobDeadlineError\(normalizeCronRunErrorText\(/gu) ?? []).length, 2);
+  assert.equal((result.content.match(/isUclawCronJobDeadlineError\(normalizeCronRunErrorText\(/gu) ?? []).length, 1);
 
   const resolveRetryHint = Function(`${result.content}\nreturn resolveCronExecutionRetryHint;`)();
   assert.deepEqual(
@@ -120,14 +123,25 @@ test('deadline errors with phase text are non-transient and retain timeout class
 });
 
 test('phase-aware deadline errors remain timed_out in scheduled and manual task ledgers', () => {
-  const result = patchOpenClawCronRuntimePolicyContent(cronServiceFixture, 'server-cron.js');
+  const serviceResult = patchOpenClawCronRuntimePolicyContent(cronServiceFixture, 'server-cron.js');
+  const taskRunsResult = patchOpenClawCronRuntimePolicyContent(cronTaskRunsFixture, 'task-runs.js');
   const failures = [];
-  const [finishScheduled, finishManual] = Function(
+  const finishScheduled = Function(
+    'failTaskRunByRunId',
+    'normalizeCronRunErrorText',
+    'timeoutErrorMessage',
+    `${taskRunsResult.content}\nreturn tryFinishCronTaskRun;`,
+  )(
+    (entry) => failures.push(entry),
+    (error) => error,
+    () => 'cron: job execution timed out',
+  );
+  const finishManual = Function(
     'failTaskRunByRunId',
     'normalizeCronRunErrorText',
     'timeoutErrorMessage',
     'resolveFailoverReasonFromError',
-    `${result.content}\nreturn [tryFinishCronTaskRun, tryFinishManualTaskRun];`,
+    `${serviceResult.content}\nreturn tryFinishManualTaskRun;`,
   )(
     (entry) => failures.push(entry),
     (error) => error,
@@ -152,18 +166,21 @@ test('runtime patch is fail-closed and idempotent across cron tool and service c
   const distDir = mkdtempSync(join(tmpdir(), 'uclaw-cron-runtime-policy-'));
   const toolFile = join(distDir, 'openclaw-tools.js');
   const serviceFile = join(distDir, 'server-cron.js');
+  const taskRunsFile = join(distDir, 'task-runs.js');
   writeFileSync(toolFile, cronToolFixture, 'utf8');
   writeFileSync(serviceFile, cronServiceFixture, 'utf8');
+  writeFileSync(taskRunsFile, cronTaskRunsFixture, 'utf8');
   writeFileSync(join(distDir, 'unrelated.js'), 'export const untouched = true;', 'utf8');
 
   const first = patchOpenClawCronRuntimePolicyRuntime(distDir, { logger: { log() {} } });
-  assert.equal(first.patchedFiles, 2);
+  assert.equal(first.patchedFiles, 3);
   assert.match(readFileSync(toolFile, 'utf8'), /UCLAW_CRON_MODEL_TIMEOUT_ADD_V1/u);
   assert.match(readFileSync(serviceFile, 'utf8'), /UCLAW_CRON_DEADLINE_NO_RETRY_V1/u);
+  assert.match(readFileSync(taskRunsFile, 'utf8'), /UCLAW_CRON_SCHEDULED_TIMEOUT_LEDGER_V1/u);
 
   const second = patchOpenClawCronRuntimePolicyRuntime(distDir, { logger: { log() {} } });
   assert.equal(second.patchedFiles, 0);
-  assert.equal(second.alreadyPatchedFiles, 2);
+  assert.equal(second.alreadyPatchedFiles, 3);
 });
 
 test('runtime patch rejects partial and missing cron targets', () => {
@@ -180,7 +197,7 @@ test('runtime patch rejects partial and missing cron targets', () => {
   writeFileSync(join(distDir, 'openclaw-tools.js'), cronToolFixture, 'utf8');
   assert.throws(
     () => patchOpenClawCronRuntimePolicyRuntime(distDir, { logger: { log() {} } }),
-    /found 1 and 0/u,
+    /found 1, 0, and 0/u,
   );
 });
 
@@ -189,5 +206,5 @@ test('current installed OpenClaw runtime matches all fail-closed cron policy anc
   skip: !existsSync(installedDistDir),
 }, () => {
   const result = patchOpenClawCronRuntimePolicyRuntime(installedDistDir, { dryRun: true, logger: { log() {} } });
-  assert.equal(result.patchedFiles + result.alreadyPatchedFiles, 2);
+  assert.equal(result.patchedFiles + result.alreadyPatchedFiles, 3);
 });

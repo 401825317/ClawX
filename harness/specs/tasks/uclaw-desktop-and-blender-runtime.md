@@ -31,7 +31,6 @@ touchedAreas:
   - src/lib/generated-files.ts
   - src/lib/api-client.ts
   - src/i18n/locales/**/chat.json
-  - tests/e2e/desktop-approval-overlay.spec.ts
   - package.json
   - pnpm-lock.yaml
   - README.md

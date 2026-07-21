@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "kind": "clawx-chat-timeline-performance",
+  "status": "passed",
+  "generatedAt": "2026-07-15T17:10:34.103Z",
+  "source": {
+    "gitHead": "7bed59734577e16cf520fb51dbe1248933e20f45",
+    "branch": "feature/newUI",
+    "workingTreeDirty": true,
+    "performanceSpec": "tests/e2e/chat-timeline.spec.ts",
+    "playwrightGrep": "measures real-frame streaming|keeps a 500-message replay DOM bounded"
+  },
+  "environment": {
+    "node": "v22.22.3",
+    "electron": "^40.6.0",
+    "playwright": "^1.56.1",
+    "machine": {
+      "platform": "darwin",
+      "release": "25.5.0",
+      "arch": "arm64",
+      "cpuModel": "Apple M3",
+      "logicalCpuCount": 8,
+      "totalMemoryGiB": 16
+    }
+  },
+  "streaming": {
+    "fixture": {
+      "frames": 24,
+      "eventsPerFrame": 8,
+      "elapsedMs": 450
+    },
+    "thresholds": {
+      "targetFps": 60,
+      "minimumFps": 30,
+      "maximumLongTaskCount": 1,
+      "maximumLongTaskShare": 0.1
+    },
+    "ingressEvents": 192,
+    "adapter": {
+      "count": 192,
+      "totalMs": 4.300000429153442,
+      "maxMs": 0.20000004768371582,
+      "lastMs": 0
+    },
+    "reducer": {
+      "count": 24,
+      "totalMs": 3.200000524520874,
+      "maxMs": 0.2999999523162842,
+      "lastMs": 0
+    },
+    "projection": {
+      "count": 192,
+      "totalMs": 1.2999999523162842,
+      "maxMs": 0.10000014305114746,
+      "lastMs": 0
+    },
+    "storeCommits": 24,
+    "maxStoreCommitsPerFrame": 1,
+    "itemRenders": 24,
+    "completedTurnRenders": 0,
+    "activeTurnRenders": 24,
+    "mountedRows": 5,
+    "maxMountedRows": 5,
+    "scrollCorrections": 0,
+    "maxScrollCorrectionPx": 0,
+    "longTaskObserverSupported": true,
+    "longTasks": {
+      "count": 0,
+      "totalMs": 0,
+      "maxMs": 0,
+      "lastMs": 0
+    },
+    "longTaskShare": 0,
+    "sampledFrames": 29,
+    "slowFrames": 0,
+    "averageFps": 59.99172527927184
+  },
+  "historyReplay500": {
+    "messageCount": 500,
+    "turnCount": 250,
+    "totalRows": 500,
+    "mountedRows": 22,
+    "maxMountedRows": 22,
+    "initialInteractiveMs": 2094,
+    "replayDurationMs": 12.200000047683716
+  }
+}

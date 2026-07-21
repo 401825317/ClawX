@@ -6,21 +6,13 @@ import { join } from 'node:path';
 import { __test } from '../resources/openclaw-plugins/uclaw-artifact-guard/index.mjs';
 
 const EXPECTED_ANALYSIS_KEYS = [
-  'activeUserText',
   'artifacts',
   'currentRunFailedToolCount',
   'currentRunId',
   'currentRunSuccessfulArtifactCount',
   'currentRunToolAttemptCount',
-  'emptyFinal',
   'finalText',
-  'heartbeatOk',
-  'heartbeatPoll',
   'passedArtifactCount',
-  'shouldRevise',
-  'shouldReviseArtifact',
-  'shouldReviseEmptyFinal',
-  'shouldReviseHeartbeat',
   'verificationBlocked',
   'verificationPassed',
 ].sort();
@@ -47,26 +39,8 @@ for (const [index, [userText, finalText]] of [
 ]) {
   const analysis = __test.analyzeArtifactFinal(finalizeEvent(`ordinary-final:${index}`, userText, finalText));
   assert.equal(analysis.artifacts.length, 0, userText);
-  assert.equal(analysis.shouldRevise, false, userText);
   assert.deepEqual(Object.keys(analysis).sort(), EXPECTED_ANALYSIS_KEYS);
 }
-
-const emptyFinal = __test.analyzeArtifactFinal(finalizeEvent('empty-final', '给我一个结论', ''));
-assert.equal(emptyFinal.shouldReviseEmptyFinal, true);
-assert.match(__test.buildRevision(emptyFinal)?.retry?.idempotencyKey ?? '', /empty-final/u);
-
-const heartbeatMismatch = __test.analyzeArtifactFinal(finalizeEvent(
-  'heartbeat:mismatch',
-  '[OpenClaw heartbeat poll]',
-  '仍在处理。',
-));
-assert.equal(heartbeatMismatch.shouldReviseHeartbeat, true);
-assert.match(__test.buildRevision(heartbeatMismatch)?.retry?.idempotencyKey ?? '', /heartbeat/u);
-assert.equal(__test.analyzeArtifactFinal(finalizeEvent(
-  'heartbeat:ok',
-  '[OpenClaw heartbeat poll]',
-  'HEARTBEAT_OK',
-)).shouldRevise, false);
 
 const unverifiedRemoteUrl = __test.analyzeArtifactFinal(finalizeEvent(
   'artifact:remote-url',
@@ -74,11 +48,14 @@ const unverifiedRemoteUrl = __test.analyzeArtifactFinal(finalizeEvent(
   '已生成：https://example.invalid/generated.png',
 ));
 assert.equal(unverifiedRemoteUrl.artifacts.length, 0);
-assert.equal(unverifiedRemoteUrl.shouldRevise, false);
 
 assert.equal(__test.sanitizeInternalTranscriptMessage({
   role: 'user',
   content: 'Continue the OpenClaw runtime event.',
+}).action, 'block');
+assert.equal(__test.sanitizeInternalTranscriptMessage({
+  role: 'user',
+  content: '[OpenClaw heartbeat poll]',
 }).action, 'block');
 
 const lifecycleHooks = new Map();
@@ -94,6 +71,13 @@ __test.registerArtifactGuard({
 });
 const beforePromptBuild = lifecycleHooks.get('before_prompt_build');
 assert.equal(typeof beforePromptBuild, 'function');
+assert.equal(
+  lifecycleHooks.has('before_agent_finalize'),
+  false,
+  'before_agent_finalize makes OpenClaw defer every assistant frame until terminal delivery',
+);
+const agentEnd = lifecycleHooks.get('agent_end');
+assert.equal(typeof agentEnd, 'function');
 const ordinaryPromptContext = await beforePromptBuild({
   runId: 'prompt:ordinary',
   userMessage: '解释一下 PPT 是什么，不要生成文件。',
@@ -144,8 +128,15 @@ for (const toolName of ['image_generate', 'video_generate', 'create_designed_ppt
   }, { runId: `native-tool:${toolName}` });
   assert.notEqual(result?.block, true, toolName);
 }
+const longMediaPromptResult = await beforeToolCall({
+  runId: 'native-tool:long-image-prompt',
+  toolName: 'image_generate',
+  args: { prompt: 'a'.repeat(5_000) },
+}, { runId: 'native-tool:long-image-prompt' });
+assert.equal(longMediaPromptResult?.block, true);
+assert.match(longMediaPromptResult?.blockReason ?? '', /4096-character limit/iu);
 
-__test.emitToolResultRuntimeEvents({
+__test.emitToolArtifactRuntimeEvents({
   emitAgentEvent(event) {
     runtimeEvents.push(event);
     return { emitted: true };
@@ -156,9 +147,7 @@ __test.emitToolResultRuntimeEvents({
   isError: true,
   result: { details: { status: 'error', error: 'provider unavailable' } },
 }, { runId: 'runtime:failure', sessionKey: 'agent:main:runtime-failure' });
-assert.equal(runtimeEvents.some((event) => event.stream === 'checkpoint' || event.stream === 'issue'), false);
-assert.equal(runtimeEvents.some((event) => event.stream === 'step'), true);
-assert.equal(runtimeEvents.some((event) => event.stream === 'progress'), true);
+assert.equal(runtimeEvents.some((event) => event.stream === 'step' || event.stream === 'progress'), false);
 
 const artifactDir = mkdtempSync(join(tmpdir(), 'uclaw-deterministic-artifact-'));
 try {
@@ -181,13 +170,25 @@ try {
   assert.equal(valid.artifacts.length, 1);
   assert.equal(valid.verificationPassed, true);
   assert.equal(valid.verificationBlocked, false);
-  assert.equal(valid.shouldRevise, false);
   assert.match(valid.artifacts[0]?.verification.detail ?? '', /可读、非空的普通文件/u);
 
-  const beforeAgentFinalize = lifecycleHooks.get('before_agent_finalize');
-  assert.equal(typeof beforeAgentFinalize, 'function');
+  const eventCountBeforeToolArtifact = runtimeEvents.length;
+  __test.emitToolArtifactRuntimeEvents({
+    emitAgentEvent(event) {
+      runtimeEvents.push(event);
+      return { emitted: true };
+    },
+  }, {
+    toolCallId: 'generated-image',
+    toolName: 'image_generate',
+    cwd: artifactDir,
+    result: { content: [{ type: 'text', text: `Generated image.\nMEDIA:${validPath}` }] },
+  }, { runId: 'runtime:artifact', sessionKey: 'agent:main:runtime-artifact' });
+  const toolArtifactStreams = runtimeEvents.slice(eventCountBeforeToolArtifact).map((event) => event.stream);
+  assert.deepEqual(toolArtifactStreams, ['artifact', 'verification']);
+
   const eventCountBeforeFinalize = runtimeEvents.length;
-  assert.equal(beforeAgentFinalize(finalizeEvent(
+  assert.equal(agentEnd(finalizeEvent(
     'artifact:finalize-hook',
     '生成图片',
     `已生成。\nMEDIA:${validPath}`,
@@ -209,12 +210,7 @@ try {
     ));
     assert.equal(analysis.artifacts.length, 1, label);
     assert.equal(analysis.verificationBlocked, true, label);
-    assert.equal(analysis.shouldReviseArtifact, true, label);
-    assert.equal(analysis.shouldRevise, true, label);
     assert.match(analysis.artifacts[0]?.verification.detail ?? '', expectedDetail, label);
-    const revision = __test.buildRevision(analysis);
-    assert.equal(revision?.action, 'revise', label);
-    assert.match(revision?.reason ?? '', /deterministic availability verification/u, label);
   }
 
   const historyOnlyArtifact = finalizeEvent(
@@ -229,7 +225,6 @@ try {
   });
   const historyOnlyAnalysis = __test.analyzeArtifactFinal(historyOnlyArtifact);
   assert.equal(historyOnlyAnalysis.artifacts.length, 0);
-  assert.equal(historyOnlyAnalysis.shouldRevise, false);
 
   const previousStateDir = process.env.OPENCLAW_STATE_DIR;
   process.env.OPENCLAW_STATE_DIR = join(artifactDir, 'openclaw-state');
@@ -256,14 +251,5 @@ try {
 } finally {
   rmSync(artifactDir, { recursive: true, force: true });
 }
-
-assert.equal(__test.nativeMediaPromptLengthBlock({
-  toolName: 'image_generate',
-  args: { prompt: 'a'.repeat(4_096) },
-}), undefined);
-assert.match(__test.nativeMediaPromptLengthBlock({
-  toolName: 'video_generate',
-  args: { prompt: 'a'.repeat(4_097) },
-})?.reason ?? '', /4096-character limit/u);
 
 console.log('uclaw deterministic artifact guard runtime tests: ok');

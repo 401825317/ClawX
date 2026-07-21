@@ -241,7 +241,12 @@ test('Host task bridge routes delegate safe resume and cancellation to the regis
       body: JSON.stringify({ reason: 'route cancellation', correlation: { sessionKey: SESSION_KEY } }),
     });
     assert.equal(cancelResponse.status, 202);
-    const cancelled = await waitForTask(origin, cancelTaskId, 'cancelled');
+    const cancelled = await waitForTask(origin, cancelTaskId, 'cancelled', (task) => {
+      const operations = (task.lifecycle as { operations?: Array<{ kind?: string; status?: string }> } | undefined)?.operations;
+      return operations?.some((operation) => (
+        operation.kind === 'cancel' && operation.status === 'completed'
+      )) === true;
+    });
     assert.equal(cancels, 1);
 
     const lateUpdateResponse = await fetch(`${origin}/api/runtime/tasks/${encodeURIComponent(cancelTaskId)}/update`, {

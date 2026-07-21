@@ -11,7 +11,8 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Switch } from '@/components/ui/switch';
 import { useAgentsStore } from '@/stores/agents';
 import { useChatStore } from '@/stores/chat';
-import type { ChatRuntimeRunState, ChatSession } from '@/stores/chat/types';
+import { selectRunningAgentIds } from '@/stores/conversation/control-selectors';
+import { useConversationStore } from '@/stores/conversation/store';
 import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
 import { scheduleAfterNavigationFrame } from '@/lib/deferred-work';
@@ -59,85 +60,9 @@ type AgentWorkStatus = 'running' | 'completed';
 type FetchChannelAccountsOptions = { deferIfBusy?: boolean; force?: boolean };
 
 const AGENTS_BUSY_REFRESH_DEFER_MS = 30_000;
-const AGENTS_RUNTIME_RUN_ACTIVE_WINDOW_MS = 2 * 60_000;
-const RUNNING_SESSION_STATUSES = new Set(['running', 'active', 'queued', 'in_progress', 'processing']);
 
 function normalizeAgentId(value: string | undefined | null): string {
   return (value ?? '').trim().toLowerCase() || 'main';
-}
-
-function getAgentIdFromSessionKey(sessionKey: string | undefined | null): string {
-  if (!sessionKey?.startsWith('agent:')) return 'main';
-  const [, agentId] = sessionKey.split(':');
-  return normalizeAgentId(agentId);
-}
-
-function isRunningSession(session: ChatSession): boolean {
-  if (session.hasActiveRun === true) return true;
-  const status = session.status?.trim().toLowerCase();
-  return Boolean(status && RUNNING_SESSION_STATUSES.has(status));
-}
-
-function toMs(timestamp: number): number {
-  return timestamp < 1e12 ? timestamp * 1000 : timestamp;
-}
-
-function getRuntimeRunActivityMs(run: ChatRuntimeRunState): number | null {
-  if (typeof run.lastEventAt === 'number' && Number.isFinite(run.lastEventAt)) {
-    return toMs(run.lastEventAt);
-  }
-  if (typeof run.startedAt === 'number' && Number.isFinite(run.startedAt)) {
-    return toMs(run.startedAt);
-  }
-  return null;
-}
-
-function isRuntimeRunRecentlyActive(run: ChatRuntimeRunState, now = Date.now()): boolean {
-  if (run.status !== 'running') return false;
-  const activityMs = getRuntimeRunActivityMs(run);
-  if (activityMs == null) return true;
-  return now - activityMs < AGENTS_RUNTIME_RUN_ACTIVE_WINDOW_MS;
-}
-
-function getRunningAgentIds(
-  state: {
-    sessions: ChatSession[];
-    currentSessionKey: string;
-    currentAgentId: string;
-    sending: boolean;
-    runtimeRuns: Record<string, ChatRuntimeRunState>;
-  },
-): string[] {
-  const ids = new Set<string>();
-  const now = Date.now();
-  if (state.sending) {
-    const sendingAgentId = normalizeAgentId(state.currentAgentId || getAgentIdFromSessionKey(state.currentSessionKey));
-    ids.add(sendingAgentId);
-  }
-
-  for (const session of state.sessions) {
-    if (isRunningSession(session)) {
-      ids.add(getAgentIdFromSessionKey(session.key));
-    }
-  }
-
-  for (const run of Object.values(state.runtimeRuns)) {
-    if (isRuntimeRunRecentlyActive(run, now)) {
-      ids.add(getAgentIdFromSessionKey(run.sessionKey));
-    }
-  }
-
-  return Array.from(ids).sort();
-}
-
-function getRunningAgentKey(state: {
-  sessions: ChatSession[];
-  currentSessionKey: string;
-  currentAgentId: string;
-  sending: boolean;
-  runtimeRuns: Record<string, ChatRuntimeRunState>;
-}): string {
-  return getRunningAgentIds(state).join('|');
 }
 
 export function Agents() {
@@ -145,7 +70,10 @@ export function Agents() {
   const navigate = useNavigate();
   const gatewayStatus = useGatewayStore((state) => state.status);
   const switchSession = useChatStore((state) => state.switchSession);
-  const runningAgentKey = useChatStore(getRunningAgentKey);
+  const backendSessions = useChatStore((state) => state.sessions);
+  const runningAgentKey = useConversationStore((state) => (
+    selectRunningAgentIds(state, backendSessions).join('|')
+  ));
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const lastGatewayStateRef = useRef(gatewayStatus.state);
   const {

@@ -21,9 +21,12 @@ const (
 	defaultDataDirName = "UClawData"
 	backupDirName      = ".uclaw-update-backups"
 	resultSuffix       = ".result.json"
+	startupAckTimeout  = 90 * time.Second
 )
 
 var startUpdatedApp = defaultStartUpdatedApp
+var stopUpdatedApp = defaultStopUpdatedApp
+var awaitUpdatedAppStartup = waitForStartupAck
 
 type updateTask struct {
 	ZipPath       string `json:"zipPath"`
@@ -36,6 +39,23 @@ type updateTask struct {
 	ParentPID     int    `json:"parentPid"`
 	LogPath       string `json:"logPath"`
 	StagingDir    string `json:"stagingDir"`
+	AckPath       string `json:"ackPath"`
+	PendingPath   string `json:"pendingPath"`
+}
+
+type pendingStartup struct {
+	Version       int    `json:"version"`
+	TargetVersion string `json:"targetVersion"`
+	RootDir       string `json:"rootDir"`
+	AckPath       string `json:"ackPath"`
+}
+
+type startupAck struct {
+	Version       int    `json:"version"`
+	Ready         bool   `json:"ready"`
+	TargetVersion string `json:"targetVersion"`
+	RootDir       string `json:"rootDir"`
+	PID           int    `json:"pid"`
 }
 
 type updateResult struct {
@@ -107,9 +127,14 @@ func run(taskPath string) int {
 			Detail:  "等待 UClaw 完全退出，随后开始替换文件。",
 			Percent: 5,
 		})
-		waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
+		if err := waitForParentExit(task.ParentPID, 45*time.Second, func(format string, args ...any) {
 			u.logf(format, args...)
-		})
+		}); err != nil {
+			u.logf("refusing to replace files while the parent exit is unconfirmed: %v", err)
+			progress.Fail("更新失败", "旧版 UClaw 尚未完全退出，未替换任何文件。")
+			u.writeResult(updateResult{Success: false, Error: err.Error(), TargetVersion: task.TargetVersion})
+			return 1
+		}
 	} else {
 		time.Sleep(2 * time.Second)
 	}
@@ -157,15 +182,18 @@ func validateTask(task *updateTask) error {
 	task.RootDir = strings.TrimSpace(task.RootDir)
 	task.DataDirName = strings.TrimSpace(task.DataDirName)
 	task.LaunchPath = strings.TrimSpace(task.LaunchPath)
+	task.TargetVersion = strings.TrimSpace(task.TargetVersion)
 	task.Sha512 = strings.ToLower(strings.TrimSpace(task.Sha512))
+	task.AckPath = strings.TrimSpace(task.AckPath)
+	task.PendingPath = strings.TrimSpace(task.PendingPath)
 	if task.DataDirName == "" {
 		task.DataDirName = defaultDataDirName
 	}
-	if task.ZipPath == "" || task.RootDir == "" || task.LaunchPath == "" {
-		return errors.New("zipPath, rootDir and launchPath are required")
+	if task.ZipPath == "" || task.RootDir == "" || task.LaunchPath == "" || task.TargetVersion == "" || task.AckPath == "" || task.PendingPath == "" {
+		return errors.New("zipPath, rootDir, launchPath, targetVersion, ackPath and pendingPath are required")
 	}
-	if !filepath.IsAbs(task.ZipPath) || !filepath.IsAbs(task.RootDir) || !filepath.IsAbs(task.LaunchPath) {
-		return errors.New("zipPath, rootDir and launchPath must be absolute")
+	if !filepath.IsAbs(task.ZipPath) || !filepath.IsAbs(task.RootDir) || !filepath.IsAbs(task.LaunchPath) || !filepath.IsAbs(task.AckPath) || !filepath.IsAbs(task.PendingPath) {
+		return errors.New("zipPath, rootDir, launchPath, ackPath and pendingPath must be absolute")
 	}
 	if task.DataDirName == "." || task.DataDirName == ".." || strings.ContainsAny(task.DataDirName, `/\`) {
 		return errors.New("dataDirName must be a single directory name")
@@ -191,7 +219,27 @@ func validateTask(task *updateTask) error {
 	if rel, err := filepath.Rel(task.RootDir, task.LaunchPath); err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return errors.New("launchPath must be inside rootDir")
 	}
+	if !isPathInside(filepath.Dir(task.PendingPath), task.AckPath) {
+		return errors.New("ackPath must be inside the pending update directory")
+	}
 	return nil
+}
+
+func normalizedPath(path string) string {
+	cleaned := filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(cleaned)
+	}
+	return cleaned
+}
+
+func isPathInside(parent string, child string) bool {
+	relative, err := filepath.Rel(normalizedPath(parent), normalizedPath(child))
+	return err == nil &&
+		relative != "." &&
+		relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(os.PathSeparator)) &&
+		!filepath.IsAbs(relative)
 }
 
 func openLog(path string) (*os.File, error) {
@@ -228,7 +276,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		Percent: 8,
 	})
 	if err := verifyZip(u.task.ZipPath, u.task.Size, u.task.Sha512); err != nil {
-		return "", "", "", err
+		return "", "", "", u.restartPreviousAppAfterFailure(err)
 	}
 
 	u.progress.Update(progressState{
@@ -238,7 +286,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	})
 	stagingDir, err = u.prepareStagingDir()
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", u.restartPreviousAppAfterFailure(err)
 	}
 	u.logf("extracting update zip to %s", stagingDir)
 	if err := extractZip(u.task.ZipPath, stagingDir, func(percent int, detail string) {
@@ -249,7 +297,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		})
 	}); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return "", stagingDir, "", err
+		return "", stagingDir, "", u.restartPreviousAppAfterFailure(err)
 	}
 	u.progress.Update(progressState{
 		Title:   "正在检查新版文件",
@@ -258,7 +306,7 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	})
 	if err := u.validateStaging(stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return "", stagingDir, "", err
+		return "", stagingDir, "", u.restartPreviousAppAfterFailure(err)
 	}
 
 	backupDir = filepath.Join(u.task.RootDir, backupDirName, time.Now().UTC().Format("20060102-150405"))
@@ -270,21 +318,27 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	})
 	if err := os.MkdirAll(backupDir, 0o755); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return backupDir, stagingDir, "", err
+		return backupDir, stagingDir, "", u.restartPreviousAppAfterFailure(err)
 	}
 
 	replacementEntries, err := replacementEntrySet(stagingDir, u.task.DataDirName)
 	if err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return backupDir, stagingDir, "", err
+		return backupDir, stagingDir, "", u.restartPreviousAppAfterFailure(err)
 	}
 
 	moved, err := u.moveCurrentFilesToBackup(backupDir, replacementEntries)
 	if err != nil {
 		u.logf("backup failed; rolling back moved entries")
-		_ = moveEntriesBack(backupDir, u.task.RootDir, moved)
+		rollbackErr := moveEntriesBack(backupDir, u.task.RootDir, moved)
 		_ = os.RemoveAll(stagingDir)
-		return backupDir, stagingDir, "", err
+		if rollbackErr != nil {
+			return backupDir, stagingDir, "", combineErrors(
+				err,
+				fmt.Errorf("portable rollback failed; backup remains at %s: %w", backupDir, rollbackErr),
+			)
+		}
+		return backupDir, stagingDir, "", u.restartPreviousAppAfterFailure(err)
 	}
 
 	copied, err := copyReplacementFiles(stagingDir, u.task.RootDir, u.task.DataDirName, func(percent int, detail string) {
@@ -296,10 +350,15 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 	})
 	if err != nil {
 		u.logf("copy failed; rolling back replacement")
-		_ = removeCopiedEntries(u.task.RootDir, copied)
-		_ = moveEntriesBack(backupDir, u.task.RootDir, moved)
+		rollbackErr := rollbackReplacement(backupDir, u.task.RootDir, moved, copied)
 		_ = os.RemoveAll(stagingDir)
-		return backupDir, stagingDir, "", err
+		if rollbackErr != nil {
+			return backupDir, stagingDir, "", combineErrors(
+				err,
+				fmt.Errorf("portable rollback failed; backup remains at %s: %w", backupDir, rollbackErr),
+			)
+		}
+		return backupDir, stagingDir, "", u.restartPreviousAppAfterFailure(err)
 	}
 
 	launchPath := u.task.LaunchPath
@@ -307,23 +366,165 @@ func (u *updater) apply() (backupDir string, stagingDir string, launchedPath str
 		u.logf("declared launch path unavailable after update: %v", err)
 		launchPath = findLaunchPath(u.task.RootDir)
 		if launchPath == "" {
-			return backupDir, stagingDir, "", errors.New("updated app launch path was not found")
+			cause := errors.New("updated app launch path was not found")
+			return backupDir, stagingDir, "", u.rollbackAfterStartupFailure(
+				backupDir,
+				u.task.LaunchPath,
+				0,
+				moved,
+				copied,
+				cause,
+			)
 		}
 	}
-	_ = chmodExecutable(launchPath)
+	if err := chmodExecutable(launchPath); err != nil {
+		return backupDir, stagingDir, "", u.rollbackAfterStartupFailure(
+			backupDir,
+			launchPath,
+			0,
+			moved,
+			copied,
+			err,
+		)
+	}
+	if err := u.prepareStartupAcknowledgement(); err != nil {
+		return backupDir, stagingDir, "", u.rollbackAfterStartupFailure(backupDir, launchPath, 0, moved, copied, err)
+	}
 
 	u.progress.Update(progressState{
 		Title:   "正在启动新版 UClaw",
 		Detail:  "更新即将完成。",
 		Percent: 96,
 	})
-	if err := startUpdatedApp(launchPath, u.task.RootDir); err != nil {
-		return backupDir, stagingDir, "", err
+	launchedPID, err := startUpdatedApp(launchPath, u.task.RootDir)
+	if err != nil {
+		return backupDir, stagingDir, "", u.rollbackAfterStartupFailure(backupDir, launchPath, 0, moved, copied, err)
+	}
+	if err := awaitUpdatedAppStartup(u.task.AckPath, u.task.TargetVersion, u.task.RootDir, startupAckTimeout); err != nil {
+		return backupDir, stagingDir, "", u.rollbackAfterStartupFailure(backupDir, launchPath, launchedPID, moved, copied, err)
 	}
 
+	_ = os.Remove(u.task.AckPath)
+	_ = os.Remove(u.task.PendingPath)
 	_ = os.RemoveAll(stagingDir)
 	cleanupOldBackups(filepath.Join(u.task.RootDir, backupDirName), backupDir, 7*24*time.Hour, u.logf)
 	return backupDir, stagingDir, launchPath, nil
+}
+
+func (u *updater) prepareStartupAcknowledgement() error {
+	if err := os.MkdirAll(filepath.Dir(u.task.AckPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(u.task.PendingPath), 0o755); err != nil {
+		return err
+	}
+	_ = os.Remove(u.task.AckPath)
+
+	pending := pendingStartup{
+		Version:       1,
+		TargetVersion: u.task.TargetVersion,
+		RootDir:       u.task.RootDir,
+		AckPath:       u.task.AckPath,
+	}
+	raw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		return err
+	}
+	temporaryPath := u.task.PendingPath + ".tmp"
+	if err := os.WriteFile(temporaryPath, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	// os.Rename cannot replace an existing destination on Windows. A stale
+	// pending marker must not make an otherwise recoverable update fail.
+	if err := os.Remove(u.task.PendingPath); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := os.Rename(temporaryPath, u.task.PendingPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	return nil
+}
+
+func waitForStartupAck(path string, targetVersion string, rootDir string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			var ack startupAck
+			if err := json.Unmarshal(raw, &ack); err != nil {
+				return fmt.Errorf("invalid portable startup acknowledgement: %w", err)
+			}
+			if ack.Version != 1 ||
+				!ack.Ready ||
+				ack.TargetVersion != targetVersion ||
+				ack.PID <= 0 ||
+				normalizedPath(ack.RootDir) != normalizedPath(rootDir) {
+				return errors.New("portable startup acknowledgement does not match the update task")
+			}
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("updated UClaw did not acknowledge startup within %s", timeout)
+}
+
+func (u *updater) rollbackAfterStartupFailure(
+	backupDir string,
+	launchPath string,
+	launchedPID int,
+	moved []string,
+	copied []string,
+	cause error,
+) error {
+	u.logf("updated app startup failed; restoring previous portable version: %v", cause)
+	if launchedPID > 0 {
+		if err := stopUpdatedApp(launchPath, u.task.RootDir, launchedPID); err != nil {
+			u.logf("failed to stop the updated app before rollback: %v", err)
+		}
+	}
+	_ = os.Remove(u.task.AckPath)
+	_ = os.Remove(u.task.PendingPath)
+
+	rollbackErr := rollbackReplacement(backupDir, u.task.RootDir, moved, copied)
+	if rollbackErr != nil {
+		return combineErrors(cause, fmt.Errorf("portable rollback failed; backup remains at %s: %w", backupDir, rollbackErr))
+	}
+	return u.restartPreviousAppAfterFailure(cause)
+}
+
+func (u *updater) restartPreviousAppAfterFailure(cause error) error {
+	restoredLaunchPath := u.task.LaunchPath
+	if !existsFile(restoredLaunchPath) {
+		restoredLaunchPath = findLaunchPath(u.task.RootDir)
+	}
+	if restoredLaunchPath == "" {
+		return combineErrors(cause, errors.New("portable rollback succeeded but the previous launch path was not found"))
+	}
+	if _, err := startUpdatedApp(restoredLaunchPath, u.task.RootDir); err != nil {
+		return combineErrors(cause, fmt.Errorf("portable rollback succeeded but the previous version could not restart: %w", err))
+	}
+	return cause
+}
+
+func rollbackReplacement(backupDir string, rootDir string, moved []string, copied []string) error {
+	removeErr := removeCopiedEntries(rootDir, copied)
+	restoreErr := moveEntriesBack(backupDir, rootDir, moved)
+	return combineErrors(removeErr, restoreErr)
+}
+
+func combineErrors(primary error, secondary error) error {
+	if primary == nil {
+		return secondary
+	}
+	if secondary == nil {
+		return primary
+	}
+	return fmt.Errorf("%v; %w", primary, secondary)
 }
 
 func clampProgressPercent(value int, min int, max int) int {
@@ -561,7 +762,7 @@ func (u *updater) moveCurrentFilesToBackup(backupDir string, replacementEntries 
 }
 
 func shouldSkipRootEntry(name string, dataDirName string) bool {
-	return name == dataDirName || name == backupDirName
+	return strings.EqualFold(name, dataDirName) || strings.EqualFold(name, backupDirName)
 }
 
 func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string, onProgress func(percent int, detail string)) ([]string, error) {
@@ -589,10 +790,12 @@ func copyReplacementFiles(stagingDir string, rootDir string, dataDirName string,
 		if onProgress != nil {
 			onProgress(index*100/total, fmt.Sprintf("正在替换 %d/%d: %s", index+1, total, name))
 		}
+		// Track before copying so rollback also removes the current entry when a
+		// directory or file was only partially written.
+		copied = append(copied, name)
 		if err := copyPath(src, dst); err != nil {
 			return copied, err
 		}
-		copied = append(copied, name)
 	}
 	if onProgress != nil {
 		onProgress(100, "新版文件已安装。")
@@ -662,7 +865,9 @@ func moveEntriesBack(backupDir string, rootDir string, entries []string) error {
 		src := filepath.Join(backupDir, name)
 		dst := filepath.Join(rootDir, name)
 		_ = os.RemoveAll(dst)
-		if err := os.Rename(src, dst); err != nil && firstErr == nil {
+		if err := retry(fmt.Sprintf("restore %s", name), 18, 500*time.Millisecond, func() error {
+			return os.Rename(src, dst)
+		}); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -729,17 +934,49 @@ func chmodExecutable(path string) error {
 	return os.Chmod(path, info.Mode().Perm()|0o755)
 }
 
-func defaultStartUpdatedApp(launchPath string, rootDir string) error {
+func defaultStartUpdatedApp(launchPath string, rootDir string) (int, error) {
 	if runtime.GOOS == "darwin" {
 		if appBundle := findAppBundleFromLaunchPath(launchPath); appBundle != "" {
 			cmd := exec.Command("/usr/bin/open", "-n", appBundle)
 			cmd.Dir = rootDir
-			return cmd.Start()
+			if err := cmd.Start(); err != nil {
+				return 0, err
+			}
+			return cmd.Process.Pid, nil
 		}
 	}
 	cmd := exec.Command(launchPath)
 	cmd.Dir = rootDir
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	return cmd.Process.Pid, nil
+}
+
+func defaultStopUpdatedApp(launchPath string, rootDir string, launchedPID int) error {
+	command, args, err := stopUpdatedAppCommand(runtime.GOOS, launchPath, launchedPID)
+	if err != nil {
+		return err
+	}
+	return exec.Command(command, args...).Run()
+}
+
+// Build the stop command separately so Windows PID targeting is testable cross-platform.
+func stopUpdatedAppCommand(goos string, launchPath string, launchedPID int) (string, []string, error) {
+	if goos == "windows" {
+		if launchedPID <= 0 {
+			return "", nil, errors.New("updated app pid is unavailable")
+		}
+		return "taskkill", []string{"/F", "/T", "/PID", fmt.Sprintf("%d", launchedPID)}, nil
+	}
+	if goos == "darwin" {
+		match := findAppBundleFromLaunchPath(launchPath)
+		if match == "" {
+			match = launchPath
+		}
+		return "/usr/bin/pkill", []string{"-f", match}, nil
+	}
+	return "pkill", []string{"-f", launchPath}, nil
 }
 
 func findAppBundleFromLaunchPath(launchPath string) string {

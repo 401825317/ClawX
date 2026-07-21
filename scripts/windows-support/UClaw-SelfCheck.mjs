@@ -42,6 +42,7 @@ const WINDOWS_PE_FILES = [
   path.join('resources', 'bin', 'agent-browser.exe'),
   path.join('resources', 'bin', 'ffmpeg.exe'),
   path.join('resources', 'bin', 'ffprobe.exe'),
+  path.join('resources', 'resources', 'updater', 'win32-x64', 'uclaw-portable-updater.exe'),
 ];
 const LOG_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const args = process.argv.slice(2);

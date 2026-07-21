@@ -48,7 +48,7 @@ async function installChatMocks(app: ElectronApplication, historyMessages: RawMe
         success: true,
         result: { sessions: [{ key: SESSION_KEY, displayName: 'main' }] },
       },
-      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
         success: true,
         result: { messages: historyMessages },
       },
@@ -393,13 +393,15 @@ test.describe('structured OpenClaw task projection', () => {
     });
     const events = [...partialEvents, ...completedEvents];
     const steps = deriveTaskSteps(events, 'completed');
-    const partialIssue = steps.find((step) => step.id === 'gate-issue:issue:task:task-recovered:partial');
+    const recoveredTask = steps.find((step) => step.id === 'plan-step:task:task-recovered');
     const partialArtifact = steps.find((step) => step.id === 'artifact:partial-evidence');
 
+    expect(recoveredTask?.taskId).toBe('task-recovered');
+    expect(recoveredTask?.status).toBe('completed');
     expect(partialArtifact?.status).toBe('completed');
     expect(partialArtifact?.parentId).toBe('plan-step:task:task-recovered');
-    expect(partialIssue?.taskId).toBe('task-recovered');
-    expect(partialIssue?.status).toBe('completed');
+    expect(steps.filter((step) => step.id.startsWith('gate-issue:'))).toHaveLength(0);
+    expect(steps.filter((step) => step.taskId === 'task-recovered' && step.status === 'blocked')).toHaveLength(0);
   });
 
   test('only projects explicit output artifacts and never fabricates availability verification', () => {
@@ -574,18 +576,23 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 15,
       }]);
 
-      const progress = page.getByTestId('chat-run-progress');
-      await expect(progress).toBeVisible({ timeout: 30_000 });
-      await expect(progress.getByTestId('chat-run-progress-action')).toHaveCount(2);
-      await expect(progress).toContainText(/已完成：网页搜索|Completed: Web search/u);
-      await expect(progress).toContainText(/已提交：视频生成|Submitted: Video generation/u);
-      await expect(progress).toContainText('小米 SU7 Ultra 官方性能参数');
-      await expect(progress).toContainText('60s');
-      await expect(progress).not.toContainText('已运行');
-      await expect(progress).not.toContainText('tool_describe');
-      await expect(progress).not.toContainText('tool_call');
-      await expect(progress).not.toContainText('uclaw_declare_turn_contract');
-      await expect(progress).not.toContainText('电影级汽车宣传片电影级汽车宣传片');
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toHaveCount(1);
+      await expect(toolGroup).toHaveAttribute('data-status', 'completed');
+      await expect(page.getByTestId('timeline-tool-details')).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.locator('body')).not.toContainText('tool_describe');
+      await expect(page.locator('body')).not.toContainText('tool_call');
+      await expect(page.locator('body')).not.toContainText('uclaw_declare_turn_contract');
+      await expect(page.locator('body')).not.toContainText('电影级汽车宣传片电影级汽车宣传片');
+
+      await page.getByTestId('timeline-tool-group-toggle').click();
+      const toolDetails = page.getByTestId('timeline-tool-details');
+      await expect(toolDetails.locator(':scope > div')).toHaveCount(5);
+      await expect(toolDetails).toContainText('小米 SU7 Ultra 官方性能参数');
+      await expect(toolDetails).not.toContainText('durationSeconds');
+      await page.getByTestId('timeline-tool-group-toggle').click();
+      await expect(toolDetails).toHaveCount(0);
 
       await emitRuntimeEvents(app, [{
         type: 'task.updated',
@@ -608,10 +615,12 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 21,
       }]);
 
-      await expect(progress).not.toContainText('处理完成');
-      await expect(progress).toContainText(/处理中|已处理/u);
-      const graph = page.getByTestId('chat-execution-graph');
-      await expect(graph).toHaveAttribute('data-compact-status', 'running');
+      const subtasks = page.getByTestId('timeline-subtasks');
+      await expect(subtasks).toHaveCount(1);
+      await expect(subtasks).toHaveAttribute('data-status', 'running');
+      await expect(page.getByTestId('timeline-subtasks-toggle')).toHaveAttribute('aria-expanded', 'false');
+      await expect(page.getByTestId('timeline-subtask-details')).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
 
       await emitRuntimeEvents(app, [{
         type: 'task.updated',
@@ -631,14 +640,28 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 30,
       }]);
 
-      await expect(progress).toContainText('任务执行失败');
-      await expect(progress).toContainText(/执行失败：视频生成|Failed: Video generation/u);
-      await expect(progress).toContainText('HTTP 503');
-      await expect(progress).not.toContainText('处理完成');
-      await expect(graph).toHaveAttribute('data-compact-status', 'error');
-      if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
-      await expect(page.locator('[data-testid="chat-execution-step"][data-task-id="video-task-1"]'))
-        .toHaveAttribute('data-step-status', 'error');
+      await expect(subtasks).toHaveAttribute('data-status', 'error');
+      await expect(subtasks).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
+      await expect(page.getByTestId('timeline-subtasks-toggle')).not.toHaveAttribute('aria-expanded');
+      await expect(page.getByTestId('timeline-subtask-details')).toHaveCount(0);
+      await expect(page.getByText('HTTP 503', { exact: false })).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const graph = dialog.getByTestId('chat-execution-graph');
+      await expect(graph).toBeVisible();
+      const taskRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="video-task-1"]')
+        .filter({ hasText: '生成 1 分钟宣传片' });
+      await expect(taskRow).toHaveCount(1);
+      await expect(taskRow).toHaveAttribute('data-step-status', 'error');
+      await expect(taskRow).toHaveAttribute('data-parent-id', 'agent-run');
+      await expect(taskRow).toContainText('HTTP 503');
+      await expect(page.getByTestId('timeline-error')).toHaveCount(0);
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('chat-generated-file')).toHaveCount(0);
 
       await emitRuntimeEvents(app, [{
@@ -650,11 +673,15 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 40,
       }]);
 
-      await expect(progress).not.toContainText('任务执行失败');
+      await expect(subtasks).toHaveAttribute('data-status', 'error');
+      await expect(subtasks).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
+      await expect(page.getByText('HTTP 503', { exact: false })).toHaveCount(0);
+      await page.getByTestId('timeline-execution-details').click();
+      await expect(dialog).toBeVisible();
       await expect(graph).toHaveAttribute('data-compact-status', 'completed');
-      await expect(page.locator('[data-testid="chat-execution-step"][data-task-id="video-task-1"]'))
-        .toHaveAttribute('data-step-status', 'error');
-      await expect(progress).toContainText('HTTP 503');
+      await expect(taskRow).toHaveAttribute('data-step-status', 'error');
+      await expect(taskRow).toContainText('HTTP 503');
+      await page.keyboard.press('Escape');
     } finally {
       await closeElectronApp(app);
     }
@@ -716,20 +743,37 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 3,
         endedAt: now + 3,
         status: 'error',
+        error: 'Runtime command failed',
       }]);
 
-      const progress = page.getByTestId('chat-run-progress');
-      await expect(progress).toBeVisible();
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toHaveCount(0);
+      const timelineError = page.getByTestId('timeline-error');
+      await expect(timelineError).toHaveCount(1);
+      await expect(timelineError).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
       await expect(page.locator('body')).not.toContainText(commandSecret);
       await expect(page.locator('body')).not.toContainText(errorSecret);
       await expect(page.locator('body')).not.toContainText('signed-ui-secret');
       await expect(page.locator('body')).not.toContainText('sk-proj-error-ui-secret');
 
-      const graph = page.getByTestId('chat-execution-graph');
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const graph = dialog.getByTestId('chat-execution-graph');
       await expect(graph).toBeVisible();
-      if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
+      const secretExecRow = dialog.getByTestId('chat-execution-step').filter({ hasText: 'exec' });
+      await expect(secretExecRow).toHaveCount(1);
+      await expect(secretExecRow).toHaveAttribute('data-step-status', 'error');
+      await expect(secretExecRow).toHaveAttribute('data-parent-id', 'agent-run');
       await expect(graph).not.toContainText(commandSecret);
       await expect(graph).not.toContainText(errorSecret);
+      await expect(graph).not.toContainText('signed-ui-secret');
+      await expect(graph).not.toContainText('sk-proj-error-ui-secret');
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -807,14 +851,32 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now - 1_000,
       }]);
 
-      const graph = page.getByTestId('chat-execution-graph');
-      await expect(graph).toHaveCount(1);
-      await expect(graph).toHaveAttribute('data-compact-status', 'error');
-      if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
-      const taskRow = page.locator('[data-testid="chat-execution-step"][data-task-id="cold-video-task"]');
+      const subtasks = page.getByTestId('timeline-subtasks');
+      await expect(subtasks).toHaveCount(1);
+      await expect(subtasks).toHaveAttribute('data-status', 'error');
+      await expect(subtasks).toContainText(/This request could not be completed|暂时无法完成这项请求/u);
+      await expect(page.getByTestId('timeline-subtasks-toggle')).not.toHaveAttribute('aria-expanded');
+      await expect(page.getByTestId('timeline-subtask-details')).toHaveCount(0);
+      await expect(page.getByText('后台任务恢复后确认生成失败', { exact: true })).toHaveCount(0);
+
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const graph = dialog.getByTestId('chat-execution-graph');
+      await expect(graph).toBeVisible();
+      const taskRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="cold-video-task"]')
+        .filter({ hasText: '生成产品视频' });
+      await expect(taskRow).toHaveCount(1);
       await expect(taskRow).toHaveAttribute('data-step-status', 'error');
+      await expect(taskRow).toHaveAttribute('data-parent-id', 'agent-run');
       await expect(taskRow).toContainText('生成产品视频');
-      await expect(page.getByTestId('chat-run-progress')).toContainText('后台任务恢复后确认生成失败');
+      await taskRow.locator('button').click();
+      await expect(taskRow).toContainText('后台任务恢复后确认生成失败');
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }
@@ -872,10 +934,30 @@ test.describe('structured OpenClaw task projection', () => {
         ...normalizeTaskSnapshot(child),
       ]);
 
-      const graph = page.getByTestId('chat-execution-graph');
+      const subtasks = page.getByTestId('timeline-subtasks');
+      await expect(subtasks).toHaveCount(2);
+      const parentSubtask = subtasks.nth(0);
+      const childSubtask = subtasks.nth(1);
+      await expect(parentSubtask).toHaveAttribute('data-status', 'running');
+      await expect(childSubtask).toHaveAttribute('data-status', 'running');
+      await expect(page.getByTestId('timeline-approval')).toHaveCount(0);
+      // The default Timeline stays linear; the full graph mounts only through
+      // the Turn-level execution details entry.
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const graph = dialog.getByTestId('chat-execution-graph');
       await expect(graph).toBeVisible({ timeout: 30_000 });
       await expect(graph).toHaveAttribute('data-compact-status', 'running');
-      await expect(graph).toContainText(/0\/2/);
+      const parentRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-parent"]')
+        .filter({ hasText: 'Coordinate release evidence' });
+      const childRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-child"]')
+        .filter({ hasText: 'Inspect deployment evidence' });
+      await expect(parentRow).toHaveAttribute('data-step-status', 'running');
+      await expect(childRow).toHaveAttribute('data-step-status', 'running');
+      await expect(childRow).toHaveAttribute('data-parent-id', 'plan-step:task:task-parent');
 
       await emitRuntimeEvents(app, normalizeTaskSnapshot(
         {
@@ -904,7 +986,10 @@ test.describe('structured OpenClaw task projection', () => {
         },
       ));
       await expect(graph).toHaveAttribute('data-compact-status', 'running');
-      await expect(graph).toContainText(/1\/2/);
+      await expect(parentRow).toHaveAttribute('data-step-status', 'running');
+      await expect(childRow).toHaveAttribute('data-step-status', 'completed');
+      await expect(parentSubtask).toHaveAttribute('data-status', 'running');
+      await expect(childSubtask).toHaveAttribute('data-status', 'completed');
 
       await emitRuntimeEvents(app, normalizeTaskSnapshot(
         {
@@ -921,18 +1006,16 @@ test.describe('structured OpenClaw task projection', () => {
           },
         },
       ));
-      await expect(graph).toHaveAttribute('data-compact-status', 'blocked');
-      await expect(graph.locator('[data-status-icon="blocked"]')).toBeVisible();
-      if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
-
-      const parentRow = page.locator('[data-testid="chat-execution-step"][data-task-id="task-parent"]')
-        .filter({ hasText: 'Coordinate release evidence' });
-      const childRow = page.locator('[data-testid="chat-execution-step"][data-task-id="task-child"]')
-        .filter({ hasText: 'Inspect deployment evidence' });
-      const approvalRow = page.locator('[data-testid="chat-execution-step"][data-task-id="task-parent"]')
+      const approvalRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-parent"]')
         .filter({ hasText: 'Publish release notes' });
+      await expect(parentSubtask).toHaveAttribute('data-status', 'blocked');
+      await expect(childSubtask).toHaveAttribute('data-status', 'completed');
+      await expect(page.getByTestId('timeline-approval')).toHaveCount(1);
+      await expect(page.getByTestId('timeline-approval')).toHaveAttribute('data-status', 'blocked');
       await expect(parentRow).toHaveAttribute('data-step-status', 'blocked');
+      await expect(approvalRow).toHaveCount(1);
       await expect(approvalRow).toHaveAttribute('data-step-status', 'blocked');
+      await expect(approvalRow).toHaveAttribute('data-parent-id', 'plan-step:task:task-parent');
 
       await emitRuntimeEvents(app, [
         ...normalizeGatewayChatRuntimeEvents({
@@ -960,11 +1043,18 @@ test.describe('structured OpenClaw task projection', () => {
           endedAt: now + 60,
         }),
       ]);
+      await expect(parentSubtask).toHaveAttribute('data-status', 'completed');
+      await expect(childSubtask).toHaveAttribute('data-status', 'completed');
+      await expect(page.getByTestId('timeline-approval')).toHaveCount(1);
+      await expect(page.getByTestId('timeline-approval')).toHaveAttribute('data-status', 'completed');
+      await expect(page.getByTestId('timeline-artifacts')).toHaveCount(1);
+      await expect(page.getByTestId('timeline-verification')).toHaveCount(0);
       await expect(parentRow).toHaveAttribute('data-step-status', 'completed');
+      await expect(childRow).toHaveAttribute('data-step-status', 'completed');
+      await expect(approvalRow).toHaveCount(1);
       await expect(approvalRow).toHaveAttribute('data-step-status', 'completed');
-      await page.getByTestId('chat-execution-graph-collapse').click();
+      await expect(approvalRow).toHaveAttribute('data-parent-id', 'plan-step:task:task-parent');
       await expect(graph).toHaveAttribute('data-compact-status', 'running');
-      await expect(graph).toContainText(/2\/2/);
 
       await emitRuntimeEvents(app, [{
         type: 'run.ended',
@@ -975,25 +1065,29 @@ test.describe('structured OpenClaw task projection', () => {
         ts: now + 70,
       }]);
       await expect(graph).toHaveAttribute('data-compact-status', 'completed');
-      await expect(graph.locator('[data-status-icon="completed"]')).toBeVisible();
       if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
 
-      const flowRow = page.locator('[data-testid="chat-execution-step"]')
-        .filter({ hasText: 'Task Flow' });
-      const artifactRow = page.locator('[data-testid="chat-execution-step"][data-task-id="task-child"][data-parent-id="plan-step:task:task-child"]')
+      const flowRow = dialog.locator('[data-testid="chat-execution-step"]')
+        .filter({ hasText: /Task flow|任务流/iu });
+      const artifactRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-child"][data-parent-id="plan-step:task:task-child"]')
         .filter({ hasText: 'Release evidence' });
-      const artifactVerificationRow = page.locator('[data-testid="chat-execution-step"][data-task-id="task-child"][data-parent-id="artifact:release-evidence"]')
+      const artifactVerificationRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-child"][data-parent-id="artifact:release-evidence"]')
         .filter({ hasText: 'Release evidence' });
 
+      await expect(flowRow).toHaveCount(1);
       await expect(flowRow).toHaveAttribute('data-parent-id', 'agent-run');
       await expect(parentRow).toHaveAttribute('data-step-status', 'completed');
       await expect(parentRow).toHaveAttribute('data-parent-id', 'plan-step:task-flow:flow-release-check');
       await expect(childRow).toHaveAttribute('data-step-status', 'completed');
       await expect(childRow).toHaveAttribute('data-parent-id', 'plan-step:task:task-parent');
-      await expect(approvalRow).toHaveAttribute('data-step-status', 'completed');
-      await expect(approvalRow).toHaveAttribute('data-parent-id', 'plan-step:task:task-parent');
+      await expect(artifactRow).toHaveCount(1);
       await expect(artifactRow).toHaveAttribute('data-parent-id', 'plan-step:task:task-child');
+      await expect(artifactVerificationRow).toHaveCount(1);
       await expect(artifactVerificationRow).toHaveAttribute('data-step-status', 'completed');
+
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
 
     } finally {
       await closeElectronApp(app);
@@ -1045,19 +1139,40 @@ test.describe('structured OpenClaw task projection', () => {
         },
       ]);
 
-      const graph = page.getByTestId('chat-execution-graph');
+      const turn = page.getByTestId('conversation-turn');
+      await expect(turn).toHaveCount(1);
+      await expect(turn).toHaveAttribute('data-turn-status', 'aborted');
+      const subtasks = page.getByTestId('timeline-subtasks');
+      await expect(subtasks).toHaveCount(1);
+      await expect(subtasks).not.toHaveAttribute('data-status', 'error');
+      await page.getByTestId('timeline-subtasks-toggle').click();
+      const subtaskDetails = page.getByTestId('timeline-subtask-details');
+      await expect(subtaskDetails.locator(':scope > div')).toHaveCount(1);
+      await expect(subtaskDetails).toContainText('Cancelled delegated work');
+      await expect(subtaskDetails).toContainText(/aborted|cancelled|canceled|stopped|已中止|已取消|已停止/iu);
+
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      const graph = dialog.getByTestId('chat-execution-graph');
       await expect(graph).toBeVisible({ timeout: 30_000 });
-      await expect(graph).toHaveAttribute('data-compact-status', 'aborted');
-      await expect(graph.locator('[data-status-icon="aborted"]')).toBeVisible();
       if ((await graph.getAttribute('data-collapsed')) === 'true') await graph.click();
 
-      const flowRow = page.locator('[data-testid="chat-execution-step"]')
-        .filter({ hasText: 'Task Flow' });
-      const taskRow = page.locator('[data-testid="chat-execution-step"][data-task-id="task-cancelled"]')
+      const flowRow = dialog.locator('[data-testid="chat-execution-step"]')
+        .filter({ hasText: /Task flow|任务流/iu });
+      const taskRow = dialog.locator('[data-testid="chat-execution-step"][data-task-id="task-cancelled"]')
         .filter({ hasText: 'Cancelled delegated work' });
+      await expect(flowRow).toHaveCount(1);
       await expect(flowRow).toHaveAttribute('data-step-status', 'aborted');
+      await expect(flowRow).toHaveAttribute('data-parent-id', 'agent-run');
+      await expect(taskRow).toHaveCount(1);
       await expect(taskRow).toHaveAttribute('data-step-status', 'aborted');
-      await expect(taskRow.locator('[data-status-icon="aborted"]')).toBeVisible();
+      await expect(taskRow).toHaveAttribute('data-parent-id', 'plan-step:task-flow:flow-cancelled');
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
     }

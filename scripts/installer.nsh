@@ -11,6 +11,8 @@
   !include "nsProcess.nsh"
 !endif
 
+; The shared extract template must compile rollback only for installed NSIS builds.
+!define CLAWX_INSTALLER_ROLLBACK
 Var /GLOBAL clawxRollbackDir
 
 !macro customHeader
@@ -362,6 +364,21 @@ FunctionEnd
     !ifdef UNINSTALL_REGISTRY_KEY_2
       DeleteRegKey HKLM "${UNINSTALL_REGISTRY_KEY_2}"
     !endif
+  ${endIf}
+  ClearErrors
+
+  ; customCheckAppRunning may move the previous install directory before
+  ; electron-builder can launch its registered uninstaller. In that fallback
+  ; path the old ClawX shortcuts are not removed automatically, so delete the
+  ; exact pre-upgrade links captured by setLinkVars after the new links exist.
+  ${if} $oldDesktopLink != $newDesktopLink
+    WinShell::UninstShortcut "$oldDesktopLink"
+    Delete "$oldDesktopLink"
+  ${endIf}
+  ${if} $oldStartMenuLink != $newStartMenuLink
+    WinShell::UninstShortcut "$oldStartMenuLink"
+    Delete "$oldStartMenuLink"
+    !insertmacro cleanupOldMenuDirectory
   ${endIf}
   ClearErrors
 

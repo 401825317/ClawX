@@ -5,7 +5,7 @@ import { patchOpenClawSessionCwdContent } from './openclaw-session-cwd-runtime-p
 test('OpenClaw tools use the current coding root as their workspace', () => {
   const fixture = `\t\t\tfsPolicy,
 \t\t\tworkspaceDir: workspaceRoot,
-\t\t\tspawnWorkspaceDir: options?.spawnWorkspaceDir ? resolveWorkspaceRoot(options.spawnWorkspaceDir) : void 0,`;
+\t\t\tspawnWorkspaceDir: capabilityProfile.workspace.spawnWorkspaceRoot,`;
   const result = patchOpenClawSessionCwdContent(fixture);
   assert.equal(result.changed, true);
   assert.ok(result.changedRules.includes('agent-tools-current-cwd-workspace'));

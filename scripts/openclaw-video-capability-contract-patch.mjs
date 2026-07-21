@@ -1,13 +1,48 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const TOOL_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_TOOL_V1';
-const RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1';
-const OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1';
+const RUNTIME_LEGACY_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1';
+const RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V2';
+const OPENAI_LEGACY_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1';
+const OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V2';
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const ENDPOINTS_PATH = join(SCRIPT_DIR, '..', 'shared', 'junfeiai-endpoints.json');
 
 const GROK_VIDEO_MODELS = new Set(['grok-image-video', 'grok-video-1.5']);
 const GROK_VIDEO_DURATIONS = [4, 6, 8, 10, 12, 15];
-const GROK_VIDEO_SIZES = ['1280x720', '720x1280', '1024x1024'];
+
+function readConfiguredVideoDefaults() {
+  const endpoints = JSON.parse(readFileSync(ENDPOINTS_PATH, 'utf8'));
+  const defaults = endpoints.videoGenerationDefaults;
+  const resolution = typeof defaults?.resolution === 'string' ? defaults.resolution.trim().toLowerCase() : '';
+  const sizes = defaults?.sizes;
+  const landscape = typeof sizes?.landscape === 'string' ? sizes.landscape.trim() : '';
+  const portrait = typeof sizes?.portrait === 'string' ? sizes.portrait.trim() : '';
+  const square = typeof sizes?.square === 'string' ? sizes.square.trim() : '';
+  if (!resolution || !landscape || !portrait || !square) {
+    throw new Error(`[openclaw-video-capability-contract-patch] Invalid videoGenerationDefaults in ${ENDPOINTS_PATH}`);
+  }
+  return { resolution, landscape, portrait, square };
+}
+
+function formatGeneratedStringArray(values) {
+  return `[\n${values.map((value) => `\t${JSON.stringify(value)}`).join(',\n')}\n]`;
+}
+
+const GROK_VIDEO_DEFAULTS = readConfiguredVideoDefaults();
+const GROK_VIDEO_DEFAULT_SIZES = [
+  GROK_VIDEO_DEFAULTS.landscape,
+  GROK_VIDEO_DEFAULTS.portrait,
+  GROK_VIDEO_DEFAULTS.square,
+];
+const GROK_VIDEO_SIZES = Array.from(new Set([
+  ...GROK_VIDEO_DEFAULT_SIZES,
+  '1280x720',
+  '720x1280',
+  '1024x1024',
+]));
 
 function countOccurrences(content, search) {
   return content.split(search).length - 1;
@@ -54,6 +89,22 @@ function parseResolutionShortEdge(resolution) {
 }
 
 export function resolveMappedVideoSizeForCapabilityContract(params) {
+  const normalizedResolution = typeof params.resolution === 'string'
+    ? params.resolution.trim().toLowerCase()
+    : '';
+  const normalizedAspectRatio = typeof params.aspectRatio === 'string'
+    ? params.aspectRatio.trim()
+    : '';
+  const configuredDefaultSize = normalizedResolution === GROK_VIDEO_DEFAULTS.resolution
+    ? {
+      '16:9': GROK_VIDEO_DEFAULTS.landscape,
+      '9:16': GROK_VIDEO_DEFAULTS.portrait,
+      '1:1': GROK_VIDEO_DEFAULTS.square,
+    }[normalizedAspectRatio]
+    : undefined;
+  if (configuredDefaultSize && params.supportedSizes?.includes(configuredDefaultSize)) {
+    return configuredDefaultSize;
+  }
   const requestedAspectRatio = parseAspectRatio(params.aspectRatio);
   const requestedShortEdge = parseResolutionShortEdge(params.resolution);
   if (!requestedAspectRatio || !requestedShortEdge) return undefined;
@@ -338,6 +389,31 @@ const RUNTIME_RESOLUTION_ORDER_ANCHOR = `const VIDEO_RESOLUTION_ORDER = [
 \t"1080P"
 ];`;
 
+const RUNTIME_RESOLUTION_ORDER_PATCH_V1 = `const VIDEO_RESOLUTION_ORDER = [
+\t"360P",
+\t"480P",
+\t"540P",
+\t"720P",
+\t"768P",
+\t"1080P"
+];
+const ${RUNTIME_LEGACY_PATCH_MARKER} = true;
+function resolveVideoGenerationSizeFromResolutionAndAspectRatio(params) {
+\tconst normalizedResolution = params.resolution?.trim().toUpperCase();
+\tconst resolutionMatch = normalizedResolution?.match(/^(\\d+)P$/u);
+\tconst shortEdge = normalizedResolution === "4K" ? 2160 : resolutionMatch ? Number.parseInt(resolutionMatch[1], 10) : void 0;
+\tconst aspectRatioMatch = params.aspectRatio?.trim().match(/^(\\d+(?:\\.\\d+)?):(\\d+(?:\\.\\d+)?)$/u);
+\tif (!(shortEdge > 0) || !aspectRatioMatch) return;
+\tconst aspectRatio = Number.parseFloat(aspectRatioMatch[1]) / Number.parseFloat(aspectRatioMatch[2]);
+\tif (!(aspectRatio > 0)) return;
+\tconst requestedSize = aspectRatio >= 1 ? \`${'${Math.round(shortEdge * aspectRatio)}x${shortEdge}'}\` : \`${'${shortEdge}x${Math.round(shortEdge / aspectRatio)}'}\`;
+\treturn resolveClosestSize({
+\t\trequestedSize,
+\t\trequestedAspectRatio: params.aspectRatio,
+\t\tsupportedSizes: params.supportedSizes
+\t});
+}`;
+
 const RUNTIME_RESOLUTION_ORDER_PATCH = `const VIDEO_RESOLUTION_ORDER = [
 \t"360P",
 \t"480P",
@@ -347,11 +423,22 @@ const RUNTIME_RESOLUTION_ORDER_PATCH = `const VIDEO_RESOLUTION_ORDER = [
 \t"1080P"
 ];
 const ${RUNTIME_PATCH_MARKER} = true;
+const UCLAW_VIDEO_DEFAULT_RESOLUTION = ${JSON.stringify(GROK_VIDEO_DEFAULTS.resolution.toUpperCase())};
+const UCLAW_VIDEO_DEFAULT_SIZE_BY_ASPECT_RATIO = {
+\t"16:9": ${JSON.stringify(GROK_VIDEO_DEFAULTS.landscape)},
+\t"9:16": ${JSON.stringify(GROK_VIDEO_DEFAULTS.portrait)},
+\t"1:1": ${JSON.stringify(GROK_VIDEO_DEFAULTS.square)}
+};
 function resolveVideoGenerationSizeFromResolutionAndAspectRatio(params) {
 \tconst normalizedResolution = params.resolution?.trim().toUpperCase();
+\tconst normalizedAspectRatio = params.aspectRatio?.trim();
+\tconst configuredDefaultSize = normalizedResolution === UCLAW_VIDEO_DEFAULT_RESOLUTION
+\t\t? UCLAW_VIDEO_DEFAULT_SIZE_BY_ASPECT_RATIO[normalizedAspectRatio]
+\t\t: void 0;
+\tif (configuredDefaultSize && params.supportedSizes?.includes(configuredDefaultSize)) return configuredDefaultSize;
 \tconst resolutionMatch = normalizedResolution?.match(/^(\\d+)P$/u);
 \tconst shortEdge = normalizedResolution === "4K" ? 2160 : resolutionMatch ? Number.parseInt(resolutionMatch[1], 10) : void 0;
-\tconst aspectRatioMatch = params.aspectRatio?.trim().match(/^(\\d+(?:\\.\\d+)?):(\\d+(?:\\.\\d+)?)$/u);
+\tconst aspectRatioMatch = normalizedAspectRatio?.match(/^(\\d+(?:\\.\\d+)?):(\\d+(?:\\.\\d+)?)$/u);
 \tif (!(shortEdge > 0) || !aspectRatioMatch) return;
 \tconst aspectRatio = Number.parseFloat(aspectRatioMatch[1]) / Number.parseFloat(aspectRatioMatch[2]);
 \tif (!(aspectRatio > 0)) return;
@@ -399,6 +486,16 @@ const RUNTIME_TRANSLATION_PATCH = `\tif (caps) {
 export function patchOpenClawVideoCapabilityRuntimeContent(content, filePath = '<memory>') {
   if (!content.includes('function resolveVideoGenerationOverrides(params)')) return null;
   if (content.includes(RUNTIME_PATCH_MARKER)) return { content, changed: false, category: 'runtime' };
+  if (content.includes(RUNTIME_LEGACY_PATCH_MARKER)) {
+    const migrated = replaceUnique(
+      content,
+      RUNTIME_RESOLUTION_ORDER_PATCH_V1,
+      RUNTIME_RESOLUTION_ORDER_PATCH,
+      'legacy video resolution mapping',
+      filePath,
+    );
+    return { content: migrated, changed: true, category: 'runtime' };
+  }
   let patched = replaceUnique(content, RUNTIME_MODEL_OVERLAY_ANCHOR, RUNTIME_MODEL_OVERLAY_PATCH, 'model capability overlay', filePath);
   patched = replaceUnique(patched, RUNTIME_RESOLUTION_ORDER_ANCHOR, RUNTIME_RESOLUTION_ORDER_PATCH, 'video resolution order', filePath);
   patched = replaceUnique(patched, RUNTIME_TRANSLATION_ANCHOR, RUNTIME_TRANSLATION_PATCH, 'resolution/aspect-ratio translation', filePath);
@@ -411,6 +508,32 @@ const OPENAI_CONSTANTS_ANCHOR = `const OPENAI_VIDEO_SIZES = [
 \t"1024x1792",
 \t"1792x1024"
 ];`;
+
+const OPENAI_CONSTANTS_PATCH_V1 = `const OPENAI_VIDEO_SIZES = [
+\t"720x1280",
+\t"1280x720",
+\t"1024x1792",
+\t"1792x1024"
+];
+const ${OPENAI_LEGACY_PATCH_MARKER} = true;
+const UCLAW_OPENAI_GROK_VIDEO_MODEL = "grok-image-video";
+const UCLAW_OPENAI_GROK_VIDEO_15_MODEL = "grok-video-1.5";
+const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
+\t4,
+\t6,
+\t8,
+\t10,
+\t12,
+\t15
+];
+const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
+\t"1280x720",
+\t"720x1280",
+\t"1024x1024"
+];
+function isUClawOpenAIGrokVideoModel(model) {
+\treturn model === UCLAW_OPENAI_GROK_VIDEO_MODEL || model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL;
+}`;
 
 const OPENAI_CONSTANTS_PATCH = `const OPENAI_VIDEO_SIZES = [
 \t"720x1280",
@@ -429,11 +552,13 @@ const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
 \t12,
 \t15
 ];
-const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
-\t"1280x720",
-\t"720x1280",
-\t"1024x1024"
-];
+const UCLAW_OPENAI_GROK_VIDEO_DEFAULT_SIZE = ${JSON.stringify(GROK_VIDEO_DEFAULTS.landscape)};
+const UCLAW_OPENAI_GROK_VIDEO_DEFAULT_SIZE_BY_ASPECT_RATIO = {
+\t"16:9": ${JSON.stringify(GROK_VIDEO_DEFAULTS.landscape)},
+\t"9:16": ${JSON.stringify(GROK_VIDEO_DEFAULTS.portrait)},
+\t"1:1": ${JSON.stringify(GROK_VIDEO_DEFAULTS.square)}
+};
+const UCLAW_OPENAI_GROK_VIDEO_SIZES = ${formatGeneratedStringArray(GROK_VIDEO_SIZES)};
 function isUClawOpenAIGrokVideoModel(model) {
 \treturn model === UCLAW_OPENAI_GROK_VIDEO_MODEL || model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL;
 }`;
@@ -466,7 +591,7 @@ const OPENAI_SIZE_ANCHOR = `function resolveSize(params) {
 \tif (params.resolution === "1080P") return "1792x1024";
 }`;
 
-const OPENAI_SIZE_PATCH = `function resolveSize(params) {
+const OPENAI_SIZE_PATCH_V1 = `function resolveSize(params) {
 \tconst supportedSizes = isUClawOpenAIGrokVideoModel(params.model) ? UCLAW_OPENAI_GROK_VIDEO_SIZES : OPENAI_VIDEO_SIZES;
 \tconst explicitSize = normalizeOptionalString(params.size);
 \tif (explicitSize && supportedSizes.includes(explicitSize)) return explicitSize;
@@ -482,6 +607,29 @@ const OPENAI_SIZE_PATCH = `function resolveSize(params) {
 \t})();
 \tif (preferredSize && supportedSizes.includes(preferredSize)) return preferredSize;
 \tif (!isUClawOpenAIGrokVideoModel(params.model) && params.resolution === "1080P") return "1792x1024";
+}`;
+
+const OPENAI_SIZE_PATCH = `function resolveSize(params) {
+\tconst grokVideoModel = isUClawOpenAIGrokVideoModel(params.model);
+\tconst supportedSizes = grokVideoModel ? UCLAW_OPENAI_GROK_VIDEO_SIZES : OPENAI_VIDEO_SIZES;
+\tconst explicitSize = normalizeOptionalString(params.size);
+\tif (explicitSize && supportedSizes.includes(explicitSize)) return explicitSize;
+\tconst normalizedAspectRatio = normalizeOptionalString(params.aspectRatio);
+\tconst preferredSize = grokVideoModel
+\t\t? UCLAW_OPENAI_GROK_VIDEO_DEFAULT_SIZE_BY_ASPECT_RATIO[normalizedAspectRatio]
+\t\t: (() => {
+\t\t\tswitch (normalizedAspectRatio) {
+\t\t\t\tcase "9:16": return "720x1280";
+\t\t\t\tcase "16:9": return "1280x720";
+\t\t\t\tcase "1:1": return "1024x1024";
+\t\t\t\tcase "4:7": return "1024x1792";
+\t\t\t\tcase "7:4": return "1792x1024";
+\t\t\t\tdefault: return;
+\t\t\t}
+\t\t})();
+\tif (preferredSize && supportedSizes.includes(preferredSize)) return preferredSize;
+\tif (!grokVideoModel && params.resolution === "1080P") return "1792x1024";
+\tif (grokVideoModel) return UCLAW_OPENAI_GROK_VIDEO_DEFAULT_SIZE;
 }`;
 
 const OPENAI_GENERATE_CAPS_ANCHOR = `\t\t\tgenerate: {
@@ -600,6 +748,23 @@ const OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model
 export function patchOpenClawOpenAiVideoCapabilityContent(content, filePath = '<memory>') {
   if (!content.includes('function buildOpenAIVideoGenerationProvider()')) return null;
   if (content.includes(OPENAI_PATCH_MARKER)) return { content, changed: false, category: 'openai-provider' };
+  if (content.includes(OPENAI_LEGACY_PATCH_MARKER)) {
+    let migrated = replaceUnique(
+      content,
+      OPENAI_CONSTANTS_PATCH_V1,
+      OPENAI_CONSTANTS_PATCH,
+      'legacy OpenAI video constants',
+      filePath,
+    );
+    migrated = replaceUnique(
+      migrated,
+      OPENAI_SIZE_PATCH_V1,
+      OPENAI_SIZE_PATCH,
+      'legacy OpenAI video size resolver',
+      filePath,
+    );
+    return { content: migrated, changed: true, category: 'openai-provider' };
+  }
   let patched = replaceUnique(content, OPENAI_CONSTANTS_ANCHOR, OPENAI_CONSTANTS_PATCH, 'OpenAI video constants', filePath);
   patched = replaceUnique(patched, OPENAI_DURATION_ANCHOR, OPENAI_DURATION_PATCH, 'OpenAI video duration resolver', filePath);
   patched = replaceUnique(patched, OPENAI_SIZE_ANCHOR, OPENAI_SIZE_PATCH, 'OpenAI video size resolver', filePath);

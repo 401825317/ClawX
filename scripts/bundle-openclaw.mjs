@@ -17,13 +17,19 @@
  */
 
 import 'zx/globals';
-import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
+import {
+  ELECTRON_MAIN_RUNTIME_PACKAGES,
+  EXTRA_BUNDLED_PACKAGES,
+  OPENCLAW_REQUIRED_RUNTIME_FILES,
+  OPENCLAW_REQUIRED_RUNTIME_PACKAGES,
+} from './openclaw-bundle-config.mjs';
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { patchOpenClawBrowserLifecycleRuntime } from './openclaw-browser-lifecycle-patch.mjs';
 import { patchOpenClawCronRuntimePolicyRuntime } from './openclaw-cron-runtime-policy-patch.mjs';
 import { cleanupOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
 import { patchOpenClawFinalizeLocalActionRuntime } from './openclaw-finalize-local-action-patch.mjs';
+import { patchOpenClawImageModelPolicyRuntime } from './openclaw-image-model-policy-patch.mjs';
 import { patchOpenClawModelRequestContractRuntime } from './openclaw-model-request-contract-patch.mjs';
 import { patchOpenClawNativeImageDeliveryRuntime } from './openclaw-native-image-delivery-patch.mjs';
 import { patchOpenClawNativeMediaCancellationRuntime } from './openclaw-native-media-cancellation-patch.mjs';
@@ -40,7 +46,7 @@ import { patchOpenClawProcessControlSemanticsRuntime } from './openclaw-process-
 import { patchOpenClawPromptCacheKeyRuntime } from './openclaw-prompt-cache-key-patch.mjs';
 import { patchOpenClawRawToolSignalRuntime } from './openclaw-raw-tool-signal-patch.mjs';
 import { patchOpenClawReplySessionInitConflictRuntime } from './openclaw-reply-session-init-conflict-patch.mjs';
-import { patchOpenClawResponsesCompatibleFallbackRuntime } from './openclaw-responses-compatible-fallback-patch.mjs';
+import { patchOpenClawTextProviderFailoverRuntime } from './openclaw-text-provider-failover-patch.mjs';
 import { patchOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
@@ -1152,14 +1158,14 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${promptCacheKeyPatch.patchedFiles} prompt cache key runtime file(s)`;
   }
 
-  // --- Native Responses compatibility fallback ---
-  // A managed relay that does not expose /responses may retry once through
-  // Chat Completions, but only before any response output has started.
-  const responsesFallbackPatch = patchOpenClawResponsesCompatibleFallbackRuntime(distDir, {
+  // --- Request-scoped text Provider failover ---
+  // Reuse OpenClaw's native failover safety while keeping the configured
+  // fallback ephemeral so every new model call starts from the primary.
+  const textProviderFailoverPatch = patchOpenClawTextProviderFailoverRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
-  if (responsesFallbackPatch.patchedFiles > 0) {
-    echo`   🩹 Patched ${responsesFallbackPatch.patchedFiles} Responses fallback runtime file(s)`;
+  if (textProviderFailoverPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${textProviderFailoverPatch.patchedFiles} text Provider failover runtime file(s)`;
   }
 
   // --- Thinking effort vs reasoning visibility prompt patch ---
@@ -1270,6 +1276,16 @@ function patchBundledRuntime(outputDir) {
     echo`   🩹 Patched ${managedMediaTimeoutPatch.patchedFiles} managed media timeout runtime file(s)`;
   }
 
+  // Keep model-supplied image overrides inside the configured managed image
+  // profile, and prevent OpenClaw's transparent-background compatibility path
+  // from replacing the centrally configured gpt-image-2 model.
+  const imageModelPolicyPatch = patchOpenClawImageModelPolicyRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (imageModelPolicyPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${imageModelPolicyPatch.patchedFiles} image model policy runtime file(s)`;
+  }
+
   const nativeImageDeliveryPatch = patchOpenClawNativeImageDeliveryRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
@@ -1285,8 +1301,8 @@ function patchBundledRuntime(outputDir) {
   }
 
   // --- Segment-scoped native video idempotency patch ---
-  // Keep legacy single-flight behavior for old calls while allowing an
-  // explicit long-form plan to generate distinct segment ids safely.
+  // Preserve upstream prompt/request-key dedupe for ordinary calls while
+  // allowing an explicit long-form plan to generate distinct segment ids safely.
   const videoSegmentDedupePatch = patchOpenClawVideoSegmentDedupeRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
@@ -1378,6 +1394,25 @@ if (missingRuntimePackages.length > 0) {
   echo`❌ Bundle verification failed: missing Electron main runtime packages:`;
   for (const pkgName of missingRuntimePackages) {
     echo`   - ${pkgName}`;
+  }
+  process.exit(1);
+}
+
+const missingOpenClawRuntimePackages = OPENCLAW_REQUIRED_RUNTIME_PACKAGES.filter((pkgName) => {
+  const pkgJson = path.join(outputNodeModules, ...pkgName.split('/'), 'package.json');
+  return !fs.existsSync(pkgJson);
+});
+const missingOpenClawRuntimeFiles = OPENCLAW_REQUIRED_RUNTIME_FILES.filter((relativePath) => (
+  !fs.existsSync(path.join(outputNodeModules, ...relativePath.split('/')))
+));
+
+if (missingOpenClawRuntimePackages.length > 0 || missingOpenClawRuntimeFiles.length > 0) {
+  echo`❌ Bundle verification failed: incomplete OpenClaw 2026.7.1-2 runtime:`;
+  for (const pkgName of missingOpenClawRuntimePackages) {
+    echo`   - missing package ${pkgName}`;
+  }
+  for (const relativePath of missingOpenClawRuntimeFiles) {
+    echo`   - missing file ${relativePath}`;
   }
   process.exit(1);
 }

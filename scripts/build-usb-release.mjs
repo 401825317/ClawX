@@ -32,6 +32,7 @@ const WINDOWS_PE_FILES = [
   'resources/bin/agent-browser.exe',
   'resources/bin/ffmpeg.exe',
   'resources/bin/ffprobe.exe',
+  'resources/resources/updater/win32-x64/uclaw-portable-updater.exe',
 ];
 const requireFromElectronBuilder = createRequire(path.join(ROOT, 'node_modules', 'electron-builder', 'package.json'));
 const appBuilderPackagePath = requireFromElectronBuilder.resolve('app-builder-lib/package.json');
@@ -326,6 +327,7 @@ function assertWindowsPortableContents(portableRoot) {
     'resources/bin/ffprobe.exe',
     'resources/bin/ffmpeg-runtime.json',
     'resources/cli/openclaw.cmd',
+    'resources/resources/updater/win32-x64/uclaw-portable-updater.exe',
     'resources/openclaw/openclaw.mjs',
     'resources/openclaw/package.json',
     'resources/openclaw/node_modules/sharp/package.json',

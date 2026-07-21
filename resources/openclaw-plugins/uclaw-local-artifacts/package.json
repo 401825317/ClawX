@@ -1,8 +1,13 @@
 {
   "name": "uclaw-local-artifacts-plugin",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "main": "index.mjs",
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ]
+  },
   "dependencies": {
     "@sinclair/typebox": "^0.34.48",
     "jszip": "3.10.1",

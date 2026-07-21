@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2';
 const PATCH_MARKER = 'UCLAW_VIDEO_SEGMENT_DEDUPE_V2';
 const PREVIOUS_PATCH_MARKER = 'UCLAW_VIDEO_SEGMENT_DEDUPE_V1';
 
@@ -103,8 +104,7 @@ const VIDEO_STATUS_TEXT_PATCH = `function buildVideoGenerationTaskStatusText(tas
 \t});
 \tif (!params?.duplicateGuard) return text;
 \treturn text
-\t\t.replace("Do not call video_generate again for this request.", "Do not resubmit this same logical video segment while it is active; other planned segmentId values remain allowed.")
-\t\t.replace("Do not call video_generate again for the same request;", "Do not resubmit this same logical video segment;");
+\t\t.replace("Do not call \`video_generate\` again for the same request while that task is queued or running.", "Do not resubmit this same logical video segment while it is queued or running; other planned segmentId values remain allowed.");
 }`;
 
 const VIDEO_ACTIVE_PROMPT_ANCHOR = `function buildActiveVideoGenerationTaskPromptContextForSession(sessionKey) {
@@ -187,13 +187,13 @@ const VIDEO_EXECUTE_HEAD_PATCH = `\t\texecute: async (_toolCallId, rawArgs) => {
 \t\t\tconst videoGenerationModelConfig = resolveVideoGenerationModelConfigForTool({`;
 
 const VIDEO_BROAD_GUARD_ANCHOR = `\t\t\tconst prompt = readStringParam(args, "prompt", { required: true });
-\t\t\tconst activeDuplicateGuardResult = createVideoGenerateDuplicateGuardResult(options?.agentSessionKey);
+\t\t\tconst activeDuplicateGuardResult = createVideoGenerateDuplicateGuardResult(options?.agentSessionKey, { prompt });
 \t\t\tif (activeDuplicateGuardResult) return activeDuplicateGuardResult;
 \t\t\tconst model = readStringParam(args, "model");`;
 
 const VIDEO_BROAD_GUARD_PATCH = `\t\t\tconst prompt = readStringParam(args, "prompt", { required: true });
 \t\t\tconst taskLabel = segmentScope?.taskLabel ?? prompt;
-\t\t\tconst activeDuplicateGuardResult = segmentScope ? void 0 : createVideoGenerateDuplicateGuardResult(options?.agentSessionKey);
+\t\t\tconst activeDuplicateGuardResult = segmentScope ? void 0 : createVideoGenerateDuplicateGuardResult(options?.agentSessionKey, { prompt });
 \t\t\tif (activeDuplicateGuardResult) return activeDuplicateGuardResult;
 \t\t\tconst model = readStringParam(args, "model");`;
 
@@ -207,7 +207,10 @@ const VIDEO_REQUEST_KEY_PATCH = `\t\t\tconst requestKey = buildMediaGenerationRe
 \t\t\t\tparentTaskId: segmentScope?.parentTaskId,
 \t\t\t\tsegmentId: segmentScope?.segmentId,`;
 
-const VIDEO_SCOPED_GUARD_ANCHOR = `\t\t\tconst duplicateGuardResult = createVideoGenerateDuplicateGuardResult(options?.agentSessionKey, { requestKey });`;
+const VIDEO_SCOPED_GUARD_ANCHOR = `\t\t\tconst duplicateGuardResult = createVideoGenerateDuplicateGuardResult(options?.agentSessionKey, {
+\t\t\t\tprompt,
+\t\t\t\trequestKey
+\t\t\t});`;
 const VIDEO_SCOPED_GUARD_PATCH = `\t\t\tconst duplicateGuardResult = createVideoGenerateDuplicateGuardResult(options?.agentSessionKey, {
 \t\t\t\tprompt: taskLabel,
 \t\t\t\trequestKey
@@ -240,9 +243,23 @@ const VIDEO_RECENT_TASK_LABEL_PATCH = `\t\t\t\t\ttaskKind: "video_generation",
 \t\t\t\t\ttaskLabel,
 \t\t\t\t\trequestKey,`;
 
-const VIDEO_DETAIL_EXTRAS_ANCHOR = `\t\t\t\t\t\t...model ? { model } : {},
+const VIDEO_DETAIL_EXTRAS_ANCHOR = `\t\t\t\t\t\t...buildMediaReferenceDetails({
+\t\t\t\t\t\t\tentries: loadedReferenceVideos,
+\t\t\t\t\t\t\tsingleKey: "video",
+\t\t\t\t\t\t\tpluralKey: "videos",
+\t\t\t\t\t\t\tgetResolvedInput: (entry) => entry.resolvedInput,
+\t\t\t\t\t\t\tsingleRewriteKey: "videoRewrittenFrom"
+\t\t\t\t\t\t}),
+\t\t\t\t\t\t...model ? { model } : {},
 \t\t\t\t\t\t...size ? { size } : {},`;
-const VIDEO_DETAIL_EXTRAS_PATCH = `\t\t\t\t\t\t...segmentScope ? {
+const VIDEO_DETAIL_EXTRAS_PATCH = `\t\t\t\t\t\t...buildMediaReferenceDetails({
+\t\t\t\t\t\t\tentries: loadedReferenceVideos,
+\t\t\t\t\t\t\tsingleKey: "video",
+\t\t\t\t\t\t\tpluralKey: "videos",
+\t\t\t\t\t\t\tgetResolvedInput: (entry) => entry.resolvedInput,
+\t\t\t\t\t\t\tsingleRewriteKey: "videoRewrittenFrom"
+\t\t\t\t\t\t}),
+\t\t\t\t\t\t...segmentScope ? {
 \t\t\t\t\t\t\tparentTaskId: segmentScope.parentTaskId,
 \t\t\t\t\t\t\tsegmentId: segmentScope.segmentId
 \t\t\t\t\t\t} : {},
@@ -342,12 +359,27 @@ export function patchOpenClawVideoSegmentDedupeContent(content, filePath = '<fix
   return { content: patched, changed: true, matched: true };
 }
 
+// Runtime patches are intentionally pinned to the audited OpenClaw bundle.
+function assertExpectedOpenClawVersion(distDir) {
+  const packagePath = join(distDir, '..', 'package.json');
+  if (!existsSync(packagePath)) {
+    throw new Error(`[openclaw-video-segment-dedupe-patch] Missing ${packagePath}`);
+  }
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+  if (packageJson.version !== EXPECTED_OPENCLAW_VERSION) {
+    throw new Error(
+      `[openclaw-video-segment-dedupe-patch] Expected OpenClaw ${EXPECTED_OPENCLAW_VERSION}, found ${String(packageJson.version)}`,
+    );
+  }
+}
+
 export function patchOpenClawVideoSegmentDedupeRuntime(distDir, options = {}) {
   const logger = options.logger ?? console;
   const dryRun = options.dryRun === true;
   if (!existsSync(distDir)) {
     throw new Error(`[openclaw-video-segment-dedupe-patch] OpenClaw dist directory not found: ${distDir}`);
   }
+  assertExpectedOpenClawVersion(distDir);
 
   let matchedFiles = 0;
   let patchedFiles = 0;

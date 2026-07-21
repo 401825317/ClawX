@@ -18,10 +18,10 @@ assert.match(first.content, /segmentId: Type\.Optional/u);
 assert.match(first.content, /Long-form work may call video_generate multiple times/u);
 assert.doesNotMatch(first.content, /do not call video_generate again for same request/iu);
 
-// Legacy calls retain the existing session-wide single-flight guard.
+// Ordinary calls retain OpenClaw 2026.7.1-2 prompt-scoped duplicate handling.
 assert.match(
   first.content,
-  /const activeDuplicateGuardResult = segmentScope \? void 0 : createVideoGenerateDuplicateGuardResult\(options\?\.agentSessionKey\)/u,
+  /const activeDuplicateGuardResult = segmentScope \? void 0 : createVideoGenerateDuplicateGuardResult\(options\?\.agentSessionKey, \{ prompt \}\)/u,
 );
 
 // Scoped calls dedupe by a stable logical segment, while provider prompts stay unchanged.

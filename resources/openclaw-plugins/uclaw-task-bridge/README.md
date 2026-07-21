@@ -68,13 +68,15 @@ for the Host itself.
 
 The Host and OpenClaw stores cannot share one transaction. A Host acknowledgement
 prevents duplicate terminal replay after restart; Host events are idempotent by
-stable task/artifact/verification ids, while the injected completion context is
-exactly-once. The bridge acknowledges only after injection and the tagged
-session wake are confirmed. Failed injection, wake, or acknowledgement attempts
-use bounded exponential backoff instead of polling the same terminal task every
-monitor tick. A terminal task that remains undelivered for more than four hours
-is marked `expired`: it is retained for explicit `redeliver_existing_artifacts`
-recovery but is never injected into a later, unrelated conversation.
+stable task/artifact/verification ids, while the tagged session wake is
+revision-scoped. The bridge acknowledges only after the Host confirms that wake.
+Failed wake or acknowledgement attempts use bounded exponential backoff instead
+of polling the same terminal task every monitor tick. The retry policy has both
+attempt and elapsed-time budgets. After exhaustion it persists either the
+already-delivered acknowledgement or an `abandoned` delivery result with
+concrete failure evidence, so the Host no longer returns that terminal revision
+forever. The task and its artifacts remain durable; an explicit redelivery
+request creates a new revision and clears the prior delivery settlement.
 
 `completion.mode=internal` is reserved for durable Host substeps such as a
 VideoProject composition render. The bridge acknowledges that terminal task

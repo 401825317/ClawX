@@ -8,7 +8,6 @@ import type { ErrorInfo, ReactNode } from 'react';
 import { Toaster } from 'sonner';
 import i18n from './i18n';
 import { MainLayout } from './components/layout/MainLayout';
-import { DesktopApprovalOverlay } from './components/desktop/DesktopApprovalOverlay';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Models } from './pages/Models';
 import { Chat } from './pages/Chat';
@@ -230,7 +229,6 @@ function App() {
         <ClientConfigInitializer enabled={setupComplete && !skipSetupForE2E} />
         <UrgentAnnouncementDialog />
         <ManagedAuthGate enabled={setupComplete && !skipSetupForE2E} />
-        <DesktopApprovalOverlay />
 
         {/* Global toast notifications */}
         <Toaster

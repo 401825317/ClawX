@@ -22,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '22.19.0'
+          node-version: '22.22.3'
           cache: 'pnpm'
 
       - name: Prefer HTTPS for public GitHub git dependencies
@@ -44,6 +44,12 @@ jobs:
 
       - name: Run tests
         run: pnpm run test
+
+      - name: Test public update channel verifier
+        run: pnpm run test:update-channel:unit
+
+      - name: Test signed Windows USB metadata refresh
+        run: pnpm run test:win-signing:unit
 
       - name: Run harness checks
         run: pnpm run harness:ci
@@ -71,7 +77,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '22.19.0'
+          node-version: '22.22.3'
           cache: 'pnpm'
 
       - name: Prefer HTTPS for public GitHub git dependencies

@@ -39,7 +39,7 @@ async function installHistoryMocks(
         success: true,
         result: { sessions },
       },
-      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
         success: true,
         result: historyResult,
       },
@@ -161,7 +161,7 @@ test.describe('chat reference image provenance', () => {
     }
   });
 
-  test('keeps image-generated summary for an explicit image tool with delivered output', async ({ launchElectronApp }) => {
+  test('renders one delivered image artifact without a duplicate generated summary', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     const generatedHistory = [
       {
@@ -208,6 +208,9 @@ test.describe('chat reference image provenance', () => {
       });
 
       const page = await getStableWindow(app);
+      await page.evaluate((sessionKey) => {
+        window.localStorage.setItem('clawx:chat:current-session-key', sessionKey);
+      }, SESSION_KEY);
       try {
         await page.reload();
       } catch (error) {
@@ -215,7 +218,9 @@ test.describe('chat reference image provenance', () => {
       }
 
       await expect(page.getByTestId('chat-image-preview-card')).toHaveCount(1, { timeout: 30_000 });
-      await expect(page.getByText('图片已生成')).toBeVisible();
+      await expect(page.getByAltText('snow-mountain.png')).toBeVisible();
+      await expect(page.getByTestId('timeline-artifacts')).toHaveCount(1);
+      await expect(page.getByText('图片已生成')).toHaveCount(0);
       await expect(page.getByTestId('chat-image-thumbnail')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
@@ -275,7 +280,9 @@ test.describe('chat reference image provenance', () => {
         if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
       }
 
-      await expect(page.getByText('视频已生成')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('timeline-artifacts')).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.getByText('snow-mountain.mp4')).toBeVisible();
+      await expect(page.getByText('视频已生成')).toHaveCount(0);
       await expect(page.getByText('图片已生成')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);

@@ -20,7 +20,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
-  <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
+  <img src="https://img.shields.io/badge/electron-41+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
   <a href="https://discord.com/invite/84Kex3GGAh" target="_blank">
   <img src="https://img.shields.io/discord/1399603591471435907?logo=discord&labelColor=%20%235462eb&logoColor=%20%23f5f5f5&color=%20%235462eb" alt="chat on Discord" />
@@ -150,10 +150,10 @@ Light mode, dark mode, or system-synchronized themes. ClawX adapts to your prefe
 In **Settings → General**, you can enable **Launch at system startup** so ClawX starts automatically after login.
 
 ### 🔔 Update Prompts
-ClawX can automatically check for new versions on startup. When an update is available, it shows an in-app prompt; downloading and installing only happen after you choose the action.
+ClawX can automatically check for new versions on startup. When an update is available, it shows an in-app prompt; downloading and installing only happen after you choose the action. On Windows, an installed upgrade keeps the previous installation directory until extraction succeeds and restores it if extraction fails.
 
 ### 💾 High-Performance Portable Mode
-Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in and Chromium session state, OpenClaw config, agents, sessions, skills, and channel credentials in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable or machine-local data such as update downloads, Python, uv, temporary files, logs, crash dumps, browser disk cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth. A newly packaged artifact always starts with an empty `UClawData/`; it never inherits the packager's account or runtime state.
+Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in and Chromium session state, OpenClaw config, agents, sessions, skills, and channel credentials in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable or machine-local data such as update downloads, Python, uv, temporary files, logs, crash dumps, browser disk cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth. A newly packaged artifact always starts with an empty `UClawData/`; it never inherits the packager's account or runtime state. During an update, the portable helper first confirms that the owning process has exited, then retains the previous application files until the new version confirms critical Main-process startup. If shutdown cannot be confirmed, no files are replaced. If verification, extraction, replacement, launch, or the 90-second confirmation fails, it restores and restarts the previous version without replacing or deleting `UClawData/`.
 
 The Windows packaging flow requires a committed, clean source tree and removes stale unpacked builds and old USB artifacts before building. Finalization verifies the source version and Git commit against `app.asar`, checks all four shipped Windows executables as x64 PE files, validates all 12 bundled UClaw and channel/search plugins with their runtime dependencies, and writes `uclaw-usb-build.json` plus a companion release JSON. The build fails instead of publishing when these identities or package contents disagree.
 
@@ -433,7 +433,7 @@ Add future Electron flows under `tests/e2e/` and reuse the shared fixture in
 
 | Layer | Technology |
 |-------|------------|
-| Runtime | Electron 40+ |
+| Runtime | Electron 41+ |
 | UI Framework | React 19 + TypeScript |
 | Styling | Tailwind CSS + shadcn/ui |
 | State | Zustand |

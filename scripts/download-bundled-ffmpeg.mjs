@@ -55,15 +55,22 @@ async function sha256(filePath) {
   return hash.digest('hex');
 }
 
-async function fetchWithRetry(url, attempts = 3) {
+/** Download through a temporary file so body failures are retried without corrupting the target. */
+export async function download(url, outputPath, attempts = 3) {
   let lastError;
+  const partialPath = `${outputPath}.partial`;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30 * 60_000);
     try {
+      await rm(partialPath, { force: true });
       const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
       if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      return response;
+      if (!response.body) throw new Error('HTTP response has no body');
+      await pipeline(response.body, createWriteStream(partialPath));
+      await rm(outputPath, { force: true });
+      await rename(partialPath, outputPath);
+      return;
     } catch (error) {
       lastError = error;
       if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
@@ -71,12 +78,8 @@ async function fetchWithRetry(url, attempts = 3) {
       clearTimeout(timer);
     }
   }
+  await rm(partialPath, { force: true });
   throw lastError;
-}
-
-async function download(url, outputPath) {
-  const response = await fetchWithRetry(url);
-  await pipeline(response.body, createWriteStream(outputPath));
 }
 
 function assertBinaryArchitecture(buffer, target, filePath) {
@@ -238,9 +241,16 @@ function selectedTargets() {
   return [`${os.platform()}-${os.arch()}`];
 }
 
-const verifyOnly = process.argv.includes('--verify');
-const force = process.argv.includes('--force');
-for (const target of selectedTargets()) {
-  if (verifyOnly) await verifyTarget(target);
-  else await installTarget(target, force);
+/** Run the requested FFmpeg installation or verification targets. */
+async function main() {
+  const verifyOnly = process.argv.includes('--verify');
+  const force = process.argv.includes('--force');
+  for (const target of selectedTargets()) {
+    if (verifyOnly) await verifyTarget(target);
+    else await installTarget(target, force);
+  }
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  await main();
 }

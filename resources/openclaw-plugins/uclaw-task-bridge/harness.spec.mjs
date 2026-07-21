@@ -280,6 +280,43 @@ assert.equal(failedDirectWakeApi.schedules.length, 2);
 assert.equal(failedDirectWakeApi.injections.length, 0);
 assert.equal(failedDirectWakeAckCount, 0);
 
+const exhaustedRetryApi = makeApi();
+exhaustedRetryApi.uclawHost.scheduleSessionWake = async (payload) => {
+  exhaustedRetryApi.schedules.push(payload);
+  throw new Error('session unavailable');
+};
+const exhaustedRetryAcks = [];
+let exhaustedRetrySettled = false;
+let exhaustedRetryNow = 2_000;
+const exhaustedRetryBridge = __test.createBridge(exhaustedRetryApi, {
+  now: () => exhaustedRetryNow,
+  completionRetryBaseMs: 100,
+  completionRetryMaxMs: 1_000,
+  completionRetryMaxAttempts: 2,
+  completionRetryMaxAgeMs: 10_000,
+  hostApiFetch: async (route, options = {}) => {
+    if (route.endsWith('/ack')) {
+      exhaustedRetryAcks.push(JSON.parse(options.body));
+      exhaustedRetrySettled = true;
+      return { ok: true };
+    }
+    return { tasks: exhaustedRetrySettled ? [] : [task] };
+  },
+});
+await exhaustedRetryBridge.poll();
+assert.equal(exhaustedRetryAcks.length, 0);
+exhaustedRetryNow += 100;
+await exhaustedRetryBridge.poll();
+assert.equal(exhaustedRetryAcks.length, 1);
+assert.equal(exhaustedRetryAcks[0].delivery.outcome, 'abandoned');
+assert.equal(exhaustedRetryAcks[0].delivery.attempts, 2);
+assert.equal(exhaustedRetryAcks[0].delivery.reason, 'session_wake_failed');
+assert.equal(exhaustedRetryAcks[0].delivery.details.scheduleError, 'session unavailable');
+await exhaustedRetryBridge.poll();
+assert.equal(exhaustedRetryApi.injections.length, 0);
+assert.equal(exhaustedRetryApi.schedules.length, 2);
+assert.equal(exhaustedRetryAcks.length, 1);
+
 const replanTask = __test.normalizeTask({
   ...task,
   taskId: 'task-replan',

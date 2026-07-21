@@ -3,6 +3,12 @@ import { Type } from '@sinclair/typebox';
 
 const PLUGIN_ID = 'uclaw-desktop-control';
 const DEFAULT_HOST_API_ORIGIN = 'http://127.0.0.1:13210';
+const TOOL_CONTEXT_LIMIT = 256;
+const DESKTOP_RUNTIME_TOOL_NAMES = new Set([
+  'desktop_get_app_state',
+  'desktop_request_action',
+]);
+const runtimeContextByToolCallId = new Map();
 
 function hostApiOrigin() {
   return String(process.env.CLAWX_HOST_API_ORIGIN || DEFAULT_HOST_API_ORIGIN).replace(/\/+$/u, '');
@@ -30,25 +36,69 @@ async function hostApiFetch(path, options = {}) {
   return payload?.result ?? payload;
 }
 
-function runContext(ctx, params) {
+function normalizedString(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  return normalized || undefined;
+}
+
+/** Retain host-authoritative Tool Search context until the target tool executes. */
+function rememberRuntimeContext(event, ctx) {
+  if (!DESKTOP_RUNTIME_TOOL_NAMES.has(normalizedString(event?.toolName))) return;
+  const toolCallId = normalizedString(event?.toolCallId);
+  const sessionKey = normalizedString(ctx?.sessionKey) || normalizedString(ctx?.session?.key);
+  const runId = normalizedString(event?.runId) || normalizedString(ctx?.runId);
+  if (!toolCallId || !sessionKey || !runId) return;
+  const runtimeContext = { sessionKey, runId, toolCallId };
+  runtimeContextByToolCallId.set(toolCallId, runtimeContext);
+  while (runtimeContextByToolCallId.size > TOOL_CONTEXT_LIMIT) {
+    const oldest = runtimeContextByToolCallId.keys().next().value;
+    if (!oldest) break;
+    runtimeContextByToolCallId.delete(oldest);
+  }
+  return {
+    params: {
+      ...(event?.params && typeof event.params === 'object' ? event.params : {}),
+      __uclawRuntimeContext: runtimeContext,
+    },
+  };
+}
+
+function runContext(toolCallId, ctx, params) {
+  const normalizedToolCallId = normalizedString(toolCallId);
+  const injected = params?.__uclawRuntimeContext && typeof params.__uclawRuntimeContext === 'object'
+    ? params.__uclawRuntimeContext
+    : undefined;
+  const remembered = normalizedToolCallId
+    ? runtimeContextByToolCallId.get(normalizedToolCallId)
+    : undefined;
   const sessionKey = String(
-    params?.sessionKey
-      || ctx?.sessionKey
+    ctx?.sessionKey
       || ctx?.session?.key
       || ctx?.session?.sessionKey
+      || injected?.sessionKey
+      || remembered?.sessionKey
+      || params?.sessionKey
       || '',
   ).trim();
   const runId = String(
-    params?.runId
-      || ctx?.runId
+    ctx?.runId
       || ctx?.agentRunId
       || ctx?.session?.runId
+      || injected?.runId
+      || remembered?.runId
+      || params?.runId
       || '',
   ).trim();
   if (!sessionKey || !runId) {
     throw new Error('Desktop actions require a runtime sessionKey and runId. The UClaw runtime must provide both before using desktop tools.');
   }
-  return { sessionKey, runId };
+  return {
+    sessionKey,
+    runId,
+    ...(normalizedString(injected?.toolCallId) || normalizedToolCallId
+      ? { toolCallId: normalizedString(injected?.toolCallId) || normalizedToolCallId }
+      : {}),
+  };
 }
 
 const appTargetSchema = Type.Object({
@@ -113,8 +163,8 @@ function createTools() {
         target: Type.Optional(appTargetSchema),
         maxScreenshotSide: Type.Optional(Type.Integer({ minimum: 640, maximum: 2560 })),
       }, { additionalProperties: false }),
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const context = runContext(ctx, params);
+      async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+        const context = runContext(toolCallId, ctx, params);
         return hostApiFetch('/api/computer/state', {
           method: 'POST',
           body: JSON.stringify({ ...context, target: params?.target, maxScreenshotSide: params?.maxScreenshotSide }),
@@ -129,11 +179,15 @@ function createTools() {
         snapshotId: Type.String(),
         action: actionSchema,
       }, { additionalProperties: false }),
-      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-        const context = runContext(ctx, params);
+      async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+        const context = runContext(toolCallId, ctx, params);
         return hostApiFetch('/api/computer/actions', {
           method: 'POST',
-          body: JSON.stringify({ ...context, snapshotId: params.snapshotId, action: params.action }),
+          body: JSON.stringify({
+            ...context,
+            snapshotId: params.snapshotId,
+            action: params.action,
+          }),
         });
       },
     },
@@ -145,6 +199,17 @@ export const pluginEntry = definePluginEntry({
   name: 'UClaw Desktop Control',
   description: 'Cross-platform desktop observation with Main-owned approval-gated actions.',
   register(api) {
+    if (typeof api.on === 'function') {
+      api.on('before_tool_call', rememberRuntimeContext, {
+        name: `${PLUGIN_ID}:runtime-context`,
+        description: 'Retain authoritative runtime ownership for Tool Search delegated desktop calls.',
+      });
+    } else if (typeof api.registerHook === 'function') {
+      api.registerHook('before_tool_call', rememberRuntimeContext, {
+        name: `${PLUGIN_ID}:runtime-context`,
+        description: 'Retain authoritative runtime ownership for Tool Search delegated desktop calls.',
+      });
+    }
     for (const tool of createTools()) api.registerTool(tool);
   },
 });

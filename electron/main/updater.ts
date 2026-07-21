@@ -2,9 +2,10 @@
  * Auto-Updater Module
  * Handles automatic application updates using electron-updater
  *
- * Update providers are configured in electron-builder.yml (OSS primary, GitHub fallback).
- * For prerelease channels (alpha, beta), the feed URL is overridden at runtime
- * to point at the channel-specific OSS directory (e.g. /alpha/, /beta/).
+ * Installed builds check the JunFei release feed first and retry the current
+ * check against the legacy OSS feed when the managed feed is unavailable.
+ * Portable builds use the JunFei release metadata API and verify ZIP metadata
+ * before handing the package to the portable updater helper.
  */
 import { autoUpdater, UpdateInfo, ProgressInfo, UpdateDownloadedEvent } from 'electron-updater';
 import { BrowserWindow, app, ipcMain, shell } from 'electron';
@@ -25,19 +26,24 @@ import {
   verifyPortableUpdatePackage,
 } from './portable-update-security';
 import { launchPortableUpdateInstaller } from './portable-update-installer';
+import {
+  JUNFEIAI_APP_UPDATE_LEGACY_INSTALLED_FEED_BASE_URL,
+  JUNFEIAI_APP_UPDATE_MANAGED_API_PATH,
+  JUNFEIAI_APP_UPDATE_MANAGED_FEED_PATH,
+} from '../../shared/junfeiai-endpoints';
 
 /** Base update feed URL (without trailing channel path). */
 function getUpdateFeedBaseUrl(): string {
   return (
     process.env.CLAWX_UPDATE_FEED_BASE_URL
-    || `${getJunFeiAIBackendOrigin()}/api/clawx/updates/feed`
+    || `${getJunFeiAIBackendOrigin()}${JUNFEIAI_APP_UPDATE_MANAGED_FEED_PATH}`
   ).replace(/\/+$/, '');
 }
 
 function getUpdateApiBaseUrl(): string {
   return (
     process.env.CLAWX_UPDATE_API_BASE_URL
-    || `${getJunFeiAIBackendOrigin()}/api/clawx/updates`
+    || `${getJunFeiAIBackendOrigin()}${JUNFEIAI_APP_UPDATE_MANAGED_API_PATH}`
   ).replace(/\/+$/, '');
 }
 
@@ -77,6 +83,11 @@ function platformForUpdateApi(): 'mac' | 'win' | 'linux' {
 
 function normalizeUpdateChannel(channel: string): string {
   return channel === 'stable' ? 'latest' : channel;
+}
+
+function getInstalledUpdateFallbackFeedUrl(channel: string): string | null {
+  if (process.env.CLAWX_UPDATE_FEED_BASE_URL?.trim()) return null;
+  return `${JUNFEIAI_APP_UPDATE_LEGACY_INSTALLED_FEED_BASE_URL}/${normalizeUpdateChannel(channel)}`;
 }
 
 type BackendEnvelope<T> = {
@@ -136,6 +147,8 @@ export class AppUpdater extends EventEmitter {
   private status: UpdateStatus = { status: 'idle', mode: isPortableMode() ? 'portable' : 'installed' };
   private autoInstallTimer: NodeJS.Timeout | null = null;
   private autoInstallCountdown = 0;
+  private suppressCheckErrorPresentation = false;
+  private checkInFlight: Promise<UpdateInfo | PortableUpdateInfo | null> | null = null;
 
   /** Delay (in seconds) before auto-installing a downloaded update. */
   private static readonly AUTO_INSTALL_DELAY_SECONDS = 5;
@@ -224,6 +237,11 @@ export class AppUpdater extends EventEmitter {
     });
 
     autoUpdater.on('error', (error: Error) => {
+      // A managed-feed failure is provisional while the same check can use the legacy feed.
+      if (this.suppressCheckErrorPresentation) {
+        logger.warn('[Updater] Primary installed update feed failed; waiting for fallback:', error.message);
+        return;
+      }
       this.updateStatus({ status: 'error', error: error.message });
       this.emit('error', error);
     });
@@ -256,17 +274,75 @@ export class AppUpdater extends EventEmitter {
 
   /**
    * Check for updates.
-   * electron-updater automatically tries providers defined in electron-builder.yml in order.
+   * Installed builds reset to the managed feed on every check. A managed-feed
+   * failure can fall back only for that check, so later checks still start from
+   * the managed source.
    *
    * In dev mode (not packed), autoUpdater.checkForUpdates() silently returns
    * null without emitting any events, so we must detect this and force a
    * final status so the UI never gets stuck in 'checking'.
    */
   async checkForUpdates(): Promise<UpdateInfo | PortableUpdateInfo | null> {
+    if (this.checkInFlight) return await this.checkInFlight;
+
+    const operation = this.performCheckForUpdates();
+    this.checkInFlight = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.checkInFlight === operation) this.checkInFlight = null;
+    }
+  }
+
+  private async performCheckForUpdates(): Promise<UpdateInfo | PortableUpdateInfo | null> {
     if (isPortableMode()) {
       return await this.checkPortableForUpdates();
     }
 
+    const channel = normalizeUpdateChannel(autoUpdater.channel || detectChannel(app.getVersion()));
+    const primaryFeedUrl = `${getUpdateFeedBaseUrl()}/${channel}`;
+    autoUpdater.channel = channel;
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: primaryFeedUrl,
+      useMultipleRangeRequest: false,
+    });
+
+    const fallbackFeedUrl = getInstalledUpdateFallbackFeedUrl(channel);
+    this.suppressCheckErrorPresentation = Boolean(fallbackFeedUrl);
+    try {
+      try {
+        return await this.checkInstalledForUpdates({ presentErrors: !fallbackFeedUrl });
+      } catch (primaryError) {
+        if (!fallbackFeedUrl) throw primaryError;
+
+        this.suppressCheckErrorPresentation = false;
+        logger.warn(`[Updater] Primary update feed failed; retrying the current check via ${fallbackFeedUrl}`);
+        this.updateStatus({ status: 'checking', error: undefined });
+
+        try {
+          autoUpdater.setFeedURL({
+            provider: 'generic',
+            url: fallbackFeedUrl,
+            useMultipleRangeRequest: false,
+          });
+          return await this.checkInstalledForUpdates();
+        } catch (fallbackError) {
+          throw new AggregateError(
+            [primaryError, fallbackError],
+            'Primary and legacy installed update feeds both failed',
+            { cause: fallbackError },
+          );
+        }
+      }
+    } finally {
+      this.suppressCheckErrorPresentation = false;
+    }
+  }
+
+  private async checkInstalledForUpdates(
+    options: { presentErrors?: boolean } = {},
+  ): Promise<UpdateInfo | null> {
     try {
       const result = await autoUpdater.checkForUpdates();
 
@@ -288,8 +364,10 @@ export class AppUpdater extends EventEmitter {
 
       return result.updateInfo || null;
     } catch (error) {
-      logger.error('[Updater] Check for updates failed:', error);
-      this.updateStatus({ status: 'error', error: (error as Error).message || String(error) });
+      if (options.presentErrors !== false) {
+        logger.error('[Updater] Check for updates failed:', error);
+        this.updateStatus({ status: 'error', error: (error as Error).message || String(error) });
+      }
       throw error;
     }
   }
@@ -368,6 +446,12 @@ export class AppUpdater extends EventEmitter {
       if ((info.packageType || info.package_type) !== 'portable_zip') {
         throw new Error('Portable update metadata must use package_type=portable_zip');
       }
+      if (!/^[a-f0-9]{128}$/i.test(info.sha512?.trim() || '')) {
+        throw new Error('Portable update metadata must include a valid sha512');
+      }
+      if (!Number.isSafeInteger(info.size) || (info.size ?? 0) <= 0) {
+        throw new Error('Portable update metadata must include a valid size');
+      }
 
       const updatesDir = getPortableUpdatesDir();
       if (!updatesDir) {
@@ -433,6 +517,9 @@ export class AppUpdater extends EventEmitter {
 
       await pipeline(bodyStream, createWriteStream(partialPath));
       const verified = await verifyPortableUpdatePackage(partialPath, info);
+      // Windows rename does not replace an existing destination. Remove only
+      // after the replacement package has passed its integrity checks.
+      await rm(targetPath, { force: true });
       await rename(partialPath, targetPath);
       partialPathToCleanup = null;
       this.updateStatus({
@@ -570,7 +657,7 @@ export class AppUpdater extends EventEmitter {
    * Set update channel (stable, beta, dev)
    */
   setChannel(channel: 'stable' | 'beta' | 'dev'): void {
-    autoUpdater.channel = channel;
+    autoUpdater.channel = normalizeUpdateChannel(channel);
   }
 
   /**

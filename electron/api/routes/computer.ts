@@ -12,6 +12,7 @@ function readContext(body: Record<string, unknown>): DesktopRunContext {
   return {
     sessionKey: typeof body.sessionKey === 'string' ? body.sessionKey.trim() : '',
     runId: typeof body.runId === 'string' ? body.runId.trim() : '',
+    toolCallId: typeof body.toolCallId === 'string' ? body.toolCallId.trim() || undefined : undefined,
   };
 }
 

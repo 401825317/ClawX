@@ -31,6 +31,7 @@ type TaskProjectionContext = {
   parentTaskId?: string;
   rootSessionKey?: string;
   runId?: string;
+  rootRunId?: string;
 };
 
 const DEFAULT_POLL_INTERVAL_MS = 2_500;
@@ -110,6 +111,21 @@ function taskChildSessionKey(task: TaskLedgerRecord): string | undefined {
   return text(task.childSessionKey ?? task.child_session_key, 300);
 }
 
+/** Explicit owner lineage only; a task's own runId is not a conversation owner. */
+function taskRootRunId(task: TaskLedgerRecord): string | undefined {
+  return text(
+    task.rootRunId
+      ?? task.root_run_id
+      ?? task.ownerRunId
+      ?? task.owner_run_id
+      ?? task.requesterRunId
+      ?? task.requester_run_id
+      ?? task.parentRunId
+      ?? task.parent_run_id,
+    300,
+  );
+}
+
 function explicitParentTaskId(task: TaskLedgerRecord): string | undefined {
   return text(task.parentTaskId ?? task.parent_task_id, 300);
 }
@@ -118,7 +134,12 @@ function taskStatus(task: TaskLedgerRecord): ChatRuntimeTaskStatus {
   const status = marker(task.status ?? task.state);
   const deliveryStatus = marker(task.deliveryStatus ?? task.delivery_status);
   const terminalOutcome = marker(task.terminalOutcome ?? task.terminal_outcome);
-  if (['failed', 'error', 'cancelled', 'canceled', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
+  if (['failed', 'error', 'lost', 'timed_out', 'timeout'].includes(status)) return 'error';
+  if (
+    ['aborted', 'cancelled', 'canceled', 'stopped', 'terminated'].includes(status)
+    || ['aborted', 'cancelled', 'canceled'].includes(terminalOutcome)
+    || ['aborted', 'cancelled', 'canceled'].includes(deliveryStatus)
+  ) return 'aborted';
   if (['waiting_approval', 'approval_required', 'pending_approval'].includes(status)) return 'waiting_approval';
   if (
     ['partial', 'partially_completed', 'partial_failure'].includes(status)
@@ -151,6 +172,7 @@ function taskFingerprint(task: TaskLedgerRecord, context: TaskProjectionContext)
     context.parentTaskId,
     context.rootSessionKey,
     context.runId,
+    context.rootRunId,
     task.flowId ?? task.flow_id ?? task.parentFlowId ?? task.parent_flow_id,
     task.kind ?? task.taskKind ?? task.task_kind,
   ]);
@@ -221,7 +243,8 @@ function buildProjectionContexts(tasks: TaskLedgerRecord[]): Map<string, TaskPro
     const runId = parentContext?.runId
       ?? text(rootTask?.runId ?? rootTask?.run_id, 300)
       ?? (flowId ? `task-flow:${flowId}` : `task:${id}`);
-    const context = { parentTaskId, rootSessionKey, runId };
+    const rootRunId = parentContext?.rootRunId ?? taskRootRunId(task);
+    const context = { parentTaskId, rootSessionKey, runId, rootRunId };
     contexts.set(id, context);
     visiting.delete(id);
     return context;
@@ -248,7 +271,7 @@ export function projectTaskLedgerRecord(
     kind: text(task.kind ?? task.taskKind ?? task.task_kind, 160),
     runtime: text(task.runtime, 120),
     title: taskTitle(task),
-    detail: text(status === 'partial' || status === 'error' || status === 'completed'
+    detail: text(status === 'partial' || status === 'aborted' || status === 'error' || status === 'completed'
       ? task.terminalSummary ?? task.terminal_summary ?? task.error ?? task.progressSummary ?? task.progress_summary
       : task.progressSummary ?? task.progress_summary ?? task.terminalSummary ?? task.terminal_summary ?? task.error),
     agentId: text(task.agentId ?? task.agent_id, 160),
@@ -269,6 +292,7 @@ export function projectTaskLedgerRecord(
     producer: 'openclaw-task-ledger',
     type: 'task.updated',
     runId,
+    rootRunId: context.rootRunId ?? taskRootRunId(task),
     sessionKey,
     taskId: id,
     parentTaskId: projection.parentTaskId,

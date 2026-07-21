@@ -20,7 +20,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
-  <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
+  <img src="https://img.shields.io/badge/electron-41+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
   <a href="https://discord.com/invite/84Kex3GGAh" target="_blank">
   <img src="https://img.shields.io/discord/1399603591471435907?logo=discord&labelColor=%20%235462eb&logoColor=%20%23f5f5f5&color=%20%235462eb" alt="chat on Discord" />
@@ -153,10 +153,10 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 在 **设置 → 通用** 中，你可以开启 **开机自动启动**，让 ClawX 在系统登录后自动启动。
 
 ### 🔔 更新提示
-ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。
+ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。Windows 安装版升级会保留旧安装目录直到新文件解压成功；解压失败时会先恢复旧目录再退出安装器。
 
 ### 💾 高性能便携模式
-macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、Chromium 会话状态、OpenClaw 配置、Agent、会话、技能和通道凭据保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；更新下载、Python、uv、临时文件、日志、崩溃转储、浏览器磁盘缓存和编译缓存会放到当前电脑的本机目录 `UClawRuntime/`，避免 U 盘被频繁读写拖慢或快速占满。新生成的包一定从空白 `UClawData/` 开始，不会带入打包电脑上的账号或运行状态。
+macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、Chromium 会话状态、OpenClaw 配置、Agent、会话、技能和通道凭据保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；更新下载、Python、uv、临时文件、日志、崩溃转储、浏览器磁盘缓存和编译缓存会放到当前电脑的本机目录 `UClawRuntime/`，避免 U 盘被频繁读写拖慢或快速占满。新生成的包一定从空白 `UClawData/` 开始，不会带入打包电脑上的账号或运行状态。更新时，portable helper 会先确认当前进程已经退出，再保留旧版应用文件，直到新版确认完成关键 Main 进程初始化；如果无法确认旧版退出，不会替换任何文件。如果更新包校验、解压、替换、新版启动或 90 秒启动确认失败，会自动恢复并重启旧版，且不会替换或删除 `UClawData/`。
 
 Windows 打包必须从已经提交且 worktree 干净的源码开始，并会先清理旧的解包目录和历史 USB 产物。封装阶段会核对源码版本、Git commit 与 `app.asar`，把随包的 4 个 Windows 可执行文件全部校验为 x64 PE，并检查 12 个 UClaw 内置及渠道/搜索插件和它们的运行依赖，随后生成 `uclaw-usb-build.json` 和配套发布 JSON；任何身份或内容不一致都会直接让构建失败，不再发布看似成功的旧包。
 
@@ -414,7 +414,7 @@ CI 中的 `comms-regression` 会校验必选场景与阈值。
 
 | 层级 | 技术 |
 |------|------|
-| 运行时 | Electron 40+ |
+| 运行时 | Electron 41+ |
 | UI 框架 | React 19 + TypeScript |
 | 样式 | Tailwind CSS + shadcn/ui |
 | 状态管理 | Zustand |

@@ -65,6 +65,12 @@ import {
   JUNFEIAI_DEFAULT_THINKING_LEVEL,
   JUNFEIAI_MANAGED_OPENAI_API_PROTOCOL,
   JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID,
+  JUNFEIAI_OPENCLAW_EXEC_ASK,
+  JUNFEIAI_OPENCLAW_EXEC_SECURITY,
+  JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
+  JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
+  JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
   getJunFeiAIProviderBaseUrl,
@@ -1248,7 +1254,36 @@ function normalizeAgentsDefaultsCompactionMode(config: Record<string, unknown>):
   }
 }
 
-function prepareOpenClawJsonForWrite(config: Record<string, unknown>): void {
+function compareOpenClawReleaseVersions(left: string, right: string): number | null {
+  const parse = (value: string): [number, number, number, number] | null => {
+    const match = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-(\d+))?$/.exec(value.trim());
+    if (!match) return null;
+    return [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] ?? 0)];
+  };
+
+  const leftParts = parse(left);
+  const rightParts = parse(right);
+  if (!leftParts || !rightParts) return null;
+
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] !== rightParts[index]) {
+      return leftParts[index] > rightParts[index] ? 1 : -1;
+    }
+  }
+  return 0;
+}
+
+async function resolveBundledOpenClawVersion(): Promise<string> {
+  const manifestPath = join(getOpenClawResolvedDir(), 'package.json');
+  const manifest = await readJsonFileWithRetry<{ version?: unknown }>(manifestPath);
+  const version = typeof manifest?.version === 'string' ? manifest.version.trim() : '';
+  if (!version) {
+    throw new Error(`Unable to resolve bundled OpenClaw version from ${manifestPath}`);
+  }
+  return version;
+}
+
+async function prepareOpenClawJsonForWrite(config: Record<string, unknown>): Promise<void> {
   normalizeAgentsDefaultsCompactionMode(config);
 
   // Ensure SIGUSR1 graceful reload is authorized by OpenClaw config.
@@ -1259,11 +1294,31 @@ function prepareOpenClawJsonForWrite(config: Record<string, unknown>): void {
   ) as Record<string, unknown>;
   commands.restart = true;
   config.commands = commands;
+
+  // Match OpenClaw-owned config writes so downgrade guards see the true writer version.
+  const runtimeVersion = await resolveBundledOpenClawVersion();
+  const meta = isPlainRecord(config.meta) ? { ...config.meta } : {};
+  const previousVersion = typeof meta.lastTouchedVersion === 'string'
+    ? meta.lastTouchedVersion.trim()
+    : '';
+  const versionComparison = previousVersion
+    ? compareOpenClawReleaseVersions(previousVersion, runtimeVersion)
+    : 0;
+  if (previousVersion && (versionComparison === null || versionComparison > 0)) {
+    throw new Error(
+      `Refusing to write openclaw.json because meta.lastTouchedVersion=${previousVersion} `
+      + `is newer than or incompatible with bundled OpenClaw ${runtimeVersion}. `
+      + 'Restore the matching runtime or a pre-upgrade config backup before writing.',
+    );
+  }
+  meta.lastTouchedVersion = runtimeVersion;
+  meta.lastTouchedAt = new Date().toISOString();
+  config.meta = meta;
 }
 
 async function writeOpenClawJson(config: Record<string, unknown>): Promise<void> {
   return withConfigLock(async () => {
-    prepareOpenClawJsonForWrite(config);
+    await prepareOpenClawJsonForWrite(config);
 
     await writeJsonFile(getOpenClawConfigPath(), config);
   });
@@ -2622,6 +2677,47 @@ export async function syncOpenAiProviderToManagedRelay(params: {
   }
 }
 
+/**
+ * Register the request-scoped text fallback on the same managed relay as
+ * OpenAI while preserving the fallback Provider's own transport protocol.
+ */
+export async function syncManagedTextFailoverProviderToOpenClaw(params: {
+  baseUrl: string;
+  apiKey?: string;
+}): Promise<void> {
+  if (!JUNFEIAI_OPENCLAW_TEXT_FAILOVER.enabled) {
+    return;
+  }
+
+  const baseUrl = normalizeOpenAiRelayBaseUrl(params.baseUrl);
+  const trimmedApiKey = params.apiKey?.trim();
+  const {
+    fallbackProvider,
+    fallbackModel,
+    fallbackApiProtocol,
+  } = JUNFEIAI_OPENCLAW_TEXT_FAILOVER;
+
+  await withConfigLock(async () => {
+    const config = await readOpenClawJson();
+    upsertOpenClawProviderEntry(config, fallbackProvider, {
+      baseUrl,
+      api: fallbackApiProtocol,
+      apiKey: trimmedApiKey ?? null,
+      timeoutSeconds: JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
+      request: { allowPrivateNetwork: true },
+      modelIds: [fallbackModel],
+      replaceExistingProvider: true,
+    });
+    await writeOpenClawJson(config);
+  });
+
+  if (trimmedApiKey) {
+    await saveProviderKeyToOpenClaw(fallbackProvider, trimmedApiKey);
+  } else {
+    await removeProviderKeyFromOpenClaw(fallbackProvider);
+  }
+}
+
 function readModelsProvider(config: Record<string, unknown>, providerKey: string): Record<string, unknown> | null {
   const models = config.models;
   if (!models || typeof models !== 'object') {
@@ -2670,7 +2766,7 @@ function ensurePluginRegistrationEnabled(config: Record<string, unknown>, plugin
 export async function syncOpenAiCompatibleImageRelay(params: {
   enabled: boolean;
   baseUrl?: string | null;
-  apiKey?: string;
+  apiKey?: string | null;
   imageModelIds?: string[];
 }): Promise<void> {
   return withConfigLock(async () => {
@@ -3193,6 +3289,76 @@ export function ensureManagedMediaLimitInConfig(config: Record<string, unknown>)
   return true;
 }
 
+/** Apply the endpoint-configured OpenClaw long-session compaction policy. */
+export function ensureJunFeiAICompactionDefaultsInConfig(config: Record<string, unknown>): boolean {
+  const agents = (
+    config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+      ? { ...(config.agents as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const defaults = (
+    agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+      ? { ...(agents.defaults as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const compaction = (
+    defaults.compaction && typeof defaults.compaction === 'object' && !Array.isArray(defaults.compaction)
+      ? { ...(defaults.compaction as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const midTurnPrecheck = (
+    compaction.midTurnPrecheck
+      && typeof compaction.midTurnPrecheck === 'object'
+      && !Array.isArray(compaction.midTurnPrecheck)
+      ? { ...(compaction.midTurnPrecheck as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (
+    midTurnPrecheck.enabled === JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED
+    && compaction.truncateAfterCompaction === JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION
+    && compaction.maxActiveTranscriptBytes === JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES
+  ) {
+    return false;
+  }
+
+  midTurnPrecheck.enabled = JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED;
+  compaction.midTurnPrecheck = midTurnPrecheck;
+  compaction.truncateAfterCompaction = JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION;
+  compaction.maxActiveTranscriptBytes = JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES;
+  defaults.compaction = compaction;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
+/** Apply the endpoint-configured OpenClaw host-command approval defaults. */
+export function ensureJunFeiAIExecDefaultsInConfig(config: Record<string, unknown>): boolean {
+  const tools = (
+    config.tools && typeof config.tools === 'object' && !Array.isArray(config.tools)
+      ? { ...(config.tools as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const exec = (
+    tools.exec && typeof tools.exec === 'object' && !Array.isArray(tools.exec)
+      ? { ...(tools.exec as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (
+    exec.security === JUNFEIAI_OPENCLAW_EXEC_SECURITY
+    && exec.ask === JUNFEIAI_OPENCLAW_EXEC_ASK
+  ) {
+    return false;
+  }
+
+  exec.security = JUNFEIAI_OPENCLAW_EXEC_SECURITY;
+  exec.ask = JUNFEIAI_OPENCLAW_EXEC_ASK;
+  tools.exec = exec;
+  config.tools = tools;
+  return true;
+}
+
 /** Keep every tool available while sending only a small, locally selected set
  * of schemas on each model call. Directory selection does not use embeddings. */
 function ensureManagedToolDirectoryInConfig(config: Record<string, unknown>): boolean {
@@ -3382,6 +3548,8 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     ensureToolSearchDirectoryDefaultInConfig(config);
     ensureManagedHeartbeatIsolationInConfig(config);
     ensureManagedMediaLimitInConfig(config);
+    ensureJunFeiAICompactionDefaultsInConfig(config);
+    ensureJunFeiAIExecDefaultsInConfig(config);
     ensureManagedToolDirectoryInConfig(config);
 
     removePluginRegistrations(config, [UCLAW_COMPUTER_USE_PLUGIN_ID]);
@@ -3443,7 +3611,7 @@ type AgentModelProviderEntry = {
     maxTokens?: number;
     [key: string]: unknown;
   }>;
-  apiKey?: string;
+  apiKey?: string | null;
   /** When true, pi-ai sends Authorization: Bearer instead of x-api-key */
   authHeader?: boolean;
   timeoutSeconds?: number;
@@ -3701,6 +3869,16 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       console.log('[sanitize] Defaulted generated media delivery limit to 16 MiB');
     }
 
+    if (ensureJunFeiAICompactionDefaultsInConfig(config)) {
+      modified = true;
+      console.log(
+        `[sanitize] Applied OpenClaw compaction defaults from junfeiai-endpoints.json `
+        + `(midTurnPrecheck=${JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED}, `
+        + `truncateAfterCompaction=${JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION}, `
+        + `maxActiveTranscriptBytes=${JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES})`,
+      );
+    }
+
     if (ensureManagedToolDirectoryInConfig(config)) {
       modified = true;
       console.log('[sanitize] Enabled the local tool-schema directory (no embeddings)');
@@ -3849,23 +4027,18 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
     }
 
     // ── tools.exec approvals (OpenClaw 3.28+) ──────────────────────
-    // ClawX is a local desktop app where the user is the trusted operator.
-    // Exec approval prompts add unnecessary friction in this context, so we
-    // set security="full" (allow all commands) and ask="off" (never prompt).
+    // The managed distribution owns these defaults in junfeiai-endpoints.json.
     // If a user has manually configured a stricter ~/.openclaw/exec-approvals.json,
     // OpenClaw's minSecurity/maxAsk merge will still respect their intent.
-    const execConfig = (toolsConfig.exec as Record<string, unknown> | undefined) || {};
-    if (execConfig.security !== 'full' || execConfig.ask !== 'off') {
-      execConfig.security = 'full';
-      execConfig.ask = 'off';
-      toolsConfig.exec = execConfig;
-      toolsModified = true;
-      console.log('[sanitize] Set tools.exec.security="full" and tools.exec.ask="off" to disable exec approvals for ClawX desktop');
-    }
-
     if (toolsModified) {
       config.tools = toolsConfig;
       modified = true;
+    }
+    if (ensureJunFeiAIExecDefaultsInConfig(config)) {
+      modified = true;
+      console.log(
+        `[sanitize] Set tools.exec.security="${JUNFEIAI_OPENCLAW_EXEC_SECURITY}" and tools.exec.ask="${JUNFEIAI_OPENCLAW_EXEC_ASK}" from junfeiai-endpoints.json`,
+      );
     }
 
     // ── plugins.entries.feishu cleanup ──────────────────────────────

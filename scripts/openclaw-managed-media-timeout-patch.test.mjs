@@ -36,7 +36,7 @@ const result = await downloadOpenAIVideo({
 \t\t\t\t\t\tmaxBytes:
 });
 const imageRequest = {
-  input_reference: { image_url: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType) }
+  input_reference: { image_url: toImageDataUrl(referenceAsset) }
 };`;
 
 const patchedTool = patchOpenClawManagedMediaTimeoutContent(toolFixture, 'tools.js', timeouts);
@@ -53,16 +53,16 @@ assert.match(patchedProvider.content, /\["completed", "done", "succeeded"\]\.inc
 assert.match(patchedProvider.content, /Boolean\(resolveOpenAIVideoOutputUrl\(payload\)\)/);
 assert.match(patchedProvider.content, /UCLAW_MANAGED_VIDEO_OUTPUT_URL_V1/);
 assert.match(patchedProvider.content, /outputUrl: resolveOpenAIVideoOutputUrl\(completed\)/);
-assert.match(patchedProvider.content, /image: toOpenAIDataUrl\(referenceAsset\.buffer, referenceAsset\.mimeType\)/);
+assert.match(patchedProvider.content, /image: toImageDataUrl\(referenceAsset\)/);
 assert.doesNotMatch(patchedProvider.content, /input_reference:/);
 
 const priorManagedProvider = patchedProvider.content.replace(
-  'image: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType), // UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1',
+  'image: toImageDataUrl(referenceAsset), // UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1',
   'input_reference: { image_url: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType) }',
 );
 const upgradedProvider = patchOpenClawManagedMediaTimeoutContent(priorManagedProvider, 'provider.js', timeouts);
 assert.equal(upgradedProvider.changed, true);
-assert.match(upgradedProvider.content, /image: toOpenAIDataUrl\(referenceAsset\.buffer, referenceAsset\.mimeType\)/);
+assert.match(upgradedProvider.content, /image: toImageDataUrl\(referenceAsset\)/);
 assert.doesNotMatch(upgradedProvider.content, /input_reference:/);
 
 const distDir = mkdtempSync(join(tmpdir(), 'uclaw-managed-media-timeout-'));

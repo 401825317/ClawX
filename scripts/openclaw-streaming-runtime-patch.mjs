@@ -37,13 +37,22 @@ const CHAT_STATE_ANCHOR = `	const emitChatDelta = (sessionKey, agentId, clientRu
 const CHAT_STATE_PATCH = `	const UCLAW_CHAT_DELTA_THROTTLE_MS_V1 = 24;
 	const emitChatDelta = (sessionKey, agentId, clientRunId, sourceRunId, seq, text, delta, opts) => {`;
 
+// OpenClaw 2026.7.1-2 inserts first-event timeout guarding between the
+// cooperative scheduler and the completions loop.
+const GUARDED_STREAM_ANCHOR = SCHEDULER_ANCHOR
+  .slice(SCHEDULER_ANCHOR.indexOf('\n') + 1)
+  .replace('responseStream', 'guardedStream');
+const GUARDED_STREAM_PATCH = SCHEDULER_PATCH
+  .slice(SCHEDULER_PATCH.indexOf('\n') + 1)
+  .replace('responseStream', 'guardedStream');
+
 function patchTransport(content, filePath) {
   if (content.includes(TRANSPORT_MARKER)) return { content, changed: false };
-  if (!content.includes(SCHEDULER_ANCHOR) || !content.includes(CONTENT_ANCHOR)) {
+  if (!content.includes(GUARDED_STREAM_ANCHOR) || !content.includes(CONTENT_ANCHOR)) {
     throw new Error(`[openclaw-streaming-runtime-patch] Missing completions stream anchor in ${filePath}`);
   }
   return {
-    content: content.replace(SCHEDULER_ANCHOR, SCHEDULER_PATCH).replace(CONTENT_ANCHOR, CONTENT_PATCH),
+    content: content.replace(GUARDED_STREAM_ANCHOR, GUARDED_STREAM_PATCH).replace(CONTENT_ANCHOR, CONTENT_PATCH),
     changed: true,
   };
 }

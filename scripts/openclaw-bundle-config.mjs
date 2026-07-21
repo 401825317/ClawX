@@ -26,6 +26,12 @@ export const EXTRA_BUNDLED_PACKAGES = [
   // transitive dependency graph from the app bundle context.
   'playwright-core',
 
+  // OpenClaw's built-in canvas extension lazy-loads its A2UI renderer.
+  // The published core package does not hoist these workspace dependencies.
+  '@a2ui/lit',
+  '@lit/context',
+  'lit',
+
   // Electron main process QR login flows resolve these files from the
   // bundled OpenClaw runtime context in packaged builds.
   'qrcode-terminal',
@@ -35,6 +41,24 @@ export const EXTRA_BUNDLED_PACKAGES = [
 export const ELECTRON_MAIN_RUNTIME_PACKAGES = [
   '@whiskeysockets/baileys',
   'qrcode-terminal',
+];
+
+/** OpenClaw 2026.7.1-2 runtime packages that must survive bundle cleanup. */
+export const OPENCLAW_REQUIRED_RUNTIME_PACKAGES = [
+  '@openclaw/ai',
+  '@agentclientprotocol/sdk',
+  '@silvia-odwyer/photon-node',
+  '@a2ui/lit',
+  '@lit/context',
+  'lit',
+];
+
+/** Runtime entry points and native payloads required by the bundled OpenClaw. */
+export const OPENCLAW_REQUIRED_RUNTIME_FILES = [
+  '@openclaw/ai/dist/index.mjs',
+  '@agentclientprotocol/sdk/dist/acp.js',
+  '@silvia-odwyer/photon-node/photon_rs.js',
+  '@silvia-odwyer/photon-node/photon_rs_bg.wasm',
 ];
 
 /** Third-party channel/provider plugins copied into every packaged runtime. */

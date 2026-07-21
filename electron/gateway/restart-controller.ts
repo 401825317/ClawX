@@ -10,6 +10,7 @@ type RestartDeferralState = {
   startLock: boolean;
   hasInFlightWork?: boolean;
   activeRunCount?: number;
+  activeTaskCount?: number;
   blockingRpcCount?: number;
 };
 
@@ -35,12 +36,12 @@ export class GatewayRestartController {
     if (!this.deferredRestartPending) {
       logger.info(
         `Deferring Gateway restart (${reason}) until startup/reconnect settles ` +
-        `(state=${context.state}, startLock=${context.startLock}, activeRuns=${context.activeRunCount ?? 0}, blockingRpc=${context.blockingRpcCount ?? 0})`,
+        `(state=${context.state}, startLock=${context.startLock}, activeRuns=${context.activeRunCount ?? 0}, activeTasks=${context.activeTaskCount ?? 0}, blockingRpc=${context.blockingRpcCount ?? 0})`,
       );
     } else {
       logger.debug(
         `Gateway restart already deferred; keeping pending request ` +
-        `(${reason}, state=${context.state}, startLock=${context.startLock}, activeRuns=${context.activeRunCount ?? 0}, blockingRpc=${context.blockingRpcCount ?? 0})`,
+        `(${reason}, state=${context.state}, startLock=${context.startLock}, activeRuns=${context.activeRunCount ?? 0}, activeTasks=${context.activeTaskCount ?? 0}, blockingRpc=${context.blockingRpcCount ?? 0})`,
       );
     }
     this.deferredRestartPending = true;
@@ -62,7 +63,7 @@ export class GatewayRestartController {
 
     if (this.shouldWaitForDeferredRestart(context)) {
       logger.debug(
-        `Deferred Gateway restart still waiting (${trigger}, state=${context.state}, startLock=${context.startLock}, activeRuns=${context.activeRunCount ?? 0}, blockingRpc=${context.blockingRpcCount ?? 0})`,
+        `Deferred Gateway restart still waiting (${trigger}, state=${context.state}, startLock=${context.startLock}, activeRuns=${context.activeRunCount ?? 0}, activeTasks=${context.activeTaskCount ?? 0}, blockingRpc=${context.blockingRpcCount ?? 0})`,
       );
       return;
     }

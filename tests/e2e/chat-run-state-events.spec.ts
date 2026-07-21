@@ -1,5 +1,6 @@
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
 import type { ElectronApplication } from '@playwright/test';
+import { normalizeGatewayChatRuntimeEvents } from '../../electron/gateway/chat-runtime-events';
 
 const MAIN_SESSION_KEY = 'agent:main:main';
 
@@ -20,7 +21,7 @@ async function installHistoryMocks(app: ElectronApplication, history: unknown[])
         success: true,
         result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
       },
-      [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+      [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
         success: true,
         result: { messages: history },
       },
@@ -66,7 +67,7 @@ async function installHistoryMocks(app: ElectronApplication, history: unknown[])
 }
 
 test.describe('ClawX chat run state events', () => {
-  test('rehydrates the persisted final reply when a normal run ends without a final event', async ({ launchElectronApp }) => {
+  test('does not replay terminal history into the live stream and still recovers on manual refresh', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
@@ -76,13 +77,17 @@ test.describe('ClawX chat run state events', () => {
       await app.evaluate(async () => {
         const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
         let history: unknown[] = [];
+        let historyRequestCount = 0;
         const sessions = { sessions: [{ key: 'agent:main:main', displayName: 'main' }] };
         const response = (json: unknown) => ({ ok: true, data: { status: 200, ok: true, json } });
 
         ipcMain.removeHandler('gateway:rpc');
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string) => {
           if (method === 'sessions.list') return { success: true, result: sessions };
-          if (method === 'chat.history') return { success: true, result: { messages: history } };
+          if (method === 'chat.history') {
+            historyRequestCount += 1;
+            return { success: true, result: { messages: history } };
+          }
           return { success: true, result: {} };
         });
 
@@ -91,7 +96,9 @@ test.describe('ClawX chat run state events', () => {
           switch (request.path) {
             case '/api/gateway/status': return response({ state: 'running', port: 18789, pid: 12345, gatewayReady: true });
             case '/api/chat/sessions': return response({ success: true, result: sessions });
-            case '/api/chat/history': return response({ success: true, result: { messages: history } });
+            case '/api/chat/history':
+              historyRequestCount += 1;
+              return response({ success: true, result: { messages: history } });
             case '/api/agents': return response({ success: true, agents: [{ id: 'main', name: 'Main' }] });
             default: return response({});
           }
@@ -100,6 +107,7 @@ test.describe('ClawX chat run state events', () => {
         (globalThis as Record<string, unknown>).__setTerminalHistory = (nextHistory: unknown[]) => {
           history = nextHistory;
         };
+        (globalThis as Record<string, unknown>).__getTerminalHistoryRequestCount = () => historyRequestCount;
       });
 
       const page = await getStableWindow(app);
@@ -109,6 +117,15 @@ test.describe('ClawX chat run state events', () => {
         if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
       }
       await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      const readHistoryRequestCount = async () => await app.evaluate(() => {
+        const getCount = (globalThis as Record<string, unknown>).__getTerminalHistoryRequestCount as
+          | (() => number)
+          | undefined;
+        return getCount?.() ?? 0;
+      });
+      await expect.poll(readHistoryRequestCount).toBeGreaterThan(0);
+      await page.waitForTimeout(300);
+      const historyRequestsBeforeTerminal = await readHistoryRequestCount();
 
       await app.evaluate(({ BrowserWindow }) => {
         const setHistory = (globalThis as Record<string, unknown>).__setTerminalHistory as
@@ -131,7 +148,598 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
+      await page.waitForTimeout(1_000);
+      const historyRequestsAfterTerminal = await readHistoryRequestCount();
+      expect(historyRequestsAfterTerminal).toBe(historyRequestsBeforeTerminal);
+      await expect(page.getByText('本次视频生成失败：生成服务处理超时，未产生可交付的视频文件。')).toHaveCount(0, { timeout: 1_000 });
+      await page.getByRole('button', { name: /Refresh|刷新/u }).click();
       await expect(page.getByText('本次视频生成失败：生成服务处理超时，未产生可交付的视频文件。')).toBeVisible({ timeout: 10_000 });
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('streams assistant text in place and folds a late tool-message echo without duplication', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const runId = 'run-stable-assistant-stream';
+    const toolCallId = 'tool-stable-assistant-stream';
+
+    try {
+      await installHistoryMocks(app, [{
+        id: 'stable-assistant-stream-user',
+        role: 'user',
+        content: 'Inspect the file and summarize it.',
+        timestamp: Date.now() / 1000,
+      }]);
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByText('Inspect the file and summarize it.', { exact: true })).toBeVisible({ timeout: 30_000 });
+
+      const startedAt = Date.now();
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('chat:runtime-event', {
+            type: 'run.started',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 1,
+            ts: input.startedAt,
+          });
+          win.webContents.send('chat:runtime-event', {
+            type: 'assistant.delta',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 2,
+            ts: input.startedAt + 1,
+            text: 'I will inspect the file first.',
+            replace: true,
+          });
+        }
+      }, { runId, startedAt });
+
+      const preamble = page.getByTestId('timeline-commentary').filter({ hasText: 'I will inspect the file first.' });
+      await expect(preamble).toHaveCount(1);
+      const preambleRow = preamble.locator('xpath=ancestor::*[@data-item-id][1]');
+      const preambleItemId = await preambleRow.getAttribute('data-item-id');
+      expect(preambleItemId).toBeTruthy();
+
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('chat:runtime-event', {
+            type: 'tool.started',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 3,
+            ts: input.startedAt + 2,
+            toolCallId: input.toolCallId,
+            name: 'read_file',
+            args: { path: '/tmp/example.md' },
+          });
+          win.webContents.send('chat:runtime-event', {
+            type: 'tool.completed',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 4,
+            ts: input.startedAt + 3,
+            toolCallId: input.toolCallId,
+            name: 'read_file',
+            result: 'ok',
+          });
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'final',
+              runId: input.runId,
+              sessionKey: 'agent:main:main',
+              seq: 5,
+              message: {
+                role: 'assistant',
+                timestamp: (input.startedAt + 4) / 1000,
+                content: [{
+                  type: 'text',
+                  text: 'I will inspect the file first.',
+                }, {
+                  type: 'toolCall',
+                  id: input.toolCallId,
+                  name: 'read_file',
+                  arguments: { path: '/tmp/example.md' },
+                }],
+              },
+            },
+          });
+        }
+      }, { runId, toolCallId, startedAt });
+
+      await expect(preamble).toHaveCount(1);
+      await expect(preambleRow).toHaveAttribute('data-item-id', preambleItemId!);
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toHaveCount(1);
+      const [preambleBox, toolBox] = await Promise.all([preamble.boundingBox(), toolGroup.boundingBox()]);
+      expect(preambleBox).not.toBeNull();
+      expect(toolBox).not.toBeNull();
+      expect(preambleBox!.y).toBeLessThan(toolBox!.y);
+
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('chat:runtime-event', {
+            type: 'assistant.delta',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 6,
+            ts: input.startedAt + 5,
+            text: 'The file is valid',
+            replace: true,
+            phase: 'final_answer',
+          });
+        }
+      }, { runId, startedAt });
+      const streamingFinal = page.getByTestId('timeline-commentary').filter({ hasText: 'The file is valid' });
+      await expect(streamingFinal).toHaveCount(1);
+      const streamingFinalRow = streamingFinal.locator('xpath=ancestor::*[@data-item-id][1]');
+      const streamingFinalItemId = await streamingFinalRow.getAttribute('data-item-id');
+      expect(streamingFinalItemId).toBeTruthy();
+
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('chat:runtime-event', {
+            type: 'assistant.delta',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 7,
+            ts: input.startedAt + 6,
+            text: 'The file is valid and ready.',
+            replace: true,
+            phase: 'final_answer',
+          });
+        }
+      }, { runId, startedAt });
+      await expect(page.getByTestId('timeline-commentary').filter({ hasText: 'The file is valid and ready.' })).toHaveCount(1);
+      await expect(streamingFinalRow).toHaveAttribute('data-item-id', streamingFinalItemId!);
+
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'final',
+              runId: input.runId,
+              sessionKey: 'agent:main:main',
+              seq: 8,
+              message: {
+                role: 'assistant',
+                timestamp: (input.startedAt + 7) / 1000,
+                content: 'The file is valid and ready.',
+              },
+            },
+          });
+          win.webContents.send('chat:runtime-event', {
+            type: 'run.ended',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 9,
+            ts: input.startedAt + 8,
+            status: 'completed',
+          });
+        }
+      }, { runId, startedAt });
+
+      await expect(page.getByText('The file is valid and ready.', { exact: true })).toHaveCount(1);
+      await expect(page.getByTestId('timeline-commentary').filter({ hasText: 'The file is valid and ready.' })).toHaveCount(0);
+      await expect(page.getByTestId('timeline-tool-group')).toHaveCount(1);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('renders native OpenClaw preamble and final frames incrementally around the tool boundary', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const runId = 'run-native-openclaw-preamble-stream';
+    const itemId = 'item-native-openclaw-preamble-stream';
+    const toolCallId = 'tool-native-openclaw-preamble-stream';
+    const preambleStart = 'I will inspect';
+    const preamble = 'I will inspect the session first.';
+    const finalStart = 'The tool finished';
+    const finalAnswer = 'The tool finished and the result is valid.';
+    const foldedFinal = `${preamble}${finalAnswer}`;
+    const startedAt = Date.now();
+    const normalize = (seq: number, stream: string, data: Record<string, unknown>) => (
+      normalizeGatewayChatRuntimeEvents({
+        runId,
+        sessionKey: MAIN_SESSION_KEY,
+        seq,
+        ts: startedAt + seq,
+        stream,
+        data,
+      })
+    );
+    const sendRuntime = async (events: ReturnType<typeof normalizeGatewayChatRuntimeEvents>) => {
+      await app.evaluate(({ BrowserWindow }, runtimeEvents) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          runtimeEvents.forEach((event) => win.webContents.send('chat:runtime-event', event));
+        }
+      }, events);
+    };
+    try {
+      await installHistoryMocks(app, [{
+        id: 'native-openclaw-preamble-stream-user',
+        role: 'user',
+        content: 'Inspect the session and report back.',
+        timestamp: startedAt / 1_000,
+      }]);
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByText('Inspect the session and report back.', { exact: true })).toBeVisible({ timeout: 30_000 });
+
+      await sendRuntime(normalize(1, 'lifecycle', { phase: 'start' }));
+      await sendRuntime(normalize(2, 'item', {
+        itemId,
+        kind: 'preamble',
+        title: 'Preamble',
+        phase: 'update',
+        progressText: preambleStart,
+        source: 'codex-app-server',
+      }));
+      const preambleBlock = page.getByTestId('timeline-commentary').filter({ hasText: preambleStart });
+      await expect(preambleBlock).toHaveCount(1);
+      const preambleRow = preambleBlock.locator('xpath=ancestor::*[@data-item-id][1]');
+      const preambleTimelineItemId = await preambleRow.getAttribute('data-item-id');
+      expect(preambleTimelineItemId).toBeTruthy();
+
+      await sendRuntime(normalize(3, 'item', {
+        itemId,
+        kind: 'preamble',
+        title: 'Preamble',
+        phase: 'update',
+        progressText: preamble,
+        source: 'codex-app-server',
+      }));
+      await expect(page.getByTestId('timeline-commentary').filter({ hasText: preamble })).toHaveCount(1);
+      await expect(preambleRow).toHaveAttribute('data-item-id', preambleTimelineItemId!);
+
+      await sendRuntime(normalize(4, 'tool', {
+        phase: 'start',
+        toolCallId,
+        name: 'tool_search',
+        args: { query: 'status' },
+      }));
+      await sendRuntime(normalize(5, 'tool', {
+        phase: 'result',
+        toolCallId,
+        name: 'tool_search',
+        result: [],
+      }));
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toHaveCount(1);
+
+      await sendRuntime(normalize(6, 'assistant', { text: finalStart, delta: finalStart }));
+      const streamingFinal = page.getByTestId('timeline-commentary').filter({ hasText: finalStart });
+      await expect(streamingFinal).toHaveCount(1);
+      const streamingFinalRow = streamingFinal.locator('xpath=ancestor::*[@data-item-id][1]');
+      const streamingFinalItemId = await streamingFinalRow.getAttribute('data-item-id');
+      expect(streamingFinalItemId).toBeTruthy();
+
+      await sendRuntime(normalize(7, 'assistant', {
+        text: finalAnswer,
+        delta: ' and the result is valid.',
+      }));
+      await expect(page.getByTestId('timeline-commentary').filter({ hasText: finalAnswer })).toHaveCount(1);
+      await expect(streamingFinalRow).toHaveAttribute('data-item-id', streamingFinalItemId!);
+
+      await sendRuntime(normalize(8, 'assistant', { text: foldedFinal }));
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'final',
+              runId: input.runId,
+              sessionKey: 'agent:main:main',
+              seq: 9,
+              message: {
+                role: 'assistant',
+                timestamp: (input.startedAt + 9) / 1_000,
+                content: [{ type: 'text', text: input.foldedFinal }],
+              },
+            },
+          });
+        }
+      }, { runId, startedAt, foldedFinal });
+
+      const finalBlock = page.getByText(finalAnswer, { exact: true });
+      await expect(finalBlock).toHaveCount(1);
+      await expect(page.getByText(foldedFinal, { exact: true })).toHaveCount(0);
+      await expect(page.getByTestId('timeline-commentary').filter({ hasText: preamble })).toHaveCount(1);
+      await expect(preambleRow).toHaveAttribute('data-item-id', preambleTimelineItemId!);
+      const finalRow = finalBlock.locator('xpath=ancestor::*[@data-item-id][1]');
+      const [preambleBox, toolBox, finalBox] = await Promise.all([
+        preambleBlock.boundingBox(),
+        toolGroup.boundingBox(),
+        finalRow.boundingBox(),
+      ]);
+      expect(preambleBox).not.toBeNull();
+      expect(toolBox).not.toBeNull();
+      expect(finalBox).not.toBeNull();
+      expect(preambleBox!.y).toBeLessThan(toolBox!.y);
+      expect(toolBox!.y).toBeLessThan(finalBox!.y);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('preserves multiple native commentary items around tools when chat final aggregates the whole run', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    const runId = 'run-native-openclaw-multi-commentary-stream';
+    const startedAt = Date.now();
+    const commentary = [
+      {
+        itemId: 'item-native-commentary-1',
+        partial: 'First commentary starts',
+        text: 'First commentary starts and completes before the first tool.',
+      },
+      {
+        itemId: 'item-native-commentary-2',
+        partial: 'Second commentary starts',
+        text: 'Second commentary starts and completes before the second tool.',
+      },
+      {
+        itemId: 'item-native-commentary-3',
+        partial: 'Third commentary starts',
+        text: 'Third commentary starts and completes before the third tool.',
+      },
+    ];
+    const finalPartial = 'The final answer starts';
+    const finalAnswer = 'The final answer starts and completes after all three tools.';
+    const aggregatedFinal = `${commentary.map((item) => item.text).join('')}${finalAnswer}`;
+    const userMessage = {
+      id: 'native-openclaw-multi-commentary-user',
+      role: 'user',
+      content: 'Run three searches and report the result.',
+      timestamp: startedAt / 1_000,
+    };
+    const persistedHistory = [
+      userMessage,
+      ...commentary.flatMap((item, index) => {
+        const toolCallId = `tool-native-commentary-${index + 1}`;
+        return [{
+          id: item.itemId,
+          role: 'assistant',
+          timestamp: (startedAt + 2 + (index * 4)) / 1_000,
+          content: [{ type: 'text', text: item.text }, {
+            type: 'toolCall',
+            id: toolCallId,
+            name: 'tool_search',
+            arguments: { query: `search-${index + 1}` },
+          }],
+        }, {
+          id: `tool-result-native-commentary-${index + 1}`,
+          role: 'toolresult',
+          toolCallId,
+          toolName: 'tool_search',
+          timestamp: (startedAt + 5 + (index * 4)) / 1_000,
+          content: [{ id: `result-${index + 1}` }],
+        }];
+      }),
+      {
+        id: 'native-openclaw-multi-commentary-final',
+        role: 'assistant',
+        timestamp: (startedAt + 18) / 1_000,
+        content: [{ type: 'text', text: finalAnswer }],
+      },
+    ];
+    const normalize = (seq: number, stream: string, data: Record<string, unknown>) => (
+      normalizeGatewayChatRuntimeEvents({
+        runId,
+        sessionKey: MAIN_SESSION_KEY,
+        seq,
+        ts: startedAt + seq,
+        stream,
+        data,
+      })
+    );
+    const sendRuntime = async (events: ReturnType<typeof normalizeGatewayChatRuntimeEvents>) => {
+      await app.evaluate(({ BrowserWindow }, runtimeEvents) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          runtimeEvents.forEach((event) => win.webContents.send('chat:runtime-event', event));
+        }
+      }, events);
+    };
+    const sendChatDelta = async (seq: number, text: string, deltaText: string) => {
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'delta',
+              runId: input.runId,
+              sessionKey: 'agent:main:main',
+              seq: input.seq,
+              deltaText: input.deltaText,
+              message: {
+                role: 'assistant',
+                timestamp: input.timestamp,
+                content: [{ type: 'text', text: input.text }],
+              },
+            },
+          });
+        }
+      }, {
+        runId,
+        seq,
+        text,
+        deltaText,
+        timestamp: startedAt + seq,
+      });
+    };
+
+    try {
+      await installHistoryMocks(app, [userMessage]);
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByText('Run three searches and report the result.', { exact: true })).toBeVisible({ timeout: 30_000 });
+
+      await sendRuntime(normalize(1, 'lifecycle', { phase: 'start' }));
+      const commentaryRows: Array<{ locator: ReturnType<typeof page.getByTestId>; itemId: string }> = [];
+      let accumulatedAssistantText = '';
+      for (let index = 0; index < commentary.length; index += 1) {
+        const item = commentary[index]!;
+        const toolCallId = `tool-native-commentary-${index + 1}`;
+        const baseSeq = 2 + (index * 4);
+        await sendRuntime(normalize(baseSeq, 'item', {
+          itemId: item.itemId,
+          kind: 'preamble',
+          title: 'Preamble',
+          phase: 'update',
+          progressText: item.partial,
+          source: 'codex-app-server',
+        }));
+        await sendChatDelta(baseSeq, `${accumulatedAssistantText}${item.partial}`, item.partial);
+        const block = page.getByTestId('timeline-commentary').filter({ hasText: item.partial });
+        await expect(block).toHaveCount(1);
+        await expect(block).toHaveText(item.partial);
+        const row = block.locator('xpath=ancestor::*[@data-item-id][1]');
+        const timelineItemId = await row.getAttribute('data-item-id');
+        expect(timelineItemId).toBeTruthy();
+
+        await sendRuntime(normalize(baseSeq + 1, 'item', {
+          itemId: item.itemId,
+          kind: 'preamble',
+          title: 'Preamble',
+          phase: 'update',
+          progressText: item.text,
+          source: 'codex-app-server',
+        }));
+        await sendChatDelta(baseSeq + 1, `${accumulatedAssistantText}${item.text}`, item.text.slice(item.partial.length));
+        await expect(page.getByTestId('timeline-commentary').filter({ hasText: item.text })).toHaveCount(1);
+        await expect(row.getByTestId('timeline-commentary')).toHaveText(item.text);
+        await expect(row).toHaveAttribute('data-item-id', timelineItemId!);
+        commentaryRows.push({ locator: row, itemId: timelineItemId! });
+        accumulatedAssistantText += item.text;
+
+        await sendRuntime(normalize(baseSeq + 2, 'tool', {
+          phase: 'start',
+          toolCallId,
+          name: 'tool_search',
+          args: { query: `search-${index + 1}` },
+        }));
+        await sendRuntime(normalize(baseSeq + 3, 'tool', {
+          phase: 'result',
+          toolCallId,
+          name: 'tool_search',
+          result: [{ id: `result-${index + 1}` }],
+        }));
+        await expect(page.getByTestId('timeline-tool-group')).toHaveCount(index + 1);
+      }
+
+      const finalStreamSamples = [
+        'The final',
+        finalPartial,
+        'The final answer starts and completes',
+        finalAnswer,
+      ];
+      let previousFinalText = '';
+      let streamingFinalItemId: string | null = null;
+      const observedFinalTexts: string[] = [];
+      for (let index = 0; index < finalStreamSamples.length; index += 1) {
+        const text = finalStreamSamples[index]!;
+        const seq = 14 + index;
+        const delta = text.slice(previousFinalText.length);
+        await sendRuntime(normalize(seq, 'assistant', { text, delta }));
+        await sendChatDelta(seq, `${accumulatedAssistantText}${text}`, delta);
+        await page.waitForTimeout(40);
+        const currentFinal = page.getByTestId('timeline-commentary').filter({ hasText: text });
+        await expect(currentFinal).toHaveCount(1);
+        await expect(currentFinal).toHaveText(text);
+        const currentFinalRow = currentFinal.locator('xpath=ancestor::*[@data-item-id][1]');
+        const currentItemId = await currentFinalRow.getAttribute('data-item-id');
+        expect(currentItemId).toBeTruthy();
+        if (streamingFinalItemId == null) streamingFinalItemId = currentItemId;
+        else expect(currentItemId).toBe(streamingFinalItemId);
+        observedFinalTexts.push((await currentFinal.textContent()) ?? '');
+        previousFinalText = text;
+      }
+      expect(observedFinalTexts).toEqual(finalStreamSamples);
+      const streamingFinal = page.getByTestId('timeline-commentary').filter({ hasText: finalAnswer });
+      await expect(streamingFinal).toHaveCount(1);
+      await expect(streamingFinal).toHaveText(finalAnswer);
+      const streamingFinalRow = streamingFinal.locator('xpath=ancestor::*[@data-item-id][1]');
+      await expect(streamingFinalRow).toHaveAttribute('data-item-id', streamingFinalItemId!);
+
+      await app.evaluate(({ BrowserWindow }, input) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('gateway:chat-message', {
+            message: {
+              state: 'final',
+              runId: input.runId,
+              sessionKey: 'agent:main:main',
+              seq: 18,
+              message: {
+                role: 'assistant',
+                timestamp: input.startedAt + 18,
+                content: [{ type: 'text', text: input.aggregatedFinal }],
+              },
+            },
+          });
+          win.webContents.send('chat:runtime-event', {
+            type: 'run.ended',
+            producer: 'openclaw',
+            runId: input.runId,
+            sessionKey: 'agent:main:main',
+            seq: 19,
+            ts: input.startedAt + 19,
+            status: 'completed',
+          });
+        }
+      }, { runId, startedAt, aggregatedFinal });
+
+      await expect(page.getByText(aggregatedFinal, { exact: true })).toHaveCount(0);
+      await expect(page.getByText(finalAnswer, { exact: true })).toHaveCount(1);
+      await expect(page.getByTestId('timeline-commentary')).toHaveCount(3);
+      await expect(page.getByTestId('timeline-tool-group')).toHaveCount(3);
+      for (const item of commentary) {
+        await expect(page.getByTestId('timeline-commentary').filter({ hasText: item.text })).toHaveCount(1);
+      }
+
+      const timelineItemOrder = async () => page.locator('[data-timeline-row-kind="item"]')
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute('data-item-id')));
+      const liveItemOrder = await timelineItemOrder();
+      expect(liveItemOrder).toHaveLength(8);
+      await installHistoryMocks(app, persistedHistory);
+      await page.getByRole('button', { name: /Refresh|刷新/u }).click();
+      await expect.poll(timelineItemOrder).toEqual(liveItemOrder);
+      await expect(page.getByText(finalAnswer, { exact: true })).toHaveCount(1);
+      await expect(page.getByTestId('timeline-commentary')).toHaveCount(3);
+      await expect(page.getByTestId('timeline-tool-group')).toHaveCount(3);
+
+      const toolGroups = page.getByTestId('timeline-tool-group');
+      const finalRow = page.getByText(finalAnswer, { exact: true }).locator('xpath=ancestor::*[@data-item-id][1]');
+      const rowBoxes = await Promise.all([
+        commentaryRows[0]!.locator.boundingBox(),
+        toolGroups.nth(0).boundingBox(),
+        commentaryRows[1]!.locator.boundingBox(),
+        toolGroups.nth(1).boundingBox(),
+        commentaryRows[2]!.locator.boundingBox(),
+        toolGroups.nth(2).boundingBox(),
+        finalRow.boundingBox(),
+      ]);
+      rowBoxes.forEach((box) => expect(box).not.toBeNull());
+      for (let index = 1; index < rowBoxes.length; index += 1) {
+        expect(rowBoxes[index - 1]!.y).toBeLessThan(rowBoxes[index]!.y);
+      }
     } finally {
       await closeElectronApp(app);
     }
@@ -150,7 +758,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: [] },
           },
@@ -278,14 +886,28 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
-      await expect(page.getByTestId('chat-run-progress')).toBeVisible();
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'false');
-      await page.getByTestId('chat-run-progress-toggle').click();
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'true');
-      await expect(page.getByTestId('chat-run-progress')).toContainText(/completed|完成/i);
-      await expect(page.getByTestId('chat-run-progress')).not.toContainText(/failed|失败/i);
+      const turn = page.getByTestId('conversation-turn').filter({ hasText: 'run long task' });
+      const turnId = await turn.getAttribute('data-turn-id');
+      expect(turnId).toBeTruthy();
+      await expect(turn).toHaveAttribute('data-turn-status', 'running');
+      await expect(page.getByTestId('timeline-turn-status')).toBeVisible();
+      const toolGroups = page.getByTestId('timeline-tool-group');
+      await expect(toolGroups).toHaveCount(1);
+      await expect(toolGroups.nth(0)).toHaveAttribute('data-status', 'completed');
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
       await expect(page.getByText(/No such file or directory/i)).toHaveCount(0);
       await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
+
+      await page.getByTestId('timeline-execution-details').click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+      await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'read' })).toBeVisible();
+      const failedExec = page.getByTestId('chat-execution-step').filter({ hasText: 'exec' });
+      await expect(failedExec).toBeVisible();
+      await failedExec.locator('button').click();
+      await expect(failedExec).toContainText('No such file or directory');
+      await page.keyboard.press('Escape');
+      await expect(page.getByRole('dialog')).toHaveCount(0);
 
       await app.evaluate(({ BrowserWindow }) => {
         for (const win of BrowserWindow.getAllWindows()) {
@@ -299,9 +921,7 @@ test.describe('ClawX chat run state events', () => {
         }
       });
 
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'false');
-      await page.getByTestId('chat-run-progress-toggle').click();
-      await expect(page.getByTestId('chat-run-progress')).toHaveAttribute('data-expanded', 'true');
+      await expect(page.locator(`[data-turn-id="${turnId}"][data-timeline-row-kind="status"]`)).toHaveCount(0);
 
       await installIpcMocks(app, {
         gatewayRpc: {
@@ -349,7 +969,7 @@ test.describe('ClawX chat run state events', () => {
             success: true,
             result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: [] },
           },
@@ -522,15 +1142,20 @@ test.describe('ClawX chat run state events', () => {
         }
       }, { runId, parentToolCallId, nestedToolCallId });
 
-      const progress = page.getByTestId('chat-run-progress');
-      await expect(progress).toBeVisible({ timeout: 30_000 });
-      await expect(progress).toHaveAttribute('data-expanded', 'false');
-      await progress.getByTestId('chat-run-progress-toggle').click();
-      await expect(progress).toHaveAttribute('data-expanded', 'true');
-      await expect(progress.getByTestId('chat-run-progress-action')).toHaveCount(1);
-      await expect(progress).not.toContainText(/已完成：命令|Completed: Command/u);
-      await expect(progress).not.toContainText(/Update Plan|update plan/u);
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toHaveCount(1);
+      await expect(toolGroup).toContainText(/command|命令/u);
+      await toolGroup.getByTestId('timeline-tool-group-toggle').click();
+      const toolDetails = toolGroup.getByTestId('timeline-tool-details');
+      await expect(toolDetails).toBeVisible();
+      await expect(toolDetails.locator(':scope > div')).toHaveCount(3);
       await expect(page.getByText(/Update Plan|update plan/u)).toHaveCount(0);
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByTestId('chat-execution-step')).toHaveCount(3);
+      await expect(dialog).not.toContainText(/Update Plan|update plan/u);
       await expect(page.getByTestId('chat-typing-indicator')).toHaveCount(0);
     } finally {
       await closeElectronApp(app);
@@ -650,6 +1275,7 @@ test.describe('ClawX chat run state events', () => {
         let mainActive = false;
         let mainIdleObserved = false;
         let mainHistory: unknown[] = [];
+        let mainRequestIdempotencyKey: string | undefined;
         const otherHistory = [
           {
             id: 'user-offscreen-control',
@@ -684,7 +1310,11 @@ test.describe('ClawX chat run state events', () => {
         });
 
         ipcMain.removeHandler('gateway:rpc');
-        ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: { sessionKey?: string } = {}) => {
+        ipcMain.handle('gateway:rpc', async (
+          _event: unknown,
+          method: string,
+          params: { sessionKey?: string; idempotencyKey?: string } = {},
+        ) => {
           if (method === 'sessions.list') {
             if (!mainActive) mainIdleObserved = true;
             return { success: true, result: sessionResult() };
@@ -703,6 +1333,7 @@ test.describe('ClawX chat run state events', () => {
           }
           if (method === 'chat.send') {
             mainActive = true;
+            mainRequestIdempotencyKey = params.idempotencyKey;
             return { success: true, result: { runId: 'run-offscreen-idle' } };
           }
           return { success: true, result: {} };
@@ -732,6 +1363,10 @@ test.describe('ClawX chat run state events', () => {
           }
           if (request.path === '/api/chat/send') {
             mainActive = true;
+            const body = request.body
+              ? JSON.parse(request.body) as { idempotencyKey?: string }
+              : {};
+            mainRequestIdempotencyKey = body.idempotencyKey;
             return response({ success: true, result: { runId: 'run-offscreen-idle' } });
           }
           if (request.path?.startsWith('/api/task-bridge/tasks')) {
@@ -751,6 +1386,7 @@ test.describe('ClawX chat run state events', () => {
           mainIdleObserved = false;
         };
         (globalThis as Record<string, unknown>).__mainOffscreenIdleObserved = () => mainIdleObserved;
+        (globalThis as Record<string, unknown>).__mainRequestIdempotencyKey = () => mainRequestIdempotencyKey;
       });
 
       const page = await getStableWindow(app);
@@ -767,9 +1403,17 @@ test.describe('ClawX chat run state events', () => {
       await expect(sendButton).toHaveAttribute('title', /Stop|停止/);
 
       const finalTimestamp = Date.now() / 1000;
+      const idempotencyKey = await app.evaluate(() => {
+        const getIdempotencyKey = (globalThis as Record<string, unknown>).__mainRequestIdempotencyKey as
+          | (() => string | undefined)
+          | undefined;
+        return getIdempotencyKey?.();
+      });
+      expect(idempotencyKey).toBeTruthy();
       const settledHistory = [
         {
           id: 'user-offscreen-idle',
+          idempotencyKey,
           role: 'user',
           content: '后台完成后不要恢复旧运行态',
           timestamp: finalTimestamp - 1,
@@ -829,7 +1473,7 @@ test.describe('ClawX chat run state events', () => {
       });
 
       await page.getByTestId(`sidebar-session-${MAIN_SESSION_KEY}`).click();
-      await expect(page.getByText('任务已经完成。')).toBeVisible();
+      await expect(page.getByText('任务已经完成。')).toHaveCount(1);
       await expect(sendButton).toHaveAttribute('title', /Send|发送/);
       expect(await page.evaluate(() => (
         (globalThis as unknown as Record<string, unknown>).__staleOffscreenRunObserved
@@ -980,7 +1624,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },
@@ -1038,11 +1682,18 @@ test.describe('ClawX chat run state events', () => {
         }
       }
 
-      await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
+      const toolGroup = page.getByTestId('timeline-tool-group');
+      await expect(toolGroup).toBeVisible({ timeout: 30_000 });
+      await expect(toolGroup).toHaveAttribute('data-status', 'completed');
       await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
-      await expect(page.getByText('我先查看相关内容。')).toBeVisible();
-      await expect(page.getByText('/tmp/capabilities.md')).toBeVisible();
+      await page.getByTestId('timeline-tool-group-toggle').click();
+      await expect(page.getByTestId('timeline-tool-details')).toContainText('/tmp/capabilities.md');
       await expect(page.getByText('我现在可以生成文档、表格和演示文稿。')).toBeVisible();
+      await expect(page.getByTestId('conversation-turn').filter({ hasText: '你现在能做哪些文件类产物？' }))
+        .toHaveAttribute('data-turn-status', 'completed');
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await page.getByTestId('timeline-execution-details').click();
+      await expect(page.getByTestId('chat-execution-step').filter({ hasText: 'read' })).toBeVisible();
     } finally {
       await closeElectronApp(app);
     }
@@ -1329,7 +1980,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [activeSession],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: activeHistory,
           },
@@ -1387,8 +2038,14 @@ test.describe('ClawX chat run state events', () => {
         }
       }
 
-      await expect(page.getByTestId('chat-run-progress')).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByText('我先查看相关内容。')).toBeVisible();
+      const openTurn = page.getByTestId('conversation-turn').filter({ hasText: '你现在能做哪些文件类产物？' });
+      await expect(openTurn).toHaveAttribute('data-turn-status', 'running', { timeout: 30_000 });
+      await expect(page.getByTestId('timeline-turn-status')).toBeVisible();
+      await expect(page.getByTestId('timeline-tool-group')).toHaveAttribute('data-status', 'completed');
+      await page.getByTestId('timeline-tool-group-toggle').click();
+      await expect(page.getByTestId('timeline-tool-details')).toContainText('/tmp/capabilities.md');
+      await expect(page.getByTestId('timeline-execution-details')).toHaveCount(1);
+      await expect(page.getByTestId('chat-execution-graph')).toHaveCount(0);
       await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Stop|停止/);
     } finally {
       await closeElectronApp(app);
@@ -1422,7 +2079,7 @@ test.describe('ClawX chat run state events', () => {
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },
@@ -1434,6 +2091,22 @@ test.describe('ClawX chat run state events', () => {
               status: 200,
               ok: true,
               json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] } },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { messages: history } },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {
@@ -1495,7 +2168,7 @@ MEDIA:C:\Users\Administrator\.openclaw\workspace\japan-kansai-4d3n-plan.svg`,
               sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: MAIN_SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },
@@ -1507,6 +2180,22 @@ MEDIA:C:\Users\Administrator\.openclaw\workspace\japan-kansai-4d3n-plan.svg`,
               status: 200,
               ok: true,
               json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true },
+            },
+          },
+          [stableStringify(['/api/chat/sessions', 'GET'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { sessions: [{ key: MAIN_SESSION_KEY, displayName: 'main' }] } },
+            },
+          },
+          [stableStringify(['/api/chat/history', 'POST'])]: {
+            ok: true,
+            data: {
+              status: 200,
+              ok: true,
+              json: { success: true, result: { messages: history } },
             },
           },
           [stableStringify(['/api/agents', 'GET'])]: {

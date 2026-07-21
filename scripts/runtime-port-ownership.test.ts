@@ -114,6 +114,8 @@ test('Gateway listener ancestry accepts descendants and rejects cycles', async (
 test('Windows installer closes both UClaw.exe and legacy ClawX.exe processes', () => {
   const installer = readFileSync('scripts/installer.nsh', 'utf8');
   const extractPatch = readFileSync('scripts/patch-nsis-extract.mjs', 'utf8');
+  assert.match(installer, /!define CLAWX_INSTALLER_ROLLBACK/u);
+  assert.match(extractPatch, /!ifdef CLAWX_INSTALLER_ROLLBACK/u);
   assert.match(installer, /!define LEGACY_APP_EXECUTABLE_FILENAME "ClawX\.exe"/u);
   assert.match(installer, /taskkill \/F \/T \/IM "\$\{LEGACY_APP_EXECUTABLE_FILENAME\}"/u);
   assert.match(
@@ -121,6 +123,185 @@ test('Windows installer closes both UClaw.exe and legacy ClawX.exe processes', (
     /Name -ieq '\$\{APP_EXECUTABLE_FILENAME\}' -or \$\$_\.Name -ieq '\$\{LEGACY_APP_EXECUTABLE_FILENAME\}'/u,
   );
   assert.match(extractPatch, /taskkill \/F \/T \/IM ClawX\.exe/u);
+});
+
+test('Windows installer removes obsolete ClawX shortcuts after a successful rename upgrade', () => {
+  const installer = readFileSync('scripts/installer.nsh', 'utf8');
+  assert.match(
+    installer,
+    /\$oldDesktopLink != \$newDesktopLink[\s\S]*WinShell::UninstShortcut "\$oldDesktopLink"[\s\S]*Delete "\$oldDesktopLink"/u,
+  );
+  assert.match(
+    installer,
+    /\$oldStartMenuLink != \$newStartMenuLink[\s\S]*WinShell::UninstShortcut "\$oldStartMenuLink"[\s\S]*Delete "\$oldStartMenuLink"/u,
+  );
+});
+
+test('release workflow publishes installer and portable metadata without deleting the live channel', () => {
+  const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+  const afterPack = readFileSync('scripts/after-pack.cjs', 'utf8');
+  const usbFinalizer = readFileSync('scripts/build-usb-release.mjs', 'utf8');
+  const signedMetadata = readFileSync('scripts/refresh-signed-windows-update-metadata.mjs', 'utf8');
+  const signedUsbMetadata = readFileSync('scripts/refresh-signed-windows-usb-metadata.mjs', 'utf8');
+  const selfCheck = readFileSync('scripts/windows-support/UClaw-SelfCheck.mjs', 'utf8');
+  const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+  const windowsBuildWorkflow = readFileSync('.github/workflows/win-build-test.yml', 'utf8');
+  assert.match(packageJson.scripts?.['package:win'] || '', /updater:build:win/u);
+  assert.match(packageJson.scripts?.['package:win:portable'] || '', /--win portable --x64/u);
+  assert.match(packageJson.scripts?.['package:win:portable'] || '', /updater:build:win/u);
+  assert.match(afterPack, /uclaw-portable-updater\.exe/u);
+  assert.match(usbFinalizer, /resources\/resources\/updater\/win32-x64\/uclaw-portable-updater\.exe/u);
+  assert.match(usbFinalizer, /const WINDOWS_PE_FILES = \[[\s\S]*resources\/resources\/updater\/win32-x64\/uclaw-portable-updater\.exe/u);
+  assert.match(selfCheck, /path\.join\('resources', 'resources', 'updater', 'win32-x64', 'uclaw-portable-updater\.exe'\)/u);
+  assert.match(workflow, /pnpm run package:win\n\s+pnpm run package:win:usb/u);
+  assert.match(workflow, /release\/UClaw-\*-win-x64-usb\.json/u);
+  assert.match(workflow, /Missing required Windows USB package/u);
+  assert.match(workflow, /publish metadata last to switch clients atomically/u);
+  assert.match(workflow, /Verify managed records before legacy feed promotion/u);
+  assert.equal(
+    packageJson.scripts?.['release:refresh-win-metadata'],
+    'node scripts/refresh-signed-windows-update-metadata.mjs',
+  );
+  assert.equal(
+    packageJson.scripts?.['release:refresh-win-usb-metadata'],
+    'node scripts/refresh-signed-windows-usb-metadata.mjs',
+  );
+  assert.equal(
+    packageJson.scripts?.['test:win-signing:unit'],
+    'node --test scripts/refresh-signed-windows-usb-metadata.test.mjs',
+  );
+  assert.match(workflow, /Refresh Windows update metadata after code signing/u);
+  assert.match(workflow, /pnpm run release:refresh-win-metadata/u);
+  assert.match(workflow, /Get-AuthenticodeSignature/u);
+  assert.match(workflow, /signature\.Status -ne 'Valid'/u);
+  assert.match(signedMetadata, /executeAppBuilderAsJson/u);
+  assert.match(signedMetadata, /'blockmap',[\s\S]*'--input',[\s\S]*'--output'/u);
+  assert.match(signedMetadata, /gunzipSync/u);
+  assert.match(signedMetadata, /Generated blockmap covers/u);
+  assert.match(signedMetadata, /Manifest verification failed after refresh/u);
+  assert.match(signedUsbMetadata, /refreshSignedWindowsUsbMetadata/u);
+  assert.match(signedUsbMetadata, /sha512Hex/u);
+  assert.match(signedUsbMetadata, /assertMetadataShape/u);
+  assert.match(workflow, /SIGNPATH_USB_ARTIFACT_CONFIGURATION_SLUG/u);
+  assert.match(workflow, /artifact-configuration-slug:/u);
+  assert.match(workflow, /archive: false/u);
+  assert.match(workflow, /release\/signpath-input\/\*\.zip/u);
+  assert.match(workflow, /signpath-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(workflow, /skip-decompress: true/u);
+  assert.match(workflow, /release:refresh-win-usb-metadata/u);
+  assert.match(workflow, /Validate signed Windows USB package[\s\S]*test:packaged:win:full/u);
+  assert.match(workflow, /signed USB ZIP/u);
+  assert.match(workflow, /resources\\resources\\updater\\win32-x64\\uclaw-portable-updater\.exe/u);
+  for (const signingWorkflow of [workflow, windowsBuildWorkflow]) {
+    assert.match(signingWorkflow, /release\/signpath-input\/\*\.zip/u);
+    assert.match(signingWorkflow, /signpath-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
+    assert.match(signingWorkflow, /skip-decompress: true/u);
+    assert.match(signingWorkflow, /Validate signed Windows USB package[\s\S]*test:packaged:win:full/u);
+    assert.match(
+      signingWorkflow,
+      /Run signed Windows cross-version upgrade matrix[\s\S]*pnpm run test:upgrade:win/u,
+    );
+    assert.match(signingWorkflow, /UCLAW_UPGRADE_INSTALLER_101_URL/u);
+    assert.match(signingWorkflow, /UCLAW_UPGRADE_INSTALLER_101_SHA512/u);
+    assert.match(signingWorkflow, /release\/regression\/windows-upgrade-matrix-\*/u);
+  }
+  assert.match(workflow, /--managed-only/u);
+  assert.match(workflow, /--mac-manifest staging\/latest\/latest-mac\.yml/u);
+  assert.match(workflow, /--linux-manifest staging\/latest\/latest-linux\.yml/u);
+  assert.match(workflow, /needs: \[publish, upload-oss, promote-update-channels\]/u);
+  assert.doesNotMatch(workflow, /UClaw-\*-win-arm64\.exe/u);
+  assert.doesNotMatch(workflow, /ossutil rm -r -f oss:\/\/valuecell-clawx\/\$\{CHANNEL\}/u);
+});
+
+test('manual Windows workflow exposes the native cross-version upgrade matrix', () => {
+  const workflow = readFileSync('.github/workflows/package-win-manual.yml', 'utf8');
+  assert.match(workflow, /- upgrade_matrix/u);
+  assert.match(workflow, /require_private_installer:/u);
+  assert.match(workflow, /pnpm run package:win:usb/u);
+  assert.match(workflow, /pnpm run package:win/u);
+  assert.match(workflow, /pnpm run test:upgrade:win -- --require-complete-installers/u);
+  assert.match(workflow, /pnpm run test:upgrade:win\n/u);
+  assert.match(workflow, /UCLAW_UPGRADE_INSTALLER_101_URL/u);
+  assert.match(workflow, /UCLAW_UPGRADE_INSTALLER_101_SHA512/u);
+  assert.match(workflow, /release\/regression\/windows-upgrade-matrix-\*/u);
+});
+
+test('Windows upgrade matrix verifies target artifacts and representative customer eras', () => {
+  const matrix = readFileSync('scripts/windows-support/run-upgrade-matrix.mjs', 'utf8');
+  for (const version of ['0.3.2', '0.4.6', '0.4.8', '0.5.0', '0.7.1', '1.0.1']) {
+    assert.match(matrix, new RegExp(`['"]${version.replaceAll('.', '\\.')}['"]`, 'u'));
+  }
+  assert.match(matrix, /DOWNLOAD_ATTEMPTS = 3/u);
+  assert.match(matrix, /AbortSignal\.timeout\(DOWNLOAD_TIMEOUT_MS\)/u);
+  assert.match(matrix, /Target installer manifest mismatch/u);
+  assert.match(matrix, /Target installer blockmap missing or empty/u);
+  assert.match(matrix, /inspectProductShortcuts/u);
+  assert.match(matrix, /assertProductShortcut/u);
+  assert.match(matrix, /assertNoLegacyShortcut/u);
+  assert.match(matrix, /assertNoScenarioShortcuts/u);
+  assert.match(matrix, /portable-current-helper-archive-rejection/u);
+  assert.match(matrix, /invalid-update\.zip/u);
+  assert.match(matrix, /assertBlockmapMatchesInstaller\(installerPath, blockmapPath\)/u);
+  assert.match(matrix, /kind: 'installed-nsis-clean'/u);
+  assert.match(matrix, /function installedScenarioKind\(version\)/u);
+  assert.match(matrix, /return version === '0\.7\.1'/u);
+  assert.match(matrix, /'installed-nsis-overwrite'/u);
+  assert.match(matrix, /installed-electron-updater/u);
+  assert.match(matrix, /CLAWX_UPDATE_FEED_BASE_URL/u);
+  assert.match(matrix, /ipcRenderer\.invoke\('update:check'\)/u);
+  assert.match(matrix, /ipcRenderer\.invoke\('update:download'\)/u);
+  assert.match(matrix, /ipcRenderer\.invoke\('update:install'\)/u);
+  assert.match(matrix, /manifestRequests/u);
+  assert.match(matrix, /installerRequests/u);
+  assert.match(matrix, /kind: 'portable-legacy-helper-first-hop'/u);
+  assert.match(matrix, /kind: 'portable-current-helper-startup-confirmation'/u);
+  assert.match(matrix, /kind: 'portable-current-helper-startup-rollback'/u);
+  assert.match(matrix, /kind: 'portable-current-helper-integrity-rejection'/u);
+  assert.match(matrix, /for \(const failureMode of \['size', 'sha512'\]\)/u);
+  assert.match(matrix, /legacyHelperSha512/u);
+  assert.match(matrix, /currentHelperSha512/u);
+  assert.match(matrix, /runTargetRuntimeSmoke/u);
+  assert.match(matrix, /waitForExistingRuntime/u);
+  assert.match(matrix, /const launchPath = path\.join\(appRoot, 'UClaw\.exe'\)/u);
+  assert.match(matrix, /targetVersion: `\$\{TARGET_VERSION\}-ack-timeout`/u);
+  assert.match(matrix, /\/api\/gateway\/status/u);
+  assert.match(matrix, /hostResponse\.status === 401/u);
+  assert.match(matrix, /\/health/u);
+  assert.match(matrix, /runNsisUninstaller/u);
+  assert.match(matrix, /uninstallMarkersPreserved/u);
+  assert.match(matrix, /restoredRuntime/u);
+  assert.match(matrix, /repository: '401825317\/ClawX'/u);
+  assert.match(matrix, /productName: 'UClaw'/u);
+  assert.match(matrix, /UCLAW_UPGRADE_INSTALLER_101_URL/u);
+  assert.doesNotMatch(matrix, /UCLAW_UPGRADE_INSTALLER_071_URL/u);
+});
+
+test('public update channel verifier covers every historical customer discovery path', () => {
+  const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as {
+    scripts?: Record<string, string>;
+  };
+  const verifier = readFileSync('scripts/verify-public-update-channel.mjs', 'utf8');
+  assert.equal(
+    packageJson.scripts?.['test:update-channel'],
+    'node scripts/verify-public-update-channel.mjs',
+  );
+  assert.equal(
+    packageJson.scripts?.['test:update-channel:unit'],
+    'node --test scripts/verify-public-update-channel.test.mjs',
+  );
+  const checkWorkflow = readFileSync('.github/workflows/check.yml', 'utf8');
+  assert.match(checkWorkflow, /pnpm run test:update-channel:unit/u);
+  assert.match(verifier, /ENDPOINTS\.appUpdates/u);
+  assert.match(verifier, /MANAGED_FEED_PATH/u);
+  assert.match(verifier, /LEGACY_FEED_BASE_URL/u);
+  assert.match(verifier, /--managed-only/u);
+  assert.match(verifier, /package_type', 'portable_zip'/u);
+  assert.match(verifier, /returned HTML instead of update YAML/u);
+  assert.match(verifier, /managed and legacy installer feeds/u);
+  assert.match(verifier, /local and public installer metadata/u);
+  assert.match(verifier, /local and public portable metadata/u);
 });
 
 test('shared instance lock blocks a live owner and reclaims a stale owner', () => {

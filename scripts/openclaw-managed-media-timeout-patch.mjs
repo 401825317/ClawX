@@ -88,7 +88,7 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
   const expectedCompletion = `isComplete: (payload) => ${MANAGED_VIDEO_COMPLETE_STATUS_EXPRESSION}, // ${VIDEO_STATUS_MARKER}`;
   const expectedDownloadStart = `\tconst outputUrl = normalizeOptionalString(params.outputUrl);\n\tconst url = outputUrl ? new URL(outputUrl) : new URL(\`${'${params.baseUrl}'}/videos/${'${params.videoId}'}/content\`);\n\tif (!outputUrl) url.searchParams.set("variant", "video");`;
   const expectedDownloadCall = '\t\t\t\t\t\toutputUrl: resolveOpenAIVideoOutputUrl(completed),';
-  const expectedImageReference = `image: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType), // ${VIDEO_IMAGE_REFERENCE_MARKER}`;
+  const expectedImageReference = `image: toImageDataUrl(referenceAsset), // ${VIDEO_IMAGE_REFERENCE_MARKER}`;
   if (content.includes(expectedTimeout)
     && content.includes(expectedPollInterval)
     && content.includes(expectedMaxAttempts)
@@ -166,20 +166,25 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
       filePath,
     );
   }
-  const managedImageReferencePattern = /image: toOpenAIDataUrl\(referenceAsset\.buffer, referenceAsset\.mimeType\),? \/\/ UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1/g;
+  const managedImageReferencePattern = /image: (?:toImageDataUrl\(referenceAsset\)|toOpenAIDataUrl\(referenceAsset\.buffer, referenceAsset\.mimeType\)),? \/\/ UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1/g;
   const imageReferenceMatches = patched.match(managedImageReferencePattern) ?? [];
   if (imageReferenceMatches.length > 1) {
     throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one managed OpenAI video image reference in ${filePath}; found ${imageReferenceMatches.length}.`);
   }
-  patched = imageReferenceMatches.length === 1
-    ? patched.replace(managedImageReferencePattern, expectedImageReference)
-    : replaceUnique(
-      patched,
+  if (imageReferenceMatches.length === 1) {
+    patched = patched.replace(managedImageReferencePattern, expectedImageReference);
+  } else {
+    const originalImageReferences = [
+      'input_reference: { image_url: toImageDataUrl(referenceAsset) }',
       'input_reference: { image_url: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType) }',
-      expectedImageReference,
-      'OpenAI video image reference field',
-      filePath,
-    );
+    ].filter((anchor) => patched.includes(anchor));
+    if (originalImageReferences.length !== 1) {
+      throw new Error(
+        `[openclaw-managed-media-timeout-patch] Expected exactly one OpenAI video image reference field anchor in ${filePath}; found ${originalImageReferences.length}.`,
+      );
+    }
+    patched = patched.replace(originalImageReferences[0], expectedImageReference);
+  }
   return {
     content: patched,
     changed: true,

@@ -827,10 +827,10 @@ function resolveRuntimeDefaultModel(bootstrap: JunFeiAIBootstrapPayload): string
   return JUNFEIAI_DEFAULT_MODEL;
 }
 
-function buildAccount(
+export function buildJunFeiAIProviderAccount(
   bootstrap: JunFeiAIBootstrapPayload,
-  existing: ProviderAccount | null | undefined,
-  isDefault: boolean,
+  existing?: ProviderAccount | null,
+  isDefault = existing?.isDefault ?? true,
 ): ProviderAccount {
   const runtime = bootstrap.runtime ?? {};
   const now = new Date().toISOString();
@@ -860,7 +860,10 @@ function buildAccount(
   };
 }
 
-function accountChanged(left: ProviderAccount | null, right: ProviderAccount): boolean {
+export function hasJunFeiAIProviderAccountChanged(
+  left: ProviderAccount | null,
+  right: ProviderAccount,
+): boolean {
   if (!left) return true;
   const fields: Array<keyof ProviderAccount> = [
     'vendorId',
@@ -879,6 +882,29 @@ function accountChanged(left: ProviderAccount | null, right: ProviderAccount): b
     return true;
   }
   return JSON.stringify(left.metadata ?? {}) !== JSON.stringify(right.metadata ?? {});
+}
+
+/** Decide whether a managed status refresh may rewrite the live runtime. */
+export function shouldSyncJunFeiAIRuntime(
+  options: {
+    syncRuntime?: boolean;
+    syncRuntimeOnAuthChange?: boolean;
+  },
+  changes: {
+    providerChanged: boolean;
+    defaultProviderChanged: boolean;
+    relaySecretChanged: boolean;
+    shouldClearRuntimeKey: boolean;
+  },
+): boolean {
+  const runtimeChanged = changes.providerChanged
+    || changes.defaultProviderChanged
+    || changes.relaySecretChanged
+    || changes.shouldClearRuntimeKey;
+  const authRuntimeChanged = changes.relaySecretChanged || changes.shouldClearRuntimeKey;
+  return options.syncRuntime === true
+    || (options.syncRuntime !== false && runtimeChanged)
+    || (options.syncRuntimeOnAuthChange === true && authRuntimeChanged);
 }
 
 async function requestJunFeiAI<T>(
@@ -1467,7 +1493,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     ? JUNFEIAI_MANAGED_OPENAI_PROVIDER_ID
     : JUNFEIAI_PROVIDER_ID;
   const existing = await getProviderAccount(JUNFEIAI_PROVIDER_ID);
-  const account = buildAccount(
+  const account = buildJunFeiAIProviderAccount(
     bootstrap,
     existing,
     targetDefaultProvider === JUNFEIAI_PROVIDER_ID,
@@ -1477,7 +1503,7 @@ export async function ensureJunFeiAIProviderSeeded(options: {
   } catch (error) {
     logger.warn('[junfeiai] Failed to self-heal managed text model refs:', error);
   }
-  const providerChanged = accountChanged(existing, account);
+  const providerChanged = hasJunFeiAIProviderAccountChanged(existing, account);
   if (providerChanged) {
     await saveProviderAccount(account);
   }
@@ -1551,16 +1577,12 @@ export async function ensureJunFeiAIProviderSeeded(options: {
     relaySecretChanged = relaySecretChanged || hadRelaySecret;
   }
 
-  const runtimeChanged = providerChanged || defaultProviderChanged || relaySecretChanged || shouldClearRuntimeKey;
-  const shouldSyncRuntime = options.syncRuntime === true
-    || (
-      options.syncRuntime !== false
-      && runtimeChanged
-    )
-    || (
-      options.syncRuntimeOnAuthChange === true
-      && runtimeChanged
-    );
+  const shouldSyncRuntime = shouldSyncJunFeiAIRuntime(options, {
+    providerChanged,
+    defaultProviderChanged,
+    relaySecretChanged,
+    shouldClearRuntimeKey,
+  });
   const shouldApplyRuntimeAuthImmediately = Boolean(
     options.gatewayManager
     && (relaySecretChanged || shouldClearRuntimeKey),

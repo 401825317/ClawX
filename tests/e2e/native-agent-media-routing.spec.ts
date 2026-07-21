@@ -28,7 +28,7 @@ async function installChatBootstrapMocks(app: ElectronApplication): Promise<void
         success: true,
         result: { sessions: [{ key: SESSION_KEY, displayName: 'main', model: 'lingzhiwuxian/smart-latest', hasActiveRun: false }] },
       },
-      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+      [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
         success: true,
         result: { messages: [] },
       },
@@ -248,7 +248,7 @@ test.describe('Native OpenClaw media routing', () => {
     },
   ] as const;
 
-  for (const failureCase of hostFailureCases) test(`preserves Host API chat.send ${failureCase.name} without retrying through raw Gateway RPC`, async ({ launchElectronApp }) => {
+  for (const failureCase of hostFailureCases) test(`shows one friendly Host API chat.send ${failureCase.name} without retrying through raw Gateway RPC`, async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     try {
       await installChatBootstrapMocks(app);
@@ -320,9 +320,14 @@ test.describe('Native OpenClaw media routing', () => {
       await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
       await page.getByTestId('chat-composer-mode-image').click();
       await page.getByTestId('chat-composer-input').fill('做个婴儿尿不湿的电商主图成品图 不要白底图');
-      await page.getByTestId('chat-composer-send').click();
+      const sendButton = page.getByTestId('chat-composer-send');
+      await expect(sendButton).toHaveAttribute('title', /Send|发送/, { timeout: 30_000 });
+      await expect(sendButton).toBeEnabled();
+      await sendButton.click();
 
-      await expect(page.getByText(failureCase.message, { exact: true })).toBeVisible();
+      const timelineError = page.getByTestId('timeline-error');
+      await expect(timelineError).toBeVisible();
+      await expect(timelineError).not.toContainText(failureCase.message);
       const captured = await app.evaluate(() => ({
         hostRequests: (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests as Array<{ path?: string; body?: string }> ?? [],
         gatewayMethods: (globalThis as Record<string, unknown>).__nativeMediaGatewayMethods as string[] ?? [],
@@ -410,10 +415,14 @@ test.describe('Native OpenClaw media routing', () => {
         if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
       }
       await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await page.getByTestId('chat-composer-mode-image').click();
       await page.getByTestId('chat-composer-input').fill('把这张图片改成白天晴天');
       await page.getByTestId('chat-composer-send').click();
 
       await expect(page.getByText(/你想编辑哪张图片|Which image would you like to edit/)).toBeVisible();
+      await expect(page.getByTestId('conversation-turn')).toHaveAttribute('data-turn-status', 'completed');
+      await expect(page.getByTestId('timeline-turn-status')).toHaveCount(0);
+      await expect(page.getByTestId('chat-composer-send')).toHaveAttribute('title', /Send|发送/);
       const requests = await app.evaluate(() => (
         (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests as Array<{ path?: string }> ?? []
       ));

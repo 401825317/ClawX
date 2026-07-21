@@ -52,7 +52,7 @@ test.describe('ClawX assistant reply Markdown styling', () => {
               sessions: [{ key: SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: seededHistory },
           },

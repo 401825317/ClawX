@@ -58,7 +58,13 @@ function createProfileAvailability({ opts, profile, state, getProfileState, setP
 \t\t\t\t\treturn;
 \t\t\t\t}
 \t\t\t}
-\t\t\tif (attachOnly || remoteCdp) throw new BrowserProfileUnavailableError(remoteCdp ? \`Remote CDP for profile "\${profile.name}" is not reachable at \${redactedProfileCdpUrl}.\` : \`Browser attachOnly is enabled and profile "\${profile.name}" is not running.\`);
+\t\t\tif (attachOnly || remoteCdp) {
+\t\t\t\tif (capabilities.mode === "local-extension") {
+\t\t\t\t\tconst { EXTENSION_PAIRING_HINT } = await getExtensionRelayModule();
+\t\t\t\t\tthrow new BrowserProfileUnavailableError(\`The OpenClaw Chrome extension is not connected for profile "\${profile.name}". Open Chrome on this machine and check the extension popup shows "Connected". \${EXTENSION_PAIRING_HINT}\`);
+\t\t\t\t}
+\t\t\t\tthrow new BrowserProfileUnavailableError(remoteCdp ? \`Remote CDP for profile "\${profile.name}" is not reachable at \${redactedProfileCdpUrl}.\` : \`Browser attachOnly is enabled and profile "\${profile.name}" is not running.\`);
+\t\t\t}
 \t\t\tconst launched = await launchManagedChrome(profileState, current, launchOptions);
 \t\t\tattachRunning(launched);
 \t\t\ttry {
@@ -91,7 +97,8 @@ function createProfileAvailability({ opts, profile, state, getProfileState, setP
 \t\t}
 \t\tawait stopOpenClawChrome(profileState.running);
 \t\tsetProfileRunning(null);
-\t\tattachRunning(await launchManagedChrome(profileState, current, launchOptions));
+\t\tconst relaunched = await launchManagedChrome(profileState, current, launchOptions);
+\t\tattachRunning(relaunched);
 \t\tif (!await isReachable(600)) {
 \t\t\tconst err = /* @__PURE__ */ new Error(\`Chrome CDP websocket for profile "\${profile.name}" is not reachable after restart. \${await describeCdpFailure(600)}\`);
 \t\t\trecordManagedLaunchFailure(profileState, err);

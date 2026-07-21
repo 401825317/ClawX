@@ -26,11 +26,37 @@ export const EXTRACT_APP_PACKAGE_NSH = join(
   'extractAppPackage.nsh',
 );
 
-const PATCH_MARKER = 'ClawX-patched-v3: extract directly to $INSTDIR and fail closed';
+const PATCH_MARKER = 'ClawX-patched-v6: extract directly to $INSTDIR, fail closed, and restore installer rollback';
+const LEGACY_V5_PATCH_MARKER = 'ClawX-patched-v5: extract directly to $INSTDIR, fail closed, and restore installer rollback';
+const LEGACY_V4_PATCH_MARKER = 'ClawX-patched-v4: extract directly to $INSTDIR, fail closed, and restore rollback';
+const LEGACY_V3_PATCH_MARKER = 'ClawX-patched-v3: extract directly to $INSTDIR and fail closed';
 const LEGACY_V2_PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail closed';
 const LEGACY_PATCH_MARKER = 'ClawX-patched: extract directly to $INSTDIR';
 const LEGACY_CONTINUE_ON_EXTRACT_FAILURE = 'continuing overwrite install anyway';
 const FATAL_EXTRACT_FAILURE_DETAIL = 'Failed to extract UClaw files after multiple attempts.';
+const ROLLBACK_EXTRACT_FAILURE_DETAIL = 'Restoring the previous UClaw installation after the failed update';
+
+function rollbackExtractFailureLines(labelPrefix) {
+  return [
+    '  !ifdef CLAWX_INSTALLER_ROLLBACK',
+    '    ${if} $clawxRollbackDir != ""',
+    `      IfFileExists "$clawxRollbackDir\\" 0 ${labelPrefix}_show_error`,
+    '      DetailPrint "Restoring the previous UClaw installation after the failed update..."',
+    '      SetOutPath $TEMP',
+    '      RMDir /r "$INSTDIR"',
+    '      ClearErrors',
+    '      Rename "$clawxRollbackDir" "$INSTDIR"',
+    `      IfErrors ${labelPrefix}_rollback_failed ${labelPrefix}_rollback_done`,
+    `    ${labelPrefix}_rollback_failed:`,
+    '      DetailPrint "Automatic rollback failed. The previous installation remains at $clawxRollbackDir."',
+    `      Goto ${labelPrefix}_show_error`,
+    `    ${labelPrefix}_rollback_done:`,
+    '      DetailPrint "Previous UClaw installation restored."',
+    '    ${endIf}',
+    `  ${labelPrefix}_show_error:`,
+    '  !endif',
+  ];
+}
 
 const PATCHED_EXTRACT_MACRO = [
   '!macro extractUsing7za FILE',
@@ -58,6 +84,7 @@ const PATCHED_EXTRACT_MACRO = [
   '      Goto clawx_extract_attempt',
   '    ${endIf}',
   '    DetailPrint "Failed to extract UClaw files after multiple attempts."',
+  ...rollbackExtractFailureLines('clawx_extract'),
   '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)" /SD IDOK',
   '    SetErrorLevel 2',
   '    Quit',
@@ -70,9 +97,13 @@ const DECOMPRESS_MACRO = [
   '  !ifdef ZIP_COMPRESSION',
   '    nsisunz::Unzip "$PLUGINSDIR\\app-$packageArch.zip" "$INSTDIR"',
   '    Pop $R0',
-  '    StrCmp $R0 "success" +3',
-  '      MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)$\\n$R0"',
-  '      Quit',
+  '    StrCmp $R0 "success" clawx_zip_extract_done',
+  '    DetailPrint "Failed to extract UClaw files."',
+  ...rollbackExtractFailureLines('clawx_zip_extract'),
+  '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)$\\n$R0"',
+  '    SetErrorLevel 2',
+  '    Quit',
+  '  clawx_zip_extract_done:',
   '  !else',
   '    !insertmacro extractUsing7za "$PLUGINSDIR\\app-$packageArch.7z"',
   '  !endif',
@@ -89,19 +120,22 @@ function countExtractMacros(content) {
 function isTemplateHealthy(content) {
   return content.includes(PATCH_MARKER)
     && countExtractMacros(content) === 1
+    && (content.match(/!ifdef CLAWX_INSTALLER_ROLLBACK/g) || []).length === 2
     && content.includes(FATAL_EXTRACT_FAILURE_DETAIL)
+    && content.includes(ROLLBACK_EXTRACT_FAILURE_DETAIL)
     && content.includes('$(decompressionFailed)')
     && content.includes('SetErrorLevel 2')
     && content.includes('Quit')
     && content.includes('taskkill /F /T /IM ClawX.exe')
-    && !content.includes('$clawxRollbackDir')
-    && !content.includes('clawx_extract_show_error')
     && !content.includes('$(appCannotBeClosed)')
     && !content.includes(LEGACY_CONTINUE_ON_EXTRACT_FAILURE);
 }
 
 function hasStaleExtractPatch(content) {
   return content.includes(PATCH_MARKER)
+    || content.includes(LEGACY_V5_PATCH_MARKER)
+    || content.includes(LEGACY_V4_PATCH_MARKER)
+    || content.includes(LEGACY_V3_PATCH_MARKER)
     || content.includes(LEGACY_PATCH_MARKER)
     || content.includes(LEGACY_V2_PATCH_MARKER)
     || content.includes(LEGACY_CONTINUE_ON_EXTRACT_FAILURE)
@@ -153,6 +187,12 @@ export function patchNsisExtractTemplate(targetPath = EXTRACT_APP_PACKAGE_NSH) {
 
   if (hasStaleExtractPatch(original)) {
     console.warn('[patch-nsis-extract] Stale UClaw extract patch detected; replacing with fail-closed patch.');
+    original = restoreExtractAppPackageTemplate(original);
+    writeFileSync(targetPath, original, 'utf8');
+    if (isTemplateHealthy(original)) {
+      console.log('[patch-nsis-extract] Replaced stale extractAppPackage.nsh patch.');
+      return true;
+    }
   } else if (!original.includes('CopyFiles')) {
     console.warn('[patch-nsis-extract] CopyFiles not found — NSIS template may have changed.');
     return false;

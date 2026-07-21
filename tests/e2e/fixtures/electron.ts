@@ -14,6 +14,7 @@ type IpcMockConfig = {
   gatewayStatus?: Record<string, unknown>;
   gatewayRpc?: Record<string, unknown>;
   hostApi?: Record<string, unknown>;
+  captureHostApiRequests?: boolean;
 };
 
 type ElectronFixtures = {
@@ -198,7 +199,13 @@ export const test = base.extend<ElectronFixtures>({
 
 export async function completeSetup(page: Page): Promise<void> {
   await expect(page.getByTestId('setup-page')).toBeVisible();
-  await page.getByTestId('setup-skip-button').click();
+  await page.evaluate(async () => {
+    await window.electron.ipcRenderer.invoke('settings:set', 'setupComplete', true);
+  });
+  const mainUrl = new URL(page.url());
+  mainUrl.searchParams.set('e2eSkipSetup', '1');
+  mainUrl.hash = '#/';
+  await page.goto(mainUrl.toString());
   await expect(page.getByTestId('main-layout')).toBeVisible();
 }
 
@@ -213,6 +220,10 @@ export async function installIpcMocks(
   await app.evaluate(
     async ({ app: _app }, mockConfig) => {
       const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+      const capturedHostApiRequests: Array<{ path?: string; method?: string; body?: string }> = [];
+      if (mockConfig.captureHostApiRequests) {
+        (globalThis as Record<string, unknown>).__clawxE2EHostApiRequests = capturedHostApiRequests;
+      }
       const stableStringify = (value: unknown): string => {
         if (value == null || typeof value !== 'object') return JSON.stringify(value);
         if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
@@ -239,7 +250,8 @@ export async function installIpcMocks(
 
       if (mockConfig.hostApi) {
         ipcMain.removeHandler('hostapi:fetch');
-        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string }) => {
+        ipcMain.handle('hostapi:fetch', async (_event: unknown, request: { path?: string; method?: string; body?: string }) => {
+          if (mockConfig.captureHostApiRequests) capturedHostApiRequests.push({ ...request });
           const key = stableStringify([request?.path ?? '', request?.method ?? 'GET']);
           if (key in mockConfig.hostApi!) {
             return mockConfig.hostApi![key];
@@ -255,6 +267,7 @@ export async function installIpcMocks(
         ipcMain.removeHandler('gateway:status');
         ipcMain.handle('gateway:status', async () => mockConfig.gatewayStatus);
       }
+
     },
     config,
   );

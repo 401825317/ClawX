@@ -94,7 +94,7 @@ test.describe('ClawX chat file changes', () => {
               sessions: [{ key: SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: history },
           },
@@ -184,7 +184,7 @@ test.describe('ClawX chat file changes', () => {
               sessions: [{ key: SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: htmlFileHistory },
           },
@@ -278,7 +278,7 @@ test.describe('ClawX chat file changes', () => {
               sessions: [{ key: SESSION_KEY, displayName: 'main' }],
             },
           },
-          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 200, maxChars: 500000 }])]: {
+          [stableStringify(['chat.history', { sessionKey: SESSION_KEY, limit: 100, maxChars: 500000 }])]: {
             success: true,
             result: { messages: attachedFileHistory },
           },

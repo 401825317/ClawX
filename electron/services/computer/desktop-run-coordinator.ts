@@ -115,7 +115,11 @@ export class DesktopRunCoordinator {
   }
 
   async requestAction(request: DesktopActionRequest): Promise<DesktopActionRequestResult> {
-    const context: DesktopRunContext = { sessionKey: request.sessionKey, runId: request.runId };
+    const context: DesktopRunContext = {
+      sessionKey: request.sessionKey,
+      runId: request.runId,
+      toolCallId: request.toolCallId,
+    };
     const contextError = requireContext(context);
     if (contextError) return { status: 'blocked', error: contextError };
     if (!request.snapshotId?.trim()) return blocked('invalid_request', 'snapshotId is required for desktop actions.', false);

@@ -1,5 +1,6 @@
 import type {
   ChatRuntimeArtifact,
+  ChatRuntimeArtifactAvailability,
   ChatRuntimeEvent,
   ChatRuntimePlanStep,
   ChatRuntimeProgressEntry,
@@ -14,6 +15,8 @@ export interface AttachedFileMeta {
   fileSize: number;
   preview: string | null;
   previewStatus?: 'unavailable';
+  availability?: ChatRuntimeArtifactAvailability;
+  error?: string;
   width?: number;
   height?: number;
   durationSeconds?: number;
@@ -34,7 +37,7 @@ export interface AttachedFileMeta {
   gatewayUrl?: string;
 }
 
-export type AsyncTaskLedgerStatus = 'pending' | 'completed' | 'error';
+export type AsyncTaskLedgerStatus = 'pending' | 'completed' | 'aborted' | 'error';
 
 export interface AsyncTaskLedgerEntry {
   id: string;
@@ -201,6 +204,40 @@ export interface ChatSendAttachment {
   preview: string | null;
 }
 
+export interface GatewayTurnPreferences {
+  mode: ChatSendMode;
+  image?: {
+    model?: string;
+    size?: string;
+    quality?: 'low' | 'medium' | 'high';
+  };
+  video?: ChatVideoSendOptions;
+  selectedArtifacts?: Array<{
+    filePath: string;
+    mimeType: string;
+    title: string;
+  }>;
+}
+
+/** Internal retry payload; it contains send inputs only, never run/task state. */
+export interface ChatSendReplayIntent {
+  imageOptions?: ChatImageSendOptions;
+  videoOptions?: ChatVideoSendOptions;
+  thinkingLevel?: string | null;
+  referenceImages: ChatSendAttachment[];
+  clientPreferences: GatewayTurnPreferences;
+}
+
+/** Internal ownership carried while a local send waits for the same-session run slot. */
+export interface ChatQueuedTurnOwnership {
+  sessionKey: string;
+  turnId: string;
+  userMessage: RawMessage;
+  idempotencyKey: string;
+  acceptedAt: number;
+  dequeuedFromQueue?: boolean;
+}
+
 export interface ChatState {
   // Messages
   messages: RawMessage[];
@@ -209,6 +246,7 @@ export interface ChatState {
   hasMoreHistory: boolean;
   error: string | null;
   runError: string | null;
+  historyError: string | null;
 
   // Streaming
   sending: boolean;
@@ -237,7 +275,8 @@ export interface ChatState {
   thinkingLevel: string | null;
 
   // Actions
-  loadSessions: () => Promise<void>;
+  loadSessions: (force?: boolean) => Promise<void>;
+  reconcileGatewayRecovery: () => Promise<void>;
   switchSession: (key: string) => void;
   newSession: () => void;
   deleteSession: (key: string) => Promise<void>;
@@ -256,6 +295,8 @@ export interface ChatState {
     mode?: ChatSendMode,
     imageOptions?: ChatImageSendOptions,
     videoOptions?: ChatVideoSendOptions,
+    replayIntent?: ChatSendReplayIntent,
+    queuedOwnership?: ChatQueuedTurnOwnership,
   ) => Promise<void>;
   abortRun: () => Promise<void>;
   retryLastRun: () => Promise<void>;
@@ -263,6 +304,7 @@ export interface ChatState {
   handleRuntimeEvent: (event: ChatRuntimeEvent) => void;
   refresh: () => Promise<void>;
   clearError: () => void;
+  clearHistoryError: () => void;
 }
 
 export const DEFAULT_CANONICAL_PREFIX = 'agent:main';
