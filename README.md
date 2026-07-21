@@ -20,7 +20,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
-  <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
+  <img src="https://img.shields.io/badge/electron-41+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
   <a href="https://discord.com/invite/84Kex3GGAh" target="_blank">
   <img src="https://img.shields.io/discord/1399603591471435907?logo=discord&labelColor=%20%235462eb&logoColor=%20%23f5f5f5&color=%20%235462eb" alt="chat on Discord" />
@@ -151,7 +151,7 @@ In **Settings → General**, you can enable **Launch at system startup** so Claw
 ClawX can automatically check for new versions on startup. When an update is available, it shows an in-app prompt; downloading and installing only happen after you choose the action.
 
 ### 💾 High-Performance Portable Mode
-Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in state, OpenClaw config, agents, sessions, skills, channel credentials, and update packages in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable runtime data such as Python, uv, temp files, browser cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth.
+Use `pnpm package:mac:usb` for macOS and `pnpm package:win:usb` for Windows to create an install-free portable build. The app keeps settings, sign-in state, OpenClaw config, agents, sessions, skills, channel credentials, and update packages in the bundled `UClawData/` folder, so records follow the USB drive to another machine. Rebuildable runtime data such as Python, uv, temp files, browser cache, and compile cache is stored on the host machine under `UClawRuntime/` to avoid slow USB reads/writes and unnecessary drive growth. During an update, the portable helper retains the previous application files until the new version confirms critical Main-process startup. If launch or confirmation fails within 90 seconds, it restores and restarts the previous version without replacing or deleting `UClawData/`.
 
 ---
 
@@ -424,7 +424,7 @@ Add future Electron flows under `tests/e2e/` and reuse the shared fixture in
 
 | Layer | Technology |
 |-------|------------|
-| Runtime | Electron 40+ |
+| Runtime | Electron 41+ |
 | UI Framework | React 19 + TypeScript |
 | Styling | Tailwind CSS + shadcn/ui |
 | State | Zustand |

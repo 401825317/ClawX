@@ -21,10 +21,6 @@
 
 const { cpSync, existsSync, readdirSync, rmSync, statSync, mkdirSync, realpathSync, readFileSync, writeFileSync } = require('fs');
 const { join, dirname, basename, relative } = require('path');
-const { ELECTRON_MAIN_RUNTIME_PACKAGES } = require('./openclaw-bundle-config.mjs');
-const { patchNsisExtractTemplate } = require('./patch-nsis-extract.mjs');
-const { patchNsisInstallSectionTemplate } = require('./patch-nsis-install-section.mjs');
-const { patchNsisUninstallTemplate } = require('./patch-nsis-uninstall.mjs');
 
 // On Windows, paths in pnpm's virtual store can exceed the default MAX_PATH
 // limit (260 chars). Node.js 18.17+ respects the system LongPathsEnabled
@@ -62,6 +58,23 @@ function listPackageDeps(pkgJson) {
 function readInstalledPackageVersion(packageDir) {
   const pkg = readJsonSafe(join(packageDir, 'package.json'));
   return typeof pkg?.version === 'string' ? pkg.version.trim() : null;
+}
+
+/** Fail packaging when a required OpenClaw runtime entry was removed or omitted. */
+function assertOpenClawRuntimeIntegrity(nodeModulesDir, requiredPackages, requiredFiles) {
+  const missingPackages = requiredPackages.filter((pkgName) => (
+    !existsSync(join(nodeModulesDir, ...pkgName.split('/'), 'package.json'))
+  ));
+  const missingFiles = requiredFiles.filter((relativePath) => (
+    !existsSync(join(nodeModulesDir, ...relativePath.split('/')))
+  ));
+  if (missingPackages.length === 0 && missingFiles.length === 0) return;
+
+  const details = [
+    ...missingPackages.map((pkgName) => `package ${pkgName}`),
+    ...missingFiles.map((relativePath) => `file ${relativePath}`),
+  ];
+  throw new Error(`[after-pack] Incomplete OpenClaw 2026.7.1-2 runtime after cleanup: ${details.join(', ')}`);
 }
 
 // ── General cleanup ──────────────────────────────────────────────────────────
@@ -639,6 +652,11 @@ function bundlePlugin(nodeModulesRoot, npmName, destDir) {
 // ── Main hook ────────────────────────────────────────────────────────────────
 
 exports.default = async function afterPack(context) {
+  const {
+    ELECTRON_MAIN_RUNTIME_PACKAGES,
+    OPENCLAW_REQUIRED_RUNTIME_FILES,
+    OPENCLAW_REQUIRED_RUNTIME_PACKAGES,
+  } = await import('./openclaw-bundle-config.mjs');
   const appOutDir = context.appOutDir;
   const platform = context.electronPlatformName; // 'win32' | 'darwin' | 'linux'
   const arch = resolveArch(context.arch);
@@ -728,6 +746,9 @@ exports.default = async function afterPack(context) {
     'clawx-openai-image',
     'uclaw-artifact-guard',
     'uclaw-local-artifacts',
+    'uclaw-desktop-control',
+    'uclaw-blender',
+    'uclaw-task-bridge',
   ];
 
   for (const pluginId of LOCAL_PLUGIN_IDS) {
@@ -897,6 +918,13 @@ exports.default = async function afterPack(context) {
     console.log(`[after-pack] ✅ Removed ${nativeRemoved} non-target native platform packages.`);
   }
 
+  assertOpenClawRuntimeIntegrity(
+    dest,
+    OPENCLAW_REQUIRED_RUNTIME_PACKAGES,
+    OPENCLAW_REQUIRED_RUNTIME_FILES,
+  );
+  console.log('[after-pack] ✅ OpenClaw 2026.7.1-2 runtime dependencies verified.');
+
   // 5. Patch lru-cache in app.asar.unpacked
   //
   // Production dependencies (electron-updater → semver → lru-cache@6,
@@ -984,6 +1012,15 @@ exports.default = async function afterPack(context) {
       console.log('[after-pack] Skipping NSIS install template patches for this Windows target.');
       return;
     }
+    const [
+      { patchNsisExtractTemplate },
+      { patchNsisInstallSectionTemplate },
+      { patchNsisUninstallTemplate },
+    ] = await Promise.all([
+      import('./patch-nsis-extract.mjs'),
+      import('./patch-nsis-install-section.mjs'),
+      import('./patch-nsis-uninstall.mjs'),
+    ]);
     const extractOk = patchNsisExtractTemplate();
     const installSectionOk = patchNsisInstallSectionTemplate();
     const uninstallOk = patchNsisUninstallTemplate();

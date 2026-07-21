@@ -39,22 +39,23 @@ const patchedType = patchOpenClawTaskSummaryDeliveryContent(typeFixture, 'schema
 assert.equal(patchedType.category, 'type');
 assert.match(patchedType.content, /deliveryStatus: Type\.TOptional/);
 
-const distDir = mkdtempSync(join(tmpdir(), 'uclaw-task-summary-'));
-mkdirSync(join(distDir, 'plugin-sdk'), { recursive: true });
+const packageRoot = mkdtempSync(join(tmpdir(), 'uclaw-task-summary-'));
+const distDir = join(packageRoot, 'dist');
+mkdirSync(distDir, { recursive: true });
+writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ version: '2026.7.1-2' }), 'utf8');
 writeFileSync(join(distDir, 'tasks.js'), handlerFixture, 'utf8');
 writeFileSync(join(distDir, 'schema.js'), schemaFixture, 'utf8');
 writeFileSync(join(distDir, 'schema.d.ts'), typeFixture, 'utf8');
-writeFileSync(join(distDir, 'plugin-sdk', 'tasks.d.ts'), typeFixture, 'utf8');
 
 const first = patchOpenClawTaskSummaryDeliveryRuntime(distDir, { logger: { log() {} } });
-assert.equal(first.patchedFiles, 4);
+assert.equal(first.patchedFiles, 3);
 assert.equal(first.categoryCounts.handler, 1);
 assert.equal(first.categoryCounts.schema, 1);
-assert.equal(first.categoryCounts.type, 2);
+assert.equal(first.categoryCounts.type, 1);
 assert.match(readFileSync(join(distDir, 'tasks.js'), 'utf8'), /UCLAW_TASK_SUMMARY_DELIVERY_HANDLER/);
 
 const second = patchOpenClawTaskSummaryDeliveryRuntime(distDir, { logger: { log() {} } });
 assert.equal(second.patchedFiles, 0);
-assert.equal(second.alreadyPatchedFiles, 4);
+assert.equal(second.alreadyPatchedFiles, 3);
 
 console.log('openclaw task summary delivery patch tests passed');

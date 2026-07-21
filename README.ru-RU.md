@@ -20,7 +20,7 @@
 
 <p align="center">
 <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
-<img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
+<img src="https://img.shields.io/badge/electron-41+-47848F?logo=electron" alt="Electron" />
 <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
 <a href="https://discord.com/invite/84Kex3GGAh" target="_blank">
 <img src="https://img.shields.io/discord/1399603591471435907?logo=discord&labelColor=%20%235462eb&logoColor=%20%23f5f5f5&color=%20%235462eb" alt="chat on Discord" />
@@ -134,6 +134,9 @@ ClawX также включает официальный плагин лично
 
 ### 🚀 Управление автозапуском
 В **Настройки → Общие** вы можете включить **Запускать при старте системы**, чтобы ClawX автоматически запускался после входа в систему.
+
+### 💾 Высокопроизводительный портативный режим
+На macOS команда `pnpm package:mac:usb`, а на Windows команда `pnpm package:win:usb` создаёт портативную сборку, не требующую установки. Настройки, состояние входа, конфигурация OpenClaw, агенты, сеансы, навыки, учётные данные каналов и пакеты обновления хранятся в каталоге `UClawData/` рядом с приложением, поэтому данные можно переносить вместе с USB-накопителем. Восстанавливаемые данные среды выполнения, включая Python, uv, временные файлы, кэш браузера и кэш компиляции, хранятся на компьютере в `UClawRuntime/`. Во время обновления helper сохраняет файлы предыдущей версии, пока новая версия не подтвердит завершение критической инициализации Main-процесса. Если запуск завершается ошибкой или подтверждение не поступает в течение 90 секунд, helper автоматически восстанавливает и перезапускает предыдущую версию, не заменяя и не удаляя `UClawData/`.
 
 ---
 
@@ -395,7 +398,7 @@ pnpm run comms:compare
 
 | Уровень        | Технология                    |
 |----------------|-------------------------------|
-| Среда выполнения | Electron 40+                 |
+| Среда выполнения | Electron 41+                 |
 | UI-фреймворк   | React 19 + TypeScript         |
 | Стилизация     | Tailwind CSS + shadcn/ui      |
 | Состояние      | Zustand                       |

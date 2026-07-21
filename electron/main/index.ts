@@ -33,7 +33,11 @@ import { getMacTrafficLightPosition, syncMacTrafficLightPosition } from './traff
 import { getSetting } from '../utils/store';
 import { applyProxySettings } from './proxy';
 import { syncLaunchAtStartupSettingFromStore } from './launch-at-startup';
-import { applyPortableEnvironment, isPortableMode } from '../utils/portable-mode';
+import {
+  acknowledgePortableUpdateStartup,
+  applyPortableEnvironment,
+  isPortableMode,
+} from '../utils/portable-mode';
 import {
   clearPendingSecondInstanceFocus,
   consumeMainWindowReady,
@@ -878,6 +882,10 @@ async function initialize(): Promise<void> {
     });
   } else if (isPortableMode()) {
     logger.info('Portable mode enabled: OpenClaw CLI shell integration is skipped');
+  }
+
+  if (!isE2EMode && acknowledgePortableUpdateStartup()) {
+    logger.info('Portable update startup acknowledged after Main-process initialization');
   }
 }
 

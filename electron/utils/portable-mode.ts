@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { app } from 'electron';
@@ -34,6 +41,13 @@ export type PortableModeInfo = {
 };
 
 let cachedPortableModeInfo: PortableModeInfo | null = null;
+
+type PendingPortableStartup = {
+  version: 1;
+  targetVersion: string;
+  rootDir: string;
+  ackPath: string;
+};
 
 function truthyEnv(value: string | undefined): boolean {
   if (!value) return false;
@@ -161,6 +175,48 @@ export function getPortableModeInfo(): PortableModeInfo {
 
 export function isPortableMode(): boolean {
   return getPortableModeInfo().enabled;
+}
+
+function normalizedPath(value: string): string {
+  const resolved = pathApi().resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const path = pathApi();
+  const relative = path.relative(normalizedPath(parent), normalizedPath(child));
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/** Confirms that a newly installed portable build completed its critical Main-process startup. */
+export function acknowledgePortableUpdateStartup(): boolean {
+  const info = getPortableModeInfo();
+  if (!info.enabled || !info.rootDir || !info.runtimeUpdatesDir) return false;
+
+  const pendingPath = pathApi().join(info.runtimeUpdatesDir, 'pending-startup.json');
+  if (!existsSync(pendingPath)) return false;
+
+  const pending = JSON.parse(readFileSync(pendingPath, 'utf8')) as PendingPortableStartup;
+  if (pending.version !== 1 || pending.targetVersion !== app.getVersion()) return false;
+  if (normalizedPath(pending.rootDir) !== normalizedPath(info.rootDir)) return false;
+  if (!isPathInside(info.runtimeUpdatesDir, pending.ackPath)) {
+    throw new Error('Portable update acknowledgement path is outside the managed update directory');
+  }
+
+  // Write atomically so the helper never observes a partial startup acknowledgement.
+  mkdirSync(pathApi().dirname(pending.ackPath), { recursive: true });
+  const temporaryPath = `${pending.ackPath}.tmp-${process.pid}`;
+  writeFileSync(temporaryPath, `${JSON.stringify({
+    version: 1,
+    ready: true,
+    targetVersion: pending.targetVersion,
+    rootDir: info.rootDir,
+    pid: process.pid,
+    acknowledgedAt: new Date().toISOString(),
+  }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  renameSync(temporaryPath, pending.ackPath);
+  rmSync(pendingPath, { force: true });
+  return true;
 }
 
 export function ensurePortableDataDirs(): PortableModeInfo {

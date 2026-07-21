@@ -30,6 +30,27 @@ const PATCH_MARKER = 'ClawX-patched-v2: extract directly to $INSTDIR and fail cl
 const LEGACY_PATCH_MARKER = 'ClawX-patched: extract directly to $INSTDIR';
 const LEGACY_CONTINUE_ON_EXTRACT_FAILURE = 'continuing overwrite install anyway';
 const FATAL_EXTRACT_FAILURE_DETAIL = 'Failed to extract UClaw files after multiple attempts.';
+const ROLLBACK_EXTRACT_FAILURE_DETAIL = 'Restoring the previous UClaw installation after the failed update';
+
+function rollbackExtractFailureLines(labelPrefix) {
+  return [
+    '    ${if} $clawxRollbackDir != ""',
+    `      IfFileExists "$clawxRollbackDir\\" 0 ${labelPrefix}_show_error`,
+    '      DetailPrint "Restoring the previous UClaw installation after the failed update..."',
+    '      SetOutPath $TEMP',
+    '      RMDir /r "$INSTDIR"',
+    '      ClearErrors',
+    '      Rename "$clawxRollbackDir" "$INSTDIR"',
+    `      IfErrors ${labelPrefix}_rollback_failed ${labelPrefix}_rollback_done`,
+    `    ${labelPrefix}_rollback_failed:`,
+    '      DetailPrint "Automatic rollback failed. The previous installation remains at $clawxRollbackDir."',
+    `      Goto ${labelPrefix}_show_error`,
+    `    ${labelPrefix}_rollback_done:`,
+    '      DetailPrint "Previous UClaw installation restored."',
+    '    ${endIf}',
+    `  ${labelPrefix}_show_error:`,
+  ];
+}
 
 const PATCHED_EXTRACT_MACRO = [
   '!macro extractUsing7za FILE',
@@ -54,6 +75,7 @@ const PATCHED_EXTRACT_MACRO = [
   '      Goto clawx_extract_attempt',
   '    ${endIf}',
   '    DetailPrint "Failed to extract UClaw files after multiple attempts."',
+  ...rollbackExtractFailureLines('clawx_extract'),
   '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)" /SD IDOK',
   '    SetErrorLevel 2',
   '    Quit',
@@ -66,9 +88,13 @@ const DECOMPRESS_MACRO = [
   '  !ifdef ZIP_COMPRESSION',
   '    nsisunz::Unzip "$PLUGINSDIR\\app-$packageArch.zip" "$INSTDIR"',
   '    Pop $R0',
-  '    StrCmp $R0 "success" +3',
-  '      MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)$\\n$R0"',
-  '      Quit',
+  '    StrCmp $R0 "success" clawx_zip_extract_done',
+  '    DetailPrint "Failed to extract UClaw files."',
+  ...rollbackExtractFailureLines('clawx_zip_extract'),
+  '    MessageBox MB_OK|MB_ICONEXCLAMATION "$(decompressionFailed)$\\n$R0"',
+  '    SetErrorLevel 2',
+  '    Quit',
+  '  clawx_zip_extract_done:',
   '  !else',
   '    !insertmacro extractUsing7za "$PLUGINSDIR\\app-$packageArch.7z"',
   '  !endif',
@@ -86,11 +112,10 @@ function isTemplateHealthy(content) {
   return content.includes(PATCH_MARKER)
     && countExtractMacros(content) === 1
     && content.includes(FATAL_EXTRACT_FAILURE_DETAIL)
+    && content.includes(ROLLBACK_EXTRACT_FAILURE_DETAIL)
     && content.includes('$(decompressionFailed)')
     && content.includes('SetErrorLevel 2')
     && content.includes('Quit')
-    && !content.includes('$clawxRollbackDir')
-    && !content.includes('clawx_extract_show_error')
     && !content.includes('$(appCannotBeClosed)')
     && !content.includes(LEGACY_CONTINUE_ON_EXTRACT_FAILURE);
 }

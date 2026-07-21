@@ -91,13 +91,13 @@ const FOLLOWUP_EMPTY_VISIBLE_PATCH = `\t\t\tif (finalPayloads.length === 0) {
 \t\t\t\treturn;
 \t\t\t} // ${FOLLOWUP_EMPTY_VISIBLE_MARKER}`;
 
-const MAIN_EMPTY_PAYLOAD_ANCHOR = `\t\tif (payloadArray.length === 0 && fallbackNoticePayloads.length === 0) {
+const MAIN_EMPTY_PAYLOAD_ANCHOR = `\t\tif (payloadArray.length === 0 && fallbackNoticePayloads.length === 0 && !shouldDeliverTerminalFailure && (!emptyInteractiveReplyPayload || hasSpecificFallbackFailure)) {
 \t\t\tconst silentFallbackFailurePayload = await returnSilentFallbackFailureIfNeeded();
 \t\t\tif (silentFallbackFailurePayload) return silentFallbackFailurePayload;
 \t\t\treturn returnWithQueuedFollowupDrain(void 0);
 \t\t}`;
 
-const MAIN_EMPTY_PAYLOAD_PATCH = `\t\tif (payloadArray.length === 0 && fallbackNoticePayloads.length === 0) {
+const MAIN_EMPTY_PAYLOAD_PATCH = `\t\tif (payloadArray.length === 0 && fallbackNoticePayloads.length === 0 && !shouldDeliverTerminalFailure && (!emptyInteractiveReplyPayload || hasSpecificFallbackFailure)) {
 \t\t\tif (autoCompactionCount > 0) {
 \t\t\t\tconst previousSessionId = activeSessionEntry?.sessionId ?? followupRun.run.sessionId;
 \t\t\t\tawait incrementRunCompactionCount({
@@ -127,13 +127,13 @@ const MAIN_EMPTY_PAYLOAD_PATCH = `\t\tif (payloadArray.length === 0 && fallbackN
 \t\t\treturn returnWithQueuedFollowupDrain(void 0);
 \t\t} // ${MAIN_EMPTY_PAYLOAD_MARKER}`;
 
-const MAIN_EMPTY_VISIBLE_ANCHOR = `\t\tif (replyPayloads.length === 0 || !hasReplyPayloadBeyondFallbackNotice && !canDeliverStandaloneFallbackNotice) {
+const MAIN_EMPTY_VISIBLE_ANCHOR = `\t\tif (replyPayloads.length === 0 || !hasVisibleReplyPayload && !canDeliverStandaloneFallbackNotice) {
 \t\t\tconst silentFallbackFailurePayload = await returnSilentFallbackFailureIfNeeded();
 \t\t\tif (silentFallbackFailurePayload) return silentFallbackFailurePayload;
 \t\t\treturn returnWithQueuedFollowupDrain(void 0);
 \t\t}`;
 
-const MAIN_EMPTY_VISIBLE_PATCH = `\t\tif (replyPayloads.length === 0 || !hasReplyPayloadBeyondFallbackNotice && !canDeliverStandaloneFallbackNotice) {
+const MAIN_EMPTY_VISIBLE_PATCH = `\t\tif (replyPayloads.length === 0 || !hasVisibleReplyPayload && !canDeliverStandaloneFallbackNotice) {
 \t\t\tif (autoCompactionCount > 0) {
 \t\t\t\tconst previousSessionId = activeSessionEntry?.sessionId ?? followupRun.run.sessionId;
 \t\t\t\tawait incrementRunCompactionCount({
@@ -274,7 +274,6 @@ export function patchOpenClawCompactionSessionStateRuntime(distDir, options = {}
   const expected = [
     'session-store',
     'increment-helper',
-    'followup-empty-payload',
     'followup-empty-visible',
     'main-empty-payload',
     'main-empty-visible',

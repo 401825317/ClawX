@@ -17,7 +17,12 @@
  */
 
 import 'zx/globals';
-import { ELECTRON_MAIN_RUNTIME_PACKAGES, EXTRA_BUNDLED_PACKAGES } from './openclaw-bundle-config.mjs';
+import {
+  ELECTRON_MAIN_RUNTIME_PACKAGES,
+  EXTRA_BUNDLED_PACKAGES,
+  OPENCLAW_REQUIRED_RUNTIME_FILES,
+  OPENCLAW_REQUIRED_RUNTIME_PACKAGES,
+} from './openclaw-bundle-config.mjs';
 import { UCLAW_DEFAULT_BUNDLED_OPENCLAW_SKILL_SET } from './openclaw-bundled-skill-allowlist.mjs';
 import { patchOpenClawBrowserRuntime } from './openclaw-browser-runtime-patch.mjs';
 import { cleanupOpenClawRequiredContractToolRuntime } from './openclaw-contract-tool-cleanup.mjs';
@@ -1240,8 +1245,8 @@ function patchBundledRuntime(outputDir) {
   }
 
   // --- Segment-scoped native video idempotency patch ---
-  // Keep legacy single-flight behavior for old calls while allowing an
-  // explicit long-form plan to generate distinct segment ids safely.
+  // Preserve upstream prompt/request-key dedupe for ordinary calls while
+  // allowing an explicit long-form plan to generate distinct segment ids safely.
   const videoSegmentDedupePatch = patchOpenClawVideoSegmentDedupeRuntime(distDir, {
     logger: { log: (message) => echo`   ${message}` },
   });
@@ -1323,6 +1328,25 @@ if (missingRuntimePackages.length > 0) {
   echo`❌ Bundle verification failed: missing Electron main runtime packages:`;
   for (const pkgName of missingRuntimePackages) {
     echo`   - ${pkgName}`;
+  }
+  process.exit(1);
+}
+
+const missingOpenClawRuntimePackages = OPENCLAW_REQUIRED_RUNTIME_PACKAGES.filter((pkgName) => {
+  const pkgJson = path.join(outputNodeModules, ...pkgName.split('/'), 'package.json');
+  return !fs.existsSync(pkgJson);
+});
+const missingOpenClawRuntimeFiles = OPENCLAW_REQUIRED_RUNTIME_FILES.filter((relativePath) => (
+  !fs.existsSync(path.join(outputNodeModules, ...relativePath.split('/')))
+));
+
+if (missingOpenClawRuntimePackages.length > 0 || missingOpenClawRuntimeFiles.length > 0) {
+  echo`❌ Bundle verification failed: incomplete OpenClaw 2026.7.1-2 runtime:`;
+  for (const pkgName of missingOpenClawRuntimePackages) {
+    echo`   - missing package ${pkgName}`;
+  }
+  for (const relativePath of missingOpenClawRuntimeFiles) {
+    echo`   - missing file ${relativePath}`;
   }
   process.exit(1);
 }

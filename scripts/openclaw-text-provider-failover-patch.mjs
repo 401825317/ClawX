@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const EXPECTED_OPENCLAW_VERSION = '2026.6.11';
+const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ENDPOINTS_PATH = join(SCRIPT_DIR, '..', 'shared', 'junfeiai-endpoints.json');
 const CANDIDATE_PATCH_MARKER = 'UCLAW_TEXT_PROVIDER_FAILOVER_VERSION = 2';

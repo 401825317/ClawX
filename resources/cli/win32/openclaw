@@ -20,7 +20,7 @@ ELECTRON_EXE="$INSTALL_DIR/UClaw.exe"
 [ -f "$ELECTRON_EXE" ] || ELECTRON_EXE="$INSTALL_DIR/ClawX.exe"
 
 if [ -f "$NODE_EXE" ]; then
-  if "$NODE_EXE" -e 'const [maj,min]=process.versions.node.split(".").map(Number);process.exit((maj>22||maj===22&&min>=16)?0:1)' >/dev/null 2>&1; then
+  if "$NODE_EXE" -e 'const [maj,min,patch]=process.versions.node.split(".").map(Number);const ok=(maj===22&&(min>22||min===22&&patch>=3))||(maj===24&&(min>15||min===15&&patch>=0))||(maj===25&&(min>9||min===9&&patch>=0));process.exit(ok?0:1)' >/dev/null 2>&1; then
     exec "$NODE_EXE" "$OPENCLAW_ENTRY" "$@"
   fi
 fi

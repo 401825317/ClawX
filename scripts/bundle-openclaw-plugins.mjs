@@ -232,8 +232,26 @@ function bundleLocalPlugin({ sourceDir, pluginId }) {
   }
 
   const pkgJsonPath = path.join(outputDir, 'package.json');
-  if (!fs.existsSync(pkgJsonPath)) return;
+  if (!fs.existsSync(pkgJsonPath)) {
+    throw new Error(`Missing package.json in local plugin output: ${pluginId}`);
+  }
   const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const expectedEntry = typeof manifest.entry === 'string' && manifest.entry.trim()
+    ? `./${manifest.entry.trim().replace(/^\.\//u, '')}`
+    : null;
+  const extensions = Array.isArray(pkg.openclaw?.extensions) ? pkg.openclaw.extensions : [];
+  if (!pkg.version || pkg.version !== manifest.version) {
+    throw new Error(
+      `Local plugin "${pluginId}" package/manifest versions must match; found ${String(pkg.version)} / ${String(manifest.version)}`,
+    );
+  }
+  if (!expectedEntry || !extensions.includes(expectedEntry)) {
+    throw new Error(
+      `Local plugin "${pluginId}" must declare openclaw.extensions entry ${String(expectedEntry)} in package.json`,
+    );
+  }
+
   const dependencies = Object.keys(pkg.dependencies || {});
   if (dependencies.length === 0) return;
 

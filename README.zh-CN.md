@@ -20,7 +20,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/platform-MacOS%20%7C%20Windows%20%7C%20Linux-blue" alt="Platform" />
-  <img src="https://img.shields.io/badge/electron-40+-47848F?logo=electron" alt="Electron" />
+  <img src="https://img.shields.io/badge/electron-41+-47848F?logo=electron" alt="Electron" />
   <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react" alt="React" />
   <a href="https://discord.com/invite/84Kex3GGAh" target="_blank">
   <img src="https://img.shields.io/discord/1399603591471435907?logo=discord&labelColor=%20%235462eb&logoColor=%20%23f5f5f5&color=%20%235462eb" alt="chat on Discord" />
@@ -154,7 +154,7 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 ClawX 可以在启动时自动检查新版本。发现更新后会显示应用内提示；只有在你选择操作后，才会下载或安装更新。
 
 ### 💾 高性能便携模式
-macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、OpenClaw 配置、Agent、会话、技能、通道凭据和更新包保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；Python、uv、临时文件、浏览器和编译缓存会放到当前电脑的本机缓存目录 `UClawRuntime/`，这些缓存可重建，避免 U盘被频繁读写拖慢或快速占满。
+macOS 可通过 `pnpm package:mac:usb`、Windows 可通过 `pnpm package:win:usb` 生成免安装可直接运行包。该模式会把应用设置、登录状态、OpenClaw 配置、Agent、会话、技能、通道凭据和更新包保存在随包的 `UClawData/` 中，因此插到另一台电脑后仍能看到原来的记录；Python、uv、临时文件、浏览器和编译缓存会放到当前电脑的本机缓存目录 `UClawRuntime/`，这些缓存可重建，避免 U 盘被频繁读写拖慢或快速占满。更新时，portable helper 会保留旧版应用文件，直到新版确认完成关键 Main 进程初始化；如果新版启动失败或 90 秒内未确认，会自动恢复并重启旧版，且不会替换或删除 `UClawData/`。
 
 ---
 
@@ -405,7 +405,7 @@ CI 中的 `comms-regression` 会校验必选场景与阈值。
 
 | 层级 | 技术 |
 |------|------|
-| 运行时 | Electron 40+ |
+| 运行时 | Electron 41+ |
 | UI 框架 | React 19 + TypeScript |
 | 样式 | Tailwind CSS + shadcn/ui |
 | 状态管理 | Zustand |

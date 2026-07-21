@@ -249,6 +249,7 @@ await runWithModelFallback({
 assert.deepEqual(sideEffectAttempts, [config.primaryProvider]);
 
 const abortAttempts = [];
+const abortController = new AbortController();
 await assert.rejects(
   runWithModelFallback({
     cfg: runtimeConfig,
@@ -257,10 +258,12 @@ await assert.rejects(
     fallbacksOverride: [],
     skipAuthProfileRuntime: true,
     sessionId: 'simulated-user-abort',
+    abortSignal: abortController.signal,
     run: async (provider) => {
       abortAttempts.push(provider);
       const error = new Error('simulated user cancellation');
       error.name = 'AbortError';
+      abortController.abort(error);
       throw error;
     },
   }),

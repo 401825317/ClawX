@@ -144,6 +144,17 @@ const GUARDED_FETCH_PATCH = `			localServiceLease = await ensureModelProviderLoc
 			log$1.info(\`[model-request-contract] \${JSON.stringify(modelRequestContractSummary)}\`);
 			result = await fetchWithSsrFGuard(useEnvProxy ? withTrustedEnvProxyGuardedFetchMode(guardedFetchOptions) : guardedFetchOptions);`;
 
+// OpenClaw 2026.7.1-2 adds secret-sentinel egress handling around baseInit and
+// passes the original headers to the local-service resolver.
+const CURRENT_BASE_INIT_ANCHOR = BASE_INIT_ANCHOR.slice(BASE_INIT_ANCHOR.indexOf('\n') + 1);
+const CURRENT_BASE_INIT_PATCH = BASE_INIT_PATCH.slice(BASE_INIT_PATCH.indexOf('\n') + 1);
+const CURRENT_LIGHT_CHAT_CONTRACT_SUMMARY_ANCHOR = LIGHT_CHAT_CONTRACT_SUMMARY_ANCHOR;
+const CURRENT_LIGHT_CHAT_CONTRACT_SUMMARY_PATCH = LIGHT_CHAT_CONTRACT_SUMMARY_PATCH.replace('log$1.info', 'log.info');
+const CURRENT_GUARDED_FETCH_ANCHOR = GUARDED_FETCH_ANCHOR.replace('baseInit?.headers', 'rawHeaders');
+const CURRENT_GUARDED_FETCH_PATCH = GUARDED_FETCH_PATCH
+  .replace('baseInit?.headers', 'rawHeaders')
+  .replace('log$1.info', 'log.info');
+
 function countOccurrences(content, search) {
   return content.split(search).length - 1;
 }
@@ -166,7 +177,7 @@ function patchModelRequestContractContent(content, filePath) {
   if (contractAlreadyPatched) {
     const expectedPatchedSnippets = [
       'const modelRequestContractSummary = buildUClawModelRequestContractSummary(model, baseInit);',
-      'log$1.info(`[model-request-contract] ${JSON.stringify(modelRequestContractSummary)}`);',
+      'log.info(`[model-request-contract] ${JSON.stringify(modelRequestContractSummary)}`);',
     ];
     if (!expectedPatchedSnippets.every((snippet) => content.includes(snippet))) {
       throw new Error(
@@ -175,16 +186,16 @@ function patchModelRequestContractContent(content, filePath) {
     }
   } else {
     assertUniqueAnchor(patched, BUILD_GUARDED_MODEL_FETCH_ANCHOR, 'buildGuardedModelFetch', filePath);
-    assertUniqueAnchor(patched, BASE_INIT_ANCHOR, 'baseInit', filePath);
-    assertUniqueAnchor(patched, GUARDED_FETCH_ANCHOR, 'fetchWithSsrFGuard', filePath);
+    assertUniqueAnchor(patched, CURRENT_BASE_INIT_ANCHOR, 'baseInit', filePath);
+    assertUniqueAnchor(patched, CURRENT_GUARDED_FETCH_ANCHOR, 'fetchWithSsrFGuard', filePath);
 
     patched = patched
       .replace(
         BUILD_GUARDED_MODEL_FETCH_ANCHOR,
         `${CONTRACT_SUMMARY_HELPERS}\n${BUILD_GUARDED_MODEL_FETCH_ANCHOR}`,
       )
-      .replace(BASE_INIT_ANCHOR, BASE_INIT_PATCH)
-      .replace(GUARDED_FETCH_ANCHOR, GUARDED_FETCH_PATCH);
+      .replace(CURRENT_BASE_INIT_ANCHOR, CURRENT_BASE_INIT_PATCH)
+      .replace(CURRENT_GUARDED_FETCH_ANCHOR, CURRENT_GUARDED_FETCH_PATCH);
   }
 
   if (lightChatHelperNeedsUpgrade) {
@@ -199,14 +210,14 @@ function patchModelRequestContractContent(content, filePath) {
   } else if (!lightChatAlreadyPatched) {
     assertUniqueAnchor(patched, BUILD_GUARDED_MODEL_FETCH_ANCHOR, 'buildGuardedModelFetch', filePath);
     assertUniqueAnchor(patched, LIGHT_CHAT_BASE_INIT_DECLARATION_ANCHOR, 'baseInit declaration', filePath);
-    assertUniqueAnchor(patched, LIGHT_CHAT_CONTRACT_SUMMARY_ANCHOR, 'light chat request override', filePath);
+    assertUniqueAnchor(patched, CURRENT_LIGHT_CHAT_CONTRACT_SUMMARY_ANCHOR, 'light chat request override', filePath);
     patched = patched
       .replace(
         BUILD_GUARDED_MODEL_FETCH_ANCHOR,
         `${LIGHT_CHAT_REQUEST_OVERRIDE_HELPERS}\n${BUILD_GUARDED_MODEL_FETCH_ANCHOR}`,
       )
       .replace(LIGHT_CHAT_BASE_INIT_DECLARATION_ANCHOR, LIGHT_CHAT_BASE_INIT_DECLARATION_PATCH)
-      .replace(LIGHT_CHAT_CONTRACT_SUMMARY_ANCHOR, LIGHT_CHAT_CONTRACT_SUMMARY_PATCH);
+      .replace(CURRENT_LIGHT_CHAT_CONTRACT_SUMMARY_ANCHOR, CURRENT_LIGHT_CHAT_CONTRACT_SUMMARY_PATCH);
   }
 
   if (!patched.includes(PATCH_MARKER) || patched === content) {

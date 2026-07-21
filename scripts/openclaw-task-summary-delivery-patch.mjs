@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2';
 const PATCH_MARKER = 'UCLAW_TASK_SUMMARY_DELIVERY';
 const HANDLER_MARKER = `${PATCH_MARKER}_HANDLER`;
 const SCHEMA_MARKER = `${PATCH_MARKER}_SCHEMA`;
@@ -91,12 +92,27 @@ function walkFiles(rootDir) {
   return files;
 }
 
+// Runtime patches are intentionally pinned to the audited OpenClaw bundle.
+function assertExpectedOpenClawVersion(distDir) {
+  const packagePath = join(distDir, '..', 'package.json');
+  if (!existsSync(packagePath)) {
+    throw new Error(`[openclaw-task-summary-delivery-patch] Missing ${packagePath}`);
+  }
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf8'));
+  if (packageJson.version !== EXPECTED_OPENCLAW_VERSION) {
+    throw new Error(
+      `[openclaw-task-summary-delivery-patch] Expected OpenClaw ${EXPECTED_OPENCLAW_VERSION}, found ${String(packageJson.version)}`,
+    );
+  }
+}
+
 export function patchOpenClawTaskSummaryDeliveryRuntime(distDir, options = {}) {
   const logger = options.logger ?? console;
   const dryRun = options.dryRun === true;
   if (!existsSync(distDir)) {
     throw new Error(`[openclaw-task-summary-delivery-patch] OpenClaw dist directory not found: ${distDir}`);
   }
+  assertExpectedOpenClawVersion(distDir);
 
   const categoryCounts = new Map();
   let patchedFiles = 0;
@@ -117,9 +133,9 @@ export function patchOpenClawTaskSummaryDeliveryRuntime(distDir, options = {}) {
   const handlerCount = categoryCounts.get('handler') ?? 0;
   const schemaCount = categoryCounts.get('schema') ?? 0;
   const typeCount = categoryCounts.get('type') ?? 0;
-  if (handlerCount !== 1 || schemaCount !== 1 || typeCount < 2) {
+  if (handlerCount !== 1 || schemaCount !== 1 || typeCount !== 1) {
     throw new Error(
-      `[openclaw-task-summary-delivery-patch] Expected handler=1 schema=1 types>=2 in ${distDir}; found handler=${handlerCount} schema=${schemaCount} types=${typeCount}.`,
+      `[openclaw-task-summary-delivery-patch] Expected handler=1 schema=1 type=1 in ${distDir}; found handler=${handlerCount} schema=${schemaCount} type=${typeCount}.`,
     );
   }
 

@@ -27,6 +27,8 @@ export type PortableUpdaterTask = {
   parentPid: number;
   logPath: string;
   stagingDir: string;
+  ackPath: string;
+  pendingPath: string;
 };
 
 export type PortableUpdateInstallerLaunch = {
@@ -122,9 +124,12 @@ export async function preparePortableUpdateInstaller(
   const stamp = timestampForPath();
   const logDir = logger.getLogDir() || portable.runtimeLogsDir || portable.runtimeUpdatesDir;
   const taskDir = join(portable.runtimeUpdatesDir, 'tasks');
+  const ackDir = join(portable.runtimeUpdatesDir, 'acks');
   const stagingDir = join(portable.runtimeUpdatesDir, 'staging', stamp);
   const logPath = join(logDir, `portable-updater-${stamp}.log`);
   const taskPath = join(taskDir, `portable-update-${stamp}.json`);
+  const ackPath = join(ackDir, `portable-update-${stamp}.json`);
+  const pendingPath = join(portable.runtimeUpdatesDir, 'pending-startup.json');
   const task: PortableUpdaterTask = {
     zipPath,
     rootDir: portable.rootDir,
@@ -136,9 +141,12 @@ export async function preparePortableUpdateInstaller(
     parentPid: process.pid,
     logPath,
     stagingDir,
+    ackPath,
+    pendingPath,
   };
 
   await mkdir(taskDir, { recursive: true });
+  await mkdir(ackDir, { recursive: true });
   await mkdir(dirname(logPath), { recursive: true });
   await writeFile(taskPath, `${JSON.stringify(task, null, 2)}\n`, 'utf-8');
 

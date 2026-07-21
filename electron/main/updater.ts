@@ -26,6 +26,8 @@ import {
 } from './portable-update-security';
 import { launchPortableUpdateInstaller } from './portable-update-installer';
 
+const LEGACY_INSTALLED_UPDATE_FEED_BASE_URL = 'https://oss.intelli-spectrum.com';
+
 /** Base update feed URL (without trailing channel path). */
 function getUpdateFeedBaseUrl(): string {
   return (
@@ -77,6 +79,11 @@ function platformForUpdateApi(): 'mac' | 'win' | 'linux' {
 
 function normalizeUpdateChannel(channel: string): string {
   return channel === 'stable' ? 'latest' : channel;
+}
+
+function getInstalledUpdateFallbackFeedUrl(channel: string): string | null {
+  if (process.env.CLAWX_UPDATE_FEED_BASE_URL?.trim()) return null;
+  return `${LEGACY_INSTALLED_UPDATE_FEED_BASE_URL}/${normalizeUpdateChannel(channel)}`;
 }
 
 type BackendEnvelope<T> = {
@@ -267,6 +274,41 @@ export class AppUpdater extends EventEmitter {
       return await this.checkPortableForUpdates();
     }
 
+    const channel = normalizeUpdateChannel(autoUpdater.channel || detectChannel(app.getVersion()));
+    const primaryFeedUrl = `${getUpdateFeedBaseUrl()}/${channel}`;
+    autoUpdater.channel = channel;
+    autoUpdater.setFeedURL({
+      provider: 'generic',
+      url: primaryFeedUrl,
+      useMultipleRangeRequest: false,
+    });
+
+    try {
+      return await this.checkInstalledForUpdates();
+    } catch (primaryError) {
+      const fallbackFeedUrl = getInstalledUpdateFallbackFeedUrl(channel);
+      if (!fallbackFeedUrl) throw primaryError;
+
+      logger.warn(`[Updater] Primary update feed failed; retrying the current check via ${fallbackFeedUrl}`);
+      autoUpdater.setFeedURL({
+        provider: 'generic',
+        url: fallbackFeedUrl,
+        useMultipleRangeRequest: false,
+      });
+
+      try {
+        return await this.checkInstalledForUpdates();
+      } catch (fallbackError) {
+        throw new AggregateError(
+          [primaryError, fallbackError],
+          'Primary and legacy installed update feeds both failed',
+          { cause: fallbackError },
+        );
+      }
+    }
+  }
+
+  private async checkInstalledForUpdates(): Promise<UpdateInfo | null> {
     try {
       const result = await autoUpdater.checkForUpdates();
 
@@ -570,7 +612,7 @@ export class AppUpdater extends EventEmitter {
    * Set update channel (stable, beta, dev)
    */
   setChannel(channel: 'stable' | 'beta' | 'dev'): void {
-    autoUpdater.channel = channel;
+    autoUpdater.channel = normalizeUpdateChannel(channel);
   }
 
   /**

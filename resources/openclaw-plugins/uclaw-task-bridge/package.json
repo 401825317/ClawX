@@ -1,6 +1,6 @@
 {
   "name": "uclaw-task-bridge-plugin",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "UClaw Host task bridge for OpenClaw sessions",
   "private": true,
   "type": "module",
