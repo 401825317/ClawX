@@ -11,7 +11,9 @@ touchedAreas:
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
+  - src/components/settings/VideoGenerationSettings.tsx
   - src/pages/Chat/ChatInput.tsx
+  - src/stores/client-config.ts
   - src/stores/chat.ts
   - electron/api/routes/media.ts
   - electron/services/agent-runtime/**
@@ -23,6 +25,7 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-video-project/**
   - resources/openclaw-plugins/uclaw-task-bridge/**
   - scripts/**
+  - tests/e2e/chat-model-picker.spec.ts
   - tests/e2e/native-agent-media-routing.spec.ts
 requiredProfiles:
   - fast
@@ -35,6 +38,7 @@ requiredTests:
   - pnpm exec tsc --noEmit --pretty false
   - node scripts/openclaw-video-provider-catalog-patch.test.mjs
   - node scripts/openclaw-video-model-validation-patch.test.mjs
+  - node scripts/openclaw-video-capability-contract-patch.test.mjs
   - pnpm exec tsx scripts/openclaw-video-config-validation.test.ts
   - node resources/openclaw-plugins/uclaw-video-project/harness.spec.mjs
   - node scripts/uclaw-video-agent-contract.test.mjs
@@ -52,6 +56,7 @@ acceptance:
   - When the Agent omits a model, the configured valid video primary remains the tool fallback instead of becoming a renderer or Host override.
   - A non-advertised model returns `invalid_video_model` before a provider HTTP request; UClaw does not silently replace it with a chat model, UI default, or another video model.
   - Host validation rejects `grok-video-1.5` without exactly one readable reference image before calling the backend.
+  - Managed Grok video capabilities expose only the upstream-supported `6`, `10`, and `15` second durations; omitted or stale unsupported values normalize deterministically before any provider request.
   - Task Flow preserves the edited-image dependency and does not silently downgrade a requested image-to-video task to text-to-video.
   - Retired video intent and direct media endpoints cannot accept fresh turns or provide an alternate execution path.
 docs:

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import {
+  patchOpenClawOpenAiVideoCapabilityContent,
   patchOpenClawVideoCapabilityContractRuntime,
   resolveMappedVideoSizeForCapabilityContract,
   resolveOpenAiVideoCapabilityContractProfile,
@@ -39,7 +40,7 @@ assert.equal(resolveMappedVideoSizeForCapabilityContract({
 assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-image-video', 'generate'), {
   maxVideos: 1,
   maxDurationSeconds: 15,
-  supportedDurationSeconds: [4, 6, 8, 10, 12, 15],
+  supportedDurationSeconds: [6, 10, 15],
   supportsSize: true,
   sizes: ['1280x720', '720x1280', '1024x1024'],
 });
@@ -51,7 +52,7 @@ assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-video-1.5', '
   maxInputImages: 1,
   maxVideos: 1,
   maxDurationSeconds: 15,
-  supportedDurationSeconds: [4, 6, 8, 10, 12, 15],
+  supportedDurationSeconds: [6, 10, 15],
   supportsSize: true,
   sizes: ['1280x720', '720x1280', '1024x1024'],
 });
@@ -100,11 +101,25 @@ try {
   assert.match(runtimeContent, /audio = void 0/u);
   assert.match(runtimeContent, /watermark = void 0/u);
   assert.match(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1/u);
+  assert.match(providerContent, /UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2/u);
   assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SECONDS/u);
+  assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SECONDS = \[\s*6,\s*10,\s*15\s*\]/u);
   assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SIZES/u);
   assert.match(providerContent, /resolveDurationSeconds\(req\.durationSeconds, model\)/u);
   assert.match(providerContent, /grok-video-1\.5 requires exactly one reference image/u);
   assert.match(providerContent, /const OPENAI_VIDEO_SECONDS = \[\s*4,\s*8,\s*12\s*\]/u);
+
+  const legacyProviderContent = providerContent
+    .replace('const UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2 = true;\n', '')
+    .replace(
+      'const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [\n\t6,\n\t10,\n\t15\n];',
+      'const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [\n\t4,\n\t6,\n\t8,\n\t10,\n\t12,\n\t15\n];',
+    );
+  const upgradedProvider = patchOpenClawOpenAiVideoCapabilityContent(legacyProviderContent);
+  assert.equal(upgradedProvider.changed, true);
+  assert.match(upgradedProvider.content, /UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2/u);
+  assert.match(upgradedProvider.content, /UCLAW_OPENAI_GROK_VIDEO_SECONDS = \[\s*6,\s*10,\s*15\s*\]/u);
+  assert.equal(patchOpenClawOpenAiVideoCapabilityContent(upgradedProvider.content).changed, false);
 
   for (const entry of readdirSync(fixtureDist)) {
     const checked = spawnSync(process.execPath, ['--check', join(fixtureDist, entry)], {

@@ -161,7 +161,7 @@ export function VideoGenerationSettings() {
     try {
       const result = await runVideoGenerationTest({
         agentId: testAgentId || snapshot?.defaultAgentId,
-        prompt: t('videoGeneration.testPrompt', 'A cinematic four-second shot of a small red paper airplane gliding over a white desk.'),
+        prompt: t('videoGeneration.testPrompt', 'A cinematic six-second shot of a small red paper airplane gliding over a white desk.'),
       });
       if (result.success) {
         const outputLocation = extractTestOutputLocation(result.result);

@@ -36,15 +36,15 @@ const managedClientModelOptions = {
   video: {
     defaultModel: 'grok-image-video',
     defaultSize: '1280x720',
-    defaultDurationSeconds: 4,
+    defaultDurationSeconds: 6,
     models: [{
       id: 'grok-image-video',
       label: 'Grok Video',
       modes: ['text-to-video', 'image-to-video'],
       sizes: ['1280x720', '720x1280', '1024x1024'],
-      durations: [4, 6, 8, 10, 12, 15],
+      durations: [6, 10, 15],
       defaultSize: '1280x720',
-      defaultDurationSeconds: 4,
+      defaultDurationSeconds: 6,
       enabled: true,
     }],
   },
