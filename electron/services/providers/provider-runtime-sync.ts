@@ -1,4 +1,4 @@
-import type { GatewayManager } from '../../gateway/manager';
+import type { GatewayManager, GatewayStatus } from '../../gateway/manager';
 import { getProviderAccount, listProviderAccounts } from './provider-store';
 import { getProviderSecret } from '../secrets/secret-store';
 import type { ProviderConfig } from '../../utils/secure-storage';
@@ -320,6 +320,13 @@ export async function getProviderFallbackModelRefs(config: ProviderConfig): Prom
 
 type GatewayRefreshMode = 'reload' | 'restart';
 
+export function shouldScheduleGatewayRefresh(
+  state: GatewayStatus['state'],
+  onlyIfRunning = false,
+): boolean {
+  return !onlyIfRunning || state === 'running';
+}
+
 function scheduleGatewayRefresh(
   gatewayManager: GatewayManager | undefined,
   message: string,
@@ -329,7 +336,10 @@ function scheduleGatewayRefresh(
     return;
   }
 
-  if (options?.onlyIfRunning && gatewayManager.getStatus().state === 'stopped') {
+  if (!shouldScheduleGatewayRefresh(
+    gatewayManager.getStatus().state,
+    options?.onlyIfRunning,
+  )) {
     return;
   }
 

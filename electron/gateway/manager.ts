@@ -657,6 +657,22 @@ export class GatewayManager extends EventEmitter {
    * Start Gateway process
    */
   async start(context?: GatewayLifecycleContext): Promise<void> {
+    const restartInFlight = this.restartInFlight;
+    if (restartInFlight) {
+      this.recordLifecycleEvent('start_joined_in_flight_restart', {
+        reason: context?.reason ?? 'restart-in-flight',
+        source: context?.source ?? 'gateway-manager',
+      });
+      logger.info('Gateway start joined the restart already in progress');
+      await restartInFlight;
+      return;
+    }
+
+    await this.startInternal(context);
+  }
+
+  /** Restart owns this entry so its post-stop start cannot join itself. */
+  private async startInternal(context?: GatewayLifecycleContext): Promise<void> {
     if (this.startLock) {
       this.recordLifecycleEvent('start_ignored', {
         reason: context?.reason ?? 'start-already-in-progress',
@@ -1011,7 +1027,7 @@ export class GatewayManager extends EventEmitter {
         source: context?.source ?? 'gateway-manager',
       });
       try {
-        await this.start({
+        await this.startInternal({
           reason: `restart:${context?.reason ?? 'manual-restart'}`,
           source: context?.source ?? 'gateway-manager',
         });

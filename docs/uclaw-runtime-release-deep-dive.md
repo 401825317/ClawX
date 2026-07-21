@@ -372,7 +372,7 @@ JunFeiAI 特殊点：
 
 启动顺序：
 
-1. `GatewayManager.start()` 拿 start lock，防止并发启动。
+1. `GatewayManager.start()` 如果已有 restart 在执行，会等待并复用该 restart；否则拿 start lock，防止并发启动。
 2. 设置状态 `starting`。
 3. 预热 Python readiness。
 4. `runGatewayStartupSequence()`：
@@ -765,4 +765,3 @@ Updater：
 7. 如果是 chat 问题，看 `chat.send.rpc` metric 和 runtime events。
 8. 如果是 image/video，看对应 relay provider、plugin 和 generation settings。
 9. 如果是升级问题，看 `$INSTDIR` 残留进程和 NSIS/installer 日志。
-
