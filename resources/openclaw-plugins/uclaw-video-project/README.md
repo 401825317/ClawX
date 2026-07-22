@@ -29,26 +29,33 @@ can only be read or mutated by the originating OpenClaw session.
 ## Expected flow
 
 1. Use `uclaw_video_project` with `action=create`, the user brief, constraints,
-   the shared reference image when applicable, and the proposed shots.
+   the shared reference image when applicable, the proposed shots and captions,
+   and the intended narration/audio/output composition contract.
 2. For each planned/retry-ready shot, call `video_generate` using the returned
    `generationInput`. For reference-required models, the project carries the
    effective reference path or URL in `referenceImages`.
 3. Use `uclaw_video_shot` with `action=record_attempt` after each generator
    result. Store the provider task ID and produced artifact rather than
    reconstructing them from chat text later.
-4. Run the Host deterministic QA and GPT semantic review. Record the QA result
-   on the attempt, then call `accept` only for an acceptable shot. For a failed
-   review, call `retry` and generate a new attempt.
+4. Run the Host deterministic QA and GPT semantic review. Record measured
+   dimensions and both QA decisions on the attempt, then call `accept` only for
+   an acceptable shot. Missing dimensions, output below the requested geometry,
+   and aspect-ratio mismatches are blocked; upscaling never satisfies the source
+   generation contract. For a failed review, call `retry` and generate a new
+   attempt.
 5. Once every shot is accepted, call `uclaw_video_project` with
-   `action=compose`. It persists an idempotent composition plan, starts an
-   internal Host timeline-render task, then starts final video QA only after
-   the renderer returns a verified MP4. The internal render task never sends a
-   user-facing artifact by itself.
+   `action=compose`. It reuses the persisted composition contract. A single
+   clip only uses source QA when no resize, duration change, caption, narration,
+   music, audio replacement, or transition is required; otherwise it starts an
+   idempotent Host timeline-render task. Final video QA starts only after the
+   source or renderer returns a managed MP4. The internal render task never
+   sends a user-facing artifact by itself.
 6. Final QA attaches the verified final MP4 as its sole deliverable artifact.
    When the Task Bridge acknowledges that delivery, the project moves from
    `assembled` to `delivered` automatically. Restarting the Gateway resumes
    the monitor from the persisted project and Host task IDs.
 
-The plugin does not fabricate completion: a final project can only be marked
-`assembled` or `delivered` after every planned shot is accepted and an explicit
-final artifact has been recorded.
+The plugin does not fabricate completion: `assembled` and `delivered` are
+written by the Host final-QA workflow only. The public `finalize` action can
+only confirm the same already-verified artifact and cannot override a blocked
+composition or substitute a manually upscaled file.

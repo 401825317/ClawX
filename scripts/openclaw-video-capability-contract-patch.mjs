@@ -2,13 +2,15 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const TOOL_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_TOOL_V1';
-const RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1';
+const RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V2';
+const LEGACY_RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1';
 const OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1';
 const OPENAI_DURATION_PATCH_MARKER = 'UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2';
+const OPENAI_SIZE_PATCH_MARKER = 'UCLAW_VIDEO_SIZE_CONTRACT_OPENAI_V2';
 
 const GROK_VIDEO_MODELS = new Set(['grok-image-video', 'grok-video-1.5']);
 const GROK_VIDEO_DURATIONS = [6, 10, 15];
-const GROK_VIDEO_SIZES = ['1280x720', '720x1280', '1024x1024'];
+const GROK_VIDEO_SIZES = ['1280x720', '720x1280'];
 
 function countOccurrences(content, search) {
   return content.split(search).length - 1;
@@ -339,9 +341,33 @@ const RUNTIME_RESOLUTION_ORDER_ANCHOR = `const VIDEO_RESOLUTION_ORDER = [
 \t"1080P"
 ];`;
 
-const RUNTIME_RESOLUTION_ORDER_PATCH = `const VIDEO_RESOLUTION_ORDER = [
+const LEGACY_RUNTIME_RESOLUTION_ORDER_PATCH = `const VIDEO_RESOLUTION_ORDER = [
 \t"360P",
 \t"480P",
+\t"540P",
+\t"720P",
+\t"768P",
+\t"1080P"
+];
+const ${LEGACY_RUNTIME_PATCH_MARKER} = true;
+function resolveVideoGenerationSizeFromResolutionAndAspectRatio(params) {
+\tconst normalizedResolution = params.resolution?.trim().toUpperCase();
+\tconst resolutionMatch = normalizedResolution?.match(/^(\\d+)P$/u);
+\tconst shortEdge = normalizedResolution === "4K" ? 2160 : resolutionMatch ? Number.parseInt(resolutionMatch[1], 10) : void 0;
+\tconst aspectRatioMatch = params.aspectRatio?.trim().match(/^(\\d+(?:\\.\\d+)?):(\\d+(?:\\.\\d+)?)$/u);
+\tif (!(shortEdge > 0) || !aspectRatioMatch) return;
+\tconst aspectRatio = Number.parseFloat(aspectRatioMatch[1]) / Number.parseFloat(aspectRatioMatch[2]);
+\tif (!(aspectRatio > 0)) return;
+\tconst requestedSize = aspectRatio >= 1 ? \`${'${Math.round(shortEdge * aspectRatio)}x${shortEdge}'}\` : \`${'${shortEdge}x${Math.round(shortEdge / aspectRatio)}'}\`;
+\treturn resolveClosestSize({
+\t\trequestedSize,
+\t\trequestedAspectRatio: params.aspectRatio,
+\t\tsupportedSizes: params.supportedSizes
+\t});
+}`;
+
+const RUNTIME_RESOLUTION_ORDER_PATCH = `const VIDEO_RESOLUTION_ORDER = [
+\t"360P",
 \t"540P",
 \t"720P",
 \t"768P",
@@ -400,6 +426,19 @@ const RUNTIME_TRANSLATION_PATCH = `\tif (caps) {
 export function patchOpenClawVideoCapabilityRuntimeContent(content, filePath = '<memory>') {
   if (!content.includes('function resolveVideoGenerationOverrides(params)')) return null;
   if (content.includes(RUNTIME_PATCH_MARKER)) return { content, changed: false, category: 'runtime' };
+  if (content.includes(LEGACY_RUNTIME_PATCH_MARKER)) {
+    return {
+      content: replaceUnique(
+        content,
+        LEGACY_RUNTIME_RESOLUTION_ORDER_PATCH,
+        RUNTIME_RESOLUTION_ORDER_PATCH,
+        'legacy video resolution order',
+        filePath,
+      ),
+      changed: true,
+      category: 'runtime',
+    };
+  }
   let patched = replaceUnique(content, RUNTIME_MODEL_OVERLAY_ANCHOR, RUNTIME_MODEL_OVERLAY_PATCH, 'model capability overlay', filePath);
   patched = replaceUnique(patched, RUNTIME_RESOLUTION_ORDER_ANCHOR, RUNTIME_RESOLUTION_ORDER_PATCH, 'video resolution order', filePath);
   patched = replaceUnique(patched, RUNTIME_TRANSLATION_ANCHOR, RUNTIME_TRANSLATION_PATCH, 'resolution/aspect-ratio translation', filePath);
@@ -428,10 +467,10 @@ const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
 \t10,
 \t15
 ];
+const ${OPENAI_SIZE_PATCH_MARKER} = true;
 const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
 \t"1280x720",
-\t"720x1280",
-\t"1024x1024"
+\t"720x1280"
 ];
 function isUClawOpenAIGrokVideoModel(model) {
 \treturn model === UCLAW_OPENAI_GROK_VIDEO_MODEL || model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL;
@@ -452,6 +491,20 @@ const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
 \t10,
 \t15
 ];`;
+
+const OPENAI_LEGACY_GROK_SIZE_PATCH = `const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
+\t"1280x720",
+\t"720x1280",
+\t"1024x1024"
+];`;
+
+const OPENAI_CURRENT_GROK_SIZE_PATCH = `const ${OPENAI_SIZE_PATCH_MARKER} = true;
+const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
+\t"1280x720",
+\t"720x1280"
+];`;
+
+const OPENAI_LEGACY_SQUARE_SIZE_CASE = '\t\t\tcase "1:1": return "1024x1024";\n';
 
 const OPENAI_DURATION_ANCHOR = `function resolveDurationSeconds(durationSeconds) {
 \tif (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds)) return;
@@ -489,7 +542,6 @@ const OPENAI_SIZE_PATCH = `function resolveSize(params) {
 \t\tswitch (normalizeOptionalString(params.aspectRatio)) {
 \t\t\tcase "9:16": return "720x1280";
 \t\t\tcase "16:9": return "1280x720";
-\t\t\tcase "1:1": return "1024x1024";
 \t\t\tcase "4:7": return "1024x1792";
 \t\t\tcase "7:4": return "1792x1024";
 \t\t\tdefault: return;
@@ -615,18 +667,35 @@ const OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model
 export function patchOpenClawOpenAiVideoCapabilityContent(content, filePath = '<memory>') {
   if (!content.includes('function buildOpenAIVideoGenerationProvider()')) return null;
   if (content.includes(OPENAI_PATCH_MARKER)) {
-    if (content.includes(OPENAI_DURATION_PATCH_MARKER)) {
-      return { content, changed: false, category: 'openai-provider' };
-    }
-    return {
-      content: replaceUnique(
-        content,
+    let migrated = content;
+    if (!migrated.includes(OPENAI_DURATION_PATCH_MARKER)) {
+      migrated = replaceUnique(
+        migrated,
         OPENAI_LEGACY_GROK_DURATION_PATCH,
         OPENAI_CURRENT_GROK_DURATION_PATCH,
         'legacy OpenAI Grok video durations',
         filePath,
-      ),
-      changed: true,
+      );
+    }
+    if (!migrated.includes(OPENAI_SIZE_PATCH_MARKER)) {
+      migrated = replaceUnique(
+        migrated,
+        OPENAI_LEGACY_GROK_SIZE_PATCH,
+        OPENAI_CURRENT_GROK_SIZE_PATCH,
+        'legacy OpenAI Grok video sizes',
+        filePath,
+      );
+      migrated = replaceUnique(
+        migrated,
+        OPENAI_LEGACY_SQUARE_SIZE_CASE,
+        '',
+        'legacy OpenAI Grok square video mapping',
+        filePath,
+      );
+    }
+    return {
+      content: migrated,
+      changed: migrated !== content,
       category: 'openai-provider',
     };
   }

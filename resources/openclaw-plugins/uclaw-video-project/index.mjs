@@ -247,6 +247,13 @@ function normalizeShot(value, index, constraints, projectReference, providers) {
   if (!prompt) throw new VideoProjectError(`Shot ${shotId} requires a prompt.`, 'shot_prompt_missing');
   const reference = normalizeReference(source.reference) || (source.useProjectReference === false ? undefined : projectReference);
   const model = normalizeVideoModel(source.model, providers) || constraints.model;
+  const captionPosition = cleanText(source.captionPosition, 40).toLowerCase() || 'bottom';
+  if (!['top', 'center', 'bottom'].includes(captionPosition)) {
+    throw new VideoProjectError(
+      `Shot ${shotId} captionPosition must be top, center, or bottom.`,
+      'shot_caption_position_invalid',
+    );
+  }
   if (modelRequiresExactlyOneReference(model) && !reference) {
     throw new VideoProjectError(
       'grok-video-1.5 requires exactly one reference image. Add a managed reference image or choose a text-to-video model.',
@@ -257,6 +264,8 @@ function normalizeShot(value, index, constraints, projectReference, providers) {
     shotId,
     title: cleanText(source.title, 500) || shotId,
     prompt,
+    caption: cleanText(source.caption, 500) || undefined,
+    captionPosition,
     durationSeconds: normalizeNumber(source.durationSeconds, { min: 1, max: 600, fallback: undefined }),
     model,
     reference,
@@ -327,12 +336,16 @@ function pendingGenerationInputs(project, providers) {
 }
 
 function projectStatus(project) {
-  if (project.finalization?.status === 'delivered') return 'completed';
-  if (project.finalization?.status === 'assembled') return 'assembled';
-  if (project.finalization?.status === 'blocked') return 'blocked';
-  if (project.composition?.status === 'delivered') return 'completed';
-  if (project.composition?.status === 'assembled') return 'assembled';
   if (project.composition?.status === 'blocked') return 'blocked';
+  if (project.finalization?.status === 'blocked') return 'blocked';
+  const verifiedArtifactPath = cleanText(project.composition?.finalArtifact?.filePath, 2_000);
+  const finalizedArtifactPath = cleanText(project.finalization?.artifact?.filePath, 2_000);
+  const hostVerified = project.composition?.finalQa?.status === 'passed'
+    && Boolean(verifiedArtifactPath)
+    && verifiedArtifactPath === finalizedArtifactPath;
+  if (hostVerified && project.composition?.status === 'delivered' && project.finalization?.status === 'delivered') return 'completed';
+  if (hostVerified && ['assembled', 'delivered'].includes(project.composition?.status)
+    && ['assembled', 'delivered'].includes(project.finalization?.status)) return 'assembled';
   if (project.composition) return 'composing';
   if (project.cancelledAt) return 'cancelled';
   const shots = project.shots;
@@ -381,7 +394,7 @@ function projectResult(project, operation, providers) {
     result.nextGenerationInput = pendingInputs[0];
   }
   if (project.status === 'ready_to_compose') {
-    result.next = 'Every shot is accepted. Call uclaw_video_project action:compose once to create the durable Host composition and final-QA workflow. Do not deliver a multi-shot video before that workflow reports a verified final artifact.';
+    result.next = 'Every shot is accepted. Call uclaw_video_project action:compose once to create the durable Host render-or-source-QA workflow. Do not deliver any project video before that workflow reports a verified final artifact.';
   } else if (project.status === 'composing') {
     result.next = 'VideoProject composition is running or waiting for bridge delivery. Do not create another composition task; inspect this durable project state or wait for the Host completion event.';
   } else if (project.status === 'generating' || project.status === 'planned') {
@@ -456,6 +469,72 @@ function parseSize(value) {
   const width = Number.parseInt(match[1], 10);
   const height = Number.parseInt(match[2], 10);
   return width > 0 && height > 0 ? { width, height } : undefined;
+}
+
+function parseAspectRatio(value) {
+  const match = cleanText(value, 40).match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$/u);
+  if (!match) return undefined;
+  const width = Number.parseFloat(match[1]);
+  const height = Number.parseFloat(match[2]);
+  return width > 0 && height > 0 ? width / height : undefined;
+}
+
+function parseResolutionShortEdge(value) {
+  const normalized = cleanText(value, 80).toUpperCase();
+  if (normalized === '4K') return 2_160;
+  const match = normalized.match(/^(\d+)P$/u);
+  if (!match) return undefined;
+  const shortEdge = Number.parseInt(match[1], 10);
+  return shortEdge > 0 ? shortEdge : undefined;
+}
+
+function artifactContractAssessment(project, artifact) {
+  const width = Number(artifact?.width);
+  const height = Number(artifact?.height);
+  const actualDimensionsKnown = Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0;
+  const targetSize = parseSize(project.constraints?.size);
+  const targetAspectRatio = targetSize
+    ? targetSize.width / targetSize.height
+    : parseAspectRatio(project.constraints?.aspectRatio);
+  const targetShortEdge = parseResolutionShortEdge(project.constraints?.resolution);
+  const requiresDimensions = Boolean(targetSize || targetAspectRatio || targetShortEdge);
+  const issues = [];
+  if (requiresDimensions && !actualDimensionsKnown) {
+    issues.push('The generated artifact has no measured width and height.');
+  }
+  if (actualDimensionsKnown && targetSize && (width < targetSize.width || height < targetSize.height)) {
+    issues.push(`Actual ${width}x${height} is below the required ${targetSize.width}x${targetSize.height}; upscaling is not accepted.`);
+  }
+  if (actualDimensionsKnown && targetShortEdge && Math.min(width, height) < targetShortEdge) {
+    issues.push(`Actual short edge ${Math.min(width, height)}px is below the required ${targetShortEdge}px; upscaling is not accepted.`);
+  }
+  if (actualDimensionsKnown && targetAspectRatio) {
+    const actualAspectRatio = width / height;
+    if (Math.abs(actualAspectRatio - targetAspectRatio) / targetAspectRatio > 0.02) {
+      issues.push(`Actual aspect ratio ${width}:${height} does not match the required geometry.`);
+    }
+  }
+  return {
+    status: issues.length === 0 ? 'passed' : 'blocked',
+    actual: actualDimensionsKnown ? { width, height } : undefined,
+    target: {
+      ...(targetSize ? { width: targetSize.width, height: targetSize.height } : {}),
+      ...(targetAspectRatio ? { aspectRatio: targetAspectRatio } : {}),
+      ...(targetShortEdge ? { shortEdge: targetShortEdge } : {}),
+    },
+    issues,
+  };
+}
+
+function assertArtifactMeetsGenerationContract(project, shot, artifact) {
+  const assessment = artifactContractAssessment(project, artifact);
+  if (assessment.status === 'blocked') {
+    throw new VideoProjectError(
+      `Shot ${shot.shotId} cannot be accepted: ${assessment.issues.join(' ')}`,
+      assessment.actual ? 'artifact_resolution_below_contract' : 'artifact_dimensions_unverified',
+    );
+  }
+  return assessment;
 }
 
 function evenDimension(value, fallback, minimum, maximum) {
@@ -547,14 +626,54 @@ function acceptedCompositionSources(project) {
         'composition_source_duration_missing',
       );
     }
+    assertArtifactMeetsGenerationContract(project, shot, artifact);
+    if (!Number.isFinite(Number(artifact?.width)) || !Number.isFinite(Number(artifact?.height))) {
+      throw new VideoProjectError(
+        `Accepted shot ${shot.shotId} has no measured dimensions and cannot be composed safely.`,
+        'composition_source_dimensions_missing',
+      );
+    }
     return {
       shotId: shot.shotId,
       title: shot.title,
+      caption: shot.caption,
+      captionPosition: shot.captionPosition || 'bottom',
       sourcePath,
       durationSeconds: Math.round(durationSeconds * 1000) / 1000,
       artifact: normalizeArtifact(artifact, 'video'),
     };
   });
+}
+
+function assertCompositionDoesNotUpscale(sources, width, height) {
+  for (const source of sources) {
+    const sourceWidth = Number(source.artifact?.width);
+    const sourceHeight = Number(source.artifact?.height);
+    if (width > sourceWidth || height > sourceHeight) {
+      throw new VideoProjectError(
+        `Shot ${source.shotId} is ${sourceWidth}x${sourceHeight}, below the ${width}x${height} composition target. Upscaling generated source video is not accepted.`,
+        'composition_source_upscale_forbidden',
+      );
+    }
+  }
+}
+
+function needsTimelineRender(sources, options, width, height, targetDurationSeconds) {
+  if (sources.length !== 1) return true;
+  const source = sources[0];
+  const sourceWidth = Number(source.artifact?.width);
+  const sourceHeight = Number(source.artifact?.height);
+  return Boolean(
+    options.narrationText
+    || options.backgroundMusicPath
+    || options.keepOriginalAudio === false
+    || source.caption
+    || options.transition !== 'cut'
+    || options.transitionDurationSeconds > 0
+    || Math.abs(targetDurationSeconds - source.durationSeconds) > 0.05
+    || width !== sourceWidth
+    || height !== sourceHeight
+  );
 }
 
 function buildCompositionPlan(project, options) {
@@ -571,9 +690,13 @@ function buildCompositionPlan(project, options) {
   const fallbackHeight = sources.find((source) => source.artifact?.height)?.artifact?.height ?? 1_080;
   const width = options.width ?? evenDimension(fallbackWidth, 1_920, 320, 7_680);
   const height = options.height ?? evenDimension(fallbackHeight, 1_080, 240, 4_320);
+  assertCompositionDoesNotUpscale(sources, width, height);
+  const mode = needsTimelineRender(sources, options, width, height, targetDurationSeconds)
+    ? 'timeline'
+    : 'source_qa';
   return {
     schema: COMPOSITION_SCHEMA,
-    mode: sources.length === 1 ? 'source_qa' : 'timeline',
+    mode,
     sources,
     scenes: sources.map((source, index) => ({
       sourcePath: source.sourcePath,
@@ -582,6 +705,8 @@ function buildCompositionPlan(project, options) {
       motion: 'none',
       transition: index === 0 ? 'cut' : options.transition,
       transitionDurationSeconds: index === 0 ? 0 : options.transitionDurationSeconds,
+      caption: source.caption,
+      captionPosition: source.captionPosition,
     })),
     filename: options.filename,
     targetDurationSeconds: Math.round(targetDurationSeconds * 1000) / 1000,
@@ -859,7 +984,11 @@ async function startProjectComposition(project, params, correlation, request = h
     throw new VideoProjectError('This VideoProject already has a verified final composition.', 'composition_already_completed');
   }
   const attempt = (Number(existing?.attempt) || 0) + 1;
-  const options = normalizeCompositionOptions(params.composition, project);
+  const options = normalizeCompositionOptions({
+    ...(project.compositionSpec || {}),
+    ...(params.composition || {}),
+  }, project);
+  project.compositionSpec = options;
   const plan = buildCompositionPlan(project, options);
   project.composition = {
     schema: COMPOSITION_SCHEMA,
@@ -922,6 +1051,12 @@ const SHOT_SCHEMA = Type.Object({
   id: Type.Optional(Type.String({ maxLength: 96 })),
   title: Type.Optional(Type.String({ maxLength: 500 })),
   prompt: Type.String({ minLength: 1, maxLength: 8_000 }),
+  caption: Type.Optional(Type.String({ maxLength: 500 })),
+  captionPosition: Type.Optional(Type.Union([
+    Type.Literal('top'),
+    Type.Literal('center'),
+    Type.Literal('bottom'),
+  ])),
   durationSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 600 })),
   model: Type.Optional(Type.String({ maxLength: 240 })),
   reference: Type.Optional(REFERENCE_SCHEMA),
@@ -978,8 +1113,8 @@ function createTools(toolContext, options = {}) {
     {
       name: 'uclaw_video_project',
       label: 'UClaw VideoProject',
-      description: 'Create, inspect, compose, list, or finalize a durable video project. This tool never calls a video provider. After accepted multi-shot generation, action:compose creates one idempotent Host composition task and a final-QA task; only the final verified artifact is delivered.',
-      promptSnippet: 'Use uclaw_video_project for durable video state, not for provider generation. Create once per user video goal. Reuse its projectId as video_generate parentTaskId and the returned shotId as segmentId. When the project result exposes nextGenerationInput or a shot generationInput, copy that object exactly; do not reconstruct or omit parentTaskId or segmentId. Keep provider output and QA evidence in the project. When every multi-shot video is accepted, call action:compose exactly once and wait for its durable final-QA result before delivery.',
+      description: 'Create, inspect, compose, list, or finalize a durable video project. This tool never calls a video provider. After every shot is accepted, action:compose chooses verified source pass-through or one idempotent Host timeline render, then runs final QA; only that Host-verified artifact is delivered.',
+      promptSnippet: 'Use uclaw_video_project for durable video state, not for provider generation. Create once per user video goal and persist intended narration, captions, audio policy, and output geometry in composition. Reuse its projectId as video_generate parentTaskId and the returned shotId as segmentId. When the project result exposes nextGenerationInput or a shot generationInput, copy that object exactly; do not reconstruct or omit parentTaskId or segmentId. Keep provider output and QA evidence in the project. When every shot is accepted, call action:compose exactly once and wait for its durable Host final-QA result before delivery. Never upscale or manually finalize a blocked source.',
       parameters: Type.Object({
         action: Type.Union([Type.Literal('create'), Type.Literal('get'), Type.Literal('list'), Type.Literal('compose'), Type.Literal('finalize')]),
         projectId: Type.Optional(Type.String({ maxLength: 120 })),
@@ -1035,6 +1170,7 @@ function createTools(toolContext, options = {}) {
                 updatedAt: createdAt,
                 revision: 0,
               };
+              project.compositionSpec = normalizeCompositionOptions(params.composition, project);
               updateDerivedState(project);
               await writeProject(project);
               return projectResult(project, 'create', providers);
@@ -1084,6 +1220,38 @@ function createTools(toolContext, options = {}) {
             if (['assembled', 'delivered'].includes(finalizationStatus) && !artifact) {
               throw new VideoProjectError('Assembled or delivered projects require the verified final video artifact.', 'finalization_artifact_missing');
             }
+            if (['assembled', 'delivered'].includes(finalizationStatus)) {
+              if (project.composition?.status === 'blocked') {
+                throw new VideoProjectError(
+                  'Blocked Host composition or final QA cannot be overwritten by manual finalization.',
+                  'finalization_composition_blocked',
+                );
+              }
+              const hostArtifactPath = cleanText(project.composition?.finalArtifact?.filePath, 2_000);
+              const requestedArtifactPath = cleanText(artifact?.filePath, 2_000);
+              const hostStatusAllowsConfirmation = finalizationStatus === 'delivered'
+                ? project.composition?.status === 'delivered'
+                : ['assembled', 'delivered'].includes(project.composition?.status);
+              if (
+                !hostStatusAllowsConfirmation
+                || project.composition?.finalQa?.status !== 'passed'
+                || !hostArtifactPath
+                || hostArtifactPath !== requestedArtifactPath
+              ) {
+                throw new VideoProjectError(
+                  'Assembled or delivered can only confirm the same artifact already passed by Host final QA.',
+                  'finalization_host_verification_required',
+                );
+              }
+              project.finalization = {
+                ...project.finalization,
+                note: cleanText(params.note, 1_500) || project.finalization?.note,
+                updatedAt: now(),
+              };
+              updateDerivedState(project);
+              await writeProject(project);
+              return projectResult(project, 'finalize', videoProviders());
+            }
             project.finalization = {
               status: finalizationStatus,
               artifact: artifact || project.finalization?.artifact,
@@ -1104,8 +1272,8 @@ function createTools(toolContext, options = {}) {
     {
       name: 'uclaw_video_shot',
       label: 'UClaw VideoProject shot',
-      description: 'Maintain one durable VideoProject shot. Use upsert to add or revise the plan before generation, record_attempt after video_generate returns, accept only after QA, and retry after a failed review. This tool never submits a provider job itself.',
-      promptSnippet: 'After video_generate returns, immediately record its provider task ID and output artifact with uclaw_video_shot. Run QA before accepting. A retry preserves failed-attempt evidence and makes the same shot eligible for one new video_generate attempt.',
+      description: 'Maintain one durable VideoProject shot. Use upsert to add or revise the plan before generation, record_attempt after video_generate returns, accept only after deterministic and semantic QA plus measured geometry, and retry after a failed review. This tool never submits a provider job itself.',
+      promptSnippet: 'After video_generate returns, immediately record its provider task ID and measured output artifact with uclaw_video_shot. Run deterministic Host QA and semantic review before accepting. A source below the project geometry contract is blocked and must be retried, never upscaled. A retry preserves failed-attempt evidence and makes the same shot eligible for one new video_generate attempt.',
       parameters: Type.Object({
         action: Type.Union([Type.Literal('upsert'), Type.Literal('record_attempt'), Type.Literal('accept'), Type.Literal('retry')]),
         projectId: Type.String({ minLength: 1, maxLength: 120 }),
@@ -1168,6 +1336,9 @@ function createTools(toolContext, options = {}) {
                 attempt.status = attemptStatus;
                 attempt.providerTaskId = cleanText(params.providerTaskId, 300) || attempt.providerTaskId;
                 attempt.artifact = normalizeArtifact(params.artifact) || attempt.artifact;
+                attempt.artifactContract = attempt.artifact
+                  ? artifactContractAssessment(project, attempt.artifact)
+                  : undefined;
                 attempt.qa = normalizeQa(params.qa) || attempt.qa;
                 attempt.error = attemptStatus === 'failed' ? cleanText(params.reason, 1_500) || 'Provider generation failed.' : undefined;
                 attempt.updatedAt = now();
@@ -1183,9 +1354,10 @@ function createTools(toolContext, options = {}) {
                   throw new VideoProjectError('Accept requires a succeeded attempt with a video artifact.', 'accept_attempt_invalid');
                 }
                 const qa = normalizeQa(params.qa) || attempt.qa;
-                if (!qa || qa.status !== 'pass') {
+                if (!qa || qa.status !== 'pass' || qa.deterministic !== true || qa.semantic !== true) {
                   throw new VideoProjectError('Accept requires a passing deterministic and semantic QA result.', 'accept_qa_missing');
                 }
+                attempt.artifactContract = assertArtifactMeetsGenerationContract(project, shot, attempt.artifact);
                 attempt.qa = qa;
                 attempt.acceptedAt = now();
                 shot.status = 'accepted';
@@ -1342,8 +1514,12 @@ export const __test = {
   shotGenerationInput,
   validateProjectVideoModels,
   projectStatus,
+  artifactContractAssessment,
+  assertArtifactMeetsGenerationContract,
   createTools,
+  normalizeCompositionOptions,
   buildCompositionPlan,
+  needsTimelineRender,
   startProjectComposition,
   synchronizeProjectComposition,
   createCompositionMonitor,

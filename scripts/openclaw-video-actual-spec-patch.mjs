@@ -2,7 +2,9 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const PATCH_MARKER = 'UCLAW_VIDEO_ACTUAL_SPEC_V1';
+const ACCEPTANCE_PATCH_MARKER = 'UCLAW_VIDEO_ACTUAL_SPEC_ACCEPTANCE_V2';
 const MEDIA_COMPLETION_CONTRACT_MARKER = 'UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2';
+const MEDIA_COMPLETION_CONTRACT_MARKER_V3 = 'UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V3';
 
 const EXECUTE_ANCHOR = 'async function executeVideoGenerationJob(params) {';
 const SAVE_ANCHOR = `\tconst mediaMaxBytes = resolveGeneratedMediaMaxBytes(params.effectiveCfg, "video");
@@ -36,6 +38,15 @@ const ASYNC_TERMINAL_ANCHOR = `\t\t\t\tpaths: executed.paths,
 const SYNC_TERMINAL_ANCHOR = `\t\t\t\t\tcount: executed.count,
 \t\t\t\t\tpaths: executed.savedPaths
 \t\t\t\t});`;
+const ACCEPTANCE_SPEC_ANCHOR = `\tconst specificationDifferences = buildGeneratedVideoSpecificationDifferencesUClaw(specification);
+\tconst specificationDifferenceLine = specificationDifferences.length > 0 ? \`Specification differences: \${specificationDifferences.slice(0, 3).join("; ")}\${specificationDifferences.length > 3 ? \`; +\${specificationDifferences.length - 3} more\` : ""}.\` : void 0;`;
+const ACCEPTANCE_LINES_ANCHOR = '\t\t...specificationDifferenceLine ? [specificationDifferenceLine] : [],';
+const ACCEPTANCE_RETURN_ANCHOR = `\t\tmediaUrls: allMediaUrls,
+\t\tattachments,
+\t\tcontentText: lines.join("\\n"),
+\t\twakeResult: lines.join("\\n"),
+\t\tdetails: {`;
+const ACCEPTANCE_DETAILS_ANCHOR = '\t\t\tspecification,';
 
 function replacementCount(content, anchor) {
   return content.split(anchor).length - 1;
@@ -172,6 +183,49 @@ function buildGeneratedVideoSpecificationDifferencesUClaw(specification) {
 } // ${PATCH_MARKER}_HELPERS
 `;
 
+const ACCEPTANCE_HELPERS = `function parseGeneratedVideoAcceptanceSizeUClaw(value) {
+\tconst match = typeof value === "string" ? value.trim().match(/^(\\d+)x(\\d+)$/u) : null;
+\tif (!match) return;
+\tconst width = Number.parseInt(match[1], 10);
+\tconst height = Number.parseInt(match[2], 10);
+\treturn width > 0 && height > 0 ? { width, height } : void 0;
+}
+function readGeneratedVideoAcceptanceDimensionsUClaw(output) {
+\tconst width = Number(output?.width);
+\tconst height = Number(output?.height);
+\tif (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) return { width, height };
+\treturn parseGeneratedVideoAcceptanceSizeUClaw(output?.size);
+}
+function buildGeneratedVideoSpecificationBlockingDifferencesUClaw(specification) {
+\tconst expected = parseGeneratedVideoAcceptanceSizeUClaw(specification.applied?.size);
+\tif (!expected) return [];
+\tconst differences = [];
+\tfor (let index = 0; index < specification.actual.outputs.length; index++) {
+\t\tconst actual = readGeneratedVideoAcceptanceDimensionsUClaw(specification.actual.outputs[index]);
+\t\tif (!actual) continue;
+\t\tconst label = specification.actual.outputs.length === 1 ? "output" : \`output \${index + 1}\`;
+\t\tconst expectedAspectRatio = expected.width / expected.height;
+\t\tconst actualAspectRatio = actual.width / actual.height;
+\t\tif (Math.abs(actualAspectRatio - expectedAspectRatio) / expectedAspectRatio > .02) {
+\t\t\tdifferences.push(\`\${label} aspect ratio submitted \${expected.width}x\${expected.height}, actual \${actual.width}x\${actual.height}\`);
+\t\t\tcontinue;
+\t\t}
+\t\tif (actual.width < expected.width || actual.height < expected.height) differences.push(\`\${label} dimensions below submitted \${expected.width}x\${expected.height}, actual \${actual.width}x\${actual.height}\`);
+\t}
+\treturn differences;
+}
+function buildGeneratedVideoSpecificationAcceptanceUClaw(specification) {
+\tconst blockingDifferences = buildGeneratedVideoSpecificationBlockingDifferencesUClaw(specification);
+\tconst expectedSize = parseGeneratedVideoAcceptanceSizeUClaw(specification.applied?.size);
+\tconst observedOutputCount = specification.actual.outputs.filter((output) => readGeneratedVideoAcceptanceDimensionsUClaw(output)).length;
+\treturn {
+\t\tstatus: blockingDifferences.length > 0 ? "blocked" : expectedSize && observedOutputCount < specification.actual.outputs.length ? "unverified" : "passed",
+\t\tblockingDifferences,
+\t\tpolicy: "generated video must meet or exceed the submitted dimensions at a matching aspect ratio; upscaling does not satisfy the generation contract"
+\t};
+} // ${ACCEPTANCE_PATCH_MARKER}_HELPERS
+`;
+
 const SAVE_PATCH = `\tconst mediaMaxBytes = resolveGeneratedMediaMaxBytes(params.effectiveCfg, "video");
 \tconst savedVideos = [];
 \tconst savedVideoSpecifications = [];
@@ -262,24 +316,91 @@ const SYNC_TERMINAL_PATCH = `\t\t\t\t\tcount: executed.count,
 \t\t\t\t\tterminalResult: { terminalSummary: executed.contentText }
 \t\t\t\t});`;
 
+const ACCEPTANCE_SPEC_PATCH = `${ACCEPTANCE_SPEC_ANCHOR}
+\tconst specificationAcceptance = buildGeneratedVideoSpecificationAcceptanceUClaw(specification);
+\tspecification.acceptance = specificationAcceptance;
+\tconst specificationBlockingLine = specificationAcceptance.status === "blocked"
+\t\t? \`Output rejected: \${specificationAcceptance.blockingDifferences.join("; ")}. Do not upscale or deliver this artifact; retry generation with a provider output that satisfies the submitted size.\`
+\t\t: void 0;
+\tconst terminalResult = specificationAcceptance.status === "blocked" ? {
+\t\tterminalOutcome: "blocked",
+\t\tterminalSummary: specificationBlockingLine
+\t} : void 0;`;
+
+const ACCEPTANCE_LINES_PATCH = `${ACCEPTANCE_LINES_ANCHOR}
+\t\t...specificationBlockingLine ? [specificationBlockingLine] : [],`;
+
+const ACCEPTANCE_RETURN_PATCH = `\t\tmediaUrls: allMediaUrls,
+\t\tattachments,
+\t\tcontentText: lines.join("\\n"),
+\t\twakeResult: lines.join("\\n"),
+\t\tterminalResult,
+\t\tdetails: {`;
+
+const ACCEPTANCE_DETAILS_PATCH = `\t\t\tspecification,
+\t\t\tspecificationAcceptance,`;
+
+const ACCEPTANCE_ASYNC_TERMINAL_ANCHOR = ASYNC_TERMINAL_PATCH;
+const ACCEPTANCE_ASYNC_TERMINAL_PATCH = `\t\t\t\tpaths: executed.paths,
+\t\t\t\tterminalResult: executed.terminalResult ?? terminalResult ?? (params.toolName === "Video generation" ? { terminalSummary: executed.contentText } : void 0)
+\t\t\t});`;
+
+const ACCEPTANCE_SYNC_TERMINAL_ANCHOR = SYNC_TERMINAL_PATCH;
+const ACCEPTANCE_SYNC_TERMINAL_PATCH = `\t\t\t\t\tcount: executed.count,
+\t\t\t\t\tpaths: executed.savedPaths,
+\t\t\t\t\tterminalResult: executed.terminalResult ?? { terminalSummary: executed.contentText }
+\t\t\t\t});`;
+
+function applyVideoActualSpecAcceptancePatch(content) {
+  let patched = replaceExactlyOnce(
+    content,
+    EXECUTE_ANCHOR,
+    `${ACCEPTANCE_HELPERS}\n${EXECUTE_ANCHOR}`,
+    'video specification acceptance helpers',
+  );
+  patched = replaceExactlyOnce(patched, ACCEPTANCE_SPEC_ANCHOR, ACCEPTANCE_SPEC_PATCH, 'video specification acceptance');
+  patched = replaceExactlyOnce(patched, ACCEPTANCE_LINES_ANCHOR, ACCEPTANCE_LINES_PATCH, 'video specification rejection line');
+  patched = replaceExactlyOnce(patched, ACCEPTANCE_RETURN_ANCHOR, ACCEPTANCE_RETURN_PATCH, 'video specification terminal result');
+  patched = replaceExactlyOnce(patched, ACCEPTANCE_DETAILS_ANCHOR, ACCEPTANCE_DETAILS_PATCH, 'video specification acceptance details');
+  if (!patched.includes(MEDIA_COMPLETION_CONTRACT_MARKER) && !patched.includes(MEDIA_COMPLETION_CONTRACT_MARKER_V3)) {
+    patched = replaceExactlyOnce(
+      patched,
+      ACCEPTANCE_ASYNC_TERMINAL_ANCHOR,
+      ACCEPTANCE_ASYNC_TERMINAL_PATCH,
+      'async blocked video terminal result',
+    );
+  }
+  patched = replaceExactlyOnce(
+    patched,
+    ACCEPTANCE_SYNC_TERMINAL_ANCHOR,
+    ACCEPTANCE_SYNC_TERMINAL_PATCH,
+    'sync blocked video terminal result',
+  );
+  return patched;
+}
+
 export function patchOpenClawVideoActualSpecContent(content, options) {
   if (!content.includes(EXECUTE_ANCHOR)) return { content, changed: false, matched: false };
-  if (content.includes(PATCH_MARKER)) return { content, changed: false, matched: true };
-  if (!options?.mediaServices?.fileName
-    || !options.mediaServices.runFfprobeExport
-    || !options.mediaServices.probeVideoDimensionsExport) {
-    throw new Error('[openclaw-video-actual-spec-patch] Media services import metadata is required.');
+  if (content.includes(ACCEPTANCE_PATCH_MARKER)) return { content, changed: false, matched: true };
+  let patched = content;
+  if (!patched.includes(PATCH_MARKER)) {
+    if (!options?.mediaServices?.fileName
+      || !options.mediaServices.runFfprobeExport
+      || !options.mediaServices.probeVideoDimensionsExport) {
+      throw new Error('[openclaw-video-actual-spec-patch] Media services import metadata is required.');
+    }
+    patched = `${buildImports(options.mediaServices)}\n${patched}`;
+    patched = replaceExactlyOnce(patched, EXECUTE_ANCHOR, `${HELPERS}\n${EXECUTE_ANCHOR}`, 'executeVideoGenerationJob');
+    patched = replaceExactlyOnce(patched, SAVE_ANCHOR, SAVE_PATCH, 'video save loop');
+    patched = replaceExactlyOnce(patched, SPECIFICATION_ANCHOR, SPECIFICATION_PATCH, 'specification');
+    patched = replaceExactlyOnce(patched, LINES_ANCHOR, LINES_PATCH, 'result lines');
+    patched = replaceExactlyOnce(patched, DETAILS_ANCHOR, DETAILS_PATCH, 'details');
+    if (!patched.includes(MEDIA_COMPLETION_CONTRACT_MARKER) && !patched.includes(MEDIA_COMPLETION_CONTRACT_MARKER_V3)) {
+      patched = replaceExactlyOnce(patched, ASYNC_TERMINAL_ANCHOR, ASYNC_TERMINAL_PATCH, 'async terminal summary');
+    }
+    patched = replaceExactlyOnce(patched, SYNC_TERMINAL_ANCHOR, SYNC_TERMINAL_PATCH, 'sync terminal summary');
   }
-  let patched = `${buildImports(options.mediaServices)}\n${content}`;
-  patched = replaceExactlyOnce(patched, EXECUTE_ANCHOR, `${HELPERS}\n${EXECUTE_ANCHOR}`, 'executeVideoGenerationJob');
-  patched = replaceExactlyOnce(patched, SAVE_ANCHOR, SAVE_PATCH, 'video save loop');
-  patched = replaceExactlyOnce(patched, SPECIFICATION_ANCHOR, SPECIFICATION_PATCH, 'specification');
-  patched = replaceExactlyOnce(patched, LINES_ANCHOR, LINES_PATCH, 'result lines');
-  patched = replaceExactlyOnce(patched, DETAILS_ANCHOR, DETAILS_PATCH, 'details');
-  if (!patched.includes(MEDIA_COMPLETION_CONTRACT_MARKER)) {
-    patched = replaceExactlyOnce(patched, ASYNC_TERMINAL_ANCHOR, ASYNC_TERMINAL_PATCH, 'async terminal summary');
-  }
-  patched = replaceExactlyOnce(patched, SYNC_TERMINAL_ANCHOR, SYNC_TERMINAL_PATCH, 'sync terminal summary');
+  patched = applyVideoActualSpecAcceptancePatch(patched);
   return { content: patched, changed: true, matched: true };
 }
 
@@ -345,4 +466,5 @@ export const __test = {
   ASYNC_TERMINAL_ANCHOR,
   SYNC_TERMINAL_ANCHOR,
   parseGeneratedVideoAvMediaInfoSource: HELPERS,
+  videoSpecificationAcceptanceSource: ACCEPTANCE_HELPERS,
 };

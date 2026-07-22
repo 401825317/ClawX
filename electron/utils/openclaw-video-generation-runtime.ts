@@ -178,17 +178,17 @@ function normalizeDurationSeconds(durationSeconds: number | undefined, model: st
 
 function buildVideoOutputMetadata(params: {
   metadata?: Record<string, unknown>;
-  size?: string;
-  durationSeconds?: number;
-  width?: number;
-  height?: number;
+  requestedSize?: string;
+  requestedDurationSeconds?: number;
+  requestedWidth?: number;
+  requestedHeight?: number;
 }): Record<string, unknown> {
   return {
     ...(params.metadata ?? {}),
-    ...(params.size ? { size: params.size } : {}),
-    width: params.width,
-    height: params.height,
-    durationSeconds: params.durationSeconds,
+    ...(params.requestedSize ? { requestedSize: params.requestedSize } : {}),
+    requestedWidth: params.requestedWidth,
+    requestedHeight: params.requestedHeight,
+    requestedDurationSeconds: params.requestedDurationSeconds,
   };
 }
 
@@ -623,14 +623,12 @@ export async function generateVideoInProcess(params: {
         url: video.url,
         mimeType: video.mimeType,
         fileName: video.fileName,
-        width: requestedDimensions.width,
-        height: requestedDimensions.height,
-        durationSeconds: requestedDurationSeconds,
         metadata: buildVideoOutputMetadata({
           metadata: video.metadata,
-          size: requestedSize,
-          durationSeconds: requestedDurationSeconds,
-          ...requestedDimensions,
+          requestedSize,
+          requestedDurationSeconds,
+          requestedWidth: requestedDimensions.width,
+          requestedHeight: requestedDimensions.height,
         }),
         outputIndex: index,
       })),
@@ -664,14 +662,12 @@ export async function generateVideoInProcess(params: {
         mimeType: saved.contentType,
         size: saved.size,
         fileName: video.fileName,
-        width: requestedDimensions.width,
-        height: requestedDimensions.height,
-        durationSeconds: requestedDurationSeconds,
         metadata: buildVideoOutputMetadata({
           metadata: video.metadata,
-          size: requestedSize,
-          durationSeconds: requestedDurationSeconds,
-          ...requestedDimensions,
+          requestedSize,
+          requestedDurationSeconds,
+          requestedWidth: requestedDimensions.width,
+          requestedHeight: requestedDimensions.height,
         }),
         outputIndex: index,
       };
@@ -682,14 +678,12 @@ export async function generateVideoInProcess(params: {
         url: video.url.trim(),
         mimeType: video.mimeType,
         fileName: video.fileName,
-        width: requestedDimensions.width,
-        height: requestedDimensions.height,
-        durationSeconds: requestedDurationSeconds,
         metadata: buildVideoOutputMetadata({
           metadata: video.metadata,
-          size: requestedSize,
-          durationSeconds: requestedDurationSeconds,
-          ...requestedDimensions,
+          requestedSize,
+          requestedDurationSeconds,
+          requestedWidth: requestedDimensions.width,
+          requestedHeight: requestedDimensions.height,
         }),
         outputIndex: index,
       };

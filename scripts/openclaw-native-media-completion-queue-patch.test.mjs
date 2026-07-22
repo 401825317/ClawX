@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import vm from 'node:vm';
 import { join } from 'node:path';
 
@@ -35,8 +37,8 @@ function countOccurrences(content, search) {
 const fixture = await findMediaFixture();
 const first = patchOpenClawNativeMediaCompletionQueueContent(fixture.content, fixture.filePath);
 assert.equal(first.matched, true);
-assert.equal(first.changed || first.content.includes('UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2'), true);
-assert.match(first.content, /UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2/u);
+assert.equal(first.changed || first.content.includes('UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V3'), true);
+assert.match(first.content, /UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V3/u);
 assert.match(first.content, /UCLAW_SESSION_COORDINATOR_V1/u);
 assert.match(first.content, /UCLAW_ARTIFACT_STATUS=available/u);
 assert.match(first.content, /const localArtifactPath =/u);
@@ -45,9 +47,23 @@ assert.match(first.content, /setUclawNativeMediaDeliveryStatus\(\{ handle: param
 assert.match(first.content, /media-completion:/u);
 assert.match(first.content, /Generated media; persisting artifact before delivery/u);
 assert.match(first.content, /typeof executed\.contentText === "string"/u);
+assert.match(first.content, /executed\.terminalResult\?\.terminalOutcome === "blocked"/u);
+assert.match(first.content, /paths: outputBlocked \? \[\] : executed\.paths/u);
+assert.match(first.content, /status: outputBlocked \? "error" : "ok"/u);
+assert.match(first.content, /attachments: outputBlocked \? \[\] : executed\.attachments/u);
 assert.doesNotMatch(first.content, /UCLAW_NATIVE_MEDIA_COMPLETION_SESSION_QUEUES/u);
 assert.equal(countOccurrences(first.content, 'async function wakeMediaGenerationTaskCompletion(params) {'), 1);
 assert.equal(countOccurrences(first.content, 'async function wakeMediaGenerationTaskCompletionQueued(params) {'), 1);
+
+const syntaxRoot = await mkdtemp(join(tmpdir(), 'uclaw-media-completion-syntax-'));
+try {
+  const syntaxFile = join(syntaxRoot, 'patched-openclaw-tools.mjs');
+  await writeFile(syntaxFile, first.content, 'utf8');
+  const syntaxCheck = spawnSync(process.execPath, ['--check', syntaxFile], { encoding: 'utf8' });
+  assert.equal(syntaxCheck.status, 0, syntaxCheck.stderr || syntaxCheck.stdout);
+} finally {
+  await rm(syntaxRoot, { recursive: true, force: true });
+}
 
 const second = patchOpenClawNativeMediaCompletionQueueContent(first.content, fixture.filePath);
 assert.equal(second.changed, false);
@@ -69,7 +85,7 @@ const repaired = patchOpenClawNativeMediaCompletionQueueContent(duplicated, fixt
 assert.equal(repaired.changed, true);
 assert.equal(repaired.content, first.content);
 
-const helperStart = first.content.indexOf('const UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2');
+const helperStart = first.content.indexOf('const UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V3');
 const helperEnd = first.content.indexOf('async function wakeMediaGenerationTaskCompletion(params) {', helperStart);
 assert.ok(helperStart >= 0 && helperEnd > helperStart);
 const helperSource = first.content.slice(helperStart, helperEnd)

@@ -2,7 +2,8 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const PATCH_NAME = 'openclaw-native-media-completion-contract-patch';
-const PATCH_MARKER = 'UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2';
+const PATCH_MARKER = 'UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V3';
+const LEGACY_PATCH_MARKER = 'UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2';
 const RUNTIME_SIGNATURE = 'async function wakeMediaGenerationTaskCompletion(params) {';
 const QUEUED_RUNTIME_SIGNATURE = 'async function wakeMediaGenerationTaskCompletionQueued(params) {';
 const COORDINATOR_MARKER = 'UCLAW_SESSION_COORDINATOR_V1';
@@ -113,11 +114,12 @@ const SCHEDULE_PATCH = `function scheduleMediaGenerationTaskCompletion(params) {
 \t\t}
 \t\ttry {
 \t\t\t// Execution is terminal before any session wake is attempted. A
-\t\t\t// session delivery failure must not turn a valid provider artifact
-\t\t\t// into an execution failure.
+\t\t\t// session delivery failure must not turn a contract-valid provider
+\t\t\t// artifact into an execution failure.
+\t\t\tconst outputBlocked = executed.terminalResult?.terminalOutcome === "blocked";
 \t\t\tconst localArtifactPath = (value) => typeof value === "string" && isAbsolute(value.trim()) ? value.trim() : void 0;
-\t\t\tconst artifactPaths = Array.isArray(executed.paths) ? executed.paths.map(localArtifactPath).filter(Boolean) : [];
-\t\t\tconst artifactAttachments = Array.isArray(executed.attachments) ? executed.attachments.map((value) => ({
+\t\t\tconst artifactPaths = !outputBlocked && Array.isArray(executed.paths) ? executed.paths.map(localArtifactPath).filter(Boolean) : [];
+\t\t\tconst artifactAttachments = !outputBlocked && Array.isArray(executed.attachments) ? executed.attachments.map((value) => ({
 \t\t\t\tpath: localArtifactPath(value?.path),
 \t\t\t\tmimeType: typeof value?.mimeType === "string" ? value.mimeType : void 0,
 \t\t\t\tname: typeof value?.name === "string" ? value.name : void 0
@@ -125,15 +127,17 @@ const SCHEDULE_PATCH = `function scheduleMediaGenerationTaskCompletion(params) {
 \t\t\tconst artifactContract = artifactPaths.length > 0 || artifactAttachments.length > 0
 \t\t\t\t? "UCLAW_ARTIFACT_STATUS=available;UCLAW_ARTIFACTS=" + Buffer.from(JSON.stringify({ paths: artifactPaths, attachments: artifactAttachments })).toString("base64url")
 \t\t\t\t: "UCLAW_ARTIFACT_STATUS=missing";
-\t\t\tif (params.handle) setUclawNativeMediaDeliveryStatus({ handle: params.handle }, "session_queued");
+\t\t\tif (params.handle) setUclawNativeMediaDeliveryStatus({ handle: params.handle }, outputBlocked ? "not_applicable" : "session_queued");
 \t\t\tparams.lifecycle.completeTaskRun({
 \t\t\t\thandle: params.handle,
 \t\t\t\tprovider: executed.provider,
 \t\t\t\tmodel: executed.model,
 \t\t\t\tcount: executed.count,
-\t\t\t\tpaths: executed.paths,
+\t\t\t\tpaths: outputBlocked ? [] : executed.paths,
 \t\t\t\tterminalResult: {
+\t\t\t\t\t...executed.terminalResult?.terminalOutcome ? { terminalOutcome: executed.terminalResult.terminalOutcome } : {},
 \t\t\t\t\tterminalSummary: [
+\t\t\t\t\t\texecuted.terminalResult?.terminalSummary,
 \t\t\t\t\t\ttypeof executed.contentText === "string" ? executed.contentText.trim() : "",
 \t\t\t\t\t\tartifactContract
 \t\t\t\t\t].filter(Boolean).join("\\n")
@@ -145,16 +149,17 @@ const SCHEDULE_PATCH = `function scheduleMediaGenerationTaskCompletion(params) {
 \t\t\treturn;
 \t\t}
 \t\ttry {
+\t\t\tconst outputBlocked = executed.terminalResult?.terminalOutcome === "blocked";
 \t\t\tconst delivered = await params.lifecycle.wakeTaskCompletion({
 \t\t\t\tconfig: params.config,
 \t\t\t\thandle: params.handle,
-\t\t\t\tstatus: "ok",
-\t\t\t\tstatusLabel: "completed successfully",
-\t\t\t\tresult: executed.wakeResult,
-\t\t\t\tattachments: executed.attachments,
-\t\t\t\tmediaUrls: executed.mediaUrls
+\t\t\t\tstatus: outputBlocked ? "error" : "ok",
+\t\t\t\tstatusLabel: outputBlocked ? "blocked by output verification" : "completed successfully",
+\t\t\t\tresult: outputBlocked ? executed.terminalResult?.terminalSummary : executed.wakeResult,
+\t\t\t\tattachments: outputBlocked ? [] : executed.attachments,
+\t\t\t\tmediaUrls: outputBlocked ? [] : executed.mediaUrls
 \t\t\t});
-\t\t\tif (!delivered) params.onWakeFailure(params.toolName + " artifact is ready but completion delivery is pending", { taskId: params.handle?.taskId, runId: params.handle?.runId });
+\t\t\tif (!delivered) params.onWakeFailure(params.toolName + (outputBlocked ? " blocked result delivery is pending" : " artifact is ready but completion delivery is pending"), { taskId: params.handle?.taskId, runId: params.handle?.runId });
 \t\t} catch (error) {
 \t\t\tif (params.handle) setUclawNativeMediaDeliveryStatus({ handle: params.handle }, "failed", error);
 \t\t\tparams.onWakeFailure(params.toolName + " completion wake failed after successful generation", { taskId: params.handle?.taskId, runId: params.handle?.runId, error });
@@ -207,6 +212,20 @@ export function patchOpenClawNativeMediaCompletionQueueContent(content, filePath
       filePath,
     );
     return { content: migrated, changed: migrated !== content, matched: true };
+  }
+  if (content.includes(LEGACY_PATCH_MARKER)) {
+    const scheduleStart = content.indexOf(SCHEDULE_START);
+    const helperStart = content.indexOf(`const ${LEGACY_PATCH_MARKER} = true;`, scheduleStart + SCHEDULE_START.length);
+    if (scheduleStart < 0 || helperStart < 0 || helperStart <= scheduleStart) {
+      throw new Error(`[${PATCH_NAME}] Legacy media completion scheduler anchor was not found in ${filePath}.`);
+    }
+    const upgraded = normalizeWakeDeclarations(
+      (content.slice(0, scheduleStart) + SCHEDULE_PATCH + content.slice(helperStart))
+        .replace(LEGACY_PATCH_MARKER, PATCH_MARKER)
+        .replace('\tconst queueKey = key;', '\tconst queueKey = "media-completion:" + key;'),
+      filePath,
+    );
+    return { content: upgraded, changed: true, matched: true };
   }
 
   let patched = patchDetachedRuntimeImport(content, filePath);
