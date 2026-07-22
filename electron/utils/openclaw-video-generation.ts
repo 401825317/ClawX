@@ -21,6 +21,7 @@ import {
   CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
   CLAWX_OPENAI_VIDEO_DEFAULT_SIZE,
   CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
+  CLAWX_OPENAI_VIDEO_MODEL_IDS,
   CLAWX_OPENAI_VIDEO_MODEL_OPTIONS,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   isClawXOpenAiVideoModelId,
@@ -411,6 +412,29 @@ function extractModelIdFromProviderEntry(provider: unknown): string | null {
   return null;
 }
 
+/** Check the managed OpenAI provider advertises every configured video model. */
+export function hasCompleteManagedOpenAiVideoModelCatalog(config: Record<string, unknown>): boolean {
+  const models = isRecord(config.models) ? config.models : null;
+  const providers = models && isRecord(models.providers) ? models.providers : null;
+  const provider = providers && isRecord(providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY])
+    ? providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY]
+    : null;
+  if (!provider || !Array.isArray(provider.models)) {
+    return false;
+  }
+
+  const configuredModelIds = new Set(provider.models.flatMap((model) => {
+    if (typeof model === 'string' && model.trim()) {
+      return [model.trim()];
+    }
+    if (isRecord(model) && typeof model.id === 'string' && model.id.trim()) {
+      return [model.id.trim()];
+    }
+    return [];
+  }));
+  return CLAWX_OPENAI_VIDEO_MODEL_IDS.every((modelId) => configuredModelIds.has(modelId));
+}
+
 function resolveOpenAiVideoRelayModelId(
   config: VideoGenerationModelConfig,
   openclawConfig: Record<string, unknown>,
@@ -592,6 +616,9 @@ export async function ensureManagedOpenAiVideoRelay(
 ): Promise<void> {
   const config = await readOpenClawConfig();
   const currentConfig = parseVideoGenerationModelConfig(config.agents?.defaults?.videoGenerationModel);
+  const hasCompleteManagedModelCatalog = hasCompleteManagedOpenAiVideoModelCatalog(
+    config as Record<string, unknown>,
+  );
   if (options.preserveExisting && currentConfig.primary) {
     const registeredProviders = await listRegisteredVideoProviders(config);
     const parsedPrimary = parseVideoModelRef(currentConfig.primary);
@@ -608,7 +635,13 @@ export async function ensureManagedOpenAiVideoRelay(
     const isManagedOpenAiRelay = parsedPrimary?.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
       && configuredOpenAiBaseUrl === managedOpenAiBaseUrl;
     const canPreservePrimary = Boolean(normalizedPrimary)
-      && (!isManagedOpenAiRelay || isClawXOpenAiVideoModelId(parsedPrimary?.model));
+      && (
+        !isManagedOpenAiRelay
+        || (
+          isClawXOpenAiVideoModelId(parsedPrimary?.model)
+          && hasCompleteManagedModelCatalog
+        )
+      );
     if (canPreservePrimary && normalizedPrimary) {
       const normalizedFallbacks = currentConfig.fallbacks
         .map((fallback) => normalizeRegisteredVideoModelRef(fallback, registeredProviders))
@@ -638,14 +671,14 @@ export async function ensureManagedOpenAiVideoRelay(
     && relayState.baseUrl.trim() === current.openAiRelay.baseUrl.trim()
     && currentConfig.primary === primaryModel
     && currentConfig.timeoutMs === timeoutMs
-    && currentConfig.fallbacks.length === 0;
+    && currentConfig.fallbacks.length === 0
+    && hasCompleteManagedModelCatalog;
 
   if (!relayAlreadyConfigured) {
     await applyOpenAiVideoRelaySettings({
       enabled: true,
       baseUrl: current.openAiRelay.baseUrl,
       model,
-      timeoutMs,
     });
     return;
   }

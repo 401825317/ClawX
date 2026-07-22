@@ -10,6 +10,7 @@
  *      conversation:
  *        - `<baseId>.jsonl`               the live transcript
  *        - `<baseId>.deleted.jsonl`       legacy soft-delete leftover
+ *        - `<baseId>.jsonl.deleted.*`     current sessions.delete archives
  *        - `<baseId>.jsonl.reset.*`       reset snapshots from sessions.reset
  *        - `<baseId>.trajectory.jsonl`    OpenClaw runtime "flight recorder"
  *                                         (default location, beside session)
@@ -179,7 +180,8 @@ async function readTrajectoryRuntimeFile(pointerPath: string): Promise<string | 
  * first. Other errors are accumulated so the caller can log/surface them.
  *
  * In addition to the local sidecars (`.jsonl`, `.deleted.jsonl`,
- * `.jsonl.reset.*`, `.trajectory.jsonl`, `.trajectory-path.json`), the
+ * `.jsonl.deleted.*`, `.jsonl.reset.*`, `.trajectory.jsonl`,
+ * `.trajectory-path.json`), the
  * sweep follows the `.trajectory-path.json` pointer when it exists and
  * unlinks the off-disk runtime file at `runtimeFile`. This keeps ClawX in
  * sync with OpenClaw's `OPENCLAW_TRAJECTORY_DIR` override (where the
@@ -207,6 +209,7 @@ export async function sweepSessionArtefacts(
     || name === `${baseId}.deleted.jsonl`
     || name === `${baseId}.trajectory.jsonl`
     || name === pointerName
+    || name.startsWith(`${baseId}.jsonl.deleted.`)
     || name.startsWith(`${baseId}.jsonl.reset.`),
   );
 
@@ -265,7 +268,7 @@ export function removeSessionEntry(
   if (Array.isArray(sessionsJson.sessions)) {
     sessionsJson.sessions = (sessionsJson.sessions as Array<Record<string, unknown>>)
       .filter((s) => s.key !== sessionKey && s.sessionKey !== sessionKey);
-  } else if (sessionsJson[sessionKey]) {
+  } else if (Object.hasOwn(sessionsJson, sessionKey)) {
     delete sessionsJson[sessionKey];
   }
 }

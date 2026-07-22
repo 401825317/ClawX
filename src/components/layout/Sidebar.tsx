@@ -957,8 +957,8 @@ function SidebarComponent() {
         variant="destructive"
         onConfirm={async () => {
           if (!sessionToDelete) return;
-          await deleteSession(sessionToDelete.key);
-          if (currentSessionKey === sessionToDelete.key) navigate('/');
+          const deleted = await deleteSession(sessionToDelete.key);
+          if (deleted && currentSessionKey === sessionToDelete.key) navigate('/');
           setSessionToDelete(null);
         }}
         onCancel={() => setSessionToDelete(null)}

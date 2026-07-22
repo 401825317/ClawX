@@ -18,9 +18,12 @@ import {
   JUNFEIAI_OPENCLAW_EXEC_SECURITY,
   JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
   JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR,
   JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
   JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF,
+  JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS,
   JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
+  JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS,
   JUNFEIAI_RUNTIME_CONTRACT_VERSION,
   JUNFEIAI_VIDEO_GENERATION_DEFAULT_RESOLUTION,
   JUNFEIAI_VIDEO_GENERATION_DEFAULT_SIZE,
@@ -30,7 +33,9 @@ import {
 } from '../electron/utils/junfeiai-distribution.ts';
 import {
   ensureJunFeiAICompactionDefaultsInConfig,
+  ensureJunFeiAIContextLimitsInConfig,
   ensureJunFeiAIExecDefaultsInConfig,
+  ensureJunFeiAIWebSearchDefaultsInConfig,
 } from '../electron/utils/openclaw-auth.ts';
 import endpoints from '../shared/junfeiai-endpoints.json';
 
@@ -59,12 +64,24 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
     endpoints.openClawCompaction.midTurnPrecheck.enabled,
   );
   assert.equal(
+    JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR,
+    endpoints.openClawCompaction.reserveTokensFloor,
+  );
+  assert.equal(
     JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
     endpoints.openClawCompaction.truncateAfterCompaction,
   );
   assert.equal(
     JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
     endpoints.openClawCompaction.maxActiveTranscriptBytes,
+  );
+  assert.equal(
+    JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS,
+    endpoints.openClawContextLimits.toolResultMaxChars,
+  );
+  assert.equal(
+    JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS,
+    endpoints.openClawWebSearch.maxResults,
   );
   assert.equal(JUNFEIAI_IMAGE_GENERATION_TIMEOUT_MS, endpoints.imageGenerationTimeoutMs);
   assert.equal(JUNFEIAI_VIDEO_GENERATION_DEFAULT_RESOLUTION, endpoints.videoGenerationDefaults.resolution);
@@ -124,7 +141,7 @@ test('applies endpoint-configured OpenClaw compaction defaults without dropping 
   assert.equal(ensureJunFeiAICompactionDefaultsInConfig(config), true);
   assert.deepEqual(config.agents.defaults.compaction, {
     mode: 'safeguard',
-    reserveTokensFloor: 24000,
+    reserveTokensFloor: endpoints.openClawCompaction.reserveTokensFloor,
     midTurnPrecheck: {
       enabled: endpoints.openClawCompaction.midTurnPrecheck.enabled,
       futureSetting: 'keep',
@@ -133,4 +150,40 @@ test('applies endpoint-configured OpenClaw compaction defaults without dropping 
     maxActiveTranscriptBytes: endpoints.openClawCompaction.maxActiveTranscriptBytes,
   });
   assert.equal(ensureJunFeiAICompactionDefaultsInConfig(config), false);
+});
+
+test('applies endpoint-configured context and web-search limits without dropping adjacent settings', () => {
+  const config = {
+    agents: {
+      defaults: {
+        contextLimits: {
+          memoryGetMaxChars: 12000,
+          toolResultMaxChars: 64000,
+        },
+      },
+    },
+    tools: {
+      web: {
+        search: {
+          provider: 'parallel-free',
+          maxResults: 5,
+          cacheTtlMinutes: 15,
+        },
+      },
+    },
+  };
+
+  assert.equal(ensureJunFeiAIContextLimitsInConfig(config), true);
+  assert.equal(ensureJunFeiAIWebSearchDefaultsInConfig(config), true);
+  assert.deepEqual(config.agents.defaults.contextLimits, {
+    memoryGetMaxChars: 12000,
+    toolResultMaxChars: endpoints.openClawContextLimits.toolResultMaxChars,
+  });
+  assert.deepEqual(config.tools.web.search, {
+    provider: 'parallel-free',
+    maxResults: endpoints.openClawWebSearch.maxResults,
+    cacheTtlMinutes: 15,
+  });
+  assert.equal(ensureJunFeiAIContextLimitsInConfig(config), false);
+  assert.equal(ensureJunFeiAIWebSearchDefaultsInConfig(config), false);
 });

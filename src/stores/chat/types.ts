@@ -281,7 +281,7 @@ export interface ChatState {
   reconcileGatewayRecovery: () => Promise<void>;
   switchSession: (key: string) => void;
   newSession: () => void;
-  deleteSession: (key: string) => Promise<void>;
+  deleteSession: (key: string) => Promise<boolean>;
   renameSession: (key: string, label: string) => Promise<void>;
   updateSessionModel: (key: string, modelRef: string | null) => Promise<void>;
   updateSessionThinking: (key: string, thinkingLevel: string | null) => Promise<void>;

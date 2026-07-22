@@ -41,6 +41,7 @@ import {
 import { clearBaselines } from './baseline-cache';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
 import {
+  isEmptyMainComposerSessionRow,
   isInternalHeartbeatSession,
   persistCurrentSessionKey,
   pickStartupSessionFallback,
@@ -985,6 +986,7 @@ const _historyLoadGenerationBySession = new Map<string, number>();
 let _historyLoadGenerationCounter = 0;
 let _deferredHistoryLoadTimer: ReturnType<typeof setTimeout> | null = null;
 const _sessionsNeedingTerminalHistoryRefresh = new Set<string>();
+const _sessionsDeleting = new Set<string>();
 const _pendingLocalSessionKeys = new Set<string>();
 const _sessionCwdMutations = new Map<string, Promise<void>>();
 
@@ -2010,8 +2012,20 @@ function getCachedSessionHistory(sessionKey: string): { messages: RawMessage[]; 
 }
 
 function clearCachedSessionHistory(sessionKey: string): void {
+  // Deletion may reuse the default session key immediately. Advance the same
+  // monotonic generation used by history loads so older requests and preview
+  // callbacks cannot mistake that placeholder for the deleted session.
+  nextHistoryLoadGeneration(sessionKey);
+  _historyLoadInFlight.delete(sessionKey);
+  _lastHistoryLoadAtBySession.delete(sessionKey);
+  _forceNextHistoryLoadBySession.delete(sessionKey);
   _sessionHistoryCache.delete(sessionKey);
   _sessionsNeedingTerminalHistoryRefresh.delete(sessionKey);
+  for (const foregroundLoadKey of _foregroundHistoryLoadSeen) {
+    if (foregroundLoadKey.endsWith(`|${sessionKey}`)) {
+      _foregroundHistoryLoadSeen.delete(foregroundLoadKey);
+    }
+  }
 }
 
 function clearCachedSessionRunState(sessionKey: string): void {
@@ -3583,7 +3597,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       try {
         const data = await fetchChatSessionsList();
         if (data) {
-          const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
+          const rawSessions = Array.isArray(data.sessions)
+            ? data.sessions.filter((session): session is Record<string, unknown> => (
+              Boolean(session)
+              && typeof session === 'object'
+              && !isEmptyMainComposerSessionRow(session as Record<string, unknown>)
+            ))
+            : [];
           const { currentSessionKey, sessions: localSessions } = get();
           const localSessionByKey = new Map(localSessions.map((session) => [session.key, session] as const));
           const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => {
@@ -3692,7 +3712,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
 
           const localCurrentSession = localSessions.find((session) => session.key === nextSessionKey);
-          const sessionsWithCurrent = !dedupedSessions.find((s) => s.key === nextSessionKey) && nextSessionKey
+          const shouldIncludePendingCurrent = Boolean(
+            nextSessionKey
+            && !dedupedSessions.some((session) => session.key === nextSessionKey)
+            && _pendingLocalSessionKeys.has(nextSessionKey)
+            && !isInternalHeartbeatSession(nextSessionKey),
+          );
+          const sessionsWithCurrent = shouldIncludePendingCurrent
             ? [
               ...dedupedSessions,
               localCurrentSession ? { ...localCurrentSession } : { key: nextSessionKey, displayName: nextSessionKey },
@@ -3836,88 +3862,103 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // ── Delete session ──
   //
-  // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
-  // RPC  - confirmed by inspecting client.ts, protocol.ts and the full codebase.
-  // Deletion is therefore performed locally: the renderer drops the session
-  // from the sidebar / labels / activity maps and the Main process hard-deletes
-  // the on-disk transcript so it stops appearing in sessions.list and stops
-  // contributing to the Dashboard token-usage history.
+  // OpenClaw owns active Run settlement and its in-memory session cache. Main
+  // therefore completes sessions.delete (or sessions.reset for the protected
+  // main identity) before the renderer removes the corresponding local state.
 
   deleteSession: async (key: string) => {
+    _sessionsDeleting.add(key);
+    if (get().currentSessionKey === key) clearHistoryPoll();
     clearCachedSessionHistory(key);
-    clearCachedSessionRunState(key);
-    clearActiveSendGeneration(key);
-    clearQueuedChatSends(key);
-    _lastSendIntentBySession.delete(key);
-    clearSessionLabelHydrationTracking(key);
-    clearPendingOptimisticUserMessages(key);
-    useConversationStore.getState().removeSession(key);
     try {
-      await cancelSessionQueuedChatSends(key);
-    } catch (error) {
-      console.warn('[deleteSession] Failed to clear durable queued sends:', {
-        sessionKey: key,
-        error: String(error),
-      });
-    }
-    // Hard-delete the session's JSONL transcript on disk.
-    // The main process unlinks <id>.jsonl plus any leftover
-    // <id>.deleted.jsonl and <id>.jsonl.reset.* siblings, then removes the
-    // entry from sessions.json so sessions.list stops surfacing it.
-    try {
-      const result = await hostApiFetch<{
-        success: boolean;
-        error?: string;
-      }>('/api/sessions/delete', {
-        method: 'POST',
-        body: JSON.stringify({ sessionKey: key }),
-      });
-      if (!result.success) {
-        console.warn(`[deleteSession] IPC reported failure for ${key}:`, result.error);
+      try {
+        await cancelSessionQueuedChatSends(key);
+      } catch (error) {
+        console.warn('[deleteSession] Failed to clear durable queued sends:', {
+          sessionKey: key,
+          error: String(error),
+        });
       }
-    } catch (err) {
-      console.warn(`[deleteSession] IPC call failed for ${key}:`, err);
-    }
 
-    const { currentSessionKey, sessions } = get();
-    const remaining = sessions.filter((s) => s.key !== key);
-
-    if (currentSessionKey === key) {
-      const nextSessionKey = pickStartupSessionFallback(currentSessionKey, remaining) ?? DEFAULT_SESSION_KEY;
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-        messages: [],
-        loadingMoreHistory: false,
-        hasMoreHistory: false,
-        historyMessageLimit: HISTORY_PAGE_SIZE,
-        streamingText: '',
-        streamingMessage: null,
-        streamingTools: [],
-        activeRunId: null,
-        pendingImageGenerationLocal: false,
-        pendingVideoGenerationLocal: false,
-        error: null,
-        runError: null,
-        historyError: null,
-        pendingFinal: false,
-        lastUserMessageAt: null,
-        pendingToolImages: [],
-        currentSessionKey: nextSessionKey,
-        currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
-      }));
-      if (remaining.some((session) => session.key === nextSessionKey)) {
-        get().loadHistory();
+      // Persist the hard delete before removing the visible session. Otherwise
+      // a failed Host API call looks successful until the next application start.
+      try {
+        const result = await hostApiFetch<{
+          success: boolean;
+          error?: string;
+        }>('/api/sessions/delete', {
+          method: 'POST',
+          body: JSON.stringify({ sessionKey: key }),
+        });
+        if (!result.success) {
+          console.warn(`[deleteSession] Host API reported failure for ${key}:`, result.error);
+          if (get().currentSessionKey === key) {
+            forceNextHistoryLoad(key);
+            deferHistoryLoad(get, true);
+          }
+          return false;
+        }
+      } catch (error) {
+        console.warn(`[deleteSession] Host API call failed for ${key}:`, error);
+        if (get().currentSessionKey === key) {
+          forceNextHistoryLoad(key);
+          deferHistoryLoad(get, true);
+        }
+        return false;
       }
-    } else {
-      set((s) => ({
-        sessions: remaining,
-        sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
-        sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
-      }));
+
+      clearCachedSessionRunState(key);
+      clearActiveSendGeneration(key);
+      clearQueuedChatSends(key);
+      _lastSendIntentBySession.delete(key);
+      clearSessionLabelHydrationTracking(key);
+      clearPendingOptimisticUserMessages(key);
+      useConversationStore.getState().removeSession(key);
+
+      const { currentSessionKey, sessions } = get();
+      const remaining = sessions.filter((s) => s.key !== key);
+
+      if (currentSessionKey === key) {
+        const nextSessionKey = pickStartupSessionFallback(currentSessionKey, remaining) ?? DEFAULT_SESSION_KEY;
+        set((s) => ({
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+          messages: [],
+          loading: false,
+          loadingMoreHistory: false,
+          hasMoreHistory: false,
+          historyMessageLimit: HISTORY_PAGE_SIZE,
+          streamingText: '',
+          streamingMessage: null,
+          streamingTools: [],
+          activeRunId: null,
+          pendingImageGenerationLocal: false,
+          pendingVideoGenerationLocal: false,
+          error: null,
+          runError: null,
+          historyError: null,
+          pendingFinal: false,
+          lastUserMessageAt: null,
+          pendingToolImages: [],
+          currentSessionKey: nextSessionKey,
+          currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
+        }));
+        if (remaining.some((session) => session.key === nextSessionKey)) {
+          get().loadHistory();
+        }
+      } else {
+        set((s) => ({
+          sessions: remaining,
+          sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
+          sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
+        }));
+      }
+      _pendingLocalSessionKeys.delete(key);
+      return true;
+    } finally {
+      _sessionsDeleting.delete(key);
     }
-    _pendingLocalSessionKeys.delete(key);
   },
 
   // ── New session ──
@@ -4100,6 +4141,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadHistory: async (quiet = false) => {
     const { currentSessionKey } = get();
+    if (_sessionsDeleting.has(currentSessionKey)) return;
     const foregroundLoadKey = getHistoryForegroundLoadKey(currentSessionKey);
     const isInitialForegroundLoad = !quiet && !_foregroundHistoryLoadSeen.has(foregroundLoadKey);
     const historyTimeoutOverride = getStartupHistoryTimeoutOverride(isInitialForegroundLoad);
@@ -4356,6 +4398,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         lastUserMessageAt: stateBeforeHistoryCommit.lastUserMessageAt,
       });
       const hostTasks = parseHostTaskBridgeTasks(await hostTaskBridgePayloadPromise);
+      if (!isCurrentSession()) return false;
       const hostTaskRehydrationOptions = {
         existingRunIds: Object.keys(nextRuntimeRuns),
       };
@@ -4956,7 +4999,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       loadingMoreHistory,
       hasMoreHistory,
     } = get();
-    if (loadingMoreHistory || !hasMoreHistory || messages.length === 0) return;
+    if (
+      _sessionsDeleting.has(currentSessionKey)
+      || loadingMoreHistory
+      || !hasMoreHistory
+      || messages.length === 0
+    ) return;
+
+    const historyLoadGeneration = nextHistoryLoadGeneration(currentSessionKey);
+    const isCurrentSessionHistory = () => (
+      get().currentSessionKey === currentSessionKey
+      && isCurrentHistoryLoad(currentSessionKey, historyLoadGeneration)
+    );
 
     set({ loadingMoreHistory: true, error: null, historyError: null });
     try {
@@ -4966,7 +5020,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         HISTORY_MAX_RENDERED_MESSAGES,
       );
       const rawMessages = await loadLocalHistoryFallback(currentSessionKey, nextLimit);
-      if (get().currentSessionKey !== currentSessionKey) return;
+      if (!isCurrentSessionHistory()) return;
       if (rawMessages.length === 0) {
         set({ hasMoreHistory: false, loadingMoreHistory: false });
         return;
@@ -5001,7 +5055,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       cacheSessionHistory(currentSessionKey, enrichedMessages, get().thinkingLevel);
       const previewHydrationMessages = enrichedMessages.slice(-PREVIEW_HYDRATION_MESSAGE_LIMIT);
       void loadMissingPreviews(previewHydrationMessages).then((updated) => {
-        if (!updated || get().currentSessionKey !== currentSessionKey) return;
+        if (!updated || !isCurrentSessionHistory()) return;
         set((state) => ({
           ...(() => {
             const messages = state.messages.map((message) => {
@@ -5038,14 +5092,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           );
         } catch (error) {
           console.warn('[conversation-timeline] Failed to replay hydrated paged history:', error);
-          if (get().currentSessionKey === currentSessionKey) set({ historyError: String(error) });
+          if (isCurrentSessionHistory()) set({ historyError: String(error) });
         }
       });
     } catch (error) {
       console.warn('Failed to load more history:', error);
-      set({ loadingMoreHistory: false, error: String(error), historyError: String(error) });
+      if (isCurrentSessionHistory()) {
+        set({ loadingMoreHistory: false, error: String(error), historyError: String(error) });
+      }
     } finally {
-      if (get().currentSessionKey === currentSessionKey) {
+      if (isCurrentSessionHistory()) {
         set({ loadingMoreHistory: false });
       }
     }

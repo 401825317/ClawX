@@ -9,6 +9,7 @@ import {
   HostTaskService,
   type HostTaskLifecycleExecutor,
 } from '../electron/services/agent-runtime/host-task-service.ts';
+import { settleOpenClawSessionForDeletion } from '../electron/utils/chat-session-cleanup.ts';
 import { applyRuntimeEventToRuns } from '../src/stores/chat/runtime-graph.ts';
 
 async function waitUntil(check: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
@@ -56,6 +57,85 @@ test('Host task persistence preserves an internal composition-step completion mo
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('Host task session removal is durable and preserves tasks owned by other conversations', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'uclaw-host-task-session-removal-'));
+  const serviceOptions = { rootDir: path.join(root, 'host-tasks') };
+  try {
+    const service = new HostTaskService(serviceOptions);
+    const removedTask = await service.create(createRequest('remove-session-task'));
+    const retainedTask = await service.create({
+      ...createRequest('retain-session-task'),
+      sessionKey: 'agent:main:retained-session',
+    });
+
+    assert.equal(await service.removeSession('agent:main:test-session'), 1);
+    assert.equal(await service.get(removedTask.task.taskId), undefined);
+    assert.equal((await service.get(retainedTask.task.taskId))?.taskId, retainedTask.task.taskId);
+    await assert.rejects(readFile(path.join(
+      serviceOptions.rootDir,
+      'jobs',
+      removedTask.task.taskId,
+      'task.json',
+    ), 'utf8'));
+
+    const restarted = new HostTaskService(serviceOptions);
+    assert.deepEqual(await restarted.list('agent:main:test-session'), []);
+    assert.equal((await restarted.list('agent:main:retained-session')).length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('session deletion delegates runtime ownership to OpenClaw before local cleanup', async () => {
+  const calls: Array<{ method: string; params: unknown; timeoutMs: number }> = [];
+  const result = await settleOpenClawSessionForDeletion({
+    async rpc(method, params, timeoutMs) {
+      calls.push({ method, params, timeoutMs });
+      return { ok: true, deleted: true };
+    },
+  }, 'agent:main:session-delete-test');
+
+  assert.equal(result, 'deleted');
+  assert.deepEqual(calls, [{
+    method: 'sessions.delete',
+    params: { key: 'agent:main:session-delete-test', deleteTranscript: true },
+    timeoutMs: 30_000,
+  }]);
+});
+
+test('protected main-session deletion resets only after OpenClaw rejects native deletion', async () => {
+  const calls: Array<{ method: string; params: unknown; timeoutMs: number }> = [];
+  const result = await settleOpenClawSessionForDeletion({
+    async rpc(method, params, timeoutMs) {
+      calls.push({ method, params, timeoutMs });
+      if (method === 'sessions.delete') {
+        throw new Error('Cannot delete the main session (agent:main:main).');
+      }
+      return { ok: true, key: 'agent:main:main', entry: { sessionId: 'fresh-main-session' } };
+    },
+  }, 'agent:main:main');
+
+  assert.equal(result, 'reset-main');
+  assert.deepEqual(calls, [{
+    method: 'sessions.delete',
+    params: { key: 'agent:main:main', deleteTranscript: true },
+    timeoutMs: 30_000,
+  }, {
+    method: 'sessions.reset',
+    params: { key: 'agent:main:main', reason: 'reset' },
+    timeoutMs: 30_000,
+  }]);
+
+  await assert.rejects(
+    settleOpenClawSessionForDeletion({
+      async rpc() {
+        throw new Error('Session is still active; try again.');
+      },
+    }, 'agent:main:session-busy'),
+    /still active/,
+  );
 });
 
 test('Host task persistence pins the default state root after initialization', async () => {

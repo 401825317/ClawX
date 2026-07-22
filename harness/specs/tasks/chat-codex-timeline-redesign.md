@@ -18,6 +18,8 @@ touchedAreas:
   - electron/preload/index.ts
   - electron/main/index.ts
   - electron/main/ipc-handlers.ts
+  - electron/api/routes/agents.ts
+  - electron/api/routes/sessions.ts
   - electron/api/routes/gateway.ts
   - electron/services/chat-send-outbox.ts
   - electron/services/junfeiai/junfeiai-service.ts
@@ -27,6 +29,8 @@ touchedAreas:
   - electron/services/computer/types.ts
   - electron/utils/junfeiai-distribution.ts
   - electron/utils/openclaw-auth.ts
+  - electron/utils/chat-session-cleanup.ts
+  - electron/utils/session-files.ts
   - electron/gateway/chat-runtime-events.ts
   - electron/gateway/event-dispatch.ts
   - electron/gateway/manager.ts
@@ -35,6 +39,7 @@ touchedAreas:
   - src/lib/approval-actions.ts
   - src/lib/runtime-display-sanitizer.ts
   - src/App.tsx
+  - src/components/layout/Sidebar.tsx
   - src/components/client/ClientConfigInitializer.tsx
   - src/components/desktop/DesktopApprovalOverlay.tsx
   - src/stores/client-config.ts
@@ -98,6 +103,7 @@ touchedAreas:
   - resources/openclaw-plugins/uclaw-artifact-guard/**
   - resources/openclaw-plugins/uclaw-task-bridge/**
   - tests/e2e/chat-host-task-rehydration.spec.ts
+  - tests/e2e/chat-history-startup-retry.spec.ts
   - tests/e2e/chat-approval-actions.spec.ts
   - tests/e2e/desktop-approval-overlay.spec.ts
   - tests/e2e/chat-timeline-rollout.spec.ts
@@ -129,6 +135,8 @@ expectedUserBehavior:
   - Streaming updates do not pull a reader back to the bottom after the reader scrolls upward, and expanding details preserves the current viewport anchor.
   - Long conversations remain responsive because completed turns keep stable render identity and offscreen turns are virtualized.
   - Live delivery owns the visible order. Once a Turn or Timeline item is shown, its position is permanent. History reload updates matching identities in place and may append a genuinely missing restored Turn, but it never inserts a new assistant narrative row into an existing live Turn. Explicit backwards pagination may prepend older Turns while preserving the relative order and pixel anchor of every visible Turn.
+  - Deleting a conversation first settles its OpenClaw lifecycle, then removes its transcript, session index entry, durable Host Tasks, canonical Turns, and media as one durable operation. OpenClaw's protected main identity is reset to a fresh empty generation instead of deleting its required store row; that row is an invisible composer placeholder and is never conversation history. The UI stays unchanged when durable deletion fails, and history, pagination, or preview work started before a successful deletion cannot restore that data, including when the empty-state placeholder reuses the same default session key.
+  - The default composer session key remains usable for a first send without appearing in conversation history. The sidebar lists it only after OpenClaw reports a real session or while an explicitly created local conversation is pending its first send.
   - Ordinary chat, image and video generation, planner/task flow, execution queue, artifacts, verification, subagents, approvals, cancellation, failures, and restored sessions retain their existing product behavior.
 requiredProfiles:
   - fast
@@ -175,6 +183,8 @@ requiredTests:
   - pnpm run lint:check
   - pnpm run build:vite
   - pnpm exec playwright test tests/e2e/chat-host-task-rehydration.spec.ts tests/e2e/chat-approval-actions.spec.ts tests/e2e/chat-timeline.spec.ts tests/e2e/chat-timeline-product-matrix.spec.ts tests/e2e/chat-task-structured-runtime.spec.ts tests/e2e/chat-task-visualizer.spec.ts tests/e2e/chat-scroll-to-latest.spec.ts tests/e2e/chat-scroll-pin-bottom.spec.ts tests/e2e/chat-question-directory.spec.ts tests/e2e/chat-assistant-markdown-plain.spec.ts tests/e2e/chat-code-block-wrap.spec.ts tests/e2e/chat-reasoning-panel.spec.ts tests/e2e/chat-table-header-light.spec.ts tests/e2e/chat-run-state-events.spec.ts tests/e2e/native-agent-media-routing.spec.ts --workers=1
+  - pnpm exec playwright test tests/e2e/chat-history-startup-retry.spec.ts --workers=1
+  - pnpm exec playwright test tests/e2e/chat-new-session-date.spec.ts --workers=1
   - pnpm run comms:replay
   - pnpm run comms:compare
   - Electron UI verification for long-history streaming, user-scrolled anchoring, expanded tool details, execution details, media, subagents, approvals, abort, error, and restart recovery
@@ -204,6 +214,9 @@ acceptance:
   - Approval requests remain visible and actionable until authoritative approval, rejection, cancellation, expiry, or an error/abort that invalidates the request. Successful model Run completion does not cancel a Main-owned pending approval, and replay never reopens a terminal approval.
   - Artifact and verification items come from structured evidence, retain availability/error state, may appear before the final answer, and do not treat path-like prose as produced output.
   - Abort, error, disconnect, stale history, late tool results, duplicate finals, missing sequence numbers, and backend-idle recovery converge to one deterministic visible state.
+  - Session deletion is idempotent when the OpenClaw index or transcript is already absent, delegates active-work admission and cancellation to native `sessions.delete` before local cleanup, falls back to native `sessions.reset` only when OpenClaw rejects deletion of its protected main identity, removes independent durable Host Task snapshots before reporting success, and leaves the visible conversation intact on any durable deletion failure.
+  - Successful session deletion invalidates every older history mutation before clearing the canonical projection; a late initial load, explicit pagination response, preview-hydration callback, or restart-time Host Task rehydration cannot resurrect deleted Turns or media under a reused session key.
+  - An empty backend session list keeps the default composer available but leaves every history bucket empty; only backend-confirmed sessions and explicit pending local conversations may render as sidebar history rows.
   - Long tool loops run OpenClaw's mid-turn context precheck before the next model call, rotate the active transcript after successful compaction, and use the endpoint-owned transcript byte threshold without dropping adjacent user compaction settings.
   - Native OpenClaw compaction start/end evidence updates one stable localized Timeline status item in place while the Turn remains owned by authoritative lifecycle state.
   - Artifact-guard prompt maintenance treats OpenClaw history as immutable, replaces only changed message branches, preserves current-turn tool arguments, and never fails the whole prompt-build hook because a historical tool call is frozen.
@@ -496,6 +509,8 @@ The remaining no-streaming defect was upstream of the reducer. OpenClaw 2026.6.1
 With OpenClaw 2026.7.1-2, a second Responses-specific delivery gap remained: text deltas can arrive before the item exposes `commentary` or `final_answer` phase metadata. The first compatibility patch forwarded those deltas through `emitAssistantStreamData`, but that helper still appends to `deferredAssistantEvents` whenever `onBeforeTerminalDelivery` is installed, so the page continued to receive the whole answer only at terminal delivery. V2 bypassed that terminal buffer through OpenClaw's Agent/UI event path (`emitAgentEvent` plus `onAgentEvent`) and proved visible growth in real session `agent:main:session-1784687197385`, run `c32aea85-c0fa-4778-a605-ed4d06f07875`: the page rendered an intermediate answer through paragraph 2 before growing to one 12-paragraph, 4,446-character final; native terminal sequence 2,875 completed with `stop`, the processing state cleared, no duplicate final appeared, and Gateway PID `99941` remained unchanged. V3 removed the repeated cumulative `text` field so transport and retained event payload grow linearly with the answer, but that delta-only shape bypassed OpenClaw's native Gateway text-event coalescer and allowed token-sized frames to arrive in one Renderer scheduling burst. V4 retains the linear payload by sending only `delta`, `itemId`, and an empty transport-only `text` sentinel; the sentinel activates OpenClaw's existing 24 ms coalescer, is removed by Main normalization, and never becomes Timeline content. The patch still does not call `emitAssistantStreamData`, `onPartialReply`, or block-reply delivery, preserving final-only WeChat/external-channel behavior and all suppress/silent/message-tool-only gates; it migrates installed V1/V2/V3 blocks and remains idempotent in development and packaged bundles.
 
 The bounded-history choice is explicit rather than inferred from scroll position. Initial entry restores the latest 100 transcript messages; the existing load-earlier control reads larger local transcript suffixes in 100-message steps, preserves the visible-row anchor, and stops at the 500-message Renderer budget. Virtuoso keeps mounted rows limited to the viewport and overscan. Inactive raw-history cache entries now retain only the latest 100 messages even if that session previously expanded to 500, while the canonical store continues its 16-session LRU and 256-active/64-terminal raw-event tails. No final/idle event triggers history replay, and this paging path does not patch or poll OpenClaw.
+
+OpenClaw 2026.7.1-2 adds native session lifecycle mutation and startup recovery for interrupted main sessions. ClawX deletion therefore no longer unlinks a live transcript first: the Host asks OpenClaw to drain and delete the session, or to reset the protected main identity, before removing local archives and Host Task replay data. The reset main row has `systemSent=false` and no activity/lifecycle evidence; it remains available as the default composer identity but is filtered from history. Current `.jsonl.deleted.<timestamp>` and reset archives are included in the hard-delete sweep, so a later Gateway restart cannot recover or replay the deleted generation.
 
 The later approved product decision supersedes terminal-time automatic history replay. Final, error, abort, completion-wake, and backend-idle events now settle only the live lifecycle and never call `chat.history` for the visible session. Existing Turn and Timeline item positions remain fixed after first render. Matching history evidence updates those identities in place; assistant history that cannot match the Turn-local segment ordinal, message alias, or following tool-call boundary is ignored instead of becoming a new row at the end. Only a genuinely missing restored Turn may append after the visible Turn order. Full replay remains available on initial entry, explicit session switch, manual refresh, and Gateway reconnect. This removes the source of mid-stream transcript insertion without changing default chat/image/video routing, planner ownership, queues, approvals, artifact verification, packaging, or restored-session behavior.
 

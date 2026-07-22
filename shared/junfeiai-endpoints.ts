@@ -151,6 +151,12 @@ export const JUNFEIAI_OPENCLAW_TEXT_FAILOVER_MODEL_REF =
 if (typeof endpoints.openClawCompaction.midTurnPrecheck.enabled !== 'boolean') {
   throw new Error('openClawCompaction.midTurnPrecheck.enabled in shared/junfeiai-endpoints.json must be boolean');
 }
+if (
+  !Number.isInteger(endpoints.openClawCompaction.reserveTokensFloor)
+  || endpoints.openClawCompaction.reserveTokensFloor <= 0
+) {
+  throw new Error('openClawCompaction.reserveTokensFloor in shared/junfeiai-endpoints.json must be a positive integer');
+}
 if (typeof endpoints.openClawCompaction.truncateAfterCompaction !== 'boolean') {
   throw new Error('openClawCompaction.truncateAfterCompaction in shared/junfeiai-endpoints.json must be boolean');
 }
@@ -161,6 +167,23 @@ if (
 ) {
   throw new Error('openClawCompaction.maxActiveTranscriptBytes in shared/junfeiai-endpoints.json must be a positive byte size');
 }
+if (
+  !Number.isInteger(endpoints.openClawContextLimits.toolResultMaxChars)
+  || endpoints.openClawContextLimits.toolResultMaxChars <= 0
+  || endpoints.openClawContextLimits.toolResultMaxChars > 1_000_000
+) {
+  throw new Error('openClawContextLimits.toolResultMaxChars in shared/junfeiai-endpoints.json must be an integer from 1 to 1000000');
+}
+if (
+  !Number.isInteger(endpoints.openClawWebSearch.maxResults)
+  || endpoints.openClawWebSearch.maxResults < 1
+  || endpoints.openClawWebSearch.maxResults > 10
+) {
+  throw new Error('openClawWebSearch.maxResults in shared/junfeiai-endpoints.json must be an integer from 1 to 10');
+}
+
+/** Minimum token headroom retained for output and subsequent tool calls. */
+export const JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR = endpoints.openClawCompaction.reserveTokensFloor;
 
 /** Run context-pressure recovery between tool results and the next model call. */
 export const JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED = endpoints.openClawCompaction.midTurnPrecheck.enabled;
@@ -170,6 +193,12 @@ export const JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION = endpoints.openClawCom
 
 /** Preflight transcript-size threshold that triggers local compaction. */
 export const JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES = transcriptLimit as JunFeiAIOpenClawTranscriptLimit;
+
+/** Maximum characters retained from one live tool result in the main context. */
+export const JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS = endpoints.openClawContextLimits.toolResultMaxChars;
+
+/** Maximum result count returned by one managed web search call. */
+export const JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS = endpoints.openClawWebSearch.maxResults;
 
 function readProviderModelRef(value: unknown, key: string): { ref: string; provider: string; model: string } {
   const ref = readNonEmptyString(value, key);
@@ -198,6 +227,40 @@ export const JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL_REF = imageGenerationDefaul
 /** Model id derived from the canonical managed OpenAI image model ref. */
 export const JUNFEIAI_IMAGE_GENERATION_DEFAULT_MODEL = imageGenerationDefaultModel.model;
 
+const videoGenerationDefaults = endpoints.videoGenerationDefaults;
+const videoGenerationDefaultModel = readProviderModelRef(
+  videoGenerationDefaults.defaultModelRef,
+  'videoGenerationDefaults.defaultModelRef',
+);
+const videoGenerationImageToVideoModel = readProviderModelRef(
+  videoGenerationDefaults.imageToVideoModelRef,
+  'videoGenerationDefaults.imageToVideoModelRef',
+);
+if (videoGenerationDefaultModel.provider !== 'openai') {
+  throw new Error('videoGenerationDefaults.defaultModelRef must use the openai provider');
+}
+if (videoGenerationImageToVideoModel.provider !== videoGenerationDefaultModel.provider) {
+  throw new Error('videoGenerationDefaults model refs must use the same provider');
+}
+if (videoGenerationImageToVideoModel.model === videoGenerationDefaultModel.model) {
+  throw new Error('videoGenerationDefaults model refs must use different model ids');
+}
+
+/** OpenClaw provider key used by the managed video relay. */
+export const JUNFEIAI_VIDEO_GENERATION_PROVIDER_KEY = videoGenerationDefaultModel.provider;
+
+/** Canonical default model ref for managed video generation. */
+export const JUNFEIAI_VIDEO_GENERATION_DEFAULT_MODEL_REF = videoGenerationDefaultModel.ref;
+
+/** Default managed video model id. */
+export const JUNFEIAI_VIDEO_GENERATION_DEFAULT_MODEL = videoGenerationDefaultModel.model;
+
+/** Canonical image-to-video model ref for managed video generation. */
+export const JUNFEIAI_VIDEO_GENERATION_IMAGE_TO_VIDEO_MODEL_REF = videoGenerationImageToVideoModel.ref;
+
+/** Managed image-to-video model id. */
+export const JUNFEIAI_VIDEO_GENERATION_IMAGE_TO_VIDEO_MODEL = videoGenerationImageToVideoModel.model;
+
 function readVideoGenerationSize(
   value: unknown,
   key: string,
@@ -225,7 +288,6 @@ function readVideoGenerationSize(
   return `${width}x${height}`;
 }
 
-const videoGenerationDefaults = endpoints.videoGenerationDefaults;
 if (!VALID_VIDEO_GENERATION_RESOLUTIONS.has(videoGenerationDefaults.resolution)) {
   throw new Error('videoGenerationDefaults.resolution must be 480p or 720p');
 }

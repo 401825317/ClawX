@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   CURRENT_SESSION_STORAGE_KEY,
+  isEmptyMainComposerSessionRow,
   isInternalHeartbeatSession,
   persistCurrentSessionKey,
   pickStartupSessionFallback,
@@ -67,6 +68,31 @@ test('startup fallback never selects heartbeat sessions', () => {
     pickStartupSessionFallback('agent:main:missing', sessions.slice(0, 2)),
     null,
   );
+});
+
+test('hides only the fresh empty main generation created by sessions.reset', () => {
+  assert.equal(isEmptyMainComposerSessionRow({
+    key: 'agent:main:main',
+    systemSent: false,
+    hasActiveRun: false,
+    totalTokens: 0,
+  }), true);
+  assert.equal(isEmptyMainComposerSessionRow({
+    key: 'agent:main:main',
+    systemSent: true,
+    hasActiveRun: false,
+  }), false);
+  assert.equal(isEmptyMainComposerSessionRow({
+    key: 'agent:main:main',
+    systemSent: false,
+    hasActiveRun: false,
+    lastMessagePreview: 'Existing conversation',
+  }), false);
+  assert.equal(isEmptyMainComposerSessionRow({
+    key: 'agent:main:session-user-created',
+    systemSent: false,
+    hasActiveRun: false,
+  }), false);
 });
 
 test('persisted heartbeat keys are discarded while user sessions remain selectable', () => {

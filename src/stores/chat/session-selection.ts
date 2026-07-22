@@ -21,6 +21,19 @@ export function isInternalHeartbeatSession(
     && session.heartbeatIsolatedBaseSessionKey.trim().length > 0;
 }
 
+/** Identify the protected main-session placeholder produced by sessions.reset. */
+export function isEmptyMainComposerSessionRow(session: Record<string, unknown>): boolean {
+  const key = typeof session.key === 'string' ? session.key : '';
+  if (!/^agent:[^:\s]+:main$/.test(key)) return false;
+  return session.systemSent === false
+    && session.hasActiveRun !== true
+    && session.lastMessagePreview == null
+    && session.lastActivityAt == null
+    && session.status == null
+    && session.startedAt == null
+    && session.endedAt == null;
+}
+
 function getLocalStorage(): Storage | null {
   try {
     return globalThis.localStorage ?? null;

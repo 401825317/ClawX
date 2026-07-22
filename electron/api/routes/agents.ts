@@ -346,7 +346,7 @@ async function generateAgentProfileViaGateway(
     await Promise.resolve(ctx.gatewayManager.rpc('chat.abort', { sessionKey }, 15_000)).catch(() => {
       // The run may already be complete, or the gateway may be shutting down.
     });
-    await Promise.resolve(deleteLocalChatSession(sessionKey)).catch((error) => {
+    await Promise.resolve(deleteLocalChatSession(sessionKey, ctx.gatewayManager)).catch((error) => {
       console.warn('[agents] Failed to clean temporary profile generation session:', error);
     });
   }

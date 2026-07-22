@@ -324,6 +324,7 @@ export class HostTaskService {
   private readonly idempotency = new Map<string, string>();
   private readonly waiters = new Map<string, Set<(snapshot: HostTaskSnapshot) => void>>();
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly sessionsDeleting = new Set<string>();
   private readonly ownerId = randomUUID();
   private readonly configuredRootDir?: string;
   private resolvedRootDir?: string;
@@ -349,10 +350,14 @@ export class HostTaskService {
   async create(input: HostTaskCreateRequest): Promise<{ task: HostTaskSnapshot; idempotent: boolean }> {
     await this.ensureInitialized();
     this.validateCreate(input);
+    const sessionKey = input.sessionKey.trim();
+    if (this.sessionsDeleting.has(sessionKey)) {
+      throw new Error(`Host tasks cannot be created while session ${sessionKey} is being deleted`);
+    }
     const normalizedInput = normalizeTaskData(input.input, 'Host task input') ?? {};
     const acceptance = normalizeAcceptance(input.acceptance);
     const completion = normalizeCompletion(input.completion);
-    const key = `${input.sessionKey.trim()}:${input.idempotencyKey.trim()}`;
+    const key = `${sessionKey}:${input.idempotencyKey.trim()}`;
     const existingId = this.idempotency.get(key);
     const existing = existingId ? this.tasks.get(existingId) : undefined;
     if (existing) {
@@ -364,7 +369,7 @@ export class HostTaskService {
     const task: HostTaskSnapshot = {
       version: 3,
       taskId: randomUUID(),
-      sessionKey: input.sessionKey.trim(),
+      sessionKey,
       runId: input.runId.trim(),
       toolCallId: input.toolCallId.trim(),
       idempotencyKey: input.idempotencyKey.trim(),
@@ -385,7 +390,10 @@ export class HostTaskService {
     };
     this.tasks.set(task.taskId, task);
     this.idempotency.set(key, task.taskId);
-    await this.persist(task, 'task.created');
+    // Serialize the initial write with deletion and later lifecycle updates.
+    await this.withTaskLock(task.taskId, async (current) => {
+      await this.persist(current, 'task.created');
+    });
     this.publish(task, [
       {
         type: 'task.updated',
@@ -641,6 +649,48 @@ export class HostTaskService {
       .filter((task) => !sessionKey || task.sessionKey === sessionKey)
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .map(clone);
+  }
+
+  /** Remove every durable Host task owned by a hard-deleted conversation. */
+  async removeSession(sessionKey: string): Promise<number> {
+    await this.ensureInitialized();
+    const normalizedSessionKey = sessionKey.trim();
+    if (!normalizedSessionKey) return 0;
+
+    this.sessionsDeleting.add(normalizedSessionKey);
+    try {
+      const taskIds = [...this.tasks.values()]
+        .filter((task) => task.sessionKey === normalizedSessionKey)
+        .map((task) => task.taskId);
+      let removed = 0;
+
+      for (const taskId of taskIds) {
+        const didRemove = await this.withTaskLock(taskId, async (task) => {
+          // Delete disk state before dropping the in-memory indexes so a failed
+          // filesystem operation remains retryable and cannot become a ghost.
+          await fs.rm(path.join(this.getRootDir(), 'jobs', task.taskId), {
+            recursive: true,
+            force: true,
+          });
+          if (!TERMINAL.has(task.status)) {
+            this.notify({
+              ...task,
+              status: 'cancelled',
+              updatedAt: Date.now(),
+              error: 'Conversation deleted',
+            });
+          }
+          this.tasks.delete(task.taskId);
+          this.idempotency.delete(`${task.sessionKey}:${task.idempotencyKey}`);
+          return true;
+        });
+        if (didRemove) removed += 1;
+      }
+
+      return removed;
+    } finally {
+      this.sessionsDeleting.delete(normalizedSessionKey);
+    }
   }
 
   async waitForTerminal(taskId: string, timeoutMs: number): Promise<HostTaskSnapshot | undefined> {

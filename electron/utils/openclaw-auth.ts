@@ -69,8 +69,11 @@ import {
   JUNFEIAI_OPENCLAW_EXEC_SECURITY,
   JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
   JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED,
+  JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR,
   JUNFEIAI_OPENCLAW_TEXT_FAILOVER,
+  JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS,
   JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
+  JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS,
   JUNFEIAI_PROVIDER_ID,
   JUNFEIAI_PROVIDER_TIMEOUT_SECONDS,
   getJunFeiAIProviderBaseUrl,
@@ -3316,6 +3319,7 @@ export function ensureJunFeiAICompactionDefaultsInConfig(config: Record<string, 
 
   if (
     midTurnPrecheck.enabled === JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED
+    && compaction.reserveTokensFloor === JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR
     && compaction.truncateAfterCompaction === JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION
     && compaction.maxActiveTranscriptBytes === JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES
   ) {
@@ -3324,11 +3328,70 @@ export function ensureJunFeiAICompactionDefaultsInConfig(config: Record<string, 
 
   midTurnPrecheck.enabled = JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED;
   compaction.midTurnPrecheck = midTurnPrecheck;
+  compaction.reserveTokensFloor = JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR;
   compaction.truncateAfterCompaction = JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION;
   compaction.maxActiveTranscriptBytes = JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES;
   defaults.compaction = compaction;
   agents.defaults = defaults;
   config.agents = agents;
+  return true;
+}
+
+/** Apply the endpoint-configured ceiling for live tool results. */
+export function ensureJunFeiAIContextLimitsInConfig(config: Record<string, unknown>): boolean {
+  const agents = (
+    config.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)
+      ? { ...(config.agents as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const defaults = (
+    agents.defaults && typeof agents.defaults === 'object' && !Array.isArray(agents.defaults)
+      ? { ...(agents.defaults as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const contextLimits = (
+    defaults.contextLimits && typeof defaults.contextLimits === 'object' && !Array.isArray(defaults.contextLimits)
+      ? { ...(defaults.contextLimits as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (contextLimits.toolResultMaxChars === JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS) {
+    return false;
+  }
+
+  contextLimits.toolResultMaxChars = JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS;
+  defaults.contextLimits = contextLimits;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
+/** Apply the endpoint-configured result count for managed web search. */
+export function ensureJunFeiAIWebSearchDefaultsInConfig(config: Record<string, unknown>): boolean {
+  const tools = (
+    config.tools && typeof config.tools === 'object' && !Array.isArray(config.tools)
+      ? { ...(config.tools as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const web = (
+    tools.web && typeof tools.web === 'object' && !Array.isArray(tools.web)
+      ? { ...(tools.web as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  const search = (
+    web.search && typeof web.search === 'object' && !Array.isArray(web.search)
+      ? { ...(web.search as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+
+  if (search.maxResults === JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS) {
+    return false;
+  }
+
+  search.maxResults = JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS;
+  web.search = search;
+  tools.web = web;
+  config.tools = tools;
   return true;
 }
 
@@ -3545,10 +3608,12 @@ export async function batchSyncConfigFields(token: string): Promise<void> {
     ensureWebFetchSsrfPolicyInConfig(config);
     // ── web_search provider (key-free default) ──
     ensureFreeWebSearchProviderInConfig(config);
+    ensureJunFeiAIWebSearchDefaultsInConfig(config);
     ensureToolSearchDirectoryDefaultInConfig(config);
     ensureManagedHeartbeatIsolationInConfig(config);
     ensureManagedMediaLimitInConfig(config);
     ensureJunFeiAICompactionDefaultsInConfig(config);
+    ensureJunFeiAIContextLimitsInConfig(config);
     ensureJunFeiAIExecDefaultsInConfig(config);
     ensureManagedToolDirectoryInConfig(config);
 
@@ -3874,8 +3939,25 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
       console.log(
         `[sanitize] Applied OpenClaw compaction defaults from junfeiai-endpoints.json `
         + `(midTurnPrecheck=${JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED}, `
+        + `reserveTokensFloor=${JUNFEIAI_OPENCLAW_RESERVE_TOKENS_FLOOR}, `
         + `truncateAfterCompaction=${JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION}, `
         + `maxActiveTranscriptBytes=${JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES})`,
+      );
+    }
+
+    if (ensureJunFeiAIContextLimitsInConfig(config)) {
+      modified = true;
+      console.log(
+        `[sanitize] Set agents.defaults.contextLimits.toolResultMaxChars=`
+        + `${JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS} from junfeiai-endpoints.json`,
+      );
+    }
+
+    if (ensureJunFeiAIWebSearchDefaultsInConfig(config)) {
+      modified = true;
+      console.log(
+        `[sanitize] Set tools.web.search.maxResults=`
+        + `${JUNFEIAI_OPENCLAW_WEB_SEARCH_MAX_RESULTS} from junfeiai-endpoints.json`,
       );
     }
 

@@ -22,16 +22,25 @@
     "reusePrimaryApiKey": true
   },
   "openClawCompaction": {
+    "reserveTokensFloor": 50000,
     "midTurnPrecheck": {
       "enabled": true
     },
     "truncateAfterCompaction": true,
     "maxActiveTranscriptBytes": "20mb"
   },
+  "openClawContextLimits": {
+    "toolResultMaxChars": 16000
+  },
+  "openClawWebSearch": {
+    "maxResults": 3
+  },
   "imageGenerationDefaults": {
     "modelRef": "openai/gpt-image-2"
   },
   "videoGenerationDefaults": {
+    "defaultModelRef": "openai/grok-image-video",
+    "imageToVideoModelRef": "openai/grok-video-1.5",
     "resolution": "480p",
     "sizes": {
       "landscape": "854x480",
@@ -43,9 +52,11 @@
     "appUpdates": "UClaw 客户端更新入口。managed 路径拼接 productionOrigin；legacyInstalledFeedBaseUrl 仅作为安装版单次检查的旧 OSS 备用源。",
     "openClawExec": "OpenClaw 主机命令执行策略。security 支持 deny/allowlist/full；ask 支持 off/on-miss/always。",
     "openClawTextFailover": "托管文本模型的请求级 Provider 降级策略。fallback Provider 复用 primary Provider 的 base URL 和 API key，但使用独立的 fallbackApiProtocol；成功降级不得改变后续调用的主 Provider。",
-    "openClawCompaction": "OpenClaw 长会话压缩策略。中途预检在工具循环超限前触发恢复；压缩后轮转活跃 transcript，并在达到字节阈值时提前压缩。",
+    "openClawCompaction": "OpenClaw 长会话压缩策略。保留足够的输出与工具调用空间；中途预检在工具循环超限前触发恢复；压缩后轮转活跃 transcript，并在达到字节阈值时提前压缩。",
+    "openClawContextLimits": "OpenClaw 主会话上下文限制。限制单个实时工具结果写入会话的字符数，避免搜索或命令输出独占上下文。",
+    "openClawWebSearch": "OpenClaw 网页搜索默认限制。控制单次 web_search 返回的结果条数。",
     "imageGenerationDefaults": "托管 OpenAI 图片生成和编辑的标准模型引用。OpenClaw 工具不得将受管默认模型改写为未配置的图片模型。",
-    "videoGenerationDefaults": "托管视频生成默认清晰度及其横屏、竖屏、方形尺寸。Renderer、Host 直连和 OpenClaw 原生视频工具统一读取该配置。",
+    "videoGenerationDefaults": "托管视频生成模型目录、默认清晰度及其横屏、竖屏、方形尺寸。Renderer、Host 直连和 OpenClaw 原生视频工具统一读取该配置。",
     "imageGenerationTimeoutMs": "托管图片生成请求的超时时间，单位：毫秒。",
     "videoGenerationTimeoutMs": "托管视频生成请求的超时时间，单位：毫秒。",
     "videoGenerationPollIntervalMs": "托管视频生成任务的状态查询间隔，单位：毫秒。",

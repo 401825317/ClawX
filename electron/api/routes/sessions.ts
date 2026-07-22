@@ -2,11 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { open, readdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { getOpenClawConfigDir } from '../../utils/paths';
-import {
-  removeSessionEntry,
-  resolveSessionTranscriptPath,
-  sweepSessionArtefacts,
-} from '../../utils/session-files';
+import { deleteLocalChatSession } from '../../utils/chat-session-cleanup';
 import { logger } from '../../utils/logger';
 import type { HostApiContext } from '../context';
 import { parseJsonBody, sendJson } from '../route-utils';
@@ -633,7 +629,7 @@ export async function handleSessionRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  _ctx: HostApiContext,
+  ctx: HostApiContext,
 ): Promise<boolean> {
   if (url.pathname === '/api/sessions/summaries' && req.method === 'POST') {
     try {
@@ -704,9 +700,9 @@ export async function handleSessionRoutes(
   }
 
   // POST /api/sessions/delete — HTTP mirror of the `session:delete` IPC.
-  // Both surfaces share electron/utils/session-files.ts so they sweep the
-  // same set of artefacts: the live transcript, legacy `.deleted.jsonl`,
-  // `.jsonl.reset.*` snapshots, the trajectory sidecar pair
+  // Both surfaces first settle OpenClaw runtime ownership, then share the same
+  // cleanup helper for the live transcript, legacy `.deleted.jsonl`, current
+  // `.jsonl.deleted.*`, `.jsonl.reset.*`, and the trajectory sidecar pair
   // (`<id>.trajectory.jsonl` + `<id>.trajectory-path.json`) and — when the
   // pointer points outside sessions/ (the OPENCLAW_TRAJECTORY_DIR case) —
   // the off-disk runtime trajectory it references.
@@ -732,33 +728,15 @@ export async function handleSessionRoutes(
         sendJson(res, 400, { success: false, error: `Invalid agentId: ${agentId}` });
         return true;
       }
-      const sessionsDir = join(getOpenClawConfigDir(), 'agents', agentId, 'sessions');
-      const sessionsJsonPath = join(sessionsDir, 'sessions.json');
-      const fsP = await import('node:fs/promises');
-      const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
-      const sessionsJson = JSON.parse(raw) as Record<string, unknown>;
-
-      const resolution = resolveSessionTranscriptPath(sessionsJson, sessionsDir, sessionKey);
-      if (!resolution.ok) {
-        if (resolution.failure.kind === 'not-found') {
-          sendJson(res, 404, { success: false, error: `Cannot resolve file for session: ${sessionKey}` });
-        } else {
-          logger.warn(`[api/sessions/delete] Refusing out-of-scope path for "${sessionKey}": ${resolution.failure.resolvedPath}`);
-          sendJson(res, 400, { success: false, error: `Resolved session path is outside the agent sessions dir: ${resolution.failure.resolvedPath}` });
-        }
-        return true;
-      }
-
-      const sweep = await sweepSessionArtefacts(resolution.sessionsDirAbs, resolution.baseId);
-      for (const { path: failedPath, error } of sweep.errors) {
-        logger.warn(`[api/sessions/delete] Failed to unlink ${failedPath}: ${String(error)}`);
-      }
-
-      const raw2 = await fsP.readFile(sessionsJsonPath, 'utf8');
-      const json2 = JSON.parse(raw2) as Record<string, unknown>;
-      removeSessionEntry(json2, sessionKey);
-      await fsP.writeFile(sessionsJsonPath, JSON.stringify(json2, null, 2), 'utf8');
-      sendJson(res, 200, { success: true });
+      const deletion = await deleteLocalChatSession(sessionKey, ctx.gatewayManager);
+      logger.info(
+        `[api/sessions/delete] Removed session=${sessionKey} lifecycle=${deletion.lifecycle} files=${deletion.removedFiles.length} hostTasks=${deletion.removedHostTasks}`,
+      );
+      sendJson(res, 200, {
+        success: true,
+        lifecycle: deletion.lifecycle,
+        removedHostTasks: deletion.removedHostTasks,
+      });
     } catch (error) {
       sendJson(res, 500, { success: false, error: String(error) });
     }

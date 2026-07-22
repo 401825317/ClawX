@@ -40,11 +40,7 @@ import { buildOpenClawControlUiUrl } from '../utils/openclaw-control-ui';
 import { logger } from '../utils/logger';
 import { resolveAgentIdFromChannel } from '../utils/agent-config';
 import { resolveAccountIdFromSessionHistory } from '../utils/session-util';
-import {
-  removeSessionEntry,
-  resolveSessionTranscriptPath,
-  sweepSessionArtefacts,
-} from '../utils/session-files';
+import { deleteLocalChatSession } from '../utils/chat-session-cleanup';
 import {
   saveChannelConfig,
   getChannelConfig,
@@ -262,7 +258,7 @@ export function registerIpcHandlers(
   registerDialogHandlers();
 
   // Session handlers
-  registerSessionHandlers();
+  registerSessionHandlers(gatewayManager);
 
   // App handlers
   registerAppHandlers(gatewayManager);
@@ -3174,13 +3170,13 @@ async function resolveOutgoingMediaUrl(
  * surfacing it. Token-usage history reported by the Dashboard reads the same
  * transcripts, so deleted conversations stop contributing to the chart.
  *
- * Path resolution and the sibling sweep are shared with the HTTP mirror at
- * `electron/api/routes/sessions.ts` via `electron/utils/session-files.ts`,
- * so both surfaces unlink the same set of files for a given session id.
+ * Runtime settlement, path resolution and the sibling sweep are shared with
+ * the HTTP mirror through `electron/utils/chat-session-cleanup.ts`, so both
+ * surfaces follow the same OpenClaw lifecycle before unlinking local files.
  */
 const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-function registerSessionHandlers(): void {
+function registerSessionHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('session:delete', async (_, sessionKey: string) => {
     try {
       if (!sessionKey || !sessionKey.startsWith('agent:')) {
@@ -3200,63 +3196,16 @@ function registerSessionHandlers(): void {
         return { success: false, error: `Invalid agentId: ${agentId}` };
       }
 
-      const openclawConfigDir = getOpenClawConfigDir();
-      const sessionsDir = join(openclawConfigDir, 'agents', agentId, 'sessions');
-      const sessionsJsonPath = join(sessionsDir, 'sessions.json');
-
       logger.info(`[session:delete] key=${sessionKey} agentId=${agentId}`);
-      logger.info(`[session:delete] sessionsJson=${sessionsJsonPath}`);
-
-      const fsP = await import('fs/promises');
-
-      // ── Step 1: read sessions.json to find the UUID file for this sessionKey ──
-      let sessionsJson: Record<string, unknown> = {};
-      try {
-        const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
-        sessionsJson = JSON.parse(raw) as Record<string, unknown>;
-      } catch (e) {
-        logger.warn(`[session:delete] Could not read sessions.json: ${String(e)}`);
-        return { success: false, error: `Could not read sessions.json: ${String(e)}` };
-      }
-
-      const resolution = resolveSessionTranscriptPath(sessionsJson, sessionsDir, sessionKey);
-      if (!resolution.ok) {
-        if (resolution.failure.kind === 'not-found') {
-          const rawVal = sessionsJson[sessionKey];
-          logger.warn(`[session:delete] Cannot resolve file for "${sessionKey}". Raw value: ${JSON.stringify(rawVal)}`);
-          return { success: false, error: `Cannot resolve file for session: ${sessionKey}` };
-        }
-        logger.warn(`[session:delete] Refusing to delete out-of-scope path for "${sessionKey}": ${resolution.failure.resolvedPath}`);
-        return { success: false, error: `Resolved session path is outside the agent sessions dir: ${resolution.failure.resolvedPath}` };
-      }
-
-      const { resolvedSrcPath, sessionsDirAbs, baseId } = resolution;
-      logger.info(`[session:delete] file: ${resolvedSrcPath}`);
-
-      // ── Step 2: hard-delete the JSONL transcript and its siblings ──
-      const sweep = await sweepSessionArtefacts(sessionsDirAbs, baseId);
-      for (const removedPath of sweep.removed) {
-        logger.info(`[session:delete] Unlinked ${removedPath}`);
-      }
-      for (const { path: failedPath, error } of sweep.errors) {
-        logger.warn(`[session:delete] Failed to unlink ${failedPath}: ${String(error)}`);
-      }
-      logger.info(`[session:delete] Hard-deleted ${sweep.removed.length} file(s) for ${baseId}`);
-
-      // ── Step 3: remove the entry from sessions.json ──
-      try {
-        // Re-read to avoid race conditions
-        const raw2 = await fsP.readFile(sessionsJsonPath, 'utf8');
-        const json2 = JSON.parse(raw2) as Record<string, unknown>;
-        removeSessionEntry(json2, sessionKey);
-        await fsP.writeFile(sessionsJsonPath, JSON.stringify(json2, null, 2), 'utf8');
-        logger.info(`[session:delete] Removed "${sessionKey}" from sessions.json`);
-      } catch (e) {
-        logger.warn(`[session:delete] Could not update sessions.json: ${String(e)}`);
-        // Non-fatal — transcript files were already unlinked.
-      }
-
-      return { success: true };
+      const deletion = await deleteLocalChatSession(sessionKey, gatewayManager);
+      logger.info(
+        `[session:delete] Removed session=${sessionKey} lifecycle=${deletion.lifecycle} files=${deletion.removedFiles.length} hostTasks=${deletion.removedHostTasks}`,
+      );
+      return {
+        success: true,
+        lifecycle: deletion.lifecycle,
+        removedHostTasks: deletion.removedHostTasks,
+      };
     } catch (err) {
       logger.error(`[session:delete] Unexpected error for ${sessionKey}:`, err);
       return { success: false, error: String(err) };
