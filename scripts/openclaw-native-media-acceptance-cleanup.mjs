@@ -7,7 +7,7 @@ const RETIRED_PATCH_SIGNATURES = [
   'params.acceptance',
   'executed.acceptance',
   'executed.completionStatus',
-  'executed.terminalResult',
+  'terminalResult: executed.terminalResult ?? terminalResult',
   'original acceptance requirements',
 ];
 

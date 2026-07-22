@@ -33,13 +33,13 @@ touchedAreas:
   - README.zh-CN.md
   - README.ja-JP.md
 expectedUserBehavior:
-  - A request for a final video first creates a VideoProject. It can remain a single-shot project or expand into multiple shots; GPT determines the creative strategy from the turn context and explicit user constraints, while UClaw does not use keyword or fixed-duration rules.
+  - A request for a final video first creates a VideoProject. It can remain a single-shot project or expand into multiple shots; GPT determines the creative strategy from the turn context and explicit user constraints, while UClaw does not use keyword or fixed-duration rules. Intended narration, per-shot captions, audio policy, duration, and output geometry are persisted at creation and survive later compose calls.
   - Video-mode size and duration, plus supplied reference artifacts, are preserved as project constraints and made available to every planned shot. The Agent explicitly selects a provider model from the current request, inputs, and advertised capabilities; a UI default model is not silently injected after planning.
   - A reference-image shot passes its managed image path to native video_generate. The project records which reference was used for each attempt so continuity and retries are auditable.
   - Provider models remain selected through the existing video_generate capability contract. UClaw does not show implementation routing or provider issue identifiers in ordinary user-facing delivery text.
   - Each generated shot gets local deterministic QA for readable video, duration, dimensions, audio, black frames, and frozen-frame risk. A contact sheet is returned for GPT semantic review; local QA does not claim to understand Chinese text or visual semantics.
-  - A shot is accepted only after deterministic QA passes and GPT records semantic acceptance. Failed/rejected shots can retry under the same project and shot identity with a new attempt.
-  - A multi-shot `action=compose` persists an idempotent composition plan, starts an internal Host render task, then starts final video QA. The render artifact is never delivered on its own; only final QA exposes the verified MP4 through the normal task delivery path.
+  - A shot is accepted only after deterministic QA passes, GPT records semantic acceptance, and measured source dimensions satisfy the generation contract. Missing dimensions, a smaller output, or a mismatched aspect ratio block acceptance; rendering an upscale never repairs the source contract. Failed/rejected shots can retry under the same project and shot identity with a new attempt.
+  - Every final video uses `action=compose`. A single accepted source may use direct source QA only when no resize, duration change, caption, narration, background music, original-audio replacement, or transition is needed. All other single-shot and multi-shot projects start an internal Host render task, then final video QA. The render artifact is never delivered on its own; only final QA exposes the verified MP4 through the normal task delivery path.
   - Project completion records `assembled` after final QA and advances to `delivered` after the Task Bridge acknowledges the final delivery task. Restart recovery resumes from persisted Host task IDs without starting a duplicate render.
 requiredProfiles:
   - fast
@@ -57,6 +57,10 @@ requiredTests:
   - pnpm exec tsc --noEmit --pretty false
   - node scripts/download-bundled-ffmpeg.mjs --verify --target=current
   - pnpm exec tsx --test scripts/local-video-shot-qa.test.ts scripts/local-video-timeline.test.ts
+  - node scripts/openclaw-video-capability-contract-patch.test.mjs
+  - node scripts/openclaw-video-actual-spec-patch.test.mjs
+  - node scripts/openclaw-native-media-completion-queue-patch.test.mjs
+  - node scripts/openclaw-native-media-acceptance-cleanup.test.mjs
   - node resources/openclaw-plugins/uclaw-video-project/harness.spec.mjs
   - node resources/openclaw-plugins/uclaw-task-bridge/harness.spec.mjs
   - node scripts/uclaw-artifact-guard-runtime.test.mjs
@@ -70,7 +74,8 @@ acceptance:
   - grok-video-1.5 is only planned when an exactly-one reference image is available; a text-only shot remains eligible for grok-image-video according to configured provider capability discovery.
   - QA emits structured metadata and a managed contact-sheet artifact. Black/freeze/audio/dimension/duration findings are factual, and unavailable checks are reported as unavailable instead of passed.
   - Semantic review remains an explicit GPT decision recorded against the QA evidence; UClaw never substitutes a local OCR or keyword heuristic for it.
-  - Project finalization rejects incomplete, unaccepted, or unverifiable required shots and returns structured recovery guidance instead of terminal success.
+  - Project finalization rejects incomplete, unaccepted, undersized, or unverifiable required shots and returns structured recovery guidance instead of terminal success. Manual `assembled` or `delivered` cannot override blocked composition state and can only confirm the exact artifact already passed by Host final QA.
+  - UClaw-managed video capability guidance does not advertise `480P`; if a provider returns 480-class output after a larger size was submitted, native generation records `terminalOutcome=blocked` and withholds that artifact from successful completion delivery.
   - A final QA task attaches the final video as the verified deliverable and keeps contact-sheet evidence internal, so ordinary delivery contains one final MP4 rather than intermediate clips or QA images.
   - Development and packaged startup install the project plugin alongside existing local UClaw plugins.
 docs:

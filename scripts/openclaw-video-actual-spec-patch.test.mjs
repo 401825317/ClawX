@@ -47,6 +47,10 @@ function fixture() {
     __test.LINES_ANCHOR,
     '\t];',
     '\treturn {',
+    '\t\tmediaUrls: allMediaUrls,',
+    '\t\tattachments,',
+    '\t\tcontentText: lines.join("\\n"),',
+    '\t\twakeResult: lines.join("\\n"),',
     __test.DETAILS_ANCHOR,
     '\t\t\t}',
     '\t\t};',
@@ -61,11 +65,12 @@ function fixture() {
   ].join('\n');
 }
 
-test('patches actual video specification, non-blocking probes, differences, and task summaries', () => {
+test('patches actual video specification, blocking size acceptance, and task summaries', () => {
   const result = patchOpenClawVideoActualSpecContent(fixture(), { mediaServices });
   assert.equal(result.matched, true);
   assert.equal(result.changed, true);
   assert.match(result.content, /UCLAW_VIDEO_ACTUAL_SPEC_V1/);
+  assert.match(result.content, /UCLAW_VIDEO_ACTUAL_SPEC_ACCEPTANCE_V2/);
   assert.match(result.content, /runFfprobeUClawVideoActualSpec/);
   assert.match(result.content, /probeVideoDimensionsUClawVideoActualSpec/);
   assert.match(result.content, /\/usr\/bin\/avmediainfo/);
@@ -75,9 +80,12 @@ test('patches actual video specification, non-blocking probes, differences, and 
   assert.match(result.content, /translated to size/);
   assert.match(result.content, /translation: translatedSpecification/);
   assert.match(result.content, /aspect ratio target/);
+  assert.match(result.content, /Output rejected:/);
+  assert.match(result.content, /Do not upscale or deliver this artifact/);
+  assert.match(result.content, /terminalOutcome: "blocked"/);
+  assert.match(result.content, /terminalResult,/);
   assert.match(result.content, /terminalSummary: executed\.contentText/);
-  assert.match(result.content, /terminalResult: terminalResult \?\?/);
-  assert.doesNotMatch(result.content, /terminalOutcome: "blocked"/);
+  assert.match(result.content, /terminalResult: executed\.terminalResult \?\?/);
 
   const second = patchOpenClawVideoActualSpecContent(result.content, { mediaServices });
   assert.equal(second.changed, false);
@@ -88,7 +96,7 @@ test('keeps actual video specification compatible with the native media completi
   const completionFixture = fixture()
     .replace(
       'import { something } from "./somewhere.js";',
-      'const UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V2 = true;\nimport { something } from "./somewhere.js";',
+      'const UCLAW_NATIVE_MEDIA_COMPLETION_CONTRACT_V3 = true;\nimport { something } from "./somewhere.js";',
     )
     .replace(
       __test.ASYNC_TERMINAL_ANCHOR,
@@ -97,8 +105,39 @@ test('keeps actual video specification compatible with the native media completi
   const result = patchOpenClawVideoActualSpecContent(completionFixture, { mediaServices });
   assert.equal(result.changed, true);
   assert.match(result.content, /UCLAW_VIDEO_ACTUAL_SPEC_V1/u);
+  assert.match(result.content, /UCLAW_VIDEO_ACTUAL_SPEC_ACCEPTANCE_V2/u);
   assert.match(result.content, /terminalSummary: \[executed\.contentText, artifactContract\]/u);
-  assert.match(result.content, /terminalResult: \{ terminalSummary: executed\.contentText \}/u);
+  assert.match(result.content, /terminalResult: executed\.terminalResult \?\? \{ terminalSummary: executed\.contentText \}/u);
+});
+
+test('blocks output below the submitted 720p contract and accepts equal or higher matching output', async () => {
+  const helperSource = `${__test.videoSpecificationAcceptanceSource}\nexport { buildGeneratedVideoSpecificationAcceptanceUClaw };`;
+  const helperUrl = `data:text/javascript;base64,${Buffer.from(helperSource).toString('base64')}`;
+  const { buildGeneratedVideoSpecificationAcceptanceUClaw } = await import(helperUrl);
+  assert.deepEqual(buildGeneratedVideoSpecificationAcceptanceUClaw({
+    applied: { size: '1280x720' },
+    actual: { outputs: [{ size: '854x480', width: 854, height: 480 }] },
+  }), {
+    status: 'blocked',
+    blockingDifferences: ['output dimensions below submitted 1280x720, actual 854x480'],
+    policy: 'generated video must meet or exceed the submitted dimensions at a matching aspect ratio; upscaling does not satisfy the generation contract',
+  });
+  assert.equal(buildGeneratedVideoSpecificationAcceptanceUClaw({
+    applied: { size: '1280x720' },
+    actual: { outputs: [{ size: '1280x720', width: 1280, height: 720 }] },
+  }).status, 'passed');
+  assert.equal(buildGeneratedVideoSpecificationAcceptanceUClaw({
+    applied: { size: '1280x720' },
+    actual: { outputs: [{ size: '1920x1080', width: 1920, height: 1080 }] },
+  }).status, 'passed');
+  assert.equal(buildGeneratedVideoSpecificationAcceptanceUClaw({
+    applied: { size: '1280x720' },
+    actual: { outputs: [{ size: '720x1280', width: 720, height: 1280 }] },
+  }).status, 'blocked');
+  assert.equal(buildGeneratedVideoSpecificationAcceptanceUClaw({
+    applied: { size: '1280x720' },
+    actual: { outputs: [{ url: 'https://example.invalid/unprobed.mp4' }] },
+  }).status, 'unverified');
 });
 
 test('parses macOS avmediainfo dimensions, duration, and audio in the injected helper', () => {

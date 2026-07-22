@@ -81,7 +81,18 @@ try {
     goal: 'A short product video',
     constraints: { model: 'openai/grok-video-1.5', size: '1280x720', targetDurationSeconds: 6 },
     reference: { filePath: '/managed/reference.png', artifactId: 'artifact:reference' },
-    shots: [{ shotId: 'shot-1', prompt: 'A bright product reveal', durationSeconds: 6 }],
+    shots: [{
+      shotId: 'shot-1',
+      prompt: 'A bright product reveal',
+      caption: 'New product',
+      captionPosition: 'bottom',
+      durationSeconds: 6,
+    }],
+    composition: {
+      narrationText: 'A concise product narration.',
+      voice: 'zh-CN-XiaoxiaoNeural',
+      requireAudio: true,
+    },
   });
   const project = created.details.project;
   const shot = project.shots[0];
@@ -94,6 +105,9 @@ try {
   assert.deepEqual(shot.generationInput.imageRoles, ['reference_image']);
   assert.equal(shot.generationInput.size, '1280x720');
   assert.equal(shot.generationInput.model, 'openai/grok-video-1.5');
+  assert.equal(shot.caption, 'New product');
+  assert.equal(project.compositionSpec.narrationText, 'A concise product narration.');
+  assert.equal(project.compositionSpec.requireAudio, true);
 
   const selectableModel = await projectTool.execute('tool-select-model', {
     action: 'create',
@@ -173,7 +187,79 @@ try {
     action: 'finalize', projectId: project.projectId, finalizationStatus: 'delivered',
     artifact: { filePath: '/managed/final.mp4', durationSeconds: 6, width: 1280, height: 720 },
   });
-  assert.equal(finalized.details.project.status, 'completed');
+  assert.equal(finalized.details.ok, false);
+  assert.equal(finalized.details.code, 'finalization_host_verification_required');
+
+  const narratedSingleShotPlan = __test.buildCompositionPlan(
+    accepted.details.project,
+    accepted.details.project.compositionSpec,
+  );
+  assert.equal(narratedSingleShotPlan.mode, 'timeline');
+  assert.equal(narratedSingleShotPlan.narrationText, 'A concise product narration.');
+  assert.equal(narratedSingleShotPlan.scenes[0].caption, 'New product');
+
+  const passthrough = await projectTool.execute('tool-passthrough-create', {
+    action: 'create',
+    title: 'Verified pass-through project',
+    goal: 'Deliver one generated clip without modifying it.',
+    constraints: { size: '1280x720', targetDurationSeconds: 6 },
+    shots: [{ shotId: 'shot-1', prompt: 'One complete generated clip', durationSeconds: 6 }],
+  });
+  const passthroughAttempt = await shotTool.execute('tool-passthrough-attempt', {
+    action: 'record_attempt',
+    projectId: passthrough.details.project.projectId,
+    shotId: 'shot-1',
+    attemptStatus: 'succeeded',
+    artifact: { filePath: '/managed/passthrough.mp4', durationSeconds: 6, width: 1280, height: 720 },
+    qa: { status: 'pass', deterministic: true, semantic: true },
+  });
+  const passthroughAccepted = await shotTool.execute('tool-passthrough-accept', {
+    action: 'accept',
+    projectId: passthrough.details.project.projectId,
+    shotId: 'shot-1',
+    attemptId: passthroughAttempt.details.project.shots[0].currentAttemptId,
+    qa: { status: 'pass', deterministic: true, semantic: true },
+  });
+  const passthroughPlan = __test.buildCompositionPlan(
+    passthroughAccepted.details.project,
+    passthroughAccepted.details.project.compositionSpec,
+  );
+  assert.equal(passthroughPlan.mode, 'source_qa');
+
+  const undersized = await projectTool.execute('tool-undersized-create', {
+    action: 'create',
+    title: 'Undersized provider output',
+    goal: 'Reject provider output below the requested generation geometry.',
+    constraints: { size: '1280x720', targetDurationSeconds: 6 },
+    shots: [{ shotId: 'shot-1', prompt: 'A 720p landscape generated clip', durationSeconds: 6 }],
+  });
+  const undersizedAttempt = await shotTool.execute('tool-undersized-attempt', {
+    action: 'record_attempt',
+    projectId: undersized.details.project.projectId,
+    shotId: 'shot-1',
+    attemptStatus: 'succeeded',
+    artifact: { filePath: '/managed/provider-480.mp4', durationSeconds: 6, width: 854, height: 480 },
+    qa: { status: 'pass', deterministic: true, semantic: true },
+  });
+  assert.equal(
+    undersizedAttempt.details.project.shots[0].attempts[0].artifactContract.status,
+    'blocked',
+  );
+  const undersizedAccept = await shotTool.execute('tool-undersized-accept', {
+    action: 'accept',
+    projectId: undersized.details.project.projectId,
+    shotId: 'shot-1',
+    attemptId: undersizedAttempt.details.project.shots[0].currentAttemptId,
+    qa: { status: 'pass', deterministic: true, semantic: true },
+  });
+  assert.equal(undersizedAccept.details.ok, false);
+  assert.equal(undersizedAccept.details.code, 'artifact_resolution_below_contract');
+
+  assert.equal(__test.projectStatus({
+    shots: accepted.details.project.shots,
+    composition: { status: 'blocked' },
+    finalization: { status: 'assembled', artifact: { filePath: '/managed/manual-upscale.mp4' } },
+  }), 'blocked');
 
   const multiShot = await projectTool.execute('tool-multi-create', {
     action: 'create',

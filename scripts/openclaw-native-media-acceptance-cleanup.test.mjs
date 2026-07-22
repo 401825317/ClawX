@@ -51,12 +51,26 @@ test('rejects a partially patched media runtime instead of shipping an invalid s
     '}',
     'function scheduleMediaGenerationTaskCompletion() {',
     'const acceptance = params.acceptance;',
+    'terminalResult: executed.terminalResult ?? terminalResult',
     '}',
   ].join('\n');
   assert.throws(
     () => cleanupOpenClawNativeMediaAcceptanceContent(partialFixture),
-    /only partially removed: acceptanceMismatches, params\.acceptance/,
+    /only partially removed: acceptanceMismatches, params\.acceptance, terminalResult: executed\.terminalResult \?\? terminalResult/,
   );
+});
+
+test('keeps the verified V3 terminal result contract', () => {
+  const fixture = [
+    'async function executeVideoGenerationJob() {}',
+    'function scheduleMediaGenerationTaskCompletion() {',
+    'const outputBlocked = executed.terminalResult?.terminalOutcome === "blocked";',
+    'const summary = executed.terminalResult?.terminalSummary;',
+    '}',
+  ].join('\n');
+  const cleaned = cleanupOpenClawNativeMediaAcceptanceContent(fixture);
+  assert.equal(cleaned.changed, false);
+  assert.equal(cleaned.content, fixture);
 });
 
 test('ignores unrelated OpenClaw bundles', () => {

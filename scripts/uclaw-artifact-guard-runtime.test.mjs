@@ -110,11 +110,11 @@ assert.match(ordinaryPromptContext?.appendSystemContext ?? '', /uclaw_video_proj
 
 const explicitVideoModeContext = __test.buildTurnPreferenceSystemContext({
   mode: 'video',
-  video: { size: '854x480', durationSeconds: 6 },
+  video: { size: '1280x720', durationSeconds: 6 },
 });
 assert.match(explicitVideoModeContext, /explicit current-turn user intent/iu);
 assert.match(explicitVideoModeContext, /calling video_generate/iu);
-assert.match(explicitVideoModeContext, /size=854x480/iu);
+assert.match(explicitVideoModeContext, /size=1280x720/iu);
 assert.match(explicitVideoModeContext, /durationSeconds=6/iu);
 
 const missingVideoAttemptEvent = finalizeEvent(
@@ -124,7 +124,7 @@ const missingVideoAttemptEvent = finalizeEvent(
 );
 __test.cacheTurnPreferences(missingVideoAttemptEvent, { runId: missingVideoAttemptEvent.runId }, {
   mode: 'video',
-  video: { size: '854x480', durationSeconds: 6 },
+  video: { size: '1280x720', durationSeconds: 6 },
 });
 const missingVideoAttempt = __test.analyzeArtifactFinal(
   missingVideoAttemptEvent,
