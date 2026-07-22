@@ -75,6 +75,10 @@ touchedAreas:
   - scripts/junfeiai-distribution-defaults.test.ts
   - scripts/openclaw-compaction-session-state-patch.mjs
   - scripts/openclaw-compaction-session-state-patch.test.mjs
+  - scripts/openclaw-assistant-live-stream-patch.mjs
+  - scripts/openclaw-assistant-live-stream-patch.test.mjs
+  - scripts/bundle-openclaw.mjs
+  - scripts/patch-browser-hint.mjs
   - scripts/uclaw-artifact-guard-runtime.test.mjs
   - scripts/uclaw-presentation-history-compact.test.mjs
   - scripts/gateway-task-ledger-monitor.test.ts
@@ -142,8 +146,8 @@ requiredRules:
   - comms-regression
   - docs-sync
 requiredTests:
-  - pnpm harness validate --spec harness/specs/tasks/chat-codex-timeline-redesign.md --since origin/feature/uclaw-general-agent-orchestration
-  - pnpm harness run --spec harness/specs/tasks/chat-codex-timeline-redesign.md --since origin/feature/uclaw-general-agent-orchestration --dry-run
+  - pnpm harness validate --spec harness/specs/tasks/chat-codex-timeline-redesign.md --since origin/feature/newUI
+  - pnpm harness run --spec harness/specs/tasks/chat-codex-timeline-redesign.md --since origin/feature/newUI --dry-run
   - pnpm exec tsx --test scripts/conversation-timeline-replay.test.ts
   - pnpm exec tsx --test scripts/desktop-approval-replay.test.ts
   - pnpm exec tsx --test scripts/conversation-timeline-golden.test.ts
@@ -158,6 +162,7 @@ requiredTests:
   - node --test scripts/uclaw-presentation-history-compact.test.mjs
   - node --test scripts/uclaw-artifact-guard-runtime.test.mjs
   - node --test scripts/openclaw-compaction-session-state-patch.test.mjs
+  - node --test scripts/openclaw-assistant-live-stream-patch.test.mjs
   - pnpm exec tsx --test scripts/chat-timeline-performance.test.ts
   - pnpm exec tsx --test scripts/gateway-task-ledger-monitor.test.ts
   - pnpm exec tsx --test scripts/host-task-lifecycle.test.ts
@@ -186,6 +191,9 @@ acceptance:
   - Adjacent compatible tool calls are grouped by stable ownership and chronology; raw command output, arguments, results, duration, and errors remain lazy execution details rather than default top-level items, including after live/history reconciliation.
   - The main timeline shows no default expanded execution graph; normal users retain an execution-details action and developer diagnostics retain raw events, IDs, provenance, ordering, and the complete graph.
   - Streaming assistant deltas are coalesced to at most one visible-item store commit per animation frame, and a delta does not rebuild or rerender completed turns.
+  - OpenAI Responses text deltas remain visible before commentary/final phase metadata arrives; the compatibility patch emits only Agent/UI stream evidence and does not invoke external-channel partial or block replies.
+  - Phase-pending Responses frames carry `delta` plus an empty transport-only `text` throttle sentinel rather than a repeated cumulative transcript; Main removes the empty sentinel during normalization, and compatibility runtime state retains only a bounded assistant/thinking event tail while keeping the accumulated current text and structured lifecycle/tool evidence.
+  - History initially restores the latest 100 raw messages and exposes an explicit load-earlier action in 100-message increments. The Renderer history window is capped at 500 raw messages, inactive raw-history cache entries retain at most 100 messages, and loading older history uses the ClawX Host transcript reader without adding OpenClaw polling or runtime state inference.
   - A 500-message replay keeps the mounted turn/item DOM bounded by the viewport and overscan rather than total history size, while keyboard navigation, selection, expansion, and search targets remain usable.
   - During the agreed streaming performance fixture, the main thread has no sustained long-task pattern, targets 60 FPS on the reference machine, and remains at least 30 FPS on the agreed low-spec profile.
   - Auto-follow occurs only while the viewport is bottom-anchored; user scroll-up disables follow, a new-content affordance is shown, and returning to bottom re-enables follow without a jump.
@@ -197,6 +205,7 @@ acceptance:
   - Artifact and verification items come from structured evidence, retain availability/error state, may appear before the final answer, and do not treat path-like prose as produced output.
   - Abort, error, disconnect, stale history, late tool results, duplicate finals, missing sequence numbers, and backend-idle recovery converge to one deterministic visible state.
   - Long tool loops run OpenClaw's mid-turn context precheck before the next model call, rotate the active transcript after successful compaction, and use the endpoint-owned transcript byte threshold without dropping adjacent user compaction settings.
+  - Native OpenClaw compaction start/end evidence updates one stable localized Timeline status item in place while the Turn remains owned by authoritative lifecycle state.
   - Artifact-guard prompt maintenance treats OpenClaw history as immutable, replaces only changed message branches, preserves current-turn tool arguments, and never fails the whole prompt-build hook because a historical tool call is frozen.
   - A recovered overflow attempt cannot leave a stale deferred lifecycle error after a later successful finishing event; genuine compaction failure remains terminal and diagnostic.
   - Renderer pages and components add no direct Gateway HTTP, direct IPC, transport switching, polling ownership, semantic planner, or completion inference.
@@ -391,6 +400,8 @@ Projection rules:
 - Preserve selection, keyboard focus, text copy, deep links, artifact actions, and accessibility when rows enter or leave the virtual window.
 - Track bottom anchoring as explicit state. New content auto-follows only when anchored; scroll-up locks the viewport and shows a new-content control; returning to bottom re-enables follow.
 - Maintain an anchor item and offset while expanding/collapsing details or loading media above the viewport.
+- Prefer the explicit load-earlier control over scroll-triggered fetching. Prepending a local transcript page preserves the first visible row and pixel offset, while the 500-message Renderer window prevents unbounded resident history growth.
+- Keep stream transport linear in generated text size: delta frames must not repeat the accumulated answer, active/terminal canonical event tails remain bounded, and compatibility assistant/thinking event tails retain only the first event plus a bounded recent tail.
 - Instrument event ingress, adapter time, reducer time, projection time, store commits, item render counts, mounted rows, dropped/slow frames, long tasks, history replay time, and scroll corrections in developer diagnostics.
 
 Performance fixtures must prove:
@@ -400,6 +411,7 @@ Performance fixtures must prove:
 3. Replaying 500 messages does not mount a linearly growing number of turn/item DOM nodes.
 4. The reference stream has no sustained main-thread tasks over 50 ms, targets 60 FPS on the reference machine, and remains usable at 30 FPS or better on the agreed low-spec profile.
 5. The user-scrolled viewport does not jump under streaming, expansion, artifact delivery, media metadata load, or history prepend.
+6. A long stream retains bounded raw assistant/thinking event evidence and transports only O(n) text bytes for an n-character answer; inactive session history caching does not retain a previously expanded 500-message window.
 
 ## Product Compatibility Matrix
 
@@ -463,6 +475,7 @@ Implementation review must include:
 - Reducer transition evidence showing terminal precedence, idempotence, late events, missing sequences, and session isolation.
 - E2E screenshots/traces of the default linear timeline, expanded tool details, normal execution details, developer diagnostics, scroll lock/new-content behavior, and restored sessions.
 - Performance output for high-frequency streaming and a 500-message session, including commit counts, completed-turn render counts, mounted DOM counts, long tasks, frame rate, replay duration, and scroll corrections. The retained reports are `harness/evidence/chat-codex-timeline-performance.json` and `harness/evidence/chat-codex-timeline-performance.md`, verified by `scripts/collect-chat-timeline-performance-evidence.mjs --verify`.
+- Memory-bound evidence for non-cumulative OpenClaw UI payloads, compatibility stream-event retention, the 100-message inactive history cache, and the existing 256-active/64-terminal canonical event tails.
 - Communication replay/compare output proving no renderer-owned transport or Gateway contract regression.
 - A file-level migration checklist confirming legacy code and rollout flags are removed, the version-level rollback path remains non-destructive, and no permanent duplicate state source remains.
 
@@ -479,6 +492,10 @@ The final continuation audit after the media-order fix also passes the current r
 Latest real-OpenClaw manual evidence: image history renders one artifact block; video history renders one player and one file block with durable metadata. Real image and video transcripts persist the same semantic order: assistant process commentary, async media task evidence, delivered `MEDIA:` artifact, then one completion answer. The user's follow-up screenshots proved that history replay parity alone was insufficient: the live reducer could still show late, merged, or repeated text until a later refresh. The current invariant is append-only: the first visible position of a Timeline item never changes; matching evidence updates that item in place; history evidence without a stable Turn-local owner is ignored instead of being appended. Native OpenClaw `itemId` is the preferred assistant identity, and `stream=item` with `kind=preamble` or `commentary` becomes live assistant commentary. A mixed assistant message containing pre-tool text and a tool call remains commentary, while only the post-tool answer converges into `final-answer`. Initial entry, explicit session switch, manual refresh, and Gateway reconnect are the only full history replay boundaries.
 
 The remaining no-streaming defect was upstream of the reducer. OpenClaw 2026.6.11 sets `deferBlockReplyDelivery` whenever any plugin registers `before_agent_finalize`, buffering every assistant frame until terminal delivery while tool events remain live. `uclaw-artifact-guard` 0.2.4 therefore moves terminal artifact inspection to observation-only `agent_end`; its prompt-history maintenance, tool-result compaction, media preparation, tool-level artifact and verification evidence, and canonical media completion gates remain unchanged. This intentionally removes pre-delivery automatic revision in favor of stable real-time delivery. Real session `agent:main:session-1784288492423`, run `8a0ef6e7-c926-4f90-b026-fc01268aaa67`, then delivered pre-tool text through growing frames from 3 to 576 characters before `tool.started` sequence 105 and `tool.completed` sequence 107, followed by growing final text and one terminal answer. The page retained `commentary -> tool-group -> final-answer` with distinct item IDs. Plain text `state=delta` diagnostics are no longer written once per token-sized frame; structured tool deltas and terminal chat signals remain logged. The real Gateway stayed healthy through the run, and the plugin observer ran before terminal settlement without restarting it.
+
+With OpenClaw 2026.7.1-2, a second Responses-specific delivery gap remained: text deltas can arrive before the item exposes `commentary` or `final_answer` phase metadata. The first compatibility patch forwarded those deltas through `emitAssistantStreamData`, but that helper still appends to `deferredAssistantEvents` whenever `onBeforeTerminalDelivery` is installed, so the page continued to receive the whole answer only at terminal delivery. V2 bypassed that terminal buffer through OpenClaw's Agent/UI event path (`emitAgentEvent` plus `onAgentEvent`) and proved visible growth in real session `agent:main:session-1784687197385`, run `c32aea85-c0fa-4778-a605-ed4d06f07875`: the page rendered an intermediate answer through paragraph 2 before growing to one 12-paragraph, 4,446-character final; native terminal sequence 2,875 completed with `stop`, the processing state cleared, no duplicate final appeared, and Gateway PID `99941` remained unchanged. V3 removed the repeated cumulative `text` field so transport and retained event payload grow linearly with the answer, but that delta-only shape bypassed OpenClaw's native Gateway text-event coalescer and allowed token-sized frames to arrive in one Renderer scheduling burst. V4 retains the linear payload by sending only `delta`, `itemId`, and an empty transport-only `text` sentinel; the sentinel activates OpenClaw's existing 24 ms coalescer, is removed by Main normalization, and never becomes Timeline content. The patch still does not call `emitAssistantStreamData`, `onPartialReply`, or block-reply delivery, preserving final-only WeChat/external-channel behavior and all suppress/silent/message-tool-only gates; it migrates installed V1/V2/V3 blocks and remains idempotent in development and packaged bundles.
+
+The bounded-history choice is explicit rather than inferred from scroll position. Initial entry restores the latest 100 transcript messages; the existing load-earlier control reads larger local transcript suffixes in 100-message steps, preserves the visible-row anchor, and stops at the 500-message Renderer budget. Virtuoso keeps mounted rows limited to the viewport and overscan. Inactive raw-history cache entries now retain only the latest 100 messages even if that session previously expanded to 500, while the canonical store continues its 16-session LRU and 256-active/64-terminal raw-event tails. No final/idle event triggers history replay, and this paging path does not patch or poll OpenClaw.
 
 The later approved product decision supersedes terminal-time automatic history replay. Final, error, abort, completion-wake, and backend-idle events now settle only the live lifecycle and never call `chat.history` for the visible session. Existing Turn and Timeline item positions remain fixed after first render. Matching history evidence updates those identities in place; assistant history that cannot match the Turn-local segment ordinal, message alias, or following tool-call boundary is ignored instead of becoming a new row at the end. Only a genuinely missing restored Turn may append after the visible Turn order. Full replay remains available on initial entry, explicit session switch, manual refresh, and Gateway reconnect. This removes the source of mid-stream transcript insertion without changing default chat/image/video routing, planner ownership, queues, approvals, artifact verification, packaging, or restored-session behavior.
 

@@ -206,6 +206,11 @@
         "toolAborted": "Остановлено: {{tool}}",
         "toolPartial": "Выполнено частично: {{tool}}",
         "toolWaitingApproval": "Ожидает одобрения: {{tool}}",
+        "contextCompactionRunning": "Сжатие контекста",
+        "contextCompactionCompleted": "Сжатие контекста завершено",
+        "contextCompactionCompletedContinuing": "Контекст сжат, обработка продолжается",
+        "contextCompactionRetrying": "Сжатие контекста не завершено, повторная попытка",
+        "contextCompactionFailed": "Сжатие контекста не завершено",
         "toolLabels": {
             "command": "Этап выполнения",
             "exec": "Этап выполнения",

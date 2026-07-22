@@ -1023,7 +1023,6 @@ export const ConversationTimeline = forwardRef<ConversationTimelineHandle, Conve
         atBottomStateChange={(nextAtBottom) => {
           setBottomState({ sessionKey, atBottom: nextAtBottom });
         }}
-        startReached={loadEarlier}
         rangeChanged={({ startIndex, endIndex }) => {
           recordTimelineMountedRows(Math.max(0, endIndex - startIndex + 1));
         }}

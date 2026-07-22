@@ -11,6 +11,7 @@ import {
   applyRuntimeTaskEventToOwners,
   buildCompletionWakeTerminalTaskEvent,
   completionWakeTaskIdFromRunId,
+  RUNTIME_STREAM_EVENT_TAIL_LIMIT,
   resolveCompletionWakeOwnerRunId,
   settledRuntimeRunError,
   settledRuntimeRunStatus,
@@ -35,6 +36,52 @@ function taskEvent(task: ChatRuntimeTaskProjection, ts = task.updatedAt): ChatRu
 function applyEvents(events: ChatRuntimeEvent[]) {
   return events.reduce(applyRuntimeEventToRuns, {});
 }
+
+test('runtime stream evidence stays bounded while accumulated text remains complete', () => {
+  const assistantChunks = RUNTIME_STREAM_EVENT_TAIL_LIMIT + 80;
+  const thinkingChunks = RUNTIME_STREAM_EVENT_TAIL_LIMIT + 40;
+  let runtimeRuns = applyRuntimeEventToRuns({}, {
+    type: 'run.started',
+    runId: RUN_ID,
+    sessionKey: SESSION_KEY,
+    ts: 1,
+    startedAt: 1,
+  });
+
+  for (let index = 0; index < assistantChunks; index += 1) {
+    runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+      type: 'assistant.delta',
+      runId: RUN_ID,
+      sessionKey: SESSION_KEY,
+      seq: index + 2,
+      ts: index + 2,
+      delta: 'a',
+    });
+  }
+  for (let index = 0; index < thinkingChunks; index += 1) {
+    runtimeRuns = applyRuntimeEventToRuns(runtimeRuns, {
+      type: 'thinking.delta',
+      runId: RUN_ID,
+      sessionKey: SESSION_KEY,
+      seq: assistantChunks + index + 2,
+      ts: assistantChunks + index + 2,
+      delta: 't',
+    });
+  }
+
+  const run = runtimeRuns[RUN_ID]!;
+  const retainedAssistant = run.events.filter((event) => event.type === 'assistant.delta');
+  const retainedThinking = run.events.filter((event) => event.type === 'thinking.delta');
+  assert.equal(run.assistantText, 'a'.repeat(assistantChunks));
+  assert.equal(run.thinkingText, 't'.repeat(thinkingChunks));
+  assert.equal(retainedAssistant.length, RUNTIME_STREAM_EVENT_TAIL_LIMIT);
+  assert.equal(retainedThinking.length, RUNTIME_STREAM_EVENT_TAIL_LIMIT);
+  assert.equal(retainedAssistant[0]?.seq, 2);
+  assert.equal(retainedAssistant.at(-1)?.seq, assistantChunks + 1);
+  assert.equal(retainedThinking[0]?.seq, assistantChunks + 2);
+  assert.equal(retainedThinking.at(-1)?.seq, assistantChunks + thinkingChunks + 1);
+  assert.equal(run.events.some((event) => event.type === 'run.started'), true);
+});
 
 test('detached task terminal updates fan out to the owning chat run', () => {
   const ownerRunId = 'run-owner-video';

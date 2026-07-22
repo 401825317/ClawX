@@ -50,6 +50,7 @@ import { patchOpenClawTextProviderFailoverRuntime } from './openclaw-text-provid
 import { patchOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchOpenClawAssistantLiveStreamRuntime } from './openclaw-assistant-live-stream-patch.mjs';
 import { patchOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
 import { patchOpenClawTaskSummaryDeliveryRuntime } from './openclaw-task-summary-delivery-patch.mjs';
 import { patchOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
@@ -1205,6 +1206,16 @@ function patchBundledRuntime(outputDir) {
   });
   if (streamingRuntimePatch.patchedFiles > 0) {
     echo`   🩹 Patched ${streamingRuntimePatch.patchedFiles} streaming runtime file(s)`;
+  }
+
+  // --- OpenAI Responses assistant UI stream patch ---
+  // Responses items receive commentary/final phase metadata only at text_end.
+  // Emit earlier deltas to Agent/UI listeners without invoking channel replies.
+  const assistantLiveStreamPatch = patchOpenClawAssistantLiveStreamRuntime(distDir, {
+    logger: { log: (message) => echo`   ${message}` },
+  });
+  if (assistantLiveStreamPatch.patchedFiles > 0) {
+    echo`   🩹 Patched ${assistantLiveStreamPatch.patchedFiles} assistant UI streaming runtime file(s)`;
   }
 
   // --- Final model request contract diagnostics patch ---

@@ -1,5 +1,6 @@
 import type { ElectronApplication, Page } from '@playwright/test';
 import type { ChatRuntimeEvent } from '../../shared/chat-runtime-events';
+import { normalizeGatewayChatRuntimeEvents } from '../../electron/gateway/chat-runtime-events';
 import type { ConversationPerformanceSnapshot } from '../../src/stores/conversation/metrics';
 import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from './fixtures/electron';
 
@@ -68,6 +69,7 @@ async function installTimelineMocks(
     historyError?: string;
     devModeUnlocked?: boolean;
     captureHostApiRequests?: boolean;
+    pagedHistory?: boolean;
     thumbnailResults?: Record<string, unknown>;
     reasoningLevel?: 'off' | 'on' | 'stream';
   } = {},
@@ -79,8 +81,9 @@ async function installTimelineMocks(
     hasActiveRun: false,
     ...(options.reasoningLevel ? { reasoningLevel: options.reasoningLevel } : {}),
   }];
+  const initialHistory = options.pagedHistory ? history.slice(-100) : history;
   const historyResult = {
-    messages: history,
+    messages: initialHistory,
     sessionInfo: { hasActiveRun: false },
     ...(options.reasoningLevel ? { reasoningLevel: options.reasoningLevel } : {}),
   };
@@ -91,6 +94,20 @@ async function installTimelineMocks(
   const hostHistoryResponse = options.historyError
     ? { success: false, error: options.historyError }
     : { success: true, result: historyResult };
+
+  const transcriptHistoryMocks = options.pagedHistory
+    ? Object.fromEntries([100, 200, 300, 400, 500].map((limit) => [
+        stableStringify([`/api/sessions/transcript?sessionKey=${encodeURIComponent(SESSION_KEY)}&limit=${limit}`, 'GET']),
+        {
+          ok: true,
+          data: {
+            status: 200,
+            ok: true,
+            json: { messages: history.slice(-limit) },
+          },
+        },
+      ]))
+    : {};
 
   await installIpcMocks(app, {
     captureHostApiRequests: options.captureHostApiRequests,
@@ -140,6 +157,7 @@ async function installTimelineMocks(
         ok: true,
         data: { status: 200, ok: true, json: hostHistoryResponse },
       },
+      ...transcriptHistoryMocks,
       [stableStringify(['/api/chat/send', 'POST'])]: {
         ok: true,
         data: { status: 200, ok: true, json: { success: true, result: { runId: RUN_ID } } },
@@ -296,6 +314,15 @@ function singleLongTurnHistory(toolCount = 160): unknown[] {
   return history;
 }
 
+function pagedConversationHistory(messageCount = 600): unknown[] {
+  return Array.from({ length: messageCount }, (_, index) => ({
+    id: `paged-history-${index + 1}`,
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: `Paged history message ${index + 1}`,
+    timestamp: 70_000 + index,
+  }));
+}
+
 test.describe('Codex-style conversation timeline', () => {
   test('drives composer activity from the canonical Turn instead of legacy sending state', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
@@ -329,6 +356,83 @@ test.describe('Codex-style conversation timeline', () => {
       await expect(page.getByTestId('timeline-error-retry')).toBeVisible();
       await expect(page.getByText('connection reset while the legacy recovery timer is still active')).toHaveCount(0);
       await expect(page.getByTestId('chat-run-error')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('updates native context compaction progress in place', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installTimelineMocks(app, []);
+      const page = await openTimeline(app);
+      await page.getByTestId('chat-composer-input').fill('Continue after context compaction.');
+      await page.getByTestId('chat-composer-send').click();
+
+      const compactionEvents = (seq: number, data: Record<string, unknown>) => (
+        normalizeGatewayChatRuntimeEvents({
+          runId: RUN_ID,
+          sessionKey: SESSION_KEY,
+          producer: 'openclaw',
+          seq,
+          ts: Date.now() + seq,
+          stream: 'compaction',
+          data,
+        })
+      );
+      await emitRuntimeEvents(app, compactionEvents(1, { phase: 'start' }));
+
+      const compactionRow = page.locator(`[data-item-id="progress:compaction:${RUN_ID}"]`);
+      await expect(compactionRow).toHaveCount(1);
+      await expect(compactionRow).toContainText(/Compressing context|正在压缩上下文/u);
+      const stableRowId = await compactionRow.getAttribute('data-timeline-row-id');
+
+      await emitRuntimeEvents(app, compactionEvents(2, {
+        phase: 'end',
+        completed: true,
+        willRetry: true,
+      }));
+
+      await expect(compactionRow).toHaveCount(1);
+      await expect(compactionRow).toContainText(/Context compressed; continuing|上下文压缩完成，正在继续处理/u);
+      await expect(compactionRow).toHaveAttribute('data-timeline-row-id', stableRowId ?? '');
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('renders phase-pending throttled assistant frames before terminal delivery', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installTimelineMocks(app, []);
+      const page = await openTimeline(app);
+      await page.getByTestId('chat-composer-input').fill('Stream a delta-only answer.');
+      await page.getByTestId('chat-composer-send').click();
+
+      const startedAt = Date.now();
+      const phasePendingEvents = (seq: number, delta: string) => normalizeGatewayChatRuntimeEvents({
+        producer: 'openclaw',
+        runId: RUN_ID,
+        sessionKey: SESSION_KEY,
+        stream: 'assistant',
+        data: {
+          text: '',
+          delta,
+          itemId: 'phase-pending-answer',
+        },
+        seq,
+        ts: startedAt + seq,
+      });
+      await emitRuntimeEvents(app, phasePendingEvents(1, 'First visible frame.'));
+      const stream = page.getByTestId('timeline-commentary').filter({ hasText: 'First visible frame.' });
+      await expect(stream).toBeVisible();
+      await expect(stream).toContainText('First visible frame.');
+
+      await emitRuntimeEvents(app, phasePendingEvents(2, ' Second visible frame.'));
+      await expect(stream).toContainText('First visible frame. Second visible frame.');
+      await expect(page.getByTestId('timeline-commentary')).toHaveCount(1);
     } finally {
       await closeElectronApp(app);
     }
@@ -1236,6 +1340,82 @@ test.describe('Codex-style conversation timeline', () => {
       expect(snapshot.averageFps).toBeGreaterThanOrEqual(minimumFps);
       expect(snapshot.longTasks.count).toBeLessThanOrEqual(maximumLongTaskCount);
       expect(longTaskShare).toBeLessThanOrEqual(maximumLongTaskShare);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
+  test('loads history explicitly in 100-message pages and stops at the 500-message window', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+
+    try {
+      await installTimelineMocks(app, pagedConversationHistory(), {
+        captureHostApiRequests: true,
+        pagedHistory: true,
+      });
+      const page = await openTimeline(app);
+      const timeline = page.getByTestId('conversation-timeline');
+      const scroller = page.getByTestId('chat-scroll-container');
+      const loadEarlier = page.getByTestId('chat-load-more-history');
+      const scrollToTop = async () => {
+        await scroller.hover();
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          await page.mouse.wheel(0, -10_000);
+          await waitForAnimationFrames(page);
+          if (await scroller.evaluate((element) => element.scrollTop) < 1) return;
+        }
+      };
+
+      await expect(timeline).toHaveAttribute('data-turn-count', '50');
+      await scrollToTop();
+      await expect(timeline).toHaveAttribute('data-follow-mode', 'detached');
+      await expect.poll(async () => await scroller.evaluate((element) => element.scrollTop)).toBeLessThan(1);
+      await expect(loadEarlier).toBeInViewport();
+      const baselineTranscriptRequests = (await capturedHostApiRequests(app)).filter((request) => (
+        request.path?.startsWith('/api/sessions/transcript?')
+      )).length;
+      await page.waitForTimeout(500);
+      expect((await capturedHostApiRequests(app)).filter((request) => (
+        request.path?.startsWith('/api/sessions/transcript?')
+      ))).toHaveLength(baselineTranscriptRequests);
+
+      const anchorBefore = await scroller.evaluate((element) => {
+        const scrollerTop = element.getBoundingClientRect().top;
+        const rows = Array.from(element.querySelectorAll<HTMLElement>('[data-timeline-row-id]'));
+        const visible = rows.find((row) => row.getBoundingClientRect().top >= scrollerTop - 1)
+          ?? rows.find((row) => row.getBoundingClientRect().bottom > scrollerTop);
+        return visible
+          ? { id: visible.dataset.timelineRowId ?? '', top: visible.getBoundingClientRect().top - scrollerTop }
+          : null;
+      });
+      expect(anchorBefore?.id).toBeTruthy();
+      await loadEarlier.click();
+      await expect(timeline).toHaveAttribute('data-turn-count', '100');
+      await expect.poll(async () => {
+        return await scroller.evaluate((element, anchorId) => {
+          const anchor = Array.from(element.querySelectorAll<HTMLElement>('[data-timeline-row-id]'))
+            .find((row) => row.dataset.timelineRowId === anchorId);
+          return anchor
+            ? anchor.getBoundingClientRect().top - element.getBoundingClientRect().top
+            : Number.NaN;
+        }, anchorBefore?.id ?? '');
+      }).toBeCloseTo(anchorBefore?.top ?? 0, 0);
+
+      for (const expectedTurnCount of [150, 200, 250]) {
+        await scrollToTop();
+        await expect.poll(async () => await scroller.evaluate((element) => element.scrollTop)).toBeLessThan(1);
+        await expect(loadEarlier).toBeInViewport();
+        await loadEarlier.click();
+        await expect(timeline).toHaveAttribute('data-turn-count', String(expectedTurnCount));
+      }
+
+      await expect(loadEarlier).toHaveCount(0);
+      const transcriptPaths = (await capturedHostApiRequests(app))
+        .map((request) => request.path ?? '')
+        .filter((path) => path.startsWith('/api/sessions/transcript?'));
+      for (const limit of [200, 300, 400, 500]) {
+        expect(transcriptPaths.filter((path) => path.endsWith(`limit=${limit}`))).toHaveLength(1);
+      }
     } finally {
       await closeElectronApp(app);
     }

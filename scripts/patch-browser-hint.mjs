@@ -32,6 +32,7 @@ import { patchInstalledOpenClawTextProviderFailoverRuntime } from './openclaw-te
 import { patchInstalledOpenClawCompactionSessionStateRuntime } from './openclaw-compaction-session-state-patch.mjs';
 import { patchInstalledOpenClawSessionCwdRuntime } from './openclaw-session-cwd-runtime-patch.mjs';
 import { patchInstalledOpenClawStreamingRuntime } from './openclaw-streaming-runtime-patch.mjs';
+import { patchInstalledOpenClawAssistantLiveStreamRuntime } from './openclaw-assistant-live-stream-patch.mjs';
 import { patchInstalledOpenClawSystemPromptReasoningLabelRuntime } from './openclaw-system-prompt-reasoning-label-patch.mjs';
 import { patchInstalledOpenClawTaskSummaryDeliveryRuntime } from './openclaw-task-summary-delivery-patch.mjs';
 import { patchInstalledOpenClawToolDirectoryI18nRuntime } from './openclaw-tool-directory-i18n-patch.mjs';
@@ -54,6 +55,7 @@ try {
   patchInstalledOpenClawToolDirectoryI18nRuntime();
   cleanupInstalledOpenClawRequiredContractToolRuntime();
   patchInstalledOpenClawStreamingRuntime();
+  patchInstalledOpenClawAssistantLiveStreamRuntime();
   patchInstalledOpenClawModelRequestContractRuntime();
   patchInstalledOpenClawRawToolSignalRuntime();
   patchInstalledOpenClawPluginToolRunContextRuntime();

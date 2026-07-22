@@ -36,6 +36,21 @@ export const DEFAULT_SESSION_RUN_STATE: SessionRunState = {
 const SESSION_RUN_STATE_CACHE_MAX_SESSIONS = 32;
 const sessionRunStateCache = new Map<string, SessionRunState>();
 
+/** Keeps the newest raw messages within the inactive-session cache budget. */
+export function boundSessionHistoryMessages(messages: RawMessage[], maxMessages: number): RawMessage[] {
+  if (maxMessages <= 0) return [];
+  return messages.length > maxMessages ? messages.slice(-maxMessages) : messages;
+}
+
+/** Advances an explicit transcript page without exceeding the Renderer budget. */
+export function nextHistoryMessageLimit(
+  currentLimit: number,
+  pageSize: number,
+  maxMessages: number,
+): number {
+  return Math.min(currentLimit + pageSize, maxMessages);
+}
+
 function toMs(timestamp: number): number {
   return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
 }
@@ -461,6 +476,7 @@ export function buildSessionSwitchPatch(params: {
         ? cachedNextSession.messages.length >= historyPageSize
           || cachedNextSession.messages.length > restoredCachedMessages.length
         : false,
+      historyMessageLimit: historyPageSize,
       loadingMoreHistory: false,
       thinkingLevel: cachedNextSession?.thinkingLevel ?? state.thinkingLevel ?? null,
       ...cachedRunState,

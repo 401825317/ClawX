@@ -565,6 +565,210 @@ test('history without an idempotency key aligns to the unique local turn by cont
   );
 });
 
+test('assistant-only compacted history aligns to the live Turn through shared tool identity', () => {
+  const sessionKey = 'agent:main:history-align-compacted-suffix';
+  const turnId = createTurnId({ sessionKey, idempotencyKey: 'compacted-suffix-request' });
+  const runId = 'run-history-align-compacted-suffix';
+  const toolCallId = 'tool-history-align-compacted-suffix';
+  const occurredAt = 1_700_000_100_000;
+  const event = (
+    type: ConversationEvent['type'],
+    offset: number,
+    data: ConversationEvent['data'],
+    extra: Partial<ConversationEvent> = {},
+  ): ConversationEvent => ({
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: `history-align-compacted-suffix:${offset}:${type}`,
+    type,
+    source: type === 'turn.requested'
+      ? 'host'
+      : type === 'final.message'
+        ? 'openclaw-chat'
+        : 'openclaw-runtime',
+    authority: type === 'turn.requested' || type === 'run.ended' || type === 'final.message'
+      ? 'authoritative'
+      : 'corroborating',
+    sessionKey,
+    turnId,
+    runId,
+    occurredAt: occurredAt + offset,
+    receivedAt: occurredAt + offset,
+    replayed: false,
+    data,
+    ...extra,
+  });
+  const liveState = reduceConversationEvents(createEmptyConversationState(), [
+    event('turn.requested', 0, {
+      message: {
+        role: 'user',
+        id: 'compacted-suffix-user',
+        idempotencyKey: 'compacted-suffix-request',
+        timestamp: occurredAt,
+        content: 'Explain why the market rose today.',
+      },
+    }, { messageId: 'compacted-suffix-user' }),
+    event('run.started', 1, { startedAt: occurredAt + 1 }),
+    event('tool.started', 2, {
+      toolCallId,
+      name: 'web_search',
+      args: { query: 'market rally' },
+    }, { toolCallId }),
+    event('tool.completed', 3, {
+      toolCallId,
+      name: 'web_search',
+      result: 'market evidence',
+    }, { toolCallId }),
+    event('final.message', 4, {
+      message: {
+        role: 'assistant',
+        content: 'The market rose for several reinforcing reasons.',
+        timestamp: occurredAt + 4,
+      },
+    }),
+    event('run.ended', 5, { status: 'completed', endedAt: occurredAt + 5 }),
+  ]);
+  const compactedHistory = historyMessagesToConversationEvents(sessionKey, [{
+    role: 'assistant',
+    id: 'compacted-suffix-tool-message',
+    timestamp: occurredAt + 2,
+    content: [{
+      type: 'toolCall',
+      id: toolCallId,
+      name: 'web_search',
+      arguments: { query: 'market rally' },
+    }],
+  }, {
+    role: 'toolresult',
+    id: 'compacted-suffix-tool-result',
+    timestamp: occurredAt + 3,
+    toolCallId,
+    toolName: 'web_search',
+    content: 'market evidence',
+  }, {
+    role: 'assistant',
+    id: 'compacted-suffix-final',
+    timestamp: occurredAt + 4,
+    content: 'The market rose for several reinforcing reasons.',
+  }], { reason: 'terminal-refresh' });
+
+  assert.equal(compactedHistory.some((historyEvent) => historyEvent.type === 'turn.requested'), false);
+  const freshlyAligned = replaceSessionTurns(liveState, sessionKey, compactedHistory);
+  assert.deepEqual(freshlyAligned.turnOrderBySession[sessionKey], [turnId]);
+
+  const stateWithDuplicateOrphan = reduceConversationEvents(liveState, compactedHistory);
+  assert.deepEqual(stateWithDuplicateOrphan.turnOrderBySession[sessionKey], [
+    turnId,
+    compactedHistory.find((event) => event.turnId)?.turnId,
+  ]);
+  const state = replaceSessionTurns(stateWithDuplicateOrphan, sessionKey, compactedHistory);
+
+  assert.deepEqual(state.turnOrderBySession[sessionKey], [turnId]);
+  const turn = state.turnsById[turnId];
+  assert.equal(turn.items.filter((item) => item.kind === 'final-answer').length, 1);
+  assert.equal(
+    turn.items.flatMap((item) => item.kind === 'tool-group' ? item.entries : []).length,
+    1,
+  );
+  assert.equal(
+    state.aliases.byMessageId[createSessionAliasKey(sessionKey, 'compacted-suffix-final')],
+    turnId,
+  );
+});
+
+test('identity-free assistant history aligns only when one live lifecycle can own it', () => {
+  const sessionKey = 'agent:main:history-align-orphan-lifecycle';
+  const occurredAt = 1_700_000_200_000;
+  const liveTurnEvents = (turnId: string, requestId: string, offset: number): ConversationEvent[] => {
+    const runId = `run:${requestId}`;
+    const event = (
+      type: ConversationEvent['type'],
+      eventOffset: number,
+      data: ConversationEvent['data'],
+      extra: Partial<ConversationEvent> = {},
+    ): ConversationEvent => ({
+      version: CONVERSATION_EVENT_CONTRACT_VERSION,
+      eventId: `${requestId}:${eventOffset}:${type}`,
+      type,
+      source: type === 'turn.requested'
+        ? 'host'
+        : type === 'final.message'
+          ? 'openclaw-chat'
+          : 'openclaw-runtime',
+      authority: 'authoritative',
+      sessionKey,
+      turnId,
+      runId,
+      occurredAt: occurredAt + offset + eventOffset,
+      receivedAt: occurredAt + offset + eventOffset,
+      replayed: false,
+      data,
+      ...extra,
+    });
+    return [
+      event('turn.requested', 0, {
+        message: {
+          role: 'user',
+          id: `${requestId}:user`,
+          idempotencyKey: requestId,
+          content: `Request ${requestId}`,
+        },
+      }, { messageId: `${requestId}:user` }),
+      event('final.message', 1, {
+        message: { role: 'assistant', content: 'Recovered answer.' },
+      }),
+      event('run.ended', 2, { status: 'completed', endedAt: occurredAt + offset + 2 }),
+    ];
+  };
+  const firstTurnId = createTurnId({ sessionKey, idempotencyKey: 'lifecycle-first' });
+  const assistantOnlyHistory = historyMessagesToConversationEvents(sessionKey, [{
+    role: 'assistant',
+    id: 'lifecycle-history-final',
+    timestamp: occurredAt + 2,
+    content: 'Recovered answer.',
+  }]);
+  const historyTurnId = assistantOnlyHistory.find((event) => event.turnId)?.turnId;
+  assert.ok(historyTurnId);
+
+  const uniqueState = replaceSessionTurns(
+    reduceConversationEvents(
+      createEmptyConversationState(),
+      liveTurnEvents(firstTurnId, 'lifecycle-first', 0),
+    ),
+    sessionKey,
+    assistantOnlyHistory,
+  );
+  assert.deepEqual(uniqueState.turnOrderBySession[sessionKey], [firstTurnId]);
+
+  const newerTurnId = createTurnId({ sessionKey, idempotencyKey: 'lifecycle-newer' });
+  const newerState = replaceSessionTurns(
+    reduceConversationEvents(
+      createEmptyConversationState(),
+      liveTurnEvents(newerTurnId, 'lifecycle-newer', 30_000),
+    ),
+    sessionKey,
+    assistantOnlyHistory,
+  );
+  assert.deepEqual(newerState.turnOrderBySession[sessionKey], [newerTurnId, historyTurnId]);
+
+  const secondTurnId = createTurnId({ sessionKey, idempotencyKey: 'lifecycle-second' });
+  const ambiguousState = replaceSessionTurns(
+    reduceConversationEvents(
+      createEmptyConversationState(),
+      [
+        ...liveTurnEvents(firstTurnId, 'lifecycle-first', 0),
+        ...liveTurnEvents(secondTurnId, 'lifecycle-second', 10),
+      ],
+    ),
+    sessionKey,
+    assistantOnlyHistory,
+  );
+  assert.deepEqual(ambiguousState.turnOrderBySession[sessionKey], [
+    firstTurnId,
+    secondTurnId,
+    historyTurnId,
+  ]);
+});
+
 test('history without ids or timestamps replays deterministically and keeps repeated prompts distinct', () => {
   const sessionKey = 'agent:main:history-stable-location';
   const messages: RawMessage[] = [{

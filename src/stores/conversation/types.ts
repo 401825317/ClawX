@@ -59,6 +59,8 @@ export type UserMessageItem = TimelineItemBase & {
 export type CommentaryItem = TimelineItemBase & {
   kind: 'commentary';
   text: string;
+  translationKey?: string;
+  translationParams?: Record<string, string | number>;
   sealed: boolean;
   origin: 'assistant' | 'progress';
   segmentOrdinal?: number;

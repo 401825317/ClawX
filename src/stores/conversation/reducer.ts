@@ -735,6 +735,8 @@ function applyProgress(turn: ConversationTurn, event: ConversationEvent): Conver
     turnId: turn.id,
     kind: 'commentary',
     text: entry.text,
+    translationKey: entry.translationKey,
+    translationParams: entry.translationParams,
     sealed: true,
     origin: 'progress',
     status: progressItemStatus(entry),
@@ -3482,6 +3484,7 @@ export function reduceConversationEvents(state: ConversationState, events: Conve
 }
 
 const HISTORY_TURN_ALIGNMENT_WINDOW_MS = 60_000;
+const HISTORY_TURN_ALIGNMENT_CLOCK_SKEW_MS = 5_000;
 
 function messageTimestampMs(message: ConversationMessageSnapshot, fallback: number): number {
   const value = message.timestamp;
@@ -3505,7 +3508,105 @@ type HistoryTurnAlignment = {
   historyTurnId: string;
   liveTurnId: string;
   eventIds: string[];
+  basis: ConversationAssignmentBasis;
+  confidence: ConversationAssignmentConfidence;
 };
+
+const HISTORY_IDENTITY_BASES = new Set<ConversationAssignmentBasis>([
+  'message-alias',
+  'task-alias',
+  'parent-task-alias',
+  'tool-alias',
+  'root-run-alias',
+  'run-alias',
+]);
+
+/** Find a live owner from identities that survived the history projection. */
+function alignHistoryTurnByIdentity(
+  state: ConversationState,
+  sessionKey: string,
+  currentTurnIds: string[],
+  events: ConversationEvent[],
+  excludedTurnId: string,
+): { turnId: string; basis: ConversationAssignmentBasis } | undefined {
+  const owners = new Map<string, ConversationAssignmentBasis>();
+  events.forEach((event) => {
+    const assignment = resolveTurnAssignment(state, { ...event, turnId: undefined });
+    if (!assignment || !HISTORY_IDENTITY_BASES.has(assignment.basis)) return;
+    const turn = state.turnsById[assignment.turnId];
+    if (!turn?.hasLiveEvidence || turn.sessionKey !== sessionKey || turn.id === excludedTurnId) return;
+    if (!owners.has(turn.id)) owners.set(turn.id, assignment.basis);
+  });
+  // A previously appended orphan can temporarily own the global aliases.
+  // Recover from the live Turn's canonical entity indexes in that case.
+  if (owners.size === 0) {
+    currentTurnIds.forEach((turnId) => {
+      const turn = state.turnsById[turnId];
+      if (!turn?.hasLiveEvidence || turn.sessionKey !== sessionKey || turn.id === excludedTurnId) return;
+      for (const event of events) {
+        let basis: ConversationAssignmentBasis | undefined;
+        if (event.messageId && (
+          turn.trigger.message.id === event.messageId
+          || Boolean(turn.narrativeItemByMessageId[event.messageId])
+        )) {
+          basis = 'message-alias';
+        } else if (event.taskId && turn.taskIds.includes(event.taskId)) {
+          basis = 'task-alias';
+        } else if (event.parentTaskId && turn.taskIds.includes(event.parentTaskId)) {
+          basis = 'parent-task-alias';
+        } else if (event.toolCallId && turn.toolItemByCallId[event.toolCallId]) {
+          basis = 'tool-alias';
+        } else if (event.rootRunId && turn.runAliases.includes(event.rootRunId)) {
+          basis = 'root-run-alias';
+        } else if (event.runId && turn.runAliases.includes(event.runId)) {
+          basis = 'run-alias';
+        }
+        if (basis) {
+          owners.set(turn.id, basis);
+          break;
+        }
+      }
+    });
+  }
+  if (owners.size !== 1) return undefined;
+  const owner = [...owners.entries()][0];
+  return { turnId: owner[0], basis: owner[1] };
+}
+
+/**
+ * Recover a suffix with no surviving upstream IDs only when its lifecycle
+ * points to exactly one live Turn. This is intentionally disabled for a
+ * history snapshot that contains any user boundary.
+ */
+function alignHistoryTurnByLifecycle(
+  state: ConversationState,
+  sessionKey: string,
+  currentTurnIds: string[],
+  events: ConversationEvent[],
+  excludedTurnId: string,
+): { turnId: string; basis: ConversationAssignmentBasis } | undefined {
+  const evidence = events.filter((event) => event.type !== 'history.checkpoint');
+  if (evidence.length === 0) return undefined;
+  const firstAt = Math.min(...evidence.map((event) => event.occurredAt));
+  const lastAt = Math.max(...evidence.map((event) => event.occurredAt));
+  const candidates = currentTurnIds
+    .map((turnId) => state.turnsById[turnId])
+    .filter((turn): turn is ConversationTurn => Boolean(
+      turn?.hasLiveEvidence && turn.sessionKey === sessionKey && turn.id !== excludedTurnId,
+    ))
+    .filter((turn) => {
+      const suffixCanFollowRequest = lastAt + HISTORY_TURN_ALIGNMENT_CLOCK_SKEW_MS >= turn.createdAt;
+      const terminalUpdateIsClose = isTerminalTurn(turn)
+        && suffixCanFollowRequest
+        && Math.abs(turn.updatedAt - lastAt) <= HISTORY_TURN_ALIGNMENT_WINDOW_MS;
+      const activeLifecycleOverlaps = !isTerminalTurn(turn)
+        && suffixCanFollowRequest
+        && turn.updatedAt + HISTORY_TURN_ALIGNMENT_WINDOW_MS >= firstAt;
+      return terminalUpdateIsClose || activeLifecycleOverlaps;
+    });
+  if (candidates.length !== 1) return undefined;
+  return { turnId: candidates[0].id, basis: 'history-content-time' };
+}
 
 /** Align persisted server message IDs to a unique optimistic Turn without fuzzy text matching. */
 function alignHistoryTurnsToLiveState(
@@ -3535,33 +3636,52 @@ function alignHistoryTurnsToLiveState(
   const usedLiveTurnIds = new Set<string>();
   const alignedTurnIds = new Map<string, string>();
   const alignments: HistoryTurnAlignment[] = [];
+  const historyHasUserBoundary = historyEvents.some((event) => event.type === 'turn.requested');
 
   for (const [historyTurnId, events] of eventsByTurnId) {
-    if (state.turnsById[historyTurnId]?.sessionKey === sessionKey) continue;
+    const existingHistoryTurn = state.turnsById[historyTurnId];
+    if (existingHistoryTurn?.sessionKey === sessionKey
+      && existingHistoryTurn.items.some((item) => item.kind === 'user-message')) continue;
     const requested = events.find((event) => event.type === 'turn.requested');
     const message = requested ? messageData(requested) : null;
-    if (!requested || !message) continue;
-    const historyAt = messageTimestampMs(message, requested.occurredAt);
-    const candidates = (candidatesByFingerprint.get(messageAlignmentFingerprint(message)) ?? [])
-      .filter((turn) => !usedLiveTurnIds.has(turn.id))
-      .map((turn) => ({
-        turn,
-        distance: Math.abs(messageTimestampMs(turn.trigger.message, turn.createdAt) - historyAt),
-      }))
-      .filter((candidate) => candidate.distance <= HISTORY_TURN_ALIGNMENT_WINDOW_MS)
-      .sort((left, right) => (
-        left.distance - right.distance
-        || left.turn.createdAt - right.turn.createdAt
-        || left.turn.id.localeCompare(right.turn.id)
-      ));
-    const closest = candidates[0];
-    if (!closest || (candidates[1] && candidates[1].distance === closest.distance)) continue;
-    alignedTurnIds.set(historyTurnId, closest.turn.id);
-    usedLiveTurnIds.add(closest.turn.id);
+    let owner: { turnId: string; basis: ConversationAssignmentBasis } | undefined;
+    let confidence: ConversationAssignmentConfidence = 'high';
+    if (!requested || !message) {
+      // Compaction can remove the user boundary while preserving tool/message IDs.
+      owner = alignHistoryTurnByIdentity(state, sessionKey, currentTurnIds, events, historyTurnId);
+      if (!owner && !historyHasUserBoundary) {
+        owner = alignHistoryTurnByLifecycle(state, sessionKey, currentTurnIds, events, historyTurnId);
+        confidence = owner ? 'medium' : confidence;
+      }
+    } else {
+      const historyAt = messageTimestampMs(message, requested.occurredAt);
+      const candidates = (candidatesByFingerprint.get(messageAlignmentFingerprint(message)) ?? [])
+        .filter((turn) => !usedLiveTurnIds.has(turn.id))
+        .map((turn) => ({
+          turn,
+          distance: Math.abs(messageTimestampMs(turn.trigger.message, turn.createdAt) - historyAt),
+        }))
+        .filter((candidate) => candidate.distance <= HISTORY_TURN_ALIGNMENT_WINDOW_MS)
+        .sort((left, right) => (
+          left.distance - right.distance
+          || left.turn.createdAt - right.turn.createdAt
+          || left.turn.id.localeCompare(right.turn.id)
+        ));
+      const closest = candidates[0];
+      if (closest && !(candidates[1] && candidates[1].distance === closest.distance)) {
+        owner = { turnId: closest.turn.id, basis: 'history-content-time' };
+        confidence = 'medium';
+      }
+    }
+    if (!owner || usedLiveTurnIds.has(owner.turnId)) continue;
+    alignedTurnIds.set(historyTurnId, owner.turnId);
+    usedLiveTurnIds.add(owner.turnId);
     alignments.push({
       historyTurnId,
-      liveTurnId: closest.turn.id,
+      liveTurnId: owner.turnId,
       eventIds: events.map((event) => event.eventId),
+      basis: owner.basis,
+      confidence,
     });
   }
   if (alignedTurnIds.size === 0) return { events: historyEvents, alignments: [] };
@@ -3676,8 +3796,8 @@ export function replaceSessionTurns(
       .filter((event) => event.turnId === alignment.liveTurnId && alignment.eventIds.includes(event.eventId))
       .forEach((event) => appendAssignmentDiagnostic(base, event, {
         turnId: alignment.liveTurnId,
-        basis: 'history-content-time',
-        confidence: 'medium',
+        basis: alignment.basis,
+        confidence: alignment.confidence,
       }));
   });
 

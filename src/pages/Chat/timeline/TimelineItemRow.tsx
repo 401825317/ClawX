@@ -504,14 +504,18 @@ function ItemContent(props: TimelineItemRowProps & { item: TimelineItem }) {
           onUseImageAsReference={onUseImageAsReference}
         />
       );
-    case 'commentary':
+    case 'commentary': {
+      const text = item.translationKey
+        ? t(item.translationKey, { ...item.translationParams, defaultValue: item.text })
+        : item.text;
       return (
         <section className="ml-1 border-l border-foreground/15 pl-4" data-testid="timeline-commentary">
           {item.status === 'running'
-            ? <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{item.text}</p>
-            : <TimelineMarkdown text={item.text} />}
+            ? <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{text}</p>
+            : <TimelineMarkdown text={text} />}
         </section>
       );
+    }
     case 'thinking':
       return (
         <section className="ml-1 border-l border-border/70 pl-4" data-testid="timeline-thinking">

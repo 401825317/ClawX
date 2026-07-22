@@ -244,6 +244,8 @@ export interface ChatState {
   loading: boolean;
   loadingMoreHistory: boolean;
   hasMoreHistory: boolean;
+  /** Raw transcript suffix currently requested for the visible session. */
+  historyMessageLimit: number;
   error: string | null;
   runError: string | null;
   historyError: string | null;

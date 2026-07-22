@@ -187,6 +187,7 @@ function markTerminalRunEmitted(
     if (existing.status === event.status) {
       if (authoritative && !existing.authoritative) {
         runs.set(key, { status: event.status, authoritative: true, endedAt: endedAt ?? existing.endedAt });
+        return true;
       }
       return false;
     }

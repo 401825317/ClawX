@@ -10,6 +10,7 @@ import {
 import {
   GatewayApprovalRecoveryCoordinator,
   normalizeGatewayApprovalListRuntimeEvents,
+  normalizeGatewayChatRuntimeEvents,
   replayPendingGatewayApprovalRuntimeEvents,
 } from '../electron/gateway/chat-runtime-events.ts';
 import { GatewayManager } from '../electron/gateway/manager.ts';
@@ -17,6 +18,13 @@ import {
   CHAT_SYNTHETIC_TERMINAL_PRODUCER,
   type ChatRuntimeEvent,
 } from '../shared/chat-runtime-events.ts';
+import {
+  CONVERSATION_EVENT_CONTRACT_VERSION,
+  type ConversationEvent,
+} from '../shared/conversation-events.ts';
+import { runtimeEventToConversationEvents } from '../src/stores/conversation/runtime-adapter.ts';
+import { reduceConversationEvents } from '../src/stores/conversation/reducer.ts';
+import { createEmptyConversationState } from '../src/stores/conversation/types.ts';
 
 type Emission = { event: string; payload: unknown };
 
@@ -801,6 +809,164 @@ test('authoritative lifecycle failure corrects an earlier synthesized completion
     },
   ])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'run.ended' }> => event.type === 'run.ended');
   assert.deepEqual(nativeAbortThenSynthesizedFailure.map((event) => event.status), ['aborted']);
+});
+
+test('authoritative lifecycle completion upgrades an earlier synthesized completion', () => {
+  const runId = 'run-terminal-authority-upgrade';
+  const sessionKey = 'agent:main:session-terminal-authority-upgrade';
+  const finalPayload = {
+    runId,
+    sessionKey,
+    seq: 10,
+    state: 'final',
+    message: {
+      role: 'assistant',
+      content: 'The answer is ready.',
+      timestamp: 1_783_967_166_000,
+    },
+  };
+  const lifecycleCompletion = {
+    runId,
+    sessionKey,
+    seq: 11,
+    stream: 'lifecycle',
+    data: {
+      phase: 'completed',
+      endedAt: 1_783_967_166_100,
+    },
+  };
+
+  const upgraded = runtimeEvents(replayProtocolEvents([
+    { event: 'chat', payload: finalPayload },
+    { event: 'agent', payload: lifecycleCompletion },
+  ])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'run.ended' }> => event.type === 'run.ended');
+  assert.deepEqual(upgraded.map((event) => event.producer), [
+    CHAT_SYNTHETIC_TERMINAL_PRODUCER,
+    'gateway',
+  ]);
+
+  const turnId = 'turn-terminal-authority-upgrade';
+  const occurredAt = 1_783_967_165_000;
+  const turnEvents: ConversationEvent[] = [{
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'terminal-authority-upgrade:requested',
+    type: 'turn.requested',
+    source: 'host',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    runId,
+    occurredAt,
+    receivedAt: occurredAt,
+    replayed: false,
+    data: {
+      message: {
+        id: 'terminal-authority-upgrade:user',
+        role: 'user',
+        content: 'Complete this request.',
+        timestamp: occurredAt,
+      },
+    },
+  }, {
+    version: CONVERSATION_EVENT_CONTRACT_VERSION,
+    eventId: 'terminal-authority-upgrade:final',
+    type: 'final.message',
+    source: 'openclaw-chat',
+    authority: 'authoritative',
+    sessionKey,
+    turnId,
+    runId,
+    occurredAt: occurredAt + 1,
+    receivedAt: occurredAt + 1,
+    replayed: false,
+    data: {
+      message: {
+        id: 'terminal-authority-upgrade:assistant',
+        role: 'assistant',
+        content: 'The answer is ready.',
+        timestamp: occurredAt + 1,
+      },
+    },
+  }];
+  const syntheticTerminal = runtimeEventToConversationEvents(upgraded[0]);
+  const authoritativeTerminal = runtimeEventToConversationEvents(upgraded[1]);
+  const corroborated = reduceConversationEvents(
+    createEmptyConversationState(),
+    [...turnEvents, ...syntheticTerminal],
+  );
+  assert.equal(corroborated.turnsById[turnId]?.status, 'running');
+  assert.equal(corroborated.turnsById[turnId]?.evidence.runTerminalAuthority, 'corroborating');
+  const settled = reduceConversationEvents(corroborated, authoritativeTerminal);
+  assert.equal(settled.turnsById[turnId]?.status, 'completed');
+  assert.equal(settled.turnsById[turnId]?.evidence.runTerminalAuthority, 'authoritative');
+
+  const authoritativeFirst = runtimeEvents(replayProtocolEvents([
+    { event: 'agent', payload: lifecycleCompletion },
+    { event: 'chat', payload: finalPayload },
+  ])).filter((event): event is Extract<ChatRuntimeEvent, { type: 'run.ended' }> => event.type === 'run.ended');
+  assert.deepEqual(authoritativeFirst.map((event) => event.producer), ['gateway']);
+});
+
+test('normalizes OpenClaw compaction lifecycle into one stable native progress entry', () => {
+  const runId = 'run-compaction-progress';
+  const sessionKey = 'agent:main:session-compaction-progress';
+  const normalize = (seq: number, data: Record<string, unknown>) => normalizeGatewayChatRuntimeEvents({
+    runId,
+    sessionKey,
+    seq,
+    stream: 'compaction',
+    data,
+  });
+
+  const started = normalize(20, { phase: 'start' });
+  const completedAndContinuing = normalize(21, { phase: 'end', completed: true, willRetry: true });
+  const incompleteAndRetrying = normalize(22, { phase: 'end', completed: false, willRetry: true });
+  const failed = normalize(23, { phase: 'end', completed: false, willRetry: false });
+
+  assert.deepEqual(
+    [started, completedAndContinuing, incompleteAndRetrying, failed].map((events) => {
+      const event = events[0];
+      return event?.type === 'progress.update'
+        ? {
+            count: events.length,
+            id: event.entry.id,
+            kind: event.entry.kind,
+            status: event.entry.status,
+            translationKey: event.entry.translationKey,
+            source: event.entry.source,
+          }
+        : null;
+    }),
+    [{
+      count: 1,
+      id: `compaction:${runId}`,
+      kind: 'status',
+      status: 'running',
+      translationKey: 'runtimeProgress.contextCompactionRunning',
+      source: 'native',
+    }, {
+      count: 1,
+      id: `compaction:${runId}`,
+      kind: 'status',
+      status: 'completed',
+      translationKey: 'runtimeProgress.contextCompactionCompletedContinuing',
+      source: 'native',
+    }, {
+      count: 1,
+      id: `compaction:${runId}`,
+      kind: 'status',
+      status: 'running',
+      translationKey: 'runtimeProgress.contextCompactionRetrying',
+      source: 'native',
+    }, {
+      count: 1,
+      id: `compaction:${runId}`,
+      kind: 'status',
+      status: 'error',
+      translationKey: 'runtimeProgress.contextCompactionFailed',
+      source: 'native',
+    }],
+  );
 });
 
 test('chat error and aborted states close their runtime runs', () => {

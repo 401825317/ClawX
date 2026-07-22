@@ -206,6 +206,11 @@
         "toolAborted": "停止済み: {{tool}}",
         "toolPartial": "一部完了: {{tool}}",
         "toolWaitingApproval": "承認待ち: {{tool}}",
+        "contextCompactionRunning": "コンテキストを圧縮しています",
+        "contextCompactionCompleted": "コンテキストの圧縮が完了しました",
+        "contextCompactionCompletedContinuing": "コンテキストの圧縮が完了しました。処理を続けています",
+        "contextCompactionRetrying": "コンテキストの圧縮が完了しませんでした。再試行しています",
+        "contextCompactionFailed": "コンテキストの圧縮が完了しませんでした",
         "toolLabels": {
             "command": "実行ステップ",
             "exec": "実行ステップ",

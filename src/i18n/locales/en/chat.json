@@ -206,6 +206,11 @@
         "toolAborted": "Stopped: {{tool}}",
         "toolPartial": "Partially completed: {{tool}}",
         "toolWaitingApproval": "Waiting for approval: {{tool}}",
+        "contextCompactionRunning": "Compressing context",
+        "contextCompactionCompleted": "Context compression completed",
+        "contextCompactionCompletedContinuing": "Context compressed; continuing",
+        "contextCompactionRetrying": "Context compression was incomplete; retrying",
+        "contextCompactionFailed": "Context compression was not completed",
         "toolLabels": {
             "command": "Task step",
             "exec": "Task step",

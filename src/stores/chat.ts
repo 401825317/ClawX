@@ -175,6 +175,7 @@ import {
   DEFAULT_SESSION_RUN_STATE,
   alignRuntimeRunsWithBackendSessionTerminalState as alignRuntimeRunsWithBackendTerminal,
   backendSessionReportsActive,
+  boundSessionHistoryMessages,
   buildSessionSwitchPatch as buildSessionSwitchStatePatch,
   captureSessionRunState,
   clearCachedSessionRunState as clearSessionRunStateCache,
@@ -186,6 +187,7 @@ import {
   mergeBackendSessionProbe as mergeBackendSessionProbeWithModel,
   mergeSessionRowWithLocalState as mergeSessionRowWithLocalModel,
   mergeSessionRunStatePatch,
+  nextHistoryMessageLimit,
   parseGatewayHistorySessionAuthority,
   parseGatewaySessionProbe,
   parseSessionStatus,
@@ -1991,7 +1993,7 @@ function cacheSessionHistory(sessionKey: string, messages: RawMessage[], thinkin
     _sessionHistoryCache,
     sessionKey,
     {
-      messages: cloneHistoryMessages(messages),
+      messages: cloneHistoryMessages(boundSessionHistoryMessages(messages, HISTORY_PAGE_SIZE)),
       thinkingLevel,
     },
     SESSION_HISTORY_CACHE_MAX_SESSIONS,
@@ -3531,6 +3533,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loading: false,
   loadingMoreHistory: false,
   hasMoreHistory: false,
+  historyMessageLimit: HISTORY_PAGE_SIZE,
   error: null,
   runError: null,
   historyError: null,
@@ -3886,6 +3889,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionLabels: Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== key)),
         sessionLastActivity: Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== key)),
         messages: [],
+        loadingMoreHistory: false,
+        hasMoreHistory: false,
+        historyMessageLimit: HISTORY_PAGE_SIZE,
         streamingText: '',
         streamingMessage: null,
         streamingTools: [],
@@ -4430,6 +4436,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       set({
         messages: finalMessages,
+        historyMessageLimit: HISTORY_PAGE_SIZE,
         thinkingLevel,
         ...(reasoningLevel ? {
           sessions: get().sessions.map((session) => (
@@ -4942,12 +4949,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadMoreHistory: async () => {
-    const { currentSessionKey, messages, loadingMoreHistory, hasMoreHistory } = get();
+    const {
+      currentSessionKey,
+      messages,
+      historyMessageLimit,
+      loadingMoreHistory,
+      hasMoreHistory,
+    } = get();
     if (loadingMoreHistory || !hasMoreHistory || messages.length === 0) return;
 
     set({ loadingMoreHistory: true, error: null, historyError: null });
     try {
-      const nextLimit = Math.min(messages.length + HISTORY_PAGE_SIZE, HISTORY_MAX_RENDERED_MESSAGES);
+      const nextLimit = nextHistoryMessageLimit(
+        historyMessageLimit,
+        HISTORY_PAGE_SIZE,
+        HISTORY_MAX_RENDERED_MESSAGES,
+      );
       const rawMessages = await loadLocalHistoryFallback(currentSessionKey, nextLimit);
       if (get().currentSessionKey !== currentSessionKey) return;
       if (rawMessages.length === 0) {
@@ -4966,6 +4983,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const runtimeHistoryMessages = buildRuntimeReplayMessages(messagesWithToolAttachments);
       set((state) => ({
         messages: enrichedMessages,
+        historyMessageLimit: nextLimit,
         loadingMoreHistory: false,
         hasMoreHistory: rawMessages.length >= nextLimit && nextLimit < HISTORY_MAX_RENDERED_MESSAGES,
         runtimeRuns: applyHistoricalRuntimeRunsFromMessages(state.runtimeRuns, currentSessionKey, runtimeHistoryMessages),

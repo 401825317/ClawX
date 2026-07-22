@@ -206,6 +206,11 @@
         "toolAborted": "已停止：{{tool}}",
         "toolPartial": "部分完成：{{tool}}",
         "toolWaitingApproval": "等待批准：{{tool}}",
+        "contextCompactionRunning": "正在压缩上下文",
+        "contextCompactionCompleted": "上下文压缩完成",
+        "contextCompactionCompletedContinuing": "上下文压缩完成，正在继续处理",
+        "contextCompactionRetrying": "上下文压缩未完成，正在重试",
+        "contextCompactionFailed": "上下文压缩未完成",
         "toolLabels": {
             "command": "执行步骤",
             "exec": "执行步骤",

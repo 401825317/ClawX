@@ -10,11 +10,33 @@ import {
   updateCachedSessionRunStateFromRuntimeEvent,
 } from '../src/stores/chat/runtime-control.ts';
 import {
+  boundSessionHistoryMessages,
   captureSessionRunState,
   clearCachedSessionRunState,
   DEFAULT_SESSION_RUN_STATE,
+  nextHistoryMessageLimit,
 } from '../src/stores/chat/session-controller.ts';
-import type { ChatState } from '../src/stores/chat/types.ts';
+import type { ChatState, RawMessage } from '../src/stores/chat/types.ts';
+
+test('inactive session history keeps only the newest bounded cache window', () => {
+  const messages: RawMessage[] = Array.from({ length: 500 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    id: `history-${index}`,
+    content: `message-${index}`,
+  }));
+
+  const bounded = boundSessionHistoryMessages(messages, 100);
+
+  assert.equal(bounded.length, 100);
+  assert.equal(bounded[0]?.id, 'history-400');
+  assert.equal(bounded.at(-1)?.id, 'history-499');
+});
+
+test('explicit history pages advance by 100 messages and stop at the Renderer budget', () => {
+  assert.equal(nextHistoryMessageLimit(100, 100, 500), 200);
+  assert.equal(nextHistoryMessageLimit(400, 100, 500), 500);
+  assert.equal(nextHistoryMessageLimit(500, 100, 500), 500);
+});
 
 test('second-based run.ended settles a background untracked send', () => {
   const sessionKey = 'agent:main:runtime-control-second-terminal';

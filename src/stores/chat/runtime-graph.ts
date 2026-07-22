@@ -16,6 +16,8 @@ type CompletionWakeEvidenceEvent = Extract<ChatRuntimeEvent, {
 
 const COMPLETION_WAKE_RUN_ID_RE = /^(?:image_generate|image_edit|video_generate|music_generate):([^:]+):([^:]+)$/iu;
 
+export const RUNTIME_STREAM_EVENT_TAIL_LIMIT = 32;
+
 function completionWakeRunParts(runId: string): { taskId: string; outcome: string } | null {
   const match = COMPLETION_WAKE_RUN_ID_RE.exec(runId.trim());
   return match ? { taskId: match[1]!, outcome: match[2]!.trim().toLowerCase() } : null;
@@ -454,6 +456,37 @@ function sameRuntimeEvent(left: ChatRuntimeEvent | undefined, right: ChatRuntime
   return false;
 }
 
+/** Retains complete projections while bounding raw high-frequency stream evidence. */
+function appendRuntimeEventEvidence(
+  events: ChatRuntimeEvent[],
+  event: ChatRuntimeEvent,
+): ChatRuntimeEvent[] {
+  const lastEvent = events.at(-1);
+  const sameSequence = typeof event.seq !== 'number'
+    || typeof lastEvent?.seq !== 'number'
+    || event.seq === lastEvent.seq;
+  if (sameSequence && sameRuntimeEvent(lastEvent, event)) return events;
+  if (event.type !== 'assistant.delta' && event.type !== 'thinking.delta') {
+    return [...events, event];
+  }
+
+  let matchingCount = 0;
+  let oldestTailIndex = -1;
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index]?.type !== event.type) continue;
+    matchingCount += 1;
+    if (matchingCount === 2) oldestTailIndex = index;
+  }
+  if (matchingCount < RUNTIME_STREAM_EVENT_TAIL_LIMIT || oldestTailIndex < 0) {
+    return [...events, event];
+  }
+  return [
+    ...events.slice(0, oldestTailIndex),
+    ...events.slice(oldestTailIndex + 1),
+    event,
+  ];
+}
+
 function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
   const existingIndex = items.findIndex((item) => item.id === next.id);
   if (existingIndex === -1) return [...items, next];
@@ -624,9 +657,7 @@ export function applyRuntimeEventToRuns(
     ...existing,
     sessionKey: event.sessionKey ?? existing.sessionKey,
     lastEventAt: Math.max(existing.lastEventAt ?? eventTs, eventTs),
-    events: sameRuntimeEvent(existing.events.at(-1), event)
-      ? existing.events
-      : [...existing.events, event],
+    events: appendRuntimeEventEvidence(existing.events, event),
   };
 
   switch (event.type) {

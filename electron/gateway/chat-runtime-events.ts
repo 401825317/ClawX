@@ -1142,6 +1142,56 @@ export function normalizeGatewayChatRuntimeEvent(payload: unknown): ChatRuntimeE
     return null;
   }
 
+  // OpenClaw emits context compaction as a native run-scoped stream. Keep one
+  // stable progress identity so start/end evidence updates the same Timeline row.
+  if (stream === 'compaction') {
+    const phase = normalizeMarker(data.phase);
+    if (phase !== 'start' && phase !== 'end') return null;
+    const base = withBase('progress.update', raw);
+    if (!base) return null;
+
+    const completed = readBoolean(data.completed) === true;
+    const willRetry = readBoolean(data.willRetry) === true;
+    const state = phase === 'start'
+      ? {
+          text: 'Compressing context',
+          status: 'running' as const,
+          translationKey: 'runtimeProgress.contextCompactionRunning',
+        }
+      : completed && willRetry
+        ? {
+            text: 'Context compressed; continuing',
+            status: 'completed' as const,
+            translationKey: 'runtimeProgress.contextCompactionCompletedContinuing',
+          }
+        : completed
+          ? {
+              text: 'Context compression completed',
+              status: 'completed' as const,
+              translationKey: 'runtimeProgress.contextCompactionCompleted',
+            }
+          : willRetry
+            ? {
+                text: 'Context compression was incomplete; retrying',
+                status: 'running' as const,
+                translationKey: 'runtimeProgress.contextCompactionRetrying',
+              }
+            : {
+                text: 'Context compression was not completed',
+                status: 'error' as const,
+                translationKey: 'runtimeProgress.contextCompactionFailed',
+              };
+    return {
+      ...base,
+      entry: {
+        id: `compaction:${base.runId}`,
+        kind: 'status',
+        ...state,
+        source: 'native',
+      },
+    };
+  }
+
   if (stream === 'plan' || stream === 'run_plan') {
     const stepsRaw = Array.isArray(data.steps) ? data.steps : [];
     const steps = stepsRaw
