@@ -6,6 +6,7 @@ taskType: runtime-bridge
 intent: Restore the public skill marketplace without coupling it to managed authentication or making local skill management depend on Gateway readiness.
 touchedAreas:
   - .gitignore
+  - clawx-extensions.json
   - README.md
   - README.zh-CN.md
   - README.ja-JP.md
@@ -30,6 +31,7 @@ touchedAreas:
   - shared/i18n/locales/*/skills.json
   - tests/e2e/skills-gateway-readiness.spec.ts
   - tests/unit/clawhub-service.test.ts
+  - tests/unit/extension-host-api-contributions.test.ts
   - tests/unit/host-api-facade.test.ts
   - tests/unit/junfeiai-endpoints.test.ts
   - tests/unit/local-skill-service.test.ts
@@ -58,6 +60,7 @@ requiredRules:
 requiredTests:
   - tests/e2e/skills-gateway-readiness.spec.ts
   - tests/unit/clawhub-service.test.ts
+  - tests/unit/extension-host-api-contributions.test.ts
   - tests/unit/skillhub-marketplace.test.ts
   - tests/unit/skills-api-marketplace.test.ts
   - tests/unit/skills-store-marketplace.test.ts

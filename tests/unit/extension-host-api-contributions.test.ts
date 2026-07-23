@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { extensionRegistry } from '../../electron/extensions/registry';
 import type { ExtensionContext, HostApiProviderExtension } from '../../electron/extensions/types';
@@ -9,6 +11,17 @@ describe('extension host API contributions', () => {
 
   afterEach(async () => {
     await extensionRegistry.teardownAll();
+  });
+
+  it('enables both public marketplace providers in the extension manifest', () => {
+    const manifest = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'clawx-extensions.json'), 'utf8'),
+    ) as { extensions?: { main?: string[] } };
+
+    expect(manifest.extensions?.main).toEqual(expect.arrayContaining([
+      'builtin/clawhub-marketplace',
+      'builtin/skillhub-marketplace',
+    ]));
   });
 
   it('registers host IPC contributions during extension initialization and unregisters them on teardown', async () => {
