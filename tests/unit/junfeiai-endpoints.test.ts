@@ -14,6 +14,8 @@ import {
   UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_MANAGED_SERVICE_NAME,
+  UCLAW_MARKETPLACE_CONFIG,
+  UCLAW_MARKETPLACE_DEFAULT_PROVIDER,
   UCLAW_PRODUCTION_ORIGIN,
   UCLAW_VIDEO_GENERATION_PREFERRED_RESOLUTION,
   UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE,
@@ -37,6 +39,10 @@ type MutableTestConfig = {
   media: {
     image: { defaultSize: string };
     video: { preferredResolution: string };
+  };
+  marketplace: {
+    skillHubApiOrigin: string;
+    requestTimeoutMs: number;
   };
 };
 
@@ -65,14 +71,16 @@ describe('UClaw managed endpoint configuration', () => {
     expect(validateUclawEndpointsConfig(config).provider.productionOrigin).toBe('http://127.0.0.1:8083');
   });
 
-  it('keeps provider, auth, runtime, and media settings in explicit sections', () => {
-    expect(Object.keys(rawConfig).sort()).toEqual(['auth', 'media', 'provider', 'runtimeDefaults']);
+  it('keeps provider, auth, marketplace, runtime, and media settings in explicit sections', () => {
+    expect(Object.keys(rawConfig).sort()).toEqual(['auth', 'marketplace', 'media', 'provider', 'runtimeDefaults']);
     expect(UCLAW_EXEC_SECURITY).toBe('full');
     expect(UCLAW_EXEC_ASK).toBe('off');
     expect(UCLAW_COMPACTION_MODE).toBe('safeguard');
     expect(UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR).toBe(50_000);
     expect(UCLAW_VIDEO_GENERATION_PREFERRED_RESOLUTION).toBe('480p');
     expect(UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE).toBe(480);
+    expect(UCLAW_MARKETPLACE_DEFAULT_PROVIDER).toBe('skillhub');
+    expect(UCLAW_MARKETPLACE_CONFIG.skillHubApiOrigin).toBe('https://api.skillhub.cn');
   });
 
   it.each([
@@ -82,6 +90,8 @@ describe('UClaw managed endpoint configuration', () => {
     ['non-positive auth timeout', (config: MutableTestConfig) => { config.auth.requestTimeoutMs = 0; }],
     ['invalid image size', (config: MutableTestConfig) => { config.media.image.defaultSize = 'large'; }],
     ['invalid video resolution', (config: MutableTestConfig) => { config.media.video.preferredResolution = '480'; }],
+    ['insecure marketplace origin', (config: MutableTestConfig) => { config.marketplace.skillHubApiOrigin = 'http://example.com'; }],
+    ['non-positive marketplace timeout', (config: MutableTestConfig) => { config.marketplace.requestTimeoutMs = 0; }],
   ])('rejects %s', (_name, mutate) => {
     const config = structuredClone(rawConfig) as unknown as MutableTestConfig;
     mutate(config);

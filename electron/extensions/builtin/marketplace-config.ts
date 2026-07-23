@@ -1,19 +1,7 @@
-/**
- * Public skill marketplace transport limits.
- * This configuration is intentionally independent from managed-account auth.
- */
-export const SKILL_MARKETPLACE_CONFIG = Object.freeze({
-  skillHubApiOrigin: 'https://api.skillhub.cn',
-  skillHubWebOrigin: 'https://skillhub.cn',
-  clawHubConvexOrigin: 'https://wry-manatee-359.convex.cloud',
-  requestTimeoutMs: 15_000,
-  downloadTimeoutMs: 90_000,
-  maxJsonBytes: 4 * 1024 * 1024,
-  maxDownloadBytes: 32 * 1024 * 1024,
-  maxArchiveFiles: 512,
-  maxArchiveEntryBytes: 16 * 1024 * 1024,
-  maxArchiveUncompressedBytes: 64 * 1024 * 1024,
-});
+import { UCLAW_MARKETPLACE_CONFIG } from '../../../shared/junfeiai-endpoints';
+
+/** Public marketplace settings are centralized without depending on managed-account state. */
+export const SKILL_MARKETPLACE_CONFIG = Object.freeze({ ...UCLAW_MARKETPLACE_CONFIG });
 
 export function validateMarketplaceOrigin(value: string, label: string): string {
   let url: URL;

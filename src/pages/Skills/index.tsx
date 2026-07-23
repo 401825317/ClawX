@@ -24,6 +24,7 @@ import type { TFunction } from 'i18next';
 import { SkillFileSections } from '@/components/file-preview/SkillFileSections';
 import type { FilePreviewTarget } from '@/components/file-preview/FilePreviewOverlay';
 import type { SkillFile } from '@/lib/skill-files';
+import { UCLAW_CLAWHUB_MIRROR_ORIGIN, UCLAW_SKILLHUB_WEB_ORIGIN } from '@shared/junfeiai-endpoints';
 
 const FilePreviewOverlayLazy = lazy(() =>
   import('@/components/file-preview/FilePreviewOverlay').then((m) => ({ default: m.FilePreviewOverlay })),
@@ -221,8 +222,8 @@ function marketplaceSkillUrl(skill: MarketplaceSkill, slug: string): string {
   const sourceUrl = safeHttpsUrl(skill.sourceUrl);
   if (sourceUrl) return sourceUrl;
   return skill.provider === 'skillhub'
-    ? `https://skillhub.cn/skills/${encodeURIComponent(slug)}`
-    : `https://mirror-cn.clawhub.com/s/${encodeURIComponent(slug)}`;
+    ? `${UCLAW_SKILLHUB_WEB_ORIGIN}/skills/${encodeURIComponent(slug)}`
+    : `${UCLAW_CLAWHUB_MIRROR_ORIGIN}/s/${encodeURIComponent(slug)}`;
 }
 
 type MarketplaceSkillCardProps = {

@@ -7,6 +7,7 @@ import path from 'path';
 import { shell } from 'electron';
 import { getOpenClawConfigDir, ensureDir } from '../utils/paths';
 import { removeSkillConfig } from '../utils/skill-config';
+import { UCLAW_MARKETPLACE_DEFAULT_PROVIDER } from '../../shared/junfeiai-endpoints';
 
 export interface MarketplaceSearchParams {
     query?: string;
@@ -215,7 +216,7 @@ export class ClawHubService {
             }
             return provider;
         }
-        return this.marketplaceProviders.find((candidate) => candidate.id === 'skillhub')
+        return this.marketplaceProviders.find((candidate) => candidate.id === UCLAW_MARKETPLACE_DEFAULT_PROVIDER)
             ?? this.marketplaceProviders[0];
     }
 

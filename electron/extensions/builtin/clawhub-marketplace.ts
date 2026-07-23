@@ -161,8 +161,14 @@ const OPENCLAW_SKILLS_STATUS_EXPORT_MARKERS = [
   'searchSkillsFromClawHub',
   'installSkillFromClawHub',
 ] as const;
-const DEFAULT_CLAWHUB_MIRROR_URL = validateMarketplaceOrigin('https://mirror-cn.clawhub.com', 'ClawHub mirror origin');
-const DEFAULT_CLAWHUB_INSTALL_URL = validateMarketplaceOrigin('https://clawhub.ai', 'ClawHub install origin');
+const DEFAULT_CLAWHUB_MIRROR_URL = validateMarketplaceOrigin(
+  SKILL_MARKETPLACE_CONFIG.clawHubMirrorOrigin,
+  'ClawHub mirror origin',
+);
+const DEFAULT_CLAWHUB_INSTALL_URL = validateMarketplaceOrigin(
+  SKILL_MARKETPLACE_CONFIG.clawHubInstallOrigin,
+  'ClawHub install origin',
+);
 const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 
 let runtimeModulePromise: Promise<LoadedRuntime> | null = null;

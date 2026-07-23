@@ -5,6 +5,7 @@ export type UclawThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' |
 export type UclawExecSecurity = 'deny' | 'allowlist' | 'full';
 export type UclawExecAsk = 'off' | 'on-miss' | 'always';
 export type UclawCompactionMode = 'default' | 'safeguard';
+export type UclawMarketplaceProvider = 'skillhub' | 'clawhub';
 
 export type UclawEndpointsConfig = {
   provider: {
@@ -28,6 +29,21 @@ export type UclawEndpointsConfig = {
     verifyMemoryCacheSeconds: number;
     tokenRefreshSkewSeconds: number;
     defaultAccessTokenLifetimeSeconds: number;
+  };
+  marketplace: {
+    defaultProvider: UclawMarketplaceProvider;
+    skillHubApiOrigin: string;
+    skillHubWebOrigin: string;
+    clawHubConvexOrigin: string;
+    clawHubMirrorOrigin: string;
+    clawHubInstallOrigin: string;
+    requestTimeoutMs: number;
+    downloadTimeoutMs: number;
+    maxJsonBytes: number;
+    maxDownloadBytes: number;
+    maxArchiveFiles: number;
+    maxArchiveEntryBytes: number;
+    maxArchiveUncompressedBytes: number;
   };
   runtimeDefaults: {
     tools: {
@@ -110,6 +126,30 @@ function readProductionOrigin(value: unknown): string {
   return parsed.origin;
 }
 
+function readMarketplaceOrigin(value: unknown, key: string): string {
+  const normalized = readNonEmptyString(value, key);
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a valid URL`);
+  }
+  const isLoopback = parsed.hostname === 'localhost'
+    || parsed.hostname === '127.0.0.1'
+    || parsed.hostname === '[::1]';
+  if (
+    (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopback))
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || (parsed.pathname && parsed.pathname !== '/')
+  ) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be an HTTPS origin`);
+  }
+  return parsed.origin;
+}
+
 function readProviderName(value: unknown): 'UClaw' {
   const normalized = readNonEmptyString(value, 'provider.providerName');
   if (normalized !== 'UClaw') {
@@ -139,6 +179,7 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const root = readRecord(value, 'root');
   const provider = readRecord(root.provider, 'provider');
   const auth = readRecord(root.auth, 'auth');
+  const marketplace = readRecord(root.marketplace, 'marketplace');
   const runtimeDefaults = readRecord(root.runtimeDefaults, 'runtimeDefaults');
   const tools = readRecord(runtimeDefaults.tools, 'runtimeDefaults.tools');
   const exec = readRecord(tools.exec, 'runtimeDefaults.tools.exec');
@@ -197,6 +238,58 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
       defaultAccessTokenLifetimeSeconds: readPositiveInteger(
         auth.defaultAccessTokenLifetimeSeconds,
         'auth.defaultAccessTokenLifetimeSeconds',
+      ),
+    },
+    marketplace: {
+      defaultProvider: readEnum(
+        marketplace.defaultProvider,
+        'marketplace.defaultProvider',
+        ['skillhub', 'clawhub'],
+      ),
+      skillHubApiOrigin: readMarketplaceOrigin(
+        marketplace.skillHubApiOrigin,
+        'marketplace.skillHubApiOrigin',
+      ),
+      skillHubWebOrigin: readMarketplaceOrigin(
+        marketplace.skillHubWebOrigin,
+        'marketplace.skillHubWebOrigin',
+      ),
+      clawHubConvexOrigin: readMarketplaceOrigin(
+        marketplace.clawHubConvexOrigin,
+        'marketplace.clawHubConvexOrigin',
+      ),
+      clawHubMirrorOrigin: readMarketplaceOrigin(
+        marketplace.clawHubMirrorOrigin,
+        'marketplace.clawHubMirrorOrigin',
+      ),
+      clawHubInstallOrigin: readMarketplaceOrigin(
+        marketplace.clawHubInstallOrigin,
+        'marketplace.clawHubInstallOrigin',
+      ),
+      requestTimeoutMs: readPositiveInteger(
+        marketplace.requestTimeoutMs,
+        'marketplace.requestTimeoutMs',
+      ),
+      downloadTimeoutMs: readPositiveInteger(
+        marketplace.downloadTimeoutMs,
+        'marketplace.downloadTimeoutMs',
+      ),
+      maxJsonBytes: readPositiveInteger(marketplace.maxJsonBytes, 'marketplace.maxJsonBytes'),
+      maxDownloadBytes: readPositiveInteger(
+        marketplace.maxDownloadBytes,
+        'marketplace.maxDownloadBytes',
+      ),
+      maxArchiveFiles: readPositiveInteger(
+        marketplace.maxArchiveFiles,
+        'marketplace.maxArchiveFiles',
+      ),
+      maxArchiveEntryBytes: readPositiveInteger(
+        marketplace.maxArchiveEntryBytes,
+        'marketplace.maxArchiveEntryBytes',
+      ),
+      maxArchiveUncompressedBytes: readPositiveInteger(
+        marketplace.maxArchiveUncompressedBytes,
+        'marketplace.maxArchiveUncompressedBytes',
       ),
     },
     runtimeDefaults: {
@@ -265,6 +358,11 @@ export const UCLAW_OFFLINE_GRACE_SECONDS = UCLAW_ENDPOINTS_CONFIG.auth.offlineGr
 export const UCLAW_VERIFY_MEMORY_CACHE_SECONDS = UCLAW_ENDPOINTS_CONFIG.auth.verifyMemoryCacheSeconds;
 export const UCLAW_TOKEN_REFRESH_SKEW_SECONDS = UCLAW_ENDPOINTS_CONFIG.auth.tokenRefreshSkewSeconds;
 export const UCLAW_DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS = UCLAW_ENDPOINTS_CONFIG.auth.defaultAccessTokenLifetimeSeconds;
+
+export const UCLAW_MARKETPLACE_CONFIG = UCLAW_ENDPOINTS_CONFIG.marketplace;
+export const UCLAW_MARKETPLACE_DEFAULT_PROVIDER = UCLAW_MARKETPLACE_CONFIG.defaultProvider;
+export const UCLAW_SKILLHUB_WEB_ORIGIN = UCLAW_MARKETPLACE_CONFIG.skillHubWebOrigin;
+export const UCLAW_CLAWHUB_MIRROR_ORIGIN = UCLAW_MARKETPLACE_CONFIG.clawHubMirrorOrigin;
 
 export const UCLAW_EXEC_SECURITY = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.security;
 export const UCLAW_EXEC_ASK = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.ask;

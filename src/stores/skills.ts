@@ -7,6 +7,7 @@ import { hostApi } from '@/lib/host-api';
 import type { SkillsStatusResult } from '@/lib/host-api';
 import { AppError, normalizeAppError } from '@/lib/error-model';
 import i18n from '@/i18n';
+import { UCLAW_MARKETPLACE_DEFAULT_PROVIDER } from '@shared/junfeiai-endpoints';
 import type { Skill, MarketplaceCatalogMeta, MarketplaceSkill } from '../types/skill';
 
 type GatewaySkillStatus = NonNullable<SkillsStatusResult['skills']>[number];
@@ -18,7 +19,7 @@ const MARKETPLACE_HOME_SEARCH_LIMIT = 100;
 const MARKETPLACE_QUERY_SEARCH_LIMIT = 80;
 const MARKETPLACE_CATEGORY_QUERY_LIMIT = 24;
 const MARKETPLACE_LOAD_MORE_LIMIT = 100;
-const DEFAULT_MARKETPLACE_PROVIDER = 'skillhub';
+const DEFAULT_MARKETPLACE_PROVIDER = UCLAW_MARKETPLACE_DEFAULT_PROVIDER;
 const SKILLS_FETCH_TTL_MS = 15_000;
 const MARKETPLACE_SEARCH_CACHE_TTL_MS = 60_000;
 const MARKETPLACE_SEARCH_CACHE_MAX_ENTRIES = 30;

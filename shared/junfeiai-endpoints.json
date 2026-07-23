@@ -21,6 +21,21 @@
     "tokenRefreshSkewSeconds": 300,
     "defaultAccessTokenLifetimeSeconds": 86400
   },
+  "marketplace": {
+    "defaultProvider": "skillhub",
+    "skillHubApiOrigin": "https://api.skillhub.cn",
+    "skillHubWebOrigin": "https://skillhub.cn",
+    "clawHubConvexOrigin": "https://wry-manatee-359.convex.cloud",
+    "clawHubMirrorOrigin": "https://mirror-cn.clawhub.com",
+    "clawHubInstallOrigin": "https://clawhub.ai",
+    "requestTimeoutMs": 15000,
+    "downloadTimeoutMs": 90000,
+    "maxJsonBytes": 4194304,
+    "maxDownloadBytes": 33554432,
+    "maxArchiveFiles": 512,
+    "maxArchiveEntryBytes": 16777216,
+    "maxArchiveUncompressedBytes": 67108864
+  },
   "runtimeDefaults": {
     "tools": {
       "exec": {

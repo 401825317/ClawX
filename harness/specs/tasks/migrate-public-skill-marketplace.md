@@ -21,6 +21,8 @@ touchedAreas:
   - electron/services/skills-api.ts
   - electron/services/skills/local-skill-service.ts
   - shared/host-api/contract.ts
+  - shared/junfeiai-endpoints.json
+  - shared/junfeiai-endpoints.ts
   - shared/types/skill.ts
   - src/lib/host-api.ts
   - src/pages/Skills/index.tsx
@@ -29,6 +31,7 @@ touchedAreas:
   - tests/e2e/skills-gateway-readiness.spec.ts
   - tests/unit/clawhub-service.test.ts
   - tests/unit/host-api-facade.test.ts
+  - tests/unit/junfeiai-endpoints.test.ts
   - tests/unit/local-skill-service.test.ts
   - tests/unit/skillhub-marketplace.test.ts
   - tests/unit/skills-api-marketplace.test.ts
