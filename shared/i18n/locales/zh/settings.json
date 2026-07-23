@@ -1,6 +1,41 @@
 {
   "title": "设置",
   "subtitle": "配置您的 ClawX 体验",
+  "managedAuth": {
+    "status": {
+      "ready": "已登录",
+      "offlineGrace": "离线可用",
+      "checking": "检查中",
+      "loggedOut": "未登录",
+      "loginExpired": "登录已过期",
+      "activationRequired": "需要设备授权",
+      "relayMissing": "模型服务未就绪",
+      "unmanaged": "未启用",
+      "error": "状态不可用"
+    },
+    "accountCard": {
+      "title": "UClaw 账号",
+      "description": "账号、设备授权和模型服务状态。",
+      "currentAccount": "当前账号",
+      "unknownUser": "未读取到账号信息",
+      "service": "服务",
+      "device": "设备授权",
+      "deviceActivated": "已授权",
+      "deviceInactive": "未授权",
+      "modelService": "模型服务",
+      "modelServiceReady": "已就绪",
+      "modelServiceMissing": "不可用"
+    },
+    "actions": {
+      "refreshStatus": "刷新状态",
+      "logout": "退出登录"
+    },
+    "toast": {
+      "verifyFailed": "UClaw 状态刷新失败：{{message}}",
+      "loggedOut": "已退出 UClaw",
+      "logoutFailed": "退出 UClaw 失败：{{message}}"
+    }
+  },
   "appearance": {
     "title": "通用",
     "description": "自定义外观和风格",

@@ -1,6 +1,41 @@
 {
   "title": "Настройки",
   "subtitle": "Настройте ваш опыт работы с ClawX",
+  "managedAuth": {
+    "status": {
+      "ready": "Вход выполнен",
+      "offlineGrace": "Доступно без сети",
+      "checking": "Проверка",
+      "loggedOut": "Выход выполнен",
+      "loginExpired": "Сессия истекла",
+      "activationRequired": "Нужна авторизация устройства",
+      "relayMissing": "Сервис моделей не готов",
+      "unmanaged": "Не включено",
+      "error": "Статус недоступен"
+    },
+    "accountCard": {
+      "title": "Аккаунт UClaw",
+      "description": "Статус аккаунта, авторизации устройства и сервиса моделей.",
+      "currentAccount": "Текущий аккаунт",
+      "unknownUser": "Нет данных аккаунта",
+      "service": "Сервис",
+      "device": "Авторизация устройства",
+      "deviceActivated": "Авторизовано",
+      "deviceInactive": "Не авторизовано",
+      "modelService": "Сервис моделей",
+      "modelServiceReady": "Готов",
+      "modelServiceMissing": "Недоступен"
+    },
+    "actions": {
+      "refreshStatus": "Обновить статус",
+      "logout": "Выйти"
+    },
+    "toast": {
+      "verifyFailed": "Не удалось обновить статус UClaw: {{message}}",
+      "loggedOut": "Выход из UClaw выполнен",
+      "logoutFailed": "Не удалось выйти из UClaw: {{message}}"
+    }
+  },
   "appearance": {
     "title": "Общие",
     "description": "Настройте внешний вид",

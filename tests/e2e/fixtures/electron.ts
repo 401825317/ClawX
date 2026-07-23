@@ -10,6 +10,7 @@ import type { RawMessage } from '../../../shared/chat/types';
 
 export type LaunchElectronOptions = {
   skipSetup?: boolean;
+  managedProvider?: boolean;
   additionalArgs?: string[];
 };
 
@@ -272,6 +273,9 @@ async function launchClawXElectron(
       CLAWX_E2E: '1',
       CLAWX_USER_DATA_DIR: userDataDir,
       ...(options.skipSetup ? { CLAWX_E2E_SKIP_SETUP: '1' } : {}),
+      ...(options.managedProvider === undefined
+        ? {}
+        : { CLAWX_MANAGED_PROVIDER: options.managedProvider ? '1' : '0' }),
       CLAWX_PORT_CLAWX_HOST_API: String(hostApiPort),
     },
     timeout: 90_000,

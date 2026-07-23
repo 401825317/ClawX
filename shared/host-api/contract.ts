@@ -11,6 +11,19 @@ import type { CronJob, CronJobCreateInput, CronJobUpdateInput } from '../types/c
 import type { GatewayHealth, GatewayStatus } from '../types/gateway';
 import type { MarketplaceSkill, QuickAccessSkill, Skill } from '../types/skill';
 import type { WebBrowserNavigatePayload } from '../web-browser';
+import type {
+  ManagedAuthActivationCheckPayload,
+  ManagedAuthActivationCheckResult,
+  ManagedAuthBootstrap,
+  ManagedAuthLoginPayload,
+  ManagedAuthRefreshPayload,
+  ManagedAuthRegisterPayload,
+  ManagedAuthResult,
+  ManagedAuthStatus,
+  ManagedAuthVerificationCodePayload,
+  ManagedAuthVerificationCodeResult,
+  ManagedAuthVerifyPayload,
+} from '../managed-auth';
 
 export type JsonRecord = Record<string, unknown>;
 export type HostSuccess = { success: boolean; error?: string };
@@ -375,6 +388,10 @@ export type ProviderAccount = {
     email?: string;
     resourceUrl?: string;
     customModels?: string[];
+    managedBy?: 'uclaw';
+    managedDefaultModel?: string;
+    managedAllowedModels?: string[];
+    managedRuntimeContractVersion?: number;
   };
   createdAt: string;
   updatedAt: string;
@@ -977,6 +994,18 @@ export type HostApiContract = {
     requestOAuth: (payload: ProviderOAuthRequestPayload) => HostSuccess;
     cancelOAuth: () => HostSuccess;
     submitOAuth: (payload: ProviderOAuthSubmitPayload) => HostSuccess;
+  };
+  managedAuth: {
+    bootstrap: () => ManagedAuthBootstrap;
+    localStatus: () => ManagedAuthStatus;
+    status: (payload?: ManagedAuthVerifyPayload) => ManagedAuthStatus;
+    checkActivation: (payload: ManagedAuthActivationCheckPayload) => ManagedAuthActivationCheckResult;
+    sendVerificationCode: (payload: ManagedAuthVerificationCodePayload) => ManagedAuthVerificationCodeResult;
+    login: (payload: ManagedAuthLoginPayload) => ManagedAuthResult;
+    register: (payload: ManagedAuthRegisterPayload) => ManagedAuthResult;
+    verify: (payload?: ManagedAuthVerifyPayload) => ManagedAuthResult;
+    refresh: (payload?: ManagedAuthRefreshPayload) => ManagedAuthResult;
+    logout: () => ManagedAuthResult;
   };
   files: {
     stagePaths: (payload: StagePathsPayload) => StagedFileResult[];

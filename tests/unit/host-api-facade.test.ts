@@ -276,6 +276,36 @@ describe('hostApi facade', () => {
     }));
   });
 
+  it('routes managed authentication through the typed host facade', async () => {
+    hostInvoke.mockResolvedValue({ id: 'req', ok: true, data: { success: true } });
+    const { hostApi } = await import('@/lib/host-api');
+    const login = { account: 'user@example.com', password: 'secret' };
+
+    await hostApi.managedAuth.localStatus();
+    await hostApi.managedAuth.status({ force: true });
+    await hostApi.managedAuth.login(login);
+    await hostApi.managedAuth.logout();
+
+    expect(hostInvoke).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      module: 'managedAuth',
+      action: 'localStatus',
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      module: 'managedAuth',
+      action: 'status',
+      payload: { force: true },
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      module: 'managedAuth',
+      action: 'login',
+      payload: login,
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      module: 'managedAuth',
+      action: 'logout',
+    }));
+  });
+
   it('passes provider OAuth requests through hostInvoke', async () => {
     hostInvoke
       .mockResolvedValueOnce({ id: 'req-1', ok: true, data: { success: true } })

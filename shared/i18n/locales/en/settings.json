@@ -1,6 +1,41 @@
 {
   "title": "Settings",
   "subtitle": "Configure your ClawX experience",
+  "managedAuth": {
+    "status": {
+      "ready": "Signed in",
+      "offlineGrace": "Available offline",
+      "checking": "Checking",
+      "loggedOut": "Signed out",
+      "loginExpired": "Sign-in expired",
+      "activationRequired": "Device authorization required",
+      "relayMissing": "Model service not ready",
+      "unmanaged": "Not enabled",
+      "error": "Status unavailable"
+    },
+    "accountCard": {
+      "title": "UClaw account",
+      "description": "Account, device authorization, and model service status.",
+      "currentAccount": "Current account",
+      "unknownUser": "No account information",
+      "service": "Service",
+      "device": "Device authorization",
+      "deviceActivated": "Authorized",
+      "deviceInactive": "Not authorized",
+      "modelService": "Model service",
+      "modelServiceReady": "Ready",
+      "modelServiceMissing": "Unavailable"
+    },
+    "actions": {
+      "refreshStatus": "Refresh status",
+      "logout": "Sign out"
+    },
+    "toast": {
+      "verifyFailed": "Could not refresh UClaw status: {{message}}",
+      "loggedOut": "Signed out of UClaw",
+      "logoutFailed": "Could not sign out of UClaw: {{message}}"
+    }
+  },
   "appearance": {
     "title": "General",
     "description": "Customize the look and feel",
