@@ -2307,15 +2307,18 @@ test('runs the packaged UClaw regression matrix', async () => {
       { skip: profile !== 'full' ? 'The core profile does not execute media work.' : undefined },
     );
 
-    await runner.run('media.controls', 'expose image and video modes with bounded controls', async () => {
+    await runner.run('media.controls', 'expose image controls and fail closed for video without a verified contract', async () => {
       const page = contextOrThrow(context).page;
       await startNewChat(page);
       await page.getByTestId('chat-composer-mode-image').click();
       await expect(page.getByTestId('chat-image-options')).toBeVisible();
-      await page.getByTestId('chat-composer-mode-video').click();
-      await expect(page.getByTestId('chat-video-options')).toBeVisible();
-      await expect(page.getByTestId('chat-video-size')).toBeVisible();
-      await expect(page.getByTestId('chat-video-duration')).toBeVisible();
+      await expect(page.getByTestId('chat-composer-mode-video')).toBeDisabled();
+      await expect(page.getByTestId('chat-video-options')).toHaveCount(0);
+      return {
+        imageModeAvailable: true,
+        videoModeEnabled: false,
+        reason: 'managed-video-capability-contract-unavailable',
+      };
     });
 
     await runner.run(

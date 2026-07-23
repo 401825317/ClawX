@@ -36,6 +36,8 @@ touchedAreas:
   - scripts/**
   - tests/e2e/chat-model-picker.spec.ts
   - tests/e2e/native-agent-media-routing.spec.ts
+  - tests/packaged-e2e/capability-matrix.json
+  - tests/packaged-e2e/portable-regression.spec.ts
 requiredProfiles:
   - fast
   - comms
@@ -52,6 +54,7 @@ requiredTests:
   - pnpm exec tsx scripts/openclaw-video-config-validation.test.ts
   - pnpm exec playwright test tests/e2e/chat-model-picker.spec.ts
   - pnpm exec playwright test tests/e2e/native-agent-media-routing.spec.ts
+  - node scripts/windows-support/run-packaged-regression.mjs --latest --profile full
   - node resources/openclaw-plugins/uclaw-video-project/harness.spec.mjs
   - node scripts/uclaw-video-agent-contract.test.mjs
 expectedUserBehavior:
