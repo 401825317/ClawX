@@ -56,6 +56,7 @@ import { isDefaultWorkspacePath } from '@/lib/workspace-context';
 import { useWorkspaceAvailability } from '@/hooks/use-workspace-availability';
 import { projectSessionRunState } from '@/stores/chat/session-status';
 import { isOpenClawSessionIdFallbackTitle } from '@shared/chat/session-title';
+import { SupportContactButton } from '@/components/client/SupportContactButton';
 
 interface NavItemProps {
   to: string;
@@ -931,6 +932,11 @@ export function Sidebar() {
             )}
           </div>
         </div>
+
+        <SupportContactButton
+          collapsed={sidebarCollapsed}
+          sidebarOffset={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}
+        />
 
         <NavLink
           to="/settings"

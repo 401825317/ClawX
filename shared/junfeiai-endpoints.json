@@ -47,6 +47,14 @@
       "verify": "/api/clawx/billing/orders/verify"
     }
   },
+  "support": {
+    "requestTimeoutMs": 8000,
+    "refreshIntervalMs": 600000,
+    "routes": {
+      "clientConfig": "/api/clawx/client-config",
+      "bootstrap": "/api/clawx/bootstrap"
+    }
+  },
   "runtimeDefaults": {
     "tools": {
       "exec": {

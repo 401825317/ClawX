@@ -64,5 +64,15 @@
         "notRunningDesc": "OpenClaw 网关需要运行才能使用此功能。它将自动启动，或者您可以从设置中启动。",
         "restarting": "网关重启中",
         "warning": "网关未运行。"
+    },
+    "support": {
+        "nav": "帮助与客服",
+        "title": "联系 UClaw 官方客服",
+        "description": "扫码添加客服，可咨询账号、充值、模型使用等问题。",
+        "contactFallback": "客服 {{index}}",
+        "contactQrAlt": "{{name}}二维码",
+        "copyWechat": "复制微信号：{{id}}",
+        "copied": "微信号已复制",
+        "copyFailed": "复制微信号失败"
     }
 }

@@ -56,6 +56,14 @@ export type UclawEndpointsConfig = {
       verify: string;
     };
   };
+  support: {
+    requestTimeoutMs: number;
+    refreshIntervalMs: number;
+    routes: {
+      clientConfig: string;
+      bootstrap: string;
+    };
+  };
   runtimeDefaults: {
     tools: {
       exec: {
@@ -201,6 +209,8 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
   const marketplace = readRecord(root.marketplace, 'marketplace');
   const billing = readRecord(root.billing, 'billing');
   const billingRoutes = readRecord(billing.routes, 'billing.routes');
+  const support = readRecord(root.support, 'support');
+  const supportRoutes = readRecord(support.routes, 'support.routes');
   const runtimeDefaults = readRecord(root.runtimeDefaults, 'runtimeDefaults');
   const tools = readRecord(runtimeDefaults.tools, 'runtimeDefaults.tools');
   const exec = readRecord(tools.exec, 'runtimeDefaults.tools.exec');
@@ -327,6 +337,20 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         verify: readApiPath(billingRoutes.verify, 'billing.routes.verify'),
       },
     },
+    support: {
+      requestTimeoutMs: readPositiveInteger(support.requestTimeoutMs, 'support.requestTimeoutMs'),
+      refreshIntervalMs: readPositiveInteger(
+        support.refreshIntervalMs,
+        'support.refreshIntervalMs',
+      ),
+      routes: {
+        clientConfig: readApiPath(
+          supportRoutes.clientConfig,
+          'support.routes.clientConfig',
+        ),
+        bootstrap: readApiPath(supportRoutes.bootstrap, 'support.routes.bootstrap'),
+      },
+    },
     runtimeDefaults: {
       tools: {
         exec: {
@@ -403,6 +427,10 @@ export const UCLAW_BILLING_REQUEST_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.billing.r
 export const UCLAW_BILLING_ORDER_STATUS_POLL_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.billing.orderStatusPollIntervalMs;
 export const UCLAW_BILLING_HISTORY_PAGE_SIZE = UCLAW_ENDPOINTS_CONFIG.billing.historyPageSize;
 export const UCLAW_BILLING_ROUTES = UCLAW_ENDPOINTS_CONFIG.billing.routes;
+
+export const UCLAW_SUPPORT_REQUEST_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.support.requestTimeoutMs;
+export const UCLAW_SUPPORT_REFRESH_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.support.refreshIntervalMs;
+export const UCLAW_SUPPORT_ROUTES = UCLAW_ENDPOINTS_CONFIG.support.routes;
 
 export const UCLAW_EXEC_SECURITY = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.security;
 export const UCLAW_EXEC_ASK = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.ask;

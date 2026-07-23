@@ -140,6 +140,7 @@ Skills ページでは OpenClaw の複数ソース（管理ディレクトリ、
 複数のAIプロバイダー（OpenAI、Anthropic、Z.AI / GLMなど）に接続でき、資格情報はシステムのネイティブキーチェーンに安全に保存されます。OpenAI は API キーとブラウザ OAuth（Codex サブスクリプション）の両方に対応しています。
 UClaw 管理対象ディストリビューションでは、初回セットアップにアカウントのサインイン、登録、確認コード、デバイス認証が追加されます。資格情報は Electron Main と保護された Secret Store 内だけに保持され、認証後は既存の Provider と OpenClaw Runtime Sync を通じて管理対象の `openai/smart-latest` アカウントが設定されます。通常の Provider 管理画面から、そのランタイムキーを表示、編集、削除することはできません。コミュニティ版は従来の Provider 設定フローを維持します。
 UClaw にサインインしたユーザーは、サイドバーからシュリンプストアを開き、残高の確認、チャージ注文の作成、QR コードまたは安全なブラウザーリンクでの支払い、注文履歴のページ表示を行えます。支払い状態は自動的に確認され、支払い完了後に残高が更新されます。
+UClaw が有効なサポート連絡先を公開している場合、サイドバーには「ヘルプとサポート」も表示され、複数の公式 QR 連絡先、対応時間、注記、任意の WeChat ID コピーを利用できます。この公開設定はサインインを必要とせず、Chat や Gateway の状態にも影響しません。
 開発者モードでは、専用の Image Generation ページで、独立した OpenAI 互換の画像生成エンドポイント（Base URL、API キー、`gpt-image-2` などのモデル名）を設定でき、画像生成だけ専用の `/v1/images/generations` サービスを使い、チャットは通常の OpenAI Provider のまま継続できます。
 OpenAI-compatible ゲートウェイを **Custom プロバイダー** で使う場合、**設定 → AI Providers → Provider 編集** でカスタム `User-Agent` を設定でき、互換性が必要なエンドポイントで有効です。
 プロバイダーの編集や切り替え時、ClawX は `input: ["text", "image"]` など既存のモデル単位の能力メタデータを保持します。新しく選択した Custom プロバイダーのモデルには OpenClaw onboarding と同等の画像入力推論を適用し、不明なモデルはテキスト専用として扱います。
@@ -238,6 +239,8 @@ Chat は Electron Main が所有する ACP stdio bridge を使用します。Ren
 UClaw 管理アカウントの操作には型付き `managedAuth` Host API を使用します。Renderer が access token、refresh token、relay credential を受け取ることはなく、認証 UI が Gateway を直接起動またはリロードすることもありません。
 
 シュリンプストアは独立した型付き `billing` Host API を使用します。認証付きの課金リクエストとトークン更新は Electron Main が管理し、Provider または OpenClaw の設定を書き換えず、Chat、ACP、Gateway のライフサイクル動作にも影響しません。
+
+「ヘルプとサポート」は読み取り専用の型付き `support` Host API を使用します。Electron Main は資格情報を付与せずに公開クライアント設定を取得・正規化します。設定が無効または取得不能な場合はサイドバーに表示されず、認証、Provider、OpenClaw、Chat、ACP、Gateway の状態を変更しません。
 
 別の会話やページを開いても、未完了の ACP 応答はストリーミングを継続します。完了前に戻ると最新のメモリ内 timeline が復元され、ライブ応答の表示が続きます。完了後は通常の ACP 履歴リプレイが引き続き唯一の正となります。
 

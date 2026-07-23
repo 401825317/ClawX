@@ -20,6 +20,9 @@ import {
   UCLAW_MARKETPLACE_CONFIG,
   UCLAW_MARKETPLACE_DEFAULT_PROVIDER,
   UCLAW_PRODUCTION_ORIGIN,
+  UCLAW_SUPPORT_REFRESH_INTERVAL_MS,
+  UCLAW_SUPPORT_REQUEST_TIMEOUT_MS,
+  UCLAW_SUPPORT_ROUTES,
   UCLAW_VIDEO_GENERATION_PREFERRED_RESOLUTION,
   UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE,
   validateUclawEndpointsConfig,
@@ -42,6 +45,11 @@ type MutableTestConfig = {
   billing: {
     requestTimeoutMs: number;
     routes: { overview: string };
+  };
+  support: {
+    requestTimeoutMs: number;
+    refreshIntervalMs: number;
+    routes: { clientConfig: string };
   };
   media: {
     image: { defaultSize: string };
@@ -78,7 +86,7 @@ describe('UClaw managed endpoint configuration', () => {
     expect(validateUclawEndpointsConfig(config).provider.productionOrigin).toBe('http://127.0.0.1:8083');
   });
 
-  it('keeps provider, auth, billing, marketplace, runtime, and media settings in explicit sections', () => {
+  it('keeps provider, auth, billing, support, marketplace, runtime, and media settings in explicit sections', () => {
     expect(Object.keys(rawConfig).sort()).toEqual([
       'auth',
       'billing',
@@ -86,6 +94,7 @@ describe('UClaw managed endpoint configuration', () => {
       'media',
       'provider',
       'runtimeDefaults',
+      'support',
     ]);
     expect(UCLAW_EXEC_SECURITY).toBe('full');
     expect(UCLAW_EXEC_ASK).toBe('off');
@@ -98,6 +107,10 @@ describe('UClaw managed endpoint configuration', () => {
     expect(UCLAW_BILLING_ORDER_STATUS_POLL_INTERVAL_MS).toBe(2_000);
     expect(UCLAW_BILLING_HISTORY_PAGE_SIZE).toBe(20);
     expect(UCLAW_BILLING_ROUTES.overview).toBe('/api/clawx/billing/checkout-info');
+    expect(UCLAW_SUPPORT_REQUEST_TIMEOUT_MS).toBe(8_000);
+    expect(UCLAW_SUPPORT_REFRESH_INTERVAL_MS).toBe(600_000);
+    expect(UCLAW_SUPPORT_ROUTES.clientConfig).toBe('/api/clawx/client-config');
+    expect(UCLAW_SUPPORT_ROUTES.bootstrap).toBe('/api/clawx/bootstrap');
   });
 
   it.each([
@@ -107,6 +120,9 @@ describe('UClaw managed endpoint configuration', () => {
     ['non-positive auth timeout', (config: MutableTestConfig) => { config.auth.requestTimeoutMs = 0; }],
     ['non-positive billing timeout', (config: MutableTestConfig) => { config.billing.requestTimeoutMs = 0; }],
     ['invalid billing route', (config: MutableTestConfig) => { config.billing.routes.overview = 'https://example.com/billing'; }],
+    ['non-positive support timeout', (config: MutableTestConfig) => { config.support.requestTimeoutMs = 0; }],
+    ['non-positive support refresh interval', (config: MutableTestConfig) => { config.support.refreshIntervalMs = 0; }],
+    ['invalid support route', (config: MutableTestConfig) => { config.support.routes.clientConfig = 'https://example.com/support'; }],
     ['invalid image size', (config: MutableTestConfig) => { config.media.image.defaultSize = 'large'; }],
     ['invalid video resolution', (config: MutableTestConfig) => { config.media.video.preferredResolution = '480'; }],
     ['insecure marketplace origin', (config: MutableTestConfig) => { config.marketplace.skillHubApiOrigin = 'http://example.com'; }],

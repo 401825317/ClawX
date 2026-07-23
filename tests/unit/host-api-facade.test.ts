@@ -337,6 +337,24 @@ describe('hostApi facade', () => {
     expect(JSON.stringify(hostInvoke.mock.calls)).not.toMatch(/accessToken|refreshToken|relayToken/);
   });
 
+  it('reads support configuration through the typed host facade without credentials', async () => {
+    hostInvoke.mockResolvedValue({
+      id: 'req',
+      ok: true,
+      data: { enabled: true, contacts: [] },
+    });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await hostApi.support.config();
+
+    expect(hostInvoke).toHaveBeenCalledWith(expect.objectContaining({
+      module: 'support',
+      action: 'config',
+    }));
+    expect(hostInvoke.mock.calls[0][0]).not.toHaveProperty('payload');
+    expect(JSON.stringify(hostInvoke.mock.calls)).not.toMatch(/accessToken|refreshToken|relayToken/);
+  });
+
   it('passes provider OAuth requests through hostInvoke', async () => {
     hostInvoke
       .mockResolvedValueOnce({ id: 'req-1', ok: true, data: { success: true } })

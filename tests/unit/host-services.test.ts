@@ -1353,6 +1353,7 @@ describe('host services', () => {
 
     expect(source).toContain('managedAuth: createManagedAuthApi({ gatewayManager })');
     expect(source).toContain('billing: createBillingApi()');
+    expect(source).toContain('support: createSupportApi()');
   });
 
   it('configures browser policy and typed handlers before the initial renderer load', () => {

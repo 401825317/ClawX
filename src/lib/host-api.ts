@@ -64,6 +64,7 @@ import type {
   BillingOrderHistoryPayload,
   BillingOrderStatusPayload,
 } from '@shared/billing';
+import type { SupportContactConfig } from '@shared/support';
 import { invokeHost } from './host-api-client';
 
 export type {
@@ -120,6 +121,7 @@ export type {
   WorkspaceNativeFileResult,
   WorkspaceOpenHandlersResult,
 } from '@shared/host-api/contract';
+export type { SupportContact, SupportContactConfig } from '@shared/support';
 
 export const hostApi = {
   app: {
@@ -330,6 +332,9 @@ export const hostApi = {
     history: (input?: BillingOrderHistoryPayload) => invokeHost('billing', 'history', input),
     createOrder: (input: BillingCreateOrderPayload) => invokeHost('billing', 'createOrder', input),
     orderStatus: (input: BillingOrderStatusPayload) => invokeHost('billing', 'orderStatus', input),
+  },
+  support: {
+    config: () => invokeHost('support', 'config') as Promise<SupportContactConfig | null>,
   },
   files: {
     stagePaths: (input: { filePaths: string[] }) => invokeHost('files', 'stagePaths', input),

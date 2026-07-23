@@ -34,6 +34,7 @@ import type {
   BillingOverview,
   BillingResult,
 } from '../billing';
+import type { SupportContactConfig } from '../support';
 
 export type JsonRecord = Record<string, unknown>;
 export type HostSuccess = { success: boolean; error?: string };
@@ -1022,6 +1023,9 @@ export type HostApiContract = {
     history: (payload?: BillingOrderHistoryPayload) => BillingResult<BillingOrderHistory>;
     createOrder: (payload: BillingCreateOrderPayload) => BillingResult<BillingCheckout>;
     orderStatus: (payload: BillingOrderStatusPayload) => BillingResult<BillingOrderStatus>;
+  };
+  support: {
+    config: () => SupportContactConfig | null;
   };
   files: {
     stagePaths: (payload: StagePathsPayload) => StagedFileResult[];

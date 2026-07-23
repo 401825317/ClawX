@@ -70,6 +70,7 @@ import {
 } from '../services/providers-api';
 import { createManagedAuthApi } from '../services/managed-auth-api';
 import { createBillingApi } from '../services/billing-api';
+import { createSupportApi } from '../services/support-api';
 import { createSessionsApi } from '../services/sessions-api';
 import { createSkillsApi } from '../services/skills-api';
 import { createUsageApi } from '../services/usage-api';
@@ -180,6 +181,7 @@ function registerTypedHostHandlers(
     providers: createProvidersApi({ gatewayManager, mainWindow }),
     managedAuth: createManagedAuthApi({ gatewayManager }),
     billing: createBillingApi(),
+    support: createSupportApi(),
     files: createFilesApi({
       attachmentAccess,
       openWith: attachmentOpenWith,
