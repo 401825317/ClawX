@@ -36,6 +36,17 @@
     "maxArchiveEntryBytes": 16777216,
     "maxArchiveUncompressedBytes": 67108864
   },
+  "billing": {
+    "requestTimeoutMs": 12000,
+    "orderStatusPollIntervalMs": 2000,
+    "historyPageSize": 20,
+    "routes": {
+      "overview": "/api/clawx/billing/checkout-info",
+      "orders": "/api/clawx/billing/orders",
+      "history": "/api/clawx/billing/orders/history",
+      "verify": "/api/clawx/billing/orders/verify"
+    }
+  },
   "runtimeDefaults": {
     "tools": {
       "exec": {

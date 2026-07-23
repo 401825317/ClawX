@@ -12,6 +12,7 @@ import enCron from './locales/en/cron.json';
 import enDreams from './locales/en/dreams.json';
 import enSetup from './locales/en/setup.json';
 import enMenu from './locales/en/menu.json';
+import enRecharge from './locales/en/recharge.json';
 
 // ZH
 import zhCommon from './locales/zh/common.json';
@@ -25,6 +26,7 @@ import zhCron from './locales/zh/cron.json';
 import zhDreams from './locales/zh/dreams.json';
 import zhSetup from './locales/zh/setup.json';
 import zhMenu from './locales/zh/menu.json';
+import zhRecharge from './locales/zh/recharge.json';
 
 // JA
 import jaCommon from './locales/ja/common.json';
@@ -38,6 +40,7 @@ import jaCron from './locales/ja/cron.json';
 import jaDreams from './locales/ja/dreams.json';
 import jaSetup from './locales/ja/setup.json';
 import jaMenu from './locales/ja/menu.json';
+import jaRecharge from './locales/ja/recharge.json';
 
 // RU
 import ruCommon from './locales/ru/common.json';
@@ -51,6 +54,7 @@ import ruCron from './locales/ru/cron.json';
 import ruDreams from './locales/ru/dreams.json';
 import ruSetup from './locales/ru/setup.json';
 import ruMenu from './locales/ru/menu.json';
+import ruRecharge from './locales/ru/recharge.json';
 
 export const I18N_NAMESPACES = [
   'common',
@@ -64,6 +68,7 @@ export const I18N_NAMESPACES = [
   'dreams',
   'setup',
   'menu',
+  'recharge',
 ] as const;
 
 export const I18N_RESOURCES = {
@@ -79,6 +84,7 @@ export const I18N_RESOURCES = {
     dreams: enDreams,
     setup: enSetup,
     menu: enMenu,
+    recharge: enRecharge,
   },
   zh: {
     common: zhCommon,
@@ -92,6 +98,7 @@ export const I18N_RESOURCES = {
     dreams: zhDreams,
     setup: zhSetup,
     menu: zhMenu,
+    recharge: zhRecharge,
   },
   ja: {
     common: jaCommon,
@@ -105,6 +112,7 @@ export const I18N_RESOURCES = {
     dreams: jaDreams,
     setup: jaSetup,
     menu: jaMenu,
+    recharge: jaRecharge,
   },
   ru: {
     common: ruCommon,
@@ -118,6 +126,7 @@ export const I18N_RESOURCES = {
     dreams: ruDreams,
     setup: ruSetup,
     menu: ruMenu,
+    recharge: ruRecharge,
   },
 } as const;
 

@@ -4,6 +4,9 @@ import { describe, expect, it } from 'vitest';
 import rawConfig from '@shared/junfeiai-endpoints.json';
 import {
   UCLAW_AUTH_REQUEST_TIMEOUT_MS,
+  UCLAW_BILLING_HISTORY_PAGE_SIZE,
+  UCLAW_BILLING_ORDER_STATUS_POLL_INTERVAL_MS,
+  UCLAW_BILLING_ROUTES,
   UCLAW_COMPACTION_MODE,
   UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR,
   UCLAW_DEFAULT_API_PROTOCOL,
@@ -35,6 +38,10 @@ type MutableTestConfig = {
   };
   auth: {
     requestTimeoutMs: number;
+  };
+  billing: {
+    requestTimeoutMs: number;
+    routes: { overview: string };
   };
   media: {
     image: { defaultSize: string };
@@ -71,8 +78,15 @@ describe('UClaw managed endpoint configuration', () => {
     expect(validateUclawEndpointsConfig(config).provider.productionOrigin).toBe('http://127.0.0.1:8083');
   });
 
-  it('keeps provider, auth, marketplace, runtime, and media settings in explicit sections', () => {
-    expect(Object.keys(rawConfig).sort()).toEqual(['auth', 'marketplace', 'media', 'provider', 'runtimeDefaults']);
+  it('keeps provider, auth, billing, marketplace, runtime, and media settings in explicit sections', () => {
+    expect(Object.keys(rawConfig).sort()).toEqual([
+      'auth',
+      'billing',
+      'marketplace',
+      'media',
+      'provider',
+      'runtimeDefaults',
+    ]);
     expect(UCLAW_EXEC_SECURITY).toBe('full');
     expect(UCLAW_EXEC_ASK).toBe('off');
     expect(UCLAW_COMPACTION_MODE).toBe('safeguard');
@@ -81,6 +95,9 @@ describe('UClaw managed endpoint configuration', () => {
     expect(UCLAW_VIDEO_GENERATION_PREFERRED_SHORT_EDGE).toBe(480);
     expect(UCLAW_MARKETPLACE_DEFAULT_PROVIDER).toBe('skillhub');
     expect(UCLAW_MARKETPLACE_CONFIG.skillHubApiOrigin).toBe('https://api.skillhub.cn');
+    expect(UCLAW_BILLING_ORDER_STATUS_POLL_INTERVAL_MS).toBe(2_000);
+    expect(UCLAW_BILLING_HISTORY_PAGE_SIZE).toBe(20);
+    expect(UCLAW_BILLING_ROUTES.overview).toBe('/api/clawx/billing/checkout-info');
   });
 
   it.each([
@@ -88,6 +105,8 @@ describe('UClaw managed endpoint configuration', () => {
     ['non-UClaw visible provider name', (config: MutableTestConfig) => { config.provider.providerName = 'Legacy Brand'; }],
     ['unsupported API protocol', (config: MutableTestConfig) => { config.provider.defaultApiProtocol = 'anthropic-messages'; }],
     ['non-positive auth timeout', (config: MutableTestConfig) => { config.auth.requestTimeoutMs = 0; }],
+    ['non-positive billing timeout', (config: MutableTestConfig) => { config.billing.requestTimeoutMs = 0; }],
+    ['invalid billing route', (config: MutableTestConfig) => { config.billing.routes.overview = 'https://example.com/billing'; }],
     ['invalid image size', (config: MutableTestConfig) => { config.media.image.defaultSize = 'large'; }],
     ['invalid video resolution', (config: MutableTestConfig) => { config.media.video.preferredResolution = '480'; }],
     ['insecure marketplace origin', (config: MutableTestConfig) => { config.marketplace.skillHubApiOrigin = 'http://example.com'; }],

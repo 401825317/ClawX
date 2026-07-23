@@ -139,6 +139,7 @@ The Skills page can display skills discovered from multiple OpenClaw sources (ma
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, Z.AI / GLM, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
 UClaw managed distributions add account sign-in, registration, verification codes, and device authorization to first-run Setup. Credentials remain in Electron Main and the protected secret store; after authentication, the existing Provider and OpenClaw runtime sync paths configure the managed `openai/smart-latest` account. Its runtime key cannot be viewed, edited, or deleted through the ordinary Provider controls. Community distributions keep the existing Provider setup flow.
+Signed-in UClaw users can open the Shrimp Store from the sidebar to view their balance, create a recharge order, complete payment by QR code or a safe browser link, and review paginated order history. Payment status is checked automatically and the balance refreshes after successful payment.
 In developer mode, the dedicated Image Generation page supports an independent OpenAI-compatible image-generation endpoint (Base URL, API key, and model name such as `gpt-image-2`) so image generation can use a dedicated `/v1/images/generations` service while chat continues using the normal OpenAI provider.
 For **Custom** providers used with OpenAI-compatible gateways, you can set a custom `User-Agent` in **Settings → AI Providers → Edit Provider** for compatibility-sensitive endpoints.
 When you edit or switch providers, ClawX preserves existing per-model capability metadata such as `input: ["text", "image"]`. Newly selected Custom-provider models use OpenClaw onboarding-compatible image-input inference, with unknown models defaulting to text-only.
@@ -238,6 +239,8 @@ ClawX employs a **dual-process architecture** with a unified host API layer. The
 Chat uses an ACP stdio bridge owned by Electron Main. Renderer receives typed host events and renders an in-memory ACP timeline. Gateway remains responsible for non-Chat capabilities such as providers, models, skills, workspace, settings, diagnostics, and media configuration.
 
 Managed UClaw account actions use the typed `managedAuth` Host API. Renderer never receives access, refresh, or relay credentials and does not directly start or reload Gateway as part of authentication.
+
+The Shrimp Store uses a separate typed `billing` Host API. Electron Main owns authenticated billing requests and token refresh; the flow does not write Provider or OpenClaw configuration and does not alter Chat, ACP, or Gateway lifecycle behavior.
 
 An unfinished ACP response keeps streaming when you open another conversation or page. Returning before it finishes restores the latest in-memory timeline and continues the live response; once it finishes, normal ACP history replay remains the source of truth.
 

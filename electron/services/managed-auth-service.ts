@@ -741,6 +741,37 @@ async function getAccessToken(refresh = true): Promise<{ secret: AuthSecret; tok
   return { secret, token: secret.accessToken.trim() };
 }
 
+/** Execute a Main-only UClaw request with the current refreshed access token. */
+export async function requestManagedAuthenticatedJson<T>(
+  path: string,
+  options: { method?: 'GET' | 'POST'; body?: unknown; timeoutMs?: number } = {},
+): Promise<T> {
+  try {
+    const access = await getAccessToken(true);
+    if (!access) {
+      throw new ManagedAuthServiceError('auth_required', 'Sign in to UClaw to continue');
+    }
+
+    return await requestJson<T>(path, {
+      method: options.method,
+      body: options.body,
+      accessToken: access.token,
+      timeoutMs: options.timeoutMs ?? UCLAW_AUTH_REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (
+      error instanceof ManagedAuthHttpError
+      && (error.status === 401 || error.status === 403)
+    ) {
+      throw new ManagedAuthServiceError('auth_expired', 'Your UClaw session has expired', error.status);
+    }
+    if (error instanceof ManagedAuthServiceError && error.code === 'invalid_credentials') {
+      throw new ManagedAuthServiceError('auth_expired', 'Your UClaw session has expired', error.status);
+    }
+    throw error;
+  }
+}
+
 function extractRelay(payload: unknown): { token: string; expiresAt?: number } {
   const raw = isRecord(payload) && isRecord(payload.data) ? payload.data : payload;
   const record = isRecord(raw) ? raw : {};

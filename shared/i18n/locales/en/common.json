@@ -18,7 +18,8 @@
         "renameSessionPlaceholder": "Session title",
         "saveSessionRename": "Save session title",
         "cancelSessionRename": "Cancel renaming",
-        "imageGeneration": "Image Generation"
+        "imageGeneration": "Image Generation",
+        "recharge": "Shrimp Store"
     },
     "actions": {
         "save": "Save",

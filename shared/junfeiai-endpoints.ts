@@ -45,6 +45,17 @@ export type UclawEndpointsConfig = {
     maxArchiveEntryBytes: number;
     maxArchiveUncompressedBytes: number;
   };
+  billing: {
+    requestTimeoutMs: number;
+    orderStatusPollIntervalMs: number;
+    historyPageSize: number;
+    routes: {
+      overview: string;
+      orders: string;
+      history: string;
+      verify: string;
+    };
+  };
   runtimeDefaults: {
     tools: {
       exec: {
@@ -174,12 +185,22 @@ function readResolution(value: unknown, key: string): string {
   return normalized;
 }
 
+function readApiPath(value: unknown, key: string): string {
+  const normalized = readNonEmptyString(value, key);
+  if (!normalized.startsWith('/') || normalized.startsWith('//') || normalized.includes('?') || normalized.includes('#')) {
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be an absolute API path`);
+  }
+  return normalized;
+}
+
 /** Validate the checked-in managed-distribution configuration before exporting it. */
 export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConfig {
   const root = readRecord(value, 'root');
   const provider = readRecord(root.provider, 'provider');
   const auth = readRecord(root.auth, 'auth');
   const marketplace = readRecord(root.marketplace, 'marketplace');
+  const billing = readRecord(root.billing, 'billing');
+  const billingRoutes = readRecord(billing.routes, 'billing.routes');
   const runtimeDefaults = readRecord(root.runtimeDefaults, 'runtimeDefaults');
   const tools = readRecord(runtimeDefaults.tools, 'runtimeDefaults.tools');
   const exec = readRecord(tools.exec, 'runtimeDefaults.tools.exec');
@@ -292,6 +313,20 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
         'marketplace.maxArchiveUncompressedBytes',
       ),
     },
+    billing: {
+      requestTimeoutMs: readPositiveInteger(billing.requestTimeoutMs, 'billing.requestTimeoutMs'),
+      orderStatusPollIntervalMs: readPositiveInteger(
+        billing.orderStatusPollIntervalMs,
+        'billing.orderStatusPollIntervalMs',
+      ),
+      historyPageSize: readPositiveInteger(billing.historyPageSize, 'billing.historyPageSize'),
+      routes: {
+        overview: readApiPath(billingRoutes.overview, 'billing.routes.overview'),
+        orders: readApiPath(billingRoutes.orders, 'billing.routes.orders'),
+        history: readApiPath(billingRoutes.history, 'billing.routes.history'),
+        verify: readApiPath(billingRoutes.verify, 'billing.routes.verify'),
+      },
+    },
     runtimeDefaults: {
       tools: {
         exec: {
@@ -363,6 +398,11 @@ export const UCLAW_MARKETPLACE_CONFIG = UCLAW_ENDPOINTS_CONFIG.marketplace;
 export const UCLAW_MARKETPLACE_DEFAULT_PROVIDER = UCLAW_MARKETPLACE_CONFIG.defaultProvider;
 export const UCLAW_SKILLHUB_WEB_ORIGIN = UCLAW_MARKETPLACE_CONFIG.skillHubWebOrigin;
 export const UCLAW_CLAWHUB_MIRROR_ORIGIN = UCLAW_MARKETPLACE_CONFIG.clawHubMirrorOrigin;
+
+export const UCLAW_BILLING_REQUEST_TIMEOUT_MS = UCLAW_ENDPOINTS_CONFIG.billing.requestTimeoutMs;
+export const UCLAW_BILLING_ORDER_STATUS_POLL_INTERVAL_MS = UCLAW_ENDPOINTS_CONFIG.billing.orderStatusPollIntervalMs;
+export const UCLAW_BILLING_HISTORY_PAGE_SIZE = UCLAW_ENDPOINTS_CONFIG.billing.historyPageSize;
+export const UCLAW_BILLING_ROUTES = UCLAW_ENDPOINTS_CONFIG.billing.routes;
 
 export const UCLAW_EXEC_SECURITY = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.security;
 export const UCLAW_EXEC_ASK = UCLAW_ENDPOINTS_CONFIG.runtimeDefaults.tools.exec.ask;

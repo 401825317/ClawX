@@ -17,6 +17,7 @@ import {
   Plus,
   Terminal,
   ExternalLink,
+  CreditCard,
   Trash2,
   Pencil,
   Check,
@@ -457,6 +458,12 @@ export function Sidebar() {
       icon: <Puzzle className="h-4 w-4" strokeWidth={2} />,
       label: t('sidebar.skills'),
       testId: 'sidebar-nav-skills',
+    },
+    {
+      to: '/recharge',
+      icon: <CreditCard className="h-4 w-4" strokeWidth={2} />,
+      label: t('sidebar.recharge'),
+      testId: 'sidebar-nav-recharge',
     },
     {
       to: '/cron',

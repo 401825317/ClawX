@@ -306,6 +306,37 @@ describe('hostApi facade', () => {
     }));
   });
 
+  it('routes billing through the typed host facade without credentials', async () => {
+    hostInvoke.mockResolvedValue({ id: 'req', ok: true, data: { success: true, data: {} } });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await hostApi.billing.overview();
+    await hostApi.billing.history({ page: 2, pageSize: 20 });
+    await hostApi.billing.createOrder({ amountFen: 500, paymentMethod: 'alipay', productId: 7 });
+    await hostApi.billing.orderStatus({ tradeNo: 'trade-1' });
+
+    expect(hostInvoke).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      module: 'billing',
+      action: 'overview',
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      module: 'billing',
+      action: 'history',
+      payload: { page: 2, pageSize: 20 },
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      module: 'billing',
+      action: 'createOrder',
+      payload: { amountFen: 500, paymentMethod: 'alipay', productId: 7 },
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      module: 'billing',
+      action: 'orderStatus',
+      payload: { tradeNo: 'trade-1' },
+    }));
+    expect(JSON.stringify(hostInvoke.mock.calls)).not.toMatch(/accessToken|refreshToken|relayToken/);
+  });
+
   it('passes provider OAuth requests through hostInvoke', async () => {
     hostInvoke
       .mockResolvedValueOnce({ id: 'req-1', ok: true, data: { success: true } })

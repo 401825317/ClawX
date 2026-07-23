@@ -1352,6 +1352,7 @@ describe('host services', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/ipc-handlers.ts'), 'utf8');
 
     expect(source).toContain('managedAuth: createManagedAuthApi({ gatewayManager })');
+    expect(source).toContain('billing: createBillingApi()');
   });
 
   it('configures browser policy and typed handlers before the initial renderer load', () => {

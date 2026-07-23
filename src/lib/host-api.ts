@@ -59,6 +59,11 @@ import type {
   ManagedAuthVerificationCodePayload,
   ManagedAuthVerifyPayload,
 } from '@shared/managed-auth';
+import type {
+  BillingCreateOrderPayload,
+  BillingOrderHistoryPayload,
+  BillingOrderStatusPayload,
+} from '@shared/billing';
 import { invokeHost } from './host-api-client';
 
 export type {
@@ -319,6 +324,12 @@ export const hostApi = {
     verify: (input?: ManagedAuthVerifyPayload) => invokeHost('managedAuth', 'verify', input),
     refresh: (input?: ManagedAuthRefreshPayload) => invokeHost('managedAuth', 'refresh', input),
     logout: () => invokeHost('managedAuth', 'logout'),
+  },
+  billing: {
+    overview: () => invokeHost('billing', 'overview'),
+    history: (input?: BillingOrderHistoryPayload) => invokeHost('billing', 'history', input),
+    createOrder: (input: BillingCreateOrderPayload) => invokeHost('billing', 'createOrder', input),
+    orderStatus: (input: BillingOrderStatusPayload) => invokeHost('billing', 'orderStatus', input),
   },
   files: {
     stagePaths: (input: { filePaths: string[] }) => invokeHost('files', 'stagePaths', input),

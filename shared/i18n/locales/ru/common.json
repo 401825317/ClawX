@@ -18,7 +18,8 @@
         "renameSessionPlaceholder": "Название сессии",
         "saveSessionRename": "Сохранить название",
         "cancelSessionRename": "Отменить переименование",
-        "imageGeneration": "Генерация изображений"
+        "imageGeneration": "Генерация изображений",
+        "recharge": "Магазин креветок"
     },
     "actions": {
         "save": "Сохранить",

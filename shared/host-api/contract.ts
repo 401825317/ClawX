@@ -24,6 +24,16 @@ import type {
   ManagedAuthVerificationCodeResult,
   ManagedAuthVerifyPayload,
 } from '../managed-auth';
+import type {
+  BillingCheckout,
+  BillingCreateOrderPayload,
+  BillingOrderHistory,
+  BillingOrderHistoryPayload,
+  BillingOrderStatus,
+  BillingOrderStatusPayload,
+  BillingOverview,
+  BillingResult,
+} from '../billing';
 
 export type JsonRecord = Record<string, unknown>;
 export type HostSuccess = { success: boolean; error?: string };
@@ -1006,6 +1016,12 @@ export type HostApiContract = {
     verify: (payload?: ManagedAuthVerifyPayload) => ManagedAuthResult;
     refresh: (payload?: ManagedAuthRefreshPayload) => ManagedAuthResult;
     logout: () => ManagedAuthResult;
+  };
+  billing: {
+    overview: () => BillingResult<BillingOverview>;
+    history: (payload?: BillingOrderHistoryPayload) => BillingResult<BillingOrderHistory>;
+    createOrder: (payload: BillingCreateOrderPayload) => BillingResult<BillingCheckout>;
+    orderStatus: (payload: BillingOrderStatusPayload) => BillingResult<BillingOrderStatus>;
   };
   files: {
     stagePaths: (payload: StagePathsPayload) => StagedFileResult[];

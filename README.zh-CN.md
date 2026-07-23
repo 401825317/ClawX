@@ -140,6 +140,7 @@ Skills 页面可展示来自多个 OpenClaw 来源的技能（托管目录、wor
 ### 🔐 安全的供应商集成
 连接多个 AI 供应商（OpenAI、Anthropic、Z.AI / GLM 等），凭证安全存储在系统原生密钥链中。OpenAI 同时支持 API Key 与浏览器 OAuth（Codex 订阅）登录。
 UClaw 托管分发会在首次设置中提供账号登录、注册、验证码和设备授权。凭证只保存在 Electron Main 与受保护的 Secret Store 中；认证成功后，通过现有 Provider 和 OpenClaw Runtime Sync 配置托管的 `openai/smart-latest` 账号。普通 Provider 管理入口不能查看、编辑或删除其运行时密钥。社区分发继续使用原有 Provider 设置流程。
+已登录的 UClaw 用户可以从侧栏进入虾粮商店，查看虾粮余额、创建充值订单、通过二维码或安全的浏览器链接完成支付，并分页查看历史订单。系统会自动检查支付状态，并在支付成功后刷新余额。
 在开发者模式下，独立的“图像生成”页面支持配置 OpenAI 兼容生图端点（Base URL、API Key 和模型名，例如 `gpt-image-2`），生图请求会走专用的 `/v1/images/generations` 服务，聊天仍继续使用正常的 OpenAI Provider。
 如果你通过 **自定义（Custom）Provider** 对接 OpenAI-compatible 网关，可以在 **设置 → AI Providers → 编辑 Provider** 中配置自定义 `User-Agent`，以提高兼容性。
 编辑或切换 Provider 时，ClawX 会保留已有的模型级能力元数据，例如 `input: ["text", "image"]`。新选择的自定义 Provider 模型会使用与 OpenClaw onboarding 一致的图片输入能力推断；未知模型默认按纯文本模型处理。
@@ -239,6 +240,8 @@ ClawX 采用 **双进程 + Host API 统一接入架构**。渲染进程只调用
 Chat 使用由 Electron Main 持有的 ACP stdio bridge。Renderer 接收类型化 host events，并渲染内存中的 ACP timeline。Gateway 仍负责 providers、models、skills、workspace、settings、diagnostics 和 media configuration 等非 Chat 能力。
 
 UClaw 托管账号操作通过类型化 `managedAuth` Host API 完成。Renderer 不会收到 access token、refresh token 或 relay credential，认证界面也不会直接启动或重载 Gateway。
+
+虾粮商店使用独立的类型化 `billing` Host API。带认证的计费请求和令牌刷新均由 Electron Main 持有；该流程不会写入 Provider 或 OpenClaw 配置，也不会改变 Chat、ACP 或 Gateway 生命周期行为。
 
 打开其它会话或页面时，尚未完成的 ACP 回复仍会继续流式接收。若在回复完成前返回，ClawX 会恢复最新的内存 timeline 并继续显示实时输出；回复完成后，普通 ACP 历史回放仍是唯一事实来源。
 

@@ -147,6 +147,7 @@ import {
   logoutManagedAuth,
   registerManagedAuth,
   refreshManagedAuth,
+  requestManagedAuthenticatedJson,
   sendManagedAuthVerificationCode,
 } from '@electron/services/managed-auth-service';
 
@@ -342,6 +343,75 @@ describe('managed auth service transaction and compatibility behavior', () => {
 
     expect(status.activationRequired).toBe(false);
     expect(status.bootstrap.auth?.activationRequired).toBe(false);
+  });
+
+  it('uses the Main-owned access token for authenticated UClaw requests', async () => {
+    secrets.set('uclaw-auth', {
+      type: 'oauth',
+      accountId: 'uclaw-auth',
+      accessToken: 'access-secret',
+      refreshToken: 'refresh-secret',
+      expiresAt: Date.now() + 3_600_000,
+    });
+    mocks.proxyAwareFetch.mockImplementation(async (input: unknown, init: unknown) => {
+      expect(requestPath(input)).toBe('/api/clawx/billing/checkout-info');
+      expect((init as { headers?: Record<string, string> }).headers?.Authorization)
+        .toBe('Bearer access-secret');
+      return jsonResponse(200, { data: { balance: 12 } });
+    });
+
+    await expect(requestManagedAuthenticatedJson('/api/clawx/billing/checkout-info'))
+      .resolves.toEqual({ balance: 12 });
+  });
+
+  it('refreshes an expired access token before an authenticated UClaw request', async () => {
+    secrets.set('uclaw-auth', {
+      type: 'oauth',
+      accountId: 'uclaw-auth',
+      accessToken: 'expired-access',
+      refreshToken: 'refresh-secret',
+      expiresAt: Date.now() - 1_000,
+    });
+    mocks.proxyAwareFetch.mockImplementation(async (input: unknown, init: unknown) => {
+      const path = requestPath(input);
+      if (path === '/api/clawx/auth/refresh') {
+        return jsonResponse(200, {
+          access_token: 'fresh-access',
+          refresh_token: 'fresh-refresh',
+          expires_in: 3_600,
+        });
+      }
+      if (path === '/api/clawx/billing/checkout-info') {
+        expect((init as { headers?: Record<string, string> }).headers?.Authorization)
+          .toBe('Bearer fresh-access');
+        return jsonResponse(200, { data: { balance: 12 } });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await expect(requestManagedAuthenticatedJson('/api/clawx/billing/checkout-info'))
+      .resolves.toEqual({ balance: 12 });
+    expect(secrets.get('uclaw-auth')).toEqual(expect.objectContaining({
+      accessToken: 'fresh-access',
+      refreshToken: 'fresh-refresh',
+    }));
+  });
+
+  it('maps rejected authenticated UClaw requests to an expired session', async () => {
+    secrets.set('uclaw-auth', {
+      type: 'oauth',
+      accountId: 'uclaw-auth',
+      accessToken: 'rejected-access',
+      refreshToken: 'refresh-secret',
+      expiresAt: Date.now() + 3_600_000,
+    });
+    mocks.proxyAwareFetch.mockResolvedValue(jsonResponse(401, {
+      code: 'session_revoked',
+      message: 'Session revoked',
+    }));
+
+    await expect(requestManagedAuthenticatedJson('/api/clawx/billing/checkout-info'))
+      .rejects.toEqual(expect.objectContaining({ code: 'auth_expired', status: 401 }));
   });
 
   it('commits a successful login to the managed OpenAI account', async () => {
