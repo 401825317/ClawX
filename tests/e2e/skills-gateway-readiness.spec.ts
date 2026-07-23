@@ -1,4 +1,10 @@
-import { completeSetup, expect, installIpcMocks, test } from './fixtures/electron';
+import {
+  completeSetup,
+  expect,
+  getRecordedHostInvocations,
+  installIpcMocks,
+  test,
+} from './fixtures/electron';
 
 test.describe('Skills page gateway readiness', () => {
   test('shows local skills even when gateway is stopped', async ({ electronApp, page }) => {
@@ -11,7 +17,7 @@ test.describe('Skills page gateway readiness', () => {
       },
       hostApi: {
         '["skills","status",null]': { skills: [] },
-        '["skills","clawhubCapability",null]': {
+        '["skills","marketplaceCapability",null]': {
           success: true,
           capability: { canSearch: false, canInstall: false },
         },
@@ -64,7 +70,7 @@ test.describe('Skills page gateway readiness', () => {
       },
       hostApi: {
         '["skills","status",null]': { skills: [] },
-        '["skills","clawhubCapability",null]': {
+        '["skills","marketplaceCapability",null]': {
           success: true,
           capability: { canSearch: false, canInstall: false },
         },
@@ -99,7 +105,7 @@ test.describe('Skills page gateway readiness', () => {
       },
       hostApi: {
         '["skills","status",null]': { skills: [] },
-        '["skills","clawhubCapability",null]': {
+        '["skills","marketplaceCapability",null]': {
           success: true,
           capability: { canSearch: false, canInstall: false },
         },
@@ -135,7 +141,7 @@ test.describe('Skills page gateway readiness', () => {
       hostApi: {
         '["skills","status",null]': { skills: [] },
         '["skills","local",null]': { success: true, skills: [] },
-        '["skills","clawhubCapability",null]': {
+        '["skills","marketplaceCapability",null]': {
           success: true,
           capability: { canSearch: false, canInstall: false },
         },
@@ -154,5 +160,154 @@ test.describe('Skills page gateway readiness', () => {
     });
 
     await expect(page.getByTestId('skills-gateway-banner')).toHaveCount(0, { timeout: 2_000 });
+  });
+
+  test('browses and installs marketplace skills without auth or gateway lifecycle calls', async ({ electronApp, page }, testInfo) => {
+    await completeSetup(page);
+
+    await installIpcMocks(electronApp, {
+      gatewayStatus: { state: 'stopped', port: 18789 },
+      gatewayRpc: {
+        '["skills.status",null]': { success: false, error: 'Gateway not connected' },
+      },
+      recordHostInvocations: true,
+      hostApi: {
+        '["skills","status",null]': { skills: [] },
+        '["skills","local",null]': { success: true, skills: [] },
+        '["skills","marketplaceCapability",null]': {
+          success: true,
+          capability: { mode: 'multi-marketplace', canSearch: true, canInstall: true },
+        },
+        '["skills","marketplaceSearch",{"limit":100,"locale":"en","provider":"skillhub","query":""}]': {
+          success: true,
+          results: [{
+            slug: 'demo-skill',
+            name: 'Demo Skill',
+            description: 'A marketplace skill',
+            version: '1.0.0',
+            provider: 'skillhub',
+          }],
+          total: 2,
+          loaded: 1,
+          totalKnown: true,
+          source: 'skillhub',
+          query: '',
+          sort: 'score',
+          dir: 'desc',
+          hasMore: true,
+          nextCursor: '2',
+        },
+        '["skills","marketplaceSearch",{"cursor":"2","dir":"desc","limit":100,"locale":"en","provider":"skillhub","query":"","sort":"score"}]': {
+          success: true,
+          results: [{
+            slug: 'second-skill',
+            name: 'Second Skill',
+            description: 'Loaded from the next page',
+            version: '1.0.0',
+            provider: 'skillhub',
+          }],
+          total: 2,
+          loaded: 1,
+          totalKnown: true,
+          source: 'skillhub',
+          query: '',
+          sort: 'score',
+          dir: 'desc',
+          hasMore: false,
+          nextCursor: '',
+        },
+        '["skills","marketplaceSearch",{"limit":24,"locale":"en","provider":"skillhub","query":"browser automation"}]': {
+          success: true,
+          results: [{
+            slug: 'github-helper',
+            name: 'GitHub Helper',
+            description: 'Developer automation',
+            version: '2.0.0',
+            provider: 'skillhub',
+            category: 'developer_tools',
+          }],
+          source: 'skillhub',
+        },
+        '["skills","marketplaceSearch",{"limit":24,"locale":"en","provider":"skillhub","query":"github"}]': {
+          success: true,
+          results: [],
+          source: 'skillhub',
+        },
+        '["skills","marketplaceSearch",{"limit":24,"locale":"en","provider":"skillhub","query":"coding"}]': {
+          success: true,
+          results: [],
+          source: 'skillhub',
+        },
+        '["skills","marketplaceSearch",{"limit":24,"locale":"en","provider":"skillhub","query":"developer tools"}]': {
+          success: true,
+          results: [],
+          source: 'skillhub',
+        },
+        '["skills","marketplaceInstall",{"provider":"skillhub","slug":"github-helper","version":"2.0.0"}]': {
+          success: true,
+        },
+      },
+    });
+
+    await page.getByTestId('sidebar-nav-skills').click();
+    await expect(page.getByTestId('skills-page')).toBeVisible();
+    await page.getByTestId('skills-marketplace-button').click();
+    await expect(page.getByTestId('skills-marketplace-view')).toBeVisible();
+    await expect(page.getByTestId('marketplace-skill-card').filter({ hasText: 'Demo Skill' })).toBeVisible();
+
+    await page.getByTestId('marketplace-load-more').click();
+    await expect(page.getByTestId('marketplace-skill-card').filter({ hasText: 'Second Skill' })).toBeVisible();
+
+    await page.getByTestId('marketplace-category-dev-automation').click();
+    const githubCard = page.getByTestId('marketplace-skill-card').filter({ hasText: 'GitHub Helper' });
+    await expect(githubCard).toBeVisible();
+    await expect.poll(async () => (
+      page.getByTestId('skills-content-scroll').evaluate((element) => element.scrollTop)
+    )).toBe(0);
+    await page.evaluate(() => window.getSelection()?.removeAllRanges());
+
+    const desktopScreenshot = testInfo.outputPath('skills-marketplace-desktop.png');
+    await page.screenshot({ path: desktopScreenshot });
+    await testInfo.attach('skills-marketplace-desktop', {
+      path: desktopScreenshot,
+      contentType: 'image/png',
+    });
+
+    await page.setViewportSize({ width: 720, height: 760 });
+    await expect(githubCard).toBeVisible();
+    expect(await page.evaluate(() => (
+      document.documentElement.scrollWidth <= document.documentElement.clientWidth
+    ))).toBe(true);
+    const narrowScreenshot = testInfo.outputPath('skills-marketplace-narrow.png');
+    await page.screenshot({ path: narrowScreenshot });
+    await testInfo.attach('skills-marketplace-narrow', {
+      path: narrowScreenshot,
+      contentType: 'image/png',
+    });
+    await githubCard.scrollIntoViewIfNeeded();
+    const narrowCardScreenshot = testInfo.outputPath('skills-marketplace-narrow-card.png');
+    await githubCard.screenshot({ path: narrowCardScreenshot });
+    await testInfo.attach('skills-marketplace-narrow-card', {
+      path: narrowCardScreenshot,
+      contentType: 'image/png',
+    });
+
+    await githubCard.getByRole('button', { name: /Install/i }).click();
+
+    await expect.poll(async () => {
+      const invocations = await getRecordedHostInvocations(electronApp);
+      return invocations.some((entry) => (
+        entry.module === 'skills'
+        && entry.action === 'marketplaceInstall'
+        && entry.payload?.slug === 'github-helper'
+      ));
+    }).toBe(true);
+
+    const invocations = await getRecordedHostInvocations(electronApp);
+    expect(invocations.some((entry) => entry.module === 'managedAuth')).toBe(false);
+    expect(invocations.some((entry) => (
+      entry.module === 'gateway'
+      && ['start', 'restart', 'stop'].includes(entry.action || '')
+    ))).toBe(false);
   });
 });

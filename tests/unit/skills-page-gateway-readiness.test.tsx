@@ -9,7 +9,7 @@ const setSkillsEnabledMock = vi.fn();
 const searchSkillsMock = vi.fn();
 const installSkillMock = vi.fn();
 const uninstallSkillMock = vi.fn();
-const clawhubCapabilityMock = vi.fn();
+const marketplaceCapabilityMock = vi.fn();
 const clawhubOpenSkillPathMock = vi.fn();
 const openclawGetSkillsDirMock = vi.fn();
 const shellOpenExternalMock = vi.fn();
@@ -37,7 +37,9 @@ vi.mock('@/stores/skills', () => ({
     disableSkill: disableSkillMock,
     setSkillsEnabled: setSkillsEnabledMock,
     searchResults: [],
+    marketplaceMeta: {},
     searchSkills: searchSkillsMock,
+    loadMoreMarketplaceSkills: vi.fn(),
     installSkill: installSkillMock,
     uninstallSkill: uninstallSkillMock,
     searching: false,
@@ -59,7 +61,7 @@ vi.mock('@/lib/host-api', () => ({
       openExternal: (...args: unknown[]) => shellOpenExternalMock(...args),
     },
     skills: {
-      clawhubCapability: () => clawhubCapabilityMock(),
+      marketplaceCapability: () => marketplaceCapabilityMock(),
       clawhubOpenSkillPath: (...args: unknown[]) => clawhubOpenSkillPathMock(...args),
     },
   },
@@ -98,7 +100,7 @@ describe('Skills page gateway readiness', () => {
     skillsState.skills = [];
     openclawGetSkillsDirMock.mockResolvedValue('/tmp/.openclaw/skills');
     shellOpenExternalMock.mockResolvedValue(undefined);
-    clawhubCapabilityMock.mockResolvedValue({ success: true, capability: { canSearch: false, canInstall: false } });
+    marketplaceCapabilityMock.mockResolvedValue({ success: true, capability: { canSearch: false, canInstall: false } });
     clawhubOpenSkillPathMock.mockResolvedValue({ success: true });
     fetchSkillsMock.mockResolvedValue(true);
   });

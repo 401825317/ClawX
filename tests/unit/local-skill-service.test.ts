@@ -125,4 +125,33 @@ describe('local skill service', () => {
     expect(skills.find((skill) => skill.id === 'docx')?.version).toBeUndefined();
     expect(skills.find((skill) => skill.id === 'custom-skill')?.version).toBe('0.1.3');
   });
+
+  it('marks only user-installed marketplace skills as uninstallable', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'clawx-local-skills-origin-'));
+    const managedRoot = join(root, 'managed');
+
+    mkdirSync(join(managedRoot, 'skillhub-skill', '.clawhub'), { recursive: true });
+    writeFileSync(join(managedRoot, 'skillhub-skill', 'SKILL.md'), '---\nname: skillhub-skill\n---\n');
+    writeFileSync(join(managedRoot, 'skillhub-skill', '.clawhub', 'origin.json'), JSON.stringify({ provider: 'skillhub', slug: 'skillhub-skill' }));
+
+    mkdirSync(join(managedRoot, 'unknown-skill', '.clawhub'), { recursive: true });
+    writeFileSync(join(managedRoot, 'unknown-skill', 'SKILL.md'), '---\nname: unknown-skill\n---\n');
+    writeFileSync(join(managedRoot, 'unknown-skill', '.clawhub', 'origin.json'), JSON.stringify({ provider: 'other', slug: 'unknown-skill' }));
+
+    mkdirSync(join(managedRoot, 'preinstalled-skill', '.clawhub'), { recursive: true });
+    writeFileSync(join(managedRoot, 'preinstalled-skill', 'SKILL.md'), '---\nname: preinstalled-skill\n---\n');
+    writeFileSync(join(managedRoot, 'preinstalled-skill', '.clawhub', 'origin.json'), JSON.stringify({ provider: 'skillhub', slug: 'preinstalled-skill' }));
+    writeFileSync(join(managedRoot, 'preinstalled-skill', '.clawx-preinstalled.json'), JSON.stringify({ slug: 'preinstalled-skill' }));
+
+    listAgentsSnapshotMock.mockResolvedValue({ agents: [] });
+    getOpenClawSkillsDirMock.mockReturnValue(managedRoot);
+    getOpenClawResolvedDirMock.mockReturnValue(join(root, 'openclaw'));
+    getAllSkillConfigsMock.mockResolvedValue({});
+
+    const { listLocalSkills } = await import('@electron/services/skills/local-skill-service');
+    const skills = await listLocalSkills();
+    expect(skills.find((skill) => skill.id === 'skillhub-skill')).toMatchObject({ uninstallable: true });
+    expect(skills.find((skill) => skill.id === 'unknown-skill')).toMatchObject({ uninstallable: false });
+    expect(skills.find((skill) => skill.id === 'preinstalled-skill')).toMatchObject({ uninstallable: false });
+  });
 });

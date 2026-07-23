@@ -397,10 +397,10 @@ async function initialize(): Promise<void> {
     },
   });
 
-  // Wire marketplace provider to ClawHubService if an extension provides one
-  const marketplaceProvider = extensionRegistry.getMarketplaceProvider();
-  if (marketplaceProvider) {
-    clawHubService.setMarketplaceProvider(marketplaceProvider);
+  // Wire all marketplace providers after extension initialization.
+  const marketplaceProviders = extensionRegistry.getMarketplaceProviders();
+  if (marketplaceProviders.length > 0) {
+    clawHubService.setMarketplaceProviders(marketplaceProviders);
   }
 
   // Register update handlers

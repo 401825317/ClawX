@@ -8,9 +8,9 @@ vi.mock('@/lib/host-api', () => ({
     skills: {
       status: () => statusMock(),
       local: () => localMock(),
-      clawhubSearch: vi.fn(),
-      clawhubInstall: vi.fn(),
-      clawhubUninstall: vi.fn(),
+      marketplaceSearch: vi.fn(),
+      marketplaceInstall: vi.fn(),
+      marketplaceUninstall: vi.fn(),
       updateConfigs: vi.fn(),
     },
   },

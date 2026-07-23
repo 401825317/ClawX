@@ -31,6 +31,7 @@ export interface LocalSkillRecord {
   source?: string;
   baseDir?: string;
   filePath?: string;
+  uninstallable?: boolean;
   marketplace?: LocalSkillMarketplaceMeta;
 }
 
@@ -207,7 +208,7 @@ async function readOriginMeta(skillDir: string): Promise<OriginMeta | null> {
   const parsed = await safeReadJson<Record<string, unknown>>(join(skillDir, '.clawhub', 'origin.json'));
   if (!parsed) return null;
   return {
-    provider: 'clawhub',
+    provider: toStringValue(parsed.provider) || 'clawhub',
     slug: toStringValue(parsed.slug),
     installedVersion: toStringValue(parsed.installedVersion) || toStringValue(parsed.version),
     source: toStringValue(parsed.source),
@@ -273,6 +274,10 @@ async function inspectSkillDir(
     const version = manifestMeta?.version || parsedManifest.version || originMeta?.installedVersion;
     const source = descriptor.source;
     const isBundled = source === 'openclaw-bundled' || Boolean(preinstalledMeta);
+    const marketplaceProvider = normalizeKey(originMeta?.provider);
+    const uninstallable = source === 'openclaw-managed'
+      && !preinstalledMeta
+      && (marketplaceProvider === 'clawhub' || marketplaceProvider === 'skillhub');
     const marketplace = originMeta || manifestMeta
       ? {
           provider: originMeta?.provider || (manifestMeta ? 'manifest' : source),
@@ -298,6 +303,7 @@ async function inspectSkillDir(
       source,
       baseDir: skillDirRealPath,
       filePath: manifestPath,
+      uninstallable,
       marketplace,
       priority: descriptor.priority,
     };

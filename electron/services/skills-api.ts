@@ -38,6 +38,35 @@ type SkillOpenPayload = {
   baseDir?: unknown;
 };
 
+function getMarketplaceSearchParams(payload: unknown): ClawHubSearchParams {
+  const body = isRecord(payload) ? payload : {};
+  return {
+    query: typeof body.query === 'string' ? body.query.trim() : '',
+    limit: typeof body.limit === 'number' ? body.limit : undefined,
+    locale: typeof body.locale === 'string' ? body.locale : undefined,
+    cursor: typeof body.cursor === 'string' ? body.cursor : undefined,
+    sort: typeof body.sort === 'string' ? body.sort : undefined,
+    dir: typeof body.dir === 'string' ? body.dir : undefined,
+    force: typeof body.force === 'boolean' ? body.force : undefined,
+    provider: typeof body.provider === 'string' ? body.provider : undefined,
+  };
+}
+
+function getMarketplaceInstallParams(payload: unknown): ClawHubInstallParams {
+  const body = isRecord(payload) ? payload : {};
+  return {
+    slug: typeof body.slug === 'string' ? body.slug.trim() : '',
+    version: typeof body.version === 'string' ? body.version : undefined,
+    force: typeof body.force === 'boolean' ? body.force : undefined,
+    provider: typeof body.provider === 'string' ? body.provider : undefined,
+  };
+}
+
+function getMarketplaceUninstallParams(payload: unknown): ClawHubUninstallParams {
+  const body = isRecord(payload) ? payload : {};
+  return { slug: typeof body.slug === 'string' ? body.slug.trim() : '' };
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -90,6 +119,45 @@ export function createSkillsApi({
   clawHubService: ClawHubService;
   gatewayManager: GatewayManager;
 }): CompleteHostServiceRegistry['skills'] {
+  const marketplaceCapability = async () => {
+    try {
+      return { success: true, capability: await clawHubService.getMarketplaceCapability() };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  };
+  const marketplaceList = async () => {
+    try {
+      return { success: true, results: await clawHubService.listInstalled() };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  };
+  const marketplaceSearch = async (payload: unknown) => {
+    try {
+      const result = await clawHubService.search(getMarketplaceSearchParams(payload));
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  };
+  const marketplaceInstall = async (payload: unknown) => {
+    try {
+      await clawHubService.install(getMarketplaceInstallParams(payload));
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  };
+  const marketplaceUninstall = async (payload: unknown) => {
+    try {
+      await clawHubService.uninstall(getMarketplaceUninstallParams(payload));
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: errorMessage(error) };
+    }
+  };
+
   return {
     local: async () => ({ success: true, skills: await listLocalSkills() }),
     configs: async () => getAllSkillConfigs(),
@@ -127,43 +195,16 @@ export function createSkillsApi({
         skills: filterEnabledQuickAccessSkills(scannedSkills, runtimeSkills, configs),
       };
     },
-    clawhubCapability: async () => {
-      try {
-        return { success: true, capability: await clawHubService.getMarketplaceCapability() };
-      } catch (error) {
-        return { success: false, error: errorMessage(error) };
-      }
-    },
-    clawhubList: async () => {
-      try {
-        return { success: true, results: await clawHubService.listInstalled() };
-      } catch (error) {
-        return { success: false, error: errorMessage(error) };
-      }
-    },
-    clawhubSearch: async (payload) => {
-      try {
-        return { success: true, results: await clawHubService.search((isRecord(payload) ? payload : {}) as ClawHubSearchParams) };
-      } catch (error) {
-        return { success: false, error: errorMessage(error) };
-      }
-    },
-    clawhubInstall: async (payload) => {
-      try {
-        await clawHubService.install((isRecord(payload) ? payload : {}) as ClawHubInstallParams);
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: errorMessage(error) };
-      }
-    },
-    clawhubUninstall: async (payload) => {
-      try {
-        await clawHubService.uninstall((isRecord(payload) ? payload : {}) as ClawHubUninstallParams);
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: errorMessage(error) };
-      }
-    },
+    marketplaceCapability,
+    marketplaceList,
+    marketplaceSearch,
+    marketplaceInstall,
+    marketplaceUninstall,
+    clawhubCapability: marketplaceCapability,
+    clawhubList: marketplaceList,
+    clawhubSearch: marketplaceSearch,
+    clawhubInstall: marketplaceInstall,
+    clawhubUninstall: marketplaceUninstall,
     clawhubOpenSkillReadme: async (payload) => {
       try {
         const body = isRecord(payload) ? payload as SkillOpenPayload : {};

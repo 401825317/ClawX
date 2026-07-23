@@ -23,6 +23,7 @@ export interface Skill {
   source?: string;
   baseDir?: string;
   filePath?: string;
+  uninstallable?: boolean;
   marketplace?: {
     provider: string;
     slug?: string;
@@ -64,9 +65,29 @@ export interface MarketplaceSkill {
   name: string;
   description: string;
   version: string;
+  provider?: string;
+  source?: string;
+  sourceUrl?: string;
+  iconUrl?: string;
+  category?: string;
   author?: string;
   downloads?: number;
   stars?: number;
+  keywords?: string[];
+}
+
+export interface MarketplaceCatalogMeta {
+  total?: number;
+  loaded?: number;
+  totalKnown?: boolean;
+  catalogTotal?: number;
+  catalogTotalKnown?: boolean;
+  source?: string;
+  query?: string;
+  sort?: string;
+  dir?: string;
+  hasMore?: boolean;
+  nextCursor?: string;
 }
 
 /**

@@ -9,14 +9,21 @@ import { getOpenClawConfigDir, ensureDir } from '../utils/paths';
 import { removeSkillConfig } from '../utils/skill-config';
 
 export interface MarketplaceSearchParams {
-    query: string;
+    query?: string;
     limit?: number;
+    locale?: string;
+    cursor?: string;
+    sort?: string;
+    dir?: string;
+    force?: boolean;
+    provider?: string;
 }
 
 export interface MarketplaceInstallParams {
     slug: string;
     version?: string;
     force?: boolean;
+    provider?: string;
 }
 
 export interface MarketplaceUninstallParams {
@@ -28,10 +35,33 @@ export interface MarketplaceSkillResult {
     name: string;
     description: string;
     version: string;
+    provider?: string;
+    source?: string;
+    sourceUrl?: string;
+    iconUrl?: string;
+    category?: string;
     author?: string;
     downloads?: number;
     stars?: number;
+    keywords?: string[];
 }
+
+export interface MarketplaceSearchResult {
+    results: MarketplaceSkillResult[];
+    total?: number;
+    loaded?: number;
+    totalKnown?: boolean;
+    catalogTotal?: number;
+    catalogTotalKnown?: boolean;
+    source?: string;
+    query?: string;
+    sort?: string;
+    dir?: string;
+    hasMore?: boolean;
+    nextCursor?: string;
+}
+
+export type MarketplaceSearchProviderResult = MarketplaceSkillResult[] | MarketplaceSearchResult;
 
 export type ClawHubSearchParams = MarketplaceSearchParams;
 export type ClawHubInstallParams = MarketplaceInstallParams;
@@ -46,14 +76,57 @@ export interface ClawHubInstalledSkillResult {
 }
 
 export interface MarketplaceProvider {
+    id?: string;
     getCapability(): Promise<{ mode: string; canSearch: boolean; canInstall: boolean; reason?: string }>;
-    search(params: MarketplaceSearchParams): Promise<MarketplaceSkillResult[]>;
+    search(params: MarketplaceSearchParams): Promise<MarketplaceSearchProviderResult>;
     install(params: MarketplaceInstallParams): Promise<void>;
+}
+
+const VALID_MARKETPLACE_SKILL_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+function normalizeMarketplaceSlug(value: unknown): string {
+    if (typeof value !== 'string') {
+        throw new Error('Marketplace install requires a skill slug');
+    }
+    const slug = value.trim();
+    if (!slug || slug === 'undefined' || slug === 'null' || !VALID_MARKETPLACE_SKILL_SLUG_RE.test(slug)) {
+        throw new Error('Marketplace install requires a valid skill slug');
+    }
+    return slug;
+}
+
+function normalizeMarketplaceProvider(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const provider = value.trim().toLowerCase();
+    return provider || undefined;
+}
+
+function normalizeMarketplaceSearchResult(
+    value: MarketplaceSearchProviderResult,
+    params: MarketplaceSearchParams,
+): MarketplaceSearchResult {
+    if (Array.isArray(value)) {
+        return {
+            results: value,
+            loaded: value.length,
+            total: value.length,
+            totalKnown: true,
+            query: params.query || '',
+            hasMore: false,
+        };
+    }
+
+    const results = Array.isArray(value.results) ? value.results : [];
+    return {
+        ...value,
+        results,
+        loaded: typeof value.loaded === 'number' ? value.loaded : results.length,
+    };
 }
 
 export class ClawHubService {
     private workDir: string;
-    private marketplaceProvider: MarketplaceProvider | null = null;
+    private marketplaceProviders: MarketplaceProvider[] = [];
 
     constructor() {
         this.workDir = getOpenClawConfigDir();
@@ -61,12 +134,32 @@ export class ClawHubService {
     }
 
     setMarketplaceProvider(provider: MarketplaceProvider): void {
-        this.marketplaceProvider = provider;
+        this.marketplaceProviders = [provider];
+    }
+
+    setMarketplaceProviders(providers: MarketplaceProvider[]): void {
+        this.marketplaceProviders = [...providers];
     }
 
     async getMarketplaceCapability(): Promise<{ mode: string; canSearch: boolean; canInstall: boolean; reason?: string }> {
-        if (this.marketplaceProvider) {
-            return this.marketplaceProvider.getCapability();
+        if (this.marketplaceProviders.length > 0) {
+            const capabilities = await Promise.allSettled(this.marketplaceProviders.map((provider) => provider.getCapability()));
+            const available = capabilities
+                .filter((result): result is PromiseFulfilledResult<{ mode: string; canSearch: boolean; canInstall: boolean; reason?: string }> => result.status === 'fulfilled')
+                .map((result) => result.value);
+            const searchable = available.filter((capability) => capability.canSearch);
+            const installable = available.filter((capability) => capability.canInstall);
+            if (available.length > 1) {
+                return {
+                    mode: 'multi-marketplace',
+                    canSearch: searchable.length > 0,
+                    canInstall: installable.length > 0,
+                    reason: searchable.length > 0 ? undefined : 'marketplace-disabled',
+                };
+            }
+            if (available.length === 1) {
+                return available[0];
+            }
         }
         return {
             mode: 'local-only',
@@ -79,9 +172,11 @@ export class ClawHubService {
     /**
      * Search for skills via an extension-provided marketplace.
      */
-    async search(params: MarketplaceSearchParams): Promise<MarketplaceSkillResult[]> {
-        if (this.marketplaceProvider) {
-            return this.marketplaceProvider.search(params);
+    async search(params: MarketplaceSearchParams): Promise<MarketplaceSearchResult> {
+        const provider = this.resolveMarketplaceProvider(params.provider);
+        if (provider) {
+            const result = await provider.search(params);
+            return normalizeMarketplaceSearchResult(result, params);
         }
         throw new Error('Marketplace search is disabled');
     }
@@ -90,8 +185,10 @@ export class ClawHubService {
      * Explore marketplace skills via the registered marketplace provider.
      */
     async explore(params: { limit?: number } = {}): Promise<MarketplaceSkillResult[]> {
-        if (this.marketplaceProvider) {
-            return this.marketplaceProvider.search({ query: '', limit: params.limit });
+        const provider = this.resolveMarketplaceProvider();
+        if (provider) {
+            const result = await provider.search({ query: '', limit: params.limit });
+            return normalizeMarketplaceSearchResult(result, { query: '', limit: params.limit }).results;
         }
         throw new Error('Marketplace search is disabled');
     }
@@ -100,10 +197,26 @@ export class ClawHubService {
      * Install a skill through an extension-provided marketplace.
      */
     async install(params: MarketplaceInstallParams): Promise<void> {
-        if (this.marketplaceProvider) {
-            return this.marketplaceProvider.install(params);
+        const slug = normalizeMarketplaceSlug(params.slug);
+        const provider = this.resolveMarketplaceProvider(params.provider);
+        if (provider) {
+            return provider.install({ ...params, slug });
         }
         throw new Error('Marketplace install is disabled');
+    }
+
+    private resolveMarketplaceProvider(providerId?: string): MarketplaceProvider | null {
+        if (this.marketplaceProviders.length === 0) return null;
+        if (providerId) {
+            const normalizedProviderId = providerId.trim().toLowerCase();
+            const provider = this.marketplaceProviders.find((candidate) => candidate.id?.trim().toLowerCase() === normalizedProviderId);
+            if (!provider) {
+                throw new Error(`Marketplace provider "${providerId}" is not available`);
+            }
+            return provider;
+        }
+        return this.marketplaceProviders.find((candidate) => candidate.id === 'skillhub')
+            ?? this.marketplaceProviders[0];
     }
 
     /**
@@ -111,8 +224,36 @@ export class ClawHubService {
      */
     async uninstall(params: ClawHubUninstallParams): Promise<void> {
         const fsPromises = fs.promises;
+        const slug = normalizeMarketplaceSlug(params.slug);
+        const skillsRoot = path.resolve(this.workDir, 'skills');
+        const skillDir = path.resolve(skillsRoot, slug);
+        if (path.dirname(skillDir) !== skillsRoot) {
+            throw new Error('Invalid marketplace skill path');
+        }
+        const preinstalledMarker = path.join(skillDir, '.clawx-preinstalled.json');
+        const originPath = path.join(skillDir, '.clawhub', 'origin.json');
 
-        const skillDir = path.join(this.workDir, 'skills', params.slug);
+        if (fs.existsSync(preinstalledMarker)) {
+            throw new Error('Preinstalled skills cannot be uninstalled');
+        }
+
+        if (!fs.existsSync(originPath)) {
+            throw new Error('Only user-installed marketplace skills can be uninstalled');
+        }
+
+        try {
+            const origin = JSON.parse(await fsPromises.readFile(originPath, 'utf8')) as { provider?: unknown };
+            const provider = normalizeMarketplaceProvider(origin.provider) || 'clawhub';
+            if (provider !== 'clawhub' && provider !== 'skillhub') {
+                throw new Error('Only user-installed marketplace skills can be uninstalled');
+            }
+        } catch (error) {
+            if (error instanceof Error && error.message === 'Only user-installed marketplace skills can be uninstalled') {
+                throw error;
+            }
+            throw new Error('Marketplace skill origin metadata is invalid', { cause: error });
+        }
+
         if (fs.existsSync(skillDir)) {
             console.log(`Deleting skill directory: ${skillDir}`);
             await fsPromises.rm(skillDir, { recursive: true, force: true });
@@ -124,9 +265,9 @@ export class ClawHubService {
                 const lockData = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as {
                     skills?: Record<string, unknown>;
                 };
-                if (lockData.skills && lockData.skills[params.slug]) {
-                    console.log(`Removing ${params.slug} from lock.json`);
-                    delete lockData.skills[params.slug];
+                if (lockData.skills && lockData.skills[slug]) {
+                    console.log(`Removing ${slug} from lock.json`);
+                    delete lockData.skills[slug];
                     await fsPromises.writeFile(lockFile, JSON.stringify(lockData, null, 2));
                 }
             } catch (err) {
@@ -134,7 +275,7 @@ export class ClawHubService {
             }
         }
 
-        await removeSkillConfig(params.slug);
+        await removeSkillConfig(slug);
     }
 
     /**
@@ -150,7 +291,7 @@ export class ClawHubService {
             const entries = await fs.promises.readdir(skillsRoot, { withFileTypes: true });
             const items = await Promise.all(entries
                 .filter((entry) => entry.isDirectory())
-                .map(async (entry) => {
+                .map(async (entry): Promise<ClawHubInstalledSkillResult | null> => {
                     const skillDir = path.join(skillsRoot, entry.name);
                     const manifestPath = path.join(skillDir, 'SKILL.md');
                     if (!fs.existsSync(manifestPath)) return null;
@@ -183,7 +324,7 @@ export class ClawHubService {
                         baseDir: skillDir,
                     };
                 }));
-            return items.filter((item): item is NonNullable<typeof item> => item !== null);
+            return items.filter((item): item is ClawHubInstalledSkillResult => item !== null);
         } catch (error) {
             console.error('ClawHub list error:', error);
             return [];

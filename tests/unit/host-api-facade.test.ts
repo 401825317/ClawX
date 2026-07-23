@@ -531,6 +531,44 @@ describe('hostApi facade', () => {
     }));
   });
 
+  it('routes generic marketplace actions through hostInvoke', async () => {
+    hostInvoke
+      .mockResolvedValueOnce({
+        id: 'req-1',
+        ok: true,
+        data: { success: true, capability: { canSearch: true, canInstall: true } },
+      })
+      .mockResolvedValueOnce({ id: 'req-2', ok: true, data: { success: true, results: [] } })
+      .mockResolvedValueOnce({ id: 'req-3', ok: true, data: { success: true } })
+      .mockResolvedValueOnce({ id: 'req-4', ok: true, data: { success: true } });
+    const { hostApi } = await import('@/lib/host-api');
+
+    await hostApi.skills.marketplaceCapability();
+    await hostApi.skills.marketplaceSearch({ provider: 'skillhub', query: 'pdf', limit: 20 });
+    await hostApi.skills.marketplaceInstall({ provider: 'skillhub', slug: 'pdf', version: '1.0.0' });
+    await hostApi.skills.marketplaceUninstall({ slug: 'pdf' });
+
+    expect(hostInvoke).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      module: 'skills',
+      action: 'marketplaceCapability',
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      module: 'skills',
+      action: 'marketplaceSearch',
+      payload: { provider: 'skillhub', query: 'pdf', limit: 20 },
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      module: 'skills',
+      action: 'marketplaceInstall',
+      payload: { provider: 'skillhub', slug: 'pdf', version: '1.0.0' },
+    }));
+    expect(hostInvoke).toHaveBeenNthCalledWith(4, expect.objectContaining({
+      module: 'skills',
+      action: 'marketplaceUninstall',
+      payload: { slug: 'pdf' },
+    }));
+  });
+
   it('calls usage.recentTokenHistory through hostInvoke', async () => {
     hostInvoke.mockResolvedValueOnce({ id: 'req', ok: true, data: [] });
     const { hostApi } = await import('@/lib/host-api');

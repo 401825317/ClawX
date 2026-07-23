@@ -775,12 +775,47 @@ export type ClawHubCapabilityResult = HostSuccess & { capability?: JsonRecord };
 export type ClawHubListResult = HostSuccess & {
   results?: ClawHubInstalledSkill[];
 };
-export type ClawHubSearchPayload = { query?: string };
-export type ClawHubSearchResult = HostSuccess & {
-  results?: MarketplaceSkill[];
+export type MarketplaceCapability = {
+  mode: string;
+  canSearch: boolean;
+  canInstall: boolean;
+  reason?: string;
 };
-export type ClawHubInstallPayload = { slug: string; version?: string };
-export type ClawHubUninstallPayload = { slug: string };
+export type MarketplaceSearchPayload = {
+  query?: string;
+  limit?: number;
+  locale?: string;
+  cursor?: string;
+  sort?: string;
+  dir?: string;
+  force?: boolean;
+  provider?: string;
+};
+export type MarketplaceSearchResult = HostSuccess & {
+  results?: MarketplaceSkill[];
+  total?: number;
+  loaded?: number;
+  totalKnown?: boolean;
+  catalogTotal?: number;
+  catalogTotalKnown?: boolean;
+  source?: string;
+  query?: string;
+  sort?: string;
+  dir?: string;
+  hasMore?: boolean;
+  nextCursor?: string;
+};
+export type MarketplaceInstallPayload = {
+  slug: string;
+  version?: string;
+  force?: boolean;
+  provider?: string;
+};
+export type MarketplaceUninstallPayload = { slug: string };
+export type ClawHubSearchPayload = MarketplaceSearchPayload;
+export type ClawHubSearchResult = MarketplaceSearchResult;
+export type ClawHubInstallPayload = MarketplaceInstallPayload;
+export type ClawHubUninstallPayload = MarketplaceUninstallPayload;
 export type ClawHubOpenPayload = {
   skillKey?: string;
   slug?: string;
@@ -1014,6 +1049,11 @@ export type HostApiContract = {
     status: () => SkillsStatusResult;
     update: (payload: SkillUpdatePayload) => HostSuccess;
     quickAccess: (payload: SkillQuickAccessPayload) => HostSuccess & { skills?: QuickAccessSkill[] };
+    marketplaceCapability: () => HostSuccess & { capability?: MarketplaceCapability };
+    marketplaceList: () => ClawHubListResult;
+    marketplaceSearch: (payload: MarketplaceSearchPayload) => MarketplaceSearchResult;
+    marketplaceInstall: (payload: MarketplaceInstallPayload) => HostSuccess;
+    marketplaceUninstall: (payload: MarketplaceUninstallPayload) => HostSuccess;
     clawhubCapability: () => ClawHubCapabilityResult;
     clawhubList: () => ClawHubListResult;
     clawhubSearch: (payload: ClawHubSearchPayload) => ClawHubSearchResult;

@@ -132,7 +132,7 @@ The Cron page now lets you configure external delivery directly in the task form
 
 
 ### 🧩 Extensible Skill System
-Extend your AI agents with pre-built skills. The integrated Skills page is local-first: it scans managed/workspace skill directories, lets you enable or disable skills without depending on the Gateway, and can optionally expose an extension-provided marketplace in enterprise builds.
+Extend your AI agents with pre-built skills. The integrated Skills page is local-first: it scans managed/workspace skill directories and lets you enable or disable skills without depending on the Gateway. Its public marketplace supports SkillHub and compatible ClawHub providers through the Main process, without requiring UClaw account authentication or changing Gateway lifecycle state.
 ClawX also pre-bundles full document-processing skills (`pdf`, `xlsx`, `docx`, `pptx`), deploys them automatically to the managed skills directory (default `~/.openclaw/skills`) on startup, and enables them by default on first install.
 The Skills page can display skills discovered from multiple OpenClaw sources (managed dir, workspace, and extra skill dirs), and now shows each skill's actual location so you can open the real folder directly. For bundled OpenClaw skills, community builds now ship and expose only `skill-creator`; non-allowlisted bundled skills are physically trimmed in both dev and packaged startup, and any stale `openclaw.json` entries left behind for those removed bundled skills are pruned.
 
