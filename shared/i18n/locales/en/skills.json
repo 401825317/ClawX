@@ -22,7 +22,8 @@
     "actions": {
         "enableVisible": "Enable Visible",
         "disableVisible": "Disable Visible",
-        "installSkill": "Install Skills"
+        "installSkill": "Install Skills",
+        "skillMarketplace": "Skill Marketplace"
     },
     "noSkills": "No skills found",
     "noSkillsSearch": "Try a different search term",
@@ -115,7 +116,7 @@
     "marketplace": {
         "title": "Marketplace",
         "installDialogTitle": "Install Skills",
-        "installDialogSubtitle": "Browse Explore by default, or enter keywords to search.",
+        "installDialogSubtitle": "Browse the SkillHub China marketplace by default, or enter keywords to search.",
         "sourceLabel": "Source",
         "sourceClawHub": "ClawHub",
         "sourceSkillHub": "SkillHub",
@@ -123,11 +124,19 @@
         "install": "Install",
         "installed": "Installed",
         "noDescription": "No description provided.",
+        "invalidSkill": "Incomplete skill metadata",
         "installUnavailable": "Install unavailable",
         "installUnavailableDescription": "The skill marketplace is currently browse-only and cannot install skills from the client.",
+        "unavailable": "Skill marketplace is unavailable. Retry later or check the OpenClaw runtime components.",
+        "homeSubtitle": "Browse the SkillHub China marketplace, explore tens of thousands of skills, and install them into the local OpenClaw skills directory.",
+        "browseOnlyHomeSubtitle": "Browse the SkillHub China marketplace. This runtime does not currently support direct installs from the client.",
+        "searchSubtitle": "Showing marketplace skills that match your search.",
         "categoryFilterLabel": "Popular Scenarios",
-        "loadedCount": "{{count}} skills loaded",
+        "loadedCount": "Loaded: {{count}}",
+        "filteredLoadedCount": "{{category}} · Loaded: {{count}}",
+        "totalCount": "Marketplace total: {{count}}",
         "totalAndLoadedCount": "{{total}} total · {{loaded}} loaded",
+        "scenarioCount": "Popular scenarios: {{count}}",
         "loadMore": "Load more",
         "noCategoryResults": "No skills in this category yet.",
         "categories": {
@@ -148,13 +157,15 @@
             "financeBusiness": "Finance & Trading",
             "securityRisk": "Security & Risk",
             "lifeTravel": "Life & Travel",
+            "creativeDesign": "Images & Design",
+            "ecommerceGrowth": "E-commerce Growth",
             "other": "Other Skills"
         },
-        "securityNote": "Click skill card to view its documentation and security information on ClawHub before installation.",
-        "manualInstallHint": "Network issues? You can always download skill ZIP archives from ClawHub.ai and extract them manually into \"{{path}}\".",
-        "searching": "Searching ClawHub...",
+        "securityNote": "Click a skill card to view its documentation and source information before installation.",
+        "manualInstallHint": "Network issues? You can download skill ZIP archives from SkillHub or ClawHub and extract them manually into \"{{path}}\".",
+        "searching": "Searching marketplace...",
         "noResults": "No skills found matching your search.",
         "emptyPrompt": "Search for new skills to expand your capabilities.",
-        "searchError": "ClawHub search failed. Check your connection or installation."
+        "searchError": "Marketplace search failed. Check your connection or retry later."
     }
 }

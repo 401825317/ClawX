@@ -24,6 +24,9 @@ const { gatewayState, skillsState } = vi.hoisted(() => ({
   },
   skillsState: {
     skills: [] as Array<Record<string, unknown>>,
+    searchResults: [] as Array<Record<string, unknown>>,
+    marketplaceMeta: {} as Record<string, unknown>,
+    searching: false,
   },
 }));
 
@@ -36,13 +39,13 @@ vi.mock('@/stores/skills', () => ({
     enableSkill: enableSkillMock,
     disableSkill: disableSkillMock,
     setSkillsEnabled: setSkillsEnabledMock,
-    searchResults: [],
-    marketplaceMeta: {},
+    searchResults: skillsState.searchResults,
+    marketplaceMeta: skillsState.marketplaceMeta,
     searchSkills: searchSkillsMock,
     loadMoreMarketplaceSkills: vi.fn(),
     installSkill: installSkillMock,
     uninstallSkill: uninstallSkillMock,
-    searching: false,
+    searching: skillsState.searching,
     searchError: null,
     installing: {},
   }),
@@ -98,6 +101,9 @@ describe('Skills page gateway readiness', () => {
     vi.clearAllMocks();
     gatewayState.status = { state: 'running', port: 18789, gatewayReady: true };
     skillsState.skills = [];
+    skillsState.searchResults = [];
+    skillsState.marketplaceMeta = {};
+    skillsState.searching = false;
     openclawGetSkillsDirMock.mockResolvedValue('/tmp/.openclaw/skills');
     shellOpenExternalMock.mockResolvedValue(undefined);
     marketplaceCapabilityMock.mockResolvedValue({ success: true, capability: { canSearch: false, canInstall: false } });
@@ -147,6 +153,79 @@ describe('Skills page gateway readiness', () => {
 
     expect(fetchSkillsMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('actions.installSkill')).not.toBeInTheDocument();
+  });
+
+  it('opens the marketplace by default when the marketplace is available', async () => {
+    marketplaceCapabilityMock.mockResolvedValue({
+      success: true,
+      capability: { canSearch: true, canInstall: true },
+    });
+    skillsState.searchResults = [{
+      slug: 'demo-skill',
+      name: 'Demo Skill',
+      description: 'Marketplace skill',
+      provider: 'skillhub',
+    }];
+    skillsState.marketplaceMeta = {
+      total: 2,
+      totalKnown: true,
+      catalogTotalKnown: false,
+    };
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.getByTestId('skills-marketplace-view')).toBeInTheDocument();
+    expect(screen.getByText('marketplace.totalCount')).toBeInTheDocument();
+    expect(screen.getByTestId('marketplace-category-creative-design')).toBeInTheDocument();
+    expect(screen.getByTestId('marketplace-category-ecommerce-growth')).toBeInTheDocument();
+  });
+
+  it('falls back to installed skills when the marketplace is unavailable', async () => {
+    skillsState.skills = [
+      { id: 'pdf', name: 'PDF', description: 'local skill', enabled: true, source: 'openclaw-managed' },
+    ];
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.queryByTestId('skills-marketplace-view')).not.toBeInTheDocument();
+    expect(screen.getByText('PDF')).toBeInTheDocument();
+  });
+
+  it('hides results from the previous category while a new category is loading', async () => {
+    marketplaceCapabilityMock.mockResolvedValue({
+      success: true,
+      capability: { canSearch: true, canInstall: true },
+    });
+    skillsState.searchResults = [{
+      slug: 'old-skill',
+      name: 'Old Category Skill',
+      description: 'Result from the previous category',
+      provider: 'skillhub',
+    }];
+    skillsState.marketplaceMeta = { query: '' };
+
+    render(<Skills />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(screen.getByText('Old Category Skill')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('marketplace-category-creative-design'));
+
+    expect(screen.queryByText('Old Category Skill')).not.toBeInTheDocument();
+    expect(screen.getByText('marketplace.searching')).toBeInTheDocument();
   });
 
   it('filters the list via enabled and disabled buttons', async () => {

@@ -22,7 +22,8 @@
     "actions": {
         "enableVisible": "批量启用可见项",
         "disableVisible": "批量禁用可见项",
-        "installSkill": "安装技能"
+        "installSkill": "安装技能",
+        "skillMarketplace": "技能市场"
     },
     "noSkills": "未找到技能",
     "noSkillsSearch": "尝试不同的搜索词",
@@ -115,7 +116,7 @@
     "marketplace": {
         "title": "市场",
         "installDialogTitle": "安装技能",
-        "installDialogSubtitle": "默认展示 Explore，输入关键词后执行搜索。",
+        "installDialogSubtitle": "默认展示 SkillHub 国内技能市场，输入关键词后搜索。",
         "sourceLabel": "来源",
         "sourceClawHub": "ClawHub",
         "sourceSkillHub": "SkillHub",
@@ -123,11 +124,19 @@
         "install": "安装",
         "installed": "已安装",
         "noDescription": "暂无简介。",
+        "invalidSkill": "技能信息不完整",
         "installUnavailable": "暂不可安装",
         "installUnavailableDescription": "当前技能市场仅支持浏览，暂不能从客户端直接安装技能。",
+        "unavailable": "技能市场暂不可用，请稍后重试或检查 OpenClaw 运行时组件。",
+        "homeSubtitle": "浏览 SkillHub 国内技能市场，查看七万级技能目录，并可直接安装到本机 OpenClaw 技能目录。",
+        "browseOnlyHomeSubtitle": "浏览 SkillHub 国内技能市场；当前运行时暂不支持从客户端直接安装。",
+        "searchSubtitle": "正在显示技能市场中匹配搜索词的技能。",
         "categoryFilterLabel": "热门场景",
         "loadedCount": "当前已加载 {{count}} 个技能",
+        "filteredLoadedCount": "{{category}} · 当前已加载 {{count}} 个技能",
+        "totalCount": "技能市场已收录 {{count}} 个技能",
         "totalAndLoadedCount": "总量 {{total}} · 已加载 {{loaded}}",
+        "scenarioCount": "{{count}} 个热门场景",
         "loadMore": "加载更多",
         "noCategoryResults": "该分类下暂未找到技能。",
         "categories": {
@@ -148,13 +157,15 @@
             "financeBusiness": "财务与交易",
             "securityRisk": "安全与风控",
             "lifeTravel": "生活出行",
+            "creativeDesign": "生图与设计",
+            "ecommerceGrowth": "电商增长",
             "other": "其他技能"
         },
-        "securityNote": "安装前请点击技能卡片，在 ClawHub 上查看其文档和安全信息。",
-        "manualInstallHint": "遇到网络问题？您可以随时从 ClawHub.ai 下载技能压缩包，并将其解压至 \"{{path}}\" 目录来完成手动安装。",
-        "searching": "正在搜索 ClawHub...",
+        "securityNote": "安装前请点击技能卡片，查看其文档和来源信息。",
+        "manualInstallHint": "遇到网络问题？您可以从 SkillHub 或 ClawHub 下载技能压缩包，并将其解压至 \"{{path}}\" 目录来完成手动安装。",
+        "searching": "正在搜索技能市场...",
         "noResults": "未找到匹配的技能。",
         "emptyPrompt": "搜索新技能以扩展您的能力。",
-        "searchError": "ClawHub 搜索失败。请检查您的连接或安装。"
+        "searchError": "技能市场搜索失败。请检查您的连接或稍后再试。"
     }
 }

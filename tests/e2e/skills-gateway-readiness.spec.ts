@@ -44,7 +44,9 @@ test.describe('Skills page gateway readiness', () => {
       },
     });
 
-    await page.getByTestId('sidebar-nav-skills').click();
+    const skillStoreNav = page.getByTestId('sidebar-nav-skills');
+    await expect(skillStoreNav).toHaveText(/Skill Store|技能商店|スキルストア|Магазин навыков/);
+    await skillStoreNav.click();
     await expect(page.getByTestId('skills-page')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'PDF' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'XLSX' })).toBeVisible();
@@ -251,8 +253,9 @@ test.describe('Skills page gateway readiness', () => {
 
     await page.getByTestId('sidebar-nav-skills').click();
     await expect(page.getByTestId('skills-page')).toBeVisible();
-    await page.getByTestId('skills-marketplace-button').click();
     await expect(page.getByTestId('skills-marketplace-view')).toBeVisible();
+    await expect(page.getByTestId('marketplace-category-creative-design')).toBeVisible();
+    await expect(page.getByTestId('marketplace-category-ecommerce-growth')).toBeVisible();
     await expect(page.getByTestId('marketplace-skill-card').filter({ hasText: 'Demo Skill' })).toBeVisible();
 
     await page.getByTestId('marketplace-load-more').click();

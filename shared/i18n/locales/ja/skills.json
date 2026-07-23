@@ -22,7 +22,8 @@
     "actions": {
         "enableVisible": "表示中を一括有効化",
         "disableVisible": "表示中を一括無効化",
-        "installSkill": "スキルをインストール"
+        "installSkill": "スキルをインストール",
+        "skillMarketplace": "スキルマーケット"
     },
     "noSkills": "スキルが見つかりません",
     "noSkillsSearch": "別の検索語をお試しください",
@@ -115,7 +116,7 @@
     "marketplace": {
         "title": "マーケットプレイス",
         "installDialogTitle": "スキルをインストール",
-        "installDialogSubtitle": "初期表示は Explore、キーワード入力時は検索します。",
+        "installDialogSubtitle": "既定では SkillHub 中国マーケットを表示し、キーワードで検索できます。",
         "sourceLabel": "ソース",
         "sourceClawHub": "ClawHub",
         "sourceSkillHub": "SkillHub",
@@ -123,11 +124,19 @@
         "install": "インストール",
         "installed": "インストール済み",
         "noDescription": "説明はありません。",
+        "invalidSkill": "スキル情報が不完全です",
         "installUnavailable": "インストール不可",
         "installUnavailableDescription": "現在のスキルマーケットは閲覧のみ対応しており、クライアントから直接インストールできません。",
+        "unavailable": "スキルマーケットは現在利用できません。後でもう一度試すか、OpenClaw ランタイムコンポーネントを確認してください。",
+        "homeSubtitle": "SkillHub 中国マーケットで数万件のスキルを閲覧し、ローカルの OpenClaw スキルディレクトリへインストールできます。",
+        "browseOnlyHomeSubtitle": "SkillHub 中国マーケットを閲覧します。このランタイムではクライアントからの直接インストールはまだ利用できません。",
+        "searchSubtitle": "検索語に一致するマーケットプレイスのスキルを表示しています。",
         "categoryFilterLabel": "人気シーン",
         "loadedCount": "{{count}} 件を読み込み済み",
+        "filteredLoadedCount": "{{category}} · {{count}} 件を読み込み済み",
+        "totalCount": "マーケットプレイスには {{count}} 件のスキルがあります",
         "totalAndLoadedCount": "総数 {{total}} · 読み込み {{loaded}}",
+        "scenarioCount": "{{count}} 件の人気シーン",
         "loadMore": "さらに読み込む",
         "noCategoryResults": "このカテゴリにはまだスキルがありません。",
         "categories": {
@@ -148,13 +157,15 @@
             "financeBusiness": "財務と取引",
             "securityRisk": "セキュリティとリスク",
             "lifeTravel": "生活と旅行",
+            "creativeDesign": "画像とデザイン",
+            "ecommerceGrowth": "ECグロース",
             "other": "その他のスキル"
         },
-        "securityNote": "インストール前にスキルカードをクリックして、ClawHubでドキュメントとセキュリティ情報を確認してください。",
-        "manualInstallHint": "ネットワークに問題がありますか？いつでもClawHub.aiからスキルのZIPをダウンロードし、手動で \"{{path}}\" に展開してインストールできます。",
-        "searching": "ClawHubを検索中...",
+        "securityNote": "インストール前にスキルカードをクリックし、ドキュメントと提供元情報を確認してください。",
+        "manualInstallHint": "ネットワークに問題がある場合は、SkillHub または ClawHub から ZIP をダウンロードし、\"{{path}}\" に展開して手動インストールできます。",
+        "searching": "マーケットプレイスを検索中...",
         "noResults": "検索に一致するスキルが見つかりません。",
         "emptyPrompt": "新しいスキルを検索して機能を拡張しましょう。",
-        "searchError": "ClawHub検索に失敗しました。接続またはインストールを確認してください。"
+        "searchError": "マーケットプレイス検索に失敗しました。接続を確認するか、後でもう一度お試しください。"
     }
 }

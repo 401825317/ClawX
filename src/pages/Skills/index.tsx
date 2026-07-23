@@ -3,7 +3,20 @@
  * Browse and manage AI skills
  */
 import { Suspense, lazy, useEffect, useState, useCallback, useMemo, useRef } from 'react';
-import { Search, Puzzle, Lock, Package, X, AlertCircle, Trash2, FolderOpen, Copy, Download } from 'lucide-react';
+import {
+  Search,
+  Puzzle,
+  Lock,
+  Package,
+  X,
+  AlertCircle,
+  Trash2,
+  FolderOpen,
+  Copy,
+  Download,
+  Layers3,
+  Sparkles,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -52,6 +65,11 @@ type MarketplaceCategory = {
   labelKey: string;
   queries: string[];
   match: RegExp;
+};
+
+type MarketplaceCapabilityState = {
+  canSearch: boolean;
+  canInstall: boolean;
 };
 
 const MARKETPLACE_CATEGORIES: MarketplaceCategory[] = [
@@ -152,8 +170,25 @@ const MARKETPLACE_CATEGORIES: MarketplaceCategory[] = [
     queries: ['travel', 'flight', 'weather', 'health'],
     match: /map|地图|travel|旅行|flight|航班|weather|天气|health|健康|location/i,
   },
+  {
+    id: 'creative-design',
+    labelKey: 'marketplace.categories.creativeDesign',
+    queries: ['figma', 'presentation', 'design', 'image', 'poster'],
+    match: /image|生图|生成图|design|figma|photo|comic|漫画|漫剧|3d|modeling|建模|render|illustration|presentation|slide/i,
+  },
+  {
+    id: 'ecommerce-growth',
+    labelKey: 'marketplace.categories.ecommerceGrowth',
+    queries: ['ecommerce', 'amazon', 'shopify', 'keyword', 'seo'],
+    match: /ecommerce|e-commerce|电商|amazon|亚马逊|shopify|listing|上架|asin|product|选品|keyword|关键词|seo|marketplace|商品|店铺/i,
+  },
   { id: 'other', labelKey: 'marketplace.categories.other', queries: ['productivity'], match: /.*/ },
 ];
+
+function formatMarketplaceCount(value?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '0';
+  return new Intl.NumberFormat().format(Math.max(0, Math.round(value)));
+}
 
 type SkillsGatewayBannerState = 'none' | 'stopped';
 
@@ -293,10 +328,14 @@ function MarketplaceSkillCard({
       </div>
 
       <div className="mt-auto pt-4">
+        <span className="mb-3 block min-w-0 truncate font-mono text-tiny text-foreground/55">
+          {slug ?? t('marketplace.invalidSkill')}
+        </span>
         {installedSkill?.uninstallable ? (
           <Button
             variant="destructive"
             size="sm"
+            aria-label={t('detail.uninstall')}
             className="h-8 w-full shadow-none"
             disabled={installing || !slug}
             onClick={() => slug && onUninstall(slug)}
@@ -308,6 +347,7 @@ function MarketplaceSkillCard({
             size="sm"
             className="h-8 w-full rounded-full px-3 text-xs shadow-none"
             disabled={installing || Boolean(installedSkill) || !canInstall || !slug}
+            title={!slug ? t('marketplace.invalidSkill') : !canInstall ? t('marketplace.installUnavailable') : undefined}
             onClick={() => slug && onInstall(slug, skill.version)}
           >
             {installing
@@ -505,11 +545,15 @@ export function Skills() {
   const gatewayStatus = useGatewayStore((state) => state.status);
   const [searchQuery, setSearchQuery] = useState('');
   const [installQuery, setInstallQuery] = useState('');
-  const [viewMode, setViewMode] = useState<SkillsViewMode>('installed');
+  const [viewMode, setViewMode] = useState<SkillsViewMode>('marketplace');
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [marketplaceCategoryId, setMarketplaceCategoryId] = useState('all');
-  const [marketplaceCapability, setMarketplaceCapability] = useState({ canSearch: false, canInstall: false });
+  const [marketplaceCapabilityChecked, setMarketplaceCapabilityChecked] = useState(false);
+  const [marketplaceCapability, setMarketplaceCapability] = useState<MarketplaceCapabilityState>({
+    canSearch: false,
+    canInstall: false,
+  });
   const contentScrollRef = useRef<HTMLDivElement>(null);
 
   const gatewayRunning = gatewayStatus.state === 'running';
@@ -571,9 +615,13 @@ export function Skills() {
           canSearch: Boolean(result.success && result.capability?.canSearch),
           canInstall: Boolean(result.success && result.capability?.canInstall),
         });
+        setMarketplaceCapabilityChecked(true);
       })
       .catch(() => {
-        if (!cancelled) setMarketplaceCapability({ canSearch: false, canInstall: false });
+        if (!cancelled) {
+          setMarketplaceCapability({ canSearch: false, canInstall: false });
+          setMarketplaceCapabilityChecked(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -589,10 +637,37 @@ export function Skills() {
       ?? MARKETPLACE_CATEGORIES[0],
     [marketplaceCategoryId],
   );
-  const marketplaceLoadedCount = marketplaceMeta.loaded ?? searchResults.length;
-  const marketplaceTotal = marketplaceMeta.catalogTotal ?? marketplaceMeta.total;
-  const marketplaceTotalKnown = marketplaceMeta.catalogTotalKnown ?? marketplaceMeta.totalKnown;
-  const marketplaceHasMore = Boolean(marketplaceMeta.hasMore && marketplaceMeta.nextCursor);
+  const marketSearchTerm = installQuery.trim();
+  const marketplaceCategoryQuery = selectedMarketplaceCategory.queries.join(' | ');
+  const marketplaceCategoryResultPending = marketplaceCategoryId !== 'all'
+    && !marketSearchTerm
+    && marketplaceMeta.query !== marketplaceCategoryQuery;
+  const visibleMarketplaceSkills = marketplaceCategoryResultPending ? [] : searchResults;
+  const marketplaceLoadedCount = visibleMarketplaceSkills.length;
+  const marketplaceCatalogTotalKnown = marketplaceMeta.catalogTotalKnown === true
+    && marketplaceMeta.catalogTotal !== undefined;
+  const marketplaceSearchTotalKnown = marketplaceMeta.totalKnown === true
+    && marketplaceMeta.total !== undefined;
+  const marketplaceTotal = marketplaceCatalogTotalKnown
+    ? marketplaceMeta.catalogTotal
+    : marketplaceMeta.total;
+  const marketplaceTotalKnown = marketplaceCatalogTotalKnown || marketplaceSearchTotalKnown;
+  const marketplaceHasMore = Boolean(
+    marketplaceMeta.hasMore
+    && marketplaceMeta.nextCursor
+    && marketplaceCategoryId === 'all'
+    && !marketSearchTerm,
+  );
+  const marketplaceCategoryOptions = MARKETPLACE_CATEGORIES.filter((category) => category.id !== 'other');
+  const marketplaceTotalCountLabel = marketplaceTotalKnown && marketplaceTotal !== undefined
+    ? t('marketplace.totalCount', { count: formatMarketplaceCount(marketplaceTotal) })
+    : t('marketplace.loadedCount', { count: formatMarketplaceCount(marketplaceLoadedCount) });
+  const marketplaceLoadedCountLabel = marketplaceCategoryId === 'all'
+    ? t('marketplace.loadedCount', { count: formatMarketplaceCount(visibleMarketplaceSkills.length) })
+    : t('marketplace.filteredLoadedCount', {
+      category: t(selectedMarketplaceCategory.labelKey),
+      count: formatMarketplaceCount(visibleMarketplaceSkills.length),
+    });
   const filteredSkills = safeSkills
     .filter((skill) => {
       const q = searchQuery.toLowerCase().trim();
@@ -688,6 +763,12 @@ export function Skills() {
   }, []);
 
   useEffect(() => {
+    if (marketplaceCapabilityChecked && isMarketplaceView && !marketplaceCapability.canSearch) {
+      setViewMode('installed');
+    }
+  }, [isMarketplaceView, marketplaceCapability.canSearch, marketplaceCapabilityChecked]);
+
+  useEffect(() => {
     if (!isMarketplaceView || !marketplaceCapability.canSearch) return;
     const query = installQuery.trim();
     const marketplaceQuery = query || selectedMarketplaceCategory.queries;
@@ -707,7 +788,7 @@ export function Skills() {
   useEffect(() => {
     if (!isMarketplaceView) return;
     // A new catalog query starts at the top; pagination keeps the current position.
-    contentScrollRef.current?.scrollTo({ top: 0 });
+    if (contentScrollRef.current) contentScrollRef.current.scrollTop = 0;
   }, [installQuery, isMarketplaceView, marketplaceCategoryId]);
 
   const handleInstall = useCallback(
@@ -809,6 +890,7 @@ export function Skills() {
                 size="sm"
                 data-testid="skills-marketplace-button"
                 disabled={!marketplaceCapability.canSearch}
+                title={marketplaceCapability.canSearch ? undefined : t('marketplace.unavailable')}
                 onClick={() => setViewMode('marketplace')}
                 className={cn(
                   'h-7 rounded px-3 text-meta shadow-none',
@@ -816,7 +898,7 @@ export function Skills() {
                 )}
               >
                 <Download className="mr-1.5 h-3.5 w-3.5" />
-                {t('tabs.marketplace')}
+                {t('actions.skillMarketplace')}
               </Button>
             </div>
             <div className="relative group flex items-center bg-black/5 dark:bg-white/5 rounded-full px-3 py-1.5 focus-within:bg-black/10 transition-colors border border-transparent focus-within:border-black/10 dark:focus-within:border-white/10 mr-2">
@@ -900,49 +982,86 @@ export function Skills() {
 
           {isMarketplaceView ? (
             <div className="flex flex-col gap-5" data-testid="skills-marketplace-view">
-              <div className="flex flex-col gap-3 border-b border-black/5 pb-4 dark:border-white/5 sm:flex-row sm:items-end sm:justify-between">
-                <div>
+              <div className="flex flex-col gap-4 border-b border-black/5 pb-4 dark:border-white/5 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
                   <h2 className="text-xl font-serif font-normal text-foreground">{t('marketplace.title')}</h2>
-                  <p className="mt-1 text-meta text-muted-foreground">
-                    {marketplaceTotalKnown && marketplaceTotal !== undefined
-                      ? t('marketplace.totalAndLoadedCount', {
-                        total: new Intl.NumberFormat().format(marketplaceTotal),
-                        loaded: new Intl.NumberFormat().format(marketplaceLoadedCount),
-                      })
-                      : t('marketplace.loadedCount', {
-                        count: new Intl.NumberFormat().format(marketplaceLoadedCount),
-                      })}
+                  <p className="mt-1 max-w-2xl text-meta leading-relaxed text-muted-foreground">
+                    {marketSearchTerm
+                      ? t('marketplace.searchSubtitle')
+                      : marketplaceCapability.canInstall
+                        ? t('marketplace.homeSubtitle')
+                        : t('marketplace.browseOnlyHomeSubtitle')}
                   </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="inline-flex h-8 items-center gap-2 rounded-full border border-black/10 px-3 text-meta font-medium text-foreground dark:border-white/10">
+                      <Layers3 className="h-3.5 w-3.5 text-foreground/55" />
+                      {marketplaceTotalCountLabel}
+                    </span>
+                    <span className="inline-flex h-8 items-center gap-2 rounded-full border border-black/10 px-3 text-meta font-medium text-foreground dark:border-white/10">
+                      <Package className="h-3.5 w-3.5 text-foreground/55" />
+                      {t('marketplace.loadedCount', { count: formatMarketplaceCount(marketplaceLoadedCount) })}
+                    </span>
+                    <span className="inline-flex h-8 items-center gap-2 rounded-full border border-black/10 px-3 text-meta font-medium text-foreground dark:border-white/10">
+                      <Sparkles className="h-3.5 w-3.5 text-foreground/55" />
+                      {t('marketplace.scenarioCount', { count: marketplaceCategoryOptions.length - 1 })}
+                    </span>
+                  </div>
                 </div>
-                {!marketplaceCapability.canInstall && (
-                  <span className="text-meta text-amber-700 dark:text-amber-400">
-                    {t('marketplace.installUnavailableDescription')}
-                  </span>
-                )}
+                <div className="grid max-w-xl gap-2 text-meta leading-relaxed text-foreground/65 lg:w-[22rem]">
+                  <div className="flex gap-2">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-foreground/50" />
+                    <span>{t('marketplace.securityNote')}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <Package className="mt-0.5 h-3.5 w-3.5 shrink-0 text-foreground/50" />
+                    <span>{t('marketplace.manualInstallHint', { path: skillsDirPath })}</span>
+                  </div>
+                  {!marketplaceCapability.canInstall && (
+                    <div className="flex gap-2 text-amber-700 dark:text-amber-400">
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{t('marketplace.installUnavailableDescription')}</span>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <div className="flex flex-wrap gap-2" role="list" aria-label={t('marketplace.categoryFilterLabel')}>
-                {MARKETPLACE_CATEGORIES.map((category) => (
-                  <Button
-                    key={category.id}
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    data-testid={`marketplace-category-${category.id}`}
-                    onClick={() => {
-                      setInstallQuery('');
-                      setMarketplaceCategoryId(category.id);
-                    }}
-                    className={cn(
-                      'h-8 rounded-full border px-3 text-meta font-medium shadow-none',
-                      marketplaceCategoryId === category.id
-                        ? 'border-black/10 bg-black/5 text-foreground dark:border-white/10 dark:bg-white/10'
-                        : 'border-transparent text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5',
-                    )}
-                  >
-                    {t(category.labelKey)}
-                  </Button>
-                ))}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3 px-1">
+                  <span className="text-meta font-semibold text-foreground/80">
+                    {t('marketplace.categoryFilterLabel')}
+                  </span>
+                  <span className="min-w-0 shrink text-right text-tiny text-muted-foreground">
+                    {marketplaceTotalKnown && marketplaceCategoryId === 'all' && !marketSearchTerm
+                      ? t('marketplace.totalAndLoadedCount', {
+                        total: formatMarketplaceCount(marketplaceTotal),
+                        loaded: formatMarketplaceCount(marketplaceLoadedCount),
+                      })
+                      : marketplaceLoadedCountLabel}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2" role="list" aria-label={t('marketplace.categoryFilterLabel')}>
+                  {marketplaceCategoryOptions.map((category) => (
+                    <Button
+                      key={category.id}
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      data-testid={`marketplace-category-${category.id}`}
+                      onClick={() => {
+                        setInstallQuery('');
+                        setMarketplaceCategoryId(category.id);
+                      }}
+                      className={cn(
+                        'h-8 rounded-full border px-3 text-meta font-medium shadow-none',
+                        marketplaceCategoryId === category.id
+                          ? 'border-black/10 bg-black/5 text-foreground dark:border-white/10 dark:bg-white/10'
+                          : 'border-transparent text-muted-foreground hover:bg-black/5 dark:hover:bg-white/5',
+                      )}
+                    >
+                      {t(category.labelKey)}
+                    </Button>
+                  ))}
+                </div>
               </div>
 
               {searchError && (
@@ -956,19 +1075,25 @@ export function Skills() {
                 </div>
               )}
 
-              {searching && searchResults.length === 0 ? (
+              {marketplaceCategoryResultPending || (searching && visibleMarketplaceSkills.length === 0) ? (
                 <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
                   <LoadingSpinner size="lg" />
                   <p className="mt-4 text-sm">{t('marketplace.searching')}</p>
                 </div>
-              ) : searchResults.length === 0 && !searchError ? (
+              ) : visibleMarketplaceSkills.length === 0 && !searchError ? (
                 <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
                   <Package className="mb-4 h-10 w-10 opacity-50" />
-                  <p>{installQuery.trim() ? t('marketplace.noResults') : t('marketplace.noCategoryResults')}</p>
+                  <p>
+                    {marketSearchTerm
+                      ? t('marketplace.noResults')
+                      : marketplaceCategoryId === 'all'
+                        ? t('marketplace.emptyPrompt')
+                        : t('marketplace.noCategoryResults')}
+                  </p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {searchResults.map((skill) => {
+                  {visibleMarketplaceSkills.map((skill) => {
                     const slug = marketplaceSkillSlug(skill);
                     const installedSkill = safeSkills.find((entry) => (
                       (slug && (entry.marketplace?.slug === slug || entry.slug === slug || entry.id === slug))
@@ -989,7 +1114,7 @@ export function Skills() {
                 </div>
               )}
 
-              {marketplaceHasMore && searchResults.length > 0 && (
+              {marketplaceHasMore && visibleMarketplaceSkills.length > 0 && (
                 <div className="flex justify-center pt-2">
                   <Button
                     type="button"

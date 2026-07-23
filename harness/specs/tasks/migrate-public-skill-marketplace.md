@@ -28,6 +28,7 @@ touchedAreas:
   - src/lib/host-api.ts
   - src/pages/Skills/index.tsx
   - src/stores/skills.ts
+  - shared/i18n/locales/*/common.json
   - shared/i18n/locales/*/skills.json
   - tests/e2e/skills-gateway-readiness.spec.ts
   - tests/unit/clawhub-service.test.ts
@@ -35,6 +36,7 @@ touchedAreas:
   - tests/unit/host-api-facade.test.ts
   - tests/unit/junfeiai-endpoints.test.ts
   - tests/unit/local-skill-service.test.ts
+  - tests/unit/i18n-locale-parity.test.ts
   - tests/unit/skillhub-marketplace.test.ts
   - tests/unit/skills-api-marketplace.test.ts
   - tests/unit/skills-errors.test.ts
@@ -44,6 +46,8 @@ touchedAreas:
 expectedUserBehavior:
   - Installed skills remain visible and manageable while Gateway is stopped or starting.
   - The Skills page exposes separate Installed and Marketplace views.
+  - The sidebar labels the entry as Skill Store, and Marketplace is the default view when its capability is available.
+  - If marketplace capability is unavailable, the page falls back to Installed skills without blocking local skill management.
   - Marketplace Explore, keyword search, category search, pagination, install, and uninstall work through typed Host API actions.
   - SkillHub is the default public provider and compatible ClawHub results keep their provider identity through installation.
   - Marketplace browsing and installation do not require a UClaw account or managed-provider token.
@@ -63,6 +67,8 @@ requiredTests:
   - tests/unit/extension-host-api-contributions.test.ts
   - tests/unit/skillhub-marketplace.test.ts
   - tests/unit/skills-api-marketplace.test.ts
+  - tests/unit/i18n-locale-parity.test.ts
+  - tests/unit/skills-page-gateway-readiness.test.tsx
   - tests/unit/skills-store-marketplace.test.ts
   - tests/unit/local-skill-service.test.ts
   - tests/unit/host-api-facade.test.ts
@@ -78,6 +84,7 @@ acceptance:
   - Skill replacement is atomic and restores the prior installed version when commit fails.
   - Only user-installed SkillHub or ClawHub managed skills with valid origin metadata can be uninstalled.
   - Marketplace strings have matching English, Chinese, Japanese, and Russian locale keys.
+  - The Skill Store navigation label, default Marketplace view, unavailable fallback, and popular scenario entries are covered by UI tests.
 docs:
   required: true
 ---

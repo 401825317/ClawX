@@ -171,6 +171,20 @@ describe('i18n locale parity', () => {
     expect(locales).toEqual(expect.arrayContaining(['en', 'zh', 'ja', 'ru']));
   });
 
+  it('labels the Skills navigation entry as the Skill Store in every locale', () => {
+    const expectedLabels = {
+      en: 'Skill Store',
+      zh: '技能商店',
+      ja: 'スキルストア',
+      ru: 'Магазин навыков',
+    } as const;
+
+    for (const [locale, expectedLabel] of Object.entries(expectedLabels)) {
+      const common = I18N_RESOURCES[locale as keyof typeof expectedLabels].common as JsonObject;
+      expect(getValueAtPath(common, 'sidebar.skills')).toBe(expectedLabel);
+    }
+  });
+
   it.each(locales.filter((l) => l !== REFERENCE_LOCALE))(
     'locale "%s" ships the same namespace files as the reference',
     (locale) => {
