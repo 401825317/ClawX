@@ -160,12 +160,12 @@ if (
 if (typeof endpoints.openClawCompaction.truncateAfterCompaction !== 'boolean') {
   throw new Error('openClawCompaction.truncateAfterCompaction in shared/junfeiai-endpoints.json must be boolean');
 }
-const transcriptLimit = endpoints.openClawCompaction.maxActiveTranscriptBytes;
+const transcriptLimit: unknown = endpoints.openClawCompaction.maxActiveTranscriptBytes;
 if (
-  !(typeof transcriptLimit === 'number' && Number.isInteger(transcriptLimit) && transcriptLimit > 0)
+  !(typeof transcriptLimit === 'number' && Number.isInteger(transcriptLimit) && transcriptLimit >= 0)
   && !(typeof transcriptLimit === 'string' && /^\d+(?:\.\d+)?(?:b|kb|mb|gb)$/iu.test(transcriptLimit.trim()))
 ) {
-  throw new Error('openClawCompaction.maxActiveTranscriptBytes in shared/junfeiai-endpoints.json must be a positive byte size');
+  throw new Error('openClawCompaction.maxActiveTranscriptBytes in shared/junfeiai-endpoints.json must be a non-negative byte size');
 }
 if (
   !Number.isInteger(endpoints.openClawContextLimits.toolResultMaxChars)
@@ -191,7 +191,7 @@ export const JUNFEIAI_OPENCLAW_MID_TURN_PRECHECK_ENABLED = endpoints.openClawCom
 /** Rotate the active transcript after successful semantic compaction. */
 export const JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION = endpoints.openClawCompaction.truncateAfterCompaction;
 
-/** Preflight transcript-size threshold that triggers local compaction. */
+/** Preflight transcript-size threshold that triggers local compaction; zero disables it. */
 export const JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES = transcriptLimit as JunFeiAIOpenClawTranscriptLimit;
 
 /** Maximum characters retained from one live tool result in the main context. */

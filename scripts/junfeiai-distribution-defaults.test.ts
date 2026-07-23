@@ -71,10 +71,12 @@ test('keeps shared JunFeiAI defaults and managed transport explicit', () => {
     JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION,
     endpoints.openClawCompaction.truncateAfterCompaction,
   );
+  assert.equal(JUNFEIAI_OPENCLAW_TRUNCATE_AFTER_COMPACTION, false);
   assert.equal(
     JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES,
     endpoints.openClawCompaction.maxActiveTranscriptBytes,
   );
+  assert.equal(JUNFEIAI_OPENCLAW_MAX_ACTIVE_TRANSCRIPT_BYTES, 0);
   assert.equal(
     JUNFEIAI_OPENCLAW_TOOL_RESULT_MAX_CHARS,
     endpoints.openClawContextLimits.toolResultMaxChars,
@@ -133,6 +135,8 @@ test('applies endpoint-configured OpenClaw compaction defaults without dropping 
             enabled: false,
             futureSetting: 'keep',
           },
+          truncateAfterCompaction: true,
+          maxActiveTranscriptBytes: '20mb',
         },
       },
     },

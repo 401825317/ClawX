@@ -26,8 +26,8 @@
     "midTurnPrecheck": {
       "enabled": true
     },
-    "truncateAfterCompaction": true,
-    "maxActiveTranscriptBytes": "20mb"
+    "truncateAfterCompaction": false,
+    "maxActiveTranscriptBytes": 0
   },
   "openClawContextLimits": {
     "toolResultMaxChars": 16000
