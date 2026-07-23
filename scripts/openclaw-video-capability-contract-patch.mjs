@@ -4,13 +4,10 @@ import { join } from 'node:path';
 const TOOL_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_TOOL_V1';
 const RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V2';
 const LEGACY_RUNTIME_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_RUNTIME_V1';
-const OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1';
-const OPENAI_DURATION_PATCH_MARKER = 'UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2';
-const OPENAI_SIZE_PATCH_MARKER = 'UCLAW_VIDEO_SIZE_CONTRACT_OPENAI_V2';
-
-const GROK_VIDEO_MODELS = new Set(['grok-image-video', 'grok-video-1.5']);
-const GROK_VIDEO_DURATIONS = [6, 10, 15];
-const GROK_VIDEO_SIZES = ['1280x720', '720x1280'];
+const OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V3';
+const PREVIOUS_OPENAI_PATCH_MARKER = 'UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1';
+const PREVIOUS_OPENAI_DURATION_PATCH_MARKER = 'UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2';
+const PREVIOUS_OPENAI_SIZE_PATCH_MARKER = 'UCLAW_VIDEO_SIZE_CONTRACT_OPENAI_V2';
 
 function countOccurrences(content, search) {
   return content.split(search).length - 1;
@@ -90,27 +87,25 @@ export function resolveMappedVideoSizeForCapabilityContract(params) {
   return selected;
 }
 
-export function resolveOpenAiVideoCapabilityContractProfile(model, mode = 'generate') {
-  if (!GROK_VIDEO_MODELS.has(model)) return undefined;
-  const imageToVideo = mode === 'imageToVideo';
-  const textToVideo = mode === 'generate';
-  const videoToVideo = mode === 'videoToVideo';
-  if (model === 'grok-video-1.5' && !imageToVideo) {
-    return { enabled: false };
-  }
-  if (videoToVideo) {
-    return model === 'grok-image-video'
-      ? { enabled: true, maxVideos: 1, maxInputVideos: 1 }
-      : { enabled: false };
-  }
-  if (!textToVideo && !imageToVideo) return undefined;
+export function resolveOpenAiVideoCapabilityContractProfile(contract, model, mode = 'generate') {
+  const modelContract = contract?.models?.find((entry) => entry?.id === model && entry?.enabled !== false);
+  if (!modelContract) return undefined;
+  const modeName = mode === 'imageToVideo'
+    ? 'image-to-video'
+    : mode === 'videoToVideo'
+      ? 'video-to-video'
+      : 'text-to-video';
+  const enabled = modelContract.modes?.includes(modeName) === true;
+  if (!enabled) return { enabled: false };
   return {
-    ...(imageToVideo ? { enabled: true, maxInputImages: 1 } : {}),
+    ...(mode !== 'generate' ? { enabled: true } : {}),
+    ...(mode === 'imageToVideo' ? { maxInputImages: 1 } : {}),
+    ...(mode === 'videoToVideo' ? { maxInputVideos: 1 } : {}),
     maxVideos: 1,
-    maxDurationSeconds: 15,
-    supportedDurationSeconds: [...GROK_VIDEO_DURATIONS],
+    maxDurationSeconds: Math.max(...modelContract.durations),
+    supportedDurationSeconds: [...modelContract.durations],
     supportsSize: true,
-    sizes: [...GROK_VIDEO_SIZES],
+    sizes: [...modelContract.sizes],
   };
 }
 
@@ -452,22 +447,67 @@ const OPENAI_CONSTANTS_ANCHOR = `const OPENAI_VIDEO_SIZES = [
 \t"1792x1024"
 ];`;
 
-const OPENAI_CONSTANTS_PATCH = `const OPENAI_VIDEO_SIZES = [
-\t"720x1280",
-\t"1280x720",
-\t"1024x1792",
-\t"1792x1024"
-];
-const ${OPENAI_PATCH_MARKER} = true;
+const OPENAI_DYNAMIC_HELPERS = `const ${OPENAI_PATCH_MARKER} = true;
+const UCLAW_MANAGED_VIDEO_CAPABILITY_PARAM = "uclawManagedVideoCapabilityContract";
+function resolveUClawManagedVideoContract(cfg) {
+\tconst value = cfg?.models?.providers?.openai?.params?.[UCLAW_MANAGED_VIDEO_CAPABILITY_PARAM];
+\tif (!value || typeof value !== "object" || !Array.isArray(value.models)) return;
+\tconst models = value.models.filter((entry) => entry && typeof entry.id === "string" && Array.isArray(entry.modes) && Array.isArray(entry.sizes) && entry.sizes.length > 0 && Array.isArray(entry.durations) && entry.durations.length > 0 && entry.enabled !== false);
+\tif (models.length === 0) return;
+\treturn { ...value, models };
+}
+function resolveUClawManagedVideoModelCapability(cfg, model) {
+\tconst contract = resolveUClawManagedVideoContract(cfg);
+\treturn contract?.models.find((entry) => entry.id === model);
+}
+function buildUClawManagedVideoModeCapabilities(model, mode) {
+\tconst enabled = model.modes.includes(mode);
+\tconst common = {
+\t\tmaxVideos: 1,
+\t\tmaxDurationSeconds: Math.max(...model.durations),
+\t\tsupportedDurationSeconds: [...model.durations],
+\t\tsupportsSize: true,
+\t\tsizes: [...model.sizes]
+\t};
+\tif (mode === "text-to-video") return { ...common, enabled };
+\tif (mode === "image-to-video") return { ...common, enabled, maxInputImages: enabled ? 1 : 0 };
+\treturn { ...common, enabled, maxInputVideos: enabled ? 1 : 0 };
+}
+function resolveUClawManagedOpenAIVideoCapabilities(ctx) {
+\tconst model = resolveUClawManagedVideoModelCapability(ctx.cfg, ctx.model);
+\tif (!model) return;
+\treturn {
+\t\tgenerate: buildUClawManagedVideoModeCapabilities(model, "text-to-video"),
+\t\timageToVideo: buildUClawManagedVideoModeCapabilities(model, "image-to-video"),
+\t\tvideoToVideo: buildUClawManagedVideoModeCapabilities(model, "video-to-video")
+\t};
+}
+function resolveUClawManagedVideoSizeForAspectRatio(model, aspectRatio) {
+\tconst match = normalizeOptionalString(aspectRatio)?.match(/^(\\d+(?:\\.\\d+)?):(\\d+(?:\\.\\d+)?)$/u);
+\tif (!match) return;
+\tconst requestedRatio = Number.parseFloat(match[1]) / Number.parseFloat(match[2]);
+\tif (!(requestedRatio > 0)) return;
+\tconst matchesRatio = (size) => {
+\t\tconst sizeMatch = size.match(/^(\\d+)x(\\d+)$/u);
+\t\treturn sizeMatch && Math.abs(Number.parseInt(sizeMatch[1], 10) / Number.parseInt(sizeMatch[2], 10) - requestedRatio) < 0.01;
+\t};
+\tif (model.sizes.includes(model.defaultSize) && matchesRatio(model.defaultSize)) return model.defaultSize;
+\treturn model.sizes.find(matchesRatio);
+}`;
+
+const OPENAI_CONSTANTS_PATCH = `${OPENAI_CONSTANTS_ANCHOR}
+${OPENAI_DYNAMIC_HELPERS}`;
+
+const PREVIOUS_OPENAI_HELPERS = `const ${PREVIOUS_OPENAI_PATCH_MARKER} = true;
 const UCLAW_OPENAI_GROK_VIDEO_MODEL = "grok-image-video";
 const UCLAW_OPENAI_GROK_VIDEO_15_MODEL = "grok-video-1.5";
-const ${OPENAI_DURATION_PATCH_MARKER} = true;
+const ${PREVIOUS_OPENAI_DURATION_PATCH_MARKER} = true;
 const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
 \t6,
 \t10,
 \t15
 ];
-const ${OPENAI_SIZE_PATCH_MARKER} = true;
+const ${PREVIOUS_OPENAI_SIZE_PATCH_MARKER} = true;
 const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
 \t"1280x720",
 \t"720x1280"
@@ -476,36 +516,6 @@ function isUClawOpenAIGrokVideoModel(model) {
 \treturn model === UCLAW_OPENAI_GROK_VIDEO_MODEL || model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL;
 }`;
 
-const OPENAI_LEGACY_GROK_DURATION_PATCH = `const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
-\t4,
-\t6,
-\t8,
-\t10,
-\t12,
-\t15
-];`;
-
-const OPENAI_CURRENT_GROK_DURATION_PATCH = `const ${OPENAI_DURATION_PATCH_MARKER} = true;
-const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [
-\t6,
-\t10,
-\t15
-];`;
-
-const OPENAI_LEGACY_GROK_SIZE_PATCH = `const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
-\t"1280x720",
-\t"720x1280",
-\t"1024x1024"
-];`;
-
-const OPENAI_CURRENT_GROK_SIZE_PATCH = `const ${OPENAI_SIZE_PATCH_MARKER} = true;
-const UCLAW_OPENAI_GROK_VIDEO_SIZES = [
-\t"1280x720",
-\t"720x1280"
-];`;
-
-const OPENAI_LEGACY_SQUARE_SIZE_CASE = '\t\t\tcase "1:1": return "1024x1024";\n';
-
 const OPENAI_DURATION_ANCHOR = `function resolveDurationSeconds(durationSeconds) {
 \tif (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds)) return;
 \tconst rounded = Math.max(OPENAI_VIDEO_SECONDS[0], Math.round(durationSeconds));
@@ -513,9 +523,19 @@ const OPENAI_DURATION_ANCHOR = `function resolveDurationSeconds(durationSeconds)
 \treturn String(nearest);
 }`;
 
-const OPENAI_DURATION_PATCH = `function resolveDurationSeconds(durationSeconds, model) {
+const PREVIOUS_OPENAI_DURATION_PATCH = `function resolveDurationSeconds(durationSeconds, model) {
 \tif (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds)) return;
 \tconst supportedSeconds = isUClawOpenAIGrokVideoModel(model) ? UCLAW_OPENAI_GROK_VIDEO_SECONDS : OPENAI_VIDEO_SECONDS;
+\tconst rounded = Math.max(supportedSeconds[0], Math.round(durationSeconds));
+\tconst nearest = supportedSeconds.reduce((best, current) => Math.abs(current - rounded) < Math.abs(best - rounded) ? current : best);
+\treturn String(nearest);
+}`;
+
+const OPENAI_DURATION_PATCH = `function resolveDurationSeconds(durationSeconds, model, cfg) {
+\tconst managedModel = resolveUClawManagedVideoModelCapability(cfg, model);
+\tif (managedModel && (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds))) return String(managedModel.defaultDurationSeconds);
+\tif (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds)) return;
+\tconst supportedSeconds = managedModel?.durations ?? OPENAI_VIDEO_SECONDS;
 \tconst rounded = Math.max(supportedSeconds[0], Math.round(durationSeconds));
 \tconst nearest = supportedSeconds.reduce((best, current) => Math.abs(current - rounded) < Math.abs(best - rounded) ? current : best);
 \treturn String(nearest);
@@ -534,7 +554,7 @@ const OPENAI_SIZE_ANCHOR = `function resolveSize(params) {
 \tif (params.resolution === "1080P") return "1792x1024";
 }`;
 
-const OPENAI_SIZE_PATCH = `function resolveSize(params) {
+const PREVIOUS_OPENAI_SIZE_PATCH = `function resolveSize(params) {
 \tconst supportedSizes = isUClawOpenAIGrokVideoModel(params.model) ? UCLAW_OPENAI_GROK_VIDEO_SIZES : OPENAI_VIDEO_SIZES;
 \tconst explicitSize = normalizeOptionalString(params.size);
 \tif (explicitSize && supportedSizes.includes(explicitSize)) return explicitSize;
@@ -551,6 +571,23 @@ const OPENAI_SIZE_PATCH = `function resolveSize(params) {
 \tif (!isUClawOpenAIGrokVideoModel(params.model) && params.resolution === "1080P") return "1792x1024";
 }`;
 
+const OPENAI_SIZE_PATCH = `function resolveSize(params) {
+\tconst managedModel = resolveUClawManagedVideoModelCapability(params.cfg, params.model);
+\tconst supportedSizes = managedModel?.sizes ?? OPENAI_VIDEO_SIZES;
+\tconst explicitSize = normalizeOptionalString(params.size);
+\tif (explicitSize && supportedSizes.includes(explicitSize)) return explicitSize;
+\tif (explicitSize && managedModel) throw new Error("invalid_video_size: " + explicitSize + " is not supported by managed model " + params.model + ".");
+\tif (managedModel) return resolveUClawManagedVideoSizeForAspectRatio(managedModel, params.aspectRatio) ?? managedModel.defaultSize;
+\tswitch (normalizeOptionalString(params.aspectRatio)) {
+\t\tcase "9:16": return "720x1280";
+\t\tcase "16:9": return "1280x720";
+\t\tcase "4:7": return "1024x1792";
+\t\tcase "7:4": return "1792x1024";
+\t\tdefault: break;
+\t}
+\tif (params.resolution === "1080P") return "1792x1024";
+}`;
+
 const OPENAI_GENERATE_CAPS_ANCHOR = `\t\t\tgenerate: {
 \t\t\t\tmaxVideos: 1,
 \t\t\t\tmaxDurationSeconds: 12,
@@ -559,7 +596,7 @@ const OPENAI_GENERATE_CAPS_ANCHOR = `\t\t\tgenerate: {
 \t\t\t\tsizes: OPENAI_VIDEO_SIZES
 \t\t\t},`;
 
-const OPENAI_GENERATE_CAPS_PATCH = `\t\t\tgenerate: {
+const PREVIOUS_OPENAI_GENERATE_CAPS_PATCH = `\t\t\tgenerate: {
 \t\t\t\tmaxVideos: 1,
 \t\t\t\tmaxDurationSeconds: 12,
 \t\t\t\tsupportedDurationSeconds: OPENAI_VIDEO_SECONDS,
@@ -594,7 +631,7 @@ const OPENAI_IMAGE_CAPS_ANCHOR = `\t\t\timageToVideo: {
 \t\t\t\tsizes: OPENAI_VIDEO_SIZES
 \t\t\t},`;
 
-const OPENAI_IMAGE_CAPS_PATCH = `\t\t\timageToVideo: {
+const PREVIOUS_OPENAI_IMAGE_CAPS_PATCH = `\t\t\timageToVideo: {
 \t\t\t\tenabled: true,
 \t\t\t\tmaxVideos: 1,
 \t\t\t\tmaxInputImages: 1,
@@ -630,7 +667,7 @@ const OPENAI_VIDEO_CAPS_ANCHOR = `\t\t\tvideoToVideo: {
 \t\t\t\tmaxInputVideos: 1
 \t\t\t}`;
 
-const OPENAI_VIDEO_CAPS_PATCH = `\t\t\tvideoToVideo: {
+const PREVIOUS_OPENAI_VIDEO_CAPS_PATCH = `\t\t\tvideoToVideo: {
 \t\t\t\tenabled: true,
 \t\t\t\tmaxVideos: 1,
 \t\t\t\tmaxInputVideos: 1,
@@ -644,6 +681,21 @@ const OPENAI_VIDEO_CAPS_PATCH = `\t\t\tvideoToVideo: {
 \t\t\t\t}
 \t\t\t}`;
 
+const OPENAI_CAPABILITY_RESOLVER_ANCHOR = `\t\tisConfigured: ({ agentDir }) => isProviderApiKeyConfigured({
+\t\t\tprovider: "openai",
+\t\t\tagentDir,
+\t\t\tprofileTypes: ["api_key"]
+\t\t}),
+\t\tcapabilities: {`;
+
+const OPENAI_CAPABILITY_RESOLVER_PATCH = `\t\tisConfigured: ({ agentDir }) => isProviderApiKeyConfigured({
+\t\t\tprovider: "openai",
+\t\t\tagentDir,
+\t\t\tprofileTypes: ["api_key"]
+\t\t}),
+\t\tresolveModelCapabilities: resolveUClawManagedOpenAIVideoCapabilities,
+\t\tcapabilities: {`;
+
 const OPENAI_WIRE_ANCHOR = `\t\t\tconst model = normalizeOptionalString(req.model) ?? DEFAULT_OPENAI_VIDEO_MODEL;
 \t\t\tconst seconds = resolveDurationSeconds(req.durationSeconds);
 \t\t\tconst size = resolveSize({
@@ -654,6 +706,21 @@ const OPENAI_WIRE_ANCHOR = `\t\t\tconst model = normalizeOptionalString(req.mode
 \t\t\tconst referenceAsset = resolveReferenceAsset(req);`;
 
 const OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model) ?? DEFAULT_OPENAI_VIDEO_MODEL;
+\t\t\tconst managedModel = resolveUClawManagedVideoModelCapability(req.cfg, model);
+\t\t\tconst seconds = resolveDurationSeconds(req.durationSeconds, model, req.cfg);
+\t\t\tconst size = resolveSize({
+\t\t\t\tcfg: req.cfg,
+\t\t\t\tmodel,
+\t\t\t\tsize: req.size,
+\t\t\t\taspectRatio: req.aspectRatio,
+\t\t\t\tresolution: req.resolution
+\t\t\t});
+\t\t\tconst referenceAsset = resolveReferenceAsset(req);
+\t\t\tif (managedModel?.requiresImage && referenceAsset?.kind !== "image") throw new Error(model + " requires exactly one reference image.");
+\t\t\tif (managedModel && referenceAsset?.kind === "image" && !managedModel.modes.includes("image-to-video")) throw new Error(model + " does not support image-to-video.");
+\t\t\tif (managedModel && !referenceAsset && !managedModel.modes.includes("text-to-video")) throw new Error(model + " does not support text-to-video.");`;
+
+const PREVIOUS_OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model) ?? DEFAULT_OPENAI_VIDEO_MODEL;
 \t\t\tconst seconds = resolveDurationSeconds(req.durationSeconds, model);
 \t\t\tconst size = resolveSize({
 \t\t\t\tmodel,
@@ -664,47 +731,50 @@ const OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model
 \t\t\tconst referenceAsset = resolveReferenceAsset(req);
 \t\t\tif (model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL && referenceAsset?.kind !== "image") throw new Error("grok-video-1.5 requires exactly one reference image.");`;
 
+const PREVIOUS_VALIDATED_OPENAI_WIRE_PATCH = `\t\t\tconst model = normalizeOptionalString(req.model) ?? DEFAULT_OPENAI_VIDEO_MODEL;
+\t\t\tif (!isSupportedOpenAIVideoGenerationModel(model)) throw new Error(\`invalid_video_model: "${'${model}'}" is not supported by the OpenAI video-generation provider.\`);
+\t\t\tconst seconds = resolveDurationSeconds(req.durationSeconds, model);
+\t\t\tconst size = resolveSize({
+\t\t\t\tmodel,
+\t\t\t\tsize: req.size,
+\t\t\t\taspectRatio: req.aspectRatio,
+\t\t\t\tresolution: req.resolution
+\t\t\t});
+\t\t\tconst referenceAsset = resolveReferenceAsset(req);
+\t\t\tif (model === UCLAW_OPENAI_GROK_VIDEO_15_MODEL && referenceAsset?.kind !== "image") throw new Error("grok-video-1.5 requires exactly one reference image.");`;
+
+const VALIDATED_OPENAI_WIRE_PATCH = OPENAI_WIRE_PATCH.replace(
+  '\t\t\tconst managedModel =',
+  '\t\t\tif (!isSupportedOpenAIVideoGenerationModel(model, req.cfg)) throw new Error(`invalid_video_model: "${model}" is not supported by the OpenAI video-generation provider.`);\n\t\t\tconst managedModel =',
+);
+
 export function patchOpenClawOpenAiVideoCapabilityContent(content, filePath = '<memory>') {
   if (!content.includes('function buildOpenAIVideoGenerationProvider()')) return null;
-  if (content.includes(OPENAI_PATCH_MARKER)) {
-    let migrated = content;
-    if (!migrated.includes(OPENAI_DURATION_PATCH_MARKER)) {
-      migrated = replaceUnique(
-        migrated,
-        OPENAI_LEGACY_GROK_DURATION_PATCH,
-        OPENAI_CURRENT_GROK_DURATION_PATCH,
-        'legacy OpenAI Grok video durations',
-        filePath,
-      );
-    }
-    if (!migrated.includes(OPENAI_SIZE_PATCH_MARKER)) {
-      migrated = replaceUnique(
-        migrated,
-        OPENAI_LEGACY_GROK_SIZE_PATCH,
-        OPENAI_CURRENT_GROK_SIZE_PATCH,
-        'legacy OpenAI Grok video sizes',
-        filePath,
-      );
-      migrated = replaceUnique(
-        migrated,
-        OPENAI_LEGACY_SQUARE_SIZE_CASE,
-        '',
-        'legacy OpenAI Grok square video mapping',
-        filePath,
-      );
-    }
-    return {
-      content: migrated,
-      changed: migrated !== content,
-      category: 'openai-provider',
-    };
+  if (content.includes(OPENAI_PATCH_MARKER)) return { content, changed: false, category: 'openai-provider' };
+  if (content.includes(PREVIOUS_OPENAI_PATCH_MARKER)) {
+    let migrated = replaceUnique(content, PREVIOUS_OPENAI_HELPERS, OPENAI_DYNAMIC_HELPERS, 'previous OpenAI managed video helpers', filePath);
+    migrated = replaceUnique(migrated, PREVIOUS_OPENAI_DURATION_PATCH, OPENAI_DURATION_PATCH, 'previous OpenAI duration resolver', filePath);
+    migrated = replaceUnique(migrated, PREVIOUS_OPENAI_SIZE_PATCH, OPENAI_SIZE_PATCH, 'previous OpenAI size resolver', filePath);
+    migrated = replaceUnique(migrated, PREVIOUS_OPENAI_GENERATE_CAPS_PATCH, OPENAI_GENERATE_CAPS_ANCHOR, 'previous OpenAI generate capabilities', filePath);
+    migrated = replaceUnique(migrated, PREVIOUS_OPENAI_IMAGE_CAPS_PATCH, OPENAI_IMAGE_CAPS_ANCHOR, 'previous OpenAI image capabilities', filePath);
+    migrated = replaceUnique(migrated, PREVIOUS_OPENAI_VIDEO_CAPS_PATCH, OPENAI_VIDEO_CAPS_ANCHOR, 'previous OpenAI video capabilities', filePath);
+    migrated = replaceUnique(migrated, OPENAI_CAPABILITY_RESOLVER_ANCHOR, OPENAI_CAPABILITY_RESOLVER_PATCH, 'OpenAI capability resolver', filePath);
+    const previousWire = migrated.includes(PREVIOUS_VALIDATED_OPENAI_WIRE_PATCH)
+      ? PREVIOUS_VALIDATED_OPENAI_WIRE_PATCH
+      : PREVIOUS_OPENAI_WIRE_PATCH;
+    migrated = replaceUnique(
+      migrated,
+      previousWire,
+      previousWire === PREVIOUS_VALIDATED_OPENAI_WIRE_PATCH ? VALIDATED_OPENAI_WIRE_PATCH : OPENAI_WIRE_PATCH,
+      'previous OpenAI wire parameters',
+      filePath,
+    );
+    return { content: migrated, changed: true, category: 'openai-provider' };
   }
   let patched = replaceUnique(content, OPENAI_CONSTANTS_ANCHOR, OPENAI_CONSTANTS_PATCH, 'OpenAI video constants', filePath);
   patched = replaceUnique(patched, OPENAI_DURATION_ANCHOR, OPENAI_DURATION_PATCH, 'OpenAI video duration resolver', filePath);
   patched = replaceUnique(patched, OPENAI_SIZE_ANCHOR, OPENAI_SIZE_PATCH, 'OpenAI video size resolver', filePath);
-  patched = replaceUnique(patched, OPENAI_GENERATE_CAPS_ANCHOR, OPENAI_GENERATE_CAPS_PATCH, 'OpenAI generate capabilities', filePath);
-  patched = replaceUnique(patched, OPENAI_IMAGE_CAPS_ANCHOR, OPENAI_IMAGE_CAPS_PATCH, 'OpenAI image-to-video capabilities', filePath);
-  patched = replaceUnique(patched, OPENAI_VIDEO_CAPS_ANCHOR, OPENAI_VIDEO_CAPS_PATCH, 'OpenAI video-to-video capabilities', filePath);
+  patched = replaceUnique(patched, OPENAI_CAPABILITY_RESOLVER_ANCHOR, OPENAI_CAPABILITY_RESOLVER_PATCH, 'OpenAI capability resolver', filePath);
   patched = replaceUnique(patched, OPENAI_WIRE_ANCHOR, OPENAI_WIRE_PATCH, 'OpenAI video wire parameters', filePath);
   return { content: patched, changed: true, category: 'openai-provider' };
 }

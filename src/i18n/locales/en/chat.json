@@ -326,6 +326,7 @@
         "imageEditMissingReference": "Which image would you like to edit? Upload or select an image.",
         "videoMode": "Video mode",
         "videoModeActive": "Video mode enabled",
+        "videoCapabilityUnavailable": "Video generation is temporarily unavailable.",
         "videoSizeLabel": "Video size",
         "videoDurationLabel": "Video duration",
         "clearTarget": "Clear target agent",

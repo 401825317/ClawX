@@ -53,12 +53,17 @@ import {
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from './openclaw-image-relay-constants';
 import {
-  CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
   CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   isClawXOpenAiVideoModelRef,
   orderedClawXOpenAiVideoModelIds,
+  readManagedVideoCapabilityContractFromConfig,
 } from './openclaw-video-relay-constants';
+import {
+  MANAGED_VIDEO_CAPABILITY_PROVIDER_PARAM,
+  normalizeManagedVideoCapabilityContract,
+  type ManagedVideoCapabilityContract,
+} from '../../shared/managed-video-capabilities';
 import {
   JUNFEIAI_DEFAULT_MODEL,
   JUNFEIAI_DEFAULT_MODEL_CONTEXT_WINDOW,
@@ -1764,6 +1769,7 @@ type ProviderEntryBuildOptions = {
   authHeader?: boolean;
   timeoutSeconds?: number;
   request?: Record<string, unknown>;
+  params?: Record<string, unknown>;
   modelIds?: string[];
   includeRegistryModels?: boolean;
   mergeExistingModels?: boolean;
@@ -2424,6 +2430,10 @@ function upsertOpenClawProviderEntry(
       delete nextProvider.request;
     }
   }
+  if (options.params !== undefined) {
+    const existingParams = isPlainRecord(nextProvider.params) ? nextProvider.params : {};
+    nextProvider.params = { ...existingParams, ...options.params };
+  }
   applyPinnedAgentRuntime(provider, nextProvider);
 
   providers[provider] = nextProvider;
@@ -2738,12 +2748,14 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
   enabled: boolean;
   baseUrl?: string | null;
   apiKey?: string;
-  videoModelIds?: string[];
+  capabilityContract?: ManagedVideoCapabilityContract | null;
+  primaryModelId?: string | null;
 }): Promise<void> {
   return withConfigLock(async () => {
     const config = await readOpenClawJson();
 
     if (!params.enabled) {
+      const embeddedContract = readManagedVideoCapabilityContractFromConfig(config);
       const agents = isPlainRecord(config.agents) ? config.agents : null;
       const defaults = agents && isPlainRecord(agents.defaults) ? agents.defaults : null;
       const videoGenerationModel = defaults && isPlainRecord(defaults.videoGenerationModel)
@@ -2752,10 +2764,31 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
       const primary = typeof videoGenerationModel?.primary === 'string'
         ? videoGenerationModel.primary.trim()
         : '';
-      if (defaults && isClawXOpenAiVideoModelRef(primary)) {
+      const existingOpenAiProvider = isPlainRecord(config.models)
+        && isPlainRecord(config.models.providers)
+        && isPlainRecord(config.models.providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY])
+        ? config.models.providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY]
+        : null;
+      const existingBaseUrl = typeof existingOpenAiProvider?.baseUrl === 'string'
+        ? existingOpenAiProvider.baseUrl.trim().replace(/\/+$/u, '')
+        : '';
+      const managedBaseUrl = getJunFeiAIProviderBaseUrl().trim().replace(/\/+$/u, '');
+      const isManagedVideoPrimary = primary.startsWith(`${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/`)
+        && existingBaseUrl === managedBaseUrl;
+      if (defaults && (isClawXOpenAiVideoModelRef(primary, embeddedContract) || isManagedVideoPrimary)) {
         delete defaults.videoGenerationModel;
-        await writeOpenClawJson(config);
       }
+      const models = isPlainRecord(config.models) ? config.models : null;
+      const providers = models && isPlainRecord(models.providers) ? models.providers : null;
+      const provider = providers && isPlainRecord(providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY])
+        ? providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY]
+        : null;
+      const providerParams = provider && isPlainRecord(provider.params) ? provider.params : null;
+      if (providerParams && MANAGED_VIDEO_CAPABILITY_PROVIDER_PARAM in providerParams) {
+        delete providerParams[MANAGED_VIDEO_CAPABILITY_PROVIDER_PARAM];
+        provider.params = providerParams;
+      }
+      await writeOpenClawJson(config);
       if (params.apiKey?.trim()) {
         await saveProviderKeyToOpenClaw(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, params.apiKey.trim());
       }
@@ -2763,12 +2796,11 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
     }
 
     const baseUrl = normalizeOpenAiRelayBaseUrl(params.baseUrl ?? '');
-    const requestedModelIds = [...new Set((params.videoModelIds ?? [])
-      .map((id) => id.trim())
-      .filter(Boolean))];
-    const modelIds = orderedClawXOpenAiVideoModelIds(
-      requestedModelIds[0] ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
-    );
+    const capabilityContract = normalizeManagedVideoCapabilityContract(params.capabilityContract);
+    if (!capabilityContract) {
+      throw new Error('managed_video_capability_unavailable: no verified backend video contract is available');
+    }
+    const modelIds = orderedClawXOpenAiVideoModelIds(capabilityContract, params.primaryModelId);
 
     upsertOpenClawProviderEntry(config, CLAWX_OPENAI_VIDEO_PROVIDER_KEY, {
       baseUrl,
@@ -2776,6 +2808,9 @@ export async function syncOpenAiCompatibleVideoRelay(params: {
       modelIds,
       mergeExistingModels: true,
       request: { allowPrivateNetwork: true },
+      params: {
+        [MANAGED_VIDEO_CAPABILITY_PROVIDER_PARAM]: capabilityContract,
+      },
     });
 
     const agents = (config.agents || {}) as Record<string, unknown>;
@@ -2820,6 +2855,7 @@ export function readOpenAiCompatibleImageRelayState(
 export function readOpenAiCompatibleVideoRelayState(
   config: Record<string, unknown>,
 ): { enabled: boolean; baseUrl: string; providerKey?: string } {
+  const managedContract = readManagedVideoCapabilityContractFromConfig(config);
   const openai = readModelsProvidersOpenAi(config);
   const baseUrl = typeof openai?.baseUrl === 'string' ? openai.baseUrl.trim() : '';
   if (!baseUrl || baseUrl === OFFICIAL_OPENAI_API_BASE_URL) {
@@ -2833,7 +2869,7 @@ export function readOpenAiCompatibleVideoRelayState(
   const primary = typeof videoGenerationModel?.primary === 'string'
     ? videoGenerationModel.primary.trim()
     : '';
-  if (!isClawXOpenAiVideoModelRef(primary)) {
+  if (!isClawXOpenAiVideoModelRef(primary, managedContract)) {
     return { enabled: false, baseUrl: '', providerKey: undefined };
   }
   return { enabled: true, baseUrl, providerKey: CLAWX_OPENAI_VIDEO_PROVIDER_KEY };
@@ -3698,7 +3734,7 @@ export async function sanitizeOpenClawConfig(): Promise<void> {
 
     if (ensureManagedMediaLimitInConfig(config)) {
       modified = true;
-      console.log('[sanitize] Defaulted generated media delivery limit to 16 MiB');
+      console.log('[sanitize] Defaulted inline media delivery limit to 16 MiB');
     }
 
     if (ensureManagedToolDirectoryInConfig(config)) {

@@ -16,6 +16,37 @@ import {
   resolveOpenAiVideoCapabilityContractProfile,
 } from './openclaw-video-capability-contract-patch.mjs';
 
+const managedVideoContract = {
+  contractVersion: 1,
+  defaultModel: 'grok-image-video',
+  defaultSize: '1280x720',
+  defaultDurationSeconds: 6,
+  models: [
+    {
+      id: 'grok-image-video',
+      label: 'Grok Image Video',
+      modes: ['text-to-video', 'image-to-video', 'video-to-video'],
+      sizes: ['854x480', '1280x720', '720x1280', '1024x1024'],
+      durations: [6, 10, 15],
+      defaultSize: '1280x720',
+      defaultDurationSeconds: 6,
+      requiresImage: false,
+      enabled: true,
+    },
+    {
+      id: 'grok-video-1.5',
+      label: 'Grok Video 1.5',
+      modes: ['image-to-video'],
+      sizes: ['854x480', '1280x720', '720x1280', '1024x1024'],
+      durations: [6, 10, 15],
+      defaultSize: '1280x720',
+      defaultDurationSeconds: 6,
+      requiresImage: true,
+      enabled: true,
+    },
+  ],
+};
+
 assert.equal(resolveMappedVideoSizeForCapabilityContract({
   resolution: '720P',
   aspectRatio: '9:16',
@@ -32,26 +63,41 @@ assert.equal(resolveMappedVideoSizeForCapabilityContract({
   supportedSizes: ['1280x720', '720x1280'],
 }), undefined);
 
-assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-image-video', 'generate'), {
+assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile(
+  managedVideoContract,
+  'grok-image-video',
+  'generate',
+), {
   maxVideos: 1,
   maxDurationSeconds: 15,
   supportedDurationSeconds: [6, 10, 15],
   supportsSize: true,
-  sizes: ['1280x720', '720x1280'],
+  sizes: ['854x480', '1280x720', '720x1280', '1024x1024'],
 });
-assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-video-1.5', 'generate'), {
+assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile(
+  managedVideoContract,
+  'grok-video-1.5',
+  'generate',
+), {
   enabled: false,
 });
-assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile('grok-video-1.5', 'imageToVideo'), {
+assert.deepEqual(resolveOpenAiVideoCapabilityContractProfile(
+  managedVideoContract,
+  'grok-video-1.5',
+  'imageToVideo',
+), {
   enabled: true,
   maxInputImages: 1,
   maxVideos: 1,
   maxDurationSeconds: 15,
   supportedDurationSeconds: [6, 10, 15],
   supportsSize: true,
-  sizes: ['1280x720', '720x1280'],
+  sizes: ['854x480', '1280x720', '720x1280', '1024x1024'],
 });
-assert.equal(resolveOpenAiVideoCapabilityContractProfile('sora-2', 'generate'), undefined);
+assert.equal(
+  resolveOpenAiVideoCapabilityContractProfile(managedVideoContract, 'sora-2', 'generate'),
+  undefined,
+);
 
 const sourceDist = join(process.cwd(), 'node_modules', 'openclaw', 'dist');
 const files = readdirSync(sourceDist)
@@ -98,45 +144,22 @@ try {
   assert.match(runtimeContent, /resolution = void 0/u);
   assert.match(runtimeContent, /audio = void 0/u);
   assert.match(runtimeContent, /watermark = void 0/u);
-  assert.match(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V1/u);
-  assert.match(providerContent, /UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2/u);
-  assert.match(providerContent, /UCLAW_VIDEO_SIZE_CONTRACT_OPENAI_V2/u);
-  assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SECONDS/u);
-  assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SECONDS = \[\s*6,\s*10,\s*15\s*\]/u);
-  assert.match(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SIZES/u);
-  const managedGrokSizes = providerContent.match(/UCLAW_OPENAI_GROK_VIDEO_SIZES = \[([\s\S]*?)\];/u)?.[1] ?? '';
-  assert.match(managedGrokSizes, /"1280x720"/u);
-  assert.match(managedGrokSizes, /"720x1280"/u);
-  assert.doesNotMatch(managedGrokSizes, /1024x1024/u);
-  assert.match(providerContent, /resolveDurationSeconds\(req\.durationSeconds, model\)/u);
-  assert.match(providerContent, /grok-video-1\.5 requires exactly one reference image/u);
+  assert.match(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V3/u);
+  assert.match(providerContent, /uclawManagedVideoCapabilityContract/u);
+  assert.match(providerContent, /resolveUClawManagedVideoModelCapability/u);
+  assert.match(providerContent, /resolveModelCapabilities: resolveUClawManagedOpenAIVideoCapabilities/u);
+  assert.match(providerContent, /resolveDurationSeconds\(req\.durationSeconds, model, req\.cfg\)/u);
+  assert.match(providerContent, /managedModel\?\.requiresImage/u);
+  assert.doesNotMatch(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SECONDS/u);
+  assert.doesNotMatch(providerContent, /UCLAW_OPENAI_GROK_VIDEO_SIZES/u);
+  assert.doesNotMatch(providerContent, /UCLAW_OPENAI_GROK_VIDEO_MODEL/u);
   assert.match(providerContent, /const OPENAI_VIDEO_SECONDS = \[\s*4,\s*8,\s*12\s*\]/u);
 
-  const legacyProviderContent = providerContent
-    .replace('const UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2 = true;\n', '')
-    .replace('const UCLAW_VIDEO_SIZE_CONTRACT_OPENAI_V2 = true;\n', '')
-    .replace(
-      'const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [\n\t6,\n\t10,\n\t15\n];',
-      'const UCLAW_OPENAI_GROK_VIDEO_SECONDS = [\n\t4,\n\t6,\n\t8,\n\t10,\n\t12,\n\t15\n];',
-    )
-    .replace(
-      'const UCLAW_OPENAI_GROK_VIDEO_SIZES = [\n\t"1280x720",\n\t"720x1280"\n];',
-      'const UCLAW_OPENAI_GROK_VIDEO_SIZES = [\n\t"1280x720",\n\t"720x1280",\n\t"1024x1024"\n];',
-    )
-    .replace(
-      '\t\t\tcase "16:9": return "1280x720";\n',
-      '\t\t\tcase "16:9": return "1280x720";\n\t\t\tcase "1:1": return "1024x1024";\n',
-    );
-  const upgradedProvider = patchOpenClawOpenAiVideoCapabilityContent(legacyProviderContent);
-  assert.equal(upgradedProvider.changed, true);
-  assert.match(upgradedProvider.content, /UCLAW_VIDEO_DURATION_CONTRACT_OPENAI_V2/u);
-  assert.match(upgradedProvider.content, /UCLAW_VIDEO_SIZE_CONTRACT_OPENAI_V2/u);
-  assert.match(upgradedProvider.content, /UCLAW_OPENAI_GROK_VIDEO_SECONDS = \[\s*6,\s*10,\s*15\s*\]/u);
-  assert.doesNotMatch(
-    upgradedProvider.content.match(/UCLAW_OPENAI_GROK_VIDEO_SIZES = \[([\s\S]*?)\];/u)?.[1] ?? '',
-    /1024x1024/u,
-  );
-  assert.doesNotMatch(upgradedProvider.content, /case "1:1": return "1024x1024"/u);
+  const upgradedProvider = patchOpenClawOpenAiVideoCapabilityContent(targets[2].content);
+  assert.ok(upgradedProvider, 'expected the OpenAI provider fixture to be recognized');
+  assert.match(upgradedProvider.content, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V3/u);
+  assert.doesNotMatch(upgradedProvider.content, /UCLAW_OPENAI_GROK_VIDEO_SECONDS/u);
+  assert.doesNotMatch(upgradedProvider.content, /UCLAW_OPENAI_GROK_VIDEO_SIZES/u);
   assert.equal(patchOpenClawOpenAiVideoCapabilityContent(upgradedProvider.content).changed, false);
 
   for (const entry of readdirSync(fixtureDist)) {

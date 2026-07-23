@@ -155,35 +155,10 @@ export const DEFAULT_CLIENT_MODEL_OPTIONS: ClientModelOptionsConfig = {
     ],
   },
   video: {
-    defaultModel: 'grok-image-video',
-    defaultSize: '1280x720',
-    defaultDurationSeconds: 15,
-    models: [
-      {
-        id: 'grok-image-video',
-        label: 'Grok Video',
-        description: 'Supports text-to-video and image-to-video.',
-        modes: ['text-to-video', 'image-to-video'],
-        sizes: ['1280x720', '720x1280'],
-        durations: [6, 10, 15],
-        defaultSize: '1280x720',
-        defaultDurationSeconds: 15,
-        requiresImage: false,
-        enabled: true,
-      },
-      {
-        id: 'grok-video-1.5',
-        label: 'Grok Video 1.5',
-        description: 'Image-to-video model that requires one reference image.',
-        modes: ['image-to-video'],
-        sizes: ['1280x720', '720x1280'],
-        durations: [6, 10, 15],
-        defaultSize: '1280x720',
-        defaultDurationSeconds: 15,
-        requiresImage: true,
-        enabled: true,
-      },
-    ],
+    defaultModel: '',
+    defaultSize: '',
+    defaultDurationSeconds: 0,
+    models: [],
   },
 };
 
@@ -400,7 +375,7 @@ function normalizeVideoModels(
   if (!Array.isArray(models)) {
     return [...fallback];
   }
-  const defaultFallback = fallback[0] ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.models[0];
+  const defaultFallback = fallback[0];
   const seen = new Set<string>();
   const result = models
     .map((item): ClientVideoModelOption | null => {
@@ -410,9 +385,9 @@ function normalizeVideoModels(
       const id = typeof record.id === 'string' ? record.id.trim() : '';
       if (!id || seen.has(id)) return null;
       seen.add(id);
-      const modes = normalizeStringList(record.modes, defaultFallback.modes);
-      const sizes = normalizeStringList(record.sizes, defaultFallback.sizes);
-      const durations = normalizeDurationList(record.durations, defaultFallback.durations);
+      const modes = normalizeStringList(record.modes, defaultFallback?.modes ?? []);
+      const sizes = normalizeStringList(record.sizes, defaultFallback?.sizes ?? []);
+      const durations = normalizeDurationList(record.durations, defaultFallback?.durations ?? []);
       const defaultSize = typeof record.defaultSize === 'string' && sizes.includes(record.defaultSize.trim())
         ? record.defaultSize.trim()
         : sizes[0];

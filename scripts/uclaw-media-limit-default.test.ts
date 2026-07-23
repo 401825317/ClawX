@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { ensureManagedMediaLimitInConfig } from '../electron/utils/openclaw-auth.ts';
 
-test('managed UClaw config defaults generated media delivery to 16 MiB', () => {
+test('managed UClaw config defaults inline media delivery to 16 MiB', () => {
   const config: Record<string, unknown> = {};
   assert.equal(ensureManagedMediaLimitInConfig(config), true);
   assert.equal(

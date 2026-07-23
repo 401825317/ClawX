@@ -110,5 +110,10 @@
             "relayModelRequired": "モデル名が必要です",
             "relayModelInvalid": "gpt-image-2 のようなモデル名のみを入力してください。provider/model は入力しないでください。"
         }
+    },
+    "videoGeneration": {
+        "errors": {
+            "capabilityUnavailable": "動画機能を利用できません"
+        }
     }
 }

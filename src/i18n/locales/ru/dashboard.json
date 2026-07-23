@@ -110,5 +110,10 @@
             "relayModelRequired": "Укажите имя модели",
             "relayModelInvalid": "Введите только имя модели, например gpt-image-2. Не используйте provider/model."
         }
+    },
+    "videoGeneration": {
+        "errors": {
+            "capabilityUnavailable": "Возможность видео недоступна"
+        }
     }
 }

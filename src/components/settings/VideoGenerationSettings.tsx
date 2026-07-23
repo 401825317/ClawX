@@ -15,7 +15,6 @@ import {
   fetchVideoGenerationSettings,
   runVideoGenerationTest,
   saveVideoGenerationSettings,
-  type VideoGenerationModelOption,
   type VideoGenerationSettingsSnapshot,
 } from '@/lib/video-generation';
 import { cn } from '@/lib/utils';
@@ -23,23 +22,6 @@ import { cn } from '@/lib/utils';
 const inputClasses =
   'h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-sm text-foreground/80 font-bold';
-
-const FALLBACK_MODEL_OPTIONS: VideoGenerationModelOption[] = [
-  {
-    id: 'grok-image-video',
-    label: 'Grok Video',
-    description: 'Text or image to video through the current zz-cn backend model.',
-    verified: true,
-    modes: ['text-to-video', 'image-to-video'],
-  },
-  {
-    id: 'grok-video-1.5',
-    label: 'Grok Video 1.5',
-    description: 'Alternate Grok video model exposed by the current zz-cn backend.',
-    verified: true,
-    modes: ['text-to-video', 'image-to-video'],
-  },
-];
 
 function extractTestOutputLocation(result: unknown): string | null {
   if (!result || typeof result !== 'object') return null;
@@ -63,7 +45,7 @@ export function VideoGenerationSettings() {
   const [snapshot, setSnapshot] = useState<VideoGenerationSettingsSnapshot | null>(null);
 
   const [relayBaseUrl, setRelayBaseUrl] = useState('');
-  const [relayModel, setRelayModel] = useState('grok-image-video');
+  const [relayModel, setRelayModel] = useState('');
   const [testAgentId, setTestAgentId] = useState('');
 
   const load = useCallback(async () => {
@@ -72,7 +54,7 @@ export function VideoGenerationSettings() {
       const settings = await fetchVideoGenerationSettings();
       setSnapshot(settings);
       setRelayBaseUrl(settings.openAiRelay?.baseUrl ?? '');
-      setRelayModel(settings.openAiRelay?.model || 'grok-image-video');
+      setRelayModel(settings.openAiRelay?.model || '');
       setTestAgentId(settings.defaultAgentId);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -85,9 +67,11 @@ export function VideoGenerationSettings() {
     void load();
   }, [load]);
 
-  const modelOptions = snapshot?.openAiRelay?.modelOptions?.length
-    ? snapshot.openAiRelay.modelOptions
-    : FALLBACK_MODEL_OPTIONS;
+  const modelOptions = useMemo(
+    () => snapshot?.openAiRelay?.modelOptions ?? [],
+    [snapshot?.openAiRelay?.modelOptions],
+  );
+  const capabilityAvailable = Boolean(snapshot?.openAiRelay?.capabilityAvailable && modelOptions.length > 0);
 
   const selectedModelOption = useMemo(
     () => modelOptions.find((option) => option.id === relayModel) ?? modelOptions[0],
@@ -124,7 +108,7 @@ export function VideoGenerationSettings() {
       });
       setSnapshot(next);
       setRelayBaseUrl(next.openAiRelay?.baseUrl ?? '');
-      setRelayModel(next.openAiRelay?.model || 'grok-image-video');
+      setRelayModel(next.openAiRelay?.model || '');
       toast.success(t('videoGeneration.toast.saved', 'Video generation settings saved'));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -139,7 +123,7 @@ export function VideoGenerationSettings() {
       const next = await clearVideoGenerationSettings();
       setSnapshot(next);
       setRelayBaseUrl('');
-      setRelayModel('grok-image-video');
+      setRelayModel('');
       setClearConfirmOpen(false);
       toast.success(t('videoGeneration.toast.cleared', 'Video generation configuration cleared'));
     } catch (error) {
@@ -257,9 +241,15 @@ export function VideoGenerationSettings() {
                   id="video-gen-relay-model"
                   value={relayModel}
                   onChange={(e) => setRelayModel(e.target.value)}
+                  disabled={!capabilityAvailable}
                   className={cn(inputClasses, 'w-full')}
                   data-testid="video-generation-relay-model"
                 >
+                  {!capabilityAvailable ? (
+                    <option value="">
+                      {t('videoGeneration.errors.capabilityUnavailable', 'Video capability unavailable')}
+                    </option>
+                  ) : null}
                   {modelOptions.map((option) => (
                     <option key={option.id} value={option.id}>
                       {option.label}
@@ -395,7 +385,7 @@ export function VideoGenerationSettings() {
               variant="outline"
               className="rounded-full h-10"
               onClick={() => void handleTest()}
-              disabled={testing || !hasConfiguredRelay || dirty}
+              disabled={testing || !hasConfiguredRelay || dirty || !capabilityAvailable}
               data-testid="video-generation-test-button"
             >
               {testing ? (
@@ -410,7 +400,7 @@ export function VideoGenerationSettings() {
             <Button
               className="rounded-full h-10"
               onClick={() => void handleSave()}
-              disabled={saving || !dirty}
+              disabled={saving || !dirty || !capabilityAvailable}
               data-testid="video-generation-save"
             >
               {saving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}

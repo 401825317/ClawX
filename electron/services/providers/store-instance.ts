@@ -19,6 +19,7 @@ export async function getClawXProviderStore() {
         providerSecretsV2: {} as Record<string, unknown>,
         providerSecrets: {} as Record<string, unknown>,
         junfeiaiVerificationCache: null as unknown,
+        managedVideoCapabilityContract: null as unknown,
         defaultProvider: null as string | null,
         defaultProviderAccountId: null as string | null,
       },
