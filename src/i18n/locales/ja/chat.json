@@ -326,6 +326,7 @@
         "imageEditMissingReference": "どの画像を編集しますか？画像をアップロードするか選択してください。",
         "videoMode": "動画モード",
         "videoModeActive": "動画モード有効",
+        "videoCapabilityUnavailable": "動画生成機能は一時的に利用できません。",
         "videoSizeLabel": "動画サイズ",
         "videoDurationLabel": "動画の長さ",
         "modelPickerTitle": "モデルを切り替え",

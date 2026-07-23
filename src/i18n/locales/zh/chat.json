@@ -326,6 +326,7 @@
         "imageEditMissingReference": "你想编辑哪张图片？请上传或选中一张图片。",
         "videoMode": "视频模式",
         "videoModeActive": "视频模式已开启",
+        "videoCapabilityUnavailable": "视频生成能力暂时不可用。",
         "videoSizeLabel": "视频尺寸",
         "videoDurationLabel": "视频时长",
         "modelPickerTitle": "切换当前会话模型",

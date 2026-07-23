@@ -8,7 +8,7 @@ import {
   getJunFeiAITopupOrderStatus,
   getJunFeiAITopupOrders,
   getJunFeiAITopupOverview,
-  getJunFeiAIClientConfig,
+  refreshJunFeiAIClientConfig,
   getJunFeiAILocalStatus,
   listJunFeiAIModels,
   loginJunFeiAI,
@@ -20,6 +20,7 @@ import {
   verifyJunFeiAIAuth,
 } from '../../services/junfeiai/junfeiai-service';
 import { selfHealManagedTextModelsFromClientConfig } from '../../utils/agent-config';
+import { ensureManagedOpenAiVideoRelay } from '../../utils/openclaw-video-generation';
 
 async function sendJunFeiAIJson<T>(
   res: ServerResponse,
@@ -125,11 +126,31 @@ export async function handleJunFeIAIRoutes(
   }
 
   if (url.pathname === '/api/junfeiai/client-config' && req.method === 'GET') {
-    const payload = await getJunFeiAIClientConfig();
+    const { payload, videoContractChanged, videoContract } = await refreshJunFeiAIClientConfig();
     try {
       await selfHealManagedTextModelsFromClientConfig(payload.modelOptions);
     } catch (error) {
       console.warn('[junfeiai] Failed to self-heal managed text models from client config:', error);
+    }
+    if (videoContractChanged) {
+      try {
+        await ensureManagedOpenAiVideoRelay({
+          preserveExisting: true,
+          capabilityContract: videoContract,
+        });
+      } catch (error) {
+        console.warn('[junfeiai] Managed video capability contract is unavailable after refresh:', error);
+      }
+      if (ctx.gatewayManager.getStatus().state === 'running') {
+        try {
+          await ctx.gatewayManager.reload({
+            reason: 'managed-video-capability-contract-refresh',
+            source: 'junfeiai-client-config',
+          });
+        } catch (error) {
+          console.warn('[junfeiai] Failed to reload Gateway after managed video contract refresh:', error);
+        }
+      }
     }
     sendJson(res, 200, payload);
     return true;

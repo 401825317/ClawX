@@ -283,12 +283,6 @@ function strongestSize(sizes: string[] | undefined, fallback: string): string {
   ), candidates[0]!);
 }
 
-function strongestDuration(durations: number[] | undefined, fallback: number): number {
-  const candidates = (durations ?? []).filter((value) => Number.isFinite(value) && value > 0);
-  if (candidates.length === 0) return fallback;
-  return Math.max(...candidates);
-}
-
 function normalizeOptionValue<T extends string | number>(
   requested: T | undefined,
   allowed: T[] | undefined,
@@ -335,34 +329,59 @@ function parseImageQualityHint(prompt: string, allowedQualities: string[], fallb
   return undefined;
 }
 
+function preferredVideoSizeForShape(
+  allowedSizes: string[],
+  fallback: string,
+  matchesShape: (width: number, height: number) => boolean,
+  wantsMaximumSize: boolean,
+): string | undefined {
+  const candidates = allowedSizes.filter((size) => {
+    const match = size.match(/^(\d+)x(\d+)$/);
+    return match ? matchesShape(Number(match[1]), Number(match[2])) : false;
+  });
+  if (candidates.length === 0) return undefined;
+  if (wantsMaximumSize) return strongestSize(candidates, fallback);
+  return candidates.includes(fallback) ? fallback : candidates[0];
+}
+
 function parseVideoSizeHint(prompt: string, allowedSizes: string[], fallback: string): string | undefined {
   const explicit = parseExplicitDimension(prompt);
   if (explicit && allowedSizes.includes(explicit)) return explicit;
+  const wantsMaximumSize = /(?:最高|最大|最强|maximum|max\s+(?:resolution|size)|highest(?:\s+resolution)?|largest)/i.test(prompt);
   if (/(?:9\s*:\s*16|竖屏|竖版|portrait|vertical)/i.test(prompt)) {
-    return allowedSizes.find((size) => {
-      const match = size.match(/^(\d+)x(\d+)$/);
-      return match ? Number(match[2]) > Number(match[1]) : false;
-    });
+    return preferredVideoSizeForShape(
+      allowedSizes,
+      fallback,
+      (width, height) => height > width,
+      wantsMaximumSize,
+    );
   }
   if (/(?:16\s*:\s*9|横屏|横版|landscape|wide)/i.test(prompt)) {
-    return allowedSizes.find((size) => {
-      const match = size.match(/^(\d+)x(\d+)$/);
-      return match ? Number(match[1]) > Number(match[2]) : false;
-    });
+    return preferredVideoSizeForShape(
+      allowedSizes,
+      fallback,
+      (width, height) => width > height,
+      wantsMaximumSize,
+    );
   }
   if (/(?:1\s*:\s*1|方形|正方形|square)/i.test(prompt)) {
-    return allowedSizes.find((size) => {
-      const match = size.match(/^(\d+)x(\d+)$/);
-      return match ? Number(match[1]) === Number(match[2]) : false;
-    });
+    return preferredVideoSizeForShape(
+      allowedSizes,
+      fallback,
+      (width, height) => width === height,
+      wantsMaximumSize,
+    );
   }
-  if (/(?:最高|最大|最强)/i.test(prompt)) {
+  if (wantsMaximumSize) {
     return strongestSize(allowedSizes, fallback);
   }
   return undefined;
 }
 
 function parseVideoDurationHint(prompt: string, allowedDurations: number[], fallback: number): number | undefined {
+  if (/(?:最长|最大时长|longest|max(?:imum)?\s+duration)/i.test(prompt)) {
+    return allowedDurations.length > 0 ? Math.max(...allowedDurations) : fallback;
+  }
   const match = prompt.match(/(\d{1,2})\s*(?:秒|s|sec|secs|second|seconds)/i);
   if (!match) return undefined;
   const requested = Number(match[1]);
@@ -383,15 +402,24 @@ function resolveDefaultChatImageOptions(): ChatImageSendOptions {
 
 function resolveDefaultChatVideoOptions(hasSourceImage = false): ChatVideoSendOptions {
   const options = useClientConfigStore.getState().modelOptions.video;
-  const model = hasSourceImage
-    ? options.models.find((entry) => entry.requiresImage) ?? options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0]
-    : options.models.find((entry) => entry.id === options.defaultModel) ?? options.models[0];
-  const size = strongestSize(model?.sizes, model?.defaultSize ?? options.defaultSize);
-  const durationSeconds = strongestDuration(model?.durations, model?.defaultDurationSeconds ?? options.defaultDurationSeconds);
+  const requiredMode = hasSourceImage ? 'image-to-video' : 'text-to-video';
+  const configuredDefault = options.models.find((entry) => entry.id === options.defaultModel);
+  const model = configuredDefault?.modes.includes(requiredMode)
+    ? configuredDefault
+    : options.models.find((entry) => entry.modes.includes(requiredMode));
+  if (!model) {
+    throw new Error('managed_video_capability_unavailable');
+  }
+  const size = preferredOptionValue(model.defaultSize ?? options.defaultSize, model.sizes, options.defaultSize);
+  const durationSeconds = preferredOptionValue(
+    model.defaultDurationSeconds ?? options.defaultDurationSeconds,
+    model.durations,
+    options.defaultDurationSeconds,
+  );
   return {
-    model: model?.id ?? options.defaultModel,
-    size: model?.sizes.includes(size) ? size : options.defaultSize,
-    durationSeconds: model?.durations.includes(durationSeconds) ? durationSeconds : options.defaultDurationSeconds,
+    model: model.id,
+    size,
+    durationSeconds,
   };
 }
 

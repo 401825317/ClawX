@@ -5,6 +5,8 @@
 
 <h1 align="center">ClawX</h1>
 
+> Managed video models, modes, sizes, durations, and per-model defaults come from the backend capability contract. UClaw caches the last valid contract for transient outages, uses each model's advertised defaults unless the user explicitly asks for a maximum, and disables managed video on a fresh offline install instead of guessing parameters.
+
 <p align="center">
   <strong>The Desktop Interface for OpenClaw AI Agents</strong>
 </p>

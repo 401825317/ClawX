@@ -19,6 +19,11 @@ const toolFixture = 'const timeoutMs = readGenerationTimeoutMs(args) ?? videoGen
 const providerFixture = `// extensions/openai/video-generation-provider.ts
 const DEFAULT_TIMEOUT_MS = 12e4;
 const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
+function resolveGeneratedVideoMaxBytes(req) {
+\tconst configured = req.cfg.agents?.defaults?.mediaMaxMb;
+\tif (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return Math.floor(configured * 1024 * 1024);
+\treturn DEFAULT_GENERATED_VIDEO_MAX_BYTES;
+}
 const POLL_INTERVAL_MS = 2500;
 const MAX_POLL_ATTEMPTS = 120;
 const options = {
@@ -40,6 +45,24 @@ const result = await downloadOpenAIVideo({
 const imageRequest = {
   input_reference: { image_url: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType) }
 };`;
+const additionalProviderFixture = `const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
+function resolveGeneratedVideoMaxBytes(req) {
+\tconst configured = req.cfg.agents?.defaults?.mediaMaxMb;
+\tif (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return Math.floor(configured * 1024 * 1024);
+\treturn DEFAULT_GENERATED_VIDEO_MAX_BYTES;
+}`;
+const configuredMaxBytesFixture = `//#region src/media/configured-max-bytes.ts
+const MB = 1024 * 1024;
+function maxBytesForKind(kind) {
+\treturn kind === "image" ? 6 * MB : 16 * MB;
+}
+function resolveConfiguredMediaMaxBytes(cfg) {
+\tconst configured = cfg?.agents?.defaults?.mediaMaxMb;
+\tif (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return Math.floor(configured * MB);
+}
+function resolveGeneratedMediaMaxBytes(cfg, kind) {
+\treturn resolveConfiguredMediaMaxBytes(cfg) ?? maxBytesForKind(kind);
+}`;
 
 const patchedTool = patchOpenClawManagedMediaTimeoutContent(toolFixture, 'tools.js', timeouts);
 assert.equal(patchedTool.category, 'media-tool');
@@ -50,6 +73,8 @@ const patchedProvider = patchOpenClawManagedMediaTimeoutContent(providerFixture,
 assert.equal(patchedProvider.category, 'openai-video-provider');
 assert.match(patchedProvider.content, /const DEFAULT_TIMEOUT_MS = 1800000/);
 assert.match(patchedProvider.content, /const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 1073741824/);
+assert.match(patchedProvider.content, /UCLAW_GENERATED_VIDEO_DOWNLOAD_BUDGET_V1/);
+assert.doesNotMatch(patchedProvider.content, /cfg\.agents\?\.defaults\?\.mediaMaxMb/);
 assert.match(patchedProvider.content, /const POLL_INTERVAL_MS = 5000/);
 assert.match(patchedProvider.content, /const MAX_POLL_ATTEMPTS = 361/);
 assert.match(patchedProvider.content, /\["completed", "done", "succeeded"\]\.includes\(payload\.status\)/);
@@ -68,18 +93,50 @@ assert.equal(upgradedProvider.changed, true);
 assert.match(upgradedProvider.content, /image: toOpenAIDataUrl\(referenceAsset\.buffer, referenceAsset\.mimeType\)/);
 assert.doesNotMatch(upgradedProvider.content, /input_reference:/);
 
+const patchedAdditionalProvider = patchOpenClawManagedMediaTimeoutContent(
+  additionalProviderFixture,
+  'additional-provider.js',
+  timeouts,
+);
+assert.equal(patchedAdditionalProvider.category, 'video-download-limit');
+assert.match(patchedAdditionalProvider.content, /UCLAW_GENERATED_VIDEO_DOWNLOAD_BUDGET_V1/);
+
+const providerModuleUrl = `data:text/javascript;base64,${Buffer.from(`${patchedAdditionalProvider.content}\nexport { resolveGeneratedVideoMaxBytes };`).toString('base64')}`;
+const { resolveGeneratedVideoMaxBytes } = await import(providerModuleUrl);
+assert.equal(resolveGeneratedVideoMaxBytes({ cfg: { agents: { defaults: { mediaMaxMb: 16 } } } }), 1_073_741_824);
+
+const patchedConfiguredMaxBytes = patchOpenClawManagedMediaTimeoutContent(
+  configuredMaxBytesFixture,
+  'configured-max-bytes.js',
+  timeouts,
+);
+assert.equal(patchedConfiguredMaxBytes.category, 'generated-video-save-budget');
+assert.match(patchedConfiguredMaxBytes.content, /UCLAW_GENERATED_VIDEO_SAVE_BUDGET_V1/);
+const configuredModuleUrl = `data:text/javascript;base64,${Buffer.from(`${patchedConfiguredMaxBytes.content}\nexport { resolveGeneratedMediaMaxBytes };`).toString('base64')}`;
+const { resolveGeneratedMediaMaxBytes } = await import(configuredModuleUrl);
+const configured16MiB = { agents: { defaults: { mediaMaxMb: 16 } } };
+const generatedVideoBudget = resolveGeneratedMediaMaxBytes(configured16MiB, 'video');
+assert.equal(generatedVideoBudget, 1_073_741_824);
+assert.equal(64 * 1024 * 1024 <= generatedVideoBudget, true);
+assert.equal(1_073_741_825 <= generatedVideoBudget, false);
+assert.equal(resolveGeneratedMediaMaxBytes(configured16MiB, 'image'), 16 * 1024 * 1024);
+
 const distDir = mkdtempSync(join(tmpdir(), 'uclaw-managed-media-timeout-'));
 writeFileSync(join(distDir, 'tools.js'), toolFixture, 'utf8');
 writeFileSync(join(distDir, 'provider.js'), providerFixture, 'utf8');
+writeFileSync(join(distDir, 'additional-provider.js'), additionalProviderFixture, 'utf8');
+writeFileSync(join(distDir, 'configured-max-bytes.js'), configuredMaxBytesFixture, 'utf8');
 
 const first = patchOpenClawManagedMediaTimeoutRuntime(distDir, { logger: { log() {} } });
-assert.equal(first.patchedFiles, 2);
+assert.equal(first.patchedFiles, 4);
 assert.equal(first.categoryCounts['media-tool'], 1);
 assert.equal(first.categoryCounts['openai-video-provider'], 1);
+assert.equal(first.categoryCounts['video-download-limit'], 1);
+assert.equal(first.categoryCounts['generated-video-save-budget'], 1);
 assert.match(readFileSync(join(distDir, 'provider.js'), 'utf8'), /UCLAW_MANAGED_MEDIA_TIMEOUT_V1/);
 
 const second = patchOpenClawManagedMediaTimeoutRuntime(distDir, { logger: { log() {} } });
 assert.equal(second.patchedFiles, 0);
-assert.equal(second.alreadyPatchedFiles, 2);
+assert.equal(second.alreadyPatchedFiles, 4);
 
 console.log('openclaw managed media timeout patch tests passed');

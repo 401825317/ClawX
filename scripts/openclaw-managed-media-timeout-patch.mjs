@@ -6,9 +6,19 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ENDPOINTS_PATH = join(SCRIPT_DIR, '..', 'shared', 'junfeiai-endpoints.json');
 const PATCH_MARKER = 'UCLAW_MANAGED_MEDIA_TIMEOUT_V1';
 const VIDEO_MAX_DOWNLOAD_BYTES_MARKER = 'UCLAW_MANAGED_VIDEO_MAX_DOWNLOAD_BYTES_V1';
+const VIDEO_DOWNLOAD_BUDGET_MARKER = 'UCLAW_GENERATED_VIDEO_DOWNLOAD_BUDGET_V1';
+const VIDEO_SAVE_BUDGET_MARKER = 'UCLAW_GENERATED_VIDEO_SAVE_BUDGET_V1';
 const VIDEO_STATUS_MARKER = 'UCLAW_MANAGED_VIDEO_STATUS_V1';
 const VIDEO_OUTPUT_URL_MARKER = 'UCLAW_MANAGED_VIDEO_OUTPUT_URL_V1';
 const VIDEO_IMAGE_REFERENCE_MARKER = 'UCLAW_MANAGED_VIDEO_IMAGE_REFERENCE_V1';
+const ORIGINAL_GENERATED_VIDEO_MAX_BYTES_RESOLVER = `function resolveGeneratedVideoMaxBytes(req) {
+\tconst configured = req.cfg.agents?.defaults?.mediaMaxMb;
+\tif (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return Math.floor(configured * 1024 * 1024);
+\treturn DEFAULT_GENERATED_VIDEO_MAX_BYTES;
+}`;
+const DEDICATED_GENERATED_VIDEO_MAX_BYTES_RESOLVER = `function resolveGeneratedVideoMaxBytes(_req) {
+\treturn DEFAULT_GENERATED_VIDEO_MAX_BYTES; // ${VIDEO_DOWNLOAD_BUDGET_MARKER}
+}`;
 const MANAGED_VIDEO_COMPLETE_STATUS_EXPRESSION = '["completed", "done", "succeeded"].includes(payload.status) || Boolean(resolveOpenAIVideoOutputUrl(payload))';
 const MANAGED_VIDEO_OUTPUT_URL_HELPER = `// ${VIDEO_OUTPUT_URL_MARKER}
 function resolveOpenAIVideoOutputUrl(payload) {
@@ -54,6 +64,17 @@ function replaceUnique(content, search, replacement, label, filePath) {
   return content.replace(search, replacement);
 }
 
+function patchGeneratedVideoDownloadBudgetResolver(content, filePath) {
+  if (content.includes(DEDICATED_GENERATED_VIDEO_MAX_BYTES_RESOLVER)) return content;
+  return replaceUnique(
+    content,
+    ORIGINAL_GENERATED_VIDEO_MAX_BYTES_RESOLVER,
+    DEDICATED_GENERATED_VIDEO_MAX_BYTES_RESOLVER,
+    'generated video download budget resolver',
+    filePath,
+  );
+}
+
 function patchMediaToolContent(content, filePath, timeouts) {
   const expected = `const timeoutMs = videoGenerationModelConfig.timeoutMs ?? ${timeouts.videoTimeoutMs}; // ${PATCH_MARKER}`;
   if (content.includes(expected)) {
@@ -95,6 +116,7 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
   const expectedImageReference = `image: toOpenAIDataUrl(referenceAsset.buffer, referenceAsset.mimeType), // ${VIDEO_IMAGE_REFERENCE_MARKER}`;
   if (content.includes(expectedTimeout)
     && content.includes(expectedMaxDownloadBytes)
+    && content.includes(DEDICATED_GENERATED_VIDEO_MAX_BYTES_RESOLVER)
     && content.includes(expectedPollInterval)
     && content.includes(expectedMaxAttempts)
     && content.includes(expectedCompletion)
@@ -129,6 +151,7 @@ function patchOpenAiVideoProviderContent(content, filePath, timeouts) {
       'OpenAI video provider max download size',
       filePath,
     );
+  patched = patchGeneratedVideoDownloadBudgetResolver(patched, filePath);
   const pollIntervalMatches = patched.match(patchedPollIntervalPattern) ?? [];
   if (pollIntervalMatches.length > 1) {
     throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one managed OpenAI video poll interval in ${filePath}; found ${pollIntervalMatches.length}.`);
@@ -211,7 +234,9 @@ function patchGeneratedVideoMaxDownloadBytesContent(content, filePath, timeouts)
   if (content.includes('extensions/openai/video-generation-provider.ts')) return null;
 
   const expected = `const DEFAULT_GENERATED_VIDEO_MAX_BYTES = ${timeouts.videoMaxDownloadBytes}; // ${VIDEO_MAX_DOWNLOAD_BYTES_MARKER}`;
-  if (content.includes(expected)) {
+  const hasDownloadBudgetResolver = content.includes('function resolveGeneratedVideoMaxBytes(');
+  if (content.includes(expected)
+    && (!hasDownloadBudgetResolver || content.includes(DEDICATED_GENERATED_VIDEO_MAX_BYTES_RESOLVER))) {
     return { content, changed: false, category: 'video-download-limit' };
   }
 
@@ -221,18 +246,68 @@ function patchGeneratedVideoMaxDownloadBytesContent(content, filePath, timeouts)
     throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one managed generated video max download size in ${filePath}; found ${matches.length}.`);
   }
 
+  let patched = matches.length === 1
+    ? content.replace(patchedPattern, expected)
+    : replaceUnique(
+      content,
+      'const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 16 * 1024 * 1024;',
+      expected,
+      'generated video max download size',
+      filePath,
+    );
+  if (hasDownloadBudgetResolver) {
+    patched = patchGeneratedVideoDownloadBudgetResolver(patched, filePath);
+  }
   return {
-    content: matches.length === 1
-      ? content.replace(patchedPattern, expected)
-      : replaceUnique(
-        content,
-        'const DEFAULT_GENERATED_VIDEO_MAX_BYTES = 16 * 1024 * 1024;',
-        expected,
-        'generated video max download size',
-        filePath,
-      ),
+    content: patched,
     changed: true,
     category: 'video-download-limit',
+  };
+}
+
+function patchGeneratedVideoSaveBudgetContent(content, filePath, timeouts) {
+  if (!content.includes('//#region src/media/configured-max-bytes.ts')) return null;
+
+  const expectedConstant = `const UCLAW_GENERATED_VIDEO_MAX_BYTES = ${timeouts.videoMaxDownloadBytes}; // ${VIDEO_SAVE_BUDGET_MARKER}`;
+  const expectedResolver = `function resolveGeneratedMediaMaxBytes(cfg, kind) {
+\tif (kind === "video") return UCLAW_GENERATED_VIDEO_MAX_BYTES;
+\treturn resolveConfiguredMediaMaxBytes(cfg) ?? maxBytesForKind(kind);
+}`;
+  if (content.includes(expectedConstant) && content.includes(expectedResolver)) {
+    return { content, changed: false, category: 'generated-video-save-budget' };
+  }
+
+  let patched = content;
+  const managedConstantPattern = /const UCLAW_GENERATED_VIDEO_MAX_BYTES = \d+; \/\/ UCLAW_GENERATED_VIDEO_SAVE_BUDGET_V1/g;
+  const managedConstants = patched.match(managedConstantPattern) ?? [];
+  if (managedConstants.length > 1) {
+    throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one generated video save budget constant in ${filePath}; found ${managedConstants.length}.`);
+  }
+  patched = managedConstants.length === 1
+    ? patched.replace(managedConstantPattern, expectedConstant)
+    : replaceUnique(
+      patched,
+      'const MB = 1024 * 1024;',
+      `const MB = 1024 * 1024;\n${expectedConstant}`,
+      'configured media byte unit',
+      filePath,
+    );
+
+  if (!patched.includes(expectedResolver)) {
+    patched = replaceUnique(
+      patched,
+      `function resolveGeneratedMediaMaxBytes(cfg, kind) {
+\treturn resolveConfiguredMediaMaxBytes(cfg) ?? maxBytesForKind(kind);
+}`,
+      expectedResolver,
+      'generated media save budget resolver',
+      filePath,
+    );
+  }
+  return {
+    content: patched,
+    changed: true,
+    category: 'generated-video-save-budget',
   };
 }
 
@@ -240,6 +315,7 @@ export function patchOpenClawManagedMediaTimeoutContent(content, filePath = '<fi
   return patchMediaToolContent(content, filePath, timeouts)
     ?? patchOpenAiVideoProviderContent(content, filePath, timeouts)
     ?? patchGeneratedVideoMaxDownloadBytesContent(content, filePath, timeouts)
+    ?? patchGeneratedVideoSaveBudgetContent(content, filePath, timeouts)
     ?? { content, changed: false, category: null };
 }
 
@@ -284,11 +360,14 @@ export function patchOpenClawManagedMediaTimeoutRuntime(distDir, options = {}) {
     }
   }
 
-  for (const category of ['media-tool', 'openai-video-provider']) {
+  for (const category of ['media-tool', 'openai-video-provider', 'generated-video-save-budget']) {
     const count = categoryCounts.get(category) ?? 0;
     if (count !== 1) {
       throw new Error(`[openclaw-managed-media-timeout-patch] Expected exactly one ${category} runtime file in ${distDir}; found ${count}.`);
     }
+  }
+  if ((categoryCounts.get('video-download-limit') ?? 0) < 1) {
+    throw new Error(`[openclaw-managed-media-timeout-patch] Expected at least one additional video provider download budget in ${distDir}.`);
   }
 
   logger.log?.(

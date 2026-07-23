@@ -18,18 +18,24 @@ import {
 } from './openclaw-video-generation-runtime';
 import { OPENAI_CODEX_RUNTIME_PROVIDER_KEY } from './provider-keys';
 import {
-  CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
-  CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS,
   CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
-  CLAWX_OPENAI_VIDEO_MODEL_OPTIONS,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
   isClawXOpenAiVideoModelId,
+  managedVideoModelOptions,
   normalizeClawXOpenAiVideoModelId,
   orderedClawXOpenAiVideoModelIds,
+  readManagedVideoCapabilityContractFromConfig,
+  selectClawXOpenAiVideoModelForInput,
   type ClawXOpenAiVideoModelOption,
 } from './openclaw-video-relay-constants';
+import {
+  normalizeManagedVideoCapabilityContract,
+  type ManagedVideoCapabilityContract,
+  type ManagedVideoModelCapability,
+} from '../../shared/managed-video-capabilities';
 import { getJunFeiAIDefaultBaseUrl, JUNFEIAI_PROVIDER_ID } from './junfeiai-distribution';
 import { getProviderSecret } from '../services/secrets/secret-store';
+import { readManagedVideoCapabilityContract } from '../services/junfeiai/managed-video-capability-cache';
 
 export interface VideoGenerationModelConfig {
   primary: string | null;
@@ -58,6 +64,7 @@ export interface VideoGenerationAgentAuthRow {
 
 export interface OpenAiVideoRelayConfig {
   enabled: boolean;
+  capabilityAvailable: boolean;
   baseUrl: string;
   model: string;
   providerKey?: string;
@@ -92,8 +99,6 @@ export interface VideoGenerationTestResult {
 }
 
 const DEFAULT_TEST_PROMPT = 'A cinematic six-second shot of a small red paper airplane gliding over a white desk.';
-const DEFAULT_TEST_VIDEO_SIZE = '1280x720';
-const DEFAULT_TEST_DURATION_SECONDS = CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS;
 export const VIDEO_GEN_UI_TEST_MAX_TIMEOUT_MS = CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
 
 type AgentModelConfigShape = {
@@ -109,6 +114,46 @@ type ParsedVideoModelRef = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function resolveManagedVideoContract(
+  config?: Record<string, unknown>,
+): Promise<ManagedVideoCapabilityContract | null> {
+  return await readManagedVideoCapabilityContract()
+    ?? readManagedVideoCapabilityContractFromConfig(config);
+}
+
+function requireManagedVideoModel(
+  contract: ManagedVideoCapabilityContract | null,
+  requestedModel: string | null | undefined,
+  inputImageCount = 0,
+  strictRequested = true,
+): ManagedVideoModelCapability {
+  if (!contract) {
+    throw new Error('managed_video_capability_unavailable: no verified backend video contract is available');
+  }
+  const requested = requestedModel?.trim();
+  if (requested) {
+    const requestedId = requested.includes('/') ? requested.slice(requested.indexOf('/') + 1) : requested;
+    const exact = contract.models.find((model) => model.id === requestedId);
+    if (!exact && strictRequested) {
+      throw new Error(`invalid_video_model: "${requested}" is not advertised by the backend video contract`);
+    }
+    const requiredMode = inputImageCount > 0 ? 'image-to-video' : 'text-to-video';
+    if (exact?.modes.includes(requiredMode)) return exact;
+    if (exact && strictRequested) {
+      throw new Error(`invalid_video_model: "${requested}" does not support ${requiredMode}`);
+    }
+  }
+  const selected = selectClawXOpenAiVideoModelForInput(contract, inputImageCount);
+  if (!selected) {
+    throw new Error(
+      inputImageCount > 0
+        ? 'managed_video_capability_unavailable: no backend video model supports image-to-video'
+        : 'managed_video_capability_unavailable: no backend video model supports text-to-video',
+    );
+  }
+  return selected;
 }
 
 function isApiKeySecret(
@@ -235,6 +280,7 @@ async function listRegisteredVideoProviders(config: unknown): Promise<VideoGener
 export function normalizeRegisteredVideoModelRef(
   modelRef: string,
   registeredProviders: readonly VideoGenerationProviderRow[],
+  managedContract?: ManagedVideoCapabilityContract | null,
 ): string | null {
   const parsed = parseVideoModelRef(modelRef);
   if (!parsed) {
@@ -248,8 +294,9 @@ export function normalizeRegisteredVideoModelRef(
     return null;
   }
   const normalizedModel = provider.id === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
-    && isClawXOpenAiVideoModelId(parsed.model)
-    ? normalizeClawXOpenAiVideoModelId(parsed.model)
+    && managedContract
+    && isClawXOpenAiVideoModelId(parsed.model, managedContract)
+    ? normalizeClawXOpenAiVideoModelId(parsed.model, managedContract)
     : parsed.model;
   const advertisedModels = new Set(provider.models.map((model) => model.trim()).filter(Boolean));
   if (advertisedModels.size === 0 && provider.defaultModel.trim()) {
@@ -265,6 +312,7 @@ function assertRegisteredVideoModelRef(
   modelRef: string,
   registeredProviders: readonly VideoGenerationProviderRow[],
   field: 'primary' | 'fallback',
+  managedContract?: ManagedVideoCapabilityContract | null,
 ): string {
   const parsed = parseVideoModelRef(modelRef);
   if (!parsed) {
@@ -272,7 +320,7 @@ function assertRegisteredVideoModelRef(
       ? 'primary must be in "provider/model" format'
       : `Invalid fallback model ref "${modelRef}"`);
   }
-  const normalized = normalizeRegisteredVideoModelRef(modelRef, registeredProviders);
+  const normalized = normalizeRegisteredVideoModelRef(modelRef, registeredProviders, managedContract);
   if (normalized) {
     return normalized;
   }
@@ -329,6 +377,7 @@ export async function setVideoGenerationConfig(
 
   return withConfigLock(async () => {
     const config = await readOpenClawConfig();
+    const managedContract = await resolveManagedVideoContract(config as Record<string, unknown>);
     const registeredProviders = await listRegisteredVideoProviders(config);
     const agents = (config.agents && typeof config.agents === 'object'
       ? { ...(config.agents as Record<string, unknown>) }
@@ -339,10 +388,10 @@ export async function setVideoGenerationConfig(
 
     const writeValue = buildVideoGenerationModelConfigWrite({
       primary: next.primary
-        ? assertRegisteredVideoModelRef(next.primary, registeredProviders, 'primary')
+        ? assertRegisteredVideoModelRef(next.primary, registeredProviders, 'primary', managedContract)
         : null,
       fallbacks: [...new Set(next.fallbacks
-        .map((ref) => assertRegisteredVideoModelRef(ref, registeredProviders, 'fallback')))],
+        .map((ref) => assertRegisteredVideoModelRef(ref, registeredProviders, 'fallback', managedContract)))],
       timeoutMs: CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
     });
 
@@ -389,57 +438,29 @@ async function buildAgentAuthRows(
   return rows;
 }
 
-function extractModelIdFromProviderEntry(provider: unknown): string | null {
-  if (!provider || typeof provider !== 'object') {
-    return null;
-  }
-  const models = (provider as Record<string, unknown>).models;
-  if (!Array.isArray(models)) {
-    return null;
-  }
-  for (const model of models) {
-    if (typeof model === 'string' && model.trim()) {
-      return normalizeClawXOpenAiVideoModelId(model);
-    }
-    if (model && typeof model === 'object') {
-      const id = (model as Record<string, unknown>).id;
-      if (typeof id === 'string' && id.trim()) {
-        return normalizeClawXOpenAiVideoModelId(id);
-      }
-    }
-  }
-  return null;
-}
-
 function resolveOpenAiVideoRelayModelId(
   config: VideoGenerationModelConfig,
-  openclawConfig: Record<string, unknown>,
+  contract: ManagedVideoCapabilityContract | null,
 ): string {
+  if (!contract) return '';
   const primary = config.primary?.trim();
   if (primary) {
     const slash = primary.indexOf('/');
     if (slash > 0 && slash < primary.length - 1) {
       const provider = primary.slice(0, slash).toLowerCase();
       if (provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY) {
-        return normalizeClawXOpenAiVideoModelId(primary.slice(slash + 1));
+        return normalizeClawXOpenAiVideoModelId(primary.slice(slash + 1), contract);
       }
     }
   }
-
-  const models = openclawConfig.models;
-  const providers = models && typeof models === 'object'
-    ? (models as Record<string, unknown>).providers
-    : null;
-  const providerEntry = providers && typeof providers === 'object'
-    ? (providers as Record<string, unknown>)[CLAWX_OPENAI_VIDEO_PROVIDER_KEY]
-    : null;
-  return extractModelIdFromProviderEntry(providerEntry) ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
+  return contract.defaultModel;
 }
 
 export async function getVideoGenerationSettingsSnapshot(): Promise<VideoGenerationSettingsSnapshot> {
   const config = await readVideoGenerationConfig();
   const snapshot = await listAgentsSnapshot();
   const openclawConfig = await readOpenClawConfig();
+  const managedContract = await resolveManagedVideoContract(openclawConfig as Record<string, unknown>);
   const defaults = openclawConfig.agents?.defaults;
   const autoProviderFallback = !(
     defaults
@@ -459,13 +480,14 @@ export async function getVideoGenerationSettingsSnapshot(): Promise<VideoGenerat
     defaultAgentId: snapshot.defaultAgentId,
     agents: await buildAgentAuthRows(snapshot, providerKey ?? CLAWX_OPENAI_VIDEO_PROVIDER_KEY),
     openAiRelay: {
-      enabled: relayState.enabled || managedDefaults.inherited,
+      enabled: Boolean(managedContract && (relayState.enabled || managedDefaults.inherited)),
+      capabilityAvailable: Boolean(managedContract),
       baseUrl: effectiveBaseUrl,
-      model: resolveOpenAiVideoRelayModelId(config, openclawConfig as Record<string, unknown>),
+      model: resolveOpenAiVideoRelayModelId(config, managedContract),
       providerKey: relayState.providerKey ?? CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
       apiKeyConfigured: relayKeyConfigured || managedDefaults.inherited,
       inheritedFromManagedAccount: managedDefaults.inherited,
-      modelOptions: CLAWX_OPENAI_VIDEO_MODEL_OPTIONS,
+      modelOptions: managedVideoModelOptions(managedContract),
     },
   };
 }
@@ -476,14 +498,16 @@ export async function applyOpenAiVideoRelaySettings(params: {
   apiKey?: string;
   model?: string | null;
 }): Promise<void> {
-  const modelIds = orderedClawXOpenAiVideoModelIds(params.model);
+  const config = await readOpenClawConfig();
+  const managedContract = await resolveManagedVideoContract(config as Record<string, unknown>);
   const managedDefaults = await getManagedVideoRelayDefaults();
 
   await syncOpenAiCompatibleVideoRelay({
     enabled: params.enabled,
     baseUrl: params.enabled ? ((params.baseUrl ?? '').trim() || managedDefaults.baseUrl) : null,
     apiKey: params.apiKey?.trim() || managedDefaults.apiKey || undefined,
-    videoModelIds: modelIds,
+    capabilityContract: managedContract,
+    primaryModelId: params.model,
   });
 }
 
@@ -547,6 +571,8 @@ export async function runVideoGenerationTest(params: {
 
   try {
     const openclawConfig = await readOpenClawConfig();
+    const managedContract = await resolveManagedVideoContract(openclawConfig as Record<string, unknown>);
+    const modelCapability = requireManagedVideoModel(managedContract, model, 0);
     const current = await getVideoGenerationSettingsSnapshot();
     const directApiKey = providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
       ? await resolveVideoRelayApiKey(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, agentId)
@@ -557,8 +583,8 @@ export async function runVideoGenerationTest(params: {
       prompt,
       model,
       timeoutMs: generateTimeoutMs,
-      size: DEFAULT_TEST_VIDEO_SIZE,
-      durationSeconds: DEFAULT_TEST_DURATION_SECONDS,
+      size: modelCapability.defaultSize,
+      durationSeconds: modelCapability.defaultDurationSeconds,
       directOpenAiCompatible: directApiKey && current.openAiRelay.baseUrl
         ? {
           baseUrl: current.openAiRelay.baseUrl,
@@ -588,14 +614,29 @@ export async function runVideoGenerationTest(params: {
 }
 
 export async function ensureManagedOpenAiVideoRelay(
-  options: { preserveExisting?: boolean } = {},
+  options: {
+    preserveExisting?: boolean;
+    capabilityContract?: ManagedVideoCapabilityContract | null;
+  } = {},
 ): Promise<void> {
   const config = await readOpenClawConfig();
+  const managedContract = options.capabilityContract === undefined
+    ? await resolveManagedVideoContract(config as Record<string, unknown>)
+    : normalizeManagedVideoCapabilityContract(options.capabilityContract);
+  if (!managedContract) {
+    await syncOpenAiCompatibleVideoRelay({ enabled: false });
+    throw new Error('managed_video_capability_unavailable: no verified backend video contract is available');
+  }
   const currentConfig = parseVideoGenerationModelConfig(config.agents?.defaults?.videoGenerationModel);
+  let preferredManagedModel = managedContract.defaultModel;
   if (options.preserveExisting && currentConfig.primary) {
     const registeredProviders = await listRegisteredVideoProviders(config);
     const parsedPrimary = parseVideoModelRef(currentConfig.primary);
-    const normalizedPrimary = normalizeRegisteredVideoModelRef(currentConfig.primary, registeredProviders);
+    const normalizedPrimary = normalizeRegisteredVideoModelRef(
+      currentConfig.primary,
+      registeredProviders,
+      managedContract,
+    );
     const openAiProvider = isRecord(config.models)
       && isRecord(config.models.providers)
       && isRecord(config.models.providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY])
@@ -607,11 +648,9 @@ export async function ensureManagedOpenAiVideoRelay(
     const managedOpenAiBaseUrl = getJunFeiAIDefaultBaseUrl().trim().replace(/\/+$/u, '');
     const isManagedOpenAiRelay = parsedPrimary?.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
       && configuredOpenAiBaseUrl === managedOpenAiBaseUrl;
-    const canPreservePrimary = Boolean(normalizedPrimary)
-      && (!isManagedOpenAiRelay || isClawXOpenAiVideoModelId(parsedPrimary?.model));
-    if (canPreservePrimary && normalizedPrimary) {
+    if (!isManagedOpenAiRelay && normalizedPrimary) {
       const normalizedFallbacks = currentConfig.fallbacks
-        .map((fallback) => normalizeRegisteredVideoModelRef(fallback, registeredProviders))
+        .map((fallback) => normalizeRegisteredVideoModelRef(fallback, registeredProviders, managedContract))
         .filter((fallback): fallback is string => Boolean(fallback));
       if (
         normalizedPrimary !== currentConfig.primary
@@ -626,26 +665,30 @@ export async function ensureManagedOpenAiVideoRelay(
       }
       return;
     }
+    if (isManagedOpenAiRelay && isClawXOpenAiVideoModelId(parsedPrimary?.model, managedContract)) {
+      preferredManagedModel = normalizeClawXOpenAiVideoModelId(parsedPrimary?.model, managedContract);
+    }
   }
   const current = await getVideoGenerationSettingsSnapshot();
-  const model = current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
+  const model = preferredManagedModel;
   const timeoutMs = CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS;
-  const modelIds = orderedClawXOpenAiVideoModelIds(model);
-  const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0] ?? CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
+  const modelIds = orderedClawXOpenAiVideoModelIds(managedContract, model);
+  const primaryModel = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelIds[0]}`;
   const relayState = readOpenAiCompatibleVideoRelayState(config as Record<string, unknown>);
+  const embeddedContract = readManagedVideoCapabilityContractFromConfig(config as Record<string, unknown>);
   const relayAlreadyConfigured = relayState.enabled
     && relayState.providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     && relayState.baseUrl.trim() === current.openAiRelay.baseUrl.trim()
     && currentConfig.primary === primaryModel
     && currentConfig.timeoutMs === timeoutMs
-    && currentConfig.fallbacks.length === 0;
+    && currentConfig.fallbacks.length === 0
+    && JSON.stringify(embeddedContract) === JSON.stringify(managedContract);
 
   if (!relayAlreadyConfigured) {
     await applyOpenAiVideoRelaySettings({
       enabled: true,
       baseUrl: current.openAiRelay.baseUrl,
       model,
-      timeoutMs,
     });
     return;
   }
@@ -679,13 +722,20 @@ export async function generateVideoForChatSession(params: {
   }
 
   const config = await readOpenClawConfig();
+  const managedContract = await resolveManagedVideoContract(config as Record<string, unknown>);
   const current = await getVideoGenerationSettingsSnapshot();
   const inputImages = normalizeInputImageRefs(params.inputImages);
   const requestedModel = params.model?.trim();
+  const configuredModelCandidate = requestedModel ?? current.config.primary ?? current.openAiRelay.model;
+  const modelCapability = requireManagedVideoModel(
+    managedContract,
+    configuredModelCandidate,
+    inputImages.length,
+    Boolean(requestedModel),
+  );
   const configuredModel = requestedModel
-    ? (requestedModel.includes('/') ? requestedModel : `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${requestedModel}`)
-    : current.config.primary
-      || `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
+    ? (requestedModel.includes('/') ? requestedModel : `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelCapability.id}`)
+    : `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${modelCapability.id}`;
   const providerKey = parseProviderFromVideoModelRef(configuredModel);
   const directApiKey = providerKey === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     ? await resolveVideoRelayApiKey(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, agentId)
@@ -697,8 +747,8 @@ export async function generateVideoForChatSession(params: {
     prompt: params.prompt.trim(),
     model: configuredModel,
     timeoutMs: CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS,
-    size: params.size?.trim() || DEFAULT_TEST_VIDEO_SIZE,
-    durationSeconds: params.durationSeconds ?? DEFAULT_TEST_DURATION_SECONDS,
+    size: params.size?.trim() || modelCapability.defaultSize,
+    durationSeconds: params.durationSeconds ?? modelCapability.defaultDurationSeconds,
     inputImages,
     directOpenAiCompatible: directApiKey && current.openAiRelay.baseUrl
       ? {

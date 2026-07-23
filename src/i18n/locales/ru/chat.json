@@ -326,6 +326,7 @@
         "imageEditMissingReference": "Какое изображение нужно отредактировать? Загрузите или выберите изображение.",
         "videoMode": "Режим видео",
         "videoModeActive": "Режим видео включен",
+        "videoCapabilityUnavailable": "Генерация видео временно недоступна.",
         "videoSizeLabel": "Размер видео",
         "videoDurationLabel": "Длительность видео",
         "modelPickerTitle": "Переключить модель",

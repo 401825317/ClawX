@@ -21,13 +21,19 @@ export interface VideoGenerationAgentAuthRow {
 export interface VideoGenerationModelOption {
   id: string;
   label: string;
-  description: string;
+  description?: string;
   verified: boolean;
   modes: string[];
+  sizes: string[];
+  durations: number[];
+  defaultSize: string;
+  defaultDurationSeconds: number;
+  requiresImage: boolean;
 }
 
 export interface OpenAiVideoRelayConfig {
   enabled: boolean;
+  capabilityAvailable: boolean;
   baseUrl: string;
   model: string;
   providerKey?: string;

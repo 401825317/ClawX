@@ -37,6 +37,12 @@ import {
   readJunFeiAIDeviceActivationState,
 } from '../../utils/junfeiai-device';
 import { logger } from '../../utils/logger';
+import {
+  cacheManagedVideoCapabilityContract,
+  mergeCachedVideoCapabilityIntoClientConfig,
+  readManagedVideoCapabilityContract,
+} from './managed-video-capability-cache';
+import type { ManagedVideoCapabilityContract } from '../../../shared/managed-video-capabilities';
 
 interface Sub2APIEnvelope<T> {
   code?: number;
@@ -915,10 +921,15 @@ async function requestJunFeiAI<T>(
 }
 
 async function fetchRemoteJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
-  return requestJunFeiAI<JunFeiAIBootstrapPayload>('/api/clawx/bootstrap', {
+  const bootstrap = await requestJunFeiAI<JunFeiAIBootstrapPayload>('/api/clawx/bootstrap', {
     method: 'GET',
     timeoutMs: 8000,
   });
+  const remoteVideoContract = bootstrap.client?.modelOptions?.video;
+  if (remoteVideoContract !== undefined) {
+    await cacheManagedVideoCapabilityContract(remoteVideoContract);
+  }
+  return bootstrap;
 }
 
 export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload> {
@@ -926,22 +937,67 @@ export async function fetchJunFeiAIBootstrap(): Promise<JunFeiAIBootstrapPayload
   return (await applyLocalDeviceActivationState(bootstrap)).bootstrap;
 }
 
-export async function getJunFeiAIClientConfig(): Promise<JunFeiAIClientConfigPayload> {
+export async function refreshJunFeiAIClientConfig(): Promise<{
+  payload: JunFeiAIClientConfigPayload;
+  videoContractChanged: boolean;
+  videoContract: ManagedVideoCapabilityContract | null;
+}> {
   if (!isJunFeiAIManagedDistribution()) {
-    return {};
+    return { payload: {}, videoContractChanged: false, videoContract: null };
   }
   try {
-    return await requestJunFeiAI<JunFeiAIClientConfigPayload>('/api/clawx/client-config', {
+    const payload = await requestJunFeiAI<JunFeiAIClientConfigPayload>('/api/clawx/client-config', {
       method: 'GET',
       timeoutMs: 8000,
     });
-  } catch (error) {
-    if (!isMissingJunFeiAICompatRoute(error)) {
-      throw error;
+    const remoteVideoContract = payload.modelOptions?.video;
+    if (remoteVideoContract !== undefined) {
+      const { contract, changed } = await cacheManagedVideoCapabilityContract(remoteVideoContract);
+      return {
+        payload: {
+          ...payload,
+          modelOptions: {
+            ...(payload.modelOptions ?? {}),
+            video: contract ?? { models: [] },
+          },
+        },
+        videoContractChanged: changed,
+        videoContract: contract,
+      };
     }
-    const bootstrap = await fetchRemoteJunFeiAIBootstrap();
-    return bootstrap.client ?? {};
+    const videoContract = await readManagedVideoCapabilityContract();
+    return {
+      payload: await mergeCachedVideoCapabilityIntoClientConfig(
+        payload as Record<string, unknown>,
+      ) as JunFeiAIClientConfigPayload,
+      videoContractChanged: false,
+      videoContract,
+    };
+  } catch (error) {
+    if (isMissingJunFeiAICompatRoute(error)) {
+      const previousVideoContract = await readManagedVideoCapabilityContract();
+      const bootstrap = await fetchRemoteJunFeiAIBootstrap();
+      const videoContract = await readManagedVideoCapabilityContract();
+      return {
+        payload: await mergeCachedVideoCapabilityIntoClientConfig(
+          (bootstrap.client ?? {}) as Record<string, unknown>,
+        ) as JunFeiAIClientConfigPayload,
+        videoContractChanged: JSON.stringify(previousVideoContract) !== JSON.stringify(videoContract),
+        videoContract,
+      };
+    }
+    logger.warn('[junfeiai] Client config unavailable; using the last verified video capability contract:', error);
+    const videoContract = await readManagedVideoCapabilityContract();
+    return {
+      payload: await mergeCachedVideoCapabilityIntoClientConfig({}) as JunFeiAIClientConfigPayload,
+      videoContractChanged: false,
+      videoContract,
+    };
   }
+}
+
+export async function getJunFeiAIClientConfig(): Promise<JunFeiAIClientConfigPayload> {
+  return (await refreshJunFeiAIClientConfig()).payload;
 }
 
 async function requireStoredJunFeiAIAuthToken(): Promise<string> {

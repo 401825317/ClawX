@@ -3,10 +3,12 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { patchOpenClawVideoCapabilityContractRuntime } from './openclaw-video-capability-contract-patch.mjs';
 import {
   patchOpenClawVideoModelValidationRuntime,
   resolveValidatedVideoModelForCatalog,
 } from './openclaw-video-model-validation-patch.mjs';
+import { patchOpenClawVideoProviderCatalogRuntime } from './openclaw-video-provider-catalog-patch.mjs';
 
 const providers = [{
   id: 'openai',
@@ -68,13 +70,20 @@ const files = readdirSync(sourceDist)
   }));
 const targets = [
   files.find((entry) => entry.content.includes('function createVideoGenerateTool(options)')),
+  files.find((entry) => entry.content.includes('function resolveVideoGenerationOverrides(params)')),
   files.find((entry) => entry.content.includes('function buildOpenAIVideoGenerationProvider()')),
+  files.find((entry) => entry.content.includes('function listRuntimeVideoGenerationProviders(params, deps = {})')),
 ];
-assert.ok(targets.every(Boolean), 'expected video tool and OpenAI provider fixtures');
+assert.ok(targets.every(Boolean), 'expected video tool, runtime, OpenAI provider, and catalog fixtures');
 
 const fixtureDist = mkdtempSync(join(tmpdir(), 'uclaw-video-model-validation-'));
 try {
-  for (const target of targets) cpSync(target.file, join(fixtureDist, basename(target.file)));
+  const uniqueTargets = [...new Map(targets.map((target) => [target.file, target])).values()];
+  for (const target of uniqueTargets) cpSync(target.file, join(fixtureDist, basename(target.file)));
+  const catalog = patchOpenClawVideoProviderCatalogRuntime(fixtureDist, { logger: { log() {} } });
+  assert.equal(catalog.matchedFiles, 1);
+  const capability = patchOpenClawVideoCapabilityContractRuntime(fixtureDist, { logger: { log() {} } });
+  assert.equal(capability.matchedFiles, 3);
   const first = patchOpenClawVideoModelValidationRuntime(fixtureDist, { logger: { log() {} } });
   assert.equal(first.matchedFiles, 2);
   assert.equal(first.patchedFiles + first.alreadyPatchedFiles, 2);
@@ -86,8 +95,10 @@ try {
   assert.match(toolContent, /UCLAW_VIDEO_MODEL_VALIDATION_TOOL_V2/u);
   assert.match(toolContent, /validateVideoGenerationModelSelection/u);
   assert.match(toolContent, /invalid_video_model/u);
-  assert.match(providerContent, /UCLAW_VIDEO_MODEL_VALIDATION_OPENAI_V1/u);
+  assert.match(providerContent, /UCLAW_VIDEO_CAPABILITY_CONTRACT_OPENAI_V3/u);
+  assert.match(providerContent, /UCLAW_VIDEO_MODEL_VALIDATION_OPENAI_V2/u);
   assert.match(providerContent, /isSupportedOpenAIVideoGenerationModel/u);
+  assert.match(providerContent, /isSupportedOpenAIVideoGenerationModel\(model, req\.cfg\)/u);
   assert.match(providerContent, /invalid_video_model/u);
 
   const helperMatch = toolContent.match(

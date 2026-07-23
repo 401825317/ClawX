@@ -5,9 +5,7 @@ import {
   CLAWX_OPENAI_IMAGE_PROVIDER_KEY,
 } from '../../utils/openclaw-image-relay-constants';
 import {
-  CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
-  normalizeClawXOpenAiVideoModelId,
 } from '../../utils/openclaw-video-relay-constants';
 import { parseJsonBody, sendJson } from '../route-utils';
 import {
@@ -161,11 +159,15 @@ export async function handleMediaRoutes(
       }>(req);
 
       const current = await getVideoGenerationSettingsSnapshot();
-      const relayModel = normalizeClawXOpenAiVideoModelId(
-        typeof body.openAiRelayModel === 'string' && body.openAiRelayModel.trim()
-          ? body.openAiRelayModel
-          : (current.openAiRelay.model || CLAWX_OPENAI_VIDEO_DEFAULT_MODEL),
-      );
+      const requestedRelayModel = typeof body.openAiRelayModel === 'string'
+        ? body.openAiRelayModel.trim()
+        : '';
+      const relayModel = current.openAiRelay.modelOptions.find((model) => model.id === requestedRelayModel)?.id
+        ?? current.openAiRelay.modelOptions.find((model) => model.id === current.openAiRelay.model)?.id
+        ?? current.openAiRelay.modelOptions[0]?.id;
+      if (body.openAiRelayEnabled !== false && !relayModel) {
+        throw new Error('managed_video_capability_unavailable: no verified backend video contract is available');
+      }
       let nextPrimary = current.config.primary;
       let nextFallbacks = current.config.fallbacks;
       if (body.openAiRelayEnabled === true) {
@@ -186,7 +188,7 @@ export async function handleMediaRoutes(
           enabled: body.openAiRelayEnabled,
           baseUrl: body.openAiRelayBaseUrl,
           apiKey: body.openAiRelayApiKey,
-          model: relayModel,
+          model: relayModel ?? null,
         });
       }
 

@@ -110,5 +110,10 @@
             "relayModelRequired": "Model name is required",
             "relayModelInvalid": "Enter only the model name, for example gpt-image-2. Do not include provider/model."
         }
+    },
+    "videoGeneration": {
+        "errors": {
+            "capabilityUnavailable": "Video capability unavailable"
+        }
     }
 }

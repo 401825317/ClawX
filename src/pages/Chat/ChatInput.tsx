@@ -178,38 +178,6 @@ function preferredOptionValue<T>(value: T | undefined, options: T[], fallback: T
   return options[0] ?? fallback;
 }
 
-function dimensionArea(value: string): number {
-  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i);
-  if (!match) return 0;
-  return Number(match[1]) * Number(match[2]);
-}
-
-function strongestSizeOption(options: string[] | undefined, fallback: string): string {
-  const candidates = (options ?? []).filter(Boolean);
-  if (candidates.length === 0) return fallback;
-  return candidates.reduce((best, current) => (
-    dimensionArea(current) > dimensionArea(best) ? current : best
-  ), candidates[0]!);
-}
-
-function strongestDurationOption(options: number[] | undefined, fallback: number): number {
-  const candidates = (options ?? []).filter((value) => Number.isFinite(value) && value > 0);
-  return candidates.length > 0 ? Math.max(...candidates) : fallback;
-}
-
-function formatVideoSizeLabel(value: string): string {
-  switch (value) {
-    case '1280x720':
-      return '16:9';
-    case '720x1280':
-      return '9:16';
-    case '1024x1024':
-      return '1:1';
-    default:
-      return value;
-  }
-}
-
 function formatImageQualityLabel(value: string, t: ReturnType<typeof useTranslation>['t']): string {
   switch (value) {
     case 'low':
@@ -471,13 +439,20 @@ export function ChatInput({
   ]);
   const defaultVideoOptions = useMemo<ChatVideoSendOptions>(() => {
     const configuredDefault = videoModelOptions.find((model) => model.id === clientModelOptions.video.defaultModel);
-    const model = configuredDefault ?? firstEnabled(videoModelOptions) ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.models[0];
+    const model = configuredDefault ?? firstEnabled(videoModelOptions);
+    if (!model) {
+      return { model: '', size: '', durationSeconds: 0 };
+    }
     const configuredFallbackSize = model?.defaultSize ?? clientModelOptions.video.defaultSize ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultSize;
     const configuredFallbackDuration = model?.defaultDurationSeconds
       ?? clientModelOptions.video.defaultDurationSeconds
       ?? DEFAULT_CLIENT_MODEL_OPTIONS.video.defaultDurationSeconds;
-    const fallbackSize = strongestSizeOption(model?.sizes, configuredFallbackSize);
-    const fallbackDuration = strongestDurationOption(model?.durations, configuredFallbackDuration);
+    const fallbackSize = preferredOptionValue(configuredFallbackSize, model.sizes, model.sizes[0] ?? '');
+    const fallbackDuration = preferredOptionValue(
+      configuredFallbackDuration,
+      model.durations,
+      model.durations[0] ?? 0,
+    );
     return {
       model: model?.id ?? clientModelOptions.video.defaultModel,
       size: optionValue(fallbackSize, model?.sizes ?? [], fallbackSize),
@@ -495,6 +470,7 @@ export function ChatInput({
   const selectedVideoModel = videoModelOptions.find((model) => model.id === sessionVideoOptions[currentSessionKey]?.model)
     ?? videoModelOptions.find((model) => model.id === defaultVideoOptions.model)
     ?? videoModelOptions[0];
+  const videoAvailable = Boolean(selectedVideoModel && videoModelOptions.length > 0);
   const imageOptions: ChatImageSendOptions = {
     ...defaultImageOptions,
     ...sessionImageOptions[currentSessionKey],
@@ -515,6 +491,11 @@ export function ChatInput({
     selectedVideoModel?.durations ?? [],
     defaultVideoOptions.durationSeconds,
   );
+
+  useEffect(() => {
+    if (sendMode !== 'video' || videoAvailable) return;
+    setSessionSendModes((current) => ({ ...current, [currentSessionKey]: 'chat' }));
+  }, [currentSessionKey, sendMode, videoAvailable]);
 
   useEffect(() => {
     if (!hasImageEditReference) return;
@@ -861,6 +842,7 @@ export function ChatInput({
   }, [currentSessionKey, selectedThinkingLevel, t, updateSessionThinking]);
 
   const toggleMediaMode = useCallback((mode: Exclude<ChatSendMode, 'chat'>) => {
+    if (mode === 'video' && !videoAvailable) return;
     setPickerOpen(false);
     setSkillPickerOpen(false);
     setModelPickerOpen(false);
@@ -871,7 +853,7 @@ export function ChatInput({
       [currentSessionKey]: current[currentSessionKey] === mode ? 'chat' : mode,
     }));
     textareaRef.current?.focus();
-  }, [currentSessionKey]);
+  }, [currentSessionKey, videoAvailable]);
 
   const updateImageOptions = useCallback((next: Partial<ChatImageSendOptions>) => {
     setSessionImageOptions((current) => ({
@@ -1060,6 +1042,11 @@ export function ChatInput({
       : readyAttachments;
     const attachmentsToSend = dedupedReadyAttachments.length > 0 ? dedupedReadyAttachments : undefined;
 
+    if (sendMode === 'video' && !videoAvailable) {
+      toast.error(t('composer.videoCapabilityUnavailable', 'Video generation is temporarily unavailable.'));
+      return;
+    }
+
     if (rendererExtensionRegistry.hasChatBeforeSendHooks()) {
       const guard = await rendererExtensionRegistry.runChatBeforeSend({
         text: textToSend,
@@ -1141,6 +1128,7 @@ export function ChatInput({
     targetAgentId,
     updateSessionModel,
     videoOptions,
+    videoAvailable,
   ]);
 
   const handleStop = useCallback(() => {
@@ -1677,7 +1665,7 @@ export function ChatInput({
                     : 'hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10',
                 )}
                 onClick={() => toggleMediaMode('video')}
-                disabled={inputDisabled || sending}
+                disabled={inputDisabled || sending || !videoAvailable}
                 title={sendMode === 'video' ? t('composer.videoModeActive', 'Video mode on') : t('composer.videoMode', 'Video')}
               >
                 <Film className="h-4 w-4 shrink-0" />
@@ -1772,7 +1760,7 @@ export function ChatInput({
               </div>
             )}
 
-            {sendMode === 'video' && (
+            {sendMode === 'video' && selectedVideoModel && (
               <div className="ml-2 flex items-center gap-2" data-testid="chat-video-options">
                 <Select
                   value={videoOptions.size}
@@ -1783,7 +1771,7 @@ export function ChatInput({
                 >
                   {(selectedVideoModel?.sizes ?? [videoOptions.size]).map((size) => (
                     <option key={size} value={size}>
-                      {formatVideoSizeLabel(size)}
+                      {size}
                     </option>
                   ))}
                 </Select>

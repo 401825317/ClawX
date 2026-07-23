@@ -41,7 +41,7 @@ const managedClientModelOptions = {
       id: 'grok-image-video',
       label: 'Grok Video',
       modes: ['text-to-video', 'image-to-video'],
-      sizes: ['1280x720', '720x1280', '1024x1024'],
+      sizes: ['854x480', '1280x720', '720x1280', '1024x1024'],
       durations: [6, 10, 15],
       defaultSize: '1280x720',
       defaultDurationSeconds: 6,
@@ -280,7 +280,14 @@ test.describe('ClawX chat model picker', () => {
       await expect(page.getByTestId('chat-video-options')).toBeVisible();
       await expect(page.getByTestId('chat-image-options')).toHaveCount(0);
       await expect(page.getByTestId('chat-video-model')).toHaveCount(0);
-      await expect(await page.getByTestId('chat-video-size').locator('option').allTextContents()).toEqual(['16:9', '9:16', '1:1']);
+      await expect(await page.getByTestId('chat-video-size').locator('option').allTextContents()).toEqual([
+        '854x480',
+        '1280x720',
+        '720x1280',
+        '1024x1024',
+      ]);
+      await expect(page.getByTestId('chat-video-size')).toHaveValue('1280x720');
+      await expect(page.getByTestId('chat-video-duration')).toHaveValue('6');
 
       await page.getByTestId('chat-model-picker-button').click();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();

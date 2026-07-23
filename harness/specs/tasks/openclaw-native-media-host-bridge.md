@@ -155,7 +155,8 @@ acceptance:
   - The packaged and development startup paths install and enable every required bundled bridge plugin.
   - `clawx-openai-image` advertises only output controls it actually forwards, including JPEG/WebP compression and supported backgrounds.
   - An oversized PNG response for a requested JPEG is saved as a valid JPEG below the configured image byte cap, with authoritative MIME type and filename metadata.
-  - Managed UClaw installs default `agents.defaults.mediaMaxMb` to 16 when unset, while preserving an explicit user value.
+  - Managed UClaw installs default `agents.defaults.mediaMaxMb` to 16 for inline image and channel delivery when unset, while preserving an explicit user value.
+  - Generated video provider downloads and local artifact saves use the separate managed video byte budget, so first generation and regeneration may exceed 16 MiB up to the 1 GiB fail-closed safety cap without relaxing image or ordinary attachment delivery limits.
   - Failed, partial, cancelled, and completed native image tasks are terminal for the renderer pending-state detector even when the artifact guard filters their internal completion envelopes from transcript history.
   - `local.video.compose` and `local.video.timeline.render` resolve packaged FFmpeg/ffprobe binaries for the current macOS, Windows, or Linux target and do not contain a permanent OS-family rejection.
   - Packaging fails when the target FFmpeg/ffprobe binaries are absent, have the wrong architecture, or cannot execute their version probes.

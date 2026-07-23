@@ -1,89 +1,103 @@
 import { JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS } from '../../shared/junfeiai-endpoints';
+import {
+  findManagedVideoModelCapability,
+  MANAGED_VIDEO_CAPABILITY_PROVIDER_PARAM,
+  normalizeManagedVideoCapabilityContract,
+  resolveManagedVideoDurationSeconds,
+  resolveManagedVideoModelCapability,
+  type ManagedVideoCapabilityContract,
+  type ManagedVideoMode,
+  type ManagedVideoModelCapability,
+} from '../../shared/managed-video-capabilities';
 
 export const CLAWX_OPENAI_VIDEO_PROVIDER_KEY = 'openai';
-export const CLAWX_OPENAI_VIDEO_DEFAULT_MODEL = 'grok-image-video';
-export const CLAWX_OPENAI_VIDEO_15_MODEL = 'grok-video-1.5';
-export const CLAWX_OPENAI_VIDEO_DEFAULT_REF = `${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/${CLAWX_OPENAI_VIDEO_DEFAULT_MODEL}`;
 export const CLAWX_OPENAI_VIDEO_DEFAULT_TIMEOUT_MS = JUNFEIAI_VIDEO_GENERATION_TIMEOUT_MS;
-export const CLAWX_OPENAI_VIDEO_SUPPORTED_DURATION_SECONDS = [6, 10, 15] as const;
-export const CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS = CLAWX_OPENAI_VIDEO_SUPPORTED_DURATION_SECONDS[0];
 
-export type ClawXOpenAiVideoMode = 'text-to-video' | 'image-to-video';
+export type ClawXOpenAiVideoMode = ManagedVideoMode;
 
-export interface ClawXOpenAiVideoModelOption {
-  id: string;
-  label: string;
-  description: string;
-  verified: boolean;
-  modes: ClawXOpenAiVideoMode[];
+export interface ClawXOpenAiVideoModelOption extends ManagedVideoModelCapability {
+  verified: true;
 }
 
-export const CLAWX_OPENAI_VIDEO_MODEL_OPTIONS: ClawXOpenAiVideoModelOption[] = [
-  {
-    id: CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
-    label: 'Grok Imagine',
-    description: 'General video generation model for text, image, or video to video.',
-    verified: true,
-    modes: ['text-to-video', 'image-to-video'],
-  },
-  {
-    id: CLAWX_OPENAI_VIDEO_15_MODEL,
-    label: 'Grok Imagine 1.5',
-    description: 'Image-to-video model. Requires exactly one reference image.',
-    verified: true,
-    modes: ['image-to-video'],
-  },
-];
-
-export const CLAWX_OPENAI_VIDEO_MODEL_IDS = CLAWX_OPENAI_VIDEO_MODEL_OPTIONS.map((model) => model.id);
-
-export const CLAWX_OPENAI_VIDEO_MODEL_ALIASES: Record<string, string> = {
-  'grok-imagine-video': CLAWX_OPENAI_VIDEO_DEFAULT_MODEL,
-  'grok-imagine-video-1.5': CLAWX_OPENAI_VIDEO_15_MODEL,
-  'grok-imagine-video-1.5-preview': CLAWX_OPENAI_VIDEO_15_MODEL,
+const LEGACY_MODEL_ALIASES: Record<string, string> = {
+  'grok-imagine-video': 'grok-image-video',
+  'grok-imagine-video-1.5': 'grok-video-1.5',
+  'grok-imagine-video-1.5-preview': 'grok-video-1.5',
 };
 
-export function normalizeClawXOpenAiVideoModelId(raw?: string | null): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function readManagedVideoCapabilityContractFromConfig(
+  config: unknown,
+): ManagedVideoCapabilityContract | null {
+  if (!isRecord(config) || !isRecord(config.models) || !isRecord(config.models.providers)) return null;
+  const provider = config.models.providers[CLAWX_OPENAI_VIDEO_PROVIDER_KEY];
+  if (!isRecord(provider) || !isRecord(provider.params)) return null;
+  return normalizeManagedVideoCapabilityContract(
+    provider.params[MANAGED_VIDEO_CAPABILITY_PROVIDER_PARAM],
+  );
+}
+
+function modelIdFromRef(raw?: string | null): string {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
   const modelId = trimmed.includes('/') ? trimmed.slice(trimmed.indexOf('/') + 1).trim() : trimmed;
-  const normalizedAlias = CLAWX_OPENAI_VIDEO_MODEL_ALIASES[modelId] ?? modelId;
-  return CLAWX_OPENAI_VIDEO_MODEL_IDS.includes(normalizedAlias)
-    ? normalizedAlias
-    : CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
+  return LEGACY_MODEL_ALIASES[modelId] ?? modelId;
 }
 
-export function isClawXOpenAiVideoModelId(raw?: string | null): boolean {
+export function managedVideoModelOptions(
+  contract: ManagedVideoCapabilityContract | null | undefined,
+): ClawXOpenAiVideoModelOption[] {
+  return (contract?.models ?? []).map((model) => ({ ...model, verified: true }));
+}
+
+export function normalizeClawXOpenAiVideoModelId(
+  raw: string | null | undefined,
+  contract: ManagedVideoCapabilityContract,
+): string {
+  const modelId = modelIdFromRef(raw);
+  return findManagedVideoModelCapability(contract, modelId)?.id ?? contract.defaultModel;
+}
+
+export function isClawXOpenAiVideoModelId(
+  raw: string | null | undefined,
+  contract: ManagedVideoCapabilityContract | null | undefined,
+): boolean {
+  return Boolean(findManagedVideoModelCapability(contract, modelIdFromRef(raw)));
+}
+
+export function isClawXOpenAiVideoModelRef(
+  raw: string | null | undefined,
+  contract: ManagedVideoCapabilityContract | null | undefined,
+): boolean {
   const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  const modelId = trimmed.includes('/') ? trimmed.slice(trimmed.indexOf('/') + 1).trim() : trimmed;
-  const normalizedAlias = CLAWX_OPENAI_VIDEO_MODEL_ALIASES[modelId] ?? modelId;
-  return CLAWX_OPENAI_VIDEO_MODEL_IDS.includes(normalizedAlias);
+  return trimmed.startsWith(`${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/`)
+    && isClawXOpenAiVideoModelId(trimmed, contract);
 }
 
-export function isClawXOpenAiVideoModelRef(raw?: string | null): boolean {
-  const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  if (!trimmed.startsWith(`${CLAWX_OPENAI_VIDEO_PROVIDER_KEY}/`)) {
-    return false;
-  }
-  return isClawXOpenAiVideoModelId(trimmed);
-}
-
-export function normalizeClawXOpenAiVideoDurationSeconds(raw?: number | null): number {
-  const requested = typeof raw === 'number' && Number.isFinite(raw)
-    ? Math.max(CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS, Math.round(raw))
-    : CLAWX_OPENAI_VIDEO_FALLBACK_DURATION_SECONDS;
-  return CLAWX_OPENAI_VIDEO_SUPPORTED_DURATION_SECONDS.reduce((nearest, candidate) => (
-    Math.abs(candidate - requested) < Math.abs(nearest - requested) ? candidate : nearest
-  ));
-}
-
-export function orderedClawXOpenAiVideoModelIds(primary?: string | null): string[] {
-  const normalizedPrimary = normalizeClawXOpenAiVideoModelId(primary);
+export function orderedClawXOpenAiVideoModelIds(
+  contract: ManagedVideoCapabilityContract,
+  primary?: string | null,
+): string[] {
+  const normalizedPrimary = normalizeClawXOpenAiVideoModelId(primary, contract);
   return [
     normalizedPrimary,
-    ...CLAWX_OPENAI_VIDEO_MODEL_IDS.filter((modelId) => modelId !== normalizedPrimary),
+    ...contract.models.map((model) => model.id).filter((modelId) => modelId !== normalizedPrimary),
   ];
 }
 
-export function selectClawXOpenAiVideoModelIdForInput(imageCount: number): string {
-  return imageCount > 0 ? CLAWX_OPENAI_VIDEO_15_MODEL : CLAWX_OPENAI_VIDEO_DEFAULT_MODEL;
+export function selectClawXOpenAiVideoModelForInput(
+  contract: ManagedVideoCapabilityContract,
+  imageCount: number,
+  requestedModel?: string | null,
+): ManagedVideoModelCapability | null {
+  return resolveManagedVideoModelCapability(contract, modelIdFromRef(requestedModel), imageCount);
+}
+
+export function normalizeClawXOpenAiVideoDurationSeconds(
+  model: ManagedVideoModelCapability,
+  raw?: number | null,
+): number {
+  return resolveManagedVideoDurationSeconds(model, raw);
 }

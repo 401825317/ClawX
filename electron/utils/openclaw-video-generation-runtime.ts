@@ -8,11 +8,11 @@ import { JUNFEIAI_VIDEO_GENERATION_POLL_INTERVAL_MS } from '../../shared/junfeia
 import { proxyAwareFetch } from './proxy-fetch';
 import { resolveOpenClawRuntimeModulePath } from './runtime-package-resolution';
 import {
-  CLAWX_OPENAI_VIDEO_15_MODEL,
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
-  isClawXOpenAiVideoModelId,
   normalizeClawXOpenAiVideoDurationSeconds,
+  readManagedVideoCapabilityContractFromConfig,
 } from './openclaw-video-relay-constants';
+import type { ManagedVideoModelCapability } from '../../shared/managed-video-capabilities';
 import { saveGeneratedMediaBuffer } from './generated-media-store';
 
 export interface VideoGenerationInputImageAsset {
@@ -167,9 +167,12 @@ function parseVideoSize(size: string | undefined): { width?: number; height?: nu
   };
 }
 
-function normalizeDurationSeconds(durationSeconds: number | undefined, model: string): number {
-  if (isClawXOpenAiVideoModelId(model)) {
-    return normalizeClawXOpenAiVideoDurationSeconds(durationSeconds);
+function normalizeDurationSeconds(
+  durationSeconds: number | undefined,
+  managedModel: ManagedVideoModelCapability | null,
+): number {
+  if (managedModel) {
+    return normalizeClawXOpenAiVideoDurationSeconds(managedModel, durationSeconds);
   }
   return typeof durationSeconds === 'number' && Number.isFinite(durationSeconds)
     ? Math.max(1, Math.round(durationSeconds))
@@ -576,23 +579,33 @@ export async function generateVideoInProcess(params: {
   );
   const inputImages = await loadInputImages(params.inputImages);
   const imageCount = inputImages?.filter((image) => image.buffer && image.buffer.length > 0).length ?? 0;
-  const requestedSize = params.size?.trim() || '1280x720';
-  const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds, parsedModel.model);
-  const requestedDimensions = parseVideoSize(requestedSize);
-
-  if (parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+  const managedContract = readManagedVideoCapabilityContractFromConfig(params.config);
+  const managedModel = parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
+    ? managedContract?.models.find((model) => model.id === parsedModel.model) ?? null
+    : null;
+  const managedRelayRequest = parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
     && params.directOpenAiCompatible
-    && !isOfficialOpenAiBaseUrl(params.directOpenAiCompatible.baseUrl)
-    && !isClawXOpenAiVideoModelId(parsedModel.model)) {
+    && !isOfficialOpenAiBaseUrl(params.directOpenAiCompatible.baseUrl);
+  if (managedRelayRequest && !managedModel) {
     throw new Error(
-      `invalid_video_model: "${parsedModel.model}" is not supported by the managed OpenAI-compatible video relay.`,
+      `invalid_video_model: "${parsedModel.model}" is not advertised by the managed backend video contract.`,
     );
   }
+  const requiredMode = imageCount > 0 ? 'image-to-video' : 'text-to-video';
+  if (managedModel && !managedModel.modes.includes(requiredMode)) {
+    throw new Error(`invalid_video_model: "${parsedModel.model}" does not support ${requiredMode}.`);
+  }
+  const requestedSize = params.size?.trim() || managedModel?.defaultSize || '1280x720';
+  if (managedModel && !managedModel.sizes.includes(requestedSize)) {
+    throw new Error(
+      `invalid_video_size: "${requestedSize}" is not supported by managed model "${managedModel.id}".`,
+    );
+  }
+  const requestedDurationSeconds = normalizeDurationSeconds(params.durationSeconds, managedModel);
+  const requestedDimensions = parseVideoSize(requestedSize);
 
-  if (parsedModel.provider === CLAWX_OPENAI_VIDEO_PROVIDER_KEY
-    && parsedModel.model === CLAWX_OPENAI_VIDEO_15_MODEL
-    && imageCount !== 1) {
-    throw new Error('grok-video-1.5 requires exactly one reference image.');
+  if (managedModel?.requiresImage && imageCount !== 1) {
+    throw new Error(`${managedModel.id} requires exactly one reference image.`);
   }
 
   if (

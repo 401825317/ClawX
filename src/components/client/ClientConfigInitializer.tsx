@@ -28,7 +28,7 @@ export function ClientConfigInitializer(props: ClientConfigInitializerProps) {
       }, CLIENT_CONFIG_IDLE_TIMEOUT_MS);
     };
 
-    scheduleRefresh();
+    void fetchConfig();
 
     const interval = window.setInterval(() => {
       if (document.visibilityState !== 'hidden') {

@@ -44,8 +44,8 @@ import {
 } from '../../utils/openclaw-image-relay-constants';
 import {
   CLAWX_OPENAI_VIDEO_PROVIDER_KEY,
-  CLAWX_OPENAI_VIDEO_MODEL_IDS,
 } from '../../utils/openclaw-video-relay-constants';
+import { readManagedVideoCapabilityContract } from '../junfeiai/managed-video-capability-cache';
 
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai-codex';
 const OPENAI_OAUTH_DEFAULT_MODEL_REF = `${OPENAI_OAUTH_RUNTIME_PROVIDER}/gpt-5.5`;
@@ -756,12 +756,15 @@ async function syncManagedRelayAgentModelsAcrossDiscoveredAgents(
     apiKey: managedApiKey,
   }, { createIfMissing: false });
 
-  await updateAgentModelProvider(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, {
-    baseUrl,
-    api: 'openai-responses',
-    models: CLAWX_OPENAI_VIDEO_MODEL_IDS.map((modelId) => piAiModelsJsonModelEntry(modelId)),
-    apiKey: managedApiKey,
-  }, { createIfMissing: false });
+  const videoContract = await readManagedVideoCapabilityContract();
+  if (videoContract) {
+    await updateAgentModelProvider(CLAWX_OPENAI_VIDEO_PROVIDER_KEY, {
+      baseUrl,
+      api: 'openai-responses',
+      models: videoContract.models.map((model) => piAiModelsJsonModelEntry(model.id)),
+      apiKey: managedApiKey,
+    }, { createIfMissing: false });
+  }
 }
 
 async function syncManagedRelayAuthProfiles(apiKey: string | undefined): Promise<void> {

@@ -2,6 +2,42 @@ import { closeElectronApp, expect, getStableWindow, installIpcMocks, test } from
 import type { ElectronApplication } from '@playwright/test';
 
 const SESSION_KEY = 'agent:main:e2e-native-media';
+const MANAGED_VIDEO_MODEL_OPTIONS = {
+  defaultModel: 'grok-image-video',
+  defaultSize: '1280x720',
+  defaultDurationSeconds: 6,
+  models: [{
+    id: 'grok-image-video',
+    label: 'Managed Video',
+    modes: ['text-to-video', 'image-to-video'],
+    sizes: ['854x480', '1280x720', '720x1280', '1024x1024'],
+    durations: [6, 10, 15],
+    defaultSize: '1280x720',
+    defaultDurationSeconds: 6,
+    enabled: true,
+  }],
+};
+const MANAGED_CLIENT_MODEL_OPTIONS = {
+  text: {
+    defaultModel: 'smart-latest',
+    models: [{ id: 'smart-latest', label: 'Smart', enabled: true }],
+  },
+  image: {
+    defaultModel: 'gpt-image-2',
+    defaultSize: '1024x1024',
+    defaultQuality: 'medium',
+    models: [{
+      id: 'gpt-image-2',
+      label: 'Image 2',
+      sizes: ['1024x1024'],
+      qualities: ['low', 'medium', 'high'],
+      defaultSize: '1024x1024',
+      defaultQuality: 'medium',
+      enabled: true,
+    }],
+  },
+  video: MANAGED_VIDEO_MODEL_OPTIONS,
+};
 const RETIRED_AGENT_BYPASS_PATHS = [
   '/api/composite-runs',
   '/api/local-artifacts/plan-batch',
@@ -94,6 +130,24 @@ async function installImageEditRoutingMocks(
 }
 
 test.describe('Native OpenClaw media routing', () => {
+  test('disables managed video when a fresh profile has no backend capability contract', async ({ launchElectronApp }) => {
+    const app = await launchElectronApp({ skipSetup: true });
+    try {
+      await installChatBootstrapMocks(app);
+      const page = await getStableWindow(app);
+      try {
+        await page.reload();
+      } catch (error) {
+        if (!String(error).includes('ERR_FILE_NOT_FOUND')) throw error;
+      }
+      await expect(page.getByTestId('chat-composer-input')).toBeEnabled({ timeout: 30_000 });
+      await expect(page.getByTestId('chat-composer-mode-video')).toBeDisabled();
+      await expect(page.getByTestId('chat-video-options')).toHaveCount(0);
+    } finally {
+      await closeElectronApp(app);
+    }
+  });
+
   const cases = [
     {
       mode: 'chat',
@@ -107,17 +161,33 @@ test.describe('Native OpenClaw media routing', () => {
     },
     {
       mode: 'video',
-      prompt: '创作五秒未来汽车短片',
+      prompt: 'Create a 5 second landscape future-car clip',
       selector: 'chat-composer-mode-video',
       preferenceKey: 'video',
+      expectedVideo: {
+        model: 'grok-image-video',
+        size: '1280x720',
+        durationSeconds: 6,
+      },
+    },
+    {
+      mode: 'video',
+      prompt: 'Create the longest maximum-resolution landscape future-car clip',
+      selector: 'chat-composer-mode-video',
+      preferenceKey: 'video',
+      expectedVideo: {
+        model: 'grok-image-video',
+        size: '1280x720',
+        durationSeconds: 15,
+      },
     },
   ] as const;
 
-  for (const currentCase of cases) test(`sends ${currentCase.mode} through one normal agent turn without planner or direct media dispatch`, async ({ launchElectronApp }) => {
+  for (const currentCase of cases) test(`sends ${currentCase.mode} through one normal agent turn: ${currentCase.prompt}`, async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
     try {
       await installChatBootstrapMocks(app);
-      await app.evaluate(({ app: _app }, { sessionKey, runId }) => {
+      await app.evaluate(({ app: _app }, { sessionKey, runId, videoModelOptions }) => {
         const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
         const requests: Array<{ path?: string; method?: string; body?: string }> = [];
         (globalThis as Record<string, unknown>).__nativeMediaRoutingRequests = requests;
@@ -141,6 +211,16 @@ test.describe('Native OpenClaw media routing', () => {
           }
           if (request.path === '/api/junfeiai/status' || request.path === '/api/junfeiai/status/local') {
             return { ok: true, data: { status: 200, ok: true, json: { managed: false } } };
+          }
+          if (request.path === '/api/junfeiai/client-config') {
+            return {
+              ok: true,
+              data: {
+                status: 200,
+                ok: true,
+                json: { modelOptions: { video: videoModelOptions } },
+              },
+            };
           }
           if (request.path === '/api/gateway/status') {
             return { ok: true, data: { status: 200, ok: true, json: { state: 'running', port: 18789, pid: 12345, gatewayReady: true } } };
@@ -179,9 +259,19 @@ test.describe('Native OpenClaw media routing', () => {
           }
           return { ok: true, data: { status: 200, ok: true, json: {} } };
         });
-      }, { sessionKey: SESSION_KEY, runId: `native-${currentCase.mode}-run` });
+      }, {
+        sessionKey: SESSION_KEY,
+        runId: `native-${currentCase.mode}-run`,
+        videoModelOptions: MANAGED_VIDEO_MODEL_OPTIONS,
+      });
 
       const page = await getStableWindow(app);
+      await page.evaluate((modelOptions) => {
+        localStorage.setItem('clawx-client-config', JSON.stringify({
+          state: { modelOptions },
+          version: 0,
+        }));
+      }, MANAGED_CLIENT_MODEL_OPTIONS);
       try {
         await page.reload();
       } catch (error) {
@@ -222,6 +312,9 @@ test.describe('Native OpenClaw media routing', () => {
       } else {
         expect(payload.clientPreferences?.image).toBeUndefined();
         expect(payload.clientPreferences?.video).toBeUndefined();
+      }
+      if ('expectedVideo' in currentCase) {
+        expect(payload.clientPreferences?.video).toEqual(currentCase.expectedVideo);
       }
     } finally {
       await closeElectronApp(app);
