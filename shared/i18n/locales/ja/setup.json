@@ -4,6 +4,10 @@
             "title": "ClawXへようこそ",
             "description": "AIアシスタントの設定準備が整いました"
         },
+        "auth": {
+            "title": "UClaw にログイン",
+            "description": "ログインまたは登録して、このデバイスを認証します"
+        },
         "runtime": {
             "title": "環境チェック",
             "description": "システム要件を確認中"
@@ -33,6 +37,91 @@
             "modernUI": "モダンで美しいインターフェース",
             "bundles": "プリインストールされたスキルバンドル",
             "crossPlatform": "クロスプラットフォーム対応"
+        }
+    },
+    "auth": {
+        "status": {
+            "checking": "UClaw アカウントの状態を確認中...",
+            "activatedForDevice": "UClaw アカウント、デバイス認証、モデルサービスの準備ができました。",
+            "activationVerified": "アクティベーションコードを確認しました",
+            "activationInvalid": "アクティベーションコードが無効です"
+        },
+        "fields": {
+            "account": "ユーザー名",
+            "password": "パスワード",
+            "activationCode": "アクティベーションコード",
+            "verifyCode": "認証コード"
+        },
+        "placeholders": {
+            "account": "ユーザー名を入力",
+            "password": "パスワードを入力",
+            "activationCode": "アクティベーションコードを入力",
+            "verifyCode": "認証コードを入力"
+        },
+        "actions": {
+            "login": "ログイン",
+            "register": "登録",
+            "check": "確認",
+            "sendCode": "コードを送信",
+            "sendCodeCountdown": "{{seconds}}秒",
+            "refresh": "更新",
+            "logout": "ログアウト",
+            "registerAndActivate": "登録して有効化"
+        },
+        "toast": {
+            "statusFailed": "状態を確認できませんでした: {{message}}",
+            "enterActivationCode": "アクティベーションコードを入力してください",
+            "activationVerified": "アクティベーションコードを確認しました",
+            "activationCheckFailed": "アクティベーションコードを確認できませんでした: {{message}}",
+            "enterAccountFirst": "先にユーザー名を入力してください",
+            "verifyCodeSent": "認証コードを送信しました",
+            "sendVerifyCodeFailed": "認証コードを送信できませんでした: {{message}}",
+            "enterAccountPassword": "ユーザー名とパスワードを入力してください",
+            "enterVerifyCode": "認証コードを入力してください",
+            "activated": "UClaw の登録と有効化が完了しました",
+            "loggedIn": "UClaw にログインしました",
+            "registerFailed": "登録できませんでした: {{message}}",
+            "loginFailed": "ログインできませんでした: {{message}}",
+            "loggedOut": "UClaw からログアウトしました",
+            "logoutFailed": "ログアウトできませんでした: {{message}}"
+        },
+        "errors": {
+            "invalid_credentials": "ユーザー名またはパスワードが正しくありません。",
+            "missing_credentials": "ユーザー名とパスワードを入力してください。",
+            "device_authorization_required": "続行するには、このデバイスのアクティベーションコードが必要です。",
+            "activation_invalid": "アクティベーションコードが無効または期限切れです。",
+            "activation_consumed": "このアクティベーションコードは使用済みです。",
+            "activation_expired": "このアクティベーションコードは期限切れです。",
+            "activation_ticket_expired": "有効化の確認期限が切れました。コードを再入力してください。",
+            "activation_device_mismatch": "有効化の確認がこのデバイスと一致しません。",
+            "registration_disabled": "現在、登録は利用できません。",
+            "login_disabled": "現在、ログインは利用できません。",
+            "password_policy": "パスワードは8〜20文字で入力してください。",
+            "invalid_email": "メールアドレスの形式が正しくありません。",
+            "email_taken": "このメールアドレスは登録済みです。",
+            "verification_invalid": "認証コードが正しくないか、期限切れです。",
+            "device_required": "このデバイスを識別できません。UClaw を再起動してください。",
+            "user_exists": "このユーザー名は既に使用されています。",
+            "invalid_username": "ユーザー名には1〜20文字の英字、数字、アンダースコア、ハイフンを使用してください。",
+            "auth_in_progress": "別のアカウント処理が進行中です。しばらくしてから再試行してください。",
+            "provider_conflict": "OpenAI プロバイダーは別の設定によって管理されています。",
+            "AUTH_INVALID": "ログインの有効期限が切れました。再度ログインしてください。",
+            "TIMEOUT": "リクエストがタイムアウトしました。後でもう一度お試しください。",
+            "RATE_LIMIT": "リクエストが多すぎます。しばらく待ってからお試しください。",
+            "PERMISSION": "このアカウントにはこの操作の権限がありません。",
+            "NETWORK": "ネットワーク接続に失敗しました。接続を確認してください。",
+            "CONFIG": "UClaw の設定を利用できません。アプリを再起動してください。",
+            "UNKNOWN": "UClaw を一時的に利用できません。後でもう一度お試しください。"
+        }
+    },
+    "authGate": {
+        "state": {
+            "checking": { "title": "UClaw アカウントを確認中", "description": "現在のアカウントとモデルサービスの認証を確認しています。" },
+            "loggedOut": { "title": "続行するにはログインしてください", "description": "ログインすると、このデバイスのモデルサービス認証が更新されます。" },
+            "loginExpired": { "title": "ログインの有効期限が切れました", "description": "UClaw に再度ログインしてください。" },
+            "activationRequired": { "title": "このデバイスを認証してください", "description": "アクティベーションコードを入力してデバイスを認証してください。" },
+            "relayMissing": { "title": "モデルサービスの準備ができていません", "description": "再度ログインしてモデルサービス認証を更新してください。" },
+            "error": { "title": "UClaw アカウントの状態を取得できません", "description": "ネットワーク接続を確認して再試行してください。" }
         }
     },
     "runtime": {

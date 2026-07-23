@@ -359,6 +359,7 @@ function ProviderCard({
 }: ProviderCardProps) {
   const { t, i18n } = useTranslation('settings');
   const { account, vendor, status } = item;
+  const isManaged = account.metadata?.managedBy === 'uclaw';
   const [newKey, setNewKey] = useState('');
   const [baseUrl, setBaseUrl] = useState(account.baseUrl || '');
   const [apiProtocol, setApiProtocol] = useState<ProviderAccount['apiProtocol']>(account.apiProtocol || 'openai-completions');
@@ -565,7 +566,7 @@ function ProviderCard({
           </div>
         </div>
 
-        {!isEditing && (
+        {(!isEditing || isManaged) && (
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             {!isDefault && (
             <Button
@@ -579,31 +580,35 @@ function ProviderCard({
                 <Check className="h-4 w-4" />
               </Button>
             )}
-            <Button
-              data-testid={`provider-edit-${account.id}`}
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground hover:bg-surface-modal shadow-sm"
-              onClick={onEdit}
-              title={t('aiProviders.card.editKey')}
-            >
-              <Edit className="h-4 w-4" />
-            </Button>
-            <Button
-              data-testid={`provider-delete-${account.id}`}
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 rounded-full text-muted-foreground hover:text-destructive hover:bg-surface-modal shadow-sm"
-              onClick={onDelete}
-              title={t('aiProviders.card.delete')}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+            {!isManaged && (
+              <>
+                <Button
+                  data-testid={`provider-edit-${account.id}`}
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 rounded-full text-muted-foreground hover:text-foreground hover:bg-surface-modal shadow-sm"
+                  onClick={onEdit}
+                  title={t('aiProviders.card.editKey')}
+                >
+                  <Edit className="h-4 w-4" />
+                </Button>
+                <Button
+                  data-testid={`provider-delete-${account.id}`}
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 rounded-full text-muted-foreground hover:text-destructive hover:bg-surface-modal shadow-sm"
+                  onClick={onDelete}
+                  title={t('aiProviders.card.delete')}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </>
+            )}
           </div>
         )}
       </div>
 
-      {isEditing && (
+      {isEditing && !isManaged && (
         <div className="space-y-6 mt-4 pt-4 border-t border-black/5 dark:border-white/5">
           {effectiveDocsUrl && (
             <div className="flex justify-end -mt-2 mb-2">

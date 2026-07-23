@@ -4,6 +4,10 @@
             "title": "Welcome to ClawX",
             "description": "Your AI assistant is ready to be configured"
         },
+        "auth": {
+            "title": "Sign in to UClaw",
+            "description": "Sign in or register and authorize this device"
+        },
         "runtime": {
             "title": "Environment Check",
             "description": "Verifying system requirements"
@@ -33,6 +37,109 @@
             "modernUI": "Modern, beautiful interface",
             "bundles": "Pre-installed skill bundles",
             "crossPlatform": "Cross-platform support"
+        }
+    },
+    "auth": {
+        "status": {
+            "checking": "Checking UClaw account status...",
+            "activatedForDevice": "Your UClaw account, device authorization, and model service are ready.",
+            "activationVerified": "Activation code verified",
+            "activationInvalid": "Activation code is invalid"
+        },
+        "fields": {
+            "account": "Username",
+            "password": "Password",
+            "activationCode": "Activation code",
+            "verifyCode": "Verification code"
+        },
+        "placeholders": {
+            "account": "Enter username",
+            "password": "Enter password",
+            "activationCode": "Enter activation code",
+            "verifyCode": "Enter verification code"
+        },
+        "actions": {
+            "login": "Sign in",
+            "register": "Register",
+            "check": "Verify",
+            "sendCode": "Send code",
+            "sendCodeCountdown": "{{seconds}}s",
+            "refresh": "Refresh",
+            "logout": "Sign out",
+            "registerAndActivate": "Register and activate"
+        },
+        "toast": {
+            "statusFailed": "Status check failed: {{message}}",
+            "enterActivationCode": "Enter an activation code",
+            "activationVerified": "Activation code verified",
+            "activationCheckFailed": "Activation check failed: {{message}}",
+            "enterAccountFirst": "Enter a username first",
+            "verifyCodeSent": "Verification code sent",
+            "sendVerifyCodeFailed": "Could not send the verification code: {{message}}",
+            "enterAccountPassword": "Enter your username and password",
+            "enterVerifyCode": "Enter the verification code",
+            "activated": "UClaw registration and activation completed",
+            "loggedIn": "Signed in to UClaw",
+            "registerFailed": "Registration failed: {{message}}",
+            "loginFailed": "Sign-in failed: {{message}}",
+            "loggedOut": "Signed out of UClaw",
+            "logoutFailed": "Sign-out failed: {{message}}"
+        },
+        "errors": {
+            "invalid_credentials": "Username or password is incorrect.",
+            "missing_credentials": "Enter your username and password.",
+            "device_authorization_required": "This device needs an activation code before you can continue.",
+            "activation_invalid": "The activation code is invalid or expired.",
+            "activation_consumed": "This activation code has already been used.",
+            "activation_expired": "This activation code has expired.",
+            "activation_ticket_expired": "Activation verification expired. Enter the activation code again.",
+            "activation_device_mismatch": "The activation verification does not match this device.",
+            "registration_disabled": "Registration is currently unavailable.",
+            "login_disabled": "Sign-in is currently unavailable.",
+            "password_policy": "Password length must be 8-20 characters.",
+            "invalid_email": "The email address is invalid.",
+            "email_taken": "This email address is already registered.",
+            "verification_invalid": "The verification code is incorrect or expired.",
+            "device_required": "This device could not be identified. Restart UClaw and try again.",
+            "user_exists": "This username is already in use.",
+            "invalid_username": "Use 1-20 letters, numbers, underscores, or hyphens for the username.",
+            "auth_in_progress": "Another account request is in progress. Try again shortly.",
+            "provider_conflict": "The OpenAI provider is already managed by another configuration.",
+            "AUTH_INVALID": "Your sign-in has expired. Sign in again.",
+            "TIMEOUT": "The request timed out. Try again later.",
+            "RATE_LIMIT": "Too many requests. Wait and try again.",
+            "PERMISSION": "This account does not have permission for this action.",
+            "NETWORK": "Network connection failed. Check your connection and try again.",
+            "CONFIG": "UClaw configuration is unavailable. Restart the app and try again.",
+            "UNKNOWN": "UClaw is temporarily unavailable. Try again later."
+        }
+    },
+    "authGate": {
+        "state": {
+            "checking": {
+                "title": "Checking your UClaw account",
+                "description": "Verifying the current account and model service authorization."
+            },
+            "loggedOut": {
+                "title": "Sign in to continue",
+                "description": "Sign in to refresh this device's model service authorization."
+            },
+            "loginExpired": {
+                "title": "Your sign-in has expired",
+                "description": "Sign in to UClaw again to continue."
+            },
+            "activationRequired": {
+                "title": "Authorize this device",
+                "description": "Enter an activation code to authorize this device."
+            },
+            "relayMissing": {
+                "title": "Model service is not ready",
+                "description": "Sign in again to refresh the model service authorization."
+            },
+            "error": {
+                "title": "UClaw account status is unavailable",
+                "description": "Check your network connection and try again."
+            }
         }
     },
     "runtime": {

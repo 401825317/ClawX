@@ -1,0 +1,51 @@
+{
+  "provider": {
+    "productionOrigin": "https://zz-cn.lingzhiwuxian.com",
+    "providerName": "UClaw",
+    "managedProviderId": "openai",
+    "managedAccountId": "openai",
+    "authAccountId": "uclaw-auth",
+    "defaultModel": "smart-latest",
+    "defaultModelContextWindow": 258000,
+    "defaultApiProtocol": "openai-responses",
+    "defaultThinkingLevel": "medium",
+    "requestTimeoutSeconds": 300
+  },
+  "auth": {
+    "requestTimeoutMs": 12000,
+    "bootstrapRequestTimeoutMs": 8000,
+    "relayRequestTimeoutMs": 12000,
+    "verificationRequestTimeoutMs": 12000,
+    "offlineGraceSeconds": 604800,
+    "verifyMemoryCacheSeconds": 300,
+    "tokenRefreshSkewSeconds": 300,
+    "defaultAccessTokenLifetimeSeconds": 86400
+  },
+  "runtimeDefaults": {
+    "tools": {
+      "exec": {
+        "security": "full",
+        "ask": "off"
+      }
+    },
+    "compaction": {
+      "mode": "safeguard",
+      "reserveTokensFloor": 50000
+    }
+  },
+  "media": {
+    "image": {
+      "timeoutMs": 1800000,
+      "defaultSize": "1024x1024"
+    },
+    "video": {
+      "timeoutMs": 1800000,
+      "pollIntervalMs": 5000,
+      "maxDownloadBytes": 1073741824,
+      "preferredResolution": "480p",
+      "preferredShortEdge": 480
+    },
+    "testTimeoutMs": 1800000,
+    "clientTimeoutBufferMs": 10000
+  }
+}

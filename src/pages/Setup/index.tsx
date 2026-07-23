@@ -27,6 +27,8 @@ import type { TFunction } from 'i18next';
 import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { toast } from 'sonner';
 import { hostApi } from '@/lib/host-api';
+import { ManagedAccountAuthPanel } from '@/components/auth/ManagedAccountAuthPanel';
+import { useManagedAuthStore } from '@/stores/managed-auth';
 
 interface SetupStep {
   id: string;
@@ -34,18 +36,16 @@ interface SetupStep {
   description: string;
 }
 
-const STEP = {
-  WELCOME: 0,
-  RUNTIME: 1,
-  INSTALLING: 2,
-  COMPLETE: 3,
-} as const;
-
 const getSteps = (t: TFunction): SetupStep[] => [
   {
     id: 'welcome',
     title: t('steps.welcome.title'),
     description: t('steps.welcome.description'),
+  },
+  {
+    id: 'auth',
+    title: t('steps.auth.title'),
+    description: t('steps.auth.description'),
   },
   {
     id: 'runtime',
@@ -87,39 +87,55 @@ import clawxIcon from '@/assets/logo.svg';
 export function Setup() {
   const { t } = useTranslation(['setup', 'channels']);
   const navigate = useNavigate();
-  const [currentStep, setCurrentStep] = useState<number>(STEP.WELCOME);
+  const [currentStep, setCurrentStep] = useState(0);
 
   // Setup state
   // Installation state for the Installing step
   const [installedSkills, setInstalledSkills] = useState<string[]>([]);
   // Runtime check status
   const [runtimeChecksPassed, setRuntimeChecksPassed] = useState(false);
+  const [managedAuthReady, setManagedAuthReady] = useState(false);
+  const managedAuthStatus = useManagedAuthStore((state) => state.status);
+  const managedAuthInitialized = useManagedAuthStore((state) => state.initialized);
+  const loadManagedAuthLocalStatus = useManagedAuthStore((state) => state.loadLocalStatus);
 
-  const steps = getSteps(t);
+  const steps = useMemo(
+    () => getSteps(t).filter((candidate) => managedAuthStatus?.managed !== false || candidate.id !== 'auth'),
+    [managedAuthStatus?.managed, t],
+  );
   const safeStepIndex = Number.isInteger(currentStep)
-    ? Math.min(Math.max(currentStep, STEP.WELCOME), steps.length - 1)
-    : STEP.WELCOME;
-  const step = steps[safeStepIndex] ?? steps[STEP.WELCOME];
-  const isFirstStep = safeStepIndex === STEP.WELCOME;
+    ? Math.min(Math.max(currentStep, 0), steps.length - 1)
+    : 0;
+  const step = steps[safeStepIndex] ?? steps[0];
+  const isFirstStep = safeStepIndex === 0;
   const isLastStep = safeStepIndex === steps.length - 1;
 
   const markSetupComplete = useSettingsStore((state) => state.markSetupComplete);
 
+  useEffect(() => {
+    if (managedAuthInitialized) return;
+    void loadManagedAuthLocalStatus().catch(() => {
+      // The authentication step renders the localized retry state.
+    });
+  }, [loadManagedAuthLocalStatus, managedAuthInitialized]);
+
   // Derive canProceed based on current step - computed directly to avoid useEffect
   const canProceed = useMemo(() => {
-    switch (safeStepIndex) {
-      case STEP.WELCOME:
+    switch (step.id) {
+      case 'auth':
+        return managedAuthReady;
+      case 'welcome':
         return true;
-      case STEP.RUNTIME:
+      case 'runtime':
         return runtimeChecksPassed;
-      case STEP.INSTALLING:
+      case 'installing':
         return false; // Cannot manually proceed, auto-proceeds when done
-      case STEP.COMPLETE:
+      case 'complete':
         return true;
       default:
         return true;
     }
-  }, [safeStepIndex, runtimeChecksPassed]);
+  }, [managedAuthReady, runtimeChecksPassed, step.id]);
 
   const handleNext = async () => {
     if (isLastStep) {
@@ -205,16 +221,19 @@ export function Setup() {
 
             {/* Step-specific content */}
             <div className="rounded-xl bg-card text-card-foreground border shadow-sm p-8 mb-8">
-              {safeStepIndex === STEP.WELCOME && <WelcomeContent />}
-              {safeStepIndex === STEP.RUNTIME && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
-              {safeStepIndex === STEP.INSTALLING && (
+              {step.id === 'welcome' && <WelcomeContent />}
+              {step.id === 'auth' && (
+                <ManagedAccountAuthPanel onReadyChange={setManagedAuthReady} />
+              )}
+              {step.id === 'runtime' && <RuntimeContent onStatusChange={setRuntimeChecksPassed} />}
+              {step.id === 'installing' && (
                 <InstallingContent
                   skills={getDefaultSkills(t)}
                   onComplete={handleInstallationComplete}
                   onSkip={() => setCurrentStep((i) => i + 1)}
                 />
               )}
-              {safeStepIndex === STEP.COMPLETE && (
+              {step.id === 'complete' && (
                 <CompleteContent
                   installedSkills={installedSkills}
                 />
@@ -222,7 +241,7 @@ export function Setup() {
             </div>
 
             {/* Navigation - hidden during installation step */}
-            {safeStepIndex !== STEP.INSTALLING && (
+            {step.id !== 'installing' && (
               <div className="flex justify-between">
                 <div>
                   {!isFirstStep && (
@@ -233,7 +252,7 @@ export function Setup() {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  {!isLastStep && safeStepIndex !== STEP.RUNTIME && (
+                  {managedAuthStatus?.managed === false && !isLastStep && step.id !== 'runtime' && (
                     <Button data-testid="setup-skip-button" variant="ghost" onClick={handleSkip}>
                       {t('nav.skipSetup')}
                     </Button>

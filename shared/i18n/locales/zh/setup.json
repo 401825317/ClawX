@@ -4,6 +4,10 @@
             "title": "欢迎使用 ClawX",
             "description": "您的 AI 助手已准备好进行配置"
         },
+        "auth": {
+            "title": "登录 UClaw",
+            "description": "登录或注册账号，并授权当前设备"
+        },
         "runtime": {
             "title": "环境检查",
             "description": "验证系统要求"
@@ -33,6 +37,109 @@
             "modernUI": "现代美观的界面",
             "bundles": "预装技能包",
             "crossPlatform": "跨平台支持"
+        }
+    },
+    "auth": {
+        "status": {
+            "checking": "正在检查 UClaw 账号状态...",
+            "activatedForDevice": "UClaw 账号、设备授权和模型服务已就绪。",
+            "activationVerified": "激活码已验证",
+            "activationInvalid": "激活码无效"
+        },
+        "fields": {
+            "account": "用户名",
+            "password": "密码",
+            "activationCode": "激活码",
+            "verifyCode": "验证码"
+        },
+        "placeholders": {
+            "account": "请输入用户名",
+            "password": "请输入密码",
+            "activationCode": "请输入激活码",
+            "verifyCode": "请输入验证码"
+        },
+        "actions": {
+            "login": "登录",
+            "register": "注册",
+            "check": "验证",
+            "sendCode": "发送验证码",
+            "sendCodeCountdown": "{{seconds}} 秒",
+            "refresh": "刷新",
+            "logout": "退出登录",
+            "registerAndActivate": "注册并激活"
+        },
+        "toast": {
+            "statusFailed": "状态检查失败：{{message}}",
+            "enterActivationCode": "请输入激活码",
+            "activationVerified": "激活码已验证",
+            "activationCheckFailed": "激活码检查失败：{{message}}",
+            "enterAccountFirst": "请先输入用户名",
+            "verifyCodeSent": "验证码已发送",
+            "sendVerifyCodeFailed": "验证码发送失败：{{message}}",
+            "enterAccountPassword": "请输入用户名和密码",
+            "enterVerifyCode": "请输入验证码",
+            "activated": "UClaw 注册和激活已完成",
+            "loggedIn": "已登录 UClaw",
+            "registerFailed": "注册失败：{{message}}",
+            "loginFailed": "登录失败：{{message}}",
+            "loggedOut": "已退出 UClaw",
+            "logoutFailed": "退出登录失败：{{message}}"
+        },
+        "errors": {
+            "invalid_credentials": "用户名或密码错误。",
+            "missing_credentials": "请输入用户名和密码。",
+            "device_authorization_required": "当前设备需要激活码授权后才能继续。",
+            "activation_invalid": "激活码无效或已过期。",
+            "activation_consumed": "该激活码已被使用。",
+            "activation_expired": "该激活码已过期。",
+            "activation_ticket_expired": "激活验证已过期，请重新输入激活码。",
+            "activation_device_mismatch": "激活验证与当前设备不匹配。",
+            "registration_disabled": "当前暂未开放注册。",
+            "login_disabled": "当前暂时无法登录。",
+            "password_policy": "密码长度需为 8-20 位。",
+            "invalid_email": "邮箱格式不正确。",
+            "email_taken": "该邮箱已注册。",
+            "verification_invalid": "验证码错误或已过期。",
+            "device_required": "无法识别当前设备，请重启 UClaw 后重试。",
+            "user_exists": "该用户名已存在。",
+            "invalid_username": "用户名需为 1-20 位字母、数字、下划线或短横线。",
+            "auth_in_progress": "另一个账号请求正在处理中，请稍后重试。",
+            "provider_conflict": "OpenAI 提供商已由其他配置管理。",
+            "AUTH_INVALID": "登录已过期，请重新登录。",
+            "TIMEOUT": "请求超时，请稍后重试。",
+            "RATE_LIMIT": "请求过于频繁，请稍后重试。",
+            "PERMISSION": "当前账号没有执行此操作的权限。",
+            "NETWORK": "网络连接失败，请检查网络后重试。",
+            "CONFIG": "UClaw 配置不可用，请重启应用后重试。",
+            "UNKNOWN": "UClaw 服务暂时不可用，请稍后重试。"
+        }
+    },
+    "authGate": {
+        "state": {
+            "checking": {
+                "title": "正在检查 UClaw 账号",
+                "description": "正在验证当前账号和模型服务授权。"
+            },
+            "loggedOut": {
+                "title": "请登录后继续",
+                "description": "登录后将刷新当前设备的模型服务授权。"
+            },
+            "loginExpired": {
+                "title": "登录已过期",
+                "description": "请重新登录 UClaw 后继续。"
+            },
+            "activationRequired": {
+                "title": "请授权当前设备",
+                "description": "请输入激活码完成设备授权。"
+            },
+            "relayMissing": {
+                "title": "模型服务尚未就绪",
+                "description": "请重新登录以刷新模型服务授权。"
+            },
+            "error": {
+                "title": "无法获取 UClaw 账号状态",
+                "description": "请检查网络连接后重试。"
+            }
         }
     },
     "runtime": {

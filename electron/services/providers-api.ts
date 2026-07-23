@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron';
-import type { HostApiContract } from '@shared/host-api/contract';
+import type { HostApiContract, HostSuccess } from '@shared/host-api/contract';
 import type { CompleteHostServiceRegistry } from '../main/ipc/host-contract';
 import type { GatewayManager } from '../gateway/manager';
 import type { ProviderConfig } from '../utils/secure-storage';
@@ -35,6 +35,26 @@ type ValidationOptions = {
   baseUrl?: string;
   apiProtocol?: string;
 };
+
+export const UCLAW_MANAGED_PROVIDER_ERROR =
+  'This UClaw-managed provider account can only be changed through UClaw account settings';
+
+export function isUclawManagedAccount(account: unknown): boolean {
+  if (!isRecord(account) || !isRecord(account.metadata)) return false;
+  return account.metadata.managedBy === 'uclaw';
+}
+
+export function managedProviderRejected(): HostSuccess {
+  return { success: false, error: UCLAW_MANAGED_PROVIDER_ERROR };
+}
+
+async function getManagedAccount(
+  providerService: ReturnType<typeof getProviderService>,
+  accountId: string,
+): Promise<ProviderAccount | null> {
+  const account = await providerService.getAccount(accountId);
+  return isUclawManagedAccount(account) ? account : null;
+}
 
 function hasObjectChanges<T extends Record<string, unknown>>(
   existing: T,
@@ -193,6 +213,9 @@ async function saveProvider(payload: ProviderPayload<'save'>, gatewayManager?: G
   const providerService = getProviderService();
   const { config, apiKey } = getSavePayload(payload);
   try {
+    if (await getManagedAccount(providerService, config.id)) {
+      return managedProviderRejected();
+    }
     await providerService._saveProviderInternal(config);
     if (apiKey !== undefined) {
       const trimmedKey = apiKey.trim();
@@ -212,6 +235,9 @@ async function deleteProvider(payload: ProviderPayload<'delete'>, gatewayManager
   const providerService = getProviderService();
   const providerId = getProviderId(payload, 'delete');
   try {
+    if (await getManagedAccount(providerService, providerId)) {
+      return managedProviderRejected();
+    }
     const existing = await providerService._getProviderInternal(providerId);
     await providerService._deleteProviderInternal(providerId);
     await syncDeletedProviderToRuntime(existing, providerId, gatewayManager);
@@ -225,6 +251,9 @@ async function setProviderApiKey(payload: ProviderPayload<'setApiKey'>) {
   const providerService = getProviderService();
   const { providerId, apiKey } = getApiKeyPayload(payload, 'setApiKey');
   try {
+    if (await getManagedAccount(providerService, providerId)) {
+      return managedProviderRejected();
+    }
     await providerService._setProviderApiKeyInternal(providerId, apiKey);
     const provider = await providerService._getProviderInternal(providerId);
     const providerType = provider?.type || providerId;
@@ -238,6 +267,9 @@ async function setProviderApiKey(payload: ProviderPayload<'setApiKey'>) {
 async function updateProviderWithKey(payload: ProviderPayload<'updateWithKey'>, gatewayManager?: GatewayManager) {
   const providerService = getProviderService();
   const { providerId, updates, apiKey } = getProviderUpdatePayload(payload);
+  if (await getManagedAccount(providerService, providerId)) {
+    return managedProviderRejected();
+  }
   const existing = await providerService._getProviderInternal(providerId);
   if (!existing) {
     return { success: false, error: 'Provider not found' };
@@ -289,6 +321,9 @@ async function deleteProviderApiKey(payload: ProviderPayload<'deleteApiKey'>) {
   const providerService = getProviderService();
   const providerId = getProviderId(payload, 'deleteApiKey');
   try {
+    if (await getManagedAccount(providerService, providerId)) {
+      return managedProviderRejected();
+    }
     await providerService._deleteProviderApiKeyInternal(providerId);
     const provider = await providerService._getProviderInternal(providerId);
     await syncDeletedProviderApiKeyToRuntime(provider, providerId);
@@ -316,9 +351,16 @@ async function createAccount(payload: ProviderPayload<'createAccount'>, gatewayM
   if (!isRecord(body.account)) {
     throw new Error('Invalid providers.createAccount payload');
   }
+  const requestedAccount = body.account as unknown as ProviderAccount;
   const apiKey = typeof body.apiKey === 'string' ? body.apiKey : undefined;
   try {
-    const account = await providerService.createAccount(body.account as unknown as ProviderAccount, apiKey);
+    const existingManagedAccount = typeof requestedAccount.id === 'string'
+      ? await getManagedAccount(providerService, requestedAccount.id)
+      : null;
+    if (isUclawManagedAccount(requestedAccount) || existingManagedAccount) {
+      return managedProviderRejected();
+    }
+    const account = await providerService.createAccount(requestedAccount, apiKey);
     await syncSavedProviderToRuntime(providerAccountToConfig(account), apiKey, gatewayManager);
     return { success: true, account };
   } catch (error) {
@@ -339,6 +381,9 @@ async function updateAccount(payload: ProviderPayload<'updateAccount'>, gatewayM
     const existing = await providerService.getAccount(accountId);
     if (!existing) {
       return { success: false, error: 'Provider account not found' };
+    }
+    if (isUclawManagedAccount(existing) || isUclawManagedAccount(updates)) {
+      return managedProviderRejected();
     }
     const hasPatchChanges = hasObjectChanges(existing as unknown as Record<string, unknown>, updates as Record<string, unknown>);
     if (!hasPatchChanges && apiKey === undefined) {
@@ -365,6 +410,9 @@ async function deleteAccount(
   }
   try {
     const existing = await providerService.getAccount(accountId);
+    if (isUclawManagedAccount(existing)) {
+      return managedProviderRejected();
+    }
     const runtimeProviderKey = existing?.authMode === 'oauth_browser' && existing.vendorId === 'openai'
       ? 'openai'
       : undefined;
@@ -474,7 +522,11 @@ export function createProvidersApi(ctx: ProvidersApiContext): CompleteHostServic
     get: async (payload) => providerService._getProviderInternal(getProviderId(payload, 'get')),
     getDefault: async () => providerService._getDefaultProviderInternal(),
     hasApiKey: async (payload) => providerService._hasProviderApiKeyInternal(getProviderId(payload, 'hasApiKey')),
-    getApiKey: async (payload) => providerService._getProviderApiKeyInternal(getProviderId(payload, 'getApiKey')),
+    getApiKey: async (payload) => {
+      const providerId = getProviderId(payload, 'getApiKey');
+      if (await getManagedAccount(providerService, providerId)) return null;
+      return providerService._getProviderApiKeyInternal(providerId);
+    },
     validateKey,
     save: async (payload) => saveProvider(payload, ctx.gatewayManager),
     delete: async (payload) => deleteProvider(payload, ctx.gatewayManager),
@@ -487,7 +539,11 @@ export function createProvidersApi(ctx: ProvidersApiContext): CompleteHostServic
     accountKeyInfo: async () => providerService.listAccountsKeyInfo(),
     getDefaultAccount: async () => ({ accountId: await providerService.getDefaultAccountId() ?? null }),
     getAccount: async (payload) => providerService.getAccount(getAccountId(payload, 'getAccount')),
-    getAccountApiKey: async (payload) => providerService.getAccountApiKey(getAccountId(payload, 'getAccountApiKey')),
+    getAccountApiKey: async (payload) => {
+      const accountId = getAccountId(payload, 'getAccountApiKey');
+      if (await getManagedAccount(providerService, accountId)) return null;
+      return providerService.getAccountApiKey(accountId);
+    },
     hasAccountApiKey: async (payload) => providerService.hasAccountApiKey(getAccountId(payload, 'hasAccountApiKey')),
     createAccount: async (payload) => createAccount(payload, ctx.gatewayManager),
     updateAccount: async (payload) => updateAccount(payload, ctx.gatewayManager),

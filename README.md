@@ -138,6 +138,7 @@ The Skills page can display skills discovered from multiple OpenClaw sources (ma
 
 ### 🔐 Secure Provider Integration
 Connect to multiple AI providers (OpenAI, Anthropic, Z.AI / GLM, and more) with credentials stored securely in your system's native keychain. OpenAI supports both API key and browser OAuth (Codex subscription) sign-in.
+UClaw managed distributions add account sign-in, registration, verification codes, and device authorization to first-run Setup. Credentials remain in Electron Main and the protected secret store; after authentication, the existing Provider and OpenClaw runtime sync paths configure the managed `openai/smart-latest` account. Its runtime key cannot be viewed, edited, or deleted through the ordinary Provider controls. Community distributions keep the existing Provider setup flow.
 In developer mode, the dedicated Image Generation page supports an independent OpenAI-compatible image-generation endpoint (Base URL, API key, and model name such as `gpt-image-2`) so image generation can use a dedicated `/v1/images/generations` service while chat continues using the normal OpenAI provider.
 For **Custom** providers used with OpenAI-compatible gateways, you can set a custom `User-Agent` in **Settings → AI Providers → Edit Provider** for compatibility-sensitive endpoints.
 When you edit or switch providers, ClawX preserves existing per-model capability metadata such as `input: ["text", "image"]`. Newly selected Custom-provider models use OpenClaw onboarding-compatible image-input inference, with unknown models defaulting to text-only.
@@ -194,6 +195,8 @@ When you launch ClawX for the first time, the **Setup Wizard** will guide you th
 
 The wizard preselects your system language when it is supported, and falls back to English otherwise.
 
+In UClaw managed distributions, the wizard also requires UClaw sign-in or registration and authorization for the current device before runtime setup can continue.
+
 > Note for Moonshot (Kimi): ClawX keeps Kimi web search enabled by default.  
 > When Moonshot is configured, ClawX also syncs Kimi web search to the China endpoint (`https://api.moonshot.cn/v1`) in OpenClaw config.
 
@@ -233,6 +236,8 @@ Notes:
 ClawX employs a **dual-process architecture** with a unified host API layer. The renderer talks to a single client abstraction, while Electron Main owns protocol selection and process lifecycle:
 
 Chat uses an ACP stdio bridge owned by Electron Main. Renderer receives typed host events and renders an in-memory ACP timeline. Gateway remains responsible for non-Chat capabilities such as providers, models, skills, workspace, settings, diagnostics, and media configuration.
+
+Managed UClaw account actions use the typed `managedAuth` Host API. Renderer never receives access, refresh, or relay credentials and does not directly start or reload Gateway as part of authentication.
 
 An unfinished ACP response keeps streaming when you open another conversation or page. Returning before it finishes restores the latest in-memory timeline and continues the live response; once it finishes, normal ACP history replay remains the source of truth.
 

@@ -63,7 +63,12 @@ import { createAttachmentOpenWithService } from '../services/attachment-open-wit
 import { createCronApi } from '../services/cron-api';
 import { createFilesApi } from '../services/files-api';
 import { createMediaApi } from '../services/media-api';
-import { createProvidersApi } from '../services/providers-api';
+import {
+  createProvidersApi,
+  isUclawManagedAccount,
+  managedProviderRejected,
+} from '../services/providers-api';
+import { createManagedAuthApi } from '../services/managed-auth-api';
 import { createSessionsApi } from '../services/sessions-api';
 import { createSkillsApi } from '../services/skills-api';
 import { createUsageApi } from '../services/usage-api';
@@ -172,6 +177,7 @@ function registerTypedHostHandlers(
     channels: createChannelsApi({ gatewayManager, mainWindow }),
     agents: createAgentsApi({ gatewayManager }),
     providers: createProvidersApi({ gatewayManager, mainWindow }),
+    managedAuth: createManagedAuthApi({ gatewayManager }),
     files: createFilesApi({
       attachmentAccess,
       openWith: attachmentOpenWith,
@@ -807,8 +813,11 @@ function registerWhatsAppHandlers(mainWindow: BrowserWindow): void {
 /**
  * Provider-related IPC handlers
  */
-function registerProviderHandlers(gatewayManager: GatewayManager): void {
+export function registerProviderHandlers(gatewayManager: GatewayManager): void {
   const providerService = getProviderService();
+  const isManagedProvider = async (providerId: string): Promise<boolean> => (
+    isUclawManagedAccount(await providerService.getAccount(providerId))
+  );
   const legacyProviderChannelsWarned = new Set<string>();
   const logLegacyProviderChannel = (channel: string): void => {
     if (legacyProviderChannelsWarned.has(channel)) return;
@@ -846,6 +855,9 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('provider:save', async (_, config: ProviderConfig, apiKey?: string) => {
     logLegacyProviderChannel('provider:save');
     try {
+      if (isUclawManagedAccount(config) || await isManagedProvider(config.id)) {
+        return managedProviderRejected();
+      }
       // Save the provider config
       await providerService.saveLegacyProvider(config);
 
@@ -881,6 +893,9 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('provider:delete', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:delete');
     try {
+      if (await isManagedProvider(providerId)) {
+        return managedProviderRejected();
+      }
       const existing = await providerService.getLegacyProvider(providerId);
       await providerService.deleteLegacyProvider(providerId);
 
@@ -903,6 +918,9 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('provider:setApiKey', async (_, providerId: string, apiKey: string) => {
     logLegacyProviderChannel('provider:setApiKey');
     try {
+      if (await isManagedProvider(providerId)) {
+        return managedProviderRejected();
+      }
       await providerService.setLegacyProviderApiKey(providerId, apiKey);
 
       // Also write to OpenClaw auth-profiles.json
@@ -930,6 +948,9 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
       apiKey?: string
     ) => {
       logLegacyProviderChannel('provider:updateWithKey');
+      if (isUclawManagedAccount(updates) || await isManagedProvider(providerId)) {
+        return managedProviderRejected();
+      }
       const existing = await providerService.getLegacyProvider(providerId);
       if (!existing) {
         return { success: false, error: 'Provider not found' };
@@ -992,6 +1013,9 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   ipcMain.handle('provider:deleteApiKey', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:deleteApiKey');
     try {
+      if (await isManagedProvider(providerId)) {
+        return managedProviderRejected();
+      }
       await providerService.deleteLegacyProviderApiKey(providerId);
 
       // Keep OpenClaw auth-profiles.json in sync with local key storage
@@ -1017,6 +1041,7 @@ function registerProviderHandlers(gatewayManager: GatewayManager): void {
   // Get the actual API key (for internal use only - be careful!)
   ipcMain.handle('provider:getApiKey', async (_, providerId: string) => {
     logLegacyProviderChannel('provider:getApiKey');
+    if (await isManagedProvider(providerId)) return null;
     return await providerService.getLegacyProviderApiKey(providerId);
   });
 

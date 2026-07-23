@@ -3,7 +3,19 @@
  * Application configuration
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Sun, Moon, Monitor, RefreshCw, ExternalLink, Copy, FileText } from 'lucide-react';
+import {
+  Copy,
+  ExternalLink,
+  FileText,
+  KeyRound,
+  LogOut,
+  Monitor,
+  Moon,
+  RefreshCw,
+  ShieldCheck,
+  Sun,
+  UserCircle,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -28,6 +40,15 @@ import { SUPPORTED_LANGUAGES } from '@/i18n';
 import { hostApi, type OpenClawDoctorResult } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
 import { cn } from '@/lib/utils';
+import {
+  MANAGED_AUTH_BRAND,
+  getManagedAuthDisplayName,
+  getManagedAuthStateKey,
+  getManagedAuthUserEmail,
+} from '@/lib/managed-auth';
+import { getManagedAuthErrorKey } from '@/lib/managed-auth-errors';
+import { useManagedAuthStore } from '@/stores/managed-auth';
+import { useProviderStore } from '@/stores/providers';
 type ControlUiInfo = {
   url: string;
   token: string;
@@ -35,7 +56,7 @@ type ControlUiInfo = {
 };
 
 export function Settings() {
-  const { t, i18n } = useTranslation('settings');
+  const { t, i18n } = useTranslation(['settings', 'setup']);
   const {
     theme,
     setTheme,
@@ -66,6 +87,12 @@ export function Settings() {
   } = useSettingsStore();
 
   const { status: gatewayStatus, restart: restartGateway } = useGatewayStore();
+  const managedAuthStatus = useManagedAuthStore((state) => state.status);
+  const managedAuthLoading = useManagedAuthStore((state) => state.loading);
+  const managedAuthError = useManagedAuthStore((state) => state.error);
+  const refreshManagedAuthStatus = useManagedAuthStore((state) => state.refreshStatus);
+  const logoutManagedAuth = useManagedAuthStore((state) => state.logout);
+  const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const currentVersion = useUpdateStore((state) => state.currentVersion);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
@@ -86,6 +113,29 @@ export function Settings() {
   const [logContent, setLogContent] = useState('');
   const [doctorRunningMode, setDoctorRunningMode] = useState<'diagnose' | 'fix' | null>(null);
   const [doctorResult, setDoctorResult] = useState<OpenClawDoctorResult | null>(null);
+
+  const managedAuthErrorMessage = (error: unknown) => (
+    t(`setup:auth.errors.${getManagedAuthErrorKey(error)}`)
+  );
+
+  const handleManagedAuthRefresh = async () => {
+    try {
+      await refreshManagedAuthStatus(true);
+      await refreshProviderSnapshot();
+    } catch (error) {
+      toast.error(t('managedAuth.toast.verifyFailed', { message: managedAuthErrorMessage(error) }));
+    }
+  };
+
+  const handleManagedAuthLogout = async () => {
+    try {
+      await logoutManagedAuth();
+      await refreshProviderSnapshot();
+      toast.success(t('managedAuth.toast.loggedOut'));
+    } catch (error) {
+      toast.error(t('managedAuth.toast.logoutFailed', { message: managedAuthErrorMessage(error) }));
+    }
+  };
 
   const handleShowLogs = async () => {
     try {
@@ -410,6 +460,27 @@ export function Settings() {
     toast.success(translateNext('appearance.menuLanguageUpdated'));
   };
 
+  const managedAuthStateKey = getManagedAuthStateKey(managedAuthStatus, {
+    loading: managedAuthLoading,
+    error: managedAuthError,
+  });
+  const managedAuthReady = managedAuthStateKey === 'ready'
+    || managedAuthStateKey === 'offlineGrace'
+    || managedAuthStateKey === 'unmanaged';
+  const managedAuthDisplayName = getManagedAuthDisplayName(
+    managedAuthStatus,
+    t('managedAuth.accountCard.unknownUser'),
+  );
+  const managedAuthEmail = getManagedAuthUserEmail(managedAuthStatus);
+  const managedAuthStatusClassName = cn(
+    'inline-flex rounded-full px-3 py-1 text-xs font-semibold',
+    managedAuthReady
+      ? 'bg-green-500/10 text-green-700 dark:text-green-400'
+      : managedAuthStateKey === 'checking'
+        ? 'bg-blue-500/10 text-blue-700 dark:text-blue-400'
+        : 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
+  );
+
   return (
     <div
       data-testid="settings-page"
@@ -428,6 +499,106 @@ export function Settings() {
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto pr-2 pb-10 min-h-0 -mr-2 space-y-12">
+          {managedAuthStatus?.managed === true && (
+          <div data-testid="settings-managed-auth-section">
+            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h2 className="text-3xl font-serif text-foreground font-normal tracking-tight">
+                  {t('managedAuth.accountCard.title')}
+                </h2>
+                <p className="mt-2 text-meta text-muted-foreground">
+                  {t('managedAuth.accountCard.description')}
+                </p>
+              </div>
+              <span data-testid="settings-managed-auth-status" className={managedAuthStatusClassName}>
+                {t(`managedAuth.status.${managedAuthStateKey}`)}
+              </span>
+            </div>
+
+            <div className="rounded-lg border border-black/10 bg-transparent p-5 dark:border-white/10">
+              <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex min-w-0 items-start gap-4">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-black/5 text-foreground dark:bg-white/10">
+                    <UserCircle className="h-6 w-6" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-muted-foreground">
+                      {t('managedAuth.accountCard.currentAccount')}
+                    </p>
+                    <p className="mt-1 truncate text-xl font-semibold text-foreground">
+                      {managedAuthDisplayName}
+                    </p>
+                    {managedAuthEmail && managedAuthEmail !== managedAuthDisplayName && (
+                      <p className="mt-1 truncate text-meta text-muted-foreground">{managedAuthEmail}</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleManagedAuthRefresh()}
+                    disabled={managedAuthLoading}
+                  >
+                    <RefreshCw className={cn('h-4 w-4', managedAuthLoading && 'animate-spin')} />
+                    {t('managedAuth.actions.refreshStatus')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void handleManagedAuthLogout()}
+                    disabled={managedAuthLoading || !(
+                      managedAuthStatus.hasAuthToken
+                      || managedAuthStatus.hasRefreshToken
+                      || managedAuthStatus.hasRelayToken
+                    )}
+                  >
+                    <LogOut className="h-4 w-4" />
+                    {t('managedAuth.actions.logout')}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-3 md:grid-cols-3">
+                <div className="rounded-lg bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2 text-meta font-semibold text-foreground">
+                    <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                    {t('managedAuth.accountCard.service')}
+                  </div>
+                  <p className="mt-2 truncate text-meta text-muted-foreground">{MANAGED_AUTH_BRAND}</p>
+                </div>
+                <div className="rounded-lg bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2 text-meta font-semibold text-foreground">
+                    <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                    {t('managedAuth.accountCard.device')}
+                  </div>
+                  <p className="mt-2 text-meta text-muted-foreground">
+                    {managedAuthStatus?.deviceActivated
+                      ? t('managedAuth.accountCard.deviceActivated')
+                      : t('managedAuth.accountCard.deviceInactive')}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-black/5 p-4 dark:bg-white/5">
+                  <div className="flex items-center gap-2 text-meta font-semibold text-foreground">
+                    <KeyRound className="h-4 w-4 text-muted-foreground" />
+                    {t('managedAuth.accountCard.modelService')}
+                  </div>
+                  <p className="mt-2 text-meta text-muted-foreground">
+                    {managedAuthStatus?.hasRelayToken
+                      ? t('managedAuth.accountCard.modelServiceReady')
+                      : t('managedAuth.accountCard.modelServiceMissing')}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+          )}
+
+          {managedAuthStatus?.managed === true && (
+            <Separator className="bg-black/5 dark:bg-white/5" />
+          )}
+
           {/* Appearance */}
           <div>
             <h2 className="text-3xl font-serif text-foreground mb-6 font-normal tracking-tight">

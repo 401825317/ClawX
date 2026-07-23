@@ -48,6 +48,14 @@ import type {
   AcpChatRespondPermissionPayload,
 } from '@shared/acp-chat/types';
 import type { CronJobCreateInput, CronJobUpdateInput } from '@shared/types/cron';
+import type {
+  ManagedAuthActivationCheckPayload,
+  ManagedAuthLoginPayload,
+  ManagedAuthRefreshPayload,
+  ManagedAuthRegisterPayload,
+  ManagedAuthVerificationCodePayload,
+  ManagedAuthVerifyPayload,
+} from '@shared/managed-auth';
 import { invokeHost } from './host-api-client';
 
 export type {
@@ -292,6 +300,22 @@ export const hostApi = {
     requestOAuth: (input: ProviderOAuthRequestPayload) => invokeHost('providers', 'requestOAuth', input),
     cancelOAuth: () => invokeHost('providers', 'cancelOAuth'),
     submitOAuth: (input: { code: string }) => invokeHost('providers', 'submitOAuth', input),
+  },
+  managedAuth: {
+    bootstrap: () => invokeHost('managedAuth', 'bootstrap'),
+    localStatus: () => invokeHost('managedAuth', 'localStatus'),
+    status: (input?: ManagedAuthVerifyPayload) => invokeHost('managedAuth', 'status', input),
+    checkActivation: (input: ManagedAuthActivationCheckPayload) => (
+      invokeHost('managedAuth', 'checkActivation', input)
+    ),
+    sendVerificationCode: (input: ManagedAuthVerificationCodePayload) => (
+      invokeHost('managedAuth', 'sendVerificationCode', input)
+    ),
+    login: (input: ManagedAuthLoginPayload) => invokeHost('managedAuth', 'login', input),
+    register: (input: ManagedAuthRegisterPayload) => invokeHost('managedAuth', 'register', input),
+    verify: (input?: ManagedAuthVerifyPayload) => invokeHost('managedAuth', 'verify', input),
+    refresh: (input?: ManagedAuthRefreshPayload) => invokeHost('managedAuth', 'refresh', input),
+    logout: () => invokeHost('managedAuth', 'logout'),
   },
   files: {
     stagePaths: (input: { filePaths: string[] }) => invokeHost('files', 'stagePaths', input),

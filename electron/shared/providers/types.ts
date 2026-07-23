@@ -191,6 +191,10 @@ export interface ProviderAccount {
     email?: string;
     resourceUrl?: string;
     customModels?: string[];
+    managedBy?: 'uclaw';
+    managedDefaultModel?: string;
+    managedAllowedModels?: string[];
+    managedRuntimeContractVersion?: number;
   };
   createdAt: string;
   updatedAt: string;
@@ -201,6 +205,10 @@ export type ProviderSecret =
     type: 'api_key';
     accountId: string;
     apiKey: string;
+    ownerUserId?: string;
+    ownerUsername?: string;
+    ownerEmail?: string;
+    expiresAt?: number;
   }
   | {
     type: 'oauth';

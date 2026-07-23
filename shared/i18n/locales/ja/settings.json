@@ -1,6 +1,41 @@
 {
   "title": "設定",
   "subtitle": "ClawX の体験をカスタマイズ",
+  "managedAuth": {
+    "status": {
+      "ready": "ログイン済み",
+      "offlineGrace": "オフラインで利用可能",
+      "checking": "確認中",
+      "loggedOut": "未ログイン",
+      "loginExpired": "ログイン期限切れ",
+      "activationRequired": "デバイス認証が必要",
+      "relayMissing": "モデルサービス未準備",
+      "unmanaged": "無効",
+      "error": "状態を取得できません"
+    },
+    "accountCard": {
+      "title": "UClaw アカウント",
+      "description": "アカウント、デバイス認証、モデルサービスの状態です。",
+      "currentAccount": "現在のアカウント",
+      "unknownUser": "アカウント情報なし",
+      "service": "サービス",
+      "device": "デバイス認証",
+      "deviceActivated": "認証済み",
+      "deviceInactive": "未認証",
+      "modelService": "モデルサービス",
+      "modelServiceReady": "準備完了",
+      "modelServiceMissing": "利用不可"
+    },
+    "actions": {
+      "refreshStatus": "状態を更新",
+      "logout": "ログアウト"
+    },
+    "toast": {
+      "verifyFailed": "UClaw の状態を更新できませんでした: {{message}}",
+      "loggedOut": "UClaw からログアウトしました",
+      "logoutFailed": "UClaw からログアウトできませんでした: {{message}}"
+    }
+  },
   "appearance": {
     "title": "通用",
     "description": "外観とスタイルをカスタマイズ",

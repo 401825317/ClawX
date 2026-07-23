@@ -142,6 +142,10 @@ export interface ProviderAccount {
     email?: string;
     resourceUrl?: string;
     customModels?: string[];
+    managedBy?: 'uclaw';
+    managedDefaultModel?: string;
+    managedAllowedModels?: string[];
+    managedRuntimeContractVersion?: number;
   };
   createdAt: string;
   updatedAt: string;

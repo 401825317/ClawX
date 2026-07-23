@@ -1,19 +1,72 @@
+import { safeStorage } from 'electron';
 import type { ProviderSecret } from '../../shared/providers/types';
 import { getClawXProviderStore } from '../providers/store-instance';
 
 export interface SecretStore {
-  get(accountId: string): Promise<ProviderSecret | null>;
+  get(accountId: string, options?: { migrate?: boolean }): Promise<ProviderSecret | null>;
   set(secret: ProviderSecret): Promise<void>;
   delete(accountId: string): Promise<void>;
 }
 
+type EncryptedProviderSecret = {
+  encoding: 'electron-safe-storage-v1';
+  ciphertext: string;
+};
+
+function canEncryptSecrets(): boolean {
+  try {
+    return Boolean(safeStorage?.isEncryptionAvailable?.());
+  } catch {
+    return false;
+  }
+}
+
+function encryptSecret(secret: ProviderSecret): EncryptedProviderSecret | null {
+  if (!canEncryptSecrets()) {
+    return null;
+  }
+
+  return {
+    encoding: 'electron-safe-storage-v1',
+    ciphertext: safeStorage.encryptString(JSON.stringify(secret)).toString('base64'),
+  };
+}
+
+function decryptSecret(value: unknown): ProviderSecret | null {
+  if (
+    !value
+    || typeof value !== 'object'
+    || (value as EncryptedProviderSecret).encoding !== 'electron-safe-storage-v1'
+    || typeof (value as EncryptedProviderSecret).ciphertext !== 'string'
+    || !canEncryptSecrets()
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(
+      safeStorage.decryptString(Buffer.from((value as EncryptedProviderSecret).ciphertext, 'base64')),
+    ) as ProviderSecret;
+  } catch {
+    return null;
+  }
+}
+
 export class ElectronStoreSecretStore implements SecretStore {
-  async get(accountId: string): Promise<ProviderSecret | null> {
+  /** Read a secret from protected storage and migrate legacy values once. */
+  async get(accountId: string, options: { migrate?: boolean } = {}): Promise<ProviderSecret | null> {
     const store = await getClawXProviderStore();
+    const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
-    const secret = secrets[accountId];
-    if (secret) {
-      return secret;
+    const encrypted = decryptSecret(encryptedSecrets[accountId]);
+    if (encrypted) {
+      return encrypted;
+    }
+
+    const legacySecret = secrets[accountId];
+    if (legacySecret) {
+      if (options.migrate !== false) await this.set(legacySecret);
+      return legacySecret;
     }
 
     const apiKeys = (store.get('apiKeys') ?? {}) as Record<string, string>;
@@ -22,37 +75,45 @@ export class ElectronStoreSecretStore implements SecretStore {
       return null;
     }
 
-    return {
+    const secret: ProviderSecret = {
       type: 'api_key',
       accountId,
       apiKey,
     };
+    if (options.migrate !== false) await this.set(secret);
+    return secret;
   }
 
+  /** Persist a secret in safeStorage when available and remove legacy copies. */
   async set(secret: ProviderSecret): Promise<void> {
     const store = await getClawXProviderStore();
+    const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
-    secrets[secret.accountId] = secret;
+    const encrypted = encryptSecret(secret);
+    if (encrypted) {
+      encryptedSecrets[secret.accountId] = encrypted;
+      delete secrets[secret.accountId];
+    } else {
+      // Keep a compatibility value only when Electron cannot access OS encryption.
+      secrets[secret.accountId] = secret;
+      delete encryptedSecrets[secret.accountId];
+    }
+    store.set('providerSecretsV2', encryptedSecrets);
     store.set('providerSecrets', secrets);
 
-    // Keep legacy apiKeys in sync until the rest of the app moves to account-based secrets.
+    // Remove the legacy mirror so API keys cannot be duplicated in plain JSON.
     const apiKeys = (store.get('apiKeys') ?? {}) as Record<string, string>;
-    if (secret.type === 'api_key') {
-      apiKeys[secret.accountId] = secret.apiKey;
-    } else if (secret.type === 'local') {
-      if (secret.apiKey) {
-        apiKeys[secret.accountId] = secret.apiKey;
-      } else {
-        delete apiKeys[secret.accountId];
-      }
-    } else {
-      delete apiKeys[secret.accountId];
-    }
+    delete apiKeys[secret.accountId];
     store.set('apiKeys', apiKeys);
   }
 
+  /** Remove protected, compatibility, and legacy secret copies. */
   async delete(accountId: string): Promise<void> {
     const store = await getClawXProviderStore();
+    const encryptedSecrets = (store.get('providerSecretsV2') ?? {}) as Record<string, EncryptedProviderSecret>;
+    delete encryptedSecrets[accountId];
+    store.set('providerSecretsV2', encryptedSecrets);
+
     const secrets = (store.get('providerSecrets') ?? {}) as Record<string, ProviderSecret>;
     delete secrets[accountId];
     store.set('providerSecrets', secrets);
@@ -69,8 +130,11 @@ export function getSecretStore(): SecretStore {
   return secretStore;
 }
 
-export async function getProviderSecret(accountId: string): Promise<ProviderSecret | null> {
-  return getSecretStore().get(accountId);
+export async function getProviderSecret(
+  accountId: string,
+  options?: { migrate?: boolean },
+): Promise<ProviderSecret | null> {
+  return getSecretStore().get(accountId, options);
 }
 
 export async function setProviderSecret(secret: ProviderSecret): Promise<void> {

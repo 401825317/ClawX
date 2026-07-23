@@ -83,13 +83,19 @@ const {
     _setProviderApiKeyInternal: vi.fn(),
     createAccount: vi.fn(),
     deleteAccount: vi.fn(),
+    deleteLegacyProvider: vi.fn(),
+    deleteLegacyProviderApiKey: vi.fn(),
     getAccount: vi.fn(),
     getAccountApiKey: vi.fn(),
     getDefaultAccountId: vi.fn(),
+    getLegacyProvider: vi.fn(),
+    getLegacyProviderApiKey: vi.fn(),
     hasAccountApiKey: vi.fn(),
     listAccounts: vi.fn(),
     listAccountsKeyInfo: vi.fn(),
     listVendors: vi.fn(),
+    saveLegacyProvider: vi.fn(),
+    setLegacyProviderApiKey: vi.fn(),
     setDefaultAccount: vi.fn(),
     updateAccount: vi.fn(),
   },
@@ -126,6 +132,10 @@ vi.mock('@electron/main/proxy', () => ({
 
 vi.mock('@electron/main/launch-at-startup', () => ({
   syncLaunchAtStartupSettingFromStore: (...args: unknown[]) => syncLaunchAtStartupSettingFromStoreMock(...args),
+}));
+
+vi.mock('@electron/main/updater', () => ({
+  appUpdater: {},
 }));
 
 vi.mock('@electron/utils/logger', async (importOriginal) => {
@@ -220,6 +230,7 @@ vi.mock('@electron/services/providers/provider-validation', () => ({
 
 vi.mock('@electron/utils/browser-oauth', () => ({
   browserOAuthManager: {
+    on: vi.fn(),
     setWindow: vi.fn(),
     startFlow: vi.fn(),
     stopFlow: vi.fn(),
@@ -229,6 +240,7 @@ vi.mock('@electron/utils/browser-oauth', () => ({
 
 vi.mock('@electron/utils/device-oauth', () => ({
   deviceOAuthManager: {
+    on: vi.fn(),
     setWindow: vi.fn(),
     startFlow: vi.fn(),
     stopFlow: vi.fn(),
@@ -492,6 +504,219 @@ describe('host services', () => {
       'sk-test',
       gatewayManager,
     );
+  });
+
+  it('rejects ordinary Provider mutations for a UClaw-managed account', async () => {
+    const managedAccount = {
+      id: 'openai',
+      vendorId: 'openai',
+      label: 'UClaw',
+      authMode: 'api_key',
+      baseUrl: 'https://uclaw.example/v1',
+      model: 'smart-latest',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+    providerServiceMock.getAccount.mockResolvedValue(managedAccount);
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: {} as never,
+      mainWindow: {} as never,
+    });
+    const legacyConfig = {
+      id: 'openai',
+      name: 'OpenAI',
+      type: 'openai' as const,
+      enabled: true,
+      createdAt: managedAccount.createdAt,
+      updatedAt: managedAccount.updatedAt,
+    };
+    const expected = {
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    };
+
+    const results = await Promise.all([
+      providersApi.save({ config: legacyConfig, apiKey: 'replacement-key' }),
+      providersApi.delete({ providerId: 'openai' }),
+      providersApi.setApiKey({ providerId: 'openai', apiKey: 'replacement-key' }),
+      providersApi.updateWithKey({ providerId: 'openai', updates: { name: 'Changed' }, apiKey: 'replacement-key' }),
+      providersApi.deleteApiKey({ providerId: 'openai' }),
+      providersApi.createAccount({
+        account: { ...managedAccount, label: 'OpenAI', metadata: undefined },
+        apiKey: 'replacement-key',
+      }),
+      providersApi.updateAccount({ accountId: 'openai', updates: { label: 'Changed' }, apiKey: 'replacement-key' }),
+      providersApi.deleteAccount({ accountId: 'openai' }),
+      providersApi.deleteAccountApiKey({ accountId: 'openai' }),
+    ]);
+
+    expect(results).toEqual(Array.from({ length: results.length }, () => expected));
+    expect(providerServiceMock._saveProviderInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._deleteProviderInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._setProviderApiKeyInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock._deleteProviderApiKeyInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock.createAccount).not.toHaveBeenCalled();
+    expect(providerServiceMock.updateAccount).not.toHaveBeenCalled();
+    expect(providerServiceMock.deleteAccount).not.toHaveBeenCalled();
+    expect(syncSavedProviderToRuntimeMock).not.toHaveBeenCalled();
+    expect(syncDeletedProviderToRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it('does not expose a UClaw-managed runtime credential through ordinary Provider reads', async () => {
+    providerServiceMock.getAccount.mockResolvedValue({
+      id: 'openai',
+      vendorId: 'openai',
+      metadata: { managedBy: 'uclaw' },
+    });
+    providerServiceMock._getProviderApiKeyInternal.mockResolvedValue('relay-secret');
+    providerServiceMock.getAccountApiKey.mockResolvedValue('relay-secret');
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: {} as never,
+      mainWindow: {} as never,
+    });
+
+    await expect(providersApi.getApiKey({ providerId: 'openai' })).resolves.toBeNull();
+    await expect(providersApi.getAccountApiKey({ accountId: 'openai' })).resolves.toBeNull();
+    expect(providerServiceMock._getProviderApiKeyInternal).not.toHaveBeenCalled();
+    expect(providerServiceMock.getAccountApiKey).not.toHaveBeenCalled();
+  });
+
+  it('rejects attempts to create a forged UClaw-managed account through the ordinary Provider API', async () => {
+    providerServiceMock.getAccount.mockResolvedValue(null);
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: {} as never,
+      mainWindow: {} as never,
+    });
+    const forgedAccount = {
+      id: 'custom-managed',
+      vendorId: 'custom' as const,
+      label: 'UClaw',
+      authMode: 'api_key' as const,
+      enabled: true,
+      isDefault: false,
+      metadata: { managedBy: 'uclaw' as const },
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+
+    await expect(providersApi.createAccount({ account: forgedAccount })).resolves.toEqual({
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    });
+    expect(providerServiceMock.createAccount).not.toHaveBeenCalled();
+  });
+
+  it('rejects attempts to claim a regular account as UClaw-managed through Provider updates', async () => {
+    providerServiceMock.getAccount.mockResolvedValue({
+      id: 'custom-local',
+      vendorId: 'custom',
+      label: 'Local',
+      authMode: 'api_key',
+      enabled: true,
+      isDefault: false,
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    });
+    const { createProvidersApi } = await import('@electron/services/providers-api');
+    const providersApi = createProvidersApi({
+      gatewayManager: {} as never,
+      mainWindow: {} as never,
+    });
+
+    await expect(providersApi.updateAccount({
+      accountId: 'custom-local',
+      updates: { metadata: { managedBy: 'uclaw' } },
+    })).resolves.toEqual({
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    });
+    expect(providerServiceMock.updateAccount).not.toHaveBeenCalled();
+  });
+
+  it('protects UClaw-managed accounts from deprecated Provider IPC mutations and key reads', async () => {
+    providerServiceMock.getAccount.mockResolvedValue({
+      id: 'openai',
+      vendorId: 'openai',
+      metadata: { managedBy: 'uclaw' },
+    });
+    providerServiceMock.getLegacyProviderApiKey.mockResolvedValue('relay-secret');
+    const { ipcMain } = await import('electron');
+    const { registerProviderHandlers } = await import('@electron/main/ipc-handlers');
+    registerProviderHandlers({ debouncedRestart: vi.fn() } as never);
+    const handlers = new Map(
+      vi.mocked(ipcMain.handle).mock.calls.map(([channel, handler]) => [channel, handler] as const),
+    );
+    const invoke = (channel: string, ...args: unknown[]) => {
+      const handler = handlers.get(channel);
+      if (!handler) throw new Error(`Missing IPC handler: ${channel}`);
+      return handler({} as never, ...args);
+    };
+    const config = {
+      id: 'openai',
+      name: 'OpenAI',
+      type: 'openai',
+      enabled: true,
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+    const expected = {
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    };
+
+    await expect(invoke('provider:save', config, 'replacement-key')).resolves.toEqual(expected);
+    await expect(invoke('provider:delete', 'openai')).resolves.toEqual(expected);
+    await expect(invoke('provider:setApiKey', 'openai', 'replacement-key')).resolves.toEqual(expected);
+    await expect(invoke('provider:updateWithKey', 'openai', { name: 'Changed' }, 'replacement-key'))
+      .resolves.toEqual(expected);
+    await expect(invoke('provider:deleteApiKey', 'openai')).resolves.toEqual(expected);
+    await expect(invoke('provider:getApiKey', 'openai')).resolves.toBeNull();
+
+    expect(providerServiceMock.saveLegacyProvider).not.toHaveBeenCalled();
+    expect(providerServiceMock.deleteLegacyProvider).not.toHaveBeenCalled();
+    expect(providerServiceMock.setLegacyProviderApiKey).not.toHaveBeenCalled();
+    expect(providerServiceMock.deleteLegacyProviderApiKey).not.toHaveBeenCalled();
+    expect(providerServiceMock.getLegacyProviderApiKey).not.toHaveBeenCalled();
+  });
+
+  it('rejects forged UClaw ownership metadata on deprecated Provider IPC writes', async () => {
+    providerServiceMock.getAccount.mockResolvedValue(null);
+    const { ipcMain } = await import('electron');
+    const { registerProviderHandlers } = await import('@electron/main/ipc-handlers');
+    registerProviderHandlers({ debouncedRestart: vi.fn() } as never);
+    const handlers = new Map(
+      vi.mocked(ipcMain.handle).mock.calls.map(([channel, handler]) => [channel, handler] as const),
+    );
+    const saveHandler = handlers.get('provider:save');
+    const updateHandler = handlers.get('provider:updateWithKey');
+    if (!saveHandler || !updateHandler) throw new Error('Missing deprecated Provider IPC handlers');
+    const expected = {
+      success: false,
+      error: 'This UClaw-managed provider account can only be changed through UClaw account settings',
+    };
+    const forgedConfig = {
+      id: 'custom-managed',
+      name: 'UClaw',
+      type: 'custom',
+      enabled: true,
+      metadata: { managedBy: 'uclaw' },
+      createdAt: '2026-07-23T00:00:00.000Z',
+      updatedAt: '2026-07-23T00:00:00.000Z',
+    };
+
+    await expect(saveHandler({} as never, forgedConfig)).resolves.toEqual(expected);
+    await expect(updateHandler(
+      {} as never,
+      'custom-local',
+      { metadata: { managedBy: 'uclaw' } },
+    )).resolves.toEqual(expected);
+    expect(providerServiceMock.saveLegacyProvider).not.toHaveBeenCalled();
   });
 
   it('sets the default provider account and syncs runtime defaults', async () => {
@@ -1121,6 +1346,12 @@ describe('host services', () => {
     expect(source.match(/\bwebBrowser\s*:/g)).toHaveLength(1);
     expect(source).toContain('webBrowser: createWebBrowserApi({ browserSession, registry })');
     expect(source).not.toMatch(/['"]webBrowser:/);
+  });
+
+  it('registers the managed authentication typed service', () => {
+    const source = readFileSync(join(process.cwd(), 'electron/main/ipc-handlers.ts'), 'utf8');
+
+    expect(source).toContain('managedAuth: createManagedAuthApi({ gatewayManager })');
   });
 
   it('configures browser policy and typed handlers before the initial renderer load', () => {
