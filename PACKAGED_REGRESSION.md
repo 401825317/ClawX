@@ -32,7 +32,7 @@ node scripts/windows-support/run-packaged-regression.mjs --zip C:\path\UClaw-x.y
 | --- | --- | --- | --- |
 | 安装/便携 | ZIP 解压、带空格路径、JSON/SHA、x64 PE、空 `UClawData`、静态自检、便携身份文件、LOCALAPPDATA Runtime profile 和版本化快照 | 缺文件、混合版本、错误架构、脏用户数据、快照未完成或路径越界直接失败 | `core` |
 | 启动 | 首次启动、跳过引导、重启持久化、单实例 | Gateway 端口被占用、托管未登录、恢复后再次启动 | `core` |
-| UI | Chat、Models、Agents、Channels、Skills、Cron、Settings | Gateway 停止时仍可导航 | `core` |
+| UI | Chat、Models、Agents、Channels、Skills、Cron、Settings；图片控件可用；取得托管视频能力合同后视频控件按合同显示 | Gateway 停止时仍可导航；离线空白 profile 没有已验证视频能力合同时，视频模式必须禁用 | `core`/`live` |
 | Provider | 本地兼容 Provider 校验、保存、设为默认、真实 fallback、删除、重启后保留 | 无效 API Key 必须被拒绝；401 后重新校验并替换凭证会清除该账号的持久化认证失败状态；删除 fallback 不得残留引用 | `full` |
 | 文本聊天 | 简单、中文、多语言、Markdown、表格、代码、多轮上下文 | 瞬时 429/500 自动重试、畸形流失败、慢请求在到达 Provider 后取消、401 凭证修复后恢复 | `full` |
 | 会话 | 新会话落盘、转录读取、重命名、重启保留、硬删除 | 删除后会话、转录和侧车产物不得残留 | `full` |
