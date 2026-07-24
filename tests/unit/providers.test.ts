@@ -11,11 +11,52 @@ import {
 import {
   BUILTIN_PROVIDER_TYPES,
   getProviderConfig,
+  getProviderDefaultModel,
   getProviderEnvVar,
   getProviderEnvVars,
 } from '@electron/utils/provider-registry';
+import { getProviderTypeInfo as getBackendProviderTypeInfo } from '@electron/shared/providers/registry';
+import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_DEFAULT_API_PROTOCOL,
+  UCLAW_DEFAULT_MODEL,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_MANAGED_SERVICE_NAME,
+} from '@shared/junfeiai-endpoints';
 
 describe('provider metadata', () => {
+  it('keeps the UClaw compatibility provider registered from centralized config', () => {
+    expect(UCLAW_COMPATIBILITY_PROVIDER_ID).toBe('lingzhiwuxian');
+    expect(PROVIDER_TYPES).toContain(UCLAW_COMPATIBILITY_PROVIDER_ID);
+    expect(BUILTIN_PROVIDER_TYPES).toContain(UCLAW_COMPATIBILITY_PROVIDER_ID);
+
+    expect(getBackendProviderTypeInfo(UCLAW_COMPATIBILITY_PROVIDER_ID)).toMatchObject({
+      id: UCLAW_COMPATIBILITY_PROVIDER_ID,
+      name: UCLAW_MANAGED_SERVICE_NAME,
+      placeholder: expect.stringContaining(UCLAW_MANAGED_SERVICE_NAME),
+      defaultBaseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+      defaultModelId: UCLAW_DEFAULT_MODEL,
+      requiresApiKey: false,
+      supportsMultipleAccounts: false,
+    });
+    expect(getProviderConfig(UCLAW_COMPATIBILITY_PROVIDER_ID)).toMatchObject({
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+      api: UCLAW_DEFAULT_API_PROTOCOL,
+    });
+    expect(getProviderDefaultModel(UCLAW_COMPATIBILITY_PROVIDER_ID)).toBe(UCLAW_DEFAULT_MODEL);
+
+    expect(PROVIDER_TYPE_INFO).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: UCLAW_COMPATIBILITY_PROVIDER_ID,
+        name: UCLAW_MANAGED_SERVICE_NAME,
+        placeholder: expect.stringContaining(UCLAW_MANAGED_SERVICE_NAME),
+        defaultBaseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+        defaultModelId: UCLAW_DEFAULT_MODEL,
+        requiresApiKey: false,
+      }),
+    ]));
+  });
+
   it('includes ark in the frontend provider registry', () => {
     expect(PROVIDER_TYPES).toContain('ark');
 

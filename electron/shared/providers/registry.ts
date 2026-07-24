@@ -4,6 +4,13 @@ import type {
   ProviderType,
   ProviderTypeInfo,
 } from './types';
+import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_DEFAULT_API_PROTOCOL,
+  UCLAW_DEFAULT_MODEL,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_MANAGED_SERVICE_NAME,
+} from '../../../shared/junfeiai-endpoints';
 
 export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
@@ -43,6 +50,34 @@ export const PROVIDER_DEFINITIONS: ProviderDefinition[] = [
       baseUrl: 'https://api.openai.com/v1',
       api: 'openai-responses',
       apiKeyEnv: 'OPENAI_API_KEY',
+    },
+  },
+  {
+    id: UCLAW_COMPATIBILITY_PROVIDER_ID,
+    name: UCLAW_MANAGED_SERVICE_NAME,
+    icon: 'U',
+    placeholder: `由 ${UCLAW_MANAGED_SERVICE_NAME} 登录自动管理`,
+    model: UCLAW_MANAGED_SERVICE_NAME,
+    requiresApiKey: false,
+    category: 'compatible',
+    envVar: 'LINGZHIWUXIAN_API_KEY',
+    defaultBaseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+    defaultModelId: UCLAW_DEFAULT_MODEL,
+    showBaseUrl: false,
+    showModelId: false,
+    supportedAuthModes: ['api_key'],
+    defaultAuthMode: 'api_key',
+    supportsMultipleAccounts: false,
+    providerConfig: {
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+      api: UCLAW_DEFAULT_API_PROTOCOL,
+      apiKeyEnv: 'LINGZHIWUXIAN_API_KEY',
+      models: [
+        {
+          id: UCLAW_DEFAULT_MODEL,
+          name: UCLAW_DEFAULT_MODEL,
+        },
+      ],
     },
   },
   {

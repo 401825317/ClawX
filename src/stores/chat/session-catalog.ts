@@ -11,7 +11,7 @@ export type NormalizedSessionPatch = {
   cleared: ReadonlySet<keyof ChatSession>;
 };
 
-type SessionField = Exclude<keyof ChatSession, 'key' | 'createdLocally'>;
+type SessionField = Exclude<keyof ChatSession, 'key' | 'createdLocally' | 'createdOnGateway'>;
 
 const STRING_FIELDS = [
   'sessionId',
@@ -20,7 +20,6 @@ const STRING_FIELDS = [
   'derivedTitle',
   'lastMessagePreview',
   'thinkingLevel',
-  'model',
   'workspacePath',
 ] as const satisfies readonly SessionField[];
 
@@ -53,6 +52,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Build the canonical provider/model reference returned by OpenClaw session APIs. */
+export function normalizeGatewaySessionModelRef(
+  model: unknown,
+  modelProvider?: unknown,
+): string | undefined {
+  const normalizedModel = typeof model === 'string' ? model.trim() : '';
+  if (!normalizedModel) return undefined;
+  const normalizedProvider = typeof modelProvider === 'string' ? modelProvider.trim() : '';
+  if (!normalizedProvider || normalizedModel.startsWith(`${normalizedProvider}/`)) {
+    return normalizedModel;
+  }
+  return `${normalizedProvider}/${normalizedModel}`;
+}
+
 export function normalizeGatewaySessionPatch(raw: Record<string, unknown>): NormalizedSessionPatch {
   const key = normalizeSessionKey(raw.key);
   const values: Partial<ChatSession> = { key };
@@ -67,6 +80,16 @@ export function normalizeGatewaySessionPatch(raw: Record<string, unknown>): Norm
       cleared.add(field);
     } else if (typeof value === 'string' && value) {
       values[field] = value;
+    }
+  }
+
+  if (hasOwn(raw, 'model') || hasOwn(raw, 'modelProvider')) {
+    present.add('model');
+    if (raw.model === null) {
+      cleared.add('model');
+    } else {
+      const modelRef = normalizeGatewaySessionModelRef(raw.model, raw.modelProvider);
+      if (modelRef) values.model = modelRef;
     }
   }
 

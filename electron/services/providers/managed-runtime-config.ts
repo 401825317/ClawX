@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import type { ManagedClientTextModelPolicy } from '../../../shared/managed-client-config';
 import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_DEFAULT_API_PROTOCOL,
+  UCLAW_DEFAULT_MODEL,
+  UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
+  UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_LEGACY_PROVIDER_IDS,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_MANAGED_PROVIDER_ID,
+  UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
 } from '../../../shared/junfeiai-endpoints';
 import { resolveOpenClawConfigPath } from '../../utils/paths';
 import { withConfigLock } from '../../utils/config-mutex';
@@ -26,6 +34,21 @@ export type ManagedRuntimeConfigSnapshot = {
   before: FileState;
   applied?: FileGeneration;
 };
+
+export type ManagedRuntimeProviderEntry = {
+  baseUrl: string;
+  api: string;
+  timeoutSeconds: number;
+  request: { allowPrivateNetwork: true };
+  agentRuntime: { id: 'pi' };
+  models: Array<Record<string, unknown> & { id: string; name: string }>;
+};
+
+const UCLAW_RESPONSES_REASONING_COMPAT = {
+  supportsPromptCacheKey: true,
+  supportsReasoningEffort: true,
+  supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+} as const;
 
 let atomicWriteSequence = 0;
 
@@ -68,9 +91,40 @@ function isRecord(value: unknown): value is JsonRecord {
 function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<string> {
   return new Set([
     UCLAW_MANAGED_PROVIDER_ID,
+    UCLAW_COMPATIBILITY_PROVIDER_ID,
     ...UCLAW_LEGACY_PROVIDER_IDS,
     ...additionalProviderIds,
   ]);
+}
+
+function managedRuntimeModelEntry(
+  model: ManagedClientTextModelPolicy['models'][number],
+): Record<string, unknown> & { id: string; name: string } {
+  const supportsManagedReasoning = model.id === UCLAW_DEFAULT_MODEL;
+  return {
+    id: model.id,
+    name: model.label?.trim() || model.id,
+    contextWindow: UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    ...(supportsManagedReasoning ? { reasoning: true } : {}),
+    compat: supportsManagedReasoning
+      ? { ...UCLAW_RESPONSES_REASONING_COMPAT }
+      : { supportsPromptCacheKey: true },
+  };
+}
+
+/** Create the identical runtime catalog installed for both managed Provider ids. */
+export function createManagedRuntimeProviderEntry(
+  policy: ManagedClientTextModelPolicy,
+): ManagedRuntimeProviderEntry {
+  return {
+    baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+    api: UCLAW_DEFAULT_API_PROTOCOL,
+    timeoutSeconds: UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    request: { allowPrivateNetwork: true },
+    agentRuntime: { id: 'pi' },
+    models: policy.models.map(managedRuntimeModelEntry),
+  };
 }
 
 function isManagedRuntimeProvider(
@@ -252,6 +306,97 @@ function removeManagedRuntimeAuthMetadata(
   return true;
 }
 
+function isManagedModelRef(value: unknown, managedProviderIds: ReadonlySet<string>): boolean {
+  if (typeof value !== 'string') return false;
+  const providerId = value.trim().split('/', 1)[0];
+  return managedProviderIds.has(providerId) || isOpenAiProviderIdentity(providerId);
+}
+
+function removeManagedRuntimeModelDefaults(
+  config: JsonRecord,
+  managedProviderIds: ReadonlySet<string>,
+): boolean {
+  if (!isRecord(config.agents) || !isRecord(config.agents.defaults)) return false;
+  const agents = { ...config.agents };
+  const defaults = { ...config.agents.defaults };
+  const rawModel = defaults.model;
+  let changed = false;
+
+  if (typeof rawModel === 'string') {
+    if (!isManagedModelRef(rawModel, managedProviderIds)) return false;
+    delete defaults.model;
+    changed = true;
+  } else if (isRecord(rawModel)) {
+    const model = { ...rawModel };
+    const fallbacks = Array.isArray(model.fallbacks)
+      ? model.fallbacks.filter((value) => !isManagedModelRef(value, managedProviderIds))
+      : [];
+    if (Array.isArray(model.fallbacks) && fallbacks.length !== model.fallbacks.length) {
+      model.fallbacks = fallbacks;
+      changed = true;
+    }
+    if (isManagedModelRef(model.primary, managedProviderIds)) {
+      if (fallbacks.length > 0 && typeof fallbacks[0] === 'string') {
+        model.primary = fallbacks[0];
+        model.fallbacks = fallbacks.slice(1);
+      } else {
+        delete model.primary;
+      }
+      changed = true;
+    }
+    if (changed) {
+      if (Array.isArray(model.fallbacks) && model.fallbacks.length === 0) {
+        delete model.fallbacks;
+      }
+      if (Object.keys(model).length > 0) defaults.model = model;
+      else delete defaults.model;
+    }
+  }
+
+  if (!changed) return false;
+  agents.defaults = defaults;
+  config.agents = agents;
+  return true;
+}
+
+/** Install both managed Provider catalogs and the canonical OpenAI default route. */
+export async function installManagedRuntimeProviderState(
+  snapshot: ManagedRuntimeConfigSnapshot,
+  policy: ManagedClientTextModelPolicy,
+  additionalProviderIds: Iterable<string> = [],
+): Promise<void> {
+  const managedProviderIds = managedOpenAiProviderIds(additionalProviderIds);
+  const providerEntry = createManagedRuntimeProviderEntry(policy);
+  await updateManagedRuntimeConfig(snapshot, (config) => {
+    const before = JSON.stringify(config);
+    const agents = isRecord(config.agents) ? { ...config.agents } : {};
+    const defaults = isRecord(agents.defaults) ? { ...agents.defaults } : {};
+    defaults.model = {
+      primary: `${UCLAW_MANAGED_PROVIDER_ID}/${policy.defaultModel}`,
+      fallbacks: [],
+    };
+    defaults.thinkingDefault = UCLAW_DEFAULT_THINKING_LEVEL;
+    defaults.reasoningDefault = 'on';
+    agents.defaults = defaults;
+    config.agents = agents;
+
+    removeManagedRuntimeAuthMetadata(config, managedProviderIds);
+
+    const models = isRecord(config.models) ? { ...config.models } : {};
+    const providers = isRecord(models.providers) ? { ...models.providers } : {};
+    for (const [providerId, existingEntry] of Object.entries(providers)) {
+      if (isManagedRuntimeProvider(providerId, existingEntry, managedProviderIds)) {
+        delete providers[providerId];
+      }
+    }
+    providers[UCLAW_MANAGED_PROVIDER_ID] = structuredClone(providerEntry);
+    providers[UCLAW_COMPATIBILITY_PROVIDER_ID] = structuredClone(providerEntry);
+    models.providers = providers;
+    config.models = models;
+    return JSON.stringify(config) !== before;
+  });
+}
+
 /** Remove managed runtime providers and auth metadata with CAS rollback protection. */
 export async function removeManagedRuntimeOpenAiState(
   snapshot: ManagedRuntimeConfigSnapshot,
@@ -261,6 +406,7 @@ export async function removeManagedRuntimeOpenAiState(
   try {
     await updateManagedRuntimeConfig(snapshot, (config) => {
       let changed = removeManagedRuntimeAuthMetadata(config, managedProviderIds);
+      changed = removeManagedRuntimeModelDefaults(config, managedProviderIds) || changed;
       if (!isRecord(config.models) || !isRecord(config.models.providers)) return changed;
 
       const models = { ...config.models };

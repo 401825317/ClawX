@@ -1,22 +1,22 @@
 import { closeElectronApp, expect, getStableWindow, test } from './fixtures/electron';
 
-const alphaModelRef = 'custom-alpha123/model-alpha';
-const betaModelRef = 'custom-beta5678/provider/model-beta';
+const alphaModelRef = 'openai/smart-latest';
+const betaModelRef = 'openai/deepseek-v4-pro';
 
 test.describe('ClawX chat model picker', () => {
-  test('switches the current agent model without requesting a gateway refresh', async ({ launchElectronApp }) => {
+  test('switches only the current session using models supplied by new-api', async ({ launchElectronApp }) => {
     const app = await launchElectronApp({ skipSetup: true });
 
     try {
       await app.evaluate(async ({ app: _app }, refs) => {
         const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
 
-        let currentModelRef = refs.alphaModelRef;
+        let currentSessionModelRef = refs.alphaModelRef;
         const hostRequests: Array<{ path: string; method: string; body: unknown }> = [];
         const now = new Date().toISOString();
-        let releaseProviderAccounts: (() => void) | undefined;
-        const providerAccountsReady = new Promise<void>((resolve) => {
-          releaseProviderAccounts = resolve;
+        let releaseClientModels: (() => void) | undefined;
+        const clientModelsReady = new Promise<void>((resolve) => {
+          releaseClientModels = resolve;
         });
         const originalHostInvoke = (ipcMain as unknown as {
           _invokeHandlers?: Map<string, (event: unknown, request: unknown) => Promise<unknown>>;
@@ -34,9 +34,9 @@ test.describe('ClawX chat model picker', () => {
             id: 'main',
             name: 'Main',
             isDefault: true,
-            modelDisplay: currentModelRef.split('/').slice(1).join('/'),
-            modelRef: currentModelRef,
-            overrideModelRef: currentModelRef,
+            modelDisplay: refs.alphaModelRef.split('/').slice(1).join('/'),
+            modelRef: refs.alphaModelRef,
+            overrideModelRef: refs.alphaModelRef,
             inheritedModel: false,
             workspace: workspacePath,
             agentDir: '~/.openclaw/agents/main/agent',
@@ -57,7 +57,35 @@ test.describe('ClawX chat model picker', () => {
         ipcMain.handle('gateway:rpc', async (_event: unknown, method: string, params: unknown) => {
           hostRequests.push({ path: `gateway:${method}`, method: 'RPC', body: params ?? null });
           if (method === 'sessions.list') {
-            return { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main' }] } };
+            return { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main', model: currentSessionModelRef }] } };
+          }
+          if (method === 'sessions.patch') {
+            const request = params as { key?: string; model?: string | null };
+            currentSessionModelRef = request.model ?? refs.alphaModelRef;
+            return {
+              success: true,
+              result: {
+                entry: { model: currentSessionModelRef },
+                resolved: {
+                  modelProvider: currentSessionModelRef.split('/')[0],
+                  model: currentSessionModelRef.split('/').slice(1).join('/'),
+                },
+              },
+            };
+          }
+          if (method === 'sessions.create') {
+            const request = params as { key?: string; model?: string | null };
+            const model = request.model ?? refs.alphaModelRef;
+            return {
+              success: true,
+              result: {
+                entry: { key: request.key, model },
+                resolved: {
+                  modelProvider: model.split('/')[0],
+                  model: model.split('/').slice(1).join('/'),
+                },
+              },
+            };
           }
           if (method === 'chat.history') {
             return { success: true, result: { messages: [] } };
@@ -101,12 +129,43 @@ test.describe('ClawX chat model picker', () => {
           if (request?.module === 'chat' && request.action === 'loadAcpSession') {
             return makeResponse(request.id, { success: true, generation: 1 });
           }
+          if (request?.module === 'chat' && request.action === 'sendAcpPrompt') {
+            return makeResponse(request.id, { success: true, generation: 1 });
+          }
           if (request?.module === 'gateway' && request.action === 'rpc') {
             const method = typeof body?.method === 'string' ? body.method : '';
             const params = body?.params ?? null;
             hostRequests.push({ path: `gateway:${method}`, method: 'RPC', body: params });
             if (method === 'sessions.list') {
-              return makeResponse(request.id, { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main' }] } });
+              return makeResponse(request.id, { success: true, result: { sessions: [{ key: 'agent:main:main', displayName: 'main', model: currentSessionModelRef }] } });
+            }
+            if (method === 'sessions.patch') {
+              const patch = params as { key?: string; model?: string | null };
+              currentSessionModelRef = patch.model ?? refs.alphaModelRef;
+              return makeResponse(request.id, {
+                success: true,
+                result: {
+                  entry: { model: currentSessionModelRef },
+                  resolved: {
+                    modelProvider: currentSessionModelRef.split('/')[0],
+                    model: currentSessionModelRef.split('/').slice(1).join('/'),
+                  },
+                },
+              });
+            }
+            if (method === 'sessions.create') {
+              const create = params as { key?: string; model?: string | null };
+              const model = create.model ?? refs.alphaModelRef;
+              return makeResponse(request.id, {
+                success: true,
+                result: {
+                  entry: { key: create.key, model },
+                  resolved: {
+                    modelProvider: model.split('/')[0],
+                    model: model.split('/').slice(1).join('/'),
+                  },
+                },
+              });
             }
             if (method === 'chat.history') {
               return makeResponse(request.id, { success: true, result: { messages: [] } });
@@ -116,17 +175,17 @@ test.describe('ClawX chat model picker', () => {
           if (request?.module === 'agents' && request.action === 'list') {
             return makeResponse(request.id, agentsSnapshot());
           }
-          if (request?.module === 'agents' && request.action === 'updateModel') {
-            currentModelRef = typeof body?.modelRef === 'string' ? body.modelRef : refs.alphaModelRef;
-            hostRequests.push({
-              path: '/api/agents/main/model',
-              method: 'PUT',
-              body: { modelRef: currentModelRef },
+          if (request?.module === 'managedClientConfig' && request.action === 'textModels') {
+            await clientModelsReady;
+            return makeResponse(request.id, {
+              defaultModel: 'smart-latest',
+              models: [
+                { id: 'smart-latest', label: 'Smart routing' },
+                { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+              ],
             });
-            return makeResponse(request.id, agentsSnapshot());
           }
           if (request?.module === 'providers' && request.action === 'accounts') {
-            await providerAccountsReady;
             return makeResponse(request.id, [
               {
                 id: 'alpha1234',
@@ -206,8 +265,8 @@ test.describe('ClawX chat model picker', () => {
 
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: typeof hostRequests }).__chatModelPickerRequests = hostRequests;
         (globalThis as typeof globalThis & {
-          __releaseChatModelProviders?: () => void;
-        }).__releaseChatModelProviders = releaseProviderAccounts;
+          __releaseChatModelClientConfig?: () => void;
+        }).__releaseChatModelClientConfig = releaseClientModels;
       }, { alphaModelRef, betaModelRef });
 
       const page = await getStableWindow(app);
@@ -216,7 +275,7 @@ test.describe('ClawX chat model picker', () => {
       await expect.poll(async () => app.evaluate(() => (
         (globalThis as typeof globalThis & {
           __chatModelPickerRequests?: Array<{ path: string }>;
-        }).__chatModelPickerRequests?.some((request) => request.path === 'providers:accounts') ?? false
+        }).__chatModelPickerRequests?.some((request) => request.path === 'managedClientConfig:textModels') ?? false
       ))).toBe(true);
       expect(await app.evaluate(() => (
         (globalThis as typeof globalThis & {
@@ -225,42 +284,109 @@ test.describe('ClawX chat model picker', () => {
       ))).toBe(false);
       await app.evaluate(() => {
         (globalThis as typeof globalThis & {
-          __releaseChatModelProviders?: () => void;
-        }).__releaseChatModelProviders?.();
+          __releaseChatModelClientConfig?: () => void;
+        }).__releaseChatModelClientConfig?.();
       });
       await app.evaluate(({ BrowserWindow }) => {
         const win = BrowserWindow.getAllWindows()[0];
         win?.webContents.send('gateway:status-changed', { state: 'running', port: 18789, pid: 12345, gatewayReady: true });
       });
 
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('model-alpha (Alpha)');
+      await expect(page.getByTestId('chat-model-picker-button')).toContainText('Smart routing');
       await page.getByTestId('chat-model-picker-button').click();
       await expect(page.getByTestId('chat-model-picker-menu')).toBeVisible();
-      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('provider/model-beta (Beta)');
-      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('gpt-5.6 (OpenAI)');
-      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('gpt-5.5 (OpenAI)');
-      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('openai/gpt-5.6 (OpenAI)');
-      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('kimi-k2.7 (Moonshot)');
-      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('kimi-k2.6 (Moonshot)');
-      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('moonshot/kimi-k2.7 (Moonshot)');
-      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'provider/model-beta (Beta)' }).click();
-      await expect(page.getByTestId('chat-model-picker-button')).toContainText('provider/model-beta (Beta)');
+      await expect(page.getByTestId('chat-model-picker-menu')).toContainText('DeepSeek V4 Pro');
+      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('Alpha');
+      await expect(page.getByTestId('chat-model-picker-menu')).not.toContainText('Moonshot');
+      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'DeepSeek V4 Pro' }).click();
+      await expect(page.getByTestId('chat-model-picker-button')).toContainText('DeepSeek V4 Pro');
+
+      await expect.poll(async () => app.evaluate((_electron, expectedModelRef) => (
+        ((globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []).some((request) => (
+          request.path === 'gateway:sessions.patch'
+          && typeof request.body === 'object'
+          && request.body !== null
+          && (request.body as Record<string, unknown>).model === expectedModelRef
+        ))
+      ), betaModelRef)).toBe(true);
 
       const requests = await app.evaluate(() => (
         (globalThis as typeof globalThis & { __chatModelPickerRequests?: Array<{ path: string; method: string; body: unknown }> }).__chatModelPickerRequests ?? []
       ));
       expect(requests).toContainEqual({
-        path: '/api/agents/main/model',
-        method: 'PUT',
-        body: { modelRef: betaModelRef },
+        path: 'gateway:sessions.patch',
+        method: 'RPC',
+        body: { key: 'agent:main:main', model: betaModelRef },
       });
       expect(requests.some((request) =>
-        request.path === '/api/gateway/restart'
+        request.path === 'agents:updateModel'
+        || request.path === '/api/agents/main/model'
+        || request.path === '/api/gateway/restart'
         || request.path === '/api/gateway/start'
         || request.path === 'gateway:restart'
         || request.path === 'gateway:start'
         || request.path === 'gateway:config.patch'
       )).toBe(false);
+
+      await page.getByTestId('sidebar-new-chat').click();
+      await expect(page.getByTestId('chat-model-picker-button')).toContainText('Smart routing');
+      await page.getByTestId('chat-model-picker-button').click();
+      await page.getByTestId('chat-model-picker-menu').getByRole('button', { name: 'DeepSeek V4 Pro' }).click();
+
+      await expect.poll(async () => app.evaluate((_electron, expectedModelRef) => (
+        ((globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []).some((request) => (
+          request.path === 'gateway:sessions.create'
+          && typeof request.body === 'object'
+          && request.body !== null
+          && (request.body as Record<string, unknown>).model === expectedModelRef
+        ))
+      ), betaModelRef)).toBe(true);
+
+      const newSessionKey = await app.evaluate(() => {
+        const create = ((globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []).findLast((request) => request.path === 'gateway:sessions.create');
+        return typeof create?.body === 'object' && create.body !== null
+          && typeof (create.body as Record<string, unknown>).key === 'string'
+          ? (create.body as Record<string, string>).key
+          : null;
+      });
+      expect(newSessionKey).toMatch(/^agent:main:session-/);
+
+      await page.getByTestId('chat-composer-input').fill('Use the selected model in the new session');
+      await page.getByTestId('chat-composer-input').press('Enter');
+      await expect.poll(async () => app.evaluate((_electron, sessionKey) => (
+        ((globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []).some((request) => (
+          request.path === 'chat:sendAcpPrompt'
+          && typeof request.body === 'object'
+          && request.body !== null
+          && (request.body as Record<string, unknown>).sessionKey === sessionKey
+        ))
+      ), newSessionKey)).toBe(true);
+
+      const newSessionRequests = await app.evaluate(() => (
+        (globalThis as typeof globalThis & {
+          __chatModelPickerRequests?: Array<{ path: string; body: unknown }>;
+        }).__chatModelPickerRequests ?? []
+      ));
+      const acpLoad = newSessionRequests.find((request) => (
+        request.path === 'chat:loadAcpSession'
+        && typeof request.body === 'object'
+        && request.body !== null
+        && (request.body as Record<string, unknown>).sessionKey === newSessionKey
+      ));
+      expect(acpLoad?.body).toMatchObject({
+        sessionKey: newSessionKey,
+        workspaceRoot: '~/.openclaw/workspace',
+        cwd: '~/.openclaw/workspace',
+      });
+      expect(acpLoad?.body).not.toHaveProperty('createIfMissing');
     } finally {
       await closeElectronApp(app);
     }

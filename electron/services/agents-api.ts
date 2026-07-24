@@ -53,7 +53,7 @@ export function createAgentsApi(ctx: AgentsApiContext): CompleteHostServiceRegis
       const snapshot = await createAgent(name, { inheritWorkspace });
       // Do not reload a newly created Agent while managed credential cleanup is incomplete.
       try {
-        await syncAllProviderAuthToRuntime();
+        await syncAllProviderAuthToRuntime({ reconcileManagedRuntime: true });
         scheduleGatewayReload(ctx, 'create-agent');
       } catch (syncError) {
         console.warn('[agents] Failed to sync provider auth after agent creation:', syncError);

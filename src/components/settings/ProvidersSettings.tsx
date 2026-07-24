@@ -54,6 +54,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { hostApi } from '@/lib/host-api';
 import { hostEvents } from '@/lib/host-events';
 import type { OAuthCodeEvent, OAuthErrorEvent, OAuthSuccessEvent } from '@shared/host-events/contract';
+import { UCLAW_MANAGED_PROVIDER_ID } from '@shared/junfeiai-endpoints';
 
 const inputClasses = 'h-[44px] rounded-xl font-mono text-meta bg-transparent border-black/10 dark:border-white/10 focus-visible:ring-2 focus-visible:ring-blue-500/50 focus-visible:border-blue-500 shadow-sm transition-all text-foreground placeholder:text-foreground/40';
 const labelClasses = 'text-sm text-foreground/80 font-bold';
@@ -173,6 +174,9 @@ export function ProvidersSettings() {
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const vendorMap = new Map(vendors.map((vendor) => [vendor.id, vendor]));
   const existingVendorIds = new Set(accounts.map((account) => account.vendorId));
+  const managedProviderMode = vendors.length === 1
+    && vendors[0]?.id === UCLAW_MANAGED_PROVIDER_ID
+    && accounts.some((account) => account.metadata?.managedBy === 'uclaw');
   const displayProviders = useMemo(
     () => buildProviderListItems(accounts, statuses, vendors, defaultAccountId),
     [accounts, statuses, vendors, defaultAccountId],
@@ -250,10 +254,12 @@ export function ProvidersSettings() {
         <h2 data-testid="providers-settings-title" className="text-3xl font-serif text-foreground font-normal tracking-tight">
           {t('aiProviders.title', 'AI Providers')}
         </h2>
-        <Button data-testid="providers-add-button" onClick={() => setShowAddDialog(true)} className="rounded-full px-5 h-9 shadow-none font-medium text-meta">
-          <Plus className="h-4 w-4 mr-2" />
-          {t('aiProviders.add')}
-        </Button>
+        {!managedProviderMode && (
+          <Button data-testid="providers-add-button" onClick={() => setShowAddDialog(true)} className="rounded-full px-5 h-9 shadow-none font-medium text-meta">
+            <Plus className="h-4 w-4 mr-2" />
+            {t('aiProviders.add')}
+          </Button>
+        )}
       </div>
 
       {loading ? (
@@ -267,10 +273,12 @@ export function ProvidersSettings() {
           <p className="text-meta text-center mb-6 max-w-sm">
             {t('aiProviders.empty.desc')}
           </p>
-          <Button onClick={() => setShowAddDialog(true)} className="rounded-full px-6 h-10 bg-brand hover:bg-brand-hover text-white">
-            <Plus className="h-4 w-4 mr-2" />
-            {t('aiProviders.empty.cta')}
-          </Button>
+          {!managedProviderMode && (
+            <Button onClick={() => setShowAddDialog(true)} className="rounded-full px-6 h-10 bg-brand hover:bg-brand-hover text-white">
+              <Plus className="h-4 w-4 mr-2" />
+              {t('aiProviders.empty.cta')}
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -312,15 +320,17 @@ export function ProvidersSettings() {
       )}
 
       {/* Add Provider Dialog */}
-      <AddProviderDialog
-        open={showAddDialog}
-        existingVendorIds={existingVendorIds}
-        vendors={vendors}
-        onClose={() => setShowAddDialog(false)}
-        onAdd={handleAddProvider}
-        onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
-        devModeUnlocked={devModeUnlocked}
-      />
+      {!managedProviderMode && (
+        <AddProviderDialog
+          open={showAddDialog}
+          existingVendorIds={existingVendorIds}
+          vendors={vendors}
+          onClose={() => setShowAddDialog(false)}
+          onAdd={handleAddProvider}
+          onValidateKey={(type, key, options) => validateAccountApiKey(type, key, options)}
+          devModeUnlocked={devModeUnlocked}
+        />
+      )}
     </div>
   );
 }

@@ -1,4 +1,7 @@
 import type { ProviderAccount, ProviderVendorInfo, ProviderWithKeyInfo } from '@/lib/providers';
+import type { ManagedClientTextModelPolicy } from '@shared/managed-client-config';
+import { toManagedClientTextModelRef } from '@shared/managed-client-config';
+import { UCLAW_MANAGED_ACCOUNT_ID, UCLAW_MANAGED_PROVIDER_ID } from '@shared/junfeiai-endpoints';
 
 export interface ConfiguredModelOption {
   modelRef: string;
@@ -13,6 +16,24 @@ export interface RuntimeProviderOption {
   label: string;
   modelIdPlaceholder?: string;
   configuredModelId?: string;
+}
+
+/** Build chat-picker options exclusively from the server-owned managed model policy. */
+export function buildManagedTextModelOptions(
+  policy: ManagedClientTextModelPolicy,
+): ConfiguredModelOption[] {
+  const seen = new Set<string>();
+  return policy.models.flatMap((model) => {
+    const modelId = model.id.trim();
+    if (!modelId || seen.has(modelId)) return [];
+    seen.add(modelId);
+    return [{
+      modelRef: toManagedClientTextModelRef(modelId),
+      label: model.label?.trim() || modelId,
+      runtimeProviderKey: UCLAW_MANAGED_PROVIDER_ID,
+      accountId: UCLAW_MANAGED_ACCOUNT_ID,
+    }];
+  });
 }
 
 export function resolveRuntimeProviderKey(account: ProviderAccount): string {

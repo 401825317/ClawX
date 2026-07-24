@@ -59,6 +59,7 @@ import type {
   ManagedAuthVerificationCodePayload,
   ManagedAuthVerifyPayload,
 } from '@shared/managed-auth';
+import type { ManagedClientTextModelRequest } from '@shared/managed-client-config';
 import type {
   BillingCreateOrderPayload,
   BillingOrderHistoryPayload,
@@ -326,6 +327,11 @@ export const hostApi = {
     verify: (input?: ManagedAuthVerifyPayload) => invokeHost('managedAuth', 'verify', input),
     refresh: (input?: ManagedAuthRefreshPayload) => invokeHost('managedAuth', 'refresh', input),
     logout: () => invokeHost('managedAuth', 'logout'),
+  },
+  managedClientConfig: {
+    textModels: (input?: ManagedClientTextModelRequest) => (
+      invokeHost('managedClientConfig', 'textModels', input)
+    ),
   },
   billing: {
     overview: () => invokeHost('billing', 'overview'),

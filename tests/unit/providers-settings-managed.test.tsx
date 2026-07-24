@@ -113,4 +113,17 @@ describe('ProvidersSettings managed account protection', () => {
     expect(screen.getByTestId('provider-edit-custom-local')).toBeInTheDocument();
     expect(screen.getByTestId('provider-delete-custom-local')).toBeInTheDocument();
   });
+
+  it('hides the add-provider flow when the backend exposes managed mode', () => {
+    providerState.accounts = [providerState.accounts[0]];
+    providerState.statuses = [providerState.statuses[0]];
+    providerState.vendors = [{ id: 'openai', name: 'UClaw', icon: '' }];
+    providerState.defaultAccountId = 'openai';
+
+    render(<ProvidersSettings />);
+
+    expect(screen.queryByTestId('providers-add-button')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('provider-edit-openai')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('provider-delete-openai')).not.toBeInTheDocument();
+  });
 });

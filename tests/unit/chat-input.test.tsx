@@ -1,18 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ChatInput } from '@/pages/Chat/ChatInput';
 import { TooltipProvider } from '@/components/ui/tooltip';
 const hostApiFetchMock = vi.hoisted(() => vi.fn());
 const hostApiDialogOpenMock = vi.hoisted(() => vi.fn());
 const toastErrorMock = vi.hoisted(() => vi.fn());
-const { agentsState, chatState, gatewayState, providersState, artifactPanelMocks } = vi.hoisted(() => ({
+const { agentsState, chatState, gatewayState, providersState, managedClientConfigState, artifactPanelMocks } = vi.hoisted(() => ({
   agentsState: {
     agents: [] as Array<Record<string, unknown>>,
     defaultModelRef: null as string | null,
-    updateAgentModel: vi.fn(),
   },
   chatState: {
     currentAgentId: 'main',
+    currentSessionKey: 'agent:main:main',
+    sessions: [] as Array<Record<string, unknown>>,
+    pendingSessionModelUpdates: {} as Record<string, boolean>,
+    updateSessionModel: vi.fn(),
+    waitForSessionModelUpdate: vi.fn(),
   },
   gatewayState: {
     status: { state: 'running', port: 18789 },
@@ -23,6 +27,18 @@ const { agentsState, chatState, gatewayState, providersState, artifactPanelMocks
     defaultAccountId: null as string | null,
     error: null as string | null,
     refreshProviderSnapshot: vi.fn(),
+  },
+  managedClientConfigState: {
+    textModelPolicy: {
+      defaultModel: 'smart-latest',
+      models: [
+        { id: 'smart-latest', label: 'Smart' },
+        { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+      ],
+    },
+    initialized: true,
+    loading: false,
+    loadTextModels: vi.fn(),
   },
   artifactPanelMocks: {
     openPreview: vi.fn(),
@@ -43,6 +59,12 @@ vi.mock('@/stores/gateway', () => ({
 
 vi.mock('@/stores/providers', () => ({
   useProviderStore: (selector: (state: typeof providersState) => unknown) => selector(providersState),
+}));
+
+vi.mock('@/stores/managed-client-config', () => ({
+  useManagedClientConfigStore: (selector: (state: typeof managedClientConfigState) => unknown) => (
+    selector(managedClientConfigState)
+  ),
 }));
 
 vi.mock('@/stores/artifact-panel', () => ({
@@ -157,6 +179,16 @@ function renderChatInput(onSend = vi.fn()) {
   );
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function configureAgentAndModelPickers() {
   const now = '2025-01-01T00:00:00.000Z';
   agentsState.agents = [
@@ -165,6 +197,7 @@ function configureAgentAndModelPickers() {
       name: 'Main',
       isDefault: true,
       modelDisplay: 'MiniMax',
+      modelRef: 'openai/smart-latest',
       inheritedModel: true,
       workspace: '~/.openclaw/workspace',
       agentDir: '~/.openclaw/agents/main/agent',
@@ -184,6 +217,7 @@ function configureAgentAndModelPickers() {
     },
   ];
   agentsState.defaultModelRef = 'custom-aaaaaaaa/gpt-a';
+  chatState.sessions = [{ key: chatState.currentSessionKey, model: 'openai/smart-latest' }];
   providersState.accounts = [
     {
       id: 'aaaaaaaa',
@@ -222,14 +256,30 @@ describe('ChatInput agent targeting', () => {
   beforeEach(() => {
     agentsState.agents = [];
     agentsState.defaultModelRef = null;
-    agentsState.updateAgentModel.mockReset();
     chatState.currentAgentId = 'main';
+    chatState.currentSessionKey = 'agent:main:main';
+    chatState.sessions = [];
+    chatState.pendingSessionModelUpdates = {};
+    chatState.updateSessionModel.mockReset();
+    chatState.updateSessionModel.mockResolvedValue(undefined);
+    chatState.waitForSessionModelUpdate.mockReset();
+    chatState.waitForSessionModelUpdate.mockResolvedValue(undefined);
     gatewayState.status = { state: 'running', port: 18789 };
     providersState.accounts = [];
     providersState.statuses = [];
     providersState.defaultAccountId = null;
     providersState.error = null;
     providersState.refreshProviderSnapshot.mockReset();
+    managedClientConfigState.textModelPolicy = {
+      defaultModel: 'smart-latest',
+      models: [
+        { id: 'smart-latest', label: 'Smart' },
+        { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+      ],
+    };
+    managedClientConfigState.initialized = true;
+    managedClientConfigState.loadTextModels.mockReset();
+    managedClientConfigState.loadTextModels.mockResolvedValue(managedClientConfigState.textModelPolicy);
     vi.mocked(hostApiFetchMock).mockReset();
     vi.mocked(hostApiDialogOpenMock).mockReset();
     toastErrorMock.mockReset();
@@ -282,36 +332,309 @@ describe('ChatInput agent targeting', () => {
     expect(screen.queryByTestId('chat-composer-image-generation-indicator')).not.toBeInTheDocument();
   });
 
-  it('waits for the provider snapshot before clearing an unavailable model override', async () => {
-    let resolveSnapshot!: () => void;
-    agentsState.updateAgentModel.mockResolvedValue(undefined);
-    providersState.refreshProviderSnapshot.mockReturnValue(new Promise<void>((resolve) => {
-      resolveSnapshot = resolve;
-    }));
-    agentsState.agents = [{
-      id: 'main',
-      name: 'Main',
-      modelRef: 'custom-stale/model',
-      overrideModelRef: 'custom-stale/model',
-      inheritedModel: false,
-      workspace: '~/.openclaw/workspace',
-      agentDir: '~/.openclaw/agents/main/agent',
-      mainSessionKey: 'agent:main:main',
-      channelTypes: [],
+  it('shows only text models supplied by managed client-config', () => {
+    configureAgentAndModelPickers();
+
+    renderChatInput();
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+
+    expect(screen.getByTestId('chat-model-picker-menu')).toHaveTextContent('Smart');
+    expect(screen.getByTestId('chat-model-picker-menu')).toHaveTextContent('DeepSeek V4 Pro');
+    expect(screen.getByTestId('chat-model-picker-menu')).not.toHaveTextContent('Alpha');
+    expect(screen.getByTestId('chat-model-picker-menu')).not.toHaveTextContent('Beta');
+  });
+
+  it('persists a model selection only for the current session', async () => {
+    configureAgentAndModelPickers();
+
+    renderChatInput();
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+
+    await waitFor(() => {
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith(
+        'agent:main:main',
+        'openai/deepseek-v4-pro',
+      );
+    });
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('DeepSeek V4 Pro');
+  });
+
+  it('blocks sending until the selected model is persisted', async () => {
+    const modelUpdate = createDeferred<void>();
+    const onSend = vi.fn();
+    configureAgentAndModelPickers();
+    const trackedUpdate = modelUpdate.promise.finally(() => {
+      delete chatState.pendingSessionModelUpdates['agent:main:main'];
+    });
+    chatState.updateSessionModel.mockImplementationOnce((sessionKey: string) => {
+      chatState.pendingSessionModelUpdates[sessionKey] = true;
+      return trackedUpdate;
+    });
+    chatState.waitForSessionModelUpdate.mockImplementation(() => trackedUpdate);
+
+    const view = renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), {
+      target: { value: 'Use the newly selected model' },
+    });
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+
+    await waitFor(() => {
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith(
+        'agent:main:main',
+        'openai/deepseek-v4-pro',
+      );
+    });
+    expect(screen.getByTestId('chat-composer-send')).toBeDisabled();
+    expect(onSend).not.toHaveBeenCalled();
+
+    await act(async () => {
+      modelUpdate.resolve();
+      await trackedUpdate;
+    });
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-composer-send')).not.toBeDisabled();
+    });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Use the newly selected model', undefined, null);
+    });
+  });
+
+  it('does not send a queued draft after switching sessions during model persistence', async () => {
+    const modelUpdate = createDeferred<void>();
+    const onSend = vi.fn();
+    configureAgentAndModelPickers();
+    const trackedUpdate = modelUpdate.promise.finally(() => {
+      delete chatState.pendingSessionModelUpdates['agent:main:main'];
+    });
+    chatState.updateSessionModel.mockImplementationOnce((sessionKey: string) => {
+      chatState.pendingSessionModelUpdates[sessionKey] = true;
+      return trackedUpdate;
+    });
+    chatState.waitForSessionModelUpdate.mockImplementation(() => trackedUpdate);
+
+    const view = renderChatInput(onSend);
+    const input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: 'Keep this draft in the original session' } });
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    chatState.currentSessionKey = 'agent:main:other';
+    chatState.sessions = [
+      ...chatState.sessions,
+      { key: chatState.currentSessionKey, model: 'openai/smart-latest' },
+    ];
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+
+    await act(async () => {
+      modelUpdate.resolve();
+      await trackedUpdate;
+    });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('chat-composer-input')).toHaveValue(
+      'Keep this draft in the original session',
+    );
+  });
+
+  it('reads pending model persistence after remount and sends only once after it settles', async () => {
+    const modelUpdate = createDeferred<void>();
+    const onSend = vi.fn();
+    configureAgentAndModelPickers();
+    chatState.pendingSessionModelUpdates['agent:main:main'] = true;
+    chatState.waitForSessionModelUpdate.mockImplementation(() => modelUpdate.promise);
+
+    const firstMount = renderChatInput(onSend);
+    expect(screen.getByTestId('chat-composer-send')).toBeDisabled();
+    fireEvent.change(screen.getByTestId('chat-composer-input'), {
+      target: { value: 'Do not send from the unmounted instance' },
+    });
+    fireEvent.keyDown(screen.getByTestId('chat-composer-input'), { key: 'Enter', code: 'Enter' });
+    firstMount.unmount();
+
+    renderChatInput(onSend);
+    const input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: 'Send after persistence' } });
+    expect(screen.getByTestId('chat-composer-send')).toBeDisabled();
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await act(async () => {
+      delete chatState.pendingSessionModelUpdates['agent:main:main'];
+      modelUpdate.resolve();
+      await modelUpdate.promise;
+    });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('Send after persistence', undefined, null);
+  });
+
+  it('does not revive an older send after an A to B to A session switch', async () => {
+    const modelUpdate = createDeferred<void>();
+    const onSend = vi.fn();
+    configureAgentAndModelPickers();
+    chatState.pendingSessionModelUpdates['agent:main:main'] = true;
+    chatState.waitForSessionModelUpdate.mockImplementation(() => modelUpdate.promise);
+
+    const view = renderChatInput(onSend);
+    let input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: 'Stale A draft' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    chatState.currentSessionKey = 'agent:main:other';
+    chatState.sessions = [
+      ...chatState.sessions,
+      { key: chatState.currentSessionKey, model: 'openai/smart-latest' },
+    ];
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+    chatState.currentSessionKey = 'agent:main:main';
+    view.rerender(
+      <TooltipProvider>
+        <ChatInput onSend={onSend} />
+      </TooltipProvider>,
+    );
+
+    input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: 'Current A draft' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await act(async () => {
+      delete chatState.pendingSessionModelUpdates['agent:main:main'];
+      modelUpdate.resolve();
+      await modelUpdate.promise;
+    });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('Current A draft', undefined, null);
+  });
+
+  it('keeps the latest model visible when an earlier selection fails late', async () => {
+    const firstUpdate = createDeferred<void>();
+    const finalUpdate = createDeferred<void>();
+    configureAgentAndModelPickers();
+    managedClientConfigState.textModelPolicy = {
+      defaultModel: 'smart-latest',
+      models: [
+        { id: 'smart-latest', label: 'Smart' },
+        { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { id: 'glm-5', label: 'GLM 5' },
+      ],
+    };
+    chatState.updateSessionModel
+      .mockReturnValueOnce(firstUpdate.promise)
+      .mockReturnValueOnce(finalUpdate.promise);
+
+    renderChatInput();
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek V4 Pro' }));
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'GLM 5' }));
+
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('GLM 5');
+
+    await act(async () => {
+      finalUpdate.resolve();
+      await finalUpdate.promise;
+      firstUpdate.reject(new Error('older model update failed'));
+      await firstUpdate.promise.catch(() => undefined);
+    });
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId('chat-model-picker-button')).toHaveTextContent('GLM 5');
+  });
+
+  it('clears the current session override when selecting the managed default model', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{
+      key: chatState.currentSessionKey,
+      model: 'openai/deepseek-v4-pro',
     }];
 
     renderChatInput();
+    fireEvent.click(screen.getByTestId('chat-model-picker-button'));
+    fireEvent.click(screen.getByRole('button', { name: 'Smart' }));
 
     await waitFor(() => {
-      expect(providersState.refreshProviderSnapshot).toHaveBeenCalled();
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith('agent:main:main', null);
     });
-    expect(agentsState.updateAgentModel).not.toHaveBeenCalled();
+  });
 
-    resolveSnapshot();
+  it('repairs a removed session model before sending', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{ key: chatState.currentSessionKey, model: 'openai/removed-model' }];
+    const onSend = vi.fn();
+
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Hello' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
 
     await waitFor(() => {
-      expect(agentsState.updateAgentModel).toHaveBeenCalledWith('main', null);
+      expect(chatState.updateSessionModel).toHaveBeenCalledWith(
+        'agent:main:main',
+        'openai/smart-latest',
+      );
+      expect(onSend).toHaveBeenCalledWith('Hello', undefined, null);
     });
+  });
+
+  it('does not duplicate a send while repairing a removed session model', async () => {
+    const repair = createDeferred<void>();
+    const onSend = vi.fn();
+    configureAgentAndModelPickers();
+    chatState.sessions = [{ key: chatState.currentSessionKey, model: 'openai/removed-model' }];
+    chatState.updateSessionModel.mockReturnValueOnce(repair.promise);
+
+    renderChatInput(onSend);
+    const input = screen.getByTestId('chat-composer-input');
+    fireEvent.change(input, { target: { value: 'Repair once' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(chatState.updateSessionModel).toHaveBeenCalledTimes(1);
+    });
+    await act(async () => {
+      repair.resolve();
+      await repair.promise;
+    });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith('Repair once', undefined, null);
+  });
+
+  it('does not send when repairing a removed session model fails', async () => {
+    configureAgentAndModelPickers();
+    chatState.sessions = [{ key: chatState.currentSessionKey, model: 'openai/removed-model' }];
+    chatState.updateSessionModel.mockRejectedValueOnce(new Error('session patch failed'));
+    const onSend = vi.fn();
+
+    renderChatInput(onSend);
+    fireEvent.change(screen.getByTestId('chat-composer-input'), { target: { value: 'Hello' } });
+    fireEvent.click(screen.getByTestId('chat-composer-send'));
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalled();
+    });
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it('renders editable workspace selector in the composer footer', () => {
@@ -861,7 +1184,7 @@ describe('ChatInput agent targeting', () => {
     expect(textbox.className).not.toContain('text-transparent');
   });
 
-  it('lets the user select an agent target and sends it with the message', () => {
+  it('lets the user select an agent target and sends it with the message', async () => {
     const onSend = vi.fn();
     agentsState.agents = [
       {
@@ -898,10 +1221,12 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Hello direct agent' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research');
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Hello direct agent', undefined, 'research');
+    });
   });
 
-  it('keeps the ACP composer enabled while gateway is running but not yet ready', () => {
+  it('keeps the ACP composer enabled while gateway is running but not yet ready', async () => {
     const onSend = vi.fn();
     gatewayState.status = { state: 'running', port: 18789, gatewayReady: false };
     agentsState.agents = [
@@ -961,7 +1286,9 @@ describe('ChatInput agent targeting', () => {
     fireEvent.change(input, { target: { value: 'Send through ACP' } });
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Send through ACP', undefined, null);
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Send through ACP', undefined, null);
+    });
   });
 
   it('shows starting status while gateway is running but not yet ready', () => {
@@ -1066,7 +1393,9 @@ describe('ChatInput agent targeting', () => {
 
     fireEvent.click(screen.getByTitle('Send'));
 
-    expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null);
+    await waitFor(() => {
+      expect(onSend).toHaveBeenCalledWith('Draft /create-skill  a new helper', undefined, null);
+    });
     expect(hostApiFetchMock).toHaveBeenCalledWith(
       '/api/skills/quick-access',
       expect.objectContaining({

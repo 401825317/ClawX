@@ -38,12 +38,13 @@ import { CLAWX_OPENAI_IMAGE_PROVIDER_KEY } from '../utils/openclaw-image-relay-c
 import {
   isUclawManagedDistribution,
   UCLAW_AUTH_ACCOUNT_ID,
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_PROVIDER_ID,
 } from '../utils/junfeiai-distribution';
 import { getProviderAccount } from '../services/providers/provider-store';
 import {
   isUclawManagedAccount,
-  resolveValidUclawManagedRelayToken,
+  resolveValidUclawManagedRelayPairToken,
   withProviderMutationLock,
 } from '../services/providers/provider-mutation-lock';
 import { getProviderSecret } from '../services/secrets/secret-store';
@@ -567,7 +568,10 @@ export async function syncGatewayConfigBeforeLaunch(
 /** Resolve the canonical managed OpenAI credential without racing login or logout. */
 export async function loadManagedOpenAiProviderEnv(): Promise<ReturnType<typeof buildManagedOpenAiProviderEnv>> {
   return withProviderMutationLock(async () => {
-    const account = await getProviderAccount(UCLAW_PROVIDER_ID);
+    const [account, compatibilityAccount] = await Promise.all([
+      getProviderAccount(UCLAW_PROVIDER_ID),
+      getProviderAccount(UCLAW_COMPATIBILITY_PROVIDER_ID),
+    ]);
     if (
       account?.id !== UCLAW_PROVIDER_ID
       || account.vendorId !== 'openai'
@@ -576,12 +580,17 @@ export async function loadManagedOpenAiProviderEnv(): Promise<ReturnType<typeof 
       return buildManagedOpenAiProviderEnv(null);
     }
 
-    const authSecret = await getProviderSecret(UCLAW_AUTH_ACCOUNT_ID, { migrate: false });
-    const relaySecret = await getProviderSecret(UCLAW_PROVIDER_ID, { migrate: false });
-    return buildManagedOpenAiProviderEnv(resolveValidUclawManagedRelayToken(
+    const [authSecret, relaySecret, compatibilityRelaySecret] = await Promise.all([
+      getProviderSecret(UCLAW_AUTH_ACCOUNT_ID, { migrate: false }),
+      getProviderSecret(UCLAW_PROVIDER_ID, { migrate: false }),
+      getProviderSecret(UCLAW_COMPATIBILITY_PROVIDER_ID, { migrate: false }),
+    ]);
+    return buildManagedOpenAiProviderEnv(resolveValidUclawManagedRelayPairToken(
       account,
+      compatibilityAccount,
       authSecret,
       relaySecret,
+      compatibilityRelaySecret,
     ));
   });
 }

@@ -3,6 +3,7 @@
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { UCLAW_MANAGED_PROVIDER_BASE_URL } from '@shared/junfeiai-endpoints';
 
 const { testHome, testUserData, getSettingMock } = vi.hoisted(() => {
   const suffix = Math.random().toString(36).slice(2);
@@ -242,20 +243,31 @@ describe('managed auth profiles transaction', () => {
 
     const installedJson = await readAuthProfiles('main');
     const installedProfiles = installedJson.profiles as Record<string, unknown>;
-    expect(Object.keys(installedProfiles).sort()).toEqual(['deepseek:default', 'openai:default']);
+    expect(Object.keys(installedProfiles).sort()).toEqual([
+      'deepseek:default',
+      'lingzhiwuxian:default',
+      'openai:default',
+    ]);
     expect(installedProfiles['openai:default']).toEqual({
       type: 'api_key',
       provider: 'openai',
       key: 'managed-openai-key',
     });
+    expect(installedProfiles['lingzhiwuxian:default']).toEqual({
+      type: 'api_key',
+      provider: 'lingzhiwuxian',
+      key: 'managed-openai-key',
+    });
     expect(installedProfiles['deepseek:default']).toEqual(originalStore.profiles['deepseek:default']);
     expect(installedJson.order).toEqual({
       openai: ['openai:default'],
+      lingzhiwuxian: ['lingzhiwuxian:default'],
       deepseek: ['deepseek:default'],
       routed: ['deepseek:default'],
     });
     expect(installedJson.lastGood).toEqual({
       openai: 'openai:default',
+      lingzhiwuxian: 'lingzhiwuxian:default',
       deepseek: 'deepseek:default',
     });
     expect(installedJson.usageStats).toEqual({
@@ -400,9 +412,17 @@ describe('managed auth profiles transaction', () => {
 
     const jsonProfiles = (await readAuthProfiles('main')).profiles as Record<string, unknown>;
     const sqliteProfiles = readAuthProfilesFromSqlite('main')?.profiles ?? {};
-    expect(Object.keys(jsonProfiles).sort()).toEqual(['deepseek:default', 'openai:default']);
+    expect(Object.keys(jsonProfiles).sort()).toEqual([
+      'deepseek:default',
+      'lingzhiwuxian:default',
+      'openai:default',
+    ]);
     expect(jsonProfiles['moonshot:default']).toBeUndefined();
-    expect(Object.keys(sqliteProfiles).sort()).toEqual(['moonshot:default', 'openai:default']);
+    expect(Object.keys(sqliteProfiles).sort()).toEqual([
+      'lingzhiwuxian:default',
+      'moonshot:default',
+      'openai:default',
+    ]);
     expect(sqliteProfiles['deepseek:default']).toBeUndefined();
   });
 
@@ -428,9 +448,9 @@ describe('managed auth profiles transaction', () => {
     await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
 
     expect(Object.keys((await readAuthProfiles('main')).profiles as Record<string, unknown>).sort())
-      .toEqual(['deepseek:default', 'openai:default']);
+      .toEqual(['deepseek:default', 'lingzhiwuxian:default', 'openai:default']);
     expect(Object.keys(readAuthProfilesFromSqlite('main')?.profiles ?? {}).sort())
-      .toEqual(['deepseek:default', 'openai:default']);
+      .toEqual(['deepseek:default', 'lingzhiwuxian:default', 'openai:default']);
   });
 
   it('seeds a missing JSON store from SQLite before replacing OpenAI', async () => {
@@ -455,9 +475,9 @@ describe('managed auth profiles transaction', () => {
     await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
 
     expect(Object.keys((await readAuthProfiles('main')).profiles as Record<string, unknown>).sort())
-      .toEqual(['moonshot:default', 'openai:default']);
+      .toEqual(['lingzhiwuxian:default', 'moonshot:default', 'openai:default']);
     expect(Object.keys(readAuthProfilesFromSqlite('main')?.profiles ?? {}).sort())
-      .toEqual(['moonshot:default', 'openai:default']);
+      .toEqual(['lingzhiwuxian:default', 'moonshot:default', 'openai:default']);
   });
 
   it('falls back to main when the frozen discovery result is empty', async () => {
@@ -478,6 +498,11 @@ describe('managed auth profiles transaction', () => {
       'openai:default': {
         type: 'api_key',
         provider: 'openai',
+        key: 'managed-main-key',
+      },
+      'lingzhiwuxian:default': {
+        type: 'api_key',
+        provider: 'lingzhiwuxian',
         key: 'managed-main-key',
       },
     });
@@ -591,6 +616,59 @@ describe('managed auth profiles transaction', () => {
     expect(error).toBeInstanceOf(AggregateError);
     expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(concurrentJson);
     await expect(readFile(getAuthProfilesSqlitePath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not roll back concurrent JSON or SQLite changes for an unchanged managed agent', async () => {
+    await writeOpenClawJson({ agents: { list: [{ id: 'main', name: 'Main' }] } });
+    const managedStore = {
+      version: 1,
+      profiles: {
+        'openai:default': { type: 'api_key', provider: 'openai', key: 'managed-key' },
+        'lingzhiwuxian:default': {
+          type: 'api_key',
+          provider: 'lingzhiwuxian',
+          key: 'managed-key',
+        },
+      },
+      order: {
+        openai: ['openai:default'],
+        lingzhiwuxian: ['lingzhiwuxian:default'],
+      },
+      lastGood: {
+        openai: 'openai:default',
+        lingzhiwuxian: 'lingzhiwuxian:default',
+      },
+    };
+    await writeAgentAuthProfiles('main', managedStore);
+    const {
+      readAuthProfilesFromSqlite,
+      writeAuthProfilesToSqlite,
+    } = await import('@electron/utils/openclaw-auth-sqlite');
+    writeAuthProfilesToSqlite(managedStore, 'main');
+    const {
+      installManagedAgentOpenAiApiKey,
+      restoreManagedAgentAuthProfiles,
+      snapshotManagedAgentAuthProfiles,
+    } = await import('@electron/utils/openclaw-auth');
+    const snapshot = await snapshotManagedAgentAuthProfiles();
+
+    await installManagedAgentOpenAiApiKey(snapshot, 'managed-key');
+
+    const concurrentStore = {
+      ...managedStore,
+      profiles: {
+        ...managedStore.profiles,
+        'moonshot:default': { type: 'api_key', provider: 'moonshot', key: 'concurrent-key' },
+      },
+    };
+    const concurrentJson = JSON.stringify(concurrentStore);
+    await writeFile(getAgentAuthProfilesPath('main'), concurrentJson, 'utf8');
+    writeAuthProfilesToSqlite(concurrentStore, 'main');
+
+    await expect(restoreManagedAgentAuthProfiles(snapshot)).resolves.toBeUndefined();
+
+    expect(await readFile(getAgentAuthProfilesPath('main'), 'utf8')).toBe(concurrentJson);
+    expect(readAuthProfilesFromSqlite('main')).toEqual(concurrentStore);
   });
 
   it.each([
@@ -2437,7 +2515,7 @@ describe('managed agent models transaction', () => {
 
     const snapshot = await snapshotManagedAgentModelsFiles();
     await updateManagedAgentModelProviderStrict(snapshot, {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-responses',
       models: [{ id: 'smart-latest', name: 'smart-latest' }],
     });
@@ -2447,6 +2525,7 @@ describe('managed agent models transaction', () => {
       providers: Record<string, unknown>;
     };
     expect(installed.providers.openai).toBeDefined();
+    expect(installed.providers.lingzhiwuxian).toBeDefined();
 
     await restoreManagedAgentModelsFiles(snapshot);
     await expect(readFile(getAgentModelsPath('main'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -2475,7 +2554,7 @@ describe('managed agent models transaction', () => {
           models: [{ id: 'gpt-5.4', name: 'Legacy Codex' }],
         },
         'legacy-uclaw-relay': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+          baseUrl: `${UCLAW_MANAGED_PROVIDER_BASE_URL}/`,
           api: 'openai-responses',
           modelId: 'legacy-uclaw-relay/smart-latest',
         },
@@ -2485,9 +2564,14 @@ describe('managed agent models transaction', () => {
           models: [{ id: 'smart-latest', name: 'Unrelated Smart Model' }],
         },
         'same-host-other-model': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           api: 'openai-responses',
           models: [{ id: 'other-model', name: 'Other Model' }],
+        },
+        'clawx-openai-image': {
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+          api: 'openai-completions',
+          models: [{ id: 'gpt-image-2', name: 'Image' }],
         },
         deepseek: {
           baseUrl: 'https://api.deepseek.com/v1',
@@ -2503,7 +2587,7 @@ describe('managed agent models transaction', () => {
     } = await import('@electron/utils/openclaw-auth');
     const snapshot = await snapshotManagedAgentModelsFiles();
     const managedEntry = {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-completions',
       authHeader: true,
       models: [{
@@ -2525,6 +2609,7 @@ describe('managed agent models transaction', () => {
       models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }],
     });
     expect(providers.openai).toEqual(managedEntry);
+    expect(providers.lingzhiwuxian).toEqual(managedEntry);
     expect(providers['openai-codex']).toBeUndefined();
     expect(providers['legacy-uclaw-relay']).toBeUndefined();
     expect(providers['ordinary-custom']).toEqual({
@@ -2533,9 +2618,14 @@ describe('managed agent models transaction', () => {
       models: [{ id: 'smart-latest', name: 'Unrelated Smart Model' }],
     });
     expect(providers['same-host-other-model']).toEqual({
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-responses',
       models: [{ id: 'other-model', name: 'Other Model' }],
+    });
+    expect(providers['clawx-openai-image']).toEqual({
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+      api: 'openai-completions',
+      models: [{ id: 'gpt-image-2', name: 'Image' }],
     });
   });
 
@@ -2547,12 +2637,12 @@ describe('managed agent models transaction', () => {
       providers: {
         openai: { baseUrl: 'https://personal.example/v1', models: [{ id: 'personal-model' }] },
         'custom-a1b2c3d4': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+          baseUrl: `${UCLAW_MANAGED_PROVIDER_BASE_URL}/`,
           models: [{ id: 'smart-latest' }],
           apiKey: 'legacy-inline-key',
         },
         'same-host-other-model': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           models: [{ id: 'other-model' }],
         },
         'other-host-same-model': {
@@ -2564,7 +2654,7 @@ describe('managed agent models transaction', () => {
     await writeAgentModelsJson('worker', JSON.stringify({
       providers: {
         'custom-e5f6a7b8': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           modelId: 'custom-e5f6a7b8/smart-latest',
         },
       },
@@ -2592,13 +2682,13 @@ describe('managed agent models transaction', () => {
       providers: {
         openai: { apiKey: 'personal-openai-key', models: [{ id: 'personal-model' }] },
         'custom-a1b2c3d4': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           models: [{ id: 'smart-latest' }],
           apiKey: 'legacy-inline-key',
         },
         'known-managed-id': { apiKey: 'known-managed-key' },
         'same-host-other-model': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           models: [{ id: 'other-model' }],
           apiKey: 'keep-other-model-key',
         },
@@ -2661,7 +2751,7 @@ describe('managed agent models transaction', () => {
     const mainOriginal = JSON.stringify({
       providers: {
         'custom-a1b2c3d4': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           models: [{ id: 'smart-latest' }],
           apiKey: 'legacy-inline-key',
         },
@@ -2671,7 +2761,7 @@ describe('managed agent models transaction', () => {
     await writeAgentModelsJson('worker', JSON.stringify({
       providers: {
         'custom-e5f6a7b8': {
-          baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+          baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
           models: [{ id: 'smart-latest' }],
         },
       },
@@ -2709,7 +2799,7 @@ describe('managed agent models transaction', () => {
     await mkdir(workerPath);
 
     await expect(updateManagedAgentModelProviderStrict(snapshot, {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-completions',
       models: [{ id: 'smart-latest', name: 'smart-latest' }],
     })).rejects.toThrow('worker');
@@ -2729,7 +2819,7 @@ describe('managed agent models transaction', () => {
     await writeAgentModelsJson('main', concurrentModels);
 
     await expect(updateManagedAgentModelProviderStrict(snapshot, {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-responses',
       models: [{ id: 'smart-latest', name: 'smart-latest' }],
     })).rejects.toThrow('main');
@@ -2750,7 +2840,7 @@ describe('managed agent models transaction', () => {
     const snapshot = await snapshotManagedAgentModelsFiles();
 
     await updateManagedAgentModelProviderStrict(snapshot, {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-completions',
       models: [{ id: 'smart-latest', name: 'smart-latest' }],
     });
@@ -2770,7 +2860,7 @@ describe('managed agent models transaction', () => {
     } = await import('@electron/utils/openclaw-auth');
     const snapshot = await snapshotManagedAgentModelsFiles();
     await updateManagedAgentModelProviderStrict(snapshot, {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-responses',
       models: [{ id: 'smart-latest', name: 'smart-latest' }],
     });
@@ -2792,7 +2882,7 @@ describe('managed agent models transaction', () => {
     } = await import('@electron/utils/openclaw-auth');
     const snapshot = await snapshotManagedAgentModelsFiles();
     await updateManagedAgentModelProviderStrict(snapshot, {
-      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
       api: 'openai-responses',
       models: [{ id: 'smart-latest', name: 'smart-latest' }],
     });

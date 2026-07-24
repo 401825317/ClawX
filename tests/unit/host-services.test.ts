@@ -1485,7 +1485,7 @@ describe('host services', () => {
     })).resolves.toEqual({ success: true, ...snapshot });
 
     expect(agentConfig.updateAgentModel).toHaveBeenCalledWith('main', 'custom-enterpri/claude-sonnet-4');
-    expect(providerRuntimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledTimes(1);
+    expect(providerRuntimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledWith();
     expect(providerRuntimeSync.syncAgentModelOverrideToRuntime).toHaveBeenCalledWith('main');
     expect(gatewayManager.debouncedReload).toHaveBeenCalledTimes(1);
   });
@@ -1516,6 +1516,9 @@ describe('host services', () => {
     })).resolves.toEqual({ success: true, ...snapshot });
 
     expect(createAgentMock).toHaveBeenCalledWith('Code', { inheritWorkspace: false });
+    expect(providerRuntimeSync.syncAllProviderAuthToRuntime).toHaveBeenCalledWith({
+      reconcileManagedRuntime: true,
+    });
     expect(warnSpy).toHaveBeenCalledWith(
       '[agents] Failed to sync provider auth after agent creation:',
       expect.any(Error),
@@ -1853,6 +1856,7 @@ describe('host services', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/ipc-handlers.ts'), 'utf8');
 
     expect(source).toContain('managedAuth: createManagedAuthApi({ gatewayManager })');
+    expect(source).toContain('managedClientConfig: createManagedClientConfigApi()');
     expect(source).toContain('billing: createBillingApi({ gatewayManager })');
     expect(source).toContain('support: createSupportApi()');
   });
@@ -1860,12 +1864,14 @@ describe('host services', () => {
   it('checks managed recovery quarantine before startup Provider sync', () => {
     const source = readFileSync(join(process.cwd(), 'electron/main/index.ts'), 'utf8');
     const markerCheck = source.indexOf('await hasManagedRuntimeMutationMarker()');
-    const providerSync = source.indexOf('await syncAllProviderAuthToRuntime()', markerCheck);
+    const providerSync = source.indexOf('await syncAllProviderAuthToRuntime({', markerCheck);
     const gatewayStart = source.indexOf('await gatewayManager.start()', providerSync);
 
     expect(markerCheck).toBeGreaterThan(-1);
     expect(providerSync).toBeGreaterThan(markerCheck);
     expect(gatewayStart).toBeGreaterThan(providerSync);
+    expect(source.slice(providerSync, gatewayStart)).toContain('refreshManagedPolicy: true');
+    expect(source.slice(providerSync, gatewayStart)).toContain('reconcileManagedRuntime: true');
   });
 
   it('configures browser policy and typed handlers before the initial renderer load', () => {

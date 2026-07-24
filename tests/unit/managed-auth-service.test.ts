@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   restoreProviderSecretSlots: vi.fn(),
   setProviderSecret: vi.fn(),
   snapshotProviderSecretSlots: vi.fn(),
+  buildManagedProviderAccounts: vi.fn(),
   getManagedOpenAiTargetAccountIds: vi.fn(),
   getProviderAccount: vi.fn(),
   installManagedOpenAiProviderAccount: vi.fn(),
@@ -39,9 +40,12 @@ const mocks = vi.hoisted(() => ({
   updateManagedAgentModelProviderStrict: vi.fn(),
   restoreManagedRuntimeConfig: vi.fn(),
   removeManagedRuntimeOpenAiState: vi.fn(),
+  createManagedRuntimeProviderEntry: vi.fn(),
   getManagedRuntimeOpenAiProviderIds: vi.fn(),
+  installManagedRuntimeProviderState: vi.fn(),
   snapshotManagedRuntimeConfig: vi.fn(),
   updateManagedRuntimeConfig: vi.fn(),
+  cacheManagedClientTextModelPolicyFromPayload: vi.fn(),
   readOpenClawConfig: vi.fn(),
   writeOpenClawConfig: vi.fn(),
   storeGet: vi.fn(),
@@ -56,6 +60,7 @@ vi.mock('@electron/utils/junfeiai-distribution', () => ({
   UCLAW_AUTH_REQUEST_TIMEOUT_MS: 12_000,
   UCLAW_AUTH_ACCOUNT_ID: 'uclaw-auth',
   UCLAW_BOOTSTRAP_REQUEST_TIMEOUT_MS: 8_000,
+  UCLAW_COMPATIBILITY_PROVIDER_ID: 'lingzhiwuxian',
   UCLAW_DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS: 86_400,
   UCLAW_DEFAULT_API_PROTOCOL: 'openai-responses',
   UCLAW_DEFAULT_BASE_URL: 'https://zz-cn.lingzhiwuxian.com/v1',
@@ -63,7 +68,7 @@ vi.mock('@electron/utils/junfeiai-distribution', () => ({
   UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW: 258_000,
   UCLAW_DEFAULT_THINKING_LEVEL: 'medium',
   UCLAW_LEGACY_AUTH_ACCOUNT_IDS: ['lingzhiwuxian-auth'],
-  UCLAW_LEGACY_PROVIDER_IDS: ['openai-codex', 'lingzhiwuxian'],
+  UCLAW_LEGACY_PROVIDER_IDS: ['openai-codex'],
   UCLAW_MANAGED_SERVICE_NAME: 'UClaw',
   UCLAW_OFFLINE_GRACE_SECONDS: 86_400,
   UCLAW_PROVIDER_ID: 'openai',
@@ -98,6 +103,7 @@ vi.mock('@electron/services/secrets/secret-store', () => ({
 }));
 
 vi.mock('@electron/services/providers/provider-store', () => ({
+  buildManagedProviderAccounts: mocks.buildManagedProviderAccounts,
   getManagedOpenAiTargetAccountIds: mocks.getManagedOpenAiTargetAccountIds,
   getProviderAccount: mocks.getProviderAccount,
   installManagedOpenAiProviderAccount: mocks.installManagedOpenAiProviderAccount,
@@ -122,11 +128,17 @@ vi.mock('@electron/gateway/managed-runtime-mutation-barrier', () => ({
 }));
 
 vi.mock('@electron/services/providers/managed-runtime-config', () => ({
+  createManagedRuntimeProviderEntry: mocks.createManagedRuntimeProviderEntry,
   getManagedRuntimeOpenAiProviderIds: mocks.getManagedRuntimeOpenAiProviderIds,
+  installManagedRuntimeProviderState: mocks.installManagedRuntimeProviderState,
   removeManagedRuntimeOpenAiState: mocks.removeManagedRuntimeOpenAiState,
   restoreManagedRuntimeConfig: mocks.restoreManagedRuntimeConfig,
   snapshotManagedRuntimeConfig: mocks.snapshotManagedRuntimeConfig,
   updateManagedRuntimeConfig: mocks.updateManagedRuntimeConfig,
+}));
+
+vi.mock('@electron/services/managed-client-config-service', () => ({
+  cacheManagedClientTextModelPolicyFromPayload: mocks.cacheManagedClientTextModelPolicyFromPayload,
 }));
 
 vi.mock('@electron/utils/openclaw-auth', () => ({
@@ -174,6 +186,7 @@ import {
   getManagedAuthStatus,
   loginManagedAuth,
   logoutManagedAuth,
+  reconcileManagedProviderRuntimeForStartup,
   registerManagedAuth,
   refreshManagedAuth,
   requestManagedAuthenticatedJson,
@@ -220,6 +233,7 @@ const AGENT_AUTH_PROFILES_SNAPSHOT = {
 };
 
 let accountState: ProviderAccount | null;
+let compatibilityAccountState: ProviderAccount | null;
 let defaultAccountId: string | undefined;
 let legacyDefaultProvider: string | undefined;
 let activationState: ActivationState;
@@ -228,6 +242,7 @@ let secrets: Map<string, ProviderSecret>;
 let openClawConfig: Record<string, unknown>;
 let providerStoreSnapshotState: {
   account: ProviderAccount | null;
+  compatibilityAccount: ProviderAccount | null;
   defaultAccountId?: string;
   defaultProviderId?: string;
 };
@@ -237,6 +252,13 @@ let providerSecretTargetIds: string[];
 const PROVIDER_STORE_SNAPSHOT = {};
 const PROVIDER_SECRET_SLOTS_SNAPSHOT = {};
 const RUNTIME_MUTATION_LEASE = {};
+const MANAGED_MODEL_POLICY = {
+  defaultModel: 'smart-latest',
+  models: [
+    { id: 'smart-latest', label: 'Smart Latest' },
+    { id: 'gpt-5.4', label: 'GPT-5.4' },
+  ],
+};
 
 function activationFilesSnapshot(state: ActivationState = activationState) {
   const bytes = state ? Buffer.from(JSON.stringify(state), 'utf8') : null;
@@ -300,6 +322,7 @@ function installSuccessBackend() {
           refreshToken: 'refresh-secret',
           expiresIn: 3_600,
           user: { id: 'user-1', username: 'tester', email: 'test@example.com' },
+          client: { modelOptions: { text: MANAGED_MODEL_POLICY } },
         });
       case '/api/clawx/relay-token':
         return jsonResponse(200, { token: 'relay-secret', expiresIn: 3_600 });
@@ -314,13 +337,14 @@ function installSuccessBackend() {
 beforeEach(() => {
   vi.clearAllMocks();
   accountState = null;
+  compatibilityAccountState = null;
   defaultAccountId = undefined;
   legacyDefaultProvider = undefined;
   activationState = null;
   verificationCache = undefined;
   secrets = new Map<string, ProviderSecret>();
   openClawConfig = {};
-  providerStoreSnapshotState = { account: null };
+  providerStoreSnapshotState = { account: null, compatibilityAccount: null };
   providerSecretSnapshotState = new Map<string, ProviderSecret>();
   providerSecretTargetIds = [];
 
@@ -365,34 +389,79 @@ beforeEach(() => {
     _snapshot: unknown,
     authSecret: ProviderSecret,
     relaySecret: ProviderSecret,
+    compatibilityRelaySecret: ProviderSecret,
   ) => {
     for (const accountId of providerSecretTargetIds) secrets.delete(accountId);
     secrets.set(authSecret.accountId, structuredClone(authSecret));
     secrets.set(relaySecret.accountId, structuredClone(relaySecret));
+    secrets.set(compatibilityRelaySecret.accountId, structuredClone(compatibilityRelaySecret));
   });
   mocks.restoreProviderSecretSlots.mockImplementation(async () => {
     secrets = structuredClone(providerSecretSnapshotState);
   });
-  mocks.getProviderAccount.mockImplementation(async () => accountState);
+  mocks.getProviderAccount.mockImplementation(async (accountId: string) => (
+    accountId === 'lingzhiwuxian' ? compatibilityAccountState : accountState
+  ));
   mocks.snapshotManagedProviderStore.mockImplementation(async () => {
     providerStoreSnapshotState = {
       account: structuredClone(accountState),
+      compatibilityAccount: structuredClone(compatibilityAccountState),
       defaultAccountId,
       defaultProviderId: legacyDefaultProvider,
     };
     return PROVIDER_STORE_SNAPSHOT;
   });
   mocks.getManagedOpenAiTargetAccountIds.mockReturnValue(['openai']);
+  mocks.buildManagedProviderAccounts.mockImplementation((existing, policy, owner) => {
+    const modelIds = policy.models.map((model: { id: string }) => model.id);
+    const buildAccount = (
+      id: 'openai' | 'lingzhiwuxian',
+      label: string,
+      previous: ProviderAccount | null | undefined,
+      isDefault: boolean,
+    ): ProviderAccount => ({
+      id,
+      vendorId: id,
+      label,
+      authMode: 'api_key',
+      baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+      apiProtocol: 'openai-responses',
+      model: policy.defaultModel,
+      fallbackModels: [],
+      fallbackAccountIds: [],
+      enabled: true,
+      isDefault,
+      metadata: {
+        managedBy: 'uclaw',
+        customModels: modelIds,
+        managedDefaultModel: policy.defaultModel,
+        managedAllowedModels: modelIds,
+        managedRuntimeContractVersion: 4,
+        ...(owner?.email || previous?.metadata?.email
+          ? { email: owner?.email || previous?.metadata?.email }
+          : {}),
+      },
+      createdAt: previous?.createdAt ?? '2026-07-24T00:00:00.000Z',
+      updatedAt: '2026-07-24T00:00:00.000Z',
+    });
+    return [
+      buildAccount('openai', 'OpenAI', existing.primary, true),
+      buildAccount('lingzhiwuxian', 'UClaw', existing.compatibility, false),
+    ];
+  });
   mocks.installManagedOpenAiProviderAccount.mockImplementation(async (
     _snapshot: unknown,
     account: ProviderAccount,
+    compatibilityAccount: ProviderAccount,
   ) => {
     accountState = structuredClone(account);
+    compatibilityAccountState = structuredClone(compatibilityAccount);
     defaultAccountId = account.id;
     legacyDefaultProvider = account.id;
   });
   mocks.restoreManagedProviderStore.mockImplementation(async () => {
     accountState = structuredClone(providerStoreSnapshotState.account);
+    compatibilityAccountState = structuredClone(providerStoreSnapshotState.compatibilityAccount);
     defaultAccountId = providerStoreSnapshotState.defaultAccountId;
     legacyDefaultProvider = providerStoreSnapshotState.defaultProviderId;
   });
@@ -412,6 +481,26 @@ beforeEach(() => {
   mocks.restoreManagedAgentModelsFiles.mockResolvedValue(undefined);
   mocks.snapshotManagedAgentModelsFiles.mockResolvedValue({ files: [] });
   mocks.updateManagedAgentModelProviderStrict.mockResolvedValue(undefined);
+  mocks.cacheManagedClientTextModelPolicyFromPayload.mockResolvedValue(MANAGED_MODEL_POLICY);
+  mocks.createManagedRuntimeProviderEntry.mockImplementation((policy) => ({
+    baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+    api: 'openai-responses',
+    agentRuntime: { id: 'pi' },
+    models: policy.models.map((model: { id: string; label?: string }) => ({
+      id: model.id,
+      name: model.label || model.id,
+      contextWindow: 258_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      ...(model.id === 'smart-latest' ? { reasoning: true } : {}),
+      compat: model.id === 'smart-latest'
+        ? {
+            supportsPromptCacheKey: true,
+            supportsReasoningEffort: true,
+            supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
+          }
+        : { supportsPromptCacheKey: true },
+    })),
+  }));
   mocks.removeManagedRuntimeOpenAiState.mockResolvedValue(undefined);
   mocks.getManagedRuntimeOpenAiProviderIds.mockReturnValue([]);
   mocks.snapshotManagedRuntimeConfig.mockImplementation(async () => ({
@@ -427,6 +516,90 @@ beforeEach(() => {
     config.commands = commands;
     snapshotValue.applied = structuredClone(config);
     await mocks.writeOpenClawConfig(config);
+  });
+  mocks.installManagedRuntimeProviderState.mockImplementation(async (
+    snapshotValue,
+    policy,
+    additionalProviderIds: Iterable<string>,
+  ) => {
+    const managedProviderIds = new Set([
+      'openai',
+      'lingzhiwuxian',
+      'openai-codex',
+      ...additionalProviderIds,
+    ]);
+    const providerEntry = mocks.createManagedRuntimeProviderEntry(policy);
+    await mocks.updateManagedRuntimeConfig(snapshotValue, (config: Record<string, unknown>) => {
+      const agents = typeof config.agents === 'object' && config.agents && !Array.isArray(config.agents)
+        ? { ...config.agents as Record<string, unknown> }
+        : {};
+      const defaults = typeof agents.defaults === 'object' && agents.defaults && !Array.isArray(agents.defaults)
+        ? { ...agents.defaults as Record<string, unknown> }
+        : {};
+      defaults.model = { primary: `openai/${policy.defaultModel}`, fallbacks: [] };
+      defaults.thinkingDefault = 'medium';
+      defaults.reasoningDefault = 'on';
+      agents.defaults = defaults;
+      config.agents = agents;
+
+      if (typeof config.auth === 'object' && config.auth && !Array.isArray(config.auth)) {
+        const auth = { ...config.auth as Record<string, unknown> };
+        const profiles = typeof auth.profiles === 'object' && auth.profiles && !Array.isArray(auth.profiles)
+          ? { ...auth.profiles as Record<string, unknown> }
+          : {};
+        const removedProfileIds = new Set<string>();
+        for (const [profileId, profile] of Object.entries(profiles)) {
+          const provider = typeof profile === 'object' && profile && !Array.isArray(profile)
+            ? (profile as Record<string, unknown>).provider
+            : undefined;
+          if (typeof provider === 'string' && managedProviderIds.has(provider)) {
+            delete profiles[profileId];
+            removedProfileIds.add(profileId);
+          }
+        }
+        auth.profiles = profiles;
+        if (typeof auth.order === 'object' && auth.order && !Array.isArray(auth.order)) {
+          const order = { ...auth.order as Record<string, unknown> };
+          for (const [providerId, profileIds] of Object.entries(order)) {
+            if (managedProviderIds.has(providerId)) {
+              delete order[providerId];
+              continue;
+            }
+            if (!Array.isArray(profileIds)) continue;
+            const remaining = profileIds.filter((profileId) => (
+              typeof profileId !== 'string' || !removedProfileIds.has(profileId)
+            ));
+            if (remaining.length > 0) order[providerId] = remaining;
+            else delete order[providerId];
+          }
+          auth.order = order;
+        }
+        config.auth = auth;
+      }
+
+      const models = typeof config.models === 'object' && config.models && !Array.isArray(config.models)
+        ? { ...config.models as Record<string, unknown> }
+        : {};
+      const providers = typeof models.providers === 'object' && models.providers && !Array.isArray(models.providers)
+        ? { ...models.providers as Record<string, unknown> }
+        : {};
+      for (const [providerId, entry] of Object.entries(providers)) {
+        const baseUrl = typeof entry === 'object' && entry && !Array.isArray(entry)
+          ? (entry as Record<string, unknown>).baseUrl
+          : undefined;
+        if (
+          managedProviderIds.has(providerId)
+          || (typeof baseUrl === 'string'
+            && baseUrl.replace(/\/+$/, '') === 'https://zz-cn.lingzhiwuxian.com/v1')
+        ) {
+          delete providers[providerId];
+        }
+      }
+      providers.openai = structuredClone(providerEntry);
+      providers.lingzhiwuxian = structuredClone(providerEntry);
+      models.providers = providers;
+      config.models = models;
+    });
   });
   mocks.restoreManagedRuntimeConfig.mockImplementation(async (snapshotValue) => {
     if (!snapshotValue.applied) return;
@@ -453,6 +626,103 @@ beforeEach(() => {
 });
 
 describe('managed auth service transaction and compatibility behavior', () => {
+  it('repairs both managed Relay slots from a valid compatibility Secret at startup', async () => {
+    secrets.set('uclaw-auth', {
+      type: 'oauth',
+      accountId: 'uclaw-auth',
+      accessToken: 'access-secret',
+      refreshToken: 'refresh-secret',
+      expiresAt: Date.now() + 3_600_000,
+      subject: 'user-1',
+      email: 'test@example.com',
+    });
+    secrets.set('openai', {
+      type: 'api_key',
+      accountId: 'openai',
+      apiKey: 'stale-primary-relay',
+      ownerUserId: 'other-user',
+      expiresAt: Date.now() + 3_600_000,
+    });
+    secrets.set('lingzhiwuxian', {
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
+      apiKey: 'valid-compatibility-relay',
+      ownerUserId: 'user-1',
+      expiresAt: Date.now() + 3_600_000,
+    });
+
+    await reconcileManagedProviderRuntimeForStartup(MANAGED_MODEL_POLICY);
+
+    expect(secrets.get('openai')).toEqual(expect.objectContaining({
+      accountId: 'openai',
+      apiKey: 'valid-compatibility-relay',
+    }));
+    expect(secrets.get('lingzhiwuxian')).toEqual(expect.objectContaining({
+      accountId: 'lingzhiwuxian',
+      apiKey: 'valid-compatibility-relay',
+    }));
+    expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
+      AGENT_AUTH_PROFILES_SNAPSHOT,
+      'valid-compatibility-relay',
+      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+    );
+  });
+
+  it('runs the Secret canonicalization transaction when startup values already match', async () => {
+    const authSecret: ProviderSecret = {
+      type: 'oauth',
+      accountId: 'uclaw-auth',
+      accessToken: 'access-secret',
+      refreshToken: 'refresh-secret',
+      expiresAt: Date.now() + 3_600_000,
+      subject: 'user-1',
+      email: 'test@example.com',
+    };
+    const relaySecret: ProviderSecret = {
+      type: 'api_key',
+      accountId: 'openai',
+      apiKey: 'same-relay',
+      ownerUserId: 'user-1',
+      expiresAt: Date.now() + 3_600_000,
+    };
+    const compatibilityRelaySecret: ProviderSecret = {
+      ...relaySecret,
+      accountId: 'lingzhiwuxian',
+    };
+    secrets.set('uclaw-auth', authSecret);
+    secrets.set('openai', relaySecret);
+    secrets.set('lingzhiwuxian', compatibilityRelaySecret);
+
+    await reconcileManagedProviderRuntimeForStartup(MANAGED_MODEL_POLICY);
+
+    expect(mocks.installManagedProviderSecrets).toHaveBeenCalledWith(
+      PROVIDER_SECRET_SLOTS_SNAPSHOT,
+      authSecret,
+      relaySecret,
+      compatibilityRelaySecret,
+    );
+  });
+
+  it('clears only managed runtime state when startup has no usable login', async () => {
+    secrets.set('openai', {
+      type: 'api_key',
+      accountId: 'openai',
+      apiKey: 'orphaned-relay',
+      ownerUserId: 'user-1',
+    });
+
+    await reconcileManagedProviderRuntimeForStartup(MANAGED_MODEL_POLICY);
+
+    expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).toHaveBeenCalledWith(
+      AGENT_AUTH_PROFILES_SNAPSHOT,
+      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+    );
+    expect(mocks.removeManagedAgentOpenAiProviders).toHaveBeenCalledOnce();
+    expect(mocks.removeManagedRuntimeOpenAiState).toHaveBeenCalledOnce();
+    expect(mocks.installManagedOpenAiProviderAccount).not.toHaveBeenCalled();
+    expect(secrets.get('openai')).toEqual(expect.objectContaining({ apiKey: 'orphaned-relay' }));
+  });
+
   it('loads the remote registration policy before returning a logged-out status', async () => {
     mocks.proxyAwareFetch.mockImplementation(async (input: unknown) => {
       const path = requestPath(input);
@@ -572,7 +842,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
       .rejects.toEqual(expect.objectContaining({ code: 'auth_invalid', status: 403 }));
   });
 
-  it('commits a successful login to the managed OpenAI account', async () => {
+  it('commits a successful login to both managed Provider accounts', async () => {
     const result = await loginManagedAuth({
       account: 'test@example.com',
       password: 'password',
@@ -584,11 +854,30 @@ describe('managed auth service transaction and compatibility behavior', () => {
       expect.objectContaining({
         id: 'openai',
         vendorId: 'openai',
+        label: 'OpenAI',
+        baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+        apiProtocol: 'openai-responses',
+        model: 'smart-latest',
+        isDefault: true,
+        metadata: expect.objectContaining({
+          managedBy: 'uclaw',
+          customModels: ['smart-latest', 'gpt-5.4'],
+          managedAllowedModels: ['smart-latest', 'gpt-5.4'],
+        }),
+      }),
+      expect.objectContaining({
+        id: 'lingzhiwuxian',
+        vendorId: 'lingzhiwuxian',
         label: 'UClaw',
         baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
         apiProtocol: 'openai-responses',
         model: 'smart-latest',
-        metadata: expect.objectContaining({ managedBy: 'uclaw' }),
+        isDefault: false,
+        metadata: expect.objectContaining({
+          managedBy: 'uclaw',
+          customModels: ['smart-latest', 'gpt-5.4'],
+          managedAllowedModels: ['smart-latest', 'gpt-5.4'],
+        }),
       }),
     );
     expect(mocks.installManagedProviderSecrets).toHaveBeenCalledWith(
@@ -605,6 +894,12 @@ describe('managed auth service transaction and compatibility behavior', () => {
         apiKey: 'relay-secret',
         ownerUserId: 'user-1',
       }),
+      expect.objectContaining({
+        type: 'api_key',
+        accountId: 'lingzhiwuxian',
+        apiKey: 'relay-secret',
+        ownerUserId: 'user-1',
+      }),
     );
     expect(secrets.get('uclaw-auth')).toEqual(expect.objectContaining({
       type: 'oauth',
@@ -612,6 +907,11 @@ describe('managed auth service transaction and compatibility behavior', () => {
       refreshToken: 'refresh-secret',
     }));
     expect(secrets.get('openai')).toEqual(expect.objectContaining({
+      type: 'api_key',
+      apiKey: 'relay-secret',
+      ownerUserId: 'user-1',
+    }));
+    expect(secrets.get('lingzhiwuxian')).toEqual(expect.objectContaining({
       type: 'api_key',
       apiKey: 'relay-secret',
       ownerUserId: 'user-1',
@@ -625,7 +925,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'relay-secret',
-      expect.any(Set),
+      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
     );
     expect(mocks.removeManagedAgentOpenAiCredentialsFromSnapshot).not.toHaveBeenCalled();
     expect(openClawConfig).toMatchObject({
@@ -639,12 +939,22 @@ describe('managed auth service transaction and compatibility behavior', () => {
       models: {
         providers: {
           openai: {
-            models: [expect.objectContaining({
-              id: 'smart-latest',
-              contextWindow: 258_000,
-              reasoning: true,
-              compat: expect.objectContaining({ supportsReasoningEffort: true }),
-            })],
+            models: [
+              expect.objectContaining({
+                id: 'smart-latest',
+                name: 'Smart Latest',
+                contextWindow: 258_000,
+                reasoning: true,
+                compat: expect.objectContaining({ supportsReasoningEffort: true }),
+              }),
+              expect.objectContaining({ id: 'gpt-5.4', name: 'GPT-5.4' }),
+            ],
+          },
+          lingzhiwuxian: {
+            models: [
+              expect.objectContaining({ id: 'smart-latest', name: 'Smart Latest' }),
+              expect.objectContaining({ id: 'gpt-5.4', name: 'GPT-5.4' }),
+            ],
           },
         },
       },
@@ -652,9 +962,18 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.updateManagedAgentModelProviderStrict).toHaveBeenCalledWith(
       { files: [] },
       expect.objectContaining({
-        models: [expect.objectContaining({ id: 'smart-latest', contextWindow: 258_000 })],
+        models: [
+          expect.objectContaining({ id: 'smart-latest', contextWindow: 258_000 }),
+          expect.objectContaining({ id: 'gpt-5.4', contextWindow: 258_000 }),
+        ],
       }),
-      expect.any(Set),
+      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
+    );
+    expect(mocks.cacheManagedClientTextModelPolicyFromPayload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accessToken: 'access-secret',
+        client: { modelOptions: { text: MANAGED_MODEL_POLICY } },
+      }),
     );
   });
 
@@ -1224,33 +1543,51 @@ describe('managed auth service transaction and compatibility behavior', () => {
         fallbackModels: [],
         metadata: expect.objectContaining({ managedBy: 'uclaw' }),
       }),
+      expect.objectContaining({
+        id: 'lingzhiwuxian',
+        vendorId: 'lingzhiwuxian',
+        model: 'smart-latest',
+        isDefault: false,
+        metadata: expect.objectContaining({ managedBy: 'uclaw' }),
+      }),
     );
     expect(accountState?.headers).toBeUndefined();
     expect(accountState?.fallbackModels).toEqual([]);
     expect(accountState?.fallbackAccountIds).toEqual([]);
     expect(accountState?.metadata).toEqual({
       managedBy: 'uclaw',
+      customModels: ['smart-latest', 'gpt-5.4'],
       managedDefaultModel: 'smart-latest',
-      managedAllowedModels: ['smart-latest'],
+      managedAllowedModels: ['smart-latest', 'gpt-5.4'],
       managedRuntimeContractVersion: 4,
       email: 'test@example.com',
     });
+    expect(compatibilityAccountState?.metadata).toEqual(accountState?.metadata);
     expect(secrets.get('openai')).toEqual(expect.objectContaining({ apiKey: 'relay-secret' }));
+    expect(secrets.get('lingzhiwuxian')).toEqual(expect.objectContaining({ apiKey: 'relay-secret' }));
     expect(((openClawConfig.models as Record<string, unknown>).providers as Record<string, unknown>).openai).toEqual({
       baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
       api: 'openai-responses',
       agentRuntime: { id: 'pi' },
-      models: [expect.objectContaining({
-        id: 'smart-latest',
-        name: 'smart-latest',
-        contextWindow: 258_000,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      })],
+      models: [
+        expect.objectContaining({
+          id: 'smart-latest',
+          name: 'Smart Latest',
+          contextWindow: 258_000,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        }),
+        expect.objectContaining({
+          id: 'gpt-5.4',
+          name: 'GPT-5.4',
+          contextWindow: 258_000,
+        }),
+      ],
     });
     expect((openClawConfig.agents as Record<string, unknown>).defaults).toEqual(expect.objectContaining({
       model: { primary: 'openai/smart-latest', fallbacks: [] },
     }));
     const runtimeProviders = (openClawConfig.models as Record<string, unknown>).providers as Record<string, unknown>;
+    expect(runtimeProviders.lingzhiwuxian).toEqual(runtimeProviders.openai);
     expect(runtimeProviders['openai-codex']).toBeUndefined();
     expect(runtimeProviders['legacy-uclaw-relay']).toBeUndefined();
     expect(runtimeProviders['ordinary-custom']).toEqual({
@@ -1284,6 +1621,10 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedOpenAiProviderAccount).toHaveBeenCalledWith(
       PROVIDER_STORE_SNAPSHOT,
       expect.objectContaining({ metadata: expect.objectContaining({ managedBy: 'uclaw' }) }),
+      expect.objectContaining({
+        id: 'lingzhiwuxian',
+        metadata: expect.objectContaining({ managedBy: 'uclaw' }),
+      }),
     );
     const providers = (openClawConfig.models as Record<string, unknown>).providers as Record<string, unknown>;
     expect(providers.openai).toEqual(expect.objectContaining({
@@ -1291,6 +1632,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
       api: 'openai-responses',
     }));
     expect(providers.openai).not.toHaveProperty('headers');
+    expect(providers.lingzhiwuxian).toEqual(providers.openai);
     expect(providers.moonshot).toEqual({ baseUrl: 'https://api.moonshot.cn/v1' });
   });
 
@@ -1363,6 +1705,11 @@ describe('managed auth service transaction and compatibility behavior', () => {
         model: 'smart-latest',
         metadata: expect.objectContaining({ managedBy: 'uclaw' }),
       }),
+      expect.objectContaining({
+        vendorId: 'lingzhiwuxian',
+        model: 'smart-latest',
+        metadata: expect.objectContaining({ managedBy: 'uclaw' }),
+      }),
     );
     expect(mocks.markManagedDeviceActivated).toHaveBeenCalledWith(
       'register',
@@ -1372,7 +1719,7 @@ describe('managed auth service transaction and compatibility behavior', () => {
     expect(mocks.installManagedAgentOpenAiApiKey).toHaveBeenCalledWith(
       AGENT_AUTH_PROFILES_SNAPSHOT,
       'relay-secret',
-      expect.any(Set),
+      new Set(['openai', 'lingzhiwuxian', 'openai-codex']),
     );
   });
 

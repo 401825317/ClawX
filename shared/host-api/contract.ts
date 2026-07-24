@@ -25,6 +25,10 @@ import type {
   ManagedAuthVerifyPayload,
 } from '../managed-auth';
 import type {
+  ManagedClientTextModelPolicy,
+  ManagedClientTextModelRequest,
+} from '../managed-client-config';
+import type {
   BillingCheckout,
   BillingCreateOrderPayload,
   BillingOrderHistory,
@@ -308,6 +312,7 @@ export type DiagnosticsGatewaySnapshotResult = JsonRecord;
 export type ProviderType =
   | 'anthropic'
   | 'openai'
+  | 'lingzhiwuxian'
   | 'google'
   | 'openrouter'
   | 'ark'
@@ -1017,6 +1022,9 @@ export type HostApiContract = {
     verify: (payload?: ManagedAuthVerifyPayload) => ManagedAuthResult;
     refresh: (payload?: ManagedAuthRefreshPayload) => ManagedAuthResult;
     logout: () => ManagedAuthResult;
+  };
+  managedClientConfig: {
+    textModels: (payload?: ManagedClientTextModelRequest) => ManagedClientTextModelPolicy;
   };
   billing: {
     overview: () => BillingResult<BillingOverview>;

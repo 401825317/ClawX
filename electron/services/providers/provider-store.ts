@@ -1,11 +1,21 @@
 import { createHash } from 'node:crypto';
+import type { ManagedClientTextModelPolicy } from '../../../shared/managed-client-config';
+import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_MANAGED_ACCOUNT_ID,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_MANAGED_PROVIDER_ID,
+  UCLAW_MANAGED_SERVICE_NAME,
+  UCLAW_RUNTIME_CONTRACT_VERSION,
+  UCLAW_DEFAULT_API_PROTOCOL,
+} from '../../../shared/junfeiai-endpoints';
 import type { ProviderAccount, ProviderConfig, ProviderType } from '../../shared/providers/types';
 import { getProviderDefinition } from '../../shared/providers/registry';
 import { isOpenAiProviderIdentity } from './provider-mutation-lock';
 import { getClawXProviderStore } from './store-instance';
 
 const MANAGED_PROVIDER_STORE_SNAPSHOT_VERSION = 1 as const;
-const OPENAI_PROVIDER_ID = 'openai';
+const OPENAI_PROVIDER_LABEL = 'OpenAI';
 
 type ProviderStoreValueSnapshot = {
   present: boolean;
@@ -82,6 +92,89 @@ function getSnapshotData(snapshot: ManagedProviderStoreSnapshot): ManagedProvide
 
 function isOpenAiTargetAccount(storageId: string, account: ProviderAccount): boolean {
   return isOpenAiProviderIdentity(storageId) || isOpenAiProviderIdentity(account);
+}
+
+type ManagedProviderAccountExistingState = {
+  primary?: ProviderAccount | null;
+  compatibility?: ProviderAccount | null;
+};
+
+type ManagedProviderAccountOwner = {
+  email?: string;
+};
+
+function sameProviderAccount(left: ProviderAccount, right: ProviderAccount): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function managedProviderAccount(
+  providerId: typeof UCLAW_MANAGED_PROVIDER_ID | typeof UCLAW_COMPATIBILITY_PROVIDER_ID,
+  label: string,
+  existing: ProviderAccount | null | undefined,
+  policy: ManagedClientTextModelPolicy,
+  owner: ManagedProviderAccountOwner | undefined,
+  isDefault: boolean,
+): ProviderAccount {
+  const now = new Date().toISOString();
+  const email = owner?.email?.trim() || existing?.metadata?.email;
+  const vendorId: ProviderType = providerId === UCLAW_COMPATIBILITY_PROVIDER_ID
+    ? 'lingzhiwuxian'
+    : 'openai';
+  const account: ProviderAccount = {
+    id: providerId,
+    vendorId,
+    label,
+    authMode: 'api_key',
+    baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+    apiProtocol: UCLAW_DEFAULT_API_PROTOCOL,
+    model: policy.defaultModel,
+    fallbackModels: [],
+    fallbackAccountIds: [],
+    enabled: true,
+    isDefault,
+    metadata: {
+      managedBy: 'uclaw',
+      customModels: policy.models.map((model) => model.id),
+      managedDefaultModel: policy.defaultModel,
+      managedAllowedModels: policy.models.map((model) => model.id),
+      managedRuntimeContractVersion: UCLAW_RUNTIME_CONTRACT_VERSION,
+      ...(email ? { email } : {}),
+    },
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  if (existing) {
+    const stableTimestamp = { ...account, updatedAt: existing.updatedAt };
+    if (sameProviderAccount(existing, stableTimestamp)) return stableTimestamp;
+  }
+  return account;
+}
+
+/** Build the two managed Provider accounts from one server-owned model policy. */
+export function buildManagedProviderAccounts(
+  existing: ManagedProviderAccountExistingState,
+  policy: ManagedClientTextModelPolicy,
+  owner?: ManagedProviderAccountOwner,
+): [ProviderAccount, ProviderAccount] {
+  return [
+    managedProviderAccount(
+      UCLAW_MANAGED_ACCOUNT_ID,
+      OPENAI_PROVIDER_LABEL,
+      existing.primary,
+      policy,
+      owner,
+      true,
+    ),
+    managedProviderAccount(
+      UCLAW_COMPATIBILITY_PROVIDER_ID,
+      UCLAW_MANAGED_SERVICE_NAME,
+      existing.compatibility,
+      policy,
+      owner,
+      false,
+    ),
+  ];
 }
 
 function restoreSnapshotValue(
@@ -233,17 +326,27 @@ export function getManagedOpenAiTargetAccountIds(snapshot: ManagedProviderStoreS
   return [...targetIds];
 }
 
-/** Atomically replace all OpenAI targets with the single UClaw-managed account. */
+/** Atomically replace all managed OpenAI targets with the canonical and compatibility accounts. */
 export async function installManagedOpenAiProviderAccount(
   snapshot: ManagedProviderStoreSnapshot,
-  account: ProviderAccount,
-): Promise<void> {
+  primaryAccount: ProviderAccount,
+  compatibilityAccount: ProviderAccount,
+): Promise<boolean> {
   if (
-    account.id !== OPENAI_PROVIDER_ID
-    || account.vendorId !== OPENAI_PROVIDER_ID
-    || account.metadata?.managedBy !== 'uclaw'
+    primaryAccount.id !== UCLAW_MANAGED_ACCOUNT_ID
+    || primaryAccount.vendorId !== UCLAW_MANAGED_PROVIDER_ID
+    || primaryAccount.metadata?.managedBy !== 'uclaw'
+    || !primaryAccount.isDefault
   ) {
     throw new Error('Expected the managed UClaw OpenAI account');
+  }
+  if (
+    compatibilityAccount.id !== UCLAW_COMPATIBILITY_PROVIDER_ID
+    || compatibilityAccount.vendorId !== UCLAW_COMPATIBILITY_PROVIDER_ID
+    || compatibilityAccount.metadata?.managedBy !== 'uclaw'
+    || compatibilityAccount.isDefault
+  ) {
+    throw new Error('Expected the managed UClaw compatibility account');
   }
 
   const snapshotData = getSnapshotData(snapshot);
@@ -259,20 +362,28 @@ export async function installManagedOpenAiProviderAccount(
     if (isOpenAiTargetAccount(storageId, existing)) continue;
     providerAccounts[storageId] = { ...structuredClone(existing), isDefault: false };
   }
-  providerAccounts[account.id] = { ...structuredClone(account), isDefault: true };
+  providerAccounts[primaryAccount.id] = { ...structuredClone(primaryAccount), isDefault: true };
+  providerAccounts[compatibilityAccount.id] = {
+    ...structuredClone(compatibilityAccount),
+    isDefault: false,
+  };
   const appliedState: ManagedProviderStoreState = {
     providerAccountsPresent: true,
     providerAccounts,
-    defaultProvider: { present: true, value: account.id },
-    defaultProviderAccountId: { present: true, value: account.id },
+    defaultProvider: { present: true, value: primaryAccount.id },
+    defaultProviderAccountId: { present: true, value: primaryAccount.id },
   };
+
+  const appliedHash = fingerprintManagedProviderStoreState(appliedState);
+  if (appliedHash === snapshotData.beforeHash) return false;
 
   snapshotData.applied = {
     version: MANAGED_PROVIDER_STORE_SNAPSHOT_VERSION,
-    hash: fingerprintManagedProviderStoreState(appliedState),
+    hash: appliedHash,
   };
   // Record the expected result before the write so rollback can resolve an ambiguous write error.
   store.store = applyManagedProviderStoreState(currentStore, appliedState);
+  return true;
 }
 
 /** Restore the original Provider state only when no concurrent Provider change would be overwritten. */

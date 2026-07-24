@@ -1,6 +1,9 @@
+import { UCLAW_COMPATIBILITY_PROVIDER_ID } from '../../../shared/junfeiai-endpoints';
+
 export const PROVIDER_TYPES = [
   'anthropic',
   'openai',
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   'google',
   'openrouter',
   'ark',
@@ -20,6 +23,7 @@ export const PROVIDER_TYPES = [
 export const BUILTIN_PROVIDER_TYPES = [
   'anthropic',
   'openai',
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   'google',
   'openrouter',
   'ark',

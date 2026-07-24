@@ -39,6 +39,7 @@ import {
 } from '../shared/providers/types';
 import { inferCustomModelContextWindow, inferCustomModelInputModalities } from '../shared/providers/model-capabilities';
 import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_PROVIDER_ID,
 } from '../../shared/junfeiai-endpoints';
@@ -585,6 +586,7 @@ function managedAuthProfilesStoreBaselines(
 function managedOpenAiProviderIds(additionalProviderIds: Iterable<string>): Set<string> {
   return new Set([
     UCLAW_MANAGED_PROVIDER_ID,
+    UCLAW_COMPATIBILITY_PROVIDER_ID,
     ...UCLAW_LEGACY_PROVIDER_IDS,
     ...additionalProviderIds,
   ]);
@@ -698,18 +700,31 @@ function buildManagedOpenAiClearedStore(
   return store;
 }
 
-function buildStrictManagedOpenAiStore(
+function buildStrictManagedProviderStore(
   original: AuthProfilesStore,
   apiKey: string,
   managedProviderIds: ReadonlySet<string>,
 ): AuthProfilesStore {
   const store = buildManagedOpenAiClearedStore(original, managedProviderIds);
 
-  store.profiles['openai:default'] = { type: 'api_key', provider: 'openai', key: apiKey };
+  const primaryProfileId = `${UCLAW_MANAGED_PROVIDER_ID}:default`;
+  const compatibilityProfileId = `${UCLAW_COMPATIBILITY_PROVIDER_ID}:default`;
+  store.profiles[primaryProfileId] = {
+    type: 'api_key',
+    provider: UCLAW_MANAGED_PROVIDER_ID,
+    key: apiKey,
+  };
+  store.profiles[compatibilityProfileId] = {
+    type: 'api_key',
+    provider: UCLAW_COMPATIBILITY_PROVIDER_ID,
+    key: apiKey,
+  };
   if (!store.order) store.order = {};
   if (!store.lastGood) store.lastGood = {};
-  store.order.openai = ['openai:default'];
-  store.lastGood.openai = 'openai:default';
+  store.order[UCLAW_MANAGED_PROVIDER_ID] = [primaryProfileId];
+  store.order[UCLAW_COMPATIBILITY_PROVIDER_ID] = [compatibilityProfileId];
+  store.lastGood[UCLAW_MANAGED_PROVIDER_ID] = primaryProfileId;
+  store.lastGood[UCLAW_COMPATIBILITY_PROVIDER_ID] = compatibilityProfileId;
   return store;
 }
 
@@ -758,11 +773,11 @@ async function applyManagedAgentAuthProfiles(
     appliedGeneration,
   } of writes) {
     try {
-      // Record the expected generation before either write so an ambiguous
-      // filesystem result can still be rolled back without exposing content.
-      agent.appliedGeneration = appliedGeneration;
       guardManagedAuthProfilesSqliteWrite(agent.sqlite);
       writeAuthProfilesToSqlite(sqliteStore, agent.agentId, agent.sqlite);
+      // Record the expected generation immediately before JSON I/O so an
+      // ambiguous filesystem result can be rolled back without exposing content.
+      agent.appliedGeneration = appliedGeneration;
       await replaceManagedFileAtomically(
         agent.filePath,
         serializedJson,
@@ -775,7 +790,7 @@ async function applyManagedAgentAuthProfiles(
   }
 }
 
-/** Strictly replace all OpenAI credentials in every frozen agent target. */
+/** Strictly install both managed Provider credentials in every frozen agent target. */
 export async function installManagedAgentOpenAiApiKey(
   snapshot: ManagedAgentAuthProfilesSnapshot,
   apiKey: string,
@@ -787,7 +802,8 @@ export async function installManagedAgentOpenAiApiKey(
   await applyManagedAgentAuthProfiles(
     snapshot,
     'install managed',
-    (store) => buildStrictManagedOpenAiStore(store, normalizedApiKey, managedProviderIds),
+    (store) => buildStrictManagedProviderStore(store, normalizedApiKey, managedProviderIds),
+    true,
   );
 }
 
@@ -828,18 +844,22 @@ export async function restoreManagedAgentAuthProfiles(
   const state = requireManagedAgentAuthProfilesSnapshot(snapshot);
   const failures: Error[] = [];
   for (const agent of state.agents) {
-    try {
-      restoreAuthProfilesSqlitePrimaryRows(agent.sqlite);
-    } catch (cause) {
-      failures.push(new Error(`Failed to restore SQLite auth profiles for agent "${agent.agentId}"`, { cause }));
+    if (agent.sqlite.managedWriteGuarded) {
+      try {
+        restoreAuthProfilesSqlitePrimaryRows(agent.sqlite);
+      } catch (cause) {
+        failures.push(new Error(`Failed to restore SQLite auth profiles for agent "${agent.agentId}"`, { cause }));
+      }
     }
-    try {
-      await restoreManagedAuthProfilesJson(agent);
-    } catch (cause) {
-      failures.push(new Error(
-        `Failed to restore auth-profiles.json for agent "${agent.agentId}" at ${agent.filePath}`,
-        { cause },
-      ));
+    if (agent.appliedGeneration) {
+      try {
+        await restoreManagedAuthProfilesJson(agent);
+      } catch (cause) {
+        failures.push(new Error(
+          `Failed to restore auth-profiles.json for agent "${agent.agentId}" at ${agent.filePath}`,
+          { cause },
+        ));
+      }
     }
   }
 
@@ -3410,9 +3430,9 @@ async function applyManagedAgentModelsFiles(
 }
 
 /**
- * Strictly install the managed OpenAI provider into every frozen agent target.
- * The existing OpenAI entry is replaced rather than merged so personal fields
- * cannot survive a successful managed-account takeover.
+ * Strictly install both managed Provider entries into every frozen agent target.
+ * Existing managed entries are replaced rather than merged so personal fields
+ * cannot survive a successful account takeover.
  */
 export async function updateManagedAgentModelProviderStrict(
   snapshot: ManagedAgentModelsFilesSnapshot,
@@ -3430,8 +3450,9 @@ export async function updateManagedAgentModelProviderStrict(
       }
     }
     providers[UCLAW_MANAGED_PROVIDER_ID] = structuredClone(entry);
+    providers[UCLAW_COMPATIBILITY_PROVIDER_ID] = structuredClone(entry);
     return { ...document, providers };
-  });
+  }, true);
 }
 
 /** Remove every managed OpenAI provider entry, including historical inline credentials. */

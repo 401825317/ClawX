@@ -124,7 +124,7 @@ describe('ElectronStoreSecretStore', () => {
     });
 
     const managedInstall = withProviderMutationLock(async () => {
-      const snapshot = await snapshotProviderSecretSlots(['openai', 'uclaw-auth']);
+      const snapshot = await snapshotProviderSecretSlots(['openai', 'lingzhiwuxian', 'uclaw-auth']);
       managedSnapshotReady();
       await managedInstallPaused;
       await installManagedProviderSecrets(snapshot, {
@@ -133,7 +133,10 @@ describe('ElectronStoreSecretStore', () => {
         accessToken: 'next-access',
         refreshToken: 'next-refresh',
         expiresAt: 456,
-      }, nextRelay);
+      }, nextRelay, {
+        ...nextRelay,
+        accountId: 'lingzhiwuxian',
+      });
     });
     await managedSnapshotCaptured;
 
@@ -215,6 +218,59 @@ describe('ElectronStoreSecretStore', () => {
     expect(mocks.values.get('providerSecretsV2')).toEqual({});
   });
 
+  it('migrates matching managed Secrets out of plaintext storage and then stays a no-op', async () => {
+    const authSecret = {
+      type: 'oauth' as const,
+      accountId: 'uclaw-auth',
+      accessToken: 'existing-access',
+      refreshToken: 'existing-refresh',
+      expiresAt: 123,
+    };
+    const relaySecret = {
+      type: 'api_key' as const,
+      accountId: 'openai',
+      apiKey: 'existing-relay',
+      expiresAt: undefined,
+    };
+    const compatibilityRelaySecret = {
+      ...relaySecret,
+      accountId: 'lingzhiwuxian',
+    };
+    mocks.values.set('providerSecretsV2', {});
+    mocks.values.set('providerSecrets', {
+      openai: relaySecret,
+      lingzhiwuxian: compatibilityRelaySecret,
+      'uclaw-auth': authSecret,
+    });
+    mocks.values.set('apiKeys', { openai: relaySecret.apiKey });
+    const targets = ['openai', 'lingzhiwuxian', 'uclaw-auth'];
+
+    const migrationSnapshot = await snapshotProviderSecretSlots(targets);
+    await expect(installManagedProviderSecrets(
+      migrationSnapshot,
+      authSecret,
+      relaySecret,
+      compatibilityRelaySecret,
+    )).resolves.toBe(true);
+
+    expect(mocks.values.get('providerSecrets')).toEqual({});
+    expect(mocks.values.get('apiKeys')).toEqual({});
+    expect(Object.keys(mocks.values.get('providerSecretsV2') as Record<string, unknown>).sort())
+      .toEqual(['lingzhiwuxian', 'openai', 'uclaw-auth']);
+    expect(JSON.stringify(Object.fromEntries(mocks.values))).not.toContain('existing-relay');
+    expect(mocks.store.set).toHaveBeenCalledTimes(1);
+
+    const noOpSnapshot = await snapshotProviderSecretSlots(targets);
+    await expect(installManagedProviderSecrets(
+      noOpSnapshot,
+      authSecret,
+      relaySecret,
+      compatibilityRelaySecret,
+    )).resolves.toBe(false);
+
+    expect(mocks.store.set).toHaveBeenCalledTimes(1);
+  });
+
   it('snapshots opaque raw slots without decrypting or migrating them', async () => {
     const encryptedOpenAi = { encoding: 'electron-safe-storage-v1', ciphertext: 'opaque-ciphertext' };
     const plainAuth = {
@@ -266,7 +322,13 @@ describe('ElectronStoreSecretStore', () => {
     mocks.values.set('providerSecretsV2', structuredClone(originalEncrypted));
     mocks.values.set('providerSecrets', structuredClone(originalPlain));
     mocks.values.set('apiKeys', structuredClone(originalApiKeys));
-    const targets = ['openai', 'openai-secondary', 'openai-codex', 'uclaw-auth'];
+    const targets = [
+      'openai',
+      'lingzhiwuxian',
+      'openai-secondary',
+      'openai-codex',
+      'uclaw-auth',
+    ];
     const snapshot = await snapshotProviderSecretSlots(targets);
     const authSecret = {
       type: 'oauth' as const,
@@ -282,14 +344,22 @@ describe('ElectronStoreSecretStore', () => {
       ownerUserId: 'user-1',
     };
 
-    await installManagedProviderSecrets(snapshot, authSecret, relaySecret);
+    await installManagedProviderSecrets(snapshot, authSecret, relaySecret, {
+      ...relaySecret,
+      accountId: 'lingzhiwuxian',
+    });
 
     expect(mocks.store.set).toHaveBeenCalledTimes(1);
     expect(mocks.store.set.mock.calls[0]).toHaveLength(1);
     const installedEncrypted = mocks.values.get('providerSecretsV2') as Record<string, unknown>;
     const installedPlain = mocks.values.get('providerSecrets') as Record<string, unknown>;
     const installedApiKeys = mocks.values.get('apiKeys') as Record<string, unknown>;
-    expect(Object.keys(installedEncrypted).sort()).toEqual(['deepseek', 'openai', 'uclaw-auth']);
+    expect(Object.keys(installedEncrypted).sort()).toEqual([
+      'deepseek',
+      'lingzhiwuxian',
+      'openai',
+      'uclaw-auth',
+    ]);
     expect(installedEncrypted.deepseek).toEqual(originalEncrypted.deepseek);
     expect(JSON.stringify(installedEncrypted)).not.toContain('next-access');
     expect(JSON.stringify(installedEncrypted)).not.toContain('next-relay');
@@ -324,7 +394,7 @@ describe('ElectronStoreSecretStore', () => {
     mocks.values.set('providerSecretsV2', {});
     mocks.values.set('providerSecrets', {});
     mocks.values.set('apiKeys', { openai: 'before-secret' });
-    const snapshot = await snapshotProviderSecretSlots(['openai', 'uclaw-auth']);
+    const snapshot = await snapshotProviderSecretSlots(['openai', 'lingzhiwuxian', 'uclaw-auth']);
     mocks.values.set('apiKeys', { openai: 'concurrent-secret' });
 
     const error = await installManagedProviderSecrets(snapshot, {
@@ -336,6 +406,10 @@ describe('ElectronStoreSecretStore', () => {
     }, {
       type: 'api_key',
       accountId: 'openai',
+      apiKey: 'next-relay',
+    }, {
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
       apiKey: 'next-relay',
     }).catch((cause: unknown) => cause);
 
@@ -352,7 +426,7 @@ describe('ElectronStoreSecretStore', () => {
       openai: { type: 'api_key', accountId: 'openai', apiKey: 'before-relay' },
     });
     mocks.values.set('apiKeys', {});
-    const snapshot = await snapshotProviderSecretSlots(['openai', 'uclaw-auth']);
+    const snapshot = await snapshotProviderSecretSlots(['openai', 'lingzhiwuxian', 'uclaw-auth']);
     await installManagedProviderSecrets(snapshot, {
       type: 'oauth',
       accountId: 'uclaw-auth',
@@ -362,6 +436,10 @@ describe('ElectronStoreSecretStore', () => {
     }, {
       type: 'api_key',
       accountId: 'openai',
+      apiKey: 'next-relay',
+    }, {
+      type: 'api_key',
+      accountId: 'lingzhiwuxian',
       apiKey: 'next-relay',
     });
     const encrypted = mocks.values.get('providerSecretsV2') as Record<string, unknown>;

@@ -90,6 +90,8 @@ export interface ChatSession {
   workspacePath?: string;
   /** Renderer-local placeholder created by New Chat before ACP has created the backing session. */
   createdLocally?: boolean;
+  /** Renderer-local marker that sessions.create registered the placeholder before ACP acknowledged it. */
+  createdOnGateway?: boolean;
 }
 
 export type GatewaySessionsChangedPayload = Record<string, unknown> & {
@@ -166,6 +168,8 @@ export interface ChatState {
   sessionLabels: Record<string, string>;
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
+  /** Renderer model overrides currently being persisted, keyed by session. */
+  pendingSessionModelUpdates: Record<string, boolean>;
 
   // Thinking
   thinkingLevel: string | null;
@@ -180,6 +184,8 @@ export interface ChatState {
   deleteSession: (key: string) => Promise<void>;
   deleteSessions: (keys: string[]) => Promise<DeleteSessionsResult>;
   renameSession: (key: string, label: string) => Promise<void>;
+  updateSessionModel: (key: string, modelRef: string | null) => Promise<void>;
+  waitForSessionModelUpdate: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   loadMoreHistory: () => Promise<void>;

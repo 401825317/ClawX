@@ -12,6 +12,24 @@ const managedOpenAi = {
 };
 
 describe('provider mutation identity guard', () => {
+  it('recognizes compatibility Provider objects by vendor or runtime type', () => {
+    const compatibilityAccount = {
+      id: 'compatibility-alias',
+      vendorId: 'lingzhiwuxian',
+    };
+    const compatibilityRuntime = {
+      id: 'runtime-alias',
+      type: 'lingzhiwuxian',
+    };
+
+    expect(isOpenAiProviderIdentity(compatibilityAccount)).toBe(true);
+    expect(isOpenAiProviderIdentity(compatibilityRuntime)).toBe(true);
+    expect(() => assertProviderMutationAllowed(managedOpenAi, compatibilityAccount))
+      .toThrow(ManagedProviderMutationError);
+    expect(() => assertProviderMutationAllowed(managedOpenAi, compatibilityRuntime))
+      .toThrow(ManagedProviderMutationError);
+  });
+
   it('recognizes the UClaw smart-latest relay even when legacy data labels it custom', () => {
     const legacyRelay = {
       id: 'legacy-relay',
@@ -66,5 +84,21 @@ describe('provider mutation identity guard', () => {
     })).toBe(false);
     expect(() => assertProviderMutationAllowed(managedOpenAi, ordinaryCustom)).not.toThrow();
     expect(() => assertProviderMutationAllowed(managedOpenAi, sameHostDifferentModel)).not.toThrow();
+  });
+
+  it.each([
+    ['different protocol', 'http://zz-cn.lingzhiwuxian.com/v1'],
+    ['current host with different protocol', 'https://127.0.0.1:8083/v1'],
+    ['query parameters', 'https://zz-cn.lingzhiwuxian.com/v1?tenant=other'],
+    ['URL credentials', 'https://user:password@zz-cn.lingzhiwuxian.com/v1'],
+    ['URL fragment', 'https://zz-cn.lingzhiwuxian.com/v1#other'],
+  ])('does not classify a smart-latest custom Provider with %s as managed', (_case, baseUrl) => {
+    expect(isOpenAiProviderIdentity({
+      id: 'custom-relay',
+      vendorId: 'custom',
+      type: 'custom',
+      baseUrl,
+      model: 'smart-latest',
+    })).toBe(false);
   });
 });

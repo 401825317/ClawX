@@ -29,7 +29,9 @@ import { fetchCronSessionHistory } from '@/lib/cron-session-history';
 import { pickStartupSessionFallback } from './chat/session-selection';
 import {
   applyGatewaySessionsChanged,
+  normalizeGatewaySessionPatch,
   normalizeGatewaySessionRow,
+  normalizeGatewaySessionModelRef,
   type GatewaySessionsChangedPayload,
 } from './chat/session-catalog';
 import { useSessionAttentionStore, type SessionAttentionTransition } from './session-attention';
@@ -2056,6 +2058,215 @@ async function fetchChatSessionsList(): Promise<Record<string, unknown>> {
   });
 }
 
+type GatewaySessionMutationResult = {
+  entry?: Record<string, unknown>;
+  resolved?: {
+    modelProvider?: unknown;
+    model?: unknown;
+  };
+};
+
+function resolveSessionMutationModel(
+  result: GatewaySessionMutationResult | null | undefined,
+  fallback: string | null,
+): string | null {
+  const resolved = normalizeGatewaySessionModelRef(
+    result?.resolved?.model,
+    result?.resolved?.modelProvider,
+  );
+  if (resolved) return resolved;
+
+  const entry = result?.entry;
+  return normalizeGatewaySessionModelRef(entry?.model, entry?.modelProvider)
+    ?? normalizeGatewaySessionModelRef(entry?.modelOverride, entry?.providerOverride)
+    ?? fallback;
+}
+
+type SessionModelField = Readonly<{
+  hasModel: boolean;
+  model?: string;
+}>;
+
+type SessionModelMutation = {
+  latestVersion: number;
+  confirmed: SessionModelField;
+  desired: SessionModelField;
+  tail: Promise<void> | null;
+};
+
+const _sessionModelMutations = new Map<string, SessionModelMutation>();
+
+function toSessionModelField(modelRef: string | null | undefined): SessionModelField {
+  const model = modelRef?.trim();
+  return model ? { hasModel: true, model } : { hasModel: false };
+}
+
+function readSessionModelField(sessions: ChatSession[], sessionKey: string): SessionModelField {
+  const session = sessions.find((entry) => entry.key === sessionKey);
+  return toSessionModelField(session?.model);
+}
+
+function sameSessionModelField(left: SessionModelField, right: SessionModelField): boolean {
+  return left.hasModel === right.hasModel && left.model === right.model;
+}
+
+function applySessionModelField(
+  sessions: ChatSession[],
+  sessionKey: string,
+  field: SessionModelField,
+  options: {
+    insertIfMissing?: boolean;
+    createdLocallyIfMissing?: boolean;
+    updatedAt?: number;
+  } = {},
+): ChatSession[] {
+  let found = false;
+  const update = (session: ChatSession): ChatSession => {
+    const next = { ...session };
+    if (field.hasModel && field.model) next.model = field.model;
+    else delete next.model;
+    if (options.updatedAt !== undefined) next.updatedAt = options.updatedAt;
+    return next;
+  };
+  const nextSessions = sessions.map((session) => {
+    if (session.key !== sessionKey) return session;
+    found = true;
+    return update(session);
+  });
+  return found
+    ? nextSessions
+    : options.insertIfMissing === false
+      ? nextSessions
+      : [
+        ...nextSessions,
+        update({
+          key: sessionKey,
+          displayName: sessionKey,
+          ...(options.createdLocallyIfMissing ? { createdLocally: true } : {}),
+        }),
+      ];
+}
+
+function rollbackSessionModelField(
+  sessions: ChatSession[],
+  sessionKey: string,
+  expected: SessionModelField,
+  confirmed: SessionModelField,
+): ChatSession[] {
+  const current = readSessionModelField(sessions, sessionKey);
+  if (!sameSessionModelField(current, expected)) return sessions;
+  return applySessionModelField(sessions, sessionKey, confirmed, { insertIfMissing: false });
+}
+
+function markSessionCreatedOnGateway(sessions: ChatSession[], sessionKey: string): ChatSession[] {
+  return sessions.map((session) => (
+    session.key === sessionKey && session.createdLocally
+      ? { ...session, createdOnGateway: true }
+      : session
+  ));
+}
+
+function overlayPendingSessionModels(sessions: ChatSession[]): ChatSession[] {
+  let next = sessions;
+  for (const [sessionKey, mutation] of _sessionModelMutations) {
+    next = applySessionModelField(next, sessionKey, mutation.desired, { insertIfMissing: false });
+  }
+  return next;
+}
+
+/** Preserve the latest explicit Gateway model as the rollback baseline for an in-flight local change. */
+function updatePendingSessionModelBaseline(
+  rawSession: Record<string, unknown>,
+  fallbackKey?: string,
+  snapshotTs?: number,
+): void {
+  if (!Object.prototype.hasOwnProperty.call(rawSession, 'model')) return;
+
+  const rawKey = typeof rawSession.key === 'string' ? rawSession.key.trim() : '';
+  const key = rawKey || fallbackKey?.trim() || '';
+  if (!key) return;
+  const latestEventTs = _latestSessionEventTsByKey.get(key);
+  if (snapshotTs !== undefined && latestEventTs !== undefined && snapshotTs < latestEventTs) return;
+
+  const mutation = _sessionModelMutations.get(key);
+  if (!mutation) return;
+  const patch = normalizeGatewaySessionPatch({ ...rawSession, key });
+  if (patch.cleared.has('model')) {
+    mutation.confirmed = { hasModel: false };
+  } else if (typeof patch.values.model === 'string') {
+    mutation.confirmed = toSessionModelField(patch.values.model);
+  }
+}
+
+function updatePendingSessionModelBaselineFromEvent(payload: GatewaySessionsChangedPayload): void {
+  const nested = payload.session && typeof payload.session === 'object' && !Array.isArray(payload.session)
+    ? payload.session
+    : null;
+  const fallbackKey = typeof payload.sessionKey === 'string'
+    ? payload.sessionKey
+    : typeof payload.key === 'string' ? payload.key : undefined;
+  updatePendingSessionModelBaseline(nested ?? payload, fallbackKey, payload.ts);
+}
+
+function mergeGatewaySessionWithLocalState(
+  session: ChatSession,
+  localSession: ChatSession | undefined,
+): ChatSession {
+  if (!localSession) return session;
+
+  const workspacePath = session.workspacePath ?? localSession.workspacePath;
+  let merged: ChatSession = {
+    ...session,
+    ...(workspacePath ? { workspacePath } : {}),
+    ...(localSession.createdLocally ? { createdLocally: true } : {}),
+    ...(localSession.createdLocally && localSession.createdOnGateway ? { createdOnGateway: true } : {}),
+  };
+  const pending = _sessionModelMutations.get(session.key);
+  const localUpdatedAt = typeof localSession.updatedAt === 'number' ? localSession.updatedAt : undefined;
+  const gatewayUpdatedAt = typeof session.updatedAt === 'number' ? session.updatedAt : undefined;
+  const preserveLocalModel = Boolean(
+    pending
+    || localSession.createdLocally
+    || (localUpdatedAt !== undefined && (gatewayUpdatedAt === undefined || localUpdatedAt > gatewayUpdatedAt)),
+  );
+  if (preserveLocalModel) {
+    merged = applySessionModelField(
+      [merged],
+      session.key,
+      pending?.desired ?? toSessionModelField(localSession.model),
+      { insertIfMissing: false },
+    )[0] ?? merged;
+  }
+  return merged;
+}
+
+async function persistSessionModelSelection(
+  sessionKey: string,
+  modelRef: string | null,
+  createIfMissing: boolean,
+): Promise<{ modelRef: string | null; createdOnGateway: boolean }> {
+  if (createIfMissing) {
+    const created = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.create', {
+      key: sessionKey,
+      agentId: getAgentIdFromSessionKey(sessionKey),
+      ...(modelRef ? { model: modelRef } : {}),
+    });
+    return {
+      modelRef: resolveSessionMutationModel(created, modelRef),
+      createdOnGateway: true,
+    };
+  }
+
+  const patched = await useGatewayStore.getState().rpc<GatewaySessionMutationResult>('sessions.patch', {
+    key: sessionKey,
+    model: modelRef,
+  });
+  return {
+    modelRef: resolveSessionMutationModel(patched, modelRef),
+    createdOnGateway: false,
+  };
+}
+
 async function fetchChatHistory(
   sessionKey: string,
   limit: number,
@@ -2870,6 +3081,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   currentAgentId: 'main',
   sessionLabels: {},
   sessionLastActivity: {},
+  pendingSessionModelUpdates: {},
 
   thinkingLevel: null,
 
@@ -2954,13 +3166,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           );
           const mergedSessions = dedupedSessions.map((session) => {
             const localSession = localSessionByKey.get(session.key);
-            const workspacePath = session.workspacePath ?? localSession?.workspacePath;
-            if (!localSession?.createdLocally && workspacePath === session.workspacePath) return session;
-            return {
-              ...session,
-              ...(workspacePath ? { workspacePath } : {}),
-              ...(localSession?.createdLocally ? { createdLocally: true } : {}),
-            };
+            return mergeGatewaySessionWithLocalState(session, localSession);
           });
           if (previousGatewayListKeys) {
             const currentKeys = new Set(localSessions.map((session) => session.key));
@@ -2986,6 +3192,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const listTs = typeof data.ts === 'number' && Number.isFinite(data.ts)
             ? data.ts
             : undefined;
+          if (listTs !== undefined) {
+            for (const rawSession of rawSessions) {
+              updatePendingSessionModelBaseline(rawSession, undefined, listTs);
+            }
+          }
           const uncertainty = getSessionEventUncertainty(context.events);
           const toOrderableAttentionRows = (rows: ChatSession[]): ChatSession[] => (
             uncertainty.keys.size === 0
@@ -3029,7 +3240,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               _latestSessionEventTsByKey,
             );
             if (result.applied) {
-              visibleMergedSessions = result.sessions;
+              updatePendingSessionModelBaselineFromEvent(event);
+              visibleMergedSessions = overlayPendingSessionModels(result.sessions);
               if (result.deletedKey) {
                 clearSessionLabelHydrationTracking(result.deletedKey);
                 if (!uncertainty.keys.has(result.deletedKey)) {
@@ -3230,7 +3442,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               );
               if (result.applied) {
                 appliedAny = true;
-                reducedSessions = result.sessions;
+                updatePendingSessionModelBaselineFromEvent(event);
+                reducedSessions = overlayPendingSessionModels(result.sessions);
                 if (result.deletedKey) {
                   clearSessionLabelHydrationTracking(result.deletedKey);
                   if (!uncertainty.keys.has(result.deletedKey)) {
@@ -3344,26 +3557,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
       _latestSessionEventTsByKey,
     );
     if (result.applied) {
+      updatePendingSessionModelBaselineFromEvent(payload);
+      const projectedSessions = overlayPendingSessionModels(result.sessions);
       const eventKey = typeof payload.session?.key === 'string'
         ? payload.session.key.trim()
         : typeof payload.sessionKey === 'string'
           ? payload.sessionKey.trim()
           : typeof payload.key === 'string' ? payload.key.trim() : '';
-      const affectedRow = result.sessions.find((session) => session.key === eventKey);
+      const affectedRow = projectedSessions.find((session) => session.key === eventKey);
       if (affectedRow) {
         useSessionAttentionStore.getState().reconcileSessionRows([affectedRow]);
       }
       set((state) => ({
-        sessions: result.sessions,
+        sessions: projectedSessions,
         sessionLabels: result.deletedKey
           ? clearSessionEntryFromMap(state.sessionLabels, result.deletedKey)
           : state.sessionLabels,
         sessionLastActivity: result.deletedKey
           ? clearSessionEntryFromMap(state.sessionLastActivity, result.deletedKey)
-          : mergeSessionActivity(state.sessionLastActivity, result.sessions),
+          : mergeSessionActivity(state.sessionLastActivity, projectedSessions),
       }));
-      reconcileCurrentSessionIdleFromBackend(set, get, result.sessions);
-      applySessionBackendLabels(set, result.sessions);
+      reconcileCurrentSessionIdleFromBackend(set, get, projectedSessions);
+      applySessionBackendLabels(set, projectedSessions);
     }
     if (result.deletedKey) {
       clearSessionLabelHydrationTracking(result.deletedKey);
@@ -3556,15 +3771,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessionEntry = s.sessions.find((session) => session.key === key);
       return {
         sessions: sessionEntry
-          ? s.sessions.map((session) => (
-            session.key === key && session.createdLocally
-              ? {
-                ...session,
-                createdLocally: false,
-                ...(normalizedWorkspacePath ? { workspacePath: normalizedWorkspacePath } : {}),
-              }
-              : session
-          ))
+          ? s.sessions.map((session) => {
+            if (session.key !== key || !session.createdLocally) return session;
+            const { createdOnGateway: _createdOnGateway, ...confirmedSession } = session;
+            return {
+              ...confirmedSession,
+              createdLocally: false,
+              ...(normalizedWorkspacePath ? { workspacePath: normalizedWorkspacePath } : {}),
+            };
+          })
           : [...s.sessions, {
             key,
             displayName: key,
@@ -3610,6 +3825,100 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
       sessionLabels: { ...s.sessionLabels, [key]: normalized },
     }));
+  },
+
+  updateSessionModel: async (key: string, modelRef: string | null) => {
+    const normalizedModelRef = modelRef?.trim() || null;
+    let mutation = _sessionModelMutations.get(key);
+    if (!mutation) {
+      const confirmed = readSessionModelField(get().sessions, key);
+      mutation = {
+        latestVersion: 0,
+        confirmed,
+        desired: confirmed,
+        tail: null,
+      };
+      _sessionModelMutations.set(key, mutation);
+    }
+    const version = mutation.latestVersion + 1;
+    const desired = toSessionModelField(normalizedModelRef);
+    mutation.latestVersion = version;
+    mutation.desired = desired;
+
+    // Keep the picker responsive while OpenClaw persists this session-only override.
+    set((state) => ({
+      sessions: applySessionModelField(state.sessions, key, desired, {
+        createdLocallyIfMissing: true,
+        updatedAt: Date.now(),
+      }),
+      pendingSessionModelUpdates: {
+        ...state.pendingSessionModelUpdates,
+        [key]: true,
+      },
+    }));
+
+    const persist = async (): Promise<void> => {
+      const session = get().sessions.find((entry) => entry.key === key);
+      const createIfMissing = session?.createdLocally === true && session.createdOnGateway !== true;
+      const persisted = await persistSessionModelSelection(key, normalizedModelRef, createIfMissing);
+      const confirmed = toSessionModelField(persisted.modelRef);
+      mutation.confirmed = confirmed;
+      set((state) => ({
+        sessions: mutation.latestVersion === version
+          ? applySessionModelField(
+            persisted.createdOnGateway
+              ? markSessionCreatedOnGateway(state.sessions, key)
+              : state.sessions,
+            key,
+            confirmed,
+            { insertIfMissing: false, updatedAt: Date.now() },
+          )
+          : persisted.createdOnGateway
+            ? markSessionCreatedOnGateway(state.sessions, key)
+            : state.sessions,
+      }));
+    };
+
+    // Preserve request order per session while allowing different sessions to update independently.
+    const run = mutation.tail
+      ? mutation.tail.catch(() => undefined).then(persist)
+      : persist();
+    const tracked = run.catch((error) => {
+      if (mutation.latestVersion === version) {
+        set((state) => ({
+          sessions: rollbackSessionModelField(state.sessions, key, desired, mutation.confirmed),
+        }));
+      }
+      throw error;
+    }).finally(() => {
+      if (mutation.tail === tracked) {
+        _sessionModelMutations.delete(key);
+        set((state) => ({
+          pendingSessionModelUpdates: clearSessionEntryFromMap(
+            state.pendingSessionModelUpdates,
+            key,
+          ),
+        }));
+      }
+    });
+    mutation.tail = tracked;
+    return tracked;
+  },
+
+  waitForSessionModelUpdate: async (key: string) => {
+    while (true) {
+      const pending = _sessionModelMutations.get(key)?.tail;
+      if (!pending) return;
+      try {
+        await pending;
+      } catch (error) {
+        const latest = _sessionModelMutations.get(key)?.tail;
+        if (latest && latest !== pending) continue;
+        throw error;
+      }
+      const latest = _sessionModelMutations.get(key)?.tail;
+      if (!latest || latest === pending) return;
+    }
   },
 
   // ── Cleanup empty session on navigate away ──

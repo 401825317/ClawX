@@ -16,10 +16,11 @@ import { cn } from '@/lib/utils';
 import { useGatewayStore } from '@/stores/gateway';
 import { useAgentsStore } from '@/stores/agents';
 import { useChatStore } from '@/stores/chat';
+import { useManagedClientConfigStore } from '@/stores/managed-client-config';
 import { useArtifactPanel } from '@/stores/artifact-panel';
 import { buildPreviewTarget } from '@/components/file-preview/build-preview-target';
-import { useProviderStore } from '@/stores/providers';
-import { buildConfiguredModelOptions, formatModelRefLabel, isConfiguredModelRefAvailable, resolveConfiguredModelRef } from '@/lib/model-options';
+import { buildManagedTextModelOptions, formatModelRefLabel, resolveConfiguredModelRef } from '@/lib/model-options';
+import { toManagedClientTextModelRef } from '@shared/managed-client-config';
 import type { AgentSummary } from '@/types/agent';
 import type { QuickAccessSkill } from '@/types/skill';
 import { useTranslation } from 'react-i18next';
@@ -228,48 +229,72 @@ export function ChatInput({
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<QuickAccessSkill | null>(null);
-  const [switchingModelRef, setSwitchingModelRef] = useState<string | null>(null);
   const [optimisticModelRef, setOptimisticModelRef] = useState<string | null>(null);
-  const [providerSnapshotReady, setProviderSnapshotReady] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const modelChangeVersionRef = useRef(0);
+  const mountedRef = useRef(true);
+  const sendAttemptInFlightRef = useRef<{
+    sessionKey: string;
+    sessionGeneration: number;
+    token: symbol;
+  } | null>(null);
   const isComposingRef = useRef(false);
   const gatewayStatus = useGatewayStore((s) => s.status);
   const agents = useAgentsStore((s) => s.agents);
-  const updateAgentModel = useAgentsStore((s) => s.updateAgentModel);
   const defaultModelRef = useAgentsStore((s) => s.defaultModelRef);
-  const providerAccounts = useProviderStore((s) => s.accounts);
-  const providerStatuses = useProviderStore((s) => s.statuses);
-  const providerDefaultAccountId = useProviderStore((s) => s.defaultAccountId);
-  const providerVendors = useProviderStore((s) => s.vendors);
-  const providerError = useProviderStore((s) => s.error);
-  const refreshProviderSnapshot = useProviderStore((s) => s.refreshProviderSnapshot);
+  const textModelPolicy = useManagedClientConfigStore((s) => s.textModelPolicy);
+  const loadManagedTextModels = useManagedClientConfigStore((s) => s.loadTextModels);
   const currentAgentId = useChatStore((s) => s.currentAgentId);
+  const currentSessionKey = useChatStore((s) => s.currentSessionKey);
+  const currentSessionKeyRef = useRef(currentSessionKey);
+  const previousSessionKeyRef = useRef(currentSessionKey);
+  const currentSessionGenerationRef = useRef(0);
+  if (previousSessionKeyRef.current !== currentSessionKey) {
+    previousSessionKeyRef.current = currentSessionKey;
+    currentSessionGenerationRef.current += 1;
+  }
+  currentSessionKeyRef.current = currentSessionKey;
+  const sessions = useChatStore((s) => s.sessions);
+  const updateSessionModel = useChatStore((s) => s.updateSessionModel);
+  const waitForSessionModelUpdate = useChatStore((s) => s.waitForSessionModelUpdate);
+  const modelPersisting = useChatStore(
+    (s) => Boolean(s.pendingSessionModelUpdates[currentSessionKey]),
+  );
   const currentAgent = useMemo(
     () => (agents ?? []).find((agent) => agent.id === currentAgentId) ?? null,
     [agents, currentAgentId],
+  );
+  const currentSession = useMemo(
+    () => (sessions ?? []).find((session) => session.key === currentSessionKey) ?? null,
+    [currentSessionKey, sessions],
   );
   const currentAgentName = useMemo(
     () => currentAgent?.name ?? currentAgentId,
     [currentAgent, currentAgentId],
   );
   const modelOptions = useMemo(
-    () => buildConfiguredModelOptions(
-      providerAccounts,
-      providerStatuses,
-      providerVendors,
-      providerDefaultAccountId,
-    ),
-    [providerAccounts, providerDefaultAccountId, providerStatuses, providerVendors],
+    () => buildManagedTextModelOptions(textModelPolicy),
+    [textModelPolicy],
   );
+  const managedDefaultModelRef = toManagedClientTextModelRef(textModelPolicy.defaultModel);
+  const requestedModelRef = optimisticModelRef
+    || currentSession?.model
+    || currentAgent?.modelRef
+    || defaultModelRef
+    || null;
   const configuredModelRef = useMemo(
-    () => resolveConfiguredModelRef(currentAgent?.modelRef, defaultModelRef, modelOptions),
-    [currentAgent?.modelRef, defaultModelRef, modelOptions],
+    () => resolveConfiguredModelRef(
+      requestedModelRef,
+      defaultModelRef || managedDefaultModelRef,
+      modelOptions,
+    ),
+    [defaultModelRef, managedDefaultModelRef, modelOptions, requestedModelRef],
   );
-  const effectiveModelRef = optimisticModelRef || configuredModelRef;
+  const effectiveModelRef = configuredModelRef;
   const currentModelLabel = useMemo(() => {
     const matchedOption = modelOptions.find((option) => option.modelRef === effectiveModelRef);
     return matchedOption?.label || formatModelRefLabel(effectiveModelRef);
@@ -292,7 +317,7 @@ export function ChatInput({
     );
   }, [quickSkills, skillQuery]);
   const showAgentPicker = mentionableAgents.length > 0;
-  const showModelPicker = modelOptions.length > 1;
+  const showModelPicker = modelOptions.length > 0;
   const chatComposerStatusComponents = rendererExtensionRegistry.getChatComposerStatusComponents();
   const isGatewayUsable = gatewayStatus.state === 'running' && gatewayStatus.gatewayReady !== false;
   const inputDisabled = disabled;
@@ -300,51 +325,29 @@ export function ChatInput({
   const skillTokenRanges = useMemo(() => findSkillTokenRanges(input), [input]);
   const openArtifactPreview = useArtifactPanel((s) => s.openPreview);
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        await refreshProviderSnapshot();
-      } finally {
-        if (!cancelled) setProviderSnapshotReady(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshProviderSnapshot]);
+    void loadManagedTextModels(true).catch(() => undefined);
+  }, [loadManagedTextModels]);
 
   useEffect(() => {
-    if (gatewayStatus.state === 'running') return;
-    let cancelled = false;
-    hostApi.gateway.status()
-      .then((status) => {
-        if (cancelled) return;
-        if (status.state === 'running') {
-          void refreshProviderSnapshot();
-        }
-      })
-      .catch(() => {});
+    mountedRef.current = true;
     return () => {
-      cancelled = true;
+      mountedRef.current = false;
     };
-  }, [gatewayStatus.state, refreshProviderSnapshot]);
+  }, []);
 
   useEffect(() => {
     setOptimisticModelRef(null);
-  }, [currentAgent?.modelRef, currentAgentId]);
+  }, [currentSession?.model, currentSessionKey]);
+
+  useEffect(() => {
+    modelChangeVersionRef.current += 1;
+  }, [currentSessionKey]);
 
   useEffect(() => {
     if (workspaceSelectorDisabled) {
       setWorkspaceMenuOpen(false);
     }
   }, [workspaceSelectorDisabled]);
-
-  useEffect(() => {
-    if (!providerSnapshotReady || providerError || !currentAgent || switchingModelRef || optimisticModelRef) return;
-    const override = (currentAgent.overrideModelRef || '').trim();
-    if (!override || isConfiguredModelRefAvailable(override, modelOptions)) return;
-    void updateAgentModel(currentAgent.id, null).catch(() => {});
-  }, [currentAgent, modelOptions, optimisticModelRef, providerError, providerSnapshotReady, switchingModelRef, updateAgentModel]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -506,29 +509,36 @@ export function ChatInput({
     void loadQuickSkills();
   }, [skillPickerOpen, loadQuickSkills]);
 
-  const handleSelectModel = useCallback(async (modelRef: string) => {
-    if (!currentAgent || switchingModelRef) return;
-    if (modelRef === effectiveModelRef) {
+  const handleSelectModel = useCallback((modelRef: string) => {
+    if (modelRef === effectiveModelRef && requestedModelRef === effectiveModelRef) {
       setModelPickerOpen(false);
       textareaRef.current?.focus();
       return;
     }
 
     const previousModelRef = effectiveModelRef;
-    const desiredOverride = modelRef === (defaultModelRef || '').trim() ? null : modelRef;
-    setSwitchingModelRef(modelRef);
+    const desiredOverride = modelRef === managedDefaultModelRef ? null : modelRef;
+    const changeVersion = modelChangeVersionRef.current + 1;
+    modelChangeVersionRef.current = changeVersion;
     setOptimisticModelRef(modelRef);
     setModelPickerOpen(false);
-    try {
-      await updateAgentModel(currentAgent.id, desiredOverride);
-    } catch (error) {
-      setOptimisticModelRef(previousModelRef);
-      toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
-    } finally {
-      setSwitchingModelRef(null);
-      textareaRef.current?.focus();
-    }
-  }, [currentAgent, defaultModelRef, effectiveModelRef, switchingModelRef, t, updateAgentModel]);
+    textareaRef.current?.focus();
+
+    const sessionKey = currentSessionKey;
+    const sessionGeneration = currentSessionGenerationRef.current;
+    const update = updateSessionModel(sessionKey, desiredOverride);
+    void update.catch((error) => {
+      if (!mountedRef.current) return;
+      const selectionIsCurrent = currentSessionKeyRef.current === sessionKey
+        && currentSessionGenerationRef.current === sessionGeneration;
+      if (selectionIsCurrent && modelChangeVersionRef.current === changeVersion) {
+        setOptimisticModelRef(previousModelRef);
+      }
+      if (selectionIsCurrent) {
+        toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
+      }
+    });
+  }, [currentSessionKey, effectiveModelRef, managedDefaultModelRef, requestedModelRef, t, updateSessionModel]);
 
   const handleWorkspaceButtonClick = useCallback(() => {
     if (workspaceSelectorDisabled) return;
@@ -691,55 +701,112 @@ export function ChatInput({
 
   const allReady = attachments.length === 0 || attachments.every(a => a.status === 'ready');
   const hasFailedAttachments = attachments.some((a) => a.status === 'error');
-  const canSend = (input.trim() || attachments.length > 0)
+  const canSendWithoutModelPersistence = (input.trim() || attachments.length > 0)
     && allReady
     && !inputDisabled
     && !sending
     && !imageGenerating;
+  const canSend = canSendWithoutModelPersistence && !modelPersisting;
   const canStop = sending && !inputDisabled && !!onStop;
 
   const handleSend = useCallback(async () => {
-    if (!canSend) return;
-    const readyAttachments = attachments.filter(a => a.status === 'ready');
-    const textToSend = input.trim();
-    const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
+    if (!canSendWithoutModelPersistence) return;
+    const sessionKey = currentSessionKey;
+    const sessionGeneration = currentSessionGenerationRef.current;
+    const activeAttempt = sendAttemptInFlightRef.current;
+    if (
+      activeAttempt?.sessionKey === sessionKey
+      && activeAttempt.sessionGeneration === sessionGeneration
+    ) return;
 
-    if (rendererExtensionRegistry.hasChatBeforeSendHooks()) {
-      const guard = await rendererExtensionRegistry.runChatBeforeSend({
-        text: textToSend,
-        attachments: attachmentsToSend,
-        targetAgentId,
-      });
-      if (!guard.ok) {
-        if (guard.message) {
-          toast.error(guard.message);
-        }
+    const token = Symbol('chat-send-attempt');
+    sendAttemptInFlightRef.current = { sessionKey, sessionGeneration, token };
+    const isCurrentSendContext = (): boolean => (
+      mountedRef.current
+      && currentSessionKeyRef.current === sessionKey
+      && currentSessionGenerationRef.current === sessionGeneration
+    );
+
+    try {
+      try {
+        await waitForSessionModelUpdate(sessionKey);
+      } catch {
         return;
       }
-    }
+      if (!isCurrentSendContext()) return;
 
-    // Capture values before clearing — clear input immediately for snappy UX,
-    // but keep attachments available for the async send
-    console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
-    if (attachmentsToSend) {
-      console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
-        id: a.id, fileName: a.fileName, mimeType: a.mimeType, fileSize: a.fileSize,
-        stagedPath: a.stagedPath, status: a.status, hasPreview: !!a.preview,
-      })));
+      const readyAttachments = attachments.filter(a => a.status === 'ready');
+      const textToSend = input.trim();
+      const attachmentsToSend = readyAttachments.length > 0 ? readyAttachments : undefined;
+
+      if (rendererExtensionRegistry.hasChatBeforeSendHooks()) {
+        const guard = await rendererExtensionRegistry.runChatBeforeSend({
+          text: textToSend,
+          attachments: attachmentsToSend,
+          targetAgentId,
+        });
+        if (!isCurrentSendContext()) return;
+        if (!guard.ok) {
+          if (guard.message) {
+            toast.error(guard.message);
+          }
+          return;
+        }
+      }
+
+      if (effectiveModelRef && requestedModelRef !== effectiveModelRef) {
+        try {
+          await updateSessionModel(sessionKey, effectiveModelRef);
+          await waitForSessionModelUpdate(sessionKey);
+        } catch (error) {
+          if (isCurrentSendContext()) {
+            toast.error(t('composer.modelSwitchFailed', { error: String(error) }));
+          }
+          return;
+        }
+        if (!isCurrentSendContext()) return;
+      }
+
+      if (!isCurrentSendContext()) return;
+      // Capture values before clearing — clear input immediately for snappy UX,
+      // but keep attachments available for the async send
+      console.log(`[handleSend] text="${textToSend.substring(0, 50)}", attachments=${attachments.length}, ready=${readyAttachments.length}, sending=${!!attachmentsToSend}`);
+      if (attachmentsToSend) {
+        console.log('[handleSend] Attachment details:', attachmentsToSend.map(a => ({
+          id: a.id, fileName: a.fileName, mimeType: a.mimeType, fileSize: a.fileSize,
+          stagedPath: a.stagedPath, status: a.status, hasPreview: !!a.preview,
+        })));
+      }
+      setInput('');
+      setAttachments([]);
+      setSelectedSkill(null);
+      setSkillQuery('');
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+      onSend(textToSend, attachmentsToSend, targetAgentId);
+      setTargetAgentId(null);
+      setPickerOpen(false);
+      setSkillPickerOpen(false);
+      setWorkspaceMenuOpen(false);
+    } finally {
+      if (sendAttemptInFlightRef.current?.token === token) {
+        sendAttemptInFlightRef.current = null;
+      }
     }
-    setInput('');
-    setAttachments([]);
-    setSelectedSkill(null);
-    setSkillQuery('');
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-    onSend(textToSend, attachmentsToSend, targetAgentId);
-    setTargetAgentId(null);
-    setPickerOpen(false);
-    setSkillPickerOpen(false);
-    setWorkspaceMenuOpen(false);
-  }, [input, attachments, canSend, onSend, targetAgentId]);
+  }, [
+    input,
+    attachments,
+    canSendWithoutModelPersistence,
+    currentSessionKey,
+    effectiveModelRef,
+    onSend,
+    requestedModelRef,
+    t,
+    targetAgentId,
+    updateSessionModel,
+    waitForSessionModelUpdate,
+  ]);
 
   const handleStop = useCallback(() => {
     if (!canStop) return;
@@ -813,7 +880,7 @@ export function ChatInput({
           return;
         }
         e.preventDefault();
-        handleSend();
+        void handleSend();
       }
     },
     [handleSend, input, moveCaretTo, selectedSkill, skillTokenRanges],
@@ -1143,7 +1210,7 @@ export function ChatInput({
                   data-testid="chat-model-picker-button"
                   className={cn(
                     'inline-flex h-8 max-w-[220px] items-center gap-1 rounded-lg px-1.5 text-meta font-medium text-muted-foreground transition-colors hover:bg-transparent hover:text-foreground focus-visible:outline-none focus-visible:ring-0 disabled:pointer-events-none disabled:opacity-50',
-                    (modelPickerOpen || switchingModelRef) && 'text-foreground',
+                    modelPickerOpen && 'text-foreground',
                   )}
                   onClick={() => {
                     setPickerOpen(false);
@@ -1151,12 +1218,9 @@ export function ChatInput({
                     setWorkspaceMenuOpen(false);
                     setModelPickerOpen((open) => !open);
                   }}
-                  disabled={inputDisabled || sending || !currentAgent || !!switchingModelRef}
+                  disabled={inputDisabled || sending || !currentAgent}
                   title={t('composer.pickModel')}
                 >
-                  {switchingModelRef ? (
-                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                  ) : null}
                   <span className="truncate">{currentModelLabel}</span>
                   <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 transition-transform', modelPickerOpen && 'rotate-180')} />
                 </button>

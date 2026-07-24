@@ -10,10 +10,13 @@ export type UclawMarketplaceProvider = 'skillhub' | 'clawhub';
 export type UclawEndpointsConfig = {
   provider: {
     productionOrigin: string;
+    legacyProviderOrigins: string[];
     providerName: 'UClaw';
     managedProviderId: string;
+    compatibilityProviderId: 'lingzhiwuxian';
     managedAccountId: string;
     authAccountId: string;
+    managedRuntimeContractVersion: number;
     legacyProviderIds: string[];
     legacyAuthAccountIds: string[];
     defaultModel: string;
@@ -133,13 +136,13 @@ function readEnum<T extends string>(value: unknown, key: string, supported: read
   return normalized as T;
 }
 
-function readProductionOrigin(value: unknown): string {
-  const normalized = readNonEmptyString(value, 'provider.productionOrigin');
+function readProviderOrigin(value: unknown, key: string): string {
+  const normalized = readNonEmptyString(value, key);
   let parsed: URL;
   try {
     parsed = new URL(normalized);
   } catch {
-    throw new Error('provider.productionOrigin in shared/junfeiai-endpoints.json must be a valid URL');
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be a valid URL`);
   }
   if (
     !['http:', 'https:'].includes(parsed.protocol)
@@ -149,9 +152,15 @@ function readProductionOrigin(value: unknown): string {
     || parsed.hash
     || (parsed.pathname && parsed.pathname !== '/')
   ) {
-    throw new Error('provider.productionOrigin in shared/junfeiai-endpoints.json must be an HTTP(S) origin');
+    throw new Error(`${key} in shared/junfeiai-endpoints.json must be an HTTP(S) origin`);
   }
   return parsed.origin;
+}
+
+function readProviderOrigins(value: unknown, key: string): string[] {
+  return [...new Set(readNonEmptyStringArray(value, key).map((origin, index) => (
+    readProviderOrigin(origin, `${key}[${index}]`)
+  )))];
 }
 
 function readMarketplaceOrigin(value: unknown, key: string): string {
@@ -182,6 +191,17 @@ function readProviderName(value: unknown): 'UClaw' {
   const normalized = readNonEmptyString(value, 'provider.providerName');
   if (normalized !== 'UClaw') {
     throw new Error('provider.providerName in shared/junfeiai-endpoints.json must be UClaw');
+  }
+  return normalized;
+}
+
+/** Keep the compatibility provider identity stable across upgrades. */
+function readCompatibilityProviderId(value: unknown): 'lingzhiwuxian' {
+  const normalized = readNonEmptyString(value, 'provider.compatibilityProviderId');
+  if (normalized !== 'lingzhiwuxian') {
+    throw new Error(
+      'provider.compatibilityProviderId in shared/junfeiai-endpoints.json must be lingzhiwuxian',
+    );
   }
   return normalized;
 }
@@ -230,11 +250,20 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
 
   return {
     provider: {
-      productionOrigin: readProductionOrigin(provider.productionOrigin),
+      productionOrigin: readProviderOrigin(provider.productionOrigin, 'provider.productionOrigin'),
+      legacyProviderOrigins: readProviderOrigins(
+        provider.legacyProviderOrigins,
+        'provider.legacyProviderOrigins',
+      ),
       providerName: readProviderName(provider.providerName),
       managedProviderId: readNonEmptyString(provider.managedProviderId, 'provider.managedProviderId'),
+      compatibilityProviderId: readCompatibilityProviderId(provider.compatibilityProviderId),
       managedAccountId: readNonEmptyString(provider.managedAccountId, 'provider.managedAccountId'),
       authAccountId: readNonEmptyString(provider.authAccountId, 'provider.authAccountId'),
+      managedRuntimeContractVersion: readPositiveInteger(
+        provider.managedRuntimeContractVersion,
+        'provider.managedRuntimeContractVersion',
+      ),
       legacyProviderIds: readNonEmptyStringArray(provider.legacyProviderIds, 'provider.legacyProviderIds'),
       legacyAuthAccountIds: readNonEmptyStringArray(provider.legacyAuthAccountIds, 'provider.legacyAuthAccountIds'),
       defaultModel: readNonEmptyString(provider.defaultModel, 'provider.defaultModel'),
@@ -409,11 +438,15 @@ export function validateUclawEndpointsConfig(value: unknown): UclawEndpointsConf
 export const UCLAW_ENDPOINTS_CONFIG = validateUclawEndpointsConfig(rawConfig);
 
 export const UCLAW_PRODUCTION_ORIGIN = UCLAW_ENDPOINTS_CONFIG.provider.productionOrigin;
+export const UCLAW_LEGACY_PROVIDER_ORIGINS = UCLAW_ENDPOINTS_CONFIG.provider.legacyProviderOrigins;
 export const UCLAW_MANAGED_SERVICE_NAME = UCLAW_ENDPOINTS_CONFIG.provider.providerName;
 export const UCLAW_MANAGED_PROVIDER_BASE_URL = `${UCLAW_PRODUCTION_ORIGIN}/v1`;
+export const UCLAW_LEGACY_PROVIDER_BASE_URLS = UCLAW_LEGACY_PROVIDER_ORIGINS.map((origin) => `${origin}/v1`);
 export const UCLAW_MANAGED_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.provider.managedProviderId;
+export const UCLAW_COMPATIBILITY_PROVIDER_ID = UCLAW_ENDPOINTS_CONFIG.provider.compatibilityProviderId;
 export const UCLAW_MANAGED_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.managedAccountId;
 export const UCLAW_MANAGED_AUTH_ACCOUNT_ID = UCLAW_ENDPOINTS_CONFIG.provider.authAccountId;
+export const UCLAW_RUNTIME_CONTRACT_VERSION = UCLAW_ENDPOINTS_CONFIG.provider.managedRuntimeContractVersion;
 export const UCLAW_LEGACY_PROVIDER_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyProviderIds;
 export const UCLAW_LEGACY_AUTH_ACCOUNT_IDS = UCLAW_ENDPOINTS_CONFIG.provider.legacyAuthAccountIds;
 export const UCLAW_DEFAULT_MODEL = UCLAW_ENDPOINTS_CONFIG.provider.defaultModel;

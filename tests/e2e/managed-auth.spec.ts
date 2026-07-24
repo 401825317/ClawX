@@ -179,6 +179,65 @@ async function getRecordedHostInvocations(app: ElectronApplication): Promise<Rec
   });
 }
 
+/** Overlay the Provider Host API with the managed account snapshot used by the Models page. */
+async function installManagedProviderUiMock(app: ElectronApplication): Promise<void> {
+  await app.evaluate(async () => {
+    const { ipcMain } = process.mainModule!.require('electron') as typeof import('electron');
+    type HostRequest = { id?: string; module?: string; action?: string };
+    type HostHandler = (event: unknown, request: HostRequest) => Promise<unknown>;
+    const originalHostInvoke = (ipcMain as unknown as {
+      _invokeHandlers?: Map<string, HostHandler>;
+    })._invokeHandlers?.get('host:invoke');
+    const respond = (id: unknown, data: unknown) => ({
+      id: typeof id === 'string' ? id : undefined,
+      ok: true,
+      data,
+    });
+    const now = '2026-07-24T00:00:00.000Z';
+    const account = {
+      id: 'openai',
+      vendorId: 'openai',
+      label: 'UClaw',
+      authMode: 'api_key',
+      baseUrl: 'https://mock.invalid/v1',
+      apiProtocol: 'openai-responses',
+      model: 'smart-latest',
+      enabled: true,
+      isDefault: true,
+      metadata: { managedBy: 'uclaw', customModels: ['smart-latest'] },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const vendor = {
+      id: 'openai',
+      name: 'UClaw',
+      icon: 'U',
+      placeholder: '',
+      requiresApiKey: false,
+      category: 'official',
+      defaultModelId: 'smart-latest',
+      supportedAuthModes: ['api_key'],
+      defaultAuthMode: 'api_key',
+      supportsMultipleAccounts: false,
+    };
+
+    ipcMain.removeHandler('host:invoke');
+    ipcMain.handle('host:invoke', async (event: unknown, request: HostRequest) => {
+      if (request?.module !== 'providers') {
+        return originalHostInvoke?.(event, request) ?? respond(request?.id, {});
+      }
+      if (request.action === 'accounts') return respond(request.id, [account]);
+      if (request.action === 'accountKeyInfo') {
+        return respond(request.id, [{ accountId: 'openai', hasKey: true, keyMasked: null }]);
+      }
+      if (request.action === 'vendors') return respond(request.id, [vendor]);
+      if (request.action === 'getDefaultAccount') return respond(request.id, { accountId: 'openai' });
+      if (request.action === 'list') return respond(request.id, []);
+      return originalHostInvoke?.(event, request) ?? respond(request?.id, {});
+    });
+  });
+}
+
 async function expectNoLegacyBrand(page: Page): Promise<void> {
   const latinLegacyBrand = new RegExp(['jun', '\\s*', 'fei'].join(''), 'i');
   const chineseLegacyBrand = new RegExp(['君', '\\s*', '飞'].join(''), 'i');
@@ -331,10 +390,17 @@ test.describe('UClaw managed account flows', () => {
 
     try {
       await installManagedAuthMock(app, 'ready');
+      await installManagedProviderUiMock(app);
       const page = await getStableWindow(app);
       await page.reload();
 
       await expect(page.getByTestId('main-layout')).toBeVisible();
+      await page.getByTestId('sidebar-nav-models').click();
+      await expect(page.getByTestId('provider-card-openai')).toBeVisible();
+      await expect(page.getByTestId('providers-add-button')).toHaveCount(0);
+      await expect(page.getByTestId('provider-edit-openai')).toHaveCount(0);
+      await expect(page.getByTestId('provider-delete-openai')).toHaveCount(0);
+
       await page.getByTestId('sidebar-nav-settings').click();
       await expect(page.getByTestId('settings-managed-auth-section')).toBeVisible();
       await expect(page.getByTestId('settings-managed-auth-status')).toHaveText('Signed in');

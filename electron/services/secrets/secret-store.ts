@@ -1,5 +1,6 @@
 import { safeStorage } from 'electron';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { ProviderSecret } from '../../shared/providers/types';
 import { getClawXProviderStore } from '../providers/store-instance';
 import { withProviderMutationLock } from '../providers/provider-mutation-lock';
@@ -167,6 +168,64 @@ function installRawSecret(maps: RawSecretMaps, secret: ProviderSecret): void {
   delete maps.apiKeys[secret.accountId];
 }
 
+function persistedJsonValue(value: unknown): unknown {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? undefined : JSON.parse(serialized) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function samePersistedSecret(value: unknown, expected: ProviderSecret): boolean {
+  return isDeepStrictEqual(persistedJsonValue(value), persistedJsonValue(expected));
+}
+
+/** Compare values and storage sources so plaintext duplicates cannot pass as a secure no-op. */
+function hasCanonicalRawSecrets(
+  maps: RawSecretMaps,
+  accountIds: readonly string[],
+  expectedSecrets: readonly ProviderSecret[],
+): boolean {
+  const expectedByAccountId = new Map(expectedSecrets.map((secret) => [secret.accountId, secret]));
+  const encryptionAvailable = canEncryptSecrets();
+
+  for (const accountId of accountIds) {
+    const expected = expectedByAccountId.get(accountId);
+    if (!expected) {
+      if (
+        Object.hasOwn(maps.providerSecretsV2, accountId)
+        || Object.hasOwn(maps.providerSecrets, accountId)
+        || Object.hasOwn(maps.apiKeys, accountId)
+      ) {
+        return false;
+      }
+      continue;
+    }
+
+    if (encryptionAvailable) {
+      if (
+        !samePersistedSecret(decryptSecret(maps.providerSecretsV2[accountId]), expected)
+        || Object.hasOwn(maps.providerSecrets, accountId)
+        || Object.hasOwn(maps.apiKeys, accountId)
+      ) {
+        return false;
+      }
+      continue;
+    }
+
+    if (
+      !samePersistedSecret(maps.providerSecrets[accountId], expected)
+      || Object.hasOwn(maps.providerSecretsV2, accountId)
+      || Object.hasOwn(maps.apiKeys, accountId)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function restoreRawSlots(map: RawSecretMap, slots: ProviderSecretRawSlots, accountIds: readonly string[]): void {
   for (const accountId of accountIds) {
     const slot = slots[accountId];
@@ -294,15 +353,26 @@ export async function snapshotProviderSecretSlots(
 export async function installManagedProviderSecrets(
   snapshot: ProviderSecretSlotsSnapshot,
   authSecret: Extract<ProviderSecret, { type: 'oauth' }>,
-  relaySecret: Extract<ProviderSecret, { type: 'api_key' }>,
-): Promise<void> {
+  primaryRelaySecret: Extract<ProviderSecret, { type: 'api_key' }>,
+  compatibilityRelaySecret: Extract<ProviderSecret, { type: 'api_key' }>,
+): Promise<boolean> {
   const state = requireSnapshotState(snapshot);
   const targets = state.accountIds;
   const targetSet = new Set(targets);
-  if (relaySecret.accountId === authSecret.accountId) {
+  const relaySecrets = [primaryRelaySecret, compatibilityRelaySecret] as const;
+  if (relaySecrets.some((secret) => secret.accountId === authSecret.accountId)) {
     throw new Error('Managed relay and auth Secret account ids must be different');
   }
-  if (!targetSet.has(relaySecret.accountId) || !targetSet.has(authSecret.accountId)) {
+  if (primaryRelaySecret.accountId === compatibilityRelaySecret.accountId) {
+    throw new Error('Managed relay Secret account ids must be different');
+  }
+  if (primaryRelaySecret.apiKey.trim() !== compatibilityRelaySecret.apiKey.trim()) {
+    throw new Error('Managed relay Secrets must use the same API key');
+  }
+  if (
+    !targetSet.has(authSecret.accountId)
+    || relaySecrets.some((secret) => !targetSet.has(secret.accountId))
+  ) {
     throw new Error('Managed Secret account ids must be included in the frozen target set');
   }
 
@@ -313,8 +383,17 @@ export async function installManagedProviderSecrets(
     throw new Error('Provider Secret targets changed after the transaction snapshot');
   }
 
+  if (hasCanonicalRawSecrets(maps, targets, [
+    primaryRelaySecret,
+    compatibilityRelaySecret,
+    authSecret,
+  ])) {
+    return false;
+  }
+
   clearRawSlots(maps, targets);
-  installRawSecret(maps, relaySecret);
+  installRawSecret(maps, primaryRelaySecret);
+  installRawSecret(maps, compatibilityRelaySecret);
   installRawSecret(maps, authSecret);
   const appliedVersion = rawStateVersion(snapshotRawState(maps, targets));
   try {
@@ -325,6 +404,7 @@ export async function installManagedProviderSecrets(
     if (observedVersion === appliedVersion) state.appliedVersion = appliedVersion;
     throw error;
   }
+  return true;
 }
 
 /** Atomically restore the exact raw target slots while preserving unrelated Secrets. */

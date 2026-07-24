@@ -6,9 +6,17 @@
  * layer so TypeScript project boundaries remain stable during the migration.
  */
 
+import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_DEFAULT_MODEL,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_MANAGED_SERVICE_NAME,
+} from '@shared/junfeiai-endpoints';
+
 export const PROVIDER_TYPES = [
   'anthropic',
   'openai',
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   'google',
   'openrouter',
   'ark',
@@ -40,6 +48,7 @@ export type ProviderProtocol =
 export const BUILTIN_PROVIDER_TYPES = [
   'anthropic',
   'openai',
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   'google',
   'openrouter',
   'ark',
@@ -180,6 +189,18 @@ export const PROVIDER_TYPE_INFO: ProviderTypeInfo[] = [
     showModelId: true,
     modelIdPlaceholder: 'gpt-5.5',
     apiKeyUrl: 'https://platform.openai.com/api-keys',
+  },
+  {
+    id: UCLAW_COMPATIBILITY_PROVIDER_ID,
+    name: UCLAW_MANAGED_SERVICE_NAME,
+    icon: 'U',
+    placeholder: `由 ${UCLAW_MANAGED_SERVICE_NAME} 登录自动管理`,
+    model: UCLAW_MANAGED_SERVICE_NAME,
+    requiresApiKey: false,
+    defaultBaseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+    defaultModelId: UCLAW_DEFAULT_MODEL,
+    showBaseUrl: false,
+    showModelId: false,
   },
   {
     id: 'google',

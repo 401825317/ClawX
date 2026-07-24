@@ -62,6 +62,20 @@ describe('Gateway session catalog projection', () => {
     expect(result.sessions).toEqual([{ key: SESSION_KEY, status: 'running', model: 'nested-model' }]);
   });
 
+  it('combines OpenClaw modelProvider and model without duplicating a full reference', () => {
+    expect(normalizeGatewaySessionRow({
+      key: SESSION_KEY,
+      modelProvider: 'openai',
+      model: 'smart-latest',
+    }).model).toBe('openai/smart-latest');
+
+    expect(normalizeGatewaySessionRow({
+      key: SESSION_KEY,
+      modelProvider: 'openai',
+      model: 'openai/deepseek-v4-pro',
+    }).model).toBe('openai/deepseek-v4-pro');
+  });
+
   it('keeps a local new-chat placeholder hidden when the Gateway reports its ACP display name', () => {
     const result = applyGatewaySessionsChanged(
       [{ key: SESSION_KEY, displayName: SESSION_KEY, createdLocally: true }],

@@ -550,7 +550,10 @@ async function initialize(): Promise<void> {
       if (await hasManagedRuntimeMutationMarker()) {
         logger.warn('Gateway auto-start and Provider sync skipped until managed credentials are recovered');
       } else {
-        await syncAllProviderAuthToRuntime();
+        await syncAllProviderAuthToRuntime({
+          refreshManagedPolicy: true,
+          reconcileManagedRuntime: true,
+        });
         logger.debug('Auto-starting Gateway...');
         await gatewayManager.start();
         logger.info('Gateway auto-start succeeded');

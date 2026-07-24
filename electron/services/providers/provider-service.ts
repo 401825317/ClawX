@@ -47,6 +47,14 @@ import {
   isUclawManagedAccount,
   withProviderMutationLock,
 } from './provider-mutation-lock';
+import {
+  UCLAW_DEFAULT_API_PROTOCOL,
+  UCLAW_DEFAULT_BASE_URL,
+  UCLAW_DEFAULT_MODEL,
+  UCLAW_MANAGED_PROVIDER_ID,
+  UCLAW_MANAGED_SERVICE_NAME,
+  isUclawManagedDistribution,
+} from '../../utils/junfeiai-distribution';
 
 function maskApiKey(apiKey: string | null): string | null {
   if (!apiKey) return null;
@@ -113,6 +121,25 @@ function mergeSyncedProviderMetadata(
 
 export class ProviderService {
   async listVendors(): Promise<ProviderDefinition[]> {
+    if (await this.hasManagedProviderOwnership()) {
+      return PROVIDER_DEFINITIONS
+        .filter((definition) => definition.id === UCLAW_MANAGED_PROVIDER_ID)
+        .map((definition) => ({
+          ...definition,
+          name: UCLAW_MANAGED_SERVICE_NAME,
+          requiresApiKey: false,
+          defaultModelId: UCLAW_DEFAULT_MODEL,
+          showBaseUrl: false,
+          showModelId: false,
+          supportsMultipleAccounts: false,
+          providerConfig: {
+            ...(definition.providerConfig ?? {}),
+            baseUrl: UCLAW_DEFAULT_BASE_URL,
+            api: UCLAW_DEFAULT_API_PROTOCOL,
+            apiKeyEnv: definition.providerConfig?.apiKeyEnv ?? 'OPENAI_API_KEY',
+          },
+        }));
+    }
     return PROVIDER_DEFINITIONS;
   }
 
@@ -130,8 +157,12 @@ export class ProviderService {
 
     const { providers: openClawProviders, defaultModel } = await getOpenClawProvidersConfig();
     const activeProviders = await getActiveOpenClawProviders();
+    const managedProviderOwnership = await this.hasManagedProviderOwnership();
+    const visibleActiveProviders = managedProviderOwnership
+      ? new Set([...activeProviders].filter((provider) => provider === UCLAW_MANAGED_PROVIDER_ID))
+      : activeProviders;
 
-    if (activeProviders.size === 0) {
+    if (visibleActiveProviders.size === 0) {
       return [];
     }
 
@@ -151,7 +182,7 @@ export class ProviderService {
     const processedKeys = new Set<string>();
 
     let hasConfiguredOpenAiApiKey = false;
-    if (activeProviders.has('openai')) {
+    if (visibleActiveProviders.has('openai')) {
       const openClawKey = await getProviderApiKeyFromOpenClaw('openai');
       if (openClawKey) {
         hasConfiguredOpenAiApiKey = true;
@@ -169,7 +200,7 @@ export class ProviderService {
       }
     }
 
-    const activeKeysForUi = filterActiveProviderKeysForUi(activeProviders, {
+    const activeKeysForUi = filterActiveProviderKeysForUi(visibleActiveProviders, {
       hasConfiguredOpenAiApiKey,
     });
 
@@ -430,6 +461,12 @@ export class ProviderService {
   /** Re-read canonical ownership only after the caller owns the mutation lock. */
   private async assertMutationAllowed(...targets: unknown[]): Promise<void> {
     assertProviderMutationAllowed(await getProviderAccount('openai'), ...targets);
+  }
+
+  /** Managed builds keep third-party data on disk but expose only the account-owned chat Provider. */
+  private async hasManagedProviderOwnership(): Promise<boolean> {
+    if (!isUclawManagedDistribution()) return false;
+    return isUclawManagedAccount(await getProviderAccount(UCLAW_MANAGED_PROVIDER_ID));
   }
 
   // ── Internal silent variants ─────────────────────────────────────

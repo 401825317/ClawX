@@ -2,6 +2,11 @@
 
 import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
+  UCLAW_MANAGED_PROVIDER_BASE_URL,
+  UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+} from '@shared/junfeiai-endpoints';
 
 const { root, configPath } = vi.hoisted(() => {
   const root = `/tmp/uclaw-managed-runtime-${Math.random().toString(36).slice(2)}`;
@@ -17,7 +22,9 @@ vi.mock('@electron/utils/config-mutex', () => ({
 }));
 
 import {
+  createManagedRuntimeProviderEntry,
   getManagedRuntimeOpenAiProviderIds,
+  installManagedRuntimeProviderState,
   removeManagedRuntimeOpenAiState,
   restoreManagedRuntimeConfig,
   snapshotManagedRuntimeConfig,
@@ -90,18 +97,83 @@ describe('managed runtime config transaction', () => {
     expect(await readFile(configPath)).toEqual(external);
   });
 
+  it('installs the same server-owned model catalog for both managed Providers', async () => {
+    const policy = {
+      defaultModel: 'smart-latest',
+      models: [
+        { id: 'smart-latest', label: 'Smart' },
+        { id: 'standard-chat', label: 'Standard Chat' },
+      ],
+    };
+    const providerEntry = createManagedRuntimeProviderEntry(policy);
+    expect(providerEntry).toEqual(expect.objectContaining({
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+      api: 'openai-responses',
+      timeoutSeconds: UCLAW_PROVIDER_REQUEST_TIMEOUT_SECONDS,
+      request: { allowPrivateNetwork: true },
+      agentRuntime: { id: 'pi' },
+    }));
+    expect(providerEntry.models.map((model) => model.id)).toEqual([
+      'smart-latest',
+      'standard-chat',
+    ]);
+    expect(providerEntry.models[0]).toEqual(expect.objectContaining({
+      reasoning: true,
+      compat: expect.objectContaining({ supportsReasoningEffort: true }),
+    }));
+    expect(providerEntry.models[1]).not.toHaveProperty('reasoning');
+    expect(providerEntry.models[1]?.compat).toEqual({ supportsPromptCacheKey: true });
+
+    await writeFile(configPath, JSON.stringify({
+      agents: { defaults: { workspace: '/tmp/keep' } },
+      models: {
+        mode: 'merge',
+        providers: {
+          deepseek: { models: [{ id: 'deepseek-chat' }] },
+          'clawx-openai-image': {
+            baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+            models: [{ id: 'gpt-image-2' }],
+          },
+        },
+      },
+    }));
+    const snapshot = await snapshotManagedRuntimeConfig();
+    await installManagedRuntimeProviderState(snapshot, policy);
+
+    const installed = JSON.parse(await readFile(configPath, 'utf8')) as {
+      agents: { defaults: Record<string, unknown> };
+      models: { mode: string; providers: Record<string, unknown> };
+    };
+    expect(installed.agents.defaults).toEqual(expect.objectContaining({
+      workspace: '/tmp/keep',
+      model: { primary: 'openai/smart-latest', fallbacks: [] },
+    }));
+    expect(installed.models.mode).toBe('merge');
+    expect(installed.models.providers.openai).toEqual(providerEntry);
+    expect(installed.models.providers[UCLAW_COMPATIBILITY_PROVIDER_ID]).toEqual(providerEntry);
+    expect(installed.models.providers.deepseek).toEqual({ models: [{ id: 'deepseek-chat' }] });
+    expect(installed.models.providers['clawx-openai-image']).toEqual({
+      baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
+      models: [{ id: 'gpt-image-2' }],
+    });
+
+    const noOpSnapshot = await snapshotManagedRuntimeConfig();
+    await installManagedRuntimeProviderState(noOpSnapshot, policy);
+    expect(noOpSnapshot.applied).toBeUndefined();
+  });
+
   it('discovers an orphan runtime-only managed relay without matching similar custom providers', async () => {
     await writeFile(configPath, JSON.stringify({
       models: {
         providers: {
           openai: { baseUrl: 'https://personal.example/v1', models: [{ id: 'personal-model' }] },
           'custom-runtime-only': {
-            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1/',
+            baseUrl: `${UCLAW_MANAGED_PROVIDER_BASE_URL}/`,
             models: [{ id: 'smart-latest' }],
             apiKey: 'legacy-inline-key',
           },
           'same-host-other-model': {
-            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
             models: [{ id: 'other-model' }],
           },
           'other-host-same-model': {
@@ -122,17 +194,26 @@ describe('managed runtime config transaction', () => {
   it('removes managed runtime providers and complete auth metadata while preserving unrelated state', async () => {
     await writeFile(configPath, JSON.stringify({
       channels: { telegram: { enabled: true } },
+      agents: {
+        defaults: {
+          model: {
+            primary: 'openai/smart-latest',
+            fallbacks: ['lingzhiwuxian/smart-latest'],
+          },
+          workspace: '/tmp/keep',
+        },
+      },
       models: {
         mode: 'merge',
         providers: {
           openai: { apiKey: 'personal-openai-key' },
           'custom-runtime-only': {
-            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
             models: [{ id: 'smart-latest' }],
             apiKey: 'legacy-inline-key',
           },
           'same-host-other-model': {
-            baseUrl: 'https://zz-cn.lingzhiwuxian.com/v1',
+            baseUrl: UCLAW_MANAGED_PROVIDER_BASE_URL,
             models: [{ id: 'other-model' }],
             apiKey: 'keep-other-model-key',
           },
@@ -178,6 +259,7 @@ describe('managed runtime config transaction', () => {
     const models = result.models as Record<string, unknown>;
     const providers = models.providers as Record<string, unknown>;
     expect(result.channels).toEqual({ telegram: { enabled: true } });
+    expect(result.agents).toEqual({ defaults: { workspace: '/tmp/keep' } });
     expect(models.mode).toBe('merge');
     expect(Object.keys(providers).sort()).toEqual([
       'deepseek',

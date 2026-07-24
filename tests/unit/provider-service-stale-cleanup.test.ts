@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   getActiveOpenClawProviders: vi.fn(),
   getOpenClawProvidersConfig: vi.fn(),
   getProviderApiKeyFromOpenClaw: vi.fn(),
+  getProviderAccount: vi.fn(),
   getOpenClawProviderKeyForType: vi.fn(),
   getAliasSourceTypes: vi.fn(),
   getProviderDefinition: vi.fn(),
@@ -24,7 +25,7 @@ vi.mock('@electron/services/providers/provider-migration', () => ({
 vi.mock('@electron/services/providers/provider-store', () => ({
   listProviderAccounts: mocks.listProviderAccounts,
   deleteProviderAccount: mocks.deleteProviderAccount,
-  getProviderAccount: vi.fn(),
+  getProviderAccount: mocks.getProviderAccount,
   getDefaultProviderAccountId: vi.fn(),
   providerAccountToConfig: vi.fn(),
   providerConfigToAccount: vi.fn(),
@@ -118,7 +119,48 @@ describe('ProviderService.listAccounts (openclaw.json as sole source of truth)',
     mocks.getApiKey.mockResolvedValue(null);
     mocks.hasApiKey.mockResolvedValue(false);
     mocks.listProviderAccounts.mockResolvedValue([]);
+    mocks.getProviderAccount.mockResolvedValue(null);
     service = new ProviderService();
+  });
+
+  it('hides non-managed runtime providers without deleting their stored accounts', async () => {
+    const managed = makeAccount({
+      id: 'openai',
+      vendorId: 'openai',
+      label: 'UClaw',
+      model: 'smart-latest',
+      metadata: { managedBy: 'uclaw' },
+    });
+    const compatibility = makeAccount({
+      id: 'lingzhiwuxian',
+      vendorId: 'lingzhiwuxian',
+      label: 'UClaw',
+      model: 'smart-latest',
+      metadata: { managedBy: 'uclaw' },
+    });
+    const custom = makeAccount({
+      id: 'custom-local',
+      vendorId: 'custom',
+      label: 'Local',
+    });
+    mocks.getProviderAccount.mockImplementation(async (id: string) => id === 'openai' ? managed : null);
+    mocks.listProviderAccounts.mockResolvedValue([managed, compatibility, custom]);
+    mocks.getActiveOpenClawProviders.mockResolvedValue(new Set(['openai', 'lingzhiwuxian', 'custom-local']));
+    mocks.getOpenClawProvidersConfig.mockResolvedValue({
+      providers: {
+        openai: { baseUrl: 'http://127.0.0.1:8083/v1' },
+        lingzhiwuxian: { baseUrl: 'http://127.0.0.1:8083/v1' },
+        'custom-local': { baseUrl: 'http://127.0.0.1:9000/v1' },
+      },
+      defaultModel: 'openai/smart-latest',
+    });
+    mocks.getProviderApiKeyFromOpenClaw.mockResolvedValue('sk-managed');
+
+    const result = await service.listAccounts();
+
+    expect(result.map((account) => account.id)).toEqual(['openai']);
+    expect(mocks.deleteProviderAccount).not.toHaveBeenCalledWith('lingzhiwuxian');
+    expect(mocks.deleteProviderAccount).not.toHaveBeenCalledWith('custom-local');
   });
 
   it('returns empty when activeProviders is empty', async () => {

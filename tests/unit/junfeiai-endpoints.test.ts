@@ -9,14 +9,19 @@ import {
   UCLAW_BILLING_ROUTES,
   UCLAW_COMPACTION_MODE,
   UCLAW_COMPACTION_RESERVE_TOKENS_FLOOR,
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_DEFAULT_API_PROTOCOL,
   UCLAW_DEFAULT_MODEL,
   UCLAW_EXEC_ASK,
   UCLAW_EXEC_SECURITY,
+  UCLAW_LEGACY_PROVIDER_BASE_URLS,
   UCLAW_MANAGED_ACCOUNT_ID,
   UCLAW_MANAGED_PROVIDER_BASE_URL,
   UCLAW_MANAGED_PROVIDER_ID,
   UCLAW_MANAGED_SERVICE_NAME,
+  UCLAW_RUNTIME_CONTRACT_VERSION,
+  UCLAW_LEGACY_PROVIDER_IDS,
+  UCLAW_LEGACY_PROVIDER_ORIGINS,
   UCLAW_MARKETPLACE_CONFIG,
   UCLAW_MARKETPLACE_DEFAULT_PROVIDER,
   UCLAW_PRODUCTION_ORIGIN,
@@ -37,7 +42,9 @@ type MutableTestConfig = {
   provider: {
     productionOrigin: string;
     providerName: string;
+    compatibilityProviderId: string;
     defaultApiProtocol: string;
+    managedRuntimeContractVersion: number;
   };
   auth: {
     requestTimeoutMs: number;
@@ -63,13 +70,24 @@ type MutableTestConfig = {
 
 describe('UClaw managed endpoint configuration', () => {
   it('keeps the managed OpenAI runtime contract centralized and fixed', () => {
+    const configuredOrigin = new URL(rawConfig.provider.productionOrigin).origin;
+    const legacyProviderOrigins = (rawConfig.provider as unknown as {
+      legacyProviderOrigins?: string[];
+    }).legacyProviderOrigins;
+
     expect(UCLAW_MANAGED_PROVIDER_ID).toBe('openai');
+    expect(UCLAW_COMPATIBILITY_PROVIDER_ID).toBe('lingzhiwuxian');
     expect(UCLAW_MANAGED_ACCOUNT_ID).toBe('openai');
     expect(UCLAW_AUTH_ACCOUNT_ID).toBe('uclaw-auth');
     expect(UCLAW_DEFAULT_MODEL).toBe('smart-latest');
     expect(UCLAW_DEFAULT_API_PROTOCOL).toBe('openai-responses');
-    expect(UCLAW_PRODUCTION_ORIGIN).toBe('https://zz-cn.lingzhiwuxian.com');
-    expect(UCLAW_MANAGED_PROVIDER_BASE_URL).toBe('https://zz-cn.lingzhiwuxian.com/v1');
+    expect(UCLAW_RUNTIME_CONTRACT_VERSION).toBe(rawConfig.provider.managedRuntimeContractVersion);
+    expect(UCLAW_PRODUCTION_ORIGIN).toBe(configuredOrigin);
+    expect(UCLAW_MANAGED_PROVIDER_BASE_URL).toBe(`${configuredOrigin}/v1`);
+    expect(UCLAW_LEGACY_PROVIDER_IDS).toEqual(['openai-codex']);
+    expect(UCLAW_LEGACY_PROVIDER_ORIGINS).toEqual(['https://zz-cn.lingzhiwuxian.com']);
+    expect(UCLAW_LEGACY_PROVIDER_BASE_URLS).toEqual(['https://zz-cn.lingzhiwuxian.com/v1']);
+    expect(legacyProviderOrigins).toContain('https://zz-cn.lingzhiwuxian.com');
   });
 
   it('exposes only the UClaw service name and validated positive timeouts', () => {
@@ -116,7 +134,9 @@ describe('UClaw managed endpoint configuration', () => {
   it.each([
     ['unsupported production origin protocol', (config: MutableTestConfig) => { config.provider.productionOrigin = 'ftp://example.com'; }],
     ['non-UClaw visible provider name', (config: MutableTestConfig) => { config.provider.providerName = 'Legacy Brand'; }],
+    ['unsupported compatibility provider id', (config: MutableTestConfig) => { config.provider.compatibilityProviderId = 'legacy-provider'; }],
     ['unsupported API protocol', (config: MutableTestConfig) => { config.provider.defaultApiProtocol = 'anthropic-messages'; }],
+    ['non-positive runtime contract version', (config: MutableTestConfig) => { config.provider.managedRuntimeContractVersion = 0; }],
     ['non-positive auth timeout', (config: MutableTestConfig) => { config.auth.requestTimeoutMs = 0; }],
     ['non-positive billing timeout', (config: MutableTestConfig) => { config.billing.requestTimeoutMs = 0; }],
     ['invalid billing route', (config: MutableTestConfig) => { config.billing.routes.overview = 'https://example.com/billing'; }],

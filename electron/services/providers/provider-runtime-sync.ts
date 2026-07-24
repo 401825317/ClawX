@@ -7,16 +7,12 @@ import { getProviderConfig, getProviderDefaultModel } from '../../utils/provider
 import {
   ensureAnthropicMessagesModelMaxTokens,
   ensureOpenClawProviderAgentRuntimePins,
-  installManagedAgentOpenAiApiKey,
   migrateAllAgentAuthProfilesToSqlite,
   pruneInvalidApiProviderEntries,
-  removeManagedAgentOpenAiCredentials,
   removeProviderFromOpenClaw,
   removeProviderKeyFromOpenClaw,
-  restoreManagedAgentAuthProfiles,
   saveOAuthTokenToOpenClaw,
   saveProviderKeyToOpenClaw,
-  snapshotManagedAgentAuthProfiles,
   OPENAI_CODEX_OAUTH_PROVIDER_CONFIG,
   setOpenClawDefaultModel,
   setOpenClawDefaultModelWithOverride,
@@ -33,15 +29,14 @@ import { logger } from '../../utils/logger';
 import { listAgentsSnapshot } from '../../utils/agent-config';
 import {
   isUclawManagedDistribution,
-  UCLAW_AUTH_ACCOUNT_ID,
-  UCLAW_PROVIDER_ID,
 } from '../../utils/junfeiai-distribution';
 import { assertManagedRuntimeStartAllowed } from '../../gateway/managed-runtime-mutation-barrier';
 import {
   isOpenAiProviderIdentity,
-  resolveValidUclawManagedRelayToken,
   withProviderMutationLock,
 } from './provider-mutation-lock';
+import { getManagedClientTextModelPolicy } from '../managed-client-config-service';
+import { reconcileManagedProviderRuntimeForStartup } from '../managed-auth-service';
 
 /** OpenClaw Codex OAuth hooks only apply to the canonical `openai` provider id. */
 const OPENAI_OAUTH_RUNTIME_PROVIDER = 'openai';
@@ -232,58 +227,33 @@ export async function syncProviderApiKeyToRuntime(
   await saveProviderKeyToOpenClaw(ock, apiKey);
 }
 
-/** Install one strict managed key and restore the frozen stores if installation fails. */
-async function installManagedOpenAiApiKeyToRuntime(apiKey: string): Promise<void> {
-  const snapshot = await snapshotManagedAgentAuthProfiles();
-  try {
-    await installManagedAgentOpenAiApiKey(snapshot, apiKey);
-  } catch (cause) {
-    try {
-      await restoreManagedAgentAuthProfiles(snapshot);
-    } catch (rollbackCause) {
-      throw new AggregateError(
-        [cause, rollbackCause],
-        'Failed to install the managed OpenAI credential and restore Agent auth profiles',
-        { cause: rollbackCause },
-      );
-    }
-    throw cause;
-  }
-}
-
-/** Reconcile the managed OpenAI credential before ordinary Provider auth synchronization. */
-async function syncManagedOpenAiAuthToRuntime(
-  accounts: Awaited<ReturnType<typeof listProviderAccounts>>,
-): Promise<boolean> {
-  if (!isUclawManagedDistribution()) {
-    return false;
+export async function syncAllProviderAuthToRuntime(
+  options: {
+    refreshManagedPolicy?: boolean;
+    reconcileManagedRuntime?: boolean;
+  } = {},
+): Promise<void> {
+  const managed = isUclawManagedDistribution();
+  let managedPolicy: Awaited<ReturnType<typeof getManagedClientTextModelPolicy>> | null = null;
+  if (managed && options.reconcileManagedRuntime === true) {
+    // Never perform remote client-config I/O while holding the Provider mutation lock.
+    await assertManagedRuntimeStartAllowed();
+    managedPolicy = await getManagedClientTextModelPolicy({
+      refresh: options.refreshManagedPolicy === true,
+    });
   }
 
-  const account = accounts.find((candidate) => candidate.id === UCLAW_PROVIDER_ID);
-  const authSecret = await getProviderSecret(UCLAW_AUTH_ACCOUNT_ID, { migrate: false });
-  const relaySecret = await getProviderSecret(UCLAW_PROVIDER_ID, { migrate: false });
-  const relayToken = resolveValidUclawManagedRelayToken(account, authSecret, relaySecret);
-
-  if (relayToken) {
-    await installManagedOpenAiApiKeyToRuntime(relayToken);
-  } else {
-    // A failed cleanup must reject startup synchronization so Gateway cannot
-    // continue with a stale managed OpenAI profile.
-    await removeManagedAgentOpenAiCredentials();
-  }
-  return true;
-}
-
-export async function syncAllProviderAuthToRuntime(): Promise<void> {
   await withProviderMutationLock(async () => {
     // Crash recovery markers must block startup synchronization before it can
     // rewrite the exact runtime generations preserved for managed recovery.
     await assertManagedRuntimeStartAllowed();
     await migrateAllAgentAuthProfilesToSqlite();
+    if (managedPolicy) {
+      await reconcileManagedProviderRuntimeForStartup(managedPolicy);
+    }
     const accounts = await listProviderAccounts();
-    const managedOpenAiReconciled = await syncManagedOpenAiAuthToRuntime(accounts);
     for (const account of accounts) {
-      if (managedOpenAiReconciled && isOpenAiProviderIdentity(account)) {
+      if (managed && isOpenAiProviderIdentity(account)) {
         continue;
       }
 

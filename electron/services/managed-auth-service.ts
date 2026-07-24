@@ -9,6 +9,7 @@ import {
 } from '../gateway/managed-runtime-mutation-barrier';
 import { waitForPortFree } from '../gateway/supervisor';
 import type { ProviderAccount, ProviderSecret } from '../shared/providers/types';
+import type { ManagedClientTextModelPolicy } from '../../shared/managed-client-config';
 import type {
   ManagedAuthActivationCheckResult,
   ManagedAuthBootstrap,
@@ -27,19 +28,17 @@ import {
   UCLAW_AUTH_REQUEST_TIMEOUT_MS,
   UCLAW_AUTH_ACCOUNT_ID,
   UCLAW_BOOTSTRAP_REQUEST_TIMEOUT_MS,
+  UCLAW_COMPATIBILITY_PROVIDER_ID,
   UCLAW_DEFAULT_ACCESS_TOKEN_LIFETIME_SECONDS,
   UCLAW_DEFAULT_API_PROTOCOL,
   UCLAW_DEFAULT_BASE_URL,
   UCLAW_DEFAULT_MODEL,
-  UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
-  UCLAW_DEFAULT_THINKING_LEVEL,
   UCLAW_LEGACY_AUTH_ACCOUNT_IDS,
   UCLAW_LEGACY_PROVIDER_IDS,
   UCLAW_MANAGED_SERVICE_NAME,
   UCLAW_OFFLINE_GRACE_SECONDS,
   UCLAW_PROVIDER_ID,
   UCLAW_RELAY_REQUEST_TIMEOUT_MS,
-  UCLAW_RUNTIME_CONTRACT_VERSION,
   UCLAW_TOKEN_REFRESH_SKEW_SECONDS,
   UCLAW_VERIFICATION_REQUEST_TIMEOUT_MS,
   UCLAW_VERIFY_MEMORY_CACHE_SECONDS,
@@ -68,6 +67,7 @@ import {
   type ProviderSecretSlotsSnapshot,
 } from './secrets/secret-store';
 import {
+  buildManagedProviderAccounts,
   getManagedOpenAiTargetAccountIds,
   getProviderAccount,
   installManagedOpenAiProviderAccount,
@@ -77,11 +77,12 @@ import {
 } from './providers/provider-store';
 import { ensureProviderStoreMigrated } from './providers/provider-migration';
 import {
+  createManagedRuntimeProviderEntry,
   getManagedRuntimeOpenAiProviderIds,
+  installManagedRuntimeProviderState,
   removeManagedRuntimeOpenAiState,
   restoreManagedRuntimeConfig,
   snapshotManagedRuntimeConfig,
-  updateManagedRuntimeConfig,
   type ManagedRuntimeConfigSnapshot,
 } from './providers/managed-runtime-config';
 import {
@@ -98,11 +99,9 @@ import {
   type ManagedAgentModelsFilesSnapshot,
 } from '../utils/openclaw-auth';
 import { getClawXProviderStore } from './providers/store-instance';
+import { cacheManagedClientTextModelPolicyFromPayload } from './managed-client-config-service';
 import { logger } from '../utils/logger';
-import {
-  isOpenAiProviderIdentity,
-  withProviderMutationLock,
-} from './providers/provider-mutation-lock';
+import { withProviderMutationLock } from './providers/provider-mutation-lock';
 
 type JsonRecord = Record<string, unknown>;
 type AuthSecret = Extract<ProviderSecret, { type: 'oauth' }>;
@@ -203,12 +202,6 @@ const SENSITIVE_ERROR_KEYS = new Set([
   'password',
   'secret',
 ]);
-
-const UCLAW_RESPONSES_REASONING_COMPAT = {
-  supportsPromptCacheKey: true,
-  supportsReasoningEffort: true,
-  supportedReasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh'],
-} as const;
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -489,7 +482,11 @@ async function readAuthSecret(migrate = true): Promise<AuthSecret | null> {
 }
 
 async function readRelaySecret(migrate = true): Promise<RelaySecret | null> {
-  for (const accountId of [UCLAW_ACCOUNT_ID, ...UCLAW_LEGACY_PROVIDER_IDS]) {
+  for (const accountId of [
+    UCLAW_ACCOUNT_ID,
+    UCLAW_COMPATIBILITY_PROVIDER_ID,
+    ...UCLAW_LEGACY_PROVIDER_IDS,
+  ]) {
     const secret = await getProviderSecret(accountId, { migrate });
     if (secret?.type === 'api_key') return secret;
   }
@@ -1111,112 +1108,23 @@ async function requestAuth(
   }));
 }
 
-function copiedRecord(value: unknown): JsonRecord {
-  return isRecord(value) ? { ...value } : {};
-}
-
-function isManagedOpenAiProviderKey(value: unknown, managedProviderIds: ReadonlySet<string>): boolean {
-  return typeof value === 'string'
-    && (managedProviderIds.has(value) || isOpenAiProviderIdentity(value));
-}
-
-/** Remove stale OpenAI auth metadata while preserving every unrelated Provider route. */
-function removeManagedOpenAiAuthMetadata(
-  config: JsonRecord,
-  managedProviderIds: ReadonlySet<string>,
-): void {
-  const auth = copiedRecord(config.auth);
-  const profiles = copiedRecord(auth.profiles);
-  const removedProfileIds = new Set<string>();
-  for (const [profileId, profile] of Object.entries(profiles)) {
-    const provider = isRecord(profile) ? profile.provider : undefined;
-    if (!isManagedOpenAiProviderKey(provider, managedProviderIds)) continue;
-    delete profiles[profileId];
-    removedProfileIds.add(profileId);
-  }
-
-  const order = copiedRecord(auth.order);
-  for (const [provider, rawProfileIds] of Object.entries(order)) {
-    if (isManagedOpenAiProviderKey(provider, managedProviderIds)) {
-      delete order[provider];
-      continue;
-    }
-    if (!Array.isArray(rawProfileIds)) continue;
-    const retained = rawProfileIds.filter(
-      (profileId): profileId is string => typeof profileId === 'string' && !removedProfileIds.has(profileId),
-    );
-    if (retained.length > 0) order[provider] = retained;
-    else delete order[provider];
-  }
-
-  if (Object.keys(profiles).length > 0) auth.profiles = profiles;
-  else delete auth.profiles;
-  if (Object.keys(order).length > 0) auth.order = order;
-  else delete auth.order;
-  if (Object.keys(auth).length > 0) config.auth = auth;
-  else delete config.auth;
-}
-
-function managedRuntimeModelEntry(): JsonRecord {
-  return {
-    id: UCLAW_DEFAULT_MODEL,
-    name: UCLAW_DEFAULT_MODEL,
-    contextWindow: UCLAW_DEFAULT_MODEL_CONTEXT_WINDOW,
-    reasoning: true,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    compat: { ...UCLAW_RESPONSES_REASONING_COMPAT },
-  };
-}
-
 async function syncManagedRuntimeDefaults(
   agentModelsFiles: ManagedAgentModelsFilesSnapshot,
   runtimeSnapshot: ManagedRuntimeConfigSnapshot,
   managedProviderIds: ReadonlySet<string>,
+  policy: ManagedClientTextModelPolicy,
 ): Promise<void> {
-  const modelEntry = managedRuntimeModelEntry();
-  const providerEntry = {
-    baseUrl: UCLAW_DEFAULT_BASE_URL,
-    api: UCLAW_DEFAULT_API_PROTOCOL,
-    // Canonical OpenAI entries must stay on ClawX's bundled agent runtime.
-    agentRuntime: { id: 'pi' },
-    models: [modelEntry as { id: string; name: string; [key: string]: unknown }],
-  };
-
-  await updateManagedRuntimeConfig(runtimeSnapshot, (config) => {
-    const agents = copiedRecord(config.agents);
-    const defaults = copiedRecord(agents.defaults);
-    defaults.model = {
-      primary: `${UCLAW_PROVIDER_ID}/${UCLAW_DEFAULT_MODEL}`,
-      fallbacks: [],
-    };
-    defaults.thinkingDefault = UCLAW_DEFAULT_THINKING_LEVEL;
-    defaults.reasoningDefault = 'on';
-    agents.defaults = defaults;
-    config.agents = agents;
-
-    removeManagedOpenAiAuthMetadata(config, managedProviderIds);
-
-    const models = copiedRecord(config.models);
-    const providers = copiedRecord(models.providers);
-    for (const [providerId, existingEntry] of Object.entries(providers)) {
-      if (
-        managedProviderIds.has(providerId)
-        || isOpenAiProviderIdentity({ ...copiedRecord(existingEntry), id: providerId })
-      ) {
-        delete providers[providerId];
-      }
-    }
-    providers[UCLAW_PROVIDER_ID] = structuredClone(providerEntry);
-    models.providers = providers;
-    config.models = models;
-  });
-
+  const providerEntry = createManagedRuntimeProviderEntry(policy);
+  await installManagedRuntimeProviderState(runtimeSnapshot, policy, managedProviderIds);
   await updateManagedAgentModelProviderStrict(agentModelsFiles, providerEntry, managedProviderIds);
 }
 
 type ManagedAuthSnapshot = {
   account: ProviderAccount | null;
+  compatibilityAccount: ProviderAccount | null;
   auth: AuthSecret | null;
+  relay: RelaySecret | null;
+  compatibilityRelay: RelaySecret | null;
   providerStore: ManagedProviderStoreSnapshot;
   providerSecretSlots: ProviderSecretSlotsSnapshot;
   verificationCache: VerificationCache | null;
@@ -1249,6 +1157,7 @@ async function snapshot(): Promise<ManagedAuthSnapshot> {
   const managedOpenAiTargetAccountIds = [...new Set([
     UCLAW_ACCOUNT_ID,
     UCLAW_PROVIDER_ID,
+    UCLAW_COMPATIBILITY_PROVIDER_ID,
     ...UCLAW_LEGACY_PROVIDER_IDS,
     ...getManagedOpenAiTargetAccountIds(providerStore),
     ...getManagedRuntimeOpenAiProviderIds(managedRuntime),
@@ -1259,9 +1168,21 @@ async function snapshot(): Promise<ManagedAuthSnapshot> {
     UCLAW_AUTH_ACCOUNT_ID,
     ...UCLAW_LEGACY_AUTH_ACCOUNT_IDS,
   ]);
+  const [account, compatibilityAccount, auth, relay, compatibilityRelay] = await Promise.all([
+    getProviderAccount(UCLAW_ACCOUNT_ID),
+    getProviderAccount(UCLAW_COMPATIBILITY_PROVIDER_ID),
+    readAuthSecret(false),
+    readRelaySecret(false),
+    getProviderSecret(UCLAW_COMPATIBILITY_PROVIDER_ID, { migrate: false }).then((secret) => (
+      secret?.type === 'api_key' ? secret : null
+    )),
+  ]);
   return {
-    account: await getProviderAccount(UCLAW_ACCOUNT_ID),
-    auth: await readAuthSecret(false),
+    account,
+    compatibilityAccount,
+    auth,
+    relay,
+    compatibilityRelay,
     providerStore,
     providerSecretSlots,
     verificationCache: await readVerificationCache(),
@@ -1270,32 +1191,6 @@ async function snapshot(): Promise<ManagedAuthSnapshot> {
     agentModelsFiles,
     agentAuthProfiles: await snapshotManagedAgentAuthProfiles(),
     managedOpenAiTargetAccountIds,
-  };
-}
-
-function buildManagedAccount(existing: ProviderAccount | null, user: ManagedAuthUser | undefined): ProviderAccount {
-  const now = new Date().toISOString();
-  return {
-    id: UCLAW_ACCOUNT_ID,
-    vendorId: 'openai',
-    label: UCLAW_MANAGED_SERVICE_NAME,
-    authMode: 'api_key',
-    baseUrl: UCLAW_DEFAULT_BASE_URL,
-    apiProtocol: UCLAW_DEFAULT_API_PROTOCOL,
-    model: UCLAW_DEFAULT_MODEL,
-    fallbackModels: [],
-    fallbackAccountIds: [],
-    enabled: true,
-    isDefault: true,
-    metadata: {
-      managedBy: 'uclaw',
-      managedDefaultModel: UCLAW_DEFAULT_MODEL,
-      managedAllowedModels: [UCLAW_DEFAULT_MODEL],
-      managedRuntimeContractVersion: UCLAW_RUNTIME_CONTRACT_VERSION,
-      ...(user?.email ? { email: user.email } : {}),
-    },
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
   };
 }
 
@@ -1361,6 +1256,101 @@ async function restoreSnapshot(previous: ManagedAuthSnapshot): Promise<void> {
   }
 }
 
+function selectUsableManagedRuntimeRelay(previous: ManagedAuthSnapshot): RelaySecret | null {
+  const user = userFromSecret(previous.auth);
+  if (!previous.auth?.accessToken.trim() || !hasUserIdentity(user)) return null;
+  return [previous.relay, previous.compatibilityRelay].find((secret) => (
+    Boolean(secret?.apiKey.trim()) && relayBelongsToUser(secret, user)
+  )) ?? null;
+}
+
+async function clearManagedStartupRuntime(previous: ManagedAuthSnapshot): Promise<void> {
+  const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
+  await removeManagedAgentOpenAiCredentialsFromSnapshot(previous.agentAuthProfiles, managedProviderIds);
+  await removeManagedAgentOpenAiProviders(previous.agentModelsFiles, managedProviderIds);
+  await removeManagedRuntimeOpenAiState(previous.managedRuntime, managedProviderIds);
+}
+
+/**
+ * Reconcile the complete managed runtime before Gateway startup.
+ * The caller supplies a policy resolved before entering the Provider mutation lock.
+ */
+export async function reconcileManagedProviderRuntimeForStartup(
+  policy: ManagedClientTextModelPolicy,
+): Promise<void> {
+  if (!isUclawManagedDistribution()) return;
+
+  await withProviderMutationLock(async () => {
+    const previous = await snapshot();
+    try {
+      const usableRelay = selectUsableManagedRuntimeRelay(previous);
+      if (!usableRelay) {
+        // Keep local login material so status verification can recover a Relay,
+        // but never let Gateway start with stale managed runtime credentials.
+        await clearManagedStartupRuntime(previous);
+        return;
+      }
+
+      const user = userFromSecret(previous.auth);
+      const [account, compatibilityAccount] = buildManagedProviderAccounts({
+        primary: previous.account,
+        compatibility: previous.compatibilityAccount,
+      }, policy, user);
+      await installManagedOpenAiProviderAccount(
+        previous.providerStore,
+        account,
+        compatibilityAccount,
+      );
+
+      const authSecret: AuthSecret = {
+        ...previous.auth!,
+        accountId: UCLAW_AUTH_ACCOUNT_ID,
+      };
+      const relaySecret: RelaySecret = {
+        ...usableRelay,
+        accountId: UCLAW_ACCOUNT_ID,
+        apiKey: usableRelay.apiKey.trim(),
+      };
+      const compatibilityRelaySecret: RelaySecret = {
+        ...relaySecret,
+        accountId: UCLAW_COMPATIBILITY_PROVIDER_ID,
+      };
+      // The Secret transaction also validates storage provenance, so equal plaintext
+      // values are migrated instead of being mistaken for a protected-storage no-op.
+      await installManagedProviderSecrets(
+        previous.providerSecretSlots,
+        authSecret,
+        relaySecret,
+        compatibilityRelaySecret,
+      );
+
+      const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
+      await installManagedAgentOpenAiApiKey(
+        previous.agentAuthProfiles,
+        relaySecret.apiKey,
+        managedProviderIds,
+      );
+      await syncManagedRuntimeDefaults(
+        previous.agentModelsFiles,
+        previous.managedRuntime,
+        managedProviderIds,
+        policy,
+      );
+    } catch (cause) {
+      try {
+        await restoreSnapshot(previous);
+      } catch (rollbackCause) {
+        throw new AggregateError(
+          [cause, rollbackCause],
+          'Failed to reconcile managed Provider runtime and restore the previous state',
+          { cause: rollbackCause },
+        );
+      }
+      throw cause;
+    }
+  });
+}
+
 async function commitAuthenticatedSession(
   auth: AuthPayload,
   relay: { token: string; expiresAt?: number },
@@ -1372,6 +1362,8 @@ async function commitAuthenticatedSession(
   if (!accessToken) throw new ManagedAuthServiceError('auth_invalid', 'UClaw did not return a usable session');
   if (!relay.token.trim()) throw new ManagedAuthServiceError('relay_missing', 'UClaw did not return a usable runtime credential');
   const responseUser = authUserFromPayload(auth);
+  // Cache server-owned model options before quiescing Gateway or taking the Provider lock.
+  const modelPolicy = await cacheManagedClientTextModelPolicyFromPayload(auth);
   let rollbackFailed = false;
   let snapshotCompleted = false;
   let committedStatus: ManagedAuthStatus;
@@ -1381,7 +1373,6 @@ async function commitAuthenticatedSession(
       // snapshot() may migrate the Provider Store, so persist recovery evidence
       // before it can perform the first credential-related write.
       await markManagedMutationStarted(quiescence);
-      // Freeze every local generation only after all earlier Provider writers finish.
       const previous = await snapshot();
       snapshotCompleted = true;
       const previousAuth = previous.auth;
@@ -1404,7 +1395,10 @@ async function commitAuthenticatedSession(
           email: user?.email,
           subject: user?.id,
         };
-        const account = buildManagedAccount(previous.account, user);
+        const [account, compatibilityAccount] = buildManagedProviderAccounts({
+          primary: previous.account,
+          compatibility: previous.compatibilityAccount,
+        }, modelPolicy, user);
         const relaySecret: RelaySecret = {
           type: 'api_key',
           accountId: UCLAW_ACCOUNT_ID,
@@ -1414,14 +1408,32 @@ async function commitAuthenticatedSession(
           ownerEmail: user?.email,
           expiresAt: relay.expiresAt,
         };
-        await installManagedOpenAiProviderAccount(previous.providerStore, account);
-        await installManagedProviderSecrets(previous.providerSecretSlots, authSecret, relaySecret);
+        const compatibilityRelaySecret: RelaySecret = {
+          ...relaySecret,
+          accountId: UCLAW_COMPATIBILITY_PROVIDER_ID,
+        };
+        await installManagedOpenAiProviderAccount(
+          previous.providerStore,
+          account,
+          compatibilityAccount,
+        );
+        await installManagedProviderSecrets(
+          previous.providerSecretSlots,
+          authSecret,
+          relaySecret,
+          compatibilityRelaySecret,
+        );
 
         // Install only the managed OpenAI credential and runtime entries; generic
         // Provider synchronization can self-heal unrelated Provider ids.
         const managedProviderIds = new Set(previous.managedOpenAiTargetAccountIds);
         await installManagedAgentOpenAiApiKey(previous.agentAuthProfiles, relay.token, managedProviderIds);
-        await syncManagedRuntimeDefaults(previous.agentModelsFiles, previous.managedRuntime, managedProviderIds);
+        await syncManagedRuntimeDefaults(
+          previous.agentModelsFiles,
+          previous.managedRuntime,
+          managedProviderIds,
+          modelPolicy,
+        );
         const appliedVerificationCache = buildVerificationCache(user, bootstrap);
         previous.appliedVerificationCache = appliedVerificationCache;
         await persistVerificationCache(appliedVerificationCache);

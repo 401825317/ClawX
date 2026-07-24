@@ -1,11 +1,14 @@
 {
   "provider": {
-    "productionOrigin": "https://zz-cn.lingzhiwuxian.com",
+    "productionOrigin": "http://127.0.0.1:8083",
+    "legacyProviderOrigins": ["https://zz-cn.lingzhiwuxian.com"],
     "providerName": "UClaw",
     "managedProviderId": "openai",
+    "compatibilityProviderId": "lingzhiwuxian",
     "managedAccountId": "openai",
     "authAccountId": "uclaw-auth",
-    "legacyProviderIds": ["openai-codex", "lingzhiwuxian"],
+    "managedRuntimeContractVersion": 4,
+    "legacyProviderIds": ["openai-codex"],
     "legacyAuthAccountIds": ["lingzhiwuxian-auth"],
     "defaultModel": "smart-latest",
     "defaultModelContextWindow": 258000,

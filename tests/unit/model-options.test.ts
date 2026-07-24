@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildManagedTextModelOptions,
   buildConfiguredModelOptions,
   formatConfiguredModelLabel,
   formatModelRefLabel,
@@ -57,6 +58,30 @@ const vendors: ProviderVendorInfo[] = [
 ];
 
 describe('model option helpers', () => {
+  it('builds canonical managed options only from the server policy', () => {
+    expect(buildManagedTextModelOptions({
+      defaultModel: 'smart-latest',
+      models: [
+        { id: 'smart-latest', label: 'Smart' },
+        { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { id: 'deepseek-v4-pro', label: 'Duplicate' },
+      ],
+    })).toEqual([
+      {
+        modelRef: 'openai/smart-latest',
+        label: 'Smart',
+        runtimeProviderKey: 'openai',
+        accountId: 'openai',
+      },
+      {
+        modelRef: 'openai/deepseek-v4-pro',
+        label: 'DeepSeek V4 Pro',
+        runtimeProviderKey: 'openai',
+        accountId: 'openai',
+      },
+    ]);
+  });
+
   it('formats model refs using only the text after the provider prefix', () => {
     expect(formatModelRefLabel('openrouter/openai/gpt-5.5')).toBe('openai/gpt-5.5');
     expect(formatModelRefLabel('custom-alpha1234/model-alpha')).toBe('model-alpha');

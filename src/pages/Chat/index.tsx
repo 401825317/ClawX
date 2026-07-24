@@ -531,9 +531,11 @@ export function Chat() {
                 if (!promptWorkspace.ok) return;
               }
               const existingSession = sessions.find((session) => session.key === sessionKey);
-              const createIfMissing = !existingSession || !!existingSession.createdLocally;
+              const pendingAcpConfirmation = !existingSession || existingSession.createdLocally === true;
+              const createIfMissing = !existingSession
+                || (existingSession.createdLocally === true && existingSession.createdOnGateway !== true);
               if (
-                createIfMissing
+                pendingAcpConfirmation
                 || acpActiveSessionKey !== sessionKey
                 || acpWorkspaceRoot !== promptCwd
                 || acpCwd !== promptCwd
@@ -554,7 +556,7 @@ export function Chat() {
                     }
                   }
                 })();
-                if (loaded && createIfMissing) {
+                if (loaded && pendingAcpConfirmation) {
                   acknowledgeAcpSessionCreated(sessionKey, promptCwd, text);
                 }
                 if (!loaded) return;

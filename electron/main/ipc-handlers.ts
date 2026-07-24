@@ -71,6 +71,7 @@ import {
 } from '../services/providers-api';
 import { withProviderMutationLock } from '../services/providers/provider-mutation-lock';
 import { createManagedAuthApi } from '../services/managed-auth-api';
+import { createManagedClientConfigApi } from '../services/managed-client-config-api';
 import { createBillingApi } from '../services/billing-api';
 import { createSupportApi } from '../services/support-api';
 import { createSessionsApi } from '../services/sessions-api';
@@ -216,6 +217,7 @@ function registerTypedHostHandlers(
     agents: createAgentsApi({ gatewayManager }),
     providers: createProvidersApi({ gatewayManager, mainWindow }),
     managedAuth: createManagedAuthApi({ gatewayManager }),
+    managedClientConfig: createManagedClientConfigApi(),
     billing: createBillingApi({ gatewayManager }),
     support: createSupportApi(),
     files: createFilesApi({
